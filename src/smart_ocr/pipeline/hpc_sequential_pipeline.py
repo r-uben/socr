@@ -478,8 +478,12 @@ class HPCSequentialPipeline(OCRPipeline):
                 figures_dir = self.config.output_dir / doc_stem / "figures"
             figures_dir.mkdir(parents=True, exist_ok=True)
 
+        self.console.console.print(f"[dim]Figure extraction: path={document.path}[/dim]")
+
         try:
             with fitz.open(document.path) as pdf:
+                self.console.console.print(f"[dim]Scanning {len(pdf)} pages for figures...[/dim]")
+
                 for page_index in range(len(pdf)):
                     if figure_counter > self.config.figures_max_total:
                         break
@@ -500,7 +504,13 @@ class HPCSequentialPipeline(OCRPipeline):
                     # Strategy 1: Extract IMAGE blocks (finds most academic figures)
                     try:
                         text_dict = page.get_text("dict")
-                        for block in text_dict.get("blocks", []):
+                        blocks = text_dict.get("blocks", [])
+                        image_blocks = [b for b in blocks if b.get("type") == 1]
+                        if image_blocks:
+                            self.console.console.print(
+                                f"[dim]  Page {page_num}: {len(image_blocks)} image blocks[/dim]"
+                            )
+                        for block in blocks:
                             if (
                                 figure_counter > self.config.figures_max_total
                                 or per_page >= self.config.figures_max_per_page
@@ -555,6 +565,10 @@ class HPCSequentialPipeline(OCRPipeline):
 
                     # Strategy 2: Extract raw embedded images
                     images = page.get_images(full=True)
+                    if images:
+                        self.console.console.print(
+                            f"[dim]  Page {page_num}: {len(images)} embedded images[/dim]"
+                        )
                     for img in images:
                         if (
                             figure_counter > self.config.figures_max_total
