@@ -7,7 +7,9 @@ from rich.console import Console
 
 from smart_ocr import __version__
 from smart_ocr.core.config import AgentConfig, EngineType
+from smart_ocr.engines.vllm_manager import detect_gpu_setup
 from smart_ocr.pipeline.hpc_pipeline import HPCPipeline
+from smart_ocr.pipeline.hpc_sequential_pipeline import HPCSequentialPipeline
 from smart_ocr.pipeline.processor import OCRPipeline
 from smart_ocr.ui.theme import AGENT_THEME, ENGINE_LABELS
 
@@ -132,6 +134,21 @@ def cli(ctx: click.Context) -> None:
     help="Enable HPC mode: parallel multi-engine processing via local vLLM",
 )
 @click.option(
+    "--hpc-sequential",
+    is_flag=True,
+    help="HPC mode with sequential model loading (for single-GPU setups)",
+)
+@click.option(
+    "--ocr-model",
+    type=str,
+    help="OCR model for HPC mode (default: deepseek-ai/DeepSeek-OCR)",
+)
+@click.option(
+    "--vision-model",
+    type=str,
+    help="Vision model for HPC figures (default: Qwen/Qwen2-VL-7B-Instruct)",
+)
+@click.option(
     "--config",
     "config_path",
     type=click.Path(exists=True, path_type=Path),
@@ -159,6 +176,9 @@ def process(
     vllm_model: str | None,
     verbose: bool,
     hpc: bool,
+    hpc_sequential: bool,
+    ocr_model: str | None,
+    vision_model: str | None,
     config_path: Path | None,
     profile: str | None,
 ) -> None:
@@ -168,12 +188,14 @@ def process(
     quality audit with local LLM, then cloud fallback (Mistral/Gemini)
     for failed pages.
 
-    HPC mode (--hpc) runs multiple OCR engines in parallel via local vLLM
-    and reconciles outputs for best quality.
+    HPC modes:
+    - --hpc: Parallel multi-engine (requires multi-GPU or multiple vLLM servers)
+    - --hpc-sequential: Sequential model swapping (for single-GPU setups)
 
     Example:
         smart-ocr process paper.pdf -o extracted.md
         smart-ocr paper.pdf --hpc --vllm-url http://node:8000/v1
+        smart-ocr paper.pdf --hpc-sequential  # Auto-managed vLLM
     """
     # Parse DPI (can be "auto" or int)
     render_dpi: int | str = dpi if dpi == "auto" else int(dpi)
@@ -197,12 +219,29 @@ def process(
     config.verbose = verbose
 
     # HPC mode configuration
-    if hpc:
+    if hpc or hpc_sequential:
         config.hpc.enabled = True
+        config.audit.enabled = False  # Reconciliation handles quality
+
+        if hpc_sequential:
+            config.hpc.sequential = True
+            config.hpc.manage_server = True
+            # Auto-detect single GPU and warn if using parallel mode
+            gpu_setup = detect_gpu_setup()
+            if gpu_setup == "single-gpu" and hpc and not hpc_sequential:
+                console.print(
+                    "[yellow]Single GPU detected, consider using --hpc-sequential[/yellow]"
+                )
+        else:
+            config.hpc.sequential = False
+            config.hpc.manage_server = False
+
         if vllm_url:
             config.hpc.vllm_url = vllm_url
-        # Disable audit in HPC mode (reconciliation handles quality)
-        config.audit.enabled = False
+        if ocr_model:
+            config.hpc.ocr_model = ocr_model
+        if vision_model:
+            config.hpc.vision_model = vision_model
 
     # Apply timeout to all engine configs
     config.nougat.timeout = timeout
@@ -238,7 +277,10 @@ def process(
 
     # Select pipeline based on mode
     if config.hpc.enabled:
-        pipeline = HPCPipeline(config)
+        if config.hpc.sequential:
+            pipeline = HPCSequentialPipeline(config)
+        else:
+            pipeline = HPCPipeline(config)
     else:
         pipeline = OCRPipeline(config)
 
@@ -324,9 +366,24 @@ def process(
     help="Enable HPC mode: parallel multi-engine processing via local vLLM",
 )
 @click.option(
+    "--hpc-sequential",
+    is_flag=True,
+    help="HPC mode with sequential model loading (for single-GPU setups)",
+)
+@click.option(
     "--vllm-url",
     type=str,
     help="vLLM server URL for HPC mode (default: http://localhost:8000/v1)",
+)
+@click.option(
+    "--ocr-model",
+    type=str,
+    help="OCR model for HPC mode (default: deepseek-ai/DeepSeek-OCR)",
+)
+@click.option(
+    "--vision-model",
+    type=str,
+    help="Vision model for HPC figures (default: Qwen/Qwen2-VL-7B-Instruct)",
 )
 @click.option(
     "--config",
@@ -353,7 +410,10 @@ def batch(
     dpi: str,
     limit: int | None,
     hpc: bool,
+    hpc_sequential: bool,
     vllm_url: str | None,
+    ocr_model: str | None,
+    vision_model: str | None,
     config_path: Path | None,
     profile: str | None,
 ) -> None:
@@ -372,7 +432,9 @@ def batch(
         pdf_files = pdf_files[:limit]
 
     console.print(f"\n[bold]Batch Processing: {len(pdf_files)} PDFs[/bold]\n")
-    if hpc:
+    if hpc_sequential:
+        console.print("[info]HPC Sequential Mode[/info] - Single-GPU model swapping\n")
+    elif hpc:
         console.print("[info]HPC Mode[/info] - Multi-engine parallel processing\n")
 
     # Parse DPI (can be "auto" or int)
@@ -396,13 +458,25 @@ def batch(
     config.render_dpi = render_dpi
 
     # HPC mode configuration
-    if hpc:
+    if hpc or hpc_sequential:
         config.hpc.enabled = True
+        config.audit.enabled = False
+
+        if hpc_sequential:
+            config.hpc.sequential = True
+            config.hpc.manage_server = True
+        else:
+            config.hpc.sequential = False
+            config.hpc.manage_server = False
+
         if vllm_url:
             config.hpc.vllm_url = vllm_url
             config.vllm.base_url = vllm_url
             config.deepseek_vllm.base_url = vllm_url
-        config.audit.enabled = False
+        if ocr_model:
+            config.hpc.ocr_model = ocr_model
+        if vision_model:
+            config.hpc.vision_model = vision_model
 
     # Apply timeout to all engine configs
     config.nougat.timeout = timeout
@@ -431,7 +505,10 @@ def batch(
 
     # Select pipeline based on mode
     if config.hpc.enabled:
-        pipeline = HPCPipeline(config)
+        if config.hpc.sequential:
+            pipeline = HPCSequentialPipeline(config)
+        else:
+            pipeline = HPCPipeline(config)
     else:
         pipeline = OCRPipeline(config)
 

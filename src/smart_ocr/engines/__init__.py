@@ -7,6 +7,12 @@ from smart_ocr.engines.gemini import GeminiEngine
 from smart_ocr.engines.mistral import MistralEngine
 from smart_ocr.engines.nougat import NougatEngine
 from smart_ocr.engines.vllm import VLLMEngine
+from smart_ocr.engines.vllm_manager import (
+    ServerConfig,
+    VLLMServerManager,
+    detect_gpu_setup,
+    get_gpu_memory_gb,
+)
 
 __all__ = [
     "BaseEngine",
@@ -17,4 +23,8 @@ __all__ = [
     "MistralEngine",
     "GeminiEngine",
     "VLLMEngine",
+    "VLLMServerManager",
+    "ServerConfig",
+    "detect_gpu_setup",
+    "get_gpu_memory_gb",
 ]

@@ -122,19 +122,29 @@ class HPCConfig:
 
     HPC mode runs multiple OCR engines in parallel locally via vLLM,
     then reconciles outputs intelligently. No cloud fallback in HPC mode.
+
+    Two modes available:
+    - Parallel (default): Expects multiple vLLM servers or multi-GPU setup
+    - Sequential: Single-GPU mode that swaps models between phases
     """
 
     enabled: bool = False
+    sequential: bool = False  # Single-GPU mode: swap models between phases
     vllm_url: str = ""
+    vllm_port: int = 8000  # Port for managed vLLM server
     ocr_model: str = "deepseek-ai/DeepSeek-OCR"
-    vision_model: str = "OpenGVLab/InternVL2-26B"
+    vision_model: str = "Qwen/Qwen2-VL-7B-Instruct"
     reconciler_model: str = ""  # Same as ocr_model if empty
     use_nougat: bool = True  # Include Nougat for LaTeX equations
     use_llm_reconciler: bool = False  # Use LLM for conflict resolution
+    manage_server: bool = True  # Let smart-ocr start/stop vLLM in sequential mode
+    gpu_memory_utilization: float = 0.9  # vLLM GPU memory fraction
+    max_model_len: int = 8192  # Max context length for vLLM
+    server_startup_timeout: int = 180  # Seconds to wait for vLLM server
 
     def __post_init__(self) -> None:
         if not self.vllm_url:
-            self.vllm_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+            self.vllm_url = os.environ.get("VLLM_BASE_URL", f"http://localhost:{self.vllm_port}/v1")
         if not self.reconciler_model:
             self.reconciler_model = self.ocr_model
 
