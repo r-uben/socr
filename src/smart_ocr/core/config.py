@@ -13,6 +13,7 @@ class EngineType(str, Enum):
     DEEPSEEK = "deepseek"
     MISTRAL = "mistral"
     GEMINI = "gemini"
+    VLLM = "vllm"
 
 
 class AuditModel(str, Enum):
@@ -77,6 +78,23 @@ class GeminiConfig(EngineConfig):
 
 
 @dataclass
+class VLLMConfig(EngineConfig):
+    """vLLM-specific configuration for vision models via OpenAI-compatible API."""
+
+    base_url: str = ""
+    api_key: str = ""  # Optional, some vLLM deployments don't require auth
+    model: str = "Qwen/Qwen2-VL-7B-Instruct"  # Common vision models: Qwen2-VL, InternVL2
+    max_tokens: int = 1024
+    temperature: float = 0.1
+
+    def __post_init__(self) -> None:
+        if not self.base_url:
+            self.base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+        if not self.api_key:
+            self.api_key = os.environ.get("VLLM_API_KEY", "EMPTY")  # vLLM default
+
+
+@dataclass
 class AuditConfig:
     """Configuration for quality audit."""
 
@@ -100,6 +118,7 @@ class AgentConfig:
     deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
     mistral: MistralConfig = field(default_factory=MistralConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
+    vllm: VLLMConfig = field(default_factory=VLLMConfig)
 
     # Audit configuration
     audit: AuditConfig = field(default_factory=AuditConfig)
@@ -136,8 +155,9 @@ class AgentConfig:
         # Local free engines first, then cheap cloud, then expensive cloud
         self.nougat.priority = 0  # Free, local, academic-focused
         self.deepseek.priority = 1  # Free, local, general
-        self.gemini.priority = 2  # Cheap cloud ($0.0002/page)
-        self.mistral.priority = 3  # Expensive cloud ($0.001/page)
+        self.vllm.priority = 2  # Free, local, vision-capable (for figures)
+        self.gemini.priority = 3  # Cheap cloud ($0.0002/page)
+        self.mistral.priority = 4  # Expensive cloud ($0.001/page)
 
     def get_enabled_engines(self) -> list[EngineType]:
         """Get list of enabled engines sorted by priority."""
@@ -145,6 +165,7 @@ class AgentConfig:
         for engine_type, config in [
             (EngineType.NOUGAT, self.nougat),
             (EngineType.DEEPSEEK, self.deepseek),
+            (EngineType.VLLM, self.vllm),
             (EngineType.MISTRAL, self.mistral),
             (EngineType.GEMINI, self.gemini),
         ]:
@@ -158,6 +179,7 @@ class AgentConfig:
         return {
             EngineType.NOUGAT: self.nougat,
             EngineType.DEEPSEEK: self.deepseek,
+            EngineType.VLLM: self.vllm,
             EngineType.MISTRAL: self.mistral,
             EngineType.GEMINI: self.gemini,
         }[engine]
@@ -181,6 +203,8 @@ class AgentConfig:
             config.mistral = MistralConfig(**data["mistral"])
         if "gemini" in data:
             config.gemini = GeminiConfig(**data["gemini"])
+        if "vllm" in data:
+            config.vllm = VLLMConfig(**data["vllm"])
         if "audit" in data:
             config.audit = AuditConfig(**data["audit"])
 

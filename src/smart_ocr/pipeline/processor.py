@@ -20,6 +20,7 @@ from smart_ocr.engines.deepseek import DeepSeekEngine
 from smart_ocr.engines.gemini import GeminiEngine
 from smart_ocr.engines.mistral import MistralEngine
 from smart_ocr.engines.nougat import NougatEngine
+from smart_ocr.engines.vllm import VLLMEngine
 from smart_ocr.ui.console import AgentConsole
 from smart_ocr.ui.panels import AuditPanel, StagePanel, SummaryPanel
 from smart_ocr.ui.progress import AgentProgress
@@ -40,6 +41,7 @@ class OCRPipeline:
             EngineType.DEEPSEEK: DeepSeekEngine(self.config.deepseek),
             EngineType.MISTRAL: MistralEngine(self.config.mistral),
             EngineType.GEMINI: GeminiEngine(self.config.gemini),
+            EngineType.VLLM: VLLMEngine(self.config.vllm),
         }
 
         # Initialize audit components
@@ -395,8 +397,9 @@ class OCRPipeline:
                 )
 
         # Auto-select if no override or override failed
+        # Prefer local engines (vLLM, DeepSeek) over cloud (Gemini, Mistral)
         if not figure_engine:
-            for engine_type in [EngineType.GEMINI, EngineType.DEEPSEEK, EngineType.MISTRAL]:
+            for engine_type in [EngineType.VLLM, EngineType.GEMINI, EngineType.DEEPSEEK, EngineType.MISTRAL]:
                 if not self.config.get_engine_config(engine_type).enabled:
                     continue
                 engine = self.engines[engine_type]

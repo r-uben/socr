@@ -5,6 +5,7 @@ from smart_ocr.engines.deepseek import DeepSeekEngine
 from smart_ocr.engines.gemini import GeminiEngine
 from smart_ocr.engines.mistral import MistralEngine
 from smart_ocr.engines.nougat import NougatEngine
+from smart_ocr.engines.vllm import VLLMEngine
 
 __all__ = [
     "BaseEngine",
@@ -13,4 +14,5 @@ __all__ = [
     "DeepSeekEngine",
     "MistralEngine",
     "GeminiEngine",
+    "VLLMEngine",
 ]

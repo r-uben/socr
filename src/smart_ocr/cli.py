@@ -89,7 +89,7 @@ def cli(ctx: click.Context) -> None:
 )
 @click.option(
     "--figures-engine",
-    type=click.Choice(["gemini", "deepseek", "mistral"]),
+    type=click.Choice(["gemini", "deepseek", "mistral", "vllm"]),
     help="Engine to use for figure description (default: auto-select)",
 )
 @click.option(
@@ -111,6 +111,16 @@ def cli(ctx: click.Context) -> None:
     help="Render DPI: 'auto' (smart detection), or explicit value like 150, 200, 300",
 )
 @click.option(
+    "--vllm-url",
+    type=str,
+    help="vLLM server URL (default: http://localhost:8000/v1 or VLLM_BASE_URL)",
+)
+@click.option(
+    "--vllm-model",
+    type=str,
+    help="vLLM model name (default: Qwen/Qwen2-VL-7B-Instruct)",
+)
+@click.option(
     "-v", "--verbose",
     is_flag=True,
     help="Enable verbose output",
@@ -128,6 +138,8 @@ def process(
     timeout: int,
     workers: int,
     dpi: str,
+    vllm_url: str | None,
+    vllm_model: str | None,
     verbose: bool,
 ) -> None:
     """Process a PDF document with multi-agent OCR.
@@ -157,12 +169,14 @@ def process(
     config.deepseek.timeout = timeout
     config.mistral.timeout = timeout
     config.gemini.timeout = timeout
+    config.vllm.timeout = timeout
     config.figure_timeout = timeout
     # Also set engine-level figure timeouts (used by describe_figure)
     config.nougat.figure_timeout = timeout
     config.deepseek.figure_timeout = timeout
     config.mistral.figure_timeout = timeout
     config.gemini.figure_timeout = timeout
+    config.vllm.figure_timeout = timeout
 
     if no_audit:
         config.audit.enabled = False
@@ -176,6 +190,10 @@ def process(
     if figures_engine:
         config.figures_engine = EngineType(figures_engine)
         config.use_figures_engine_override = True
+    if vllm_url:
+        config.vllm.base_url = vllm_url
+    if vllm_model:
+        config.vllm.model = vllm_model
 
     pipeline = OCRPipeline(config)
 
@@ -229,7 +247,7 @@ def process(
 )
 @click.option(
     "--figures-engine",
-    type=click.Choice(["gemini", "deepseek", "mistral"]),
+    type=click.Choice(["gemini", "deepseek", "mistral", "vllm"]),
     help="Engine to use for figure description (default: auto-select)",
 )
 @click.option(
@@ -302,12 +320,14 @@ def batch(
     config.deepseek.timeout = timeout
     config.mistral.timeout = timeout
     config.gemini.timeout = timeout
+    config.vllm.timeout = timeout
     config.figure_timeout = timeout
     # Also set engine-level figure timeouts (used by describe_figure)
     config.nougat.figure_timeout = timeout
     config.deepseek.figure_timeout = timeout
     config.mistral.figure_timeout = timeout
     config.gemini.figure_timeout = timeout
+    config.vllm.figure_timeout = timeout
 
     if output_dir:
         config.output_dir = output_dir
@@ -353,11 +373,13 @@ def engines() -> None:
         GeminiEngine,
         MistralEngine,
         NougatEngine,
+        VLLMEngine,
     )
 
     engines_info = [
         ("nougat", NougatEngine(), "local, academic papers"),
         ("deepseek", DeepSeekEngine(), "local via ollama, general"),
+        ("vllm", VLLMEngine(), "local, figures only (Qwen2-VL/InternVL2)"),
         ("mistral", MistralEngine(), "cloud, $0.001/page"),
         ("gemini", GeminiEngine(), "cloud, $0.0002/page"),
     ]
