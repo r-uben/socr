@@ -14,6 +14,7 @@ class EngineType(str, Enum):
     MISTRAL = "mistral"
     GEMINI = "gemini"
     VLLM = "vllm"
+    DEEPSEEK_VLLM = "deepseek-vllm"  # DeepSeek-OCR via vLLM (HPC mode)
 
 
 class AuditModel(str, Enum):
@@ -95,6 +96,50 @@ class VLLMConfig(EngineConfig):
 
 
 @dataclass
+class DeepSeekVLLMConfig(EngineConfig):
+    """DeepSeek-OCR via vLLM configuration (HPC mode).
+
+    Uses vLLM's OpenAI-compatible API to run DeepSeek-OCR model for text extraction.
+    Unlike the standard VLLMConfig (figures-only), this engine performs OCR.
+    """
+
+    base_url: str = ""
+    api_key: str = ""
+    model: str = "deepseek-ai/DeepSeek-OCR"  # DeepSeek-OCR model
+    max_tokens: int = 4096  # OCR needs more tokens than figure description
+    temperature: float = 0.0  # Deterministic for OCR
+
+    def __post_init__(self) -> None:
+        if not self.base_url:
+            self.base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+        if not self.api_key:
+            self.api_key = os.environ.get("VLLM_API_KEY", "EMPTY")
+
+
+@dataclass
+class HPCConfig:
+    """Configuration for HPC multi-agent mode.
+
+    HPC mode runs multiple OCR engines in parallel locally via vLLM,
+    then reconciles outputs intelligently. No cloud fallback in HPC mode.
+    """
+
+    enabled: bool = False
+    vllm_url: str = ""
+    ocr_model: str = "deepseek-ai/DeepSeek-OCR"
+    vision_model: str = "OpenGVLab/InternVL2-26B"
+    reconciler_model: str = ""  # Same as ocr_model if empty
+    use_nougat: bool = True  # Include Nougat for LaTeX equations
+    use_llm_reconciler: bool = False  # Use LLM for conflict resolution
+
+    def __post_init__(self) -> None:
+        if not self.vllm_url:
+            self.vllm_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+        if not self.reconciler_model:
+            self.reconciler_model = self.ocr_model
+
+
+@dataclass
 class AuditConfig:
     """Configuration for quality audit."""
 
@@ -119,9 +164,13 @@ class AgentConfig:
     mistral: MistralConfig = field(default_factory=MistralConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     vllm: VLLMConfig = field(default_factory=VLLMConfig)
+    deepseek_vllm: DeepSeekVLLMConfig = field(default_factory=DeepSeekVLLMConfig)
 
     # Audit configuration
     audit: AuditConfig = field(default_factory=AuditConfig)
+
+    # HPC mode configuration
+    hpc: HPCConfig = field(default_factory=HPCConfig)
 
     # Processing options
     output_dir: Path = field(default_factory=lambda: Path("output"))
@@ -155,6 +204,7 @@ class AgentConfig:
         # Local free engines first, then cheap cloud, then expensive cloud
         self.nougat.priority = 0  # Free, local, academic-focused
         self.deepseek.priority = 1  # Free, local, general
+        self.deepseek_vllm.priority = 1  # Free, local, HPC mode OCR
         self.vllm.priority = 2  # Free, local, vision-capable (for figures)
         self.gemini.priority = 3  # Cheap cloud ($0.0002/page)
         self.mistral.priority = 4  # Expensive cloud ($0.001/page)
@@ -165,6 +215,7 @@ class AgentConfig:
         for engine_type, config in [
             (EngineType.NOUGAT, self.nougat),
             (EngineType.DEEPSEEK, self.deepseek),
+            (EngineType.DEEPSEEK_VLLM, self.deepseek_vllm),
             (EngineType.VLLM, self.vllm),
             (EngineType.MISTRAL, self.mistral),
             (EngineType.GEMINI, self.gemini),
@@ -179,6 +230,7 @@ class AgentConfig:
         return {
             EngineType.NOUGAT: self.nougat,
             EngineType.DEEPSEEK: self.deepseek,
+            EngineType.DEEPSEEK_VLLM: self.deepseek_vllm,
             EngineType.VLLM: self.vllm,
             EngineType.MISTRAL: self.mistral,
             EngineType.GEMINI: self.gemini,
@@ -199,6 +251,8 @@ class AgentConfig:
             config.nougat = NougatConfig(**data["nougat"])
         if "deepseek" in data:
             config.deepseek = DeepSeekConfig(**data["deepseek"])
+        if "deepseek_vllm" in data:
+            config.deepseek_vllm = DeepSeekVLLMConfig(**data["deepseek_vllm"])
         if "mistral" in data:
             config.mistral = MistralConfig(**data["mistral"])
         if "gemini" in data:
@@ -207,6 +261,8 @@ class AgentConfig:
             config.vllm = VLLMConfig(**data["vllm"])
         if "audit" in data:
             config.audit = AuditConfig(**data["audit"])
+        if "hpc" in data:
+            config.hpc = HPCConfig(**data["hpc"])
 
         for key in [
             "output_dir",
@@ -244,3 +300,41 @@ class AgentConfig:
                 config.use_figures_engine_override = True
 
         return config
+
+    @classmethod
+    def load_config(cls, profile: str | None = None, config_path: Path | str | None = None) -> "AgentConfig":
+        """Load configuration from profile or custom path.
+
+        Args:
+            profile: Profile name to load from ~/.config/smart-ocr/{profile}.yaml
+            config_path: Direct path to a config file (takes precedence over profile)
+
+        Returns:
+            AgentConfig instance
+
+        Config search order:
+            1. config_path if provided
+            2. ~/.config/smart-ocr/{profile}.yaml if profile provided
+            3. ~/.config/smart-ocr/config.yaml (default config)
+            4. Empty AgentConfig() if no config found
+        """
+        config_dir = Path.home() / ".config" / "smart-ocr"
+
+        if config_path:
+            path = Path(config_path)
+            if path.exists():
+                return cls.from_file(path)
+            raise FileNotFoundError(f"Config file not found: {path}")
+
+        if profile:
+            profile_path = config_dir / f"{profile}.yaml"
+            if profile_path.exists():
+                return cls.from_file(profile_path)
+            raise FileNotFoundError(f"Profile not found: {profile_path}")
+
+        # Try default config
+        default_path = config_dir / "config.yaml"
+        if default_path.exists():
+            return cls.from_file(default_path)
+
+        return cls()

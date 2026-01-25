@@ -13,6 +13,7 @@ DIM_COLOR = "#6B7280"          # Gray
 # Engine colors (muted)
 NOUGAT_COLOR = "#B08968"       # Warm brown
 DEEPSEEK_COLOR = "#7C9CB5"     # Muted blue
+DEEPSEEK_VLLM_COLOR = "#6B8FAB"  # Deeper blue (HPC mode)
 MISTRAL_COLOR = "#9B8AA6"      # Muted purple
 GEMINI_COLOR = "#7BA695"       # Sage
 OLLAMA_COLOR = "#8BA888"       # Soft green
@@ -24,11 +25,13 @@ STAGE_COLORS = {
     "audit": "#8BA888",
     "fallback": "#B08968",
     "figures": "#7BA695",
+    "reconcile": "#6B8FAB",  # HPC reconciliation
 }
 
 ENGINE_STYLES = {
     "nougat": Style(color=NOUGAT_COLOR),
     "deepseek": Style(color=DEEPSEEK_COLOR),
+    "deepseek-vllm": Style(color=DEEPSEEK_VLLM_COLOR),
     "mistral": Style(color=MISTRAL_COLOR),
     "gemini": Style(color=GEMINI_COLOR),
     "ollama": Style(color=OLLAMA_COLOR),
@@ -39,6 +42,7 @@ ENGINE_STYLES = {
 ENGINE_ICONS = {
     "nougat": "",
     "deepseek": "",
+    "deepseek-vllm": "",
     "mistral": "",
     "gemini": "",
     "ollama": "",
@@ -48,6 +52,7 @@ ENGINE_ICONS = {
 ENGINE_LABELS = {
     "nougat": "nougat",
     "deepseek": "deepseek",
+    "deepseek-vllm": "deepseek-vllm",
     "mistral": "mistral",
     "gemini": "gemini",
     "ollama": "ollama",
@@ -67,6 +72,7 @@ STATUS_ICONS = {
 AGENT_THEME = Theme({
     "nougat": ENGINE_STYLES["nougat"],
     "deepseek": ENGINE_STYLES["deepseek"],
+    "deepseek-vllm": ENGINE_STYLES["deepseek-vllm"],
     "mistral": ENGINE_STYLES["mistral"],
     "gemini": ENGINE_STYLES["gemini"],
     "ollama": ENGINE_STYLES["ollama"],

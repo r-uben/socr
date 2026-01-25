@@ -17,6 +17,7 @@ from smart_ocr.core.result import OCRResult, PageResult, PageStatus, ProcessingS
 from smart_ocr.pipeline.router import EngineRouter
 from smart_ocr.engines.base import BaseEngine
 from smart_ocr.engines.deepseek import DeepSeekEngine
+from smart_ocr.engines.deepseek_vllm import DeepSeekVLLMEngine
 from smart_ocr.engines.gemini import GeminiEngine
 from smart_ocr.engines.mistral import MistralEngine
 from smart_ocr.engines.nougat import NougatEngine
@@ -39,6 +40,7 @@ class OCRPipeline:
         self.engines: dict[EngineType, BaseEngine] = {
             EngineType.NOUGAT: NougatEngine(self.config.nougat),
             EngineType.DEEPSEEK: DeepSeekEngine(self.config.deepseek),
+            EngineType.DEEPSEEK_VLLM: DeepSeekVLLMEngine(self.config.deepseek_vllm),
             EngineType.MISTRAL: MistralEngine(self.config.mistral),
             EngineType.GEMINI: GeminiEngine(self.config.gemini),
             EngineType.VLLM: VLLMEngine(self.config.vllm),

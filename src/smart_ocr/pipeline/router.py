@@ -98,7 +98,7 @@ class EngineRouter:
 
     def select_cross_check(self, primary: EngineType) -> EngineType | None:
         """Select a secondary local engine for cross-checking flagged pages."""
-        candidates = [EngineType.NOUGAT, EngineType.DEEPSEEK]
+        candidates = [EngineType.NOUGAT, EngineType.DEEPSEEK, EngineType.DEEPSEEK_VLLM]
         for engine_type in candidates:
             if engine_type == primary:
                 continue
@@ -111,3 +111,39 @@ class EngineRouter:
             if caps and getattr(caps, "is_local", False) and self._available(engine_type):
                 return engine_type
         return None
+
+    def select_hpc_engines(
+        self,
+        warn: Callable[[str], None] | None = None,
+    ) -> list[EngineType]:
+        """Select engines for HPC mode parallel processing.
+
+        HPC mode uses:
+        1. DeepSeek-vLLM as primary OCR engine
+        2. Nougat for LaTeX equation handling (if enabled)
+        3. vLLM for figure description
+
+        Returns:
+            List of available HPC engines in priority order
+        """
+        available = []
+
+        # Primary: DeepSeek-vLLM
+        if self._available(EngineType.DEEPSEEK_VLLM):
+            available.append(EngineType.DEEPSEEK_VLLM)
+        elif warn:
+            warn("DeepSeek-vLLM not available for HPC mode")
+
+        # Secondary: Nougat for LaTeX
+        if self._available(EngineType.NOUGAT):
+            available.append(EngineType.NOUGAT)
+        elif warn:
+            warn("Nougat not available (LaTeX support disabled)")
+
+        # Figure description: vLLM with vision model
+        if self._available(EngineType.VLLM):
+            available.append(EngineType.VLLM)
+        elif warn:
+            warn("vLLM vision not available for figure description")
+
+        return available

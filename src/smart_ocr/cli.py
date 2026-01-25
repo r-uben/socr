@@ -7,6 +7,7 @@ from rich.console import Console
 
 from smart_ocr import __version__
 from smart_ocr.core.config import AgentConfig, EngineType
+from smart_ocr.pipeline.hpc_pipeline import HPCPipeline
 from smart_ocr.pipeline.processor import OCRPipeline
 from smart_ocr.ui.theme import AGENT_THEME, ENGINE_LABELS
 
@@ -125,6 +126,22 @@ def cli(ctx: click.Context) -> None:
     is_flag=True,
     help="Enable verbose output",
 )
+@click.option(
+    "--hpc",
+    is_flag=True,
+    help="Enable HPC mode: parallel multi-engine processing via local vLLM",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to custom config file (YAML)",
+)
+@click.option(
+    "--profile",
+    type=str,
+    help="Load profile from ~/.config/smart-ocr/{profile}.yaml",
+)
 def process(
     pdf_path: Path,
     output: Path | None,
@@ -141,6 +158,9 @@ def process(
     vllm_url: str | None,
     vllm_model: str | None,
     verbose: bool,
+    hpc: bool,
+    config_path: Path | None,
+    profile: str | None,
 ) -> None:
     """Process a PDF document with multi-agent OCR.
 
@@ -148,21 +168,41 @@ def process(
     quality audit with local LLM, then cloud fallback (Mistral/Gemini)
     for failed pages.
 
+    HPC mode (--hpc) runs multiple OCR engines in parallel via local vLLM
+    and reconciles outputs for best quality.
+
     Example:
         smart-ocr process paper.pdf -o extracted.md
+        smart-ocr paper.pdf --hpc --vllm-url http://node:8000/v1
     """
     # Parse DPI (can be "auto" or int)
     render_dpi: int | str = dpi if dpi == "auto" else int(dpi)
 
-    config = AgentConfig(
-        output_format=format,
-        include_figures=not no_figures,
-        save_figures=save_figures,
-        parallel_pages=workers,
-        parallel_figures=max(1, workers // 2),  # Fewer parallel figure workers (API calls)
-        render_dpi=render_dpi,
-        verbose=verbose,
-    )
+    # Load config from file/profile if specified
+    if config_path or profile:
+        try:
+            config = AgentConfig.load_config(profile=profile, config_path=config_path)
+        except FileNotFoundError as e:
+            raise click.ClickException(str(e))
+    else:
+        config = AgentConfig()
+
+    # Apply CLI options (override config file settings)
+    config.output_format = format
+    config.include_figures = not no_figures
+    config.save_figures = save_figures
+    config.parallel_pages = workers
+    config.parallel_figures = max(1, workers // 2)
+    config.render_dpi = render_dpi
+    config.verbose = verbose
+
+    # HPC mode configuration
+    if hpc:
+        config.hpc.enabled = True
+        if vllm_url:
+            config.hpc.vllm_url = vllm_url
+        # Disable audit in HPC mode (reconciliation handles quality)
+        config.audit.enabled = False
 
     # Apply timeout to all engine configs
     config.nougat.timeout = timeout
@@ -192,10 +232,15 @@ def process(
         config.use_figures_engine_override = True
     if vllm_url:
         config.vllm.base_url = vllm_url
+        config.deepseek_vllm.base_url = vllm_url
     if vllm_model:
         config.vllm.model = vllm_model
 
-    pipeline = OCRPipeline(config)
+    # Select pipeline based on mode
+    if config.hpc.enabled:
+        pipeline = HPCPipeline(config)
+    else:
+        pipeline = OCRPipeline(config)
 
     try:
         result = pipeline.process(pdf_path, output_path=output)
@@ -273,6 +318,27 @@ def process(
     type=int,
     help="Maximum number of PDFs to process",
 )
+@click.option(
+    "--hpc",
+    is_flag=True,
+    help="Enable HPC mode: parallel multi-engine processing via local vLLM",
+)
+@click.option(
+    "--vllm-url",
+    type=str,
+    help="vLLM server URL for HPC mode (default: http://localhost:8000/v1)",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to custom config file (YAML)",
+)
+@click.option(
+    "--profile",
+    type=str,
+    help="Load profile from ~/.config/smart-ocr/{profile}.yaml",
+)
 def batch(
     pdf_dir: Path,
     output_dir: Path | None,
@@ -286,6 +352,10 @@ def batch(
     workers: int,
     dpi: str,
     limit: int | None,
+    hpc: bool,
+    vllm_url: str | None,
+    config_path: Path | None,
+    profile: str | None,
 ) -> None:
     """Process all PDFs in a directory.
 
@@ -302,18 +372,37 @@ def batch(
         pdf_files = pdf_files[:limit]
 
     console.print(f"\n[bold]Batch Processing: {len(pdf_files)} PDFs[/bold]\n")
+    if hpc:
+        console.print("[info]HPC Mode[/info] - Multi-engine parallel processing\n")
 
     # Parse DPI (can be "auto" or int)
     render_dpi: int | str = dpi if dpi == "auto" else int(dpi)
 
-    config = AgentConfig(
-        output_format=format,
-        include_figures=not no_figures,
-        save_figures=save_figures,
-        parallel_pages=workers,
-        parallel_figures=max(1, workers // 2),
-        render_dpi=render_dpi,
-    )
+    # Load config from file/profile if specified
+    if config_path or profile:
+        try:
+            config = AgentConfig.load_config(profile=profile, config_path=config_path)
+        except FileNotFoundError as e:
+            raise click.ClickException(str(e))
+    else:
+        config = AgentConfig()
+
+    # Apply CLI options
+    config.output_format = format
+    config.include_figures = not no_figures
+    config.save_figures = save_figures
+    config.parallel_pages = workers
+    config.parallel_figures = max(1, workers // 2)
+    config.render_dpi = render_dpi
+
+    # HPC mode configuration
+    if hpc:
+        config.hpc.enabled = True
+        if vllm_url:
+            config.hpc.vllm_url = vllm_url
+            config.vllm.base_url = vllm_url
+            config.deepseek_vllm.base_url = vllm_url
+        config.audit.enabled = False
 
     # Apply timeout to all engine configs
     config.nougat.timeout = timeout
@@ -340,7 +429,12 @@ def batch(
         config.figures_engine = EngineType(figures_engine)
         config.use_figures_engine_override = True
 
-    pipeline = OCRPipeline(config)
+    # Select pipeline based on mode
+    if config.hpc.enabled:
+        pipeline = HPCPipeline(config)
+    else:
+        pipeline = OCRPipeline(config)
+
     results: list[tuple[Path, bool, str]] = []
 
     for i, pdf_path in enumerate(pdf_files, 1):
@@ -370,6 +464,7 @@ def engines() -> None:
 
     from smart_ocr.engines import (
         DeepSeekEngine,
+        DeepSeekVLLMEngine,
         GeminiEngine,
         MistralEngine,
         NougatEngine,
@@ -379,6 +474,7 @@ def engines() -> None:
     engines_info = [
         ("nougat", NougatEngine(), "local, academic papers"),
         ("deepseek", DeepSeekEngine(), "local via ollama, general"),
+        ("deepseek-vllm", DeepSeekVLLMEngine(), "local via vLLM, HPC mode OCR"),
         ("vllm", VLLMEngine(), "local, figures only (Qwen2-VL/InternVL2)"),
         ("mistral", MistralEngine(), "cloud, $0.001/page"),
         ("gemini", GeminiEngine(), "cloud, $0.0002/page"),
