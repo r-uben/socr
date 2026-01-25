@@ -1,6 +1,6 @@
 [project]
 name = "smart-ocr"
-version = "0.2.4"
+version = "0.2.5"
 description = "Multi-engine document OCR with cascading fallback"
 authors = [
     {name = "Ruben Fernandez-Fuertes", email = "fernandezfuertesruben@gmail.com"}

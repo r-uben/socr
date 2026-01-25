@@ -467,6 +467,11 @@ class HPCSequentialPipeline(OCRPipeline):
         max_dim = 1024
         min_area = 80 * 80
         render_dpi = 150
+        # Vector figure detection parameters
+        min_drawings_for_vector_figure = 5
+        min_vector_figure_area_ratio = 0.05
+        max_vector_figure_area_ratio = 0.85
+        header_footer_margin = 0.1
 
         # Prepare figures directory
         figures_dir: Path | None = None
@@ -500,6 +505,90 @@ class HPCSequentialPipeline(OCRPipeline):
 
                     per_page = 0
                     processed_regions: set[tuple[int, int, int, int]] = set()
+
+                    # Detect page orientation
+                    is_landscape = page.rect.width > page.rect.height
+                    page_width = page.rect.width
+                    page_height = page.rect.height
+                    page_area = page_width * page_height
+                    effective_min_area_ratio = min_vector_figure_area_ratio * 0.5 if is_landscape else min_vector_figure_area_ratio
+                    effective_max_area_ratio = 0.98 if is_landscape else max_vector_figure_area_ratio
+                    effective_min_drawings = 3 if is_landscape else min_drawings_for_vector_figure
+
+                    # Strategy 0: Detect vector figures (most academic papers use this)
+                    try:
+                        drawings = page.get_drawings()
+                        if len(drawings) >= effective_min_drawings:
+                            figure_regions = self._cluster_drawings_into_figures(
+                                drawings, page_width, page_height, cluster_gap=30,
+                            )
+                            if figure_regions:
+                                self.console.console.print(
+                                    f"[dim]  Page {page_num}: {len(figure_regions)} vector figures[/dim]"
+                                )
+
+                            for region_drawings, bbox in figure_regions:
+                                if figure_counter > self.config.figures_max_total:
+                                    break
+                                if per_page >= self.config.figures_max_per_page:
+                                    break
+
+                                x0, y0, x1, y1 = bbox
+                                width = x1 - x0
+                                height = y1 - y0
+                                area = width * height
+                                area_ratio = area / page_area
+
+                                if area < min_area or width < 50 or height < 50:
+                                    continue
+                                if area_ratio < effective_min_area_ratio or area_ratio > effective_max_area_ratio:
+                                    continue
+                                if len(region_drawings) < effective_min_drawings:
+                                    continue
+
+                                # Skip header/footer regions
+                                if not is_landscape:
+                                    center_y = (y0 + y1) / 2
+                                    in_header = center_y < page_height * header_footer_margin
+                                    in_footer = center_y > page_height * (1 - header_footer_margin)
+                                    if (in_header or in_footer) and len(region_drawings) < 20:
+                                        continue
+
+                                region_key = (int(x0), int(y0), int(x1), int(y1))
+                                if region_key in processed_regions:
+                                    continue
+                                processed_regions.add(region_key)
+
+                                # Render figure region
+                                padding = 10
+                                clip = fitz.Rect(
+                                    max(0, x0 - padding), max(0, y0 - padding),
+                                    min(page_width, x1 + padding), min(page_height, y1 + padding)
+                                )
+                                mat = fitz.Matrix(render_dpi / 72, render_dpi / 72)
+                                try:
+                                    pix = page.get_pixmap(matrix=mat, clip=clip)
+                                    pil_img = Image.frombytes(
+                                        "RGB", (pix.width, pix.height), pix.samples
+                                    )
+                                    if max(pil_img.size) > max_dim:
+                                        pil_img.thumbnail((max_dim, max_dim))
+
+                                    fig_path: str | None = None
+                                    if figures_dir:
+                                        fig_filename = f"figure_{figure_counter}_page{page_num}.png"
+                                        fig_path = str(figures_dir / fig_filename)
+                                        pil_img.save(fig_path)
+
+                                    pending_figures.append(
+                                        (figure_counter, page_num, pil_img, context_text, fig_path)
+                                    )
+                                    figure_counter += 1
+                                    per_page += 1
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
                     # Strategy 1: Extract IMAGE blocks (finds most academic figures)
                     try:
@@ -631,6 +720,107 @@ class HPCSequentialPipeline(OCRPipeline):
             self.console.print_warning(f"Figure extraction error: {e}")
 
         return pending_figures
+
+    def _cluster_drawings_into_figures(
+        self,
+        drawings: list[dict],
+        page_width: float,
+        page_height: float,
+        cluster_gap: float = 30,
+    ) -> list[tuple[list[dict], tuple[float, float, float, float]]]:
+        """Cluster drawings into figure regions using spatial proximity.
+
+        Uses a simple union-find approach: drawings whose bounding boxes are within
+        `cluster_gap` pixels of each other belong to the same figure.
+
+        Returns:
+            List of (drawings_in_cluster, bounding_box) tuples.
+        """
+        if not drawings:
+            return []
+
+        # Extract bounding boxes
+        boxes = []
+        for d in drawings:
+            rect = d.get("rect")
+            if rect:
+                boxes.append((rect.x0, rect.y0, rect.x1, rect.y1))
+            else:
+                boxes.append(None)
+
+        # Filter out drawings without valid boxes
+        valid = [(i, boxes[i]) for i in range(len(boxes)) if boxes[i] is not None]
+        if not valid:
+            return []
+
+        # Union-Find structure
+        parent = {i: i for i, _ in valid}
+
+        def find(x: int) -> int:
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+
+        def union(x: int, y: int) -> None:
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        # Check proximity between all pairs
+        for i, (idx_i, box_i) in enumerate(valid):
+            for j, (idx_j, box_j) in enumerate(valid):
+                if i >= j:
+                    continue
+                x0_i, y0_i, x1_i, y1_i = box_i
+                x0_j, y0_j, x1_j, y1_j = box_j
+
+                # Horizontal gap
+                if x1_i < x0_j:
+                    h_gap = x0_j - x1_i
+                elif x1_j < x0_i:
+                    h_gap = x0_i - x1_j
+                else:
+                    h_gap = 0
+
+                # Vertical gap
+                if y1_i < y0_j:
+                    v_gap = y0_j - y1_i
+                elif y1_j < y0_i:
+                    v_gap = y0_i - y1_j
+                else:
+                    v_gap = 0
+
+                if h_gap <= cluster_gap and v_gap <= cluster_gap:
+                    union(idx_i, idx_j)
+
+        # Group drawings by cluster
+        clusters: dict[int, list[int]] = {}
+        for idx, _ in valid:
+            root = find(idx)
+            if root not in clusters:
+                clusters[root] = []
+            clusters[root].append(idx)
+
+        # Compute bounding box for each cluster
+        results = []
+        for indices in clusters.values():
+            cluster_drawings = [drawings[i] for i in indices]
+            cluster_boxes = [boxes[i] for i in indices if boxes[i] is not None]
+
+            if not cluster_boxes:
+                continue
+
+            x0 = min(b[0] for b in cluster_boxes)
+            y0 = min(b[1] for b in cluster_boxes)
+            x1 = max(b[2] for b in cluster_boxes)
+            y1 = max(b[3] for b in cluster_boxes)
+
+            results.append((cluster_drawings, (x0, y0, x1, y1)))
+
+        # Sort by position (top-to-bottom, left-to-right)
+        results.sort(key=lambda r: (r[1][1], r[1][0]))
+
+        return results
 
     def save_output(self, result: OCRResult, output_path: Path | None = None) -> Path:
         """Save OCR result with HPC sequential metadata."""
