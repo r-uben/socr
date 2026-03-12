@@ -19,6 +19,7 @@ from smart_ocr.core.document import DocumentHandle
 from smart_ocr.core.metadata import MetadataManager
 from smart_ocr.core.result import DocumentResult, DocumentStatus
 from smart_ocr.engines.registry import get_engine
+from smart_ocr.figures.extractor import FigureExtractor
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -53,7 +54,9 @@ class StandardPipeline:
                 if fallback_result and fallback_result.success:
                     result = fallback_result
 
-        # Stage 4: Figures (placeholder — TICKET-4 will add FigureExtractor)
+        # Stage 4: Figures
+        if self.config.save_figures and result.success:
+            self._run_figures(doc, result, out_dir)
 
         if not self.config.quiet:
             self._print_summary(result)
@@ -182,6 +185,38 @@ class StandardPipeline:
         result = engine.process_document(doc.path, output_dir, self.config)
         result.pages_processed = doc.page_count
         return result
+
+    def _run_figures(self, doc: DocumentHandle, result: DocumentResult, output_dir: Path) -> None:
+        """Stage 4: Extract figure images from the PDF."""
+        if not self.config.quiet:
+            console.print(f"\n[cyan]Stage 4:[/cyan] Figure extraction")
+
+        from smart_ocr.engines.base import sanitize_filename
+
+        figures_dir = output_dir / sanitize_filename(doc.stem) / "figures"
+        extractor = FigureExtractor(
+            max_total=self.config.figures_max_total,
+            max_per_page=self.config.figures_max_per_page,
+            save_dir=figures_dir,
+        )
+        extracted = extractor.extract(doc.path)
+
+        if not self.config.quiet:
+            if extracted:
+                console.print(f"  Extracted {len(extracted)} figures to {figures_dir}")
+            else:
+                console.print("  [dim]No figures detected[/dim]")
+
+        from smart_ocr.core.result import FigureInfo
+        result.figures = [
+            FigureInfo(
+                figure_num=fig.figure_num,
+                page_num=fig.page_num,
+                figure_type="extracted",
+                image_path=fig.saved_path,
+            )
+            for fig in extracted
+        ]
 
     def _print_summary(self, result: DocumentResult) -> None:
         status = "[green]Success[/green]" if result.success else f"[red]{result.status.value}[/red]"

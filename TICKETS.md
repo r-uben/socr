@@ -62,7 +62,7 @@
   - [ ] Passes device/pages flags when configured
 
 ### [TICKET-4] Deduplicate figure extraction — shared FigureExtractor
-- **Status:** pending
+- **Status:** done
 - **Priority:** high
 - **Files:** `src/smart_ocr/figures/extractor.py` (new), `src/smart_ocr/figures/__init__.py` (new)
 - **Description:**
