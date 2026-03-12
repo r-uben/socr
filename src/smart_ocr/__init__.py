@@ -2,16 +2,13 @@
 
 __version__ = "0.2.7"
 
-from smart_ocr.core.config import AgentConfig
-from smart_ocr.core.document import Document, DocumentType
-from smart_ocr.core.result import OCRResult, PageResult
-from smart_ocr.pipeline.processor import OCRPipeline
+from smart_ocr.core.config import EngineType, PipelineConfig
+from smart_ocr.core.document import DocumentHandle
+from smart_ocr.core.result import DocumentResult
 
 __all__ = [
-    "AgentConfig",
-    "Document",
-    "DocumentType",
-    "OCRResult",
-    "PageResult",
-    "OCRPipeline",
+    "DocumentHandle",
+    "DocumentResult",
+    "EngineType",
+    "PipelineConfig",
 ]

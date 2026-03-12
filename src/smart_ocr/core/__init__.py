@@ -1,14 +1,16 @@
 """Core data models for smart-ocr."""
 
-from smart_ocr.core.config import AgentConfig
-from smart_ocr.core.document import Document, PageImage
-from smart_ocr.core.result import OCRResult, PageResult, ProcessingStats
+from smart_ocr.core.config import EngineType, HPCConfig, PipelineConfig
+from smart_ocr.core.document import DocumentHandle
+from smart_ocr.core.result import DocumentResult, DocumentStatus, PageResult, PageStatus
 
 __all__ = [
-    "AgentConfig",
-    "Document",
-    "PageImage",
-    "OCRResult",
+    "DocumentHandle",
+    "DocumentResult",
+    "DocumentStatus",
+    "EngineType",
+    "HPCConfig",
     "PageResult",
-    "ProcessingStats",
+    "PageStatus",
+    "PipelineConfig",
 ]
