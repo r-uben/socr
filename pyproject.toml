@@ -1,6 +1,6 @@
 [project]
 name = "smart-ocr"
-version = "0.2.7"
+version = "1.0.0"
 description = "Multi-engine document OCR with cascading fallback"
 authors = [
     {name = "Ruben Fernandez-Fuertes", email = "fernandezfuertesruben@gmail.com"}
@@ -8,7 +8,7 @@ authors = [
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11,<3.13"
-keywords = ["ocr", "pdf", "document-processing", "smart-ocr", "nougat", "mistral", "gemini", "deepseek"]
+keywords = ["ocr", "pdf", "document-processing", "smart-ocr", "nougat", "mistral", "gemini", "deepseek", "marker"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -44,6 +44,8 @@ deepseek = ["deepseek-ocr-cli>=0.1.0"]
 nougat = ["nougat-ocr-cli>=0.1.2"]
 gemini = ["gemini-ocr-cli>=0.2.0"]
 mistral = ["mistral-ocr-cli>=0.1.0"]
+# marker-ocr-cli has a pillow version conflict with deepseek-ocr-cli
+# Install marker-ocr-cli separately: pip install marker-ocr-cli
 # Convenience groups
 local = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2"]
 cloud = ["gemini-ocr-cli>=0.2.0", "mistral-ocr-cli>=0.1.0"]

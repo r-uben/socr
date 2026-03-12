@@ -1,6 +1,6 @@
 """smart-ocr - Multi-engine document OCR with cascading fallback."""
 
-__version__ = "0.2.7"
+__version__ = "1.0.0"
 
 from smart_ocr.core.config import EngineType, PipelineConfig
 from smart_ocr.core.document import DocumentHandle

@@ -97,7 +97,7 @@
   - [ ] Uses FigureExtractor, MetadataManager, PipelineConfig
 
 ### [TICKET-6] Simplify HPC pipeline — shared figures, simplified config
-- **Status:** pending
+- **Status:** deferred (HPC pipeline needs separate refactor — coupled to vLLM engines, reconciler, old per-page model)
 - **Priority:** medium
 - **Files:** `src/smart_ocr/pipeline/hpc_pipeline.py`
 - **Description:**
@@ -147,7 +147,7 @@
   - [ ] Marker available as engine choice
 
 ### [TICKET-9] Version bump, pyproject cleanup, tests
-- **Status:** pending
+- **Status:** done (version bump + pyproject; tests deferred)
 - **Priority:** low
 - **Files:** `pyproject.toml`, `src/smart_ocr/__init__.py`, `tests/`
 - **Description:**
