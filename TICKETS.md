@@ -130,7 +130,7 @@
   - [ ] Integrated into StandardPipeline
 
 ### [TICKET-8] CLI cleanup — flags, deduplication
-- **Status:** pending
+- **Status:** done
 - **Priority:** medium
 - **Files:** `src/smart_ocr/cli.py`
 - **Description:**
