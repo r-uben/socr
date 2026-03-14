@@ -6,11 +6,13 @@ Used when socr needs to swap models on a single GPU.
 
 import atexit
 import os
+import secrets
 import signal
 import subprocess
 import sys
+import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -22,11 +24,12 @@ class ServerConfig:
 
     model: str
     port: int = 8000
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     gpu_memory_utilization: float = 0.9
     max_model_len: int = 8192
-    trust_remote_code: bool = True
+    trust_remote_code: bool = False
     dtype: str = "auto"
+    api_key: str = field(default_factory=lambda: secrets.token_urlsafe(32))
 
 
 class VLLMServerManager:
@@ -76,7 +79,7 @@ class VLLMServerManager:
         if self.process is not None:
             self.stop()
 
-        # Build command (no --api-key for local HPC usage)
+        # Build command
         cmd = [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", config.model,
@@ -85,13 +88,16 @@ class VLLMServerManager:
             "--max-model-len", str(config.max_model_len),
             "--gpu-memory-utilization", str(config.gpu_memory_utilization),
             "--dtype", config.dtype,
+            "--api-key", config.api_key,
         ]
 
         if config.trust_remote_code:
             cmd.append("--trust-remote-code")
 
-        # Set up logging
-        self._log_file = Path(f"/tmp/vllm_server_{config.port}.log")
+        # Set up logging in a private temp directory
+        log_dir = Path(tempfile.gettempdir()) / f"socr-vllm-{os.getuid()}"
+        log_dir.mkdir(mode=0o700, exist_ok=True)
+        self._log_file = log_dir / f"server_{config.port}.log"
 
         env = os.environ.copy()
         # Ensure CUDA is visible

@@ -34,7 +34,7 @@ class DeepSeekVLLMConfig:
         if not self.base_url:
             self.base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
         if not self.api_key:
-            self.api_key = os.environ.get("VLLM_API_KEY", "token-abc123")
+            self.api_key = os.environ.get("VLLM_API_KEY", "")
 
 
 class DeepSeekVLLMEngine(BaseHTTPEngine):
@@ -55,12 +55,12 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
 
     def _get_client(self) -> httpx.Client:
         if self._client is None:
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if self.config.api_key:
+                headers["Authorization"] = f"Bearer {self.config.api_key}"
             self._client = httpx.Client(
                 base_url=self.config.base_url,
-                headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 timeout=httpx.Timeout(self.config.timeout, connect=30.0),
             )
         return self._client

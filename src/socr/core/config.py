@@ -1,5 +1,6 @@
 """Configuration for socr v1.0."""
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 from enum import Enum
@@ -148,9 +149,11 @@ class PipelineConfig:
         if "output_dir" in data:
             config.output_dir = Path(data["output_dir"])
 
-        # HPC config
+        # HPC config — only allow known fields to prevent injection
         if "hpc" in data and isinstance(data["hpc"], dict):
-            config.hpc = HPCConfig(**data["hpc"])
+            allowed = {f.name for f in dataclasses.fields(HPCConfig)}
+            hpc_data = {k: v for k, v in data["hpc"].items() if k in allowed}
+            config.hpc = HPCConfig(**hpc_data)
 
         return config
 
@@ -173,7 +176,9 @@ class PipelineConfig:
             raise FileNotFoundError(f"Config file not found: {path}")
 
         if profile:
-            profile_path = config_dir / f"{profile}.yaml"
+            profile_path = (config_dir / f"{profile}.yaml").resolve()
+            if not profile_path.is_relative_to(config_dir.resolve()):
+                raise ValueError(f"Invalid profile name: {profile!r}")
             if profile_path.exists():
                 return cls.from_file(profile_path)
             raise FileNotFoundError(f"Profile not found: {profile_path}")

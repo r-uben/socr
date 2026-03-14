@@ -154,6 +154,10 @@ class BaseEngine(ABC):
 
         # Fallback: find any .md file (handles sanitization mismatches)
         for md_file in output_dir.rglob("*.md"):
+            # Guard against symlinks escaping the temp directory
+            if not md_file.resolve().is_relative_to(output_dir.resolve()):
+                logger.warning(f"[{self.name}] Skipping symlink outside output dir: {md_file}")
+                continue
             logger.warning(f"[{self.name}] Output found via rglob fallback: {md_file}")
             return self._clean_output(md_file.read_text(encoding="utf-8"))
 
