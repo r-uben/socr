@@ -1,4 +1,4 @@
-# smart-ocr v1.0 Refactor — Tickets
+# socr v1.0 Refactor — Tickets
 
 ## CLI Command Reference
 
@@ -17,7 +17,7 @@
 ### [TICKET-1] Core data model — PipelineConfig, DocumentHandle, DocumentResult
 - **Status:** done
 - **Priority:** high
-- **Files:** `src/smart_ocr/core/config.py`, `src/smart_ocr/core/document.py`, `src/smart_ocr/core/result.py`
+- **Files:** `src/socr/core/config.py`, `src/socr/core/document.py`, `src/socr/core/result.py`
 - **Description:**
   - Replace 8 nested dataclasses with single `PipelineConfig` (engine selection, output dir, timeouts, flags)
   - Replace eager `Document` (renders ALL pages to PIL) with lazy `DocumentHandle` (holds path + page list, no rendering)
@@ -32,7 +32,7 @@
 ### [TICKET-2] Engine interface + fix CLI commands
 - **Status:** done
 - **Priority:** high
-- **Files:** `src/smart_ocr/engines/base.py`, `src/smart_ocr/engines/gemini.py`, `src/smart_ocr/engines/nougat.py`, `src/smart_ocr/engines/deepseek.py`, `src/smart_ocr/engines/mistral.py`
+- **Files:** `src/socr/engines/base.py`, `src/socr/engines/gemini.py`, `src/socr/engines/nougat.py`, `src/socr/engines/deepseek.py`, `src/socr/engines/mistral.py`
 - **Description:**
   - New `BaseEngine.process_document(pdf_path: Path, output_dir: Path, config: PipelineConfig) -> DocumentResult`
   - Remove `process_image()` / `process_pdf_page()` (per-page interface)
@@ -50,7 +50,7 @@
 ### [TICKET-3] Add Marker engine
 - **Status:** done
 - **Priority:** medium
-- **Files:** `src/smart_ocr/engines/marker.py` (new)
+- **Files:** `src/socr/engines/marker.py` (new)
 - **Description:**
   - New `MarkerEngine` following the same interface as TICKET-2
   - Calls `marker-ocr <path> -o <dir>` via subprocess
@@ -64,7 +64,7 @@
 ### [TICKET-4] Deduplicate figure extraction — shared FigureExtractor
 - **Status:** done
 - **Priority:** high
-- **Files:** `src/smart_ocr/figures/extractor.py` (new), `src/smart_ocr/figures/__init__.py` (new)
+- **Files:** `src/socr/figures/extractor.py` (new), `src/socr/figures/__init__.py` (new)
 - **Description:**
   - Extract ~400 lines of figure extraction from `processor.py` and ~400 from `hpc_sequential_pipeline.py`
   - Shared `FigureExtractor` class with 3 strategies: vector clustering, IMAGE blocks, raw embedded
@@ -79,7 +79,7 @@
 ### [TICKET-5] Rewrite StandardPipeline — document-level stages
 - **Status:** done
 - **Priority:** high
-- **Files:** `src/smart_ocr/pipeline/processor.py`
+- **Files:** `src/socr/pipeline/processor.py`
 - **Description:**
   - Rewrite `OCRPipeline` as `StandardPipeline` with document-level stages:
     1. Primary OCR: `engine.process_document(pdf_path, output_dir)`
@@ -99,7 +99,7 @@
 ### [TICKET-6] Simplify HPC pipeline — shared figures, simplified config
 - **Status:** done
 - **Priority:** medium
-- **Files:** `src/smart_ocr/pipeline/hpc_pipeline.py`, `src/smart_ocr/engines/base.py`, `src/smart_ocr/engines/deepseek_vllm.py`, `src/smart_ocr/engines/vllm.py`, `src/smart_ocr/pipeline/router.py`, `src/smart_ocr/pipeline/reconciler.py`
+- **Files:** `src/socr/pipeline/hpc_pipeline.py`, `src/socr/engines/base.py`, `src/socr/engines/deepseek_vllm.py`, `src/socr/engines/vllm.py`, `src/socr/pipeline/router.py`, `src/socr/pipeline/reconciler.py`
 - **Description:**
   - Added `BaseHTTPEngine` abstract class for vLLM/HPC per-page engines (separate from CLI-based `BaseEngine`)
   - Rewrote `DeepSeekVLLMEngine` and `VLLMEngine` using `BaseHTTPEngine` + local config dataclasses
@@ -124,7 +124,7 @@
 ### [TICKET-7] MetadataManager — incremental batch processing
 - **Status:** done
 - **Priority:** high
-- **Files:** `src/smart_ocr/core/metadata.py` (new)
+- **Files:** `src/socr/core/metadata.py` (new)
 - **Description:**
   - Port `MetadataManager` pattern from sibling CLIs (gemini-ocr, marker-ocr, nougat-ocr)
   - SHA256 file checksums for change detection
@@ -140,7 +140,7 @@
 ### [TICKET-8] CLI cleanup — flags, deduplication
 - **Status:** done
 - **Priority:** medium
-- **Files:** `src/smart_ocr/cli.py`
+- **Files:** `src/socr/cli.py`
 - **Description:**
   - Add `--dry-run`, `--quiet`, `--reprocess` to top-level (pass through to pipeline)
   - Remove 12x duplicated timeout settings (single `--timeout` flag)
@@ -157,7 +157,7 @@
 ### [TICKET-9] Version bump, pyproject cleanup, tests
 - **Status:** done (version bump + pyproject; tests deferred)
 - **Priority:** low
-- **Files:** `pyproject.toml`, `src/smart_ocr/__init__.py`, `tests/`
+- **Files:** `pyproject.toml`, `src/socr/__init__.py`, `tests/`
 - **Description:**
   - Bump version to 1.0.0
   - Add `marker-ocr-cli` to optional dependencies

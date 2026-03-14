@@ -6,10 +6,10 @@ import pytest
 fitz = pytest.importorskip("fitz")
 PIL = pytest.importorskip("PIL")
 
-from smart_ocr.core.config import PipelineConfig
-from smart_ocr.core.document import DocumentHandle
-from smart_ocr.core.result import FigureInfo
-from smart_ocr.figures.extractor import FigureExtractor
+from socr.core.config import PipelineConfig
+from socr.core.document import DocumentHandle
+from socr.core.result import FigureInfo
+from socr.figures.extractor import FigureExtractor
 
 
 def _make_pdf_with_image(tmp_path: Path) -> Path:

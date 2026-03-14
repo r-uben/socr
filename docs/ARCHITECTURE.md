@@ -1,7 +1,7 @@
-# smart-ocr Architecture
+# socr Architecture
 
 ## Modules
-- `smart_ocr/cli.py`: Click commands (`process`, `engines`, `audit-status`, `describe_figures`, shorthand `p`).
+- `socr/cli.py`: Click commands (`process`, `engines`, `audit-status`, `describe_figures`, shorthand `p`).
 - `core/`: shared types and configuration.
   - `config.py`: `AgentConfig`, per-engine configs, audit settings, routing overrides, optional cross-check toggle.
   - `document.py`: PDF loading/rendering, basic document classification.

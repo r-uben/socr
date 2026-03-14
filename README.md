@@ -1,8 +1,8 @@
-# smart-ocr
+# socr
 
-[![PyPI](https://img.shields.io/pypi/v/smart-ocr)](https://pypi.org/project/smart-ocr/)
-[![Python](https://img.shields.io/pypi/pyversions/smart-ocr)](https://pypi.org/project/smart-ocr/)
-[![License](https://img.shields.io/github/license/r-uben/smart-ocr)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/socr)](https://pypi.org/project/socr/)
+[![Python](https://img.shields.io/pypi/pyversions/socr)](https://pypi.org/project/socr/)
+[![License](https://img.shields.io/github/license/r-uben/socr)](LICENSE)
 
 Multi-engine OCR with cascading fallback, quality audit, and figure extraction.
 
@@ -23,23 +23,23 @@ Process academic papers and documents using free local models first, with automa
 
 ```bash
 # Install globally (recommended)
-pipx install smart-ocr --python python3.12
+pipx install socr --python python3.12
 
 # Or install in a project
-pip install smart-ocr
+pip install socr
 
 # Pull required Ollama models
 ollama pull deepseek-r1:32b    # quality audit
 ollama pull deepseek-ocr       # local OCR
 
 # Process a paper
-smart-ocr paper.pdf
+socr paper.pdf
 
 # Process with figure images saved
-smart-ocr paper.pdf --save-figures
+socr paper.pdf --save-figures
 
 # Batch process a folder
-smart-ocr batch ~/Papers/ --limit 10
+socr batch ~/Papers/ --limit 10
 ```
 
 ## Example Output
@@ -47,7 +47,7 @@ smart-ocr batch ~/Papers/ --limit 10
 Processing a 22-page economics paper:
 
 ```
-smart-ocr v0.1.0
+socr v0.1.0
 
 kuttner_2001_monetary_policy.pdf
 22 pages, 1.2 MB
@@ -330,13 +330,13 @@ See `examples/` for complete processed papers:
 
 ```bash
 # Install with local engines only (recommended to start)
-pip install smart-ocr[local]
+pip install socr[local]
 
 # Install with all engines
-pip install smart-ocr[all]
+pip install socr[all]
 
 # Install specific engines
-pip install smart-ocr[deepseek,gemini]
+pip install socr[deepseek,gemini]
 ```
 
 **Setup:**
@@ -353,7 +353,7 @@ export GEMINI_API_KEY="your-key"
 export MISTRAL_API_KEY="your-key"
 
 # 4. Check engine status
-smart-ocr engines
+socr engines
 ```
 
 ## OCR Engine CLIs
@@ -369,11 +369,11 @@ Each OCR backend is a standalone CLI tool that can be used independently:
 
 ```bash
 # Simple usage
-smart-ocr paper.pdf                    # Process a PDF
-smart-ocr paper.pdf --save-figures     # Save figure images
+socr paper.pdf                    # Process a PDF
+socr paper.pdf --save-figures     # Save figure images
 
 # Full options
-smart-ocr process paper.pdf [OPTIONS]
+socr process paper.pdf [OPTIONS]
   -o, --output PATH      Output file path
   -f, --format           markdown|json|txt
   --primary ENGINE       Force primary engine
@@ -386,7 +386,7 @@ smart-ocr process paper.pdf [OPTIONS]
   --workers N            Parallel workers (default: 4, use 1 for sequential)
 
 # Batch process directory
-smart-ocr batch ~/Papers/ [OPTIONS]
+socr batch ~/Papers/ [OPTIONS]
   --limit N              Process first N files
   --save-figures         Save all figure images
   --figures-engine       gemini|deepseek|mistral (default: auto-select)
@@ -394,28 +394,28 @@ smart-ocr batch ~/Papers/ [OPTIONS]
   --workers N            Parallel workers (default: 4)
 
 # Check engines
-smart-ocr engines
+socr engines
 
 # Check audit system
-smart-ocr audit-status
+socr audit-status
 ```
 
 ## Parallel Processing
 
-smart-ocr can process multiple pages and figures in parallel to speed up large documents:
+socr can process multiple pages and figures in parallel to speed up large documents:
 
 ```bash
 # Fast processing with 8 parallel workers (recommended for M3 Pro/Max with 32GB+ RAM)
-smart-ocr paper.pdf --workers 8
+socr paper.pdf --workers 8
 
 # Conservative processing for limited RAM
-smart-ocr paper.pdf --workers 2
+socr paper.pdf --workers 2
 
 # Sequential processing (most reliable, slowest)
-smart-ocr paper.pdf --workers 1
+socr paper.pdf --workers 1
 
 # Extended timeout for very complex pages (10 min per page)
-smart-ocr paper.pdf --timeout 600
+socr paper.pdf --timeout 600
 ```
 
 **Hardware recommendations:**
@@ -434,7 +434,7 @@ Parallel processing uses ThreadPoolExecutor for concurrent page/figure processin
 The default 300s (5 min) timeout works for most pages. For documents with complex figures or slow API responses, increase the timeout:
 
 ```yaml
-# smart-ocr.yaml
+# socr.yaml
 parallel_pages: 4
 parallel_figures: 2
 figure_timeout: 600  # 10 min per figure
@@ -447,7 +447,7 @@ deepseek:
 
 ## Configuration
 
-Create `smart-ocr.yaml` in your project or home directory:
+Create `socr.yaml` in your project or home directory:
 
 ```yaml
 # Engine selection
@@ -492,7 +492,7 @@ mistral:
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed module documentation.
 
 ```
-src/smart_ocr/
+src/socr/
 ├── cli.py              # Click CLI
 ├── core/
 │   ├── config.py       # AgentConfig dataclass

@@ -2,8 +2,8 @@ import pytest
 
 pytest.importorskip("rich")
 
-from smart_ocr.core.config import EngineType, PipelineConfig
-from smart_ocr.pipeline.router import EngineRouter
+from socr.core.config import EngineType, PipelineConfig
+from socr.pipeline.router import EngineRouter
 
 
 class _StubEngine:
