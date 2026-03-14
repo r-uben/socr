@@ -6,14 +6,14 @@ authors = [
     {name = "Ruben Fernandez-Fuertes", email = "fernandezfuertesruben@gmail.com"}
 ]
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11,<3.13"
-keywords = ["ocr", "pdf", "document-processing", "socr", "nougat", "mistral", "gemini", "deepseek", "marker"]
+keywords = ["ocr", "pdf", "document-processing", "nougat", "mistral", "gemini", "deepseek", "marker"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -39,23 +39,22 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.8.0",
 ]
-# OCR Engine CLIs - install individually based on needs
+# OCR Engine CLIs — install individually based on needs
 deepseek = ["deepseek-ocr-cli>=0.1.0"]
 nougat = ["nougat-ocr-cli>=0.1.2"]
 gemini = ["gemini-ocr-cli>=0.2.0"]
 mistral = ["mistral-ocr-cli>=0.1.0"]
-# marker-ocr-cli has a pillow version conflict with deepseek-ocr-cli
-# Install marker-ocr-cli separately: pip install marker-ocr-cli
+marker = ["marker-ocr-cli>=0.2.0"]
 # Convenience groups
-local = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2"]
+local = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2", "marker-ocr-cli>=0.2.0"]
 cloud = ["gemini-ocr-cli>=0.2.0", "mistral-ocr-cli>=0.1.0"]
-all = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2", "gemini-ocr-cli>=0.2.0", "mistral-ocr-cli>=0.1.0"]
+all = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2", "gemini-ocr-cli>=0.2.0", "mistral-ocr-cli>=0.1.0", "marker-ocr-cli>=0.2.0"]
 
 [project.scripts]
 socr = "socr.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
