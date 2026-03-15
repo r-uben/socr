@@ -52,6 +52,7 @@ class VLLMServerManager:
         self.process: subprocess.Popen | None = None
         self.current_model: str | None = None
         self.current_port: int | None = None
+        self._current_api_key: str | None = None
         self.verbose = verbose
         self._log_file: Path | None = None
 
@@ -120,6 +121,7 @@ class VLLMServerManager:
 
             self.current_model = config.model
             self.current_port = config.port
+            self._current_api_key = config.api_key
 
             # Wait for server to be ready
             if not self._wait_for_ready(config.port, timeout, config.api_key):
@@ -177,6 +179,7 @@ class VLLMServerManager:
         self.process = None
         self.current_model = None
         self.current_port = None
+        self._current_api_key = None
 
         # Force GPU memory release
         self._clear_gpu_memory()
@@ -195,6 +198,12 @@ class VLLMServerManager:
         if self.current_port is None:
             raise RuntimeError("No server running")
         return f"http://localhost:{self.current_port}/v1"
+
+    def get_api_key(self) -> str:
+        """Get the API key for the running server."""
+        if self._current_api_key is None:
+            raise RuntimeError("No server running")
+        return self._current_api_key
 
     def _wait_for_ready(self, port: int, timeout: int, api_key: str = "") -> bool:
         """Wait for server to be ready.

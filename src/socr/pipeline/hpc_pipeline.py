@@ -141,10 +141,10 @@ class HPCPipeline:
             console.print(f"\n[cyan]Phase 1:[/cyan] OCR [deepseek-vllm]")
 
         # Start vLLM with OCR model
-        base_url = self._start_server(self.config.hpc.ocr_model)
+        base_url, api_key = self._start_server(self.config.hpc.ocr_model)
 
         engine_config = DeepSeekVLLMConfig(
-            base_url=base_url, model=self.config.hpc.ocr_model
+            base_url=base_url, model=self.config.hpc.ocr_model, api_key=api_key
         )
         engine = DeepSeekVLLMEngine(engine_config)
 
@@ -321,8 +321,8 @@ class HPCPipeline:
             console.print(f"  [dim]{len(extracted)} figures extracted[/dim]")
 
         # Start vision model for descriptions
-        base_url = self._start_server(self.config.hpc.vision_model)
-        vision_config = VLLMConfig(base_url=base_url, model=self.config.hpc.vision_model)
+        base_url, api_key = self._start_server(self.config.hpc.vision_model)
+        vision_config = VLLMConfig(base_url=base_url, model=self.config.hpc.vision_model, api_key=api_key)
         vision_engine = VLLMEngine(vision_config)
 
         figures: list[FigureInfo] = []
@@ -374,8 +374,12 @@ class HPCPipeline:
 
     # --- Helpers ---
 
-    def _start_server(self, model: str) -> str:
-        """Start vLLM with a model, or use existing URL."""
+    def _start_server(self, model: str) -> tuple[str, str]:
+        """Start vLLM with a model, or use existing URL.
+
+        Returns:
+            Tuple of (base_url, api_key).
+        """
         if self.config.hpc.manage_server:
             if not self.config.quiet:
                 console.print(f"[dim]Starting vLLM with {model}...[/dim]")
@@ -389,8 +393,8 @@ class HPCPipeline:
                 server_config,
                 timeout=self.config.hpc.server_startup_timeout,
             )
-            return self.server_manager.get_base_url()
-        return self.config.hpc.vllm_url
+            return self.server_manager.get_base_url(), self.server_manager.get_api_key()
+        return self.config.hpc.vllm_url, ""
 
     def _audit_ocr_results(self, ocr_outputs: dict[int, EngineOutput]) -> list[int]:
         """Run heuristics audit on OCR outputs, return failed page numbers."""
