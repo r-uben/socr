@@ -89,6 +89,7 @@ class DeepSeekEngine(BaseEngine):
             "process",
             str(pdf_path),
             "-o", str(output_dir),
+            "--task", "ocr",
         ]
         if config.deepseek_backend == "vllm":
             cmd.extend(["--vllm-url", config.deepseek_vllm_url])
