@@ -7,6 +7,7 @@ This is a full OCR engine (unlike VLLMEngine which is figures-only).
 import base64
 import io
 import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -28,7 +29,7 @@ class DeepSeekVLLMConfig:
     max_tokens: int = 4096
     temperature: float = 0.1
     frequency_penalty: float = 0.0
-    repetition_penalty: float = 1.0
+    repetition_penalty: float = 1.05
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -200,18 +201,35 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
         choices = data.get("choices", [])
         if not choices:
             return ""
-        return choices[0].get("message", {}).get("content", "").strip()
+        raw = choices[0].get("message", {}).get("content", "").strip()
+        return DeepSeekVLLMEngine._clean_ocr_output(raw)
 
     @staticmethod
     def _build_ocr_prompt() -> str:
-        return (
-            "Extract all text from this document image. "
-            "Preserve the original structure including paragraphs, headings, lists, and tables. "
-            "For mathematical equations, use LaTeX notation (e.g., $E = mc^2$ for inline, "
-            "$$\\int_0^\\infty f(x) dx$$ for display equations). "
-            "For tables, use markdown table format. "
-            "Maintain the reading order and hierarchical structure of the content."
-        )
+        # DeepSeek-OCR was fine-tuned on specific short prompts.
+        # "Free OCR." produces clean text without bounding box coordinates.
+        # Long generic prompts cause massive hallucinations (fake formatting
+        # instructions, fabricated abstracts, etc.).
+        return "Free OCR."
+
+    @staticmethod
+    def _clean_ocr_output(text: str) -> str:
+        """Strip grounding tags and bounding boxes from DeepSeek-OCR output."""
+        # Remove <|ref|>...<|/ref|> inline references
+        text = re.sub(r'<\|ref\|>.*?<\|/ref\|>', '', text)
+        # Remove <|det|>[[x,y,w,h]]<|/det|> detection boxes
+        text = re.sub(r'<\|det\|>\[\[.*?\]\]<\|/det\|>', '', text)
+        # Remove any remaining special tokens
+        text = re.sub(r'<\|[^|]+\|>', '', text)
+        # Remove bare bounding box coordinates
+        text = re.sub(r'\[\[\d+,\s*\d+,\s*\d+,\s*\d+\]\]', '', text)
+        # Normalize HTML line breaks
+        text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+        # Strip remaining HTML tags
+        text = re.sub(r'<[^>]+>', '', text)
+        # Collapse excessive blank lines
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip()
 
     @staticmethod
     def _build_figure_prompt(figure_type: str, context: str) -> str:

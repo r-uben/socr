@@ -52,6 +52,21 @@ class HeuristicsChecker:
         r"cannot extract text",
     ]
 
+    # Formatting instruction hallucination patterns.
+    # DeepSeek-OCR hallucinates these when given generic prompts.
+    HALLUCINATION_PATTERNS = [
+        r"Use a standard font",
+        r"print on \d+\.?\d*\s*[x×]\s*\d+",
+        r"Include (?:all )?(?:figures|tables|links|references)",
+        r"Include links to other resources",
+        r"double[- ]spaced",
+        r"single[- ]spaced",
+        r"Times New Roman",
+        r"formatting guidelines",
+        r"submission guidelines",
+        r"page margins",
+    ]
+
     def __init__(
         self,
         min_word_count: int = 50,
@@ -101,6 +116,16 @@ class HeuristicsChecker:
             result.add_metric(AuditMetric(
                 name="Hallucination loops",
                 value="Repeated sentence patterns detected",
+                passed=False,
+                severity="error",
+            ))
+
+        # Formatting instruction hallucination detection
+        halluc_count = self._check_formatting_hallucination(text)
+        if halluc_count >= 2:
+            result.add_metric(AuditMetric(
+                name="Formatting hallucination",
+                value=f"{halluc_count} formatting instruction patterns detected",
                 passed=False,
                 severity="error",
             ))
@@ -172,6 +197,19 @@ class HeuristicsChecker:
         ))
 
         return result
+
+    def _check_formatting_hallucination(self, text: str) -> int:
+        """Count formatting instruction hallucination patterns.
+
+        DeepSeek-OCR hallucinates formatting instructions (font size,
+        page margins, submission guidelines) when given generic prompts.
+        Returns the number of distinct patterns matched; 2+ is a failure.
+        """
+        count = 0
+        for pattern in self.HALLUCINATION_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                count += 1
+        return count
 
     def _check_llm_refusal(self, text: str) -> bool:
         """Detect LLM refusal patterns indicating model couldn't process image."""
