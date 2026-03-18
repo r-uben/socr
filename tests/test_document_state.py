@@ -260,6 +260,69 @@ class TestNeedsRepair:
         )
         assert ps.needs_repair
 
+    def test_ocr_enhancement_needs_repair_when_no_attempts(self) -> None:
+        """Born-digital page with complex content needs repair if no OCR attempted."""
+        ps = PageState(
+            page_num=1,
+            is_born_digital=True,
+            native_text="native text with table",
+            needs_ocr_enhancement=True,
+        )
+        assert ps.needs_repair
+
+    def test_ocr_enhancement_no_repair_after_passing_ocr(self) -> None:
+        """Born-digital page with complex content is done after passing OCR."""
+        ps = PageState(
+            page_num=1,
+            is_born_digital=True,
+            native_text="native text with table",
+            needs_ocr_enhancement=True,
+            best_output=_make_page_output(1, "ocr text", audit_passed=True),
+        )
+        assert not ps.needs_repair
+
+    def test_ocr_enhancement_no_repair_after_failed_ocr(self) -> None:
+        """Born-digital page falls back to native text when OCR fails."""
+        failed = _make_page_output(1, "bad ocr", audit_passed=False)
+        ps = PageState(
+            page_num=1,
+            is_born_digital=True,
+            native_text="native fallback",
+            needs_ocr_enhancement=True,
+            attempts=[failed],
+        )
+        assert not ps.needs_repair
+
+    def test_ocr_enhancement_propagated_via_apply_born_digital(self) -> None:
+        """apply_born_digital propagates needs_ocr_enhancement to PageState."""
+        state = DocumentState(handle=_make_handle(2))
+        assessment = DocumentAssessment(
+            path=Path("/tmp/fake.pdf"),
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text="table page",
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                ),
+                PageAssessment(
+                    page_num=2,
+                    is_born_digital=True,
+                    native_text="prose page",
+                    confidence=0.9,
+                    needs_ocr_enhancement=False,
+                ),
+            ],
+        )
+        state.apply_born_digital(assessment)
+
+        assert state.pages[1].needs_ocr_enhancement is True
+        assert state.pages[2].needs_ocr_enhancement is False
+        # Page 1 needs repair (OCR not attempted), page 2 does not
+        assert state.pages[1].needs_repair
+        assert not state.pages[2].needs_repair
+
 
 # ---------------------------------------------------------------------------
 # text assembly
@@ -335,6 +398,53 @@ class TestTextAssembly:
         ]))
         # page 1 has best_output, so whole-doc is not used
         assert state.text == "page 1 text"
+
+    def test_ocr_preferred_over_native_text_when_both_exist(self) -> None:
+        """When a born-digital page also has passing OCR, OCR wins."""
+        state = DocumentState(handle=_make_handle(1))
+        # Mark as born-digital with native text
+        assessment = DocumentAssessment(
+            path=Path("/tmp/fake.pdf"),
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text="native text",
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                ),
+            ],
+        )
+        state.apply_born_digital(assessment)
+        # OCR also succeeds
+        state.apply_result(_make_engine_result([
+            _make_page_output(1, "ocr text with table", audit_passed=True),
+        ]))
+        # OCR output should be preferred
+        assert state.text == "ocr text with table"
+
+    def test_native_text_used_when_ocr_fails(self) -> None:
+        """When OCR fails, fall back to native text."""
+        state = DocumentState(handle=_make_handle(1))
+        assessment = DocumentAssessment(
+            path=Path("/tmp/fake.pdf"),
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text="native fallback",
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                ),
+            ],
+        )
+        state.apply_born_digital(assessment)
+        # OCR fails
+        state.apply_result(_make_engine_result([
+            _make_page_output(1, "bad ocr", audit_passed=False),
+        ]))
+        # Native text should be the fallback
+        assert state.text == "native fallback"
 
 
 # ---------------------------------------------------------------------------

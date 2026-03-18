@@ -34,6 +34,10 @@ class PageAssessment:
     word_count: int = 0
     font_count: int = 0
     has_images: bool = False
+    has_tables: bool = False  # page contains table-like structures
+    has_figures: bool = False  # page contains embedded images (alias for has_images)
+    has_equations: bool = False  # page contains math/equations
+    needs_ocr_enhancement: bool = False  # OCR preferred over native text for this page
     notes: list[str] = field(default_factory=list)
 
 
@@ -187,6 +191,11 @@ class BornDigitalDetector:
         # Check for embedded images (raster content)
         has_images = self._has_images(page)
 
+        # Detect structured content types
+        has_tables = self._detect_tables(page)
+        has_figures = has_images  # figures = embedded raster images
+        has_equations = self._detect_equations(raw_text)
+
         # --- Decision logic ---
 
         # No text layer at all: definitely scanned
@@ -203,6 +212,9 @@ class BornDigitalDetector:
                 word_count=word_count,
                 font_count=font_count,
                 has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
                 notes=notes,
             )
 
@@ -220,6 +232,9 @@ class BornDigitalDetector:
                 word_count=word_count,
                 font_count=font_count,
                 has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
                 notes=notes,
             )
 
@@ -241,6 +256,9 @@ class BornDigitalDetector:
                 word_count=word_count,
                 font_count=font_count,
                 has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
                 notes=notes,
             )
 
@@ -256,6 +274,9 @@ class BornDigitalDetector:
                 word_count=word_count,
                 font_count=font_count,
                 has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
                 notes=notes,
             )
 
@@ -271,6 +292,9 @@ class BornDigitalDetector:
                 word_count=word_count,
                 font_count=font_count,
                 has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
                 notes=notes,
             )
 
@@ -286,6 +310,9 @@ class BornDigitalDetector:
                 word_count=word_count,
                 font_count=font_count,
                 has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
                 notes=notes,
             )
 
@@ -300,6 +327,9 @@ class BornDigitalDetector:
                 word_count=word_count,
                 font_count=font_count,
                 has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
                 notes=notes,
             )
 
@@ -316,18 +346,231 @@ class BornDigitalDetector:
             has_images=has_images,
         )
 
-        notes.append("born-digital: clean text layer detected")
+        # For born-digital pages with complex content, use structured
+        # extraction (markdown tables) instead of plain get_text().
+        # Also flag that OCR is preferred for these pages.
+        has_complex_content = has_tables or has_figures or has_equations
+        needs_ocr_enhancement = has_complex_content
+
+        if has_tables:
+            # Use structured extraction that renders tables as markdown
+            native_text = self.extract_structured(page)
+            notes.append("born-digital: structured extraction (tables detected)")
+        else:
+            native_text = raw_text.strip()
+            notes.append("born-digital: clean text layer detected")
+
+        if has_complex_content:
+            content_types = []
+            if has_tables:
+                content_types.append("tables")
+            if has_figures:
+                content_types.append("figures")
+            if has_equations:
+                content_types.append("equations")
+            notes.append(
+                f"complex content detected ({', '.join(content_types)}); "
+                f"OCR enhancement preferred"
+            )
+
         return PageAssessment(
             page_num=page_num,
             is_born_digital=True,
-            native_text=raw_text.strip(),
+            native_text=native_text,
             confidence=confidence,
             char_count=char_count,
             word_count=word_count,
             font_count=font_count,
             has_images=has_images,
+            has_tables=has_tables,
+            has_figures=has_figures,
+            has_equations=has_equations,
+            needs_ocr_enhancement=needs_ocr_enhancement,
             notes=notes,
         )
+
+    # ------------------------------------------------------------------
+    # Content type detection
+    # ------------------------------------------------------------------
+
+    def _detect_tables(self, page: fitz.Page) -> bool:
+        """Check if the page contains table-like structures.
+
+        Uses PyMuPDF's built-in table detection (page.find_tables()).
+        """
+        try:
+            tables = page.find_tables()
+            return len(tables.tables) > 0
+        except Exception:
+            # find_tables() can fail on malformed pages; treat as no tables
+            return False
+
+    def _detect_equations(self, text: str) -> bool:
+        """Check if text contains mathematical notation.
+
+        Looks for LaTeX-like patterns that indicate equations or math content.
+        Inline dollar signs are common in non-math contexts (currency), so we
+        require paired delimiters or explicit LaTeX commands.
+        """
+        if not text:
+            return False
+
+        # LaTeX math commands (high confidence)
+        latex_commands = re.compile(
+            r"\\(?:frac|sum|int|prod|lim|infty|partial|nabla|alpha|beta|gamma"
+            r"|delta|epsilon|theta|lambda|sigma|omega|begin\{(?:equation|align"
+            r"|gather|math|displaymath)\})"
+        )
+        if latex_commands.search(text):
+            return True
+
+        # Display math delimiters: $$ ... $$ or \[ ... \]
+        if re.search(r"\$\$.+?\$\$", text, re.DOTALL):
+            return True
+        if re.search(r"\\\[.+?\\\]", text, re.DOTALL):
+            return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Structured text extraction
+    # ------------------------------------------------------------------
+
+    def extract_structured(self, page: fitz.Page) -> str:
+        """Extract text with tables rendered as markdown.
+
+        For pages with tables, replaces table regions with markdown table
+        representations while keeping surrounding prose as plain text.
+        For pages without tables, returns plain text (same as get_text()).
+        """
+        try:
+            tables_result = page.find_tables()
+        except Exception:
+            return page.get_text("text").strip()
+
+        if not tables_result.tables:
+            return page.get_text("text").strip()
+
+        # Collect table bounding boxes and their markdown representations
+        table_regions: list[tuple[fitz.Rect, str]] = []
+        for table in tables_result.tables:
+            md = self._table_to_markdown(table)
+            if md:
+                table_regions.append((fitz.Rect(table.bbox), md))
+
+        if not table_regions:
+            return page.get_text("text").strip()
+
+        # Sort table regions top-to-bottom by their y0 coordinate
+        table_regions.sort(key=lambda tr: tr[0].y0)
+
+        # Build output by interleaving prose text and markdown tables.
+        # Use text blocks from get_text("dict") to get position-aware text.
+        try:
+            page_dict = page.get_text("dict")
+        except Exception:
+            return page.get_text("text").strip()
+
+        blocks = page_dict.get("blocks", [])
+        output_parts: list[str] = []
+        table_idx = 0
+
+        for block in blocks:
+            # Skip image blocks (type 1)
+            if block.get("type", 0) == 1:
+                continue
+
+            block_rect = fitz.Rect(block["bbox"])
+
+            # Check if we need to insert a table before this block
+            while table_idx < len(table_regions):
+                table_rect, table_md = table_regions[table_idx]
+                if table_rect.y0 <= block_rect.y0:
+                    # Check if this text block overlaps the table region;
+                    # if so, skip the text block (table markdown replaces it)
+                    output_parts.append(f"\n{table_md}\n")
+                    table_idx += 1
+                else:
+                    break
+
+            # Check if this block overlaps any remaining table region
+            overlaps_table = False
+            for t_rect, _ in table_regions:
+                if block_rect.intersects(t_rect):
+                    overlaps_table = True
+                    break
+
+            if not overlaps_table:
+                # Extract text from this block
+                lines = block.get("lines", [])
+                for line in lines:
+                    spans = line.get("spans", [])
+                    line_text = "".join(s.get("text", "") for s in spans)
+                    if line_text.strip():
+                        output_parts.append(line_text.strip())
+
+        # Append any remaining tables that come after all text blocks
+        while table_idx < len(table_regions):
+            _, table_md = table_regions[table_idx]
+            output_parts.append(f"\n{table_md}\n")
+            table_idx += 1
+
+        return "\n".join(output_parts).strip()
+
+    def _table_to_markdown(self, table: object) -> str:
+        """Convert a PyMuPDF Table object to a markdown table string.
+
+        Args:
+            table: A table object from page.find_tables() with an
+                   extract() method returning a list of rows (lists of cells).
+
+        Returns:
+            Markdown table string, or empty string if table is empty/invalid.
+        """
+        try:
+            rows = table.extract()
+        except Exception:
+            return ""
+
+        if not rows:
+            return ""
+
+        # Clean cell values: replace None with empty string, strip whitespace
+        cleaned: list[list[str]] = []
+        for row in rows:
+            cleaned.append([
+                (cell.strip() if isinstance(cell, str) else "")
+                for cell in row
+            ])
+
+        if not cleaned:
+            return ""
+
+        # Build markdown table
+        col_count = max(len(row) for row in cleaned)
+        # Pad rows to uniform column count
+        for row in cleaned:
+            while len(row) < col_count:
+                row.append("")
+
+        lines: list[str] = []
+
+        # Header row
+        header = cleaned[0]
+        lines.append("| " + " | ".join(header) + " |")
+
+        # Separator
+        lines.append("| " + " | ".join("---" for _ in header) + " |")
+
+        # Data rows
+        for row in cleaned[1:]:
+            lines.append("| " + " | ".join(row) + " |")
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Low-level page analysis helpers
+    # ------------------------------------------------------------------
 
     def _count_fonts(self, page: fitz.Page) -> int:
         """Count distinct fonts used on a page.
