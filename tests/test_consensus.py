@@ -17,11 +17,14 @@ from socr.core.state import DocumentState, PageState
 from socr.pipeline.consensus import (
     ConsensusEngine,
     ConsensusResult,
+    _agreement_score,
+    _compute_wer,
     _count_structure,
-    _jaccard,
+    _levenshtein,
     _pairwise_agreement,
     _score_attempt,
-    _word_set,
+    _score_attempt_grounded,
+    _score_attempt_ungrounded,
 )
 
 
@@ -67,31 +70,92 @@ def _make_engine_result(
 
 
 # ---------------------------------------------------------------------------
-# Scoring helpers
+# Edit-distance / WER helpers
 # ---------------------------------------------------------------------------
 
 
-class TestWordSet:
-    def test_basic(self) -> None:
-        assert _word_set("Hello World") == {"hello", "world"}
-
-    def test_empty(self) -> None:
-        assert _word_set("") == set()
-
-
-class TestJaccard:
+class TestLevenshtein:
     def test_identical(self) -> None:
-        assert _jaccard({"a", "b"}, {"a", "b"}) == 1.0
+        assert _levenshtein(["a", "b", "c"], ["a", "b", "c"]) == 0
 
-    def test_disjoint(self) -> None:
-        assert _jaccard({"a", "b"}, {"c", "d"}) == 0.0
+    def test_insertion(self) -> None:
+        assert _levenshtein(["a", "b"], ["a", "x", "b"]) == 1
 
-    def test_partial_overlap(self) -> None:
-        # {a,b} & {b,c} = {b}, union = {a,b,c}, similarity = 1/3
-        assert abs(_jaccard({"a", "b"}, {"b", "c"}) - 1 / 3) < 1e-9
+    def test_deletion(self) -> None:
+        assert _levenshtein(["a", "x", "b"], ["a", "b"]) == 1
+
+    def test_substitution(self) -> None:
+        assert _levenshtein(["a", "b"], ["a", "c"]) == 1
+
+    def test_empty_both(self) -> None:
+        assert _levenshtein([], []) == 0
+
+    def test_empty_one(self) -> None:
+        assert _levenshtein([], ["a", "b"]) == 2
+        assert _levenshtein(["a", "b"], []) == 2
+
+
+class TestComputeWer:
+    def test_identical(self) -> None:
+        assert _compute_wer("hello world", "hello world") == 0.0
+
+    def test_completely_different(self) -> None:
+        assert _compute_wer("alpha bravo", "charlie delta") == 1.0
 
     def test_both_empty(self) -> None:
-        assert _jaccard(set(), set()) == 1.0
+        assert _compute_wer("", "") == 0.0
+
+    def test_hypothesis_empty(self) -> None:
+        assert _compute_wer("", "hello world") == 1.0
+
+    def test_reference_empty(self) -> None:
+        assert _compute_wer("hello world", "") == 1.0
+
+    def test_partial_match(self) -> None:
+        # ref = 4 words, hyp = 4 words, 2 substitutions -> WER = 0.5
+        wer = _compute_wer("hello world foo bar", "hello world baz qux")
+        assert abs(wer - 0.5) < 1e-9
+
+    def test_case_insensitive(self) -> None:
+        assert _compute_wer("Hello World", "hello world") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Agreement helpers
+# ---------------------------------------------------------------------------
+
+
+class TestAgreementScore:
+    def test_identical_texts(self) -> None:
+        assert _agreement_score("hello world", "hello world") == 1.0
+
+    def test_completely_different(self) -> None:
+        assert _agreement_score("alpha bravo charlie", "delta echo foxtrot") == 0.0
+
+    def test_partial_overlap(self) -> None:
+        score = _agreement_score("hello world foo", "hello world bar")
+        assert 0.0 < score < 1.0
+
+    def test_word_order_matters(self) -> None:
+        """Unlike Jaccard, reversed word order should not score 1.0."""
+        score = _agreement_score(
+            "the dog bit the man", "the man bit the dog"
+        )
+        # Same word set but different order -> WER > 0 -> agreement < 1.0
+        assert score < 1.0
+
+    def test_clamped_to_zero(self) -> None:
+        """WER can exceed 1.0; agreement should clamp at 0.0."""
+        # Very short reference, very long hypothesis
+        score = _agreement_score(
+            "a b c d e f g h i j k l m n", "x"
+        )
+        assert score >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Scoring helpers
+# ---------------------------------------------------------------------------
 
 
 class TestCountStructure:
@@ -111,7 +175,9 @@ class TestCountStructure:
         assert _count_structure("plain text") == 0
 
 
-class TestScoreAttempt:
+class TestScoreAttemptUngrounded:
+    """Tests for the ungrounded (no reference) scoring path."""
+
     def test_longer_text_scores_higher(self) -> None:
         short = _make_page_output(1, text="word " * 10)
         long = _make_page_output(1, text="word " * 100)
@@ -134,6 +200,82 @@ class TestScoreAttempt:
         high = _make_page_output(1, text="word " * 50, confidence=0.9)
         assert _score_attempt(high) > _score_attempt(low)
 
+    def test_no_structure_cap(self) -> None:
+        """Structure score should not be capped at 20 anymore."""
+        # 30 list items: old code capped at 20, new code uses log-scale
+        items = "\n".join(f"- item {i}" for i in range(30))
+        many_struct = _make_page_output(1, text=items)
+        # 20 list items
+        fewer_items = "\n".join(f"- item {i}" for i in range(20))
+        fewer_struct = _make_page_output(1, text=fewer_items)
+        assert _score_attempt_ungrounded(many_struct) > _score_attempt_ungrounded(fewer_struct)
+
+    def test_dispatches_to_ungrounded_when_no_reference(self) -> None:
+        """_score_attempt with empty reference should use ungrounded path."""
+        attempt = _make_page_output(1, text="word " * 50)
+        assert _score_attempt(attempt) == _score_attempt(attempt, reference_text="")
+        assert _score_attempt(attempt) == _score_attempt_ungrounded(attempt)
+
+
+class TestScoreAttemptGrounded:
+    """Tests for the grounded (reference text) scoring path."""
+
+    def test_closer_to_reference_wins(self) -> None:
+        """Output closest to reference should score highest, even if shorter."""
+        reference = "The quick brown fox jumps over the lazy dog"
+        close = _make_page_output(1, text="The quick brown fox jumps over the lazy dog")
+        farther = _make_page_output(
+            1, text="The fast brown fox leaps over the sleepy dog and cat and bird"
+        )
+        assert _score_attempt(close, reference) > _score_attempt(farther, reference)
+
+    def test_shorter_but_faithful_beats_longer_hallucination(self) -> None:
+        """A shorter output that matches the reference should beat a longer
+        hallucinating output."""
+        reference = "alpha bravo charlie delta echo"
+        faithful = _make_page_output(1, text="alpha bravo charlie delta echo")
+        hallucinated = _make_page_output(
+            1, text="alpha bravo charlie delta echo " + "garbage " * 50
+        )
+        assert _score_attempt(faithful, reference) > _score_attempt(hallucinated, reference)
+
+    def test_hallucination_penalty_applied(self) -> None:
+        """Output with >150% of reference word count should be penalised."""
+        reference = "word " * 20  # 20 words
+        normal = _make_page_output(1, text="word " * 20)
+        bloated = _make_page_output(1, text="word " * 40)  # 200% = hallucination
+        score_normal = _score_attempt_grounded(normal, reference)
+        score_bloated = _score_attempt_grounded(bloated, reference)
+        # Bloated gets -20 hallucination penalty
+        assert score_normal > score_bloated
+
+    def test_no_hallucination_penalty_within_threshold(self) -> None:
+        """Output within 150% of reference word count should not be penalised."""
+        reference = "word " * 20  # 20 words
+        slightly_longer = _make_page_output(1, text="word " * 28)  # 140% -- OK
+        # Should not get the -20 penalty
+        score = _score_attempt_grounded(slightly_longer, reference)
+        # Check that score is reasonable (WER is 0 for identical words + some
+        # insertions, but fidelity should be positive)
+        assert score > 0
+
+    def test_audit_bonus_in_grounded(self) -> None:
+        reference = "hello world"
+        passed = _make_page_output(1, text="hello world", audit_passed=True)
+        failed = _make_page_output(1, text="hello world", audit_passed=False)
+        assert _score_attempt_grounded(passed, reference) > _score_attempt_grounded(failed, reference)
+
+    def test_dispatches_to_grounded_when_reference_provided(self) -> None:
+        """_score_attempt with reference should use grounded path."""
+        attempt = _make_page_output(1, text="hello world")
+        reference = "hello world"
+        assert _score_attempt(attempt, reference) == _score_attempt_grounded(attempt, reference)
+
+
+# ---------------------------------------------------------------------------
+# Pairwise agreement (WER-based)
+# ---------------------------------------------------------------------------
+
 
 class TestPairwiseAgreement:
     def test_single_attempt(self) -> None:
@@ -154,6 +296,13 @@ class TestPairwiseAgreement:
         b = _make_page_output(1, "hello world bar", engine="gemini")
         score = _pairwise_agreement([a, b])
         assert 0.0 < score < 1.0
+
+    def test_order_sensitive(self) -> None:
+        """Pairwise agreement should detect word-order differences."""
+        a = _make_page_output(1, "the dog bit the man")
+        b = _make_page_output(1, "the man bit the dog", engine="gemini")
+        score = _pairwise_agreement([a, b])
+        assert score < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +327,7 @@ class TestSelectBest:
         assert result.agreement_score == 1.0
         assert result.page_num == 1
 
-    def test_longer_text_wins(self) -> None:
+    def test_longer_text_wins_ungrounded(self) -> None:
         engine = ConsensusEngine()
         short = _make_page_output(1, "short text", engine="engine-a")
         long = _make_page_output(
@@ -256,6 +405,52 @@ class TestSelectBest:
 
 
 # ---------------------------------------------------------------------------
+# Grounded select_best (with reference_text)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectBestGrounded:
+    def test_closest_to_reference_wins(self) -> None:
+        """Output closest to native text should win, even if shorter."""
+        engine = ConsensusEngine()
+        reference = "The quick brown fox jumps over the lazy dog"
+        close = _make_page_output(1, text=reference, engine="engine-a")
+        farther = _make_page_output(
+            1,
+            text="The fast brown fox leaps over the sleepy dog and cat and bird",
+            engine="engine-b",
+        )
+        result = engine.select_best([close, farther], reference_text=reference)
+        assert result.selected_engine == "engine-a"
+
+    def test_hallucinating_engine_loses(self) -> None:
+        """Output with 2x reference word count should be penalised."""
+        engine = ConsensusEngine()
+        reference = "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+        faithful = _make_page_output(1, text=reference, engine="engine-good")
+        hallucinated = _make_page_output(
+            1,
+            text=reference + " " + "hallucinated " * 20,
+            engine="engine-bad",
+        )
+        result = engine.select_best(
+            [faithful, hallucinated], reference_text=reference
+        )
+        assert result.selected_engine == "engine-good"
+
+    def test_falls_back_to_ungrounded_with_empty_reference(self) -> None:
+        """With empty reference text, should behave like ungrounded."""
+        engine = ConsensusEngine()
+        short = _make_page_output(1, "short text", engine="engine-a")
+        long = _make_page_output(
+            1, "a much longer text with many more words in it", engine="engine-b"
+        )
+        result = engine.select_best([short, long], reference_text="")
+        # Ungrounded: longer text wins
+        assert result.selected_engine == "engine-b"
+
+
+# ---------------------------------------------------------------------------
 # ConsensusEngine.select_best_with_llm
 # ---------------------------------------------------------------------------
 
@@ -322,7 +517,7 @@ class TestSelectBestWithLLM:
         ):
             result = engine.select_best_with_llm([a, b])
 
-        # Falls back to heuristic — engine-a has more words
+        # Falls back to heuristic -- engine-a has more words
         assert result.selected_engine == "engine-a"
 
     def test_falls_back_on_bad_json(self) -> None:
@@ -464,6 +659,57 @@ class TestReconcileDocument:
         engine = ConsensusEngine()
         results = engine.reconcile_document(state)
         assert results == []
+
+    def test_whole_doc_consensus_with_native_text(self) -> None:
+        """Whole-doc consensus should assemble native text from all pages."""
+        state = DocumentState(handle=_make_handle(2))
+        # Set native text on both pages
+        state.pages[1].native_text = "page one native text"
+        state.pages[2].native_text = "page two native text"
+
+        native_combined = "page one native text\n\npage two native text"
+
+        # Two whole-doc attempts: one faithful, one hallucinated
+        faithful = _make_page_output(
+            0, text=native_combined, engine="engine-good"
+        )
+        hallucinated = _make_page_output(
+            0,
+            text=native_combined + " " + "garbage " * 30,
+            engine="engine-bad",
+        )
+        state.whole_doc_attempts = [faithful, hallucinated]
+
+        engine = ConsensusEngine()
+        results = engine.reconcile_document(state)
+
+        # Should have a whole-doc consensus result
+        whole_doc_results = [r for r in results if r.page_num == 0]
+        assert len(whole_doc_results) == 1
+        assert whole_doc_results[0].selected_engine == "engine-good"
+
+    def test_per_page_passes_native_text_as_reference(self) -> None:
+        """Per-page consensus should pass native_text to select_best."""
+        state = DocumentState(handle=_make_handle(1))
+        # Page is NOT born-digital (no skip), but has native_text set
+        # (this can happen for pages that need OCR enhancement)
+        state.pages[1].is_born_digital = False
+        state.pages[1].native_text = "alpha bravo charlie"
+
+        # Two attempts: one close to native text, one hallucinated
+        close = _make_page_output(1, text="alpha bravo charlie", engine="engine-close")
+        far = _make_page_output(
+            1,
+            text="alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima " * 3,
+            engine="engine-far",
+        )
+        state.pages[1].attempts = [close, far]
+
+        engine = ConsensusEngine()
+        results = engine.reconcile_document(state)
+
+        assert len(results) == 1
+        assert results[0].selected_engine == "engine-close"
 
 
 # ---------------------------------------------------------------------------

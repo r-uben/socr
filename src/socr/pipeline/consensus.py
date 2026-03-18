@@ -3,9 +3,11 @@
 When multiple engines process the same page, this module compares their outputs
 and selects (or merges) the best version.  Two strategies are available:
 
-  1. **Heuristic** (default): scores each attempt by word count, structural
-     richness (headers, tables, lists), audit status, and engine confidence,
-     then picks the highest-scoring output.
+  1. **Heuristic** (default): scores each attempt using either grounded scoring
+     (against native text from born-digital detection) or ungrounded scoring
+     (word count, structural richness, audit status, confidence).  Grounded
+     scoring uses WER to pick the output closest to the native text layer and
+     penalises hallucination (excess word count).
 
   2. **LLM arbiter** (optional): sends the top candidates to a local Ollama
      model that identifies discrepancies and returns the most accurate version.
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -46,23 +49,60 @@ class ConsensusResult:
 
 
 # ------------------------------------------------------------------
-# Scoring helpers (pure functions, no state)
+# Edit-distance helpers (self-contained, no imports from benchmark)
 # ------------------------------------------------------------------
 
 
-def _word_set(text: str) -> set[str]:
-    """Lowercase word set for Jaccard similarity."""
-    return set(text.lower().split())
+def _levenshtein(seq_a: list[str], seq_b: list[str]) -> int:
+    """Levenshtein edit distance between two sequences.
+
+    Uses O(min(m, n)) space via a single-row DP approach.
+    """
+    m, n = len(seq_a), len(seq_b)
+
+    # Optimise by making the shorter sequence the column dimension
+    if m < n:
+        seq_a, seq_b = seq_b, seq_a
+        m, n = n, m
+
+    prev = list(range(n + 1))
+    curr = [0] * (n + 1)
+
+    for i in range(1, m + 1):
+        curr[0] = i
+        for j in range(1, n + 1):
+            cost = 0 if seq_a[i - 1] == seq_b[j - 1] else 1
+            curr[j] = min(
+                curr[j - 1] + 1,      # insertion
+                prev[j] + 1,          # deletion
+                prev[j - 1] + cost,   # substitution
+            )
+        prev, curr = curr, prev
+
+    return prev[n]
 
 
-def _jaccard(a: set[str], b: set[str]) -> float:
-    """Jaccard similarity between two sets."""
-    if not a and not b:
-        return 1.0
-    union = a | b
-    if not union:
-        return 1.0
-    return len(a & b) / len(union)
+def _normalize_words(text: str) -> list[str]:
+    """Lowercase and split text into words for WER computation."""
+    return text.lower().split()
+
+
+def _compute_wer(hypothesis: str, reference: str) -> float:
+    """Word Error Rate: edit_distance(ref, hyp) / len(ref).
+
+    Returns 0.0 when both are empty.  Can exceed 1.0 when the hypothesis
+    has many insertions relative to the reference.
+    """
+    ref_words = _normalize_words(reference)
+    hyp_words = _normalize_words(hypothesis)
+    if not ref_words:
+        return 0.0 if not hyp_words else 1.0
+    return _levenshtein(ref_words, hyp_words) / len(ref_words)
+
+
+# ------------------------------------------------------------------
+# Scoring helpers (pure functions, no state)
+# ------------------------------------------------------------------
 
 
 def _count_structure(text: str) -> int:
@@ -79,44 +119,104 @@ def _count_structure(text: str) -> int:
     return count
 
 
-def _score_attempt(attempt: PageOutput) -> float:
-    """Score a single attempt on multiple criteria.
+def _score_attempt(attempt: PageOutput, reference_text: str = "") -> float:
+    """Score a single attempt, optionally grounded against native text.
 
-    Returns a composite score (higher is better).  The components are
-    weighted so that no single signal dominates:
+    When *reference_text* is available the score is dominated by WER
+    against the reference (lower WER = higher score) with a penalty for
+    hallucination (word count far exceeding the reference).
+
+    When no reference is available, falls back to an ungrounded heuristic
+    based on word count, structural richness, audit status, and confidence.
+    """
+    if reference_text.strip():
+        return _score_attempt_grounded(attempt, reference_text)
+    return _score_attempt_ungrounded(attempt)
+
+
+def _score_attempt_grounded(attempt: PageOutput, reference_text: str) -> float:
+    """Score grounded against native text.
+
+    Components (all on a 0-100 scale so they dominate over any residual
+    ungrounded signal):
+      - WER fidelity : (1 - WER) * 70, capped at 0
+      - Audit bonus  : +15 if audit passed
+      - Hallucination penalty : -20 if word count exceeds reference by >50%
+      - Structure bonus: +5 * min(struct_ratio, 1) where struct_ratio is
+        attempt structure count / max(reference structure count, 1)
+    """
+    wer = _compute_wer(attempt.text, reference_text)
+    # Clamp WER to [0, 2] so extremely bad outputs don't produce absurd
+    # negative scores, but still get penalised heavily.
+    wer_clamped = min(wer, 2.0)
+    fidelity = (1.0 - wer_clamped) * 70.0
+
+    audit_bonus = 15.0 if attempt.audit_passed else 0.0
+
+    ref_wc = len(reference_text.split())
+    hyp_wc = attempt.word_count
+    hallucination_penalty = 0.0
+    if ref_wc > 0 and hyp_wc > ref_wc * 1.5:
+        hallucination_penalty = -20.0
+
+    # Structure: reward matching or exceeding reference structure, but
+    # don't penalise for less (the reference text layer may not have
+    # markdown structure at all).
+    ref_struct = max(_count_structure(reference_text), 1)
+    hyp_struct = _count_structure(attempt.text)
+    struct_bonus = 5.0 * min(hyp_struct / ref_struct, 1.0)
+
+    return fidelity + audit_bonus + hallucination_penalty + struct_bonus
+
+
+def _score_attempt_ungrounded(attempt: PageOutput) -> float:
+    """Original ungrounded heuristic (no reference text).
+
+    Components:
       - word count     : log-scaled, avoids rewarding padding
-      - structure count: bounded contribution
+      - structure count: log-scaled (no hard cap)
       - audit bonus    : flat bonus for passing audit
       - confidence     : engine-reported confidence
     """
-    import math
-
     wc = attempt.word_count
-    # Log-scale word count to reward having content without linearly
-    # rewarding padding.  +1 to avoid log(0).
     wc_score = math.log1p(wc)
 
     struct_count = _count_structure(attempt.text)
-    struct_score = min(struct_count, 20)  # cap contribution
+    # Log-scale structure count instead of hard cap at 20
+    struct_score = math.log1p(struct_count) * 5.0
 
     audit_bonus = 10.0 if attempt.audit_passed else 0.0
-
-    conf_score = attempt.confidence * 5.0  # scale 0-5
+    conf_score = attempt.confidence * 5.0
 
     return wc_score + struct_score + audit_bonus + conf_score
 
 
+# ------------------------------------------------------------------
+# Agreement helpers
+# ------------------------------------------------------------------
+
+
+def _agreement_score(text_a: str, text_b: str) -> float:
+    """Sequence-aware agreement between two texts using 1 - WER.
+
+    Unlike Jaccard on word sets, this preserves word order.  A score of
+    1.0 means identical word sequences; 0.0 means completely different.
+    Clamped to [0, 1].
+    """
+    wer = _compute_wer(text_a, text_b)
+    return max(0.0, 1.0 - wer)
+
+
 def _pairwise_agreement(attempts: list[PageOutput]) -> float:
-    """Average pairwise Jaccard similarity across all attempt pairs."""
+    """Average pairwise sequence-aware agreement across all attempt pairs."""
     if len(attempts) < 2:
         return 1.0
 
-    word_sets = [_word_set(a.text) for a in attempts]
     total = 0.0
     count = 0
-    for i in range(len(word_sets)):
-        for j in range(i + 1, len(word_sets)):
-            total += _jaccard(word_sets[i], word_sets[j])
+    for i in range(len(attempts)):
+        for j in range(i + 1, len(attempts)):
+            total += _agreement_score(attempts[i].text, attempts[j].text)
             count += 1
     return total / count if count else 1.0
 
@@ -250,14 +350,18 @@ class ConsensusEngine:
     # Heuristic selection
     # ------------------------------------------------------------------
 
-    def select_best(self, attempts: list[PageOutput]) -> ConsensusResult:
+    def select_best(
+        self, attempts: list[PageOutput], reference_text: str = ""
+    ) -> ConsensusResult:
         """Pick the best output from multiple attempts using heuristics.
 
-        Strategy:
-        1. Filter out failed/empty attempts.
-        2. Score each by word count, structure, audit status, confidence.
-        3. Pick the highest scoring one.
-        4. Calculate agreement by comparing word overlap between attempts.
+        When *reference_text* is provided (e.g. native text from a
+        born-digital PDF), scoring is grounded against it: the output
+        closest to the reference wins, and outputs with excessive word
+        count are penalised as likely hallucination.
+
+        When no reference is available, falls back to ungrounded scoring
+        (word count + structure + audit + confidence).
         """
         if not attempts:
             return ConsensusResult(
@@ -277,7 +381,7 @@ class ConsensusEngine:
         ]
 
         if not viable:
-            # All failed — return the first attempt's text as a last resort
+            # All failed -- return the first attempt's text as a last resort
             return ConsensusResult(
                 page_num=page_num,
                 selected_engine=attempts[0].engine,
@@ -296,7 +400,7 @@ class ConsensusEngine:
             )
 
         # Score each viable attempt
-        scored = [(a, _score_attempt(a)) for a in viable]
+        scored = [(a, _score_attempt(a, reference_text=reference_text)) for a in viable]
         scored.sort(key=lambda x: x[1], reverse=True)
         best_attempt = scored[0][0]
 
@@ -382,9 +486,12 @@ class ConsensusEngine:
         """Run consensus across all pages and whole-doc attempts.
 
         Handles two cases:
-          1. Per-page attempts (HTTP engines) — compare per page.
-          2. Whole-doc attempts (CLI engines, page_num=0) — compare at
+          1. Per-page attempts (HTTP engines) -- compare per page.
+          2. Whole-doc attempts (CLI engines, page_num=0) -- compare at
              document level and promote the winner.
+
+        When native text is available (born-digital detection), it is
+        passed as reference for grounded scoring.
         """
         results: list[ConsensusResult] = []
 
@@ -392,7 +499,15 @@ class ConsensusEngine:
         # CLI engines produce page_num=0 whole-doc outputs.  When we have
         # 2+ whole-doc attempts, pick the best one and promote it.
         if len(state.whole_doc_attempts) >= 2:
-            cr = self._select_best_impl(state.whole_doc_attempts)
+            # Assemble full native text from all pages for grounding
+            native_full = "\n\n".join(
+                p.native_text
+                for p in state.pages.values()
+                if p.native_text
+            )
+            cr = self._select_best_impl(
+                state.whole_doc_attempts, reference_text=native_full
+            )
             cr.page_num = 0
             results.append(cr)
 
@@ -418,14 +533,17 @@ class ConsensusEngine:
         for page_num in sorted(state.pages):
             page_state = state.pages[page_num]
 
-            # Skip born-digital pages — they use native text
+            # Skip born-digital pages -- they use native text
             if page_state.is_born_digital and page_state.native_text:
                 continue
 
             if len(page_state.attempts) < 2:
                 continue
 
-            cr = self._select_best_impl(page_state.attempts)
+            cr = self._select_best_impl(
+                page_state.attempts,
+                reference_text=page_state.native_text or "",
+            )
             cr.page_num = page_num
             results.append(cr)
 
@@ -440,8 +558,10 @@ class ConsensusEngine:
 
         return results
 
-    def _select_best_impl(self, attempts: list[PageOutput]) -> ConsensusResult:
+    def _select_best_impl(
+        self, attempts: list[PageOutput], reference_text: str = ""
+    ) -> ConsensusResult:
         """Route to heuristic or LLM consensus."""
         if self.use_llm and self.ollama_model:
             return self.select_best_with_llm(attempts)
-        return self.select_best(attempts)
+        return self.select_best(attempts, reference_text=reference_text)
