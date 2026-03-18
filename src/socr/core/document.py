@@ -79,6 +79,18 @@ class DocumentHandle:
                 images[i + 1] = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         return images
 
+    def detect_born_digital(self) -> "DocumentAssessment":
+        """Detect which pages are born-digital and extract native text.
+
+        Returns a DocumentAssessment with per-page results indicating whether
+        each page has a genuine native text layer (born-digital) or is scanned.
+        Born-digital pages include the extracted native text so OCR can be skipped.
+        """
+        from socr.core.born_digital import BornDigitalDetector
+
+        detector = BornDigitalDetector()
+        return detector.detect(self.path)
+
     @classmethod
     def from_path(cls, path: Path | str) -> "DocumentHandle":
         """Create a DocumentHandle from a file path."""
