@@ -22,7 +22,7 @@ from rich.console import Console
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector
-from socr.core.config import PipelineConfig
+from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
 from socr.core.result import (
@@ -342,6 +342,69 @@ class UnifiedPipeline:
                     "\n[cyan]Phase 4:[/cyan] Repair (not needed)"
                 )
             return
+
+        # Retry-on-truncation: if the latest whole-doc attempt failed
+        # specifically with TRUNCATED, retry the same engine before
+        # falling through to the fallback chain.  Gemini's truncation
+        # is non-deterministic, so a simple retry often succeeds.
+        if (
+            needs_whole_doc_retry
+            and self.config.truncation_retries > 0
+            and state.whole_doc_attempts
+        ):
+            latest_whole = state.whole_doc_attempts[-1]
+            if (
+                not latest_whole.audit_passed
+                and latest_whole.failure_mode == FailureMode.TRUNCATED
+            ):
+                # Identify which engine produced the truncated output
+                truncated_engine_name = latest_whole.engine
+                truncated_engine_type = None
+                for et in EngineType:
+                    if et.value == truncated_engine_name:
+                        truncated_engine_type = et
+                        break
+
+                if truncated_engine_type is not None:
+                    for retry_idx in range(self.config.truncation_retries):
+                        if not self.config.quiet:
+                            console.print(
+                                f"\n[cyan]Phase 4:[/cyan] Repair "
+                                f"(truncation retry {retry_idx + 1}/"
+                                f"{self.config.truncation_retries}) "
+                                f"[{truncated_engine_name}]"
+                            )
+                        engine = get_engine(truncated_engine_type)
+                        if not engine.is_available():
+                            break
+                        retry_result = engine.process_document(
+                            state.handle.path, output_dir, self.config
+                        )
+                        retry_result.pages_processed = (
+                            state.handle.page_count
+                        )
+                        state.apply_result(retry_result)
+                        if retry_result.success:
+                            self._score_repair_result(
+                                state, retry_result, []
+                            )
+                        # Check if the retry passed
+                        if any(
+                            w.audit_passed
+                            for w in state.whole_doc_attempts
+                        ):
+                            needs_whole_doc_retry = False
+                            has_passing_whole_doc = True
+                            break
+
+                    # If truncation retry resolved it, we're done
+                    if not needs_whole_doc_retry:
+                        if not self.config.quiet:
+                            console.print(
+                                "  [green]Truncation retry "
+                                "succeeded[/green]"
+                            )
+                        return
 
         for attempt in range(self.config.max_retries):
             plan = self.repair_router.plan_repairs(state)

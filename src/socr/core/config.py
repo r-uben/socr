@@ -83,6 +83,7 @@ class PipelineConfig:
     output_dir: Path = field(default_factory=lambda: Path("output"))
     timeout: int = 1800  # Single timeout for all engine subprocesses
     max_retries: int = 2
+    truncation_retries: int = 1  # Retry same engine on truncation before fallback
     save_figures: bool = False
     figures_max_total: int = 25
     figures_max_per_page: int = 3
@@ -142,7 +143,8 @@ class PipelineConfig:
 
         # Scalar fields
         scalar_fields = [
-            "timeout", "max_retries", "save_figures", "figures_max_total",
+            "timeout", "max_retries", "truncation_retries",
+            "save_figures", "figures_max_total",
             "figures_max_per_page", "audit_enabled", "audit_min_words",
             "reprocess", "dry_run", "quiet", "verbose",
             "deepseek_backend", "deepseek_vllm_url", "glm_backend", "nougat_model",

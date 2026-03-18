@@ -813,3 +813,196 @@ class TestEdgeCases:
 
         # Engine was not called because it's unavailable
         mock_engine.process_document.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Truncation retry
+# ---------------------------------------------------------------------------
+
+class TestTruncationRetry:
+    """Tests for retry-on-truncation before fallback (L1B-06)."""
+
+    def _make_truncated_state(
+        self, engine: str = "gemini", page_count: int = 10,
+    ) -> DocumentState:
+        """Build a state with a truncated whole-doc attempt."""
+        state = DocumentState(handle=_make_handle(page_count))
+        truncated_attempt = PageOutput(
+            page_num=0,
+            text="Truncated output with only a handful of words",
+            status=PageStatus.SUCCESS,
+            engine=engine,
+            audit_passed=False,
+            failure_mode=FailureMode.TRUNCATED,
+        )
+        truncated_result = EngineResult(
+            document_path=Path("/tmp/fake.pdf"),
+            engine=engine,
+            status=DocumentStatus.AUDIT_FAILED,
+            failure_mode=FailureMode.TRUNCATED,
+            pages=[truncated_attempt],
+            processing_time=2.0,
+        )
+        state.apply_result(truncated_result)
+        return state
+
+    def test_retry_succeeds_on_second_attempt(self) -> None:
+        """Truncated first attempt, retry with same engine succeeds."""
+        config = _make_config(
+            primary_engine=EngineType.GEMINI,
+            truncation_retries=1,
+            max_retries=2,
+        )
+        pipeline = UnifiedPipeline(config)
+        # Use page_count=1 so _good_text() won't trip the truncation
+        # heuristic (which only fires for expected_pages > 5).
+        state = self._make_truncated_state("gemini", page_count=1)
+
+        good_result = _make_engine_result(
+            text=_good_text(), engine="gemini",
+        )
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = good_result
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            pipeline._phase_repair(state, Path("/tmp/out"))
+
+        # The retry should have called the same engine once
+        assert mock_engine.process_document.call_count == 1
+        # Should now have a passing whole-doc attempt
+        assert any(w.audit_passed for w in state.whole_doc_attempts)
+        # Only 2 engine runs total: original truncated + retry
+        assert len(state.engine_runs) == 2
+
+    def test_retry_also_truncates_falls_through_to_fallback(self) -> None:
+        """Both attempts truncate, then fallback chain is tried."""
+        config = _make_config(
+            primary_engine=EngineType.GEMINI,
+            fallback_chain=[EngineType.DEEPSEEK],
+            truncation_retries=1,
+            max_retries=2,
+        )
+        pipeline = UnifiedPipeline(config)
+        state = self._make_truncated_state("gemini")
+
+        # Retry also returns truncated
+        still_truncated = _make_engine_result(
+            text="Still truncated short output",
+            engine="gemini",
+            audit_passed=False,
+        )
+        still_truncated.pages[0].failure_mode = FailureMode.TRUNCATED
+        still_truncated.pages[0].audit_passed = False
+
+        # Fallback returns good result
+        good_result = _make_engine_result(
+            text=_good_text(), engine="deepseek",
+        )
+
+        call_count = [0]
+
+        def mock_get(engine_type):
+            call_count[0] += 1
+            mock = MagicMock()
+            mock.name = engine_type.value
+            mock.is_available.return_value = True
+            if engine_type == EngineType.GEMINI:
+                mock.process_document.return_value = still_truncated
+            else:
+                mock.process_document.return_value = good_result
+            return mock
+
+        with patch("socr.pipeline.orchestrator.get_engine", side_effect=mock_get):
+            pipeline._phase_repair(state, Path("/tmp/out"))
+
+        # Should have tried gemini (truncation retry) + deepseek (fallback)
+        assert call_count[0] >= 2
+        # Should have engine runs: original + truncation retry + fallback
+        assert len(state.engine_runs) >= 3
+
+    def test_non_truncation_failure_skips_retry(self) -> None:
+        """Hallucination failure should NOT trigger truncation retry."""
+        config = _make_config(
+            primary_engine=EngineType.GEMINI,
+            fallback_chain=[EngineType.DEEPSEEK],
+            truncation_retries=1,
+            max_retries=1,
+        )
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(10))
+
+        # Failing with HALLUCINATION, not TRUNCATED
+        halluc_attempt = PageOutput(
+            page_num=0,
+            text="Use a standard font. Include all figures. Proofread your work.",
+            status=PageStatus.SUCCESS,
+            engine="gemini",
+            audit_passed=False,
+            failure_mode=FailureMode.HALLUCINATION,
+        )
+        halluc_result = EngineResult(
+            document_path=Path("/tmp/fake.pdf"),
+            engine="gemini",
+            status=DocumentStatus.AUDIT_FAILED,
+            failure_mode=FailureMode.HALLUCINATION,
+            pages=[halluc_attempt],
+            processing_time=2.0,
+        )
+        state.apply_result(halluc_result)
+
+        good_result = _make_engine_result(
+            text=_good_text(), engine="deepseek",
+        )
+
+        engines_called = []
+
+        def mock_get(engine_type):
+            engines_called.append(engine_type.value)
+            mock = MagicMock()
+            mock.name = engine_type.value
+            mock.is_available.return_value = True
+            mock.process_document.return_value = good_result
+            return mock
+
+        with patch("socr.pipeline.orchestrator.get_engine", side_effect=mock_get):
+            pipeline._phase_repair(state, Path("/tmp/out"))
+
+        # Should NOT have retried gemini for truncation;
+        # should have gone straight to fallback chain.
+        # The first engine resolved via the fallback should be deepseek
+        # (gemini was already tried).
+        assert "gemini" not in engines_called or engines_called[0] == "deepseek"
+
+    def test_truncation_retries_zero_disables_retry(self) -> None:
+        """Setting truncation_retries=0 skips the retry entirely."""
+        config = _make_config(
+            primary_engine=EngineType.GEMINI,
+            fallback_chain=[EngineType.DEEPSEEK],
+            truncation_retries=0,
+            max_retries=2,
+        )
+        pipeline = UnifiedPipeline(config)
+        state = self._make_truncated_state("gemini")
+
+        good_result = _make_engine_result(
+            text=_good_text(), engine="deepseek",
+        )
+
+        engines_called = []
+
+        def mock_get(engine_type):
+            engines_called.append(engine_type.value)
+            mock = MagicMock()
+            mock.name = engine_type.value
+            mock.is_available.return_value = True
+            mock.process_document.return_value = good_result
+            return mock
+
+        with patch("socr.pipeline.orchestrator.get_engine", side_effect=mock_get):
+            pipeline._phase_repair(state, Path("/tmp/out"))
+
+        # Should NOT have retried gemini; should go straight to fallback
+        # (deepseek is the first untried engine in fallback_chain)
+        assert engines_called[0] == "deepseek"
