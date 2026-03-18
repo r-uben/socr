@@ -16,6 +16,7 @@ class EngineType(str, Enum):
     GEMINI = "gemini"
     MARKER = "marker"
     GLM = "glm"  # GLM-OCR via Ollama or transformers (local)
+    GEMINI_API = "gemini-api"  # Gemini per-page via HTTP API (no CLI)
     DEEPSEEK_VLLM = "deepseek-vllm"  # DeepSeek via vLLM HTTP API (HPC mode)
     VLLM = "vllm"  # Generic vLLM vision model (figures only, HPC mode)
 
@@ -27,6 +28,7 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
     EngineType.DEEPSEEK: 2,
     EngineType.MARKER: 3,
     EngineType.GEMINI: 4,
+    EngineType.GEMINI_API: 4,  # same priority tier as CLI gemini
     EngineType.MISTRAL: 5,
     EngineType.DEEPSEEK_VLLM: 6,
     EngineType.VLLM: 7,
