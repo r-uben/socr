@@ -195,10 +195,17 @@ class UnifiedPipeline:
     ) -> EngineResult | None:
         """Run the primary engine on the document.
 
-        If the document exceeds ``config.chunk_threshold`` pages, split it
-        into chunks and process each chunk independently via
+        For per-page HTTP engines (``GEMINI_API``, ``DEEPSEEK_VLLM``), render
+        each page as an image and process independently via the HTTP API.
+
+        For CLI engines, if the document exceeds ``config.chunk_threshold``
+        pages, split it into chunks and process each chunk independently via
         :meth:`_backbone_chunked`.
         """
+        # Per-page HTTP engines — bypass CLI entirely
+        if self.config.primary_engine == EngineType.GEMINI_API:
+            return self._backbone_per_page(state, output_dir)
+
         engine = get_engine(self.config.primary_engine)
 
         if not self.config.quiet:
@@ -310,6 +317,89 @@ class UnifiedPipeline:
             pages_processed=state.handle.page_count,
             processing_time=elapsed,
             cost=total_cost,
+        )
+        state.apply_result(result)
+        return result
+
+    def _backbone_per_page(
+        self,
+        state: DocumentState,
+        output_dir: Path,
+    ) -> EngineResult:
+        """Run a per-page HTTP engine on every page individually.
+
+        Renders each page to an image, sends it to the engine's
+        ``process_image`` method, and assembles the per-page PageOutputs
+        into a single EngineResult.
+        """
+        from socr.engines.gemini_api import GeminiAPIConfig, GeminiAPIEngine
+
+        engine = GeminiAPIEngine(
+            GeminiAPIConfig(model=self.config.gemini_model)
+        )
+
+        if not self.config.quiet:
+            console.print(
+                f"\n[cyan]Phase 2:[/cyan] Backbone OCR [{engine.name}] "
+                f"(per-page)"
+            )
+
+        if not engine.is_available():
+            logger.warning(f"Engine {engine.name} not available")
+            if not self.config.quiet:
+                console.print(f"[red]Engine {engine.name} not available[/red]")
+            err_result = EngineResult(
+                document_path=state.handle.path,
+                engine=engine.name,
+                status=DocumentStatus.ERROR,
+                error=f"Engine {engine.name} not available (missing API key)",
+            )
+            state.apply_result(err_result)
+            return err_result
+
+        start_time = time.time()
+        page_outputs: list[PageOutput] = []
+        total_pages = state.handle.page_count
+
+        for page_num in range(1, total_pages + 1):
+            if not self.config.quiet:
+                console.print(
+                    f"  Page {page_num}/{total_pages}...", end=" "
+                )
+
+            image = state.handle.render_page(page_num)
+            page_result = engine.process_image(image, page_num=page_num)
+            page_outputs.append(page_result)
+
+            if not self.config.quiet:
+                if page_result.status == PageStatus.SUCCESS:
+                    console.print(
+                        f"[green]{page_result.word_count} words[/green]"
+                    )
+                else:
+                    console.print(
+                        f"[red]{page_result.failure_mode.value}[/red]"
+                    )
+
+        elapsed = time.time() - start_time
+        engine.close()
+
+        success_count = sum(
+            1 for p in page_outputs if p.status == PageStatus.SUCCESS
+        )
+        overall_status = (
+            DocumentStatus.SUCCESS if success_count > 0
+            else DocumentStatus.ERROR
+        )
+
+        result = EngineResult(
+            document_path=state.handle.path,
+            engine=engine.name,
+            status=overall_status,
+            pages=page_outputs,
+            pages_processed=total_pages,
+            processing_time=elapsed,
+            model_version=engine.model_version,
         )
         state.apply_result(result)
         return result

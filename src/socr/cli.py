@@ -11,6 +11,7 @@ from socr.core.config import EngineType, PipelineConfig
 console = Console()
 
 ENGINE_CHOICES = [e.value for e in EngineType if e not in (EngineType.DEEPSEEK_VLLM, EngineType.VLLM)]
+# gemini-api is a per-page HTTP engine (not CLI), included for --primary selection
 
 
 class PDFShortcutGroup(click.Group):
@@ -127,7 +128,8 @@ def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = Fals
         config.hpc.enabled = True
         config.hpc.sequential = True
         pipeline = HPCPipeline(config)
-    elif unified:
+    elif unified or config.primary_engine == EngineType.GEMINI_API:
+        # Per-page HTTP engines require the UnifiedPipeline orchestrator
         from socr.pipeline.orchestrator import UnifiedPipeline
 
         pipeline = UnifiedPipeline(config)
@@ -196,7 +198,7 @@ def engines() -> None:
         (EngineType.NOUGAT, "local, academic papers"),
         (EngineType.DEEPSEEK, "local via Ollama"),
         (EngineType.MARKER, "local, layout-aware (Surya + Texify)"),
-        (EngineType.GEMINI, "cloud, ~$0.0002/page"),
+        (EngineType.GEMINI, "cloud, ~$0.0002/page (CLI)"),
         (EngineType.MISTRAL, "cloud, ~$0.001/page"),
     ]
 
@@ -205,6 +207,15 @@ def engines() -> None:
         available = engine.is_available()
         status = "[green]+[/green]" if available else "[red]x[/red]"
         console.print(f"  [{status}] {engine_type.value:<12} [dim]{desc}[/dim]")
+
+    # Per-page HTTP engines (not in CLI registry)
+    from socr.engines.gemini_api import GeminiAPIEngine
+
+    gemini_api = GeminiAPIEngine()
+    available = gemini_api.is_available()
+    gemini_api.close()
+    status = "[green]+[/green]" if available else "[red]x[/red]"
+    console.print(f"  [{status}] {'gemini-api':<12} [dim]cloud, per-page HTTP API (no truncation)[/dim]")
 
 
 @cli.group()
