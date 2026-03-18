@@ -20,7 +20,7 @@ class EngineType(str, Enum):
     VLLM = "vllm"  # Generic vLLM vision model (figures only, HPC mode)
 
 
-# Default engine priority: local free → cheap cloud → expensive cloud
+# Default engine priority: local free -> cheap cloud -> expensive cloud
 ENGINE_PRIORITY: dict[EngineType, int] = {
     EngineType.GLM: 0,
     EngineType.NOUGAT: 1,
@@ -75,7 +75,7 @@ class PipelineConfig:
 
     # --- Engine routing ---
     primary_engine: EngineType = EngineType.DEEPSEEK
-    fallback_engine: EngineType = EngineType.GEMINI
+    fallback_chain: list[EngineType] = field(default_factory=lambda: [EngineType.GEMINI])
     figures_engine: EngineType = EngineType.GEMINI
     enabled_engines: list[EngineType] = field(default_factory=lambda: list(EngineType))
 
@@ -130,8 +130,11 @@ class PipelineConfig:
         # Engine routing
         if "primary_engine" in data:
             config.primary_engine = EngineType(data["primary_engine"])
-        if "fallback_engine" in data:
-            config.fallback_engine = EngineType(data["fallback_engine"])
+        if "fallback_chain" in data:
+            config.fallback_chain = [EngineType(e) for e in data["fallback_chain"]]
+        elif "fallback_engine" in data:
+            # Legacy: single engine -> wrap in a list
+            config.fallback_chain = [EngineType(data["fallback_engine"])]
         if "figures_engine" in data:
             config.figures_engine = EngineType(data["figures_engine"])
         if "enabled_engines" in data:
@@ -152,7 +155,7 @@ class PipelineConfig:
         if "output_dir" in data:
             config.output_dir = Path(data["output_dir"])
 
-        # HPC config — only allow known fields to prevent injection
+        # HPC config -- only allow known fields to prevent injection
         if "hpc" in data and isinstance(data["hpc"], dict):
             allowed = {f.name for f in dataclasses.fields(HPCConfig)}
             hpc_data = {k: v for k, v in data["hpc"].items() if k in allowed}
@@ -191,3 +194,16 @@ class PipelineConfig:
             return cls.from_file(default_path)
 
         return cls()
+
+
+# Backward-compat property: ``config.fallback_engine`` reads/writes the first
+# element of ``fallback_chain``.  Defined outside the class body so that
+# @dataclass doesn't treat it as a field.
+
+def _fallback_engine_get(self: PipelineConfig) -> EngineType | None:
+    return self.fallback_chain[0] if self.fallback_chain else None
+
+def _fallback_engine_set(self: PipelineConfig, value: EngineType) -> None:
+    self.fallback_chain = [value]
+
+PipelineConfig.fallback_engine = property(_fallback_engine_get, _fallback_engine_set)  # type: ignore[attr-defined]

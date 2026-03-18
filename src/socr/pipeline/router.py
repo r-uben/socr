@@ -65,12 +65,18 @@ class EngineRouter:
         primary: EngineType,
         warn: Callable[[str], None] | None = None,
     ) -> EngineType | None:
-        """Select fallback engine (different from primary)."""
-        fallback = self.config.fallback_engine
-        if fallback != primary and self._available(fallback):
-            return fallback
-        if warn and fallback == primary:
-            warn("Fallback engine same as primary; using automatic fallback")
+        """Select first available fallback engine from the chain (excluding primary).
+
+        Iterates through ``config.fallback_chain`` in order, returning the
+        first engine that is available and different from *primary*.  Falls
+        back to automatic priority-based selection when the chain is exhausted.
+        """
+        for engine in self.config.fallback_chain:
+            if engine != primary and self._available(engine):
+                return engine
+
+        if warn and self.config.fallback_chain:
+            warn("No engine in fallback chain available; trying automatic fallback")
 
         preference = [EngineType.DEEPSEEK, EngineType.NOUGAT, EngineType.MISTRAL, EngineType.GEMINI]
         for engine_type in preference:
@@ -78,6 +84,33 @@ class EngineRouter:
                 return engine_type
 
         return None
+
+    def select_fallback_chain(
+        self,
+        primary: EngineType,
+    ) -> list[EngineType]:
+        """Return the full ordered list of available fallback engines (excluding primary).
+
+        Engines from ``config.fallback_chain`` come first (preserving order),
+        followed by any remaining available engines sorted by default priority.
+        """
+        seen: set[EngineType] = {primary}
+        result: list[EngineType] = []
+
+        # Chain engines first
+        for engine in self.config.fallback_chain:
+            if engine not in seen and self._available(engine):
+                result.append(engine)
+                seen.add(engine)
+
+        # Then remaining available engines by priority
+        preference = [EngineType.DEEPSEEK, EngineType.NOUGAT, EngineType.MISTRAL, EngineType.GEMINI]
+        for engine in preference:
+            if engine not in seen and self._available(engine):
+                result.append(engine)
+                seen.add(engine)
+
+        return result
 
     def select_hpc_engines(
         self,

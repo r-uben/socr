@@ -173,24 +173,33 @@ class StandardPipeline:
         return check.passed
 
     def _run_fallback(self, doc: DocumentHandle, output_dir: Path) -> EngineResult | None:
-        """Stage 3: Fallback OCR with a different engine."""
-        if self.config.fallback_engine == self.config.primary_engine:
-            logger.info("Fallback engine same as primary, skipping")
-            return None
+        """Stage 3: Fallback OCR — try each engine in fallback_chain until one succeeds."""
+        primary = self.config.primary_engine
 
-        engine = get_engine(self.config.fallback_engine)
+        for engine_type in self.config.fallback_chain:
+            if engine_type == primary:
+                continue
 
-        if not self.config.quiet:
-            console.print(f"\n[cyan]Stage 3:[/cyan] Fallback OCR [{engine.name}]")
+            engine = get_engine(engine_type)
 
-        if not engine.is_available():
             if not self.config.quiet:
-                console.print(f"[yellow]Fallback engine {engine.name} not available[/yellow]")
-            return None
+                console.print(f"\n[cyan]Stage 3:[/cyan] Fallback OCR [{engine.name}]")
 
-        result = engine.process_document(doc.path, output_dir, self.config)
-        result.pages_processed = doc.page_count
-        return result
+            if not engine.is_available():
+                if not self.config.quiet:
+                    console.print(f"[yellow]Fallback engine {engine.name} not available, trying next[/yellow]")
+                continue
+
+            result = engine.process_document(doc.path, output_dir, self.config)
+            result.pages_processed = doc.page_count
+            if result.success:
+                return result
+
+            if not self.config.quiet:
+                console.print(f"[yellow]Fallback engine {engine.name} failed, trying next[/yellow]")
+
+        logger.info("All fallback engines exhausted")
+        return None
 
     def _run_figures(self, doc: DocumentHandle, result: EngineResult, output_dir: Path) -> None:
         """Stage 4: Extract figure images from the PDF."""
