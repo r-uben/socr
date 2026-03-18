@@ -83,23 +83,44 @@ class UnifiedPipeline:
             console.print(f"[blue]Processing:[/blue] {doc.filename}")
             console.print(f"[dim]{doc.page_count} pages, {doc.size_mb:.1f} MB[/dim]")
 
+        is_multi = bool(self.config.multi_engine)
+
         # Phase 1: Analyze
         self._phase_analyze(state)
 
-        # Phase 2: Backbone OCR
-        backbone_result = self._phase_backbone(state, out_dir)
+        if is_multi:
+            # Multi-engine mode: run all engines, score all, consensus
+            backbone_results = self._backbone_multi_engine(state, out_dir)
 
-        # Phase 3: Score
-        if backbone_result and backbone_result.success and self.config.audit_enabled:
-            self._phase_score(state, backbone_result)
+            # Phase 3: Score all engine outputs
+            if self.config.audit_enabled:
+                self._phase_score_multi(state, backbone_results)
 
-        # Phase 4: Selective Repair (loops up to max_retries)
-        if self.config.audit_enabled:
-            self._phase_repair(state, out_dir)
+            # Phase 4: Repair — skip (multiple engines already provide coverage)
+            if not self.config.quiet:
+                console.print(
+                    "\n[cyan]Phase 4:[/cyan] Repair "
+                    "(skipped — multi-engine mode)"
+                )
 
-        # Phase 4b: Consensus (optional, after repair)
-        if self.config.consensus_enabled:
+            # Phase 4b: Consensus — always run in multi-engine mode
             self._phase_consensus(state)
+        else:
+            # Single-engine mode: original flow
+            # Phase 2: Backbone OCR
+            backbone_result = self._phase_backbone(state, out_dir)
+
+            # Phase 3: Score
+            if backbone_result and backbone_result.success and self.config.audit_enabled:
+                self._phase_score(state, backbone_result)
+
+            # Phase 4: Selective Repair (loops up to max_retries)
+            if self.config.audit_enabled:
+                self._phase_repair(state, out_dir)
+
+            # Phase 4b: Consensus (optional, after repair)
+            if self.config.consensus_enabled:
+                self._phase_consensus(state)
 
         # Phase 5: Assemble
         final_result = self._phase_assemble(state, out_dir)
@@ -411,6 +432,87 @@ class UnifiedPipeline:
         return result
 
     # ------------------------------------------------------------------
+    # Phase 2 (multi-engine): Backbone OCR with multiple engines
+    # ------------------------------------------------------------------
+
+    def _backbone_multi_engine(
+        self,
+        state: DocumentState,
+        output_dir: Path,
+    ) -> list[EngineResult]:
+        """Run multiple engines on the document and collect all results.
+
+        Each engine's output is applied to DocumentState via
+        ``state.apply_result()``, so per-page attempts accumulate across
+        engines.  Returns the list of EngineResults for downstream scoring.
+        """
+        engines = self.config.multi_engine
+        engine_names = [e.value for e in engines]
+
+        if not self.config.quiet:
+            console.print(
+                f"\n[cyan]Phase 2:[/cyan] Multi-engine OCR "
+                f"[{', '.join(engine_names)}]"
+            )
+
+        results: list[EngineResult] = []
+
+        for idx, engine_type in enumerate(engines, 1):
+            if not self.config.quiet:
+                console.print(
+                    f"  Engine {idx}/{len(engines)}: {engine_type.value}",
+                    end="",
+                )
+
+            if engine_type == EngineType.GEMINI_API:
+                result = self._backbone_per_page(state, output_dir)
+            else:
+                try:
+                    engine = get_engine(engine_type)
+                except ValueError:
+                    if not self.config.quiet:
+                        console.print(
+                            f" [red]not supported[/red]"
+                        )
+                    continue
+
+                if not engine.is_available():
+                    if not self.config.quiet:
+                        console.print(
+                            f" [yellow]not available[/yellow]"
+                        )
+                    continue
+
+                # Chunk long documents as in single-engine mode
+                if state.handle.page_count > self.config.chunk_threshold:
+                    if not self.config.quiet:
+                        n_chunks = -(-state.handle.page_count // self.config.chunk_size)
+                        console.print(
+                            f" (chunked, {n_chunks} chunks)",
+                            end="",
+                        )
+                    result = self._backbone_chunked(state, output_dir, engine)
+                else:
+                    result = engine.process_document(
+                        state.handle.path, output_dir, self.config
+                    )
+                    result.pages_processed = state.handle.page_count
+                    state.apply_result(result)
+
+            word_count = sum(p.word_count for p in result.pages)
+            if not self.config.quiet:
+                if result.success:
+                    console.print(f"... [green]{word_count} words[/green]")
+                else:
+                    console.print(
+                        f"... [red]{result.error or result.status.value}[/red]"
+                    )
+
+            results.append(result)
+
+        return results
+
+    # ------------------------------------------------------------------
     # Phase 3: Score
     # ------------------------------------------------------------------
 
@@ -504,6 +606,86 @@ class UnifiedPipeline:
                 console.print(f"  {failures} page(s) failed audit")
             else:
                 console.print("  [green]All pages passed[/green]")
+
+    def _phase_score_multi(
+        self,
+        state: DocumentState,
+        backbone_results: list[EngineResult],
+    ) -> None:
+        """Score all engine outputs from multi-engine mode.
+
+        For each engine result, runs scoring (whole-doc or per-page as
+        appropriate) and prints a per-engine summary.
+        """
+        if not self.config.quiet:
+            console.print("\n[cyan]Phase 3:[/cyan] Score (quality audit)")
+
+        for result in backbone_results:
+            if not result.success:
+                if not self.config.quiet:
+                    console.print(
+                        f"  {result.engine}: [red]skipped (engine failed)[/red]"
+                    )
+                continue
+
+            has_whole_doc = any(p.page_num == 0 for p in result.pages)
+
+            if has_whole_doc:
+                whole_page = next(p for p in result.pages if p.page_num == 0)
+                was_chunked = (
+                    state.handle.page_count > self.config.chunk_threshold
+                )
+                scoring = self.scorer.score(
+                    whole_page.text,
+                    engine=result.engine,
+                    expected_pages=(
+                        0 if was_chunked else state.handle.page_count
+                    ),
+                )
+                whole_page.audit_passed = scoring.passed
+                if scoring.passed:
+                    whole_page.failure_mode = FailureMode.NONE
+                    result.audit_passed = True
+                else:
+                    whole_page.failure_mode = scoring.primary_failure
+                    result.audit_passed = False
+
+                if not self.config.quiet:
+                    if scoring.passed:
+                        console.print(
+                            f"  {result.engine}: [green]passed[/green]"
+                        )
+                    else:
+                        console.print(
+                            f"  {result.engine}: "
+                            f"[red]{scoring.primary_failure.value}[/red]"
+                        )
+            else:
+                # Per-page outputs: score each page
+                passed = 0
+                failed = 0
+                for page_out in result.pages:
+                    scoring = self.scorer.score(
+                        page_out.text, engine=result.engine
+                    )
+                    page_out.audit_passed = scoring.passed
+                    if scoring.passed:
+                        page_out.failure_mode = FailureMode.NONE
+                        passed += 1
+                        # Promote to best if none set for this page
+                        page_state = state.pages.get(page_out.page_num)
+                        if page_state and not page_state.best_output:
+                            page_state.best_output = page_out
+                    else:
+                        page_out.failure_mode = scoring.primary_failure
+                        failed += 1
+
+                if not self.config.quiet:
+                    console.print(
+                        f"  {result.engine}: "
+                        f"[green]{passed} passed[/green], "
+                        f"[red]{failed} failed[/red]"
+                    )
 
     # ------------------------------------------------------------------
     # Phase 4: Selective Repair
@@ -915,8 +1097,15 @@ class UnifiedPipeline:
         else:
             status_str = f"[red]{result.status.value}[/red]"
 
+        engine_str = result.engine
+        if self.config.multi_engine:
+            engine_str = (
+                "+".join(e.value for e in self.config.multi_engine)
+                + " (consensus)"
+            )
+
         console.print(
-            f"\n{status_str} | {result.engine} | "
+            f"\n{status_str} | {engine_str} | "
             f"{result.processing_time:.1f}s"
         )
         if state.pages_needing_repair:

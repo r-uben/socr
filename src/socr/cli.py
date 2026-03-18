@@ -107,8 +107,18 @@ def cli(ctx: click.Context) -> None:
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
 @click.option("--hpc-sequential", is_flag=True, help="Use HPC sequential pipeline (vLLM)")
 @click.option("--unified", is_flag=True, help="Use UnifiedPipeline (5-phase orchestrator)")
+@click.option("--multi-engine", "multi_engine_str", type=str, default="", help="Comma-separated engines to run (e.g. gemini,mistral)")
+@click.option("--consensus-llm", type=str, default="", help="Ollama model for LLM consensus (e.g. qwen3.5:4b)")
 @common_options
-def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = False, unified: bool = False, **kwargs) -> None:
+def process(
+    pdf_path: Path,
+    output_dir: Path | None,
+    hpc_sequential: bool = False,
+    unified: bool = False,
+    multi_engine_str: str = "",
+    consensus_llm: str = "",
+    **kwargs,
+) -> None:
     """Process a single PDF document.
 
     Uses cascading fallback: primary engine first, quality audit,
@@ -119,8 +129,27 @@ def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = Fals
         socr paper.pdf --primary gemini --quiet
         socr paper.pdf --hpc-sequential --save-figures
         socr paper.pdf --unified
+        socr paper.pdf --multi-engine gemini,mistral
+        socr paper.pdf --multi-engine gemini,mistral --consensus-llm qwen3.5:4b
     """
     config = build_config(output_dir=output_dir, **kwargs)
+
+    # Multi-engine mode
+    if multi_engine_str:
+        try:
+            config.multi_engine = [
+                EngineType(e.strip())
+                for e in multi_engine_str.split(",")
+                if e.strip()
+            ]
+        except ValueError as exc:
+            raise click.ClickException(f"Unknown engine: {exc}")
+        # Multi-engine implies unified pipeline + consensus
+        unified = True
+        config.consensus_enabled = True
+        if consensus_llm:
+            config.consensus_use_llm = True
+            config.consensus_ollama_model = consensus_llm
 
     if hpc_sequential:
         from socr.pipeline.hpc_pipeline import HPCPipeline
@@ -128,8 +157,8 @@ def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = Fals
         config.hpc.enabled = True
         config.hpc.sequential = True
         pipeline = HPCPipeline(config)
-    elif unified or config.primary_engine == EngineType.GEMINI_API:
-        # Per-page HTTP engines require the UnifiedPipeline orchestrator
+    elif unified or config.multi_engine or config.primary_engine == EngineType.GEMINI_API:
+        # Per-page HTTP engines and multi-engine require UnifiedPipeline
         from socr.pipeline.orchestrator import UnifiedPipeline
 
         pipeline = UnifiedPipeline(config)
