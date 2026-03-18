@@ -105,8 +105,9 @@ def cli(ctx: click.Context) -> None:
 @click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
 @click.option("--hpc-sequential", is_flag=True, help="Use HPC sequential pipeline (vLLM)")
+@click.option("--unified", is_flag=True, help="Use UnifiedPipeline (5-phase orchestrator)")
 @common_options
-def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = False, **kwargs) -> None:
+def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = False, unified: bool = False, **kwargs) -> None:
     """Process a single PDF document.
 
     Uses cascading fallback: primary engine first, quality audit,
@@ -116,6 +117,7 @@ def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = Fals
         socr process paper.pdf -o ./results/
         socr paper.pdf --primary gemini --quiet
         socr paper.pdf --hpc-sequential --save-figures
+        socr paper.pdf --unified
     """
     config = build_config(output_dir=output_dir, **kwargs)
 
@@ -125,6 +127,10 @@ def process(pdf_path: Path, output_dir: Path | None, hpc_sequential: bool = Fals
         config.hpc.enabled = True
         config.hpc.sequential = True
         pipeline = HPCPipeline(config)
+    elif unified:
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        pipeline = UnifiedPipeline(config)
     else:
         from socr.pipeline.processor import StandardPipeline
 
