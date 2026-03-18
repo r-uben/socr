@@ -239,10 +239,12 @@ class ConsensusEngine:
         use_llm: bool = False,
         ollama_model: str = "",
         ollama_url: str = "http://localhost:11434",
+        quiet: bool = False,
     ) -> None:
         self.use_llm = use_llm
         self.ollama_model = ollama_model
         self.ollama_url = ollama_url
+        self.quiet = quiet
 
     # ------------------------------------------------------------------
     # Heuristic selection
@@ -377,9 +379,42 @@ class ConsensusEngine:
     def reconcile_document(
         self, state: DocumentState
     ) -> list[ConsensusResult]:
-        """Run consensus across all pages that have multiple attempts."""
+        """Run consensus across all pages and whole-doc attempts.
+
+        Handles two cases:
+          1. Per-page attempts (HTTP engines) — compare per page.
+          2. Whole-doc attempts (CLI engines, page_num=0) — compare at
+             document level and promote the winner.
+        """
         results: list[ConsensusResult] = []
 
+        # --- Whole-doc consensus ---
+        # CLI engines produce page_num=0 whole-doc outputs.  When we have
+        # 2+ whole-doc attempts, pick the best one and promote it.
+        if len(state.whole_doc_attempts) >= 2:
+            cr = self._select_best_impl(state.whole_doc_attempts)
+            cr.page_num = 0
+            results.append(cr)
+
+            if not self.quiet:
+                logger.info(
+                    f"Whole-doc consensus: selected {cr.selected_engine} "
+                    f"(agreement={cr.agreement_score:.2f})"
+                )
+
+            # Replace the whole-doc attempts list so state.text picks
+            # the consensus winner (move it to the end).
+            winner = PageOutput(
+                page_num=0,
+                text=cr.merged_text,
+                status=PageStatus.SUCCESS if cr.merged_text.strip() else PageStatus.ERROR,
+                engine=f"consensus({cr.selected_engine})",
+                audit_passed=True,
+                confidence=cr.agreement_score,
+            )
+            state.whole_doc_attempts.append(winner)
+
+        # --- Per-page consensus ---
         for page_num in sorted(state.pages):
             page_state = state.pages[page_num]
 
@@ -390,23 +425,23 @@ class ConsensusEngine:
             if len(page_state.attempts) < 2:
                 continue
 
-            if self.use_llm and self.ollama_model:
-                cr = self.select_best_with_llm(page_state.attempts)
-            else:
-                cr = self.select_best(page_state.attempts)
-
-            # Ensure correct page_num (defensive)
+            cr = self._select_best_impl(page_state.attempts)
             cr.page_num = page_num
             results.append(cr)
 
-            # Update the page state's best_output with the consensus winner
             page_state.best_output = PageOutput(
                 page_num=page_num,
                 text=cr.merged_text,
                 status=PageStatus.SUCCESS if cr.merged_text.strip() else PageStatus.ERROR,
                 engine=f"consensus({cr.selected_engine})",
-                audit_passed=True,  # consensus output is trusted
+                audit_passed=True,
                 confidence=cr.agreement_score,
             )
 
         return results
+
+    def _select_best_impl(self, attempts: list[PageOutput]) -> ConsensusResult:
+        """Route to heuristic or LLM consensus."""
+        if self.use_llm and self.ollama_model:
+            return self.select_best_with_llm(attempts)
+        return self.select_best(attempts)

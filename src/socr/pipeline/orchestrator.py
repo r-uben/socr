@@ -927,20 +927,19 @@ class UnifiedPipeline:
     # ------------------------------------------------------------------
 
     def _phase_consensus(self, state: DocumentState) -> None:
-        """Run multi-engine consensus on pages with multiple attempts.
+        """Run multi-engine consensus on pages/docs with multiple attempts.
 
-        Only runs when ``config.consensus_enabled`` is True.  For each
-        page with >1 attempt, selects (or merges) the best output and
-        updates ``page_state.best_output``.
+        Handles both per-page attempts (HTTP engines) and whole-doc
+        attempts (CLI engines).
         """
-        pages_with_multi = [
-            pn
-            for pn in sorted(state.pages)
-            if len(state.pages[pn].attempts) >= 2
+        has_multi_pages = any(
+            len(state.pages[pn].attempts) >= 2
             and not (state.pages[pn].is_born_digital and state.pages[pn].native_text)
-        ]
+            for pn in state.pages
+        )
+        has_multi_whole_doc = len(state.whole_doc_attempts) >= 2
 
-        if not pages_with_multi:
+        if not has_multi_pages and not has_multi_whole_doc:
             if not self.config.quiet:
                 console.print(
                     "\n[cyan]Phase 4b:[/cyan] Consensus (not needed — "
@@ -949,22 +948,32 @@ class UnifiedPipeline:
             return
 
         if not self.config.quiet:
+            parts = []
+            if has_multi_whole_doc:
+                parts.append(f"{len(state.whole_doc_attempts)} whole-doc attempts")
+            if has_multi_pages:
+                count = sum(
+                    1 for pn in state.pages
+                    if len(state.pages[pn].attempts) >= 2
+                )
+                parts.append(f"{count} multi-attempt pages")
             console.print(
-                f"\n[cyan]Phase 4b:[/cyan] Consensus "
-                f"({len(pages_with_multi)} page(s) with multiple attempts)"
+                f"\n[cyan]Phase 4b:[/cyan] Consensus ({', '.join(parts)})"
             )
 
         engine = ConsensusEngine(
             use_llm=self.config.consensus_use_llm,
             ollama_model=self.config.consensus_ollama_model,
+            quiet=self.config.quiet,
         )
         results = engine.reconcile_document(state)
 
         if not self.config.quiet:
             for cr in results:
                 disc_str = f" [{len(cr.discrepancies)} discrepancies]" if cr.discrepancies else ""
+                label = "Whole doc" if cr.page_num == 0 else f"Page {cr.page_num}"
                 console.print(
-                    f"  Page {cr.page_num}: selected {cr.selected_engine} "
+                    f"  {label}: selected {cr.selected_engine} "
                     f"(agreement={cr.agreement_score:.2f}){disc_str}"
                 )
 
