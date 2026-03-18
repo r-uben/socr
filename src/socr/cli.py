@@ -207,6 +207,120 @@ def engines() -> None:
         console.print(f"  [{status}] {engine_type.value:<12} [dim]{desc}[/dim]")
 
 
+@cli.group()
+def benchmark() -> None:
+    """Benchmark suite for OCR quality evaluation.
+
+    Commands:
+        socr benchmark init    Create benchmark set and extract ground truth
+        socr benchmark run     Run all engines on benchmark (not yet implemented)
+        socr benchmark score   Score results against ground truth (not yet implemented)
+    """
+
+
+@benchmark.command("init")
+@click.option(
+    "--papers-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Directory containing benchmark PDFs (default: Papers library)",
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("benchmark"),
+    help="Output directory for benchmark data (default: ./benchmark)",
+)
+def benchmark_init(papers_dir: Path | None, output_dir: Path) -> None:
+    """Create benchmark set, extract ground truth, and generate scanned PDFs.
+
+    Resolves the 10 benchmark papers from the Papers library, extracts
+    native text as ground truth, and creates 2 synthetic scanned PDFs.
+    """
+    from socr.benchmark.dataset import build_benchmark_set, BenchmarkPaper
+    from socr.benchmark.ground_truth import GroundTruthExtractor
+    from socr.benchmark.rasterize import PaperRasterizer, RASTERIZE_SPECS
+
+    output_dir = Path(output_dir)
+
+    # 1. Build benchmark set
+    console.print("[bold]Building benchmark set...[/bold]")
+    try:
+        bench = build_benchmark_set(papers_dir)
+    except FileNotFoundError as e:
+        raise click.ClickException(str(e))
+
+    console.print(f"  Found {len(bench.papers)} papers")
+    for cat, papers in sorted(bench.by_category().items()):
+        console.print(f"    {cat}: {len(papers)} papers")
+
+    # 2. Extract ground truth
+    console.print("\n[bold]Extracting ground truth...[/bold]")
+    extractor = GroundTruthExtractor()
+    gt_dir = output_dir / "ground_truth"
+
+    for paper in bench.papers:
+        paper_gt_dir = gt_dir / paper.name
+        console.print(f"  {paper.name} ({paper.page_count}p)...", end=" ")
+        truths = extractor.extract_and_save(paper.pdf_path, paper_gt_dir)
+        paper.ground_truth_path = paper_gt_dir
+        total_words = sum(t.word_count for t in truths)
+        console.print(f"[green]{total_words} words[/green]")
+
+    # 3. Rasterize synthetic scanned PDFs
+    console.print("\n[bold]Creating synthetic scanned PDFs...[/bold]")
+    rasterizer = PaperRasterizer()
+    scanned_dir = output_dir / "scanned"
+    paper_by_name = {p.name: p for p in bench.papers}
+
+    for spec in RASTERIZE_SPECS:
+        source_paper = paper_by_name.get(spec["source_name"])
+        if not source_paper:
+            console.print(f"  [yellow]Skipping {spec['source_name']}: not found[/yellow]")
+            continue
+
+        out_path = scanned_dir / f"{spec['output_name']}.pdf"
+        console.print(f"  {spec['output_name']} @ {spec['dpi']} DPI...", end=" ")
+        rasterizer.rasterize(source_paper.pdf_path, out_path, dpi=spec["dpi"])
+
+        # Add scanned version to benchmark set
+        scanned_paper = BenchmarkPaper(
+            name=spec["output_name"],
+            pdf_path=out_path,
+            category="scanned",
+            page_count=source_paper.page_count,
+            ground_truth_path=source_paper.ground_truth_path,
+            notes=spec["notes"],
+        )
+        bench.papers.append(scanned_paper)
+        console.print("[green]done[/green]")
+
+    # 4. Save benchmark set manifest
+    manifest_path = output_dir / "benchmark.json"
+    bench.save(manifest_path)
+    console.print(f"\n[bold green]Benchmark set saved:[/bold green] {manifest_path}")
+    console.print(f"  {len(bench.papers)} papers ({len(RASTERIZE_SPECS)} scanned)")
+
+
+@benchmark.command("run")
+def benchmark_run() -> None:
+    """Run all engines on benchmark papers.
+
+    Not implemented yet — placeholder for L2C-02.
+    """
+    console.print("[yellow]Not implemented yet.[/yellow] See ticket L2C-02.")
+
+
+@benchmark.command("score")
+def benchmark_score() -> None:
+    """Score OCR results against ground truth.
+
+    Not implemented yet — placeholder for L2C-02.
+    """
+    console.print("[yellow]Not implemented yet.[/yellow] See ticket L2C-02.")
+
+
 def main() -> None:
     """Entry point."""
     cli()
