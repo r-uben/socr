@@ -96,6 +96,11 @@ class PipelineConfig:
     audit_enabled: bool = True
     audit_min_words: int = 50
 
+    # --- Consensus ---
+    consensus_enabled: bool = False
+    consensus_use_llm: bool = False
+    consensus_ollama_model: str = ""
+
     # --- Batch flags ---
     reprocess: bool = False
     dry_run: bool = False
@@ -151,6 +156,7 @@ class PipelineConfig:
             "chunk_threshold", "chunk_size",
             "save_figures", "figures_max_total",
             "figures_max_per_page", "audit_enabled", "audit_min_words",
+            "consensus_enabled", "consensus_use_llm", "consensus_ollama_model",
             "reprocess", "dry_run", "quiet", "verbose",
             "deepseek_backend", "deepseek_vllm_url", "glm_backend", "nougat_model",
             "marker_device", "gemini_model", "mistral_model",

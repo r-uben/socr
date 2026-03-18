@@ -1,11 +1,12 @@
-"""Unified 5-phase OCR pipeline orchestrator.
+"""Unified OCR pipeline orchestrator.
 
 Drives DocumentState through:
-  1. Analyze   -- born-digital detection
-  2. Backbone  -- primary engine OCR
-  3. Score     -- heuristic quality audit
-  4. Repair    -- selective fallback on failed pages
-  5. Assemble  -- stitch final output and save
+  1. Analyze    -- born-digital detection
+  2. Backbone   -- primary engine OCR
+  3. Score      -- heuristic quality audit
+  4. Repair     -- selective fallback on failed pages
+  4b. Consensus -- multi-engine best-output selection (optional)
+  5. Assemble   -- stitch final output and save
 
 Replaces StandardPipeline's ad-hoc primary/audit/fallback stages with a
 structured loop that operates on the DocumentState blackboard.
@@ -39,6 +40,7 @@ from socr.core.state import DocumentState
 from socr.engines.base import BaseEngine, sanitize_filename
 from socr.engines.registry import get_engine
 from socr.figures.extractor import FigureExtractor
+from socr.pipeline.consensus import ConsensusEngine
 from socr.pipeline.repair import RepairRouter
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,10 @@ class UnifiedPipeline:
         # Phase 4: Selective Repair (loops up to max_retries)
         if self.config.audit_enabled:
             self._phase_repair(state, out_dir)
+
+        # Phase 4b: Consensus (optional, after repair)
+        if self.config.consensus_enabled:
+            self._phase_consensus(state)
 
         # Phase 5: Assemble
         final_result = self._phase_assemble(state, out_dir)
@@ -728,6 +734,52 @@ class UnifiedPipeline:
                     page_out.failure_mode = scoring.primary_failure
                 else:
                     page_out.failure_mode = FailureMode.NONE
+
+    # ------------------------------------------------------------------
+    # Phase 4b: Consensus
+    # ------------------------------------------------------------------
+
+    def _phase_consensus(self, state: DocumentState) -> None:
+        """Run multi-engine consensus on pages with multiple attempts.
+
+        Only runs when ``config.consensus_enabled`` is True.  For each
+        page with >1 attempt, selects (or merges) the best output and
+        updates ``page_state.best_output``.
+        """
+        pages_with_multi = [
+            pn
+            for pn in sorted(state.pages)
+            if len(state.pages[pn].attempts) >= 2
+            and not (state.pages[pn].is_born_digital and state.pages[pn].native_text)
+        ]
+
+        if not pages_with_multi:
+            if not self.config.quiet:
+                console.print(
+                    "\n[cyan]Phase 4b:[/cyan] Consensus (not needed — "
+                    "no multi-attempt pages)"
+                )
+            return
+
+        if not self.config.quiet:
+            console.print(
+                f"\n[cyan]Phase 4b:[/cyan] Consensus "
+                f"({len(pages_with_multi)} page(s) with multiple attempts)"
+            )
+
+        engine = ConsensusEngine(
+            use_llm=self.config.consensus_use_llm,
+            ollama_model=self.config.consensus_ollama_model,
+        )
+        results = engine.reconcile_document(state)
+
+        if not self.config.quiet:
+            for cr in results:
+                disc_str = f" [{len(cr.discrepancies)} discrepancies]" if cr.discrepancies else ""
+                console.print(
+                    f"  Page {cr.page_num}: selected {cr.selected_engine} "
+                    f"(agreement={cr.agreement_score:.2f}){disc_str}"
+                )
 
     # ------------------------------------------------------------------
     # Phase 5: Assemble
