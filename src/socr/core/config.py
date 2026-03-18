@@ -84,6 +84,8 @@ class PipelineConfig:
     timeout: int = 1800  # Single timeout for all engine subprocesses
     max_retries: int = 2
     truncation_retries: int = 1  # Retry same engine on truncation before fallback
+    chunk_threshold: int = 30  # Chunk PDFs longer than this many pages
+    chunk_size: int = 20  # Pages per chunk
     save_figures: bool = False
     figures_max_total: int = 25
     figures_max_per_page: int = 3
@@ -144,6 +146,7 @@ class PipelineConfig:
         # Scalar fields
         scalar_fields = [
             "timeout", "max_retries", "truncation_retries",
+            "chunk_threshold", "chunk_size",
             "save_figures", "figures_max_total",
             "figures_max_per_page", "audit_enabled", "audit_min_words",
             "reprocess", "dry_run", "quiet", "verbose",

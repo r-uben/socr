@@ -14,6 +14,7 @@ structured loop that operates on the DocumentState blackboard.
 from __future__ import annotations
 
 import logging
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from rich.console import Console
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector
+from socr.core.chunker import PDFChunker
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
@@ -191,7 +193,12 @@ class UnifiedPipeline:
     def _phase_backbone(
         self, state: DocumentState, output_dir: Path
     ) -> EngineResult | None:
-        """Run the primary engine on the document."""
+        """Run the primary engine on the document.
+
+        If the document exceeds ``config.chunk_threshold`` pages, split it
+        into chunks and process each chunk independently via
+        :meth:`_backbone_chunked`.
+        """
         engine = get_engine(self.config.primary_engine)
 
         if not self.config.quiet:
@@ -213,8 +220,97 @@ class UnifiedPipeline:
             state.apply_result(err_result)
             return err_result
 
+        # Chunk long documents to avoid context-window / timeout issues
+        if state.handle.page_count > self.config.chunk_threshold:
+            if not self.config.quiet:
+                console.print(
+                    f"  [dim]{state.handle.page_count} pages > "
+                    f"chunk threshold {self.config.chunk_threshold}, "
+                    f"splitting into chunks of {self.config.chunk_size}[/dim]"
+                )
+            return self._backbone_chunked(state, output_dir, engine)
+
         result = engine.process_document(state.handle.path, output_dir, self.config)
         result.pages_processed = state.handle.page_count
+        state.apply_result(result)
+        return result
+
+    def _backbone_chunked(
+        self,
+        state: DocumentState,
+        output_dir: Path,
+        engine: BaseEngine,
+    ) -> EngineResult:
+        """Run the engine on each chunk and concatenate the results.
+
+        Splits the PDF via :class:`PDFChunker`, runs the engine on each
+        chunk, and combines the per-chunk texts into a single
+        ``PageOutput(page_num=0)`` whole-doc result.
+        """
+        chunker = PDFChunker(max_pages_per_chunk=self.config.chunk_size)
+        start_time = time.time()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chunks = chunker.chunk(state.handle.path, tmp_path / "chunks")
+
+            if not self.config.quiet:
+                console.print(f"  Split into {len(chunks)} chunks")
+
+            chunk_texts: list[str] = []
+            total_cost = 0.0
+
+            for chunk in chunks:
+                if not self.config.quiet:
+                    console.print(
+                        f"  Chunk {chunk.chunk_num}/{len(chunks)} "
+                        f"(pages {chunk.start_page}-{chunk.end_page})"
+                    )
+
+                chunk_result = engine.process_document(
+                    chunk.path, tmp_path / "out", self.config,
+                )
+
+                if chunk_result.success and chunk_result.pages:
+                    # CLI engines produce page_num=0 whole-doc output
+                    text = chunk_result.markdown
+                    if text:
+                        chunk_texts.append(text)
+                else:
+                    logger.warning(
+                        f"Chunk {chunk.chunk_num} failed: "
+                        f"{chunk_result.error or chunk_result.status.value}"
+                    )
+
+                total_cost += chunk_result.cost
+
+        elapsed = time.time() - start_time
+        combined_text = "\n\n".join(chunk_texts)
+
+        if combined_text.strip():
+            status = DocumentStatus.SUCCESS
+            page_status = PageStatus.SUCCESS
+        else:
+            status = DocumentStatus.ERROR
+            page_status = PageStatus.ERROR
+
+        result = EngineResult(
+            document_path=state.handle.path,
+            engine=engine.name,
+            status=status,
+            pages=[
+                PageOutput(
+                    page_num=0,
+                    text=combined_text,
+                    status=page_status,
+                    engine=engine.name,
+                    processing_time=elapsed,
+                )
+            ],
+            pages_processed=state.handle.page_count,
+            processing_time=elapsed,
+            cost=total_cost,
+        )
         state.apply_result(result)
         return result
 
