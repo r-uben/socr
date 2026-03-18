@@ -5,6 +5,7 @@ from socr.core.born_digital import (
     DocumentAssessment,
     PageAssessment,
 )
+from socr.core.chunker import PDFChunk, PDFChunker
 from socr.core.config import EngineType, HPCConfig, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
@@ -23,6 +24,8 @@ __all__ = [
     "BornDigitalDetector",
     "DocumentAssessment",
     "DocumentHandle",
+    "PDFChunk",
+    "PDFChunker",
     "DocumentState",
     "DocumentStatus",
     "EngineResult",
