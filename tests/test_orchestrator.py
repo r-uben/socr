@@ -1278,3 +1278,238 @@ class TestChunkedBackbone:
         # Should have chunked -- 3 calls
         assert mock_engine.process_document.call_count == 3
         assert result.success
+
+
+# ---------------------------------------------------------------------------
+# Multi-engine mode
+# ---------------------------------------------------------------------------
+
+class TestMultiEngine:
+    """Tests for multi-engine mode (Phase 2 runs multiple engines)."""
+
+    def test_multi_engine_runs_all_specified_engines(self) -> None:
+        """Multi-engine mode should run each listed engine and collect results."""
+        config = _make_config(
+            multi_engine=[EngineType.DEEPSEEK, EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(3))
+
+        result_ds = _make_engine_result(text=_good_text(), engine="deepseek")
+        result_gm = _make_engine_result(text=_good_text(), engine="gemini")
+
+        mock_ds = MagicMock()
+        mock_ds.name = "deepseek"
+        mock_ds.is_available.return_value = True
+        mock_ds.process_document.return_value = result_ds
+
+        mock_gm = MagicMock()
+        mock_gm.name = "gemini"
+        mock_gm.is_available.return_value = True
+        mock_gm.process_document.return_value = result_gm
+
+        def _mock_get_engine(engine_type):
+            if engine_type == EngineType.DEEPSEEK:
+                return mock_ds
+            if engine_type == EngineType.GEMINI:
+                return mock_gm
+            raise ValueError(f"No engine for {engine_type}")
+
+        with patch("socr.pipeline.orchestrator.get_engine", side_effect=_mock_get_engine):
+            results = pipeline._backbone_multi_engine(state, Path("/tmp/out"))
+
+        assert len(results) == 2
+        assert results[0].engine == "deepseek"
+        assert results[1].engine == "gemini"
+        # Both results applied to state
+        assert len(state.engine_runs) == 2
+        assert len(state.whole_doc_attempts) == 2
+
+    def test_multi_engine_consensus_auto_enabled(self, tmp_path: Path) -> None:
+        """In multi-engine mode, consensus should always run (even if config
+        has consensus_enabled=False)."""
+        config = _make_config(
+            multi_engine=[EngineType.DEEPSEEK, EngineType.GEMINI],
+            consensus_enabled=False,  # explicitly off -- multi-engine overrides
+        )
+        pipeline = UnifiedPipeline(config)
+
+        result_ds = _make_engine_result(text=_good_text(), engine="deepseek")
+        result_gm = _make_engine_result(text=_good_text(), engine="gemini")
+
+        # Mock out all the phases to trace which ones were called
+        with (
+            patch.object(DocumentHandle, "from_path", return_value=_make_handle(3)),
+            patch.object(pipeline, "_phase_analyze"),
+            patch.object(pipeline, "_backbone_multi_engine", return_value=[result_ds, result_gm]),
+            patch.object(pipeline, "_phase_score_multi"),
+            patch.object(pipeline, "_phase_consensus") as mock_consensus,
+            patch.object(pipeline, "_phase_assemble", return_value=_make_engine_result()),
+        ):
+            pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
+
+        # Consensus was called despite consensus_enabled=False
+        mock_consensus.assert_called_once()
+
+    def test_single_engine_unchanged_when_multi_engine_empty(self, tmp_path: Path) -> None:
+        """When multi_engine is empty, single-engine flow should be used."""
+        config = _make_config(multi_engine=[])
+        pipeline = UnifiedPipeline(config)
+
+        good_result = _make_engine_result(text=_good_text())
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = good_result
+
+        with (
+            patch.object(DocumentHandle, "from_path", return_value=_make_handle(2)),
+            patch.object(pipeline, "_phase_analyze"),
+            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine),
+            patch.object(pipeline, "_phase_score"),
+            patch.object(pipeline, "_phase_repair"),
+            patch.object(pipeline, "_phase_assemble", return_value=good_result),
+        ):
+            result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
+
+        assert result.engine == "deepseek"
+        # _backbone_multi_engine should NOT have been called (single-engine path)
+        mock_engine.process_document.assert_called_once()
+
+    def test_multi_engine_skips_unavailable_engine(self) -> None:
+        """Multi-engine mode should gracefully skip unavailable engines."""
+        config = _make_config(
+            multi_engine=[EngineType.DEEPSEEK, EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(3))
+
+        result_ds = _make_engine_result(text=_good_text(), engine="deepseek")
+
+        mock_ds = MagicMock()
+        mock_ds.name = "deepseek"
+        mock_ds.is_available.return_value = True
+        mock_ds.process_document.return_value = result_ds
+
+        mock_gm = MagicMock()
+        mock_gm.name = "gemini"
+        mock_gm.is_available.return_value = False  # unavailable
+
+        def _mock_get_engine(engine_type):
+            if engine_type == EngineType.DEEPSEEK:
+                return mock_ds
+            if engine_type == EngineType.GEMINI:
+                return mock_gm
+            raise ValueError(f"No engine for {engine_type}")
+
+        with patch("socr.pipeline.orchestrator.get_engine", side_effect=_mock_get_engine):
+            results = pipeline._backbone_multi_engine(state, Path("/tmp/out"))
+
+        # Only one result returned (gemini was unavailable)
+        assert len(results) == 1
+        assert results[0].engine == "deepseek"
+        assert len(state.engine_runs) == 1
+
+    def test_multi_engine_repair_skipped(self, tmp_path: Path) -> None:
+        """In multi-engine mode, Phase 4 (Repair) should be skipped."""
+        config = _make_config(
+            multi_engine=[EngineType.DEEPSEEK, EngineType.GEMINI],
+            audit_enabled=True,
+        )
+        pipeline = UnifiedPipeline(config)
+
+        result_ds = _make_engine_result(text=_good_text(), engine="deepseek")
+        result_gm = _make_engine_result(text=_good_text(), engine="gemini")
+
+        with (
+            patch.object(DocumentHandle, "from_path", return_value=_make_handle(3)),
+            patch.object(pipeline, "_phase_analyze"),
+            patch.object(pipeline, "_backbone_multi_engine", return_value=[result_ds, result_gm]),
+            patch.object(pipeline, "_phase_score_multi"),
+            patch.object(pipeline, "_phase_consensus"),
+            patch.object(pipeline, "_phase_repair") as mock_repair,
+            patch.object(pipeline, "_phase_assemble", return_value=_make_engine_result()),
+        ):
+            pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
+
+        # Repair should NOT have been called in multi-engine mode
+        mock_repair.assert_not_called()
+
+    def test_phase_score_multi_scores_all_results(self) -> None:
+        """_phase_score_multi should score each engine result."""
+        config = _make_config()
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(3))
+
+        result_ds = _make_engine_result(text=_good_text(), engine="deepseek")
+        result_bad = _make_engine_result(text=_bad_text(), engine="gemini")
+        state.apply_result(result_ds)
+        state.apply_result(result_bad)
+
+        pipeline._phase_score_multi(state, [result_ds, result_bad])
+
+        # Good result should pass
+        assert result_ds.pages[0].audit_passed is True
+        # Bad result should fail
+        assert result_bad.pages[0].audit_passed is False
+
+    def test_cli_parsing_multi_engine(self) -> None:
+        """CLI --multi-engine flag should parse comma-separated engines."""
+        from click.testing import CliRunner
+        from socr.cli import process
+
+        runner = CliRunner()
+        # Use --help to verify the option is recognized without running the command
+        result = runner.invoke(process, ["--help"])
+        assert result.exit_code == 0
+        assert "--multi-engine" in result.output
+        assert "--consensus-llm" in result.output
+
+    def test_config_multi_engine_from_yaml(self) -> None:
+        """PipelineConfig.from_file should parse multi_engine list."""
+        import tempfile
+        import yaml
+
+        data = {"multi_engine": ["gemini", "mistral"]}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(data, f)
+            f.flush()
+            config = PipelineConfig.from_file(f.name)
+
+        assert config.multi_engine == [EngineType.GEMINI, EngineType.MISTRAL]
+
+    def test_multi_engine_per_page_engine(self) -> None:
+        """Multi-engine mode should handle GEMINI_API (per-page engine)."""
+        config = _make_config(
+            multi_engine=[EngineType.DEEPSEEK, EngineType.GEMINI_API],
+        )
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(2))
+
+        result_ds = _make_engine_result(text=_good_text(), engine="deepseek")
+        result_api = EngineResult(
+            document_path=Path("/tmp/fake.pdf"),
+            engine="gemini-api",
+            status=DocumentStatus.SUCCESS,
+            pages=[
+                PageOutput(page_num=1, text="Page 1 text", status=PageStatus.SUCCESS, engine="gemini-api"),
+                PageOutput(page_num=2, text="Page 2 text", status=PageStatus.SUCCESS, engine="gemini-api"),
+            ],
+            processing_time=1.0,
+        )
+
+        mock_ds = MagicMock()
+        mock_ds.name = "deepseek"
+        mock_ds.is_available.return_value = True
+        mock_ds.process_document.return_value = result_ds
+
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", return_value=mock_ds),
+            patch.object(pipeline, "_backbone_per_page", return_value=result_api),
+        ):
+            results = pipeline._backbone_multi_engine(state, Path("/tmp/out"))
+
+        assert len(results) == 2
+        # First is CLI engine (deepseek), second is per-page (gemini-api)
+        assert results[0].engine == "deepseek"
+        assert results[1].engine == "gemini-api"

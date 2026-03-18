@@ -96,6 +96,9 @@ class PipelineConfig:
     audit_enabled: bool = True
     audit_min_words: int = 50
 
+    # --- Multi-engine ---
+    multi_engine: list[EngineType] = field(default_factory=list)  # empty = single engine mode
+
     # --- Consensus ---
     consensus_enabled: bool = False
     consensus_use_llm: bool = False
@@ -149,6 +152,8 @@ class PipelineConfig:
             config.figures_engine = EngineType(data["figures_engine"])
         if "enabled_engines" in data:
             config.enabled_engines = [EngineType(e) for e in data["enabled_engines"]]
+        if "multi_engine" in data:
+            config.multi_engine = [EngineType(e) for e in data["multi_engine"]]
 
         # Scalar fields
         scalar_fields = [
