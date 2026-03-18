@@ -82,8 +82,13 @@ class HeuristicsChecker:
         self.min_avg_word_length = min_avg_word_length
         self.max_avg_word_length = max_avg_word_length
 
-    def check(self, text: str) -> HeuristicsResult:
-        """Run all heuristic checks on OCR output."""
+    def check(self, text: str, expected_pages: int = 0) -> HeuristicsResult:
+        """Run all heuristic checks on OCR output.
+
+        Args:
+            text: The OCR output text to check.
+            expected_pages: If > 0, check for truncation based on expected page count.
+        """
         result = HeuristicsResult()
 
         if not text or not text.strip():
@@ -144,6 +149,20 @@ class HeuristicsChecker:
             # Low word count almost always indicates a bad extraction; treat as failing.
             severity="error" if word_count < self.min_word_count else "info",
         ))
+
+        # Truncation detection: if we know the page count, check that
+        # word count is plausible. Academic papers average ~300 words/page;
+        # anything below 100 words/page on a multi-page doc is truncated.
+        if expected_pages > 5 and word_count > 0:
+            words_per_page = word_count / expected_pages
+            is_truncated = words_per_page < 100
+            result.add_metric(AuditMetric(
+                name="Truncation check",
+                value=f"{words_per_page:.0f} words/page ({word_count} words / {expected_pages} pages)",
+                threshold=">50 words/page",
+                passed=not is_truncated,
+                severity="error" if is_truncated else "info",
+            ))
 
         # Average word length check
         if words:

@@ -251,7 +251,10 @@ class UnifiedPipeline:
         if not whole_doc_page:
             return
 
-        scoring = self.scorer.score(whole_doc_page.text, engine=result.engine)
+        scoring = self.scorer.score(
+            whole_doc_page.text, engine=result.engine,
+            expected_pages=state.handle.page_count,
+        )
 
         if scoring.passed:
             whole_doc_page.audit_passed = True
@@ -324,7 +327,16 @@ class UnifiedPipeline:
         has_passing_whole_doc = any(
             w.audit_passed for w in state.whole_doc_attempts
         )
-        if has_passing_whole_doc:
+        # Also check if there's a failing whole-doc attempt that needs
+        # document-level retry (e.g. truncated output).
+        has_failing_whole_doc = any(
+            not w.audit_passed for w in state.whole_doc_attempts
+        )
+        needs_whole_doc_retry = (
+            has_failing_whole_doc and not has_passing_whole_doc
+        )
+
+        if has_passing_whole_doc and not state.pages_needing_repair:
             if not self.config.quiet:
                 console.print(
                     "\n[cyan]Phase 4:[/cyan] Repair (not needed)"
@@ -333,6 +345,42 @@ class UnifiedPipeline:
 
         for attempt in range(self.config.max_retries):
             plan = self.repair_router.plan_repairs(state)
+
+            # If per-page plan is empty but whole-doc retry is needed,
+            # try the next engine in the fallback chain on the whole doc.
+            if plan.is_empty and needs_whole_doc_retry:
+                tried = {r.engine for r in state.engine_runs}
+                next_engine = None
+                for et in self.config.fallback_chain:
+                    if et.value not in tried:
+                        next_engine = et
+                        break
+                if next_engine:
+                    if not self.config.quiet:
+                        console.print(
+                            f"\n[cyan]Phase 4:[/cyan] Repair "
+                            f"(attempt {attempt + 1}/{self.config.max_retries}) "
+                            f"[{next_engine.value}] (whole-doc retry)"
+                        )
+                    engine = get_engine(next_engine)
+                    if engine.is_available():
+                        repair_result = engine.process_document(
+                            state.handle.path, output_dir, self.config
+                        )
+                        repair_result.pages_processed = state.handle.page_count
+                        state.apply_result(repair_result)
+                        if repair_result.success:
+                            self._score_repair_result(
+                                state, repair_result, []
+                            )
+                            # Check if the new attempt passed
+                            if any(
+                                w.audit_passed
+                                for w in state.whole_doc_attempts
+                            ):
+                                needs_whole_doc_retry = False
+                                break
+                    continue
 
             if plan.is_empty:
                 if not self.config.quiet and attempt == 0:
@@ -409,7 +457,10 @@ class UnifiedPipeline:
 
         if has_whole_doc:
             whole_page = next(p for p in result.pages if p.page_num == 0)
-            scoring = self.scorer.score(whole_page.text, engine=result.engine)
+            scoring = self.scorer.score(
+                whole_page.text, engine=result.engine,
+                expected_pages=state.handle.page_count,
+            )
             whole_page.audit_passed = scoring.passed
             if not scoring.passed:
                 whole_page.failure_mode = scoring.primary_failure

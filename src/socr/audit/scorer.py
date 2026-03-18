@@ -19,9 +19,10 @@ from socr.core.result import FailureMode
 _PRIORITY: dict[FailureMode, int] = {
     FailureMode.LOW_WORD_COUNT: 1,
     FailureMode.GARBAGE: 2,
-    FailureMode.EMPTY_OUTPUT: 3,
-    FailureMode.REFUSAL: 4,
-    FailureMode.HALLUCINATION: 5,
+    FailureMode.TRUNCATED: 3,
+    FailureMode.EMPTY_OUTPUT: 4,
+    FailureMode.REFUSAL: 5,
+    FailureMode.HALLUCINATION: 6,
 }
 
 
@@ -54,6 +55,7 @@ _METRIC_MAP: dict[str, tuple[FailureMode, str]] = {
     ),
     "Word count": (FailureMode.LOW_WORD_COUNT, "Extracted text has too few words"),
     "Garbage ratio": (FailureMode.GARBAGE, "High ratio of non-text characters"),
+    "Truncation check": (FailureMode.TRUNCATED, "Output appears truncated relative to document page count"),
 }
 
 
@@ -72,9 +74,9 @@ class FailureModeScorer:
     # Public API
     # ------------------------------------------------------------------
 
-    def score(self, text: str, engine: str = "") -> ScoringResult:
+    def score(self, text: str, engine: str = "", expected_pages: int = 0) -> ScoringResult:
         """Run heuristic checks on *text* and classify any failures."""
-        audit = self.checker.check(text)
+        audit = self.checker.check(text, expected_pages=expected_pages)
         return self.score_from_audit(audit)
 
     def score_from_audit(self, audit: HeuristicsResult) -> ScoringResult:

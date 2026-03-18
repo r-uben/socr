@@ -127,6 +127,8 @@ class RepairRouter:
                 return self._pick_cloud(candidates)
             case FailureMode.GARBAGE | FailureMode.LOW_WORD_COUNT:
                 return self._pick_capable(candidates)
+            case FailureMode.TRUNCATED:
+                return self._pick_capable(candidates)
             case FailureMode.TIMEOUT:
                 return self._pick_light(candidates)
             case _:

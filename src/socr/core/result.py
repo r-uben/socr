@@ -47,6 +47,7 @@ class FailureMode(str, Enum):
     REFUSAL = "refusal"
     GARBAGE = "garbage"
     LOW_WORD_COUNT = "low_word_count"
+    TRUNCATED = "truncated"
 
 
 @dataclass
