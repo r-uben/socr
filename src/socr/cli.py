@@ -212,9 +212,10 @@ def benchmark() -> None:
     """Benchmark suite for OCR quality evaluation.
 
     Commands:
-        socr benchmark init    Create benchmark set and extract ground truth
-        socr benchmark run     Run all engines on benchmark (not yet implemented)
-        socr benchmark score   Score results against ground truth (not yet implemented)
+        socr benchmark init        Create benchmark set and extract ground truth
+        socr benchmark run         Run engines on benchmark papers
+        socr benchmark score       Print results summary table
+        socr benchmark calibrate   Calibrate repair routing from data
     """
 
 
@@ -304,21 +305,246 @@ def benchmark_init(papers_dir: Path | None, output_dir: Path) -> None:
 
 
 @benchmark.command("run")
-def benchmark_run() -> None:
-    """Run all engines on benchmark papers.
+@click.option(
+    "--benchmark-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("benchmark"),
+    help="Benchmark directory (default: ./benchmark)",
+)
+@click.option(
+    "-o",
+    "--output",
+    "output_dir",
+    type=click.Path(path_type=Path),
+    default=Path("benchmark/results"),
+    help="Results output directory (default: ./benchmark/results)",
+)
+@click.option(
+    "--engines",
+    "engine_names",
+    type=str,
+    default=None,
+    help="Comma-separated list of engines to run (default: all available)",
+)
+def benchmark_run(benchmark_dir: Path, output_dir: Path, engine_names: str | None) -> None:
+    """Run OCR engines on benchmark papers and score results.
 
-    Not implemented yet — placeholder for L2C-02.
+    Loads the benchmark set, runs each selected engine on each paper,
+    scores against ground truth, and saves results.
+
+    Example:
+        socr benchmark run
+        socr benchmark run --engines gemini,deepseek
+        socr benchmark run --benchmark-dir ./my-bench -o ./my-results
     """
-    console.print("[yellow]Not implemented yet.[/yellow] See ticket L2C-02.")
+    from socr.benchmark.dataset import BenchmarkSet
+    from socr.benchmark.runner import BenchmarkRunner
+
+    manifest = benchmark_dir / "benchmark.json"
+    if not manifest.exists():
+        raise click.ClickException(
+            f"Benchmark manifest not found: {manifest}\n"
+            "Run 'socr benchmark init' first."
+        )
+
+    bench = BenchmarkSet.load(manifest)
+    console.print(f"[bold]Loaded benchmark:[/bold] {len(bench.papers)} papers")
+
+    # Parse engine selection
+    engines: list[EngineType] | None = None
+    if engine_names:
+        try:
+            engines = [EngineType(e.strip()) for e in engine_names.split(",")]
+        except ValueError as exc:
+            raise click.ClickException(f"Unknown engine: {exc}")
+
+    config = PipelineConfig()
+    runner = BenchmarkRunner(config)
+
+    console.print("[bold]Running benchmark...[/bold]")
+    results = runner.run(bench, output_dir, engines=engines)
+
+    # Save results
+    results_path = output_dir / "results.json"
+    results.save(results_path)
+    console.print(f"\n[bold green]Results saved:[/bold green] {results_path}")
+
+    # Print summary
+    _print_results_summary(results)
 
 
 @benchmark.command("score")
-def benchmark_score() -> None:
-    """Score OCR results against ground truth.
+@click.option(
+    "--results-file",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("benchmark/results/results.json"),
+    help="Path to results JSON (default: ./benchmark/results/results.json)",
+)
+def benchmark_score(results_file: Path) -> None:
+    """Print a summary table of benchmark results.
 
-    Not implemented yet — placeholder for L2C-02.
+    Loads saved benchmark results and displays WER/CER per engine and paper.
+
+    Example:
+        socr benchmark score
+        socr benchmark score --results-file ./my-results/results.json
     """
-    console.print("[yellow]Not implemented yet.[/yellow] See ticket L2C-02.")
+    from socr.benchmark.runner import BenchmarkResults
+
+    results = BenchmarkResults.load(results_file)
+    console.print(f"[bold]Loaded results:[/bold] {len(results.runs)} runs")
+    _print_results_summary(results)
+
+
+@benchmark.command("calibrate")
+@click.option(
+    "--results-file",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("benchmark/results/results.json"),
+    help="Path to results JSON (default: ./benchmark/results/results.json)",
+)
+@click.option(
+    "-o",
+    "--output",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Save calibration report to this path",
+)
+@click.option(
+    "--apply",
+    "apply_config",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write calibrated config to this YAML path",
+)
+def benchmark_calibrate(
+    results_file: Path,
+    output_path: Path | None,
+    apply_config: Path | None,
+) -> None:
+    """Calibrate repair routing from benchmark results.
+
+    Analyzes benchmark results to determine optimal engine chains
+    per document category and prints recommendations.
+
+    Example:
+        socr benchmark calibrate
+        socr benchmark calibrate -o calibration.json
+        socr benchmark calibrate --apply ~/.config/socr/config.yaml
+    """
+    from socr.benchmark.calibrate import RepairCalibrator
+    from socr.benchmark.runner import BenchmarkResults
+
+    results = BenchmarkResults.load(results_file)
+    console.print(f"[bold]Loaded results:[/bold] {len(results.runs)} runs")
+
+    calibrator = RepairCalibrator()
+    report = calibrator.calibrate(results)
+
+    # Print engine profiles
+    console.print("\n[bold]Engine Profiles[/bold]\n")
+    for profile in report.profiles:
+        avg_wer = sum(profile.category_wer.values()) / len(profile.category_wer) if profile.category_wer else float("nan")
+        console.print(
+            f"  {profile.engine:<12} "
+            f"avg_wer={avg_wer:.3f}  "
+            f"avg_time={profile.avg_processing_time:.1f}s"
+        )
+        if profile.failure_mode_recovery:
+            for fm, rate in sorted(profile.failure_mode_recovery.items()):
+                console.print(f"    {fm}: recovery={rate:.0%}")
+
+    # Print recommended chains
+    console.print("\n[bold]Recommended Engine Chains[/bold]\n")
+    for category, chain in sorted(report.recommended_chain.items()):
+        console.print(f"  {category}: {' -> '.join(chain)}")
+
+    # Save report
+    if output_path:
+        report.save(output_path)
+        console.print(f"\n[bold green]Calibration report saved:[/bold green] {output_path}")
+
+    # Apply to config
+    if apply_config:
+        import yaml
+
+        config = PipelineConfig()
+        calibrator.apply_to_config(report, config)
+
+        config_data = {
+            "primary_engine": config.primary_engine.value,
+            "fallback_chain": [e.value for e in config.fallback_chain],
+        }
+
+        apply_config.parent.mkdir(parents=True, exist_ok=True)
+        apply_config.write_text(yaml.dump(config_data, default_flow_style=False))
+        console.print(f"[bold green]Config written:[/bold green] {apply_config}")
+
+
+def _print_results_summary(results) -> None:
+    """Print a summary table of benchmark results."""
+    from rich.table import Table
+
+    by_engine = results.by_engine()
+
+    table = Table(title="Benchmark Results")
+    table.add_column("Engine", style="cyan")
+    table.add_column("Papers", justify="right")
+    table.add_column("Scored", justify="right")
+    table.add_column("Avg WER", justify="right")
+    table.add_column("Avg CER", justify="right")
+    table.add_column("Avg Time", justify="right")
+
+    for engine_name in sorted(by_engine):
+        runs = by_engine[engine_name]
+        scored = [r for r in runs if r.score is not None]
+        avg_wer = sum(r.score.overall_wer for r in scored) / len(scored) if scored else float("nan")
+        avg_cer = sum(r.score.overall_cer for r in scored) / len(scored) if scored else float("nan")
+        avg_time = sum(r.result.processing_time for r in runs) / len(runs) if runs else 0.0
+
+        table.add_row(
+            engine_name,
+            str(len(runs)),
+            str(len(scored)),
+            f"{avg_wer:.3f}" if scored else "N/A",
+            f"{avg_cer:.3f}" if scored else "N/A",
+            f"{avg_time:.1f}s",
+        )
+
+    console.print(table)
+
+    # Per-paper breakdown
+    by_paper = results.by_paper()
+    if by_paper:
+        paper_table = Table(title="Per-Paper Results")
+        paper_table.add_column("Paper", style="cyan")
+        paper_table.add_column("Engine", style="green")
+        paper_table.add_column("WER", justify="right")
+        paper_table.add_column("CER", justify="right")
+        paper_table.add_column("Status")
+
+        for paper_name in sorted(by_paper):
+            runs = by_paper[paper_name]
+            for run in runs:
+                if run.score:
+                    paper_table.add_row(
+                        paper_name,
+                        run.engine,
+                        f"{run.score.overall_wer:.3f}",
+                        f"{run.score.overall_cer:.3f}",
+                        "[green]OK[/green]",
+                    )
+                else:
+                    paper_table.add_row(
+                        paper_name,
+                        run.engine,
+                        "N/A",
+                        "N/A",
+                        f"[red]{run.result.failure_mode.value}[/red]",
+                    )
+
+        console.print(paper_table)
 
 
 def main() -> None:
