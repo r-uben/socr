@@ -14,10 +14,12 @@ from socr.core.result import (
     DocumentStatus,
     EngineResult,
     FailureMode,
+    FigureInfo,
     PageOutput,
     PageStatus,
 )
 from socr.core.state import DocumentState, PageState
+from socr.figures.extractor import ExtractedFigure
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.pipeline.repair import RepairPlan, RepairRouter
 
@@ -1513,3 +1515,186 @@ class TestMultiEngine:
         # First is CLI engine (deepseek), second is per-page (gemini-api)
         assert results[0].engine == "deepseek"
         assert results[1].engine == "gemini-api"
+
+
+# ---------------------------------------------------------------------------
+# Figure description and embedding
+# ---------------------------------------------------------------------------
+
+
+class TestDescribeAndEmbedFigures:
+    """Tests for _describe_and_embed_figures (Problem 2)."""
+
+    def _make_pipeline(self, **overrides) -> UnifiedPipeline:
+        return UnifiedPipeline(_make_config(save_figures=True, **overrides))
+
+    def test_no_figures_returns_text_unchanged(self, tmp_path: Path) -> None:
+        pipeline = self._make_pipeline()
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+
+        with patch(
+            "socr.pipeline.orchestrator.FigureExtractor"
+        ) as MockExtractor:
+            MockExtractor.return_value.extract.return_value = []
+            out = pipeline._describe_and_embed_figures(
+                state, result, tmp_path, "Some text"
+            )
+
+        assert out == "Some text"
+        assert result.figures == []
+
+    def test_figures_without_vision_engine(self, tmp_path: Path) -> None:
+        """Without GEMINI_API_KEY, figures are saved but not described."""
+        pipeline = self._make_pipeline()
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+
+        fig_path = tmp_path / "test_doc" / "figures" / "figure_1_page1.png"
+        fig_path.parent.mkdir(parents=True, exist_ok=True)
+        fig_path.write_bytes(b"\x89PNG")
+
+        mock_fig = ExtractedFigure(
+            figure_num=1, page_num=1, image=None,
+            saved_path=str(fig_path),
+        )
+
+        with (
+            patch(
+                "socr.pipeline.orchestrator.FigureExtractor"
+            ) as MockExtractor,
+            patch.dict("os.environ", {}, clear=False),
+            patch.object(pipeline, "_get_vision_engine", return_value=None),
+        ):
+            MockExtractor.return_value.extract.return_value = [mock_fig]
+            out = pipeline._describe_and_embed_figures(
+                state, result, tmp_path, "OCR text",
+            )
+
+        assert len(result.figures) == 1
+        assert result.figures[0].description == ""
+        # Figure block appended with image ref
+        assert "**Figure 1** (page 1)" in out
+        assert "![Figure 1]" in out
+
+    def test_figures_with_vision_engine(self, tmp_path: Path) -> None:
+        """With a vision engine, figures are described and embedded."""
+        pipeline = self._make_pipeline()
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+
+        fig_dir = tmp_path / "test_doc" / "figures"
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        fig_path = fig_dir / "figure_1_page1.png"
+        fig_path.write_bytes(b"\x89PNG")
+
+        mock_image = MagicMock()
+        mock_fig = ExtractedFigure(
+            figure_num=1, page_num=1, image=mock_image,
+            saved_path=str(fig_path),
+        )
+
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini-api"
+        mock_engine.describe_figure.return_value = FigureInfo(
+            figure_num=0, page_num=0, figure_type="chart",
+            description="A bar chart showing quarterly revenue.",
+            engine="gemini-api",
+        )
+
+        with (
+            patch(
+                "socr.pipeline.orchestrator.FigureExtractor"
+            ) as MockExtractor,
+            patch.object(
+                pipeline, "_get_vision_engine", return_value=mock_engine
+            ),
+        ):
+            MockExtractor.return_value.extract.return_value = [mock_fig]
+            out = pipeline._describe_and_embed_figures(
+                state, result, tmp_path, "OCR text",
+            )
+
+        assert len(result.figures) == 1
+        assert result.figures[0].description == "A bar chart showing quarterly revenue."
+        assert result.figures[0].figure_type == "chart"
+        assert "**Figure 1** (page 1): A bar chart showing quarterly revenue." in out
+        assert "![Figure 1]" in out
+        mock_engine.close.assert_called_once()
+
+
+class TestBuildFigureBlocks:
+    """Tests for _build_figure_blocks static method."""
+
+    def test_single_figure_with_description(self, tmp_path: Path) -> None:
+        fig_path = tmp_path / "figures" / "figure_1_page2.png"
+        fig_path.parent.mkdir(parents=True, exist_ok=True)
+        fig_path.write_bytes(b"\x89PNG")
+
+        figures = [
+            FigureInfo(
+                figure_num=1, page_num=2, figure_type="chart",
+                description="A line chart.", image_path=str(fig_path),
+            )
+        ]
+        result = UnifiedPipeline._build_figure_blocks(figures, tmp_path)
+        assert "**Figure 1** (page 2): A line chart." in result
+        assert "![Figure 1](figures/figure_1_page2.png)" in result
+
+    def test_figure_without_description(self, tmp_path: Path) -> None:
+        fig_path = tmp_path / "figures" / "figure_1_page1.png"
+        fig_path.parent.mkdir(parents=True, exist_ok=True)
+        fig_path.write_bytes(b"\x89PNG")
+
+        figures = [
+            FigureInfo(
+                figure_num=1, page_num=1, figure_type="extracted",
+                description="", image_path=str(fig_path),
+            )
+        ]
+        result = UnifiedPipeline._build_figure_blocks(figures, tmp_path)
+        assert "**Figure 1** (page 1)" in result
+        assert ": " not in result.split("\n")[0]  # no description suffix
+
+    def test_no_image_path_skipped(self, tmp_path: Path) -> None:
+        figures = [
+            FigureInfo(
+                figure_num=1, page_num=1, figure_type="extracted",
+                description="desc", image_path=None,
+            )
+        ]
+        result = UnifiedPipeline._build_figure_blocks(figures, tmp_path)
+        assert result == ""
+
+
+class TestPhantomImageStrippingInAssemble:
+    """Verify phantom images are stripped during _phase_assemble."""
+
+    def test_phantom_refs_stripped_in_assemble(self, tmp_path: Path) -> None:
+        config = _make_config(save_figures=False)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+
+        # Simulate a whole-doc attempt with phantom image refs
+        text_with_phantoms = (
+            "Some OCR text\n\n"
+            "![img](img-0.jpeg)\n\n"
+            "More text\n\n"
+            "![Page 1](./extracted_images/page1.png)"
+        )
+        page_out = PageOutput(
+            page_num=0,
+            text=text_with_phantoms,
+            status=PageStatus.SUCCESS,
+            engine="gemini",
+            audit_passed=True,
+        )
+        result = _make_engine_result(text=text_with_phantoms)
+        state.apply_result(result)
+
+        final = pipeline._phase_assemble(state, tmp_path)
+        # Phantom refs should be gone
+        assert "![img]" not in final.markdown
+        assert "![Page 1]" not in final.markdown
+        assert "Some OCR text" in final.markdown
+        assert "More text" in final.markdown

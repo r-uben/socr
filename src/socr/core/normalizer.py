@@ -10,6 +10,7 @@ Designed as a standalone module so it can be used by both BaseEngine
 
 import re
 import unicodedata
+from pathlib import Path
 
 
 class OutputNormalizer:
@@ -57,6 +58,9 @@ class OutputNormalizer:
     _RE_EXCESS_BLANK = re.compile(r"\n{3,}")
     _RE_HTML_BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
     _RE_HTML_TAG = re.compile(r"<[^>]+>")
+
+    # Markdown image references: ![alt](path)
+    _RE_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 
     # Unicode replacements: smart quotes, ligatures, etc.
     _UNICODE_MAP = {
@@ -132,6 +136,62 @@ class OutputNormalizer:
         """Strip Marker [MISSING_PAGE_*] markers."""
         text = self._RE_MISSING_PAGE.sub("", text)
         text = self._RE_MISSING_PAGE_EMPTY.sub("", text)
+        return text
+
+    # --- phantom image stripping ---
+
+    def strip_phantom_images(
+        self, text: str, output_dir: Path | None = None
+    ) -> str:
+        """Remove markdown image references that point to nonexistent files.
+
+        OCR engines (Gemini, Mistral, etc.) emit ``![alt](path)`` references
+        to images they "saw" during OCR but never saved to disk.  These
+        phantom references clutter the output and confuse downstream tools.
+
+        Args:
+            text: Markdown text potentially containing image references.
+            output_dir: If given, an image ref is kept only when the path
+                resolves to an existing file relative to *output_dir*.
+                When ``None``, **all** relative image refs are stripped
+                (they are virtually always phantoms).
+
+        Returns:
+            Text with phantom image references removed.
+        """
+        if "![" not in text:
+            return text
+
+        def _should_strip(match: re.Match) -> bool:
+            # Extract the path from ![alt](path)
+            full = match.group(0)
+            paren_start = full.rfind("(")
+            path_str = full[paren_start + 1 : -1].strip()
+
+            # Absolute URLs are never phantom (external images)
+            if path_str.startswith(("http://", "https://", "data:")):
+                return False
+
+            # Absolute local paths — check existence directly
+            p = Path(path_str)
+            if p.is_absolute():
+                return not p.exists()
+
+            # Relative path — resolve against output_dir if available
+            if output_dir is not None:
+                return not (output_dir / p).exists()
+
+            # No output_dir: strip all relative refs (phantom by default)
+            return True
+
+        def _replace(match: re.Match) -> str:
+            if _should_strip(match):
+                return ""
+            return match.group(0)
+
+        text = self._RE_MD_IMAGE.sub(_replace, text)
+        # Clean up blank lines left behind
+        text = re.sub(r"\n{3,}", "\n\n", text)
         return text
 
     # --- generic normalization ---

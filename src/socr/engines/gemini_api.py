@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import httpx
 from PIL import Image
 
-from socr.core.result import FailureMode, PageOutput
+from socr.core.result import FailureMode, FigureInfo, PageOutput
 from socr.engines.base import BaseHTTPEngine
 
 
@@ -172,6 +172,80 @@ class GeminiAPIEngine(BaseHTTPEngine):
                 failure_mode=FailureMode.API_ERROR,
             )
 
+    def describe_figure(
+        self,
+        image: Image.Image,
+        figure_type: str = "unknown",
+        context: str = "",
+    ) -> FigureInfo:
+        """Describe a figure image using the Gemini vision API."""
+        if not self._initialized and not self.initialize():
+            return FigureInfo(
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
+                description="Gemini API not available (missing or invalid API key)",
+            )
+
+        try:
+            img_base64 = image_to_base64(image)
+            prompt = _build_figure_prompt(figure_type, context)
+
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "inline_data": {
+                                    "mime_type": "image/jpeg",
+                                    "data": img_base64,
+                                }
+                            },
+                            {"text": prompt},
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "maxOutputTokens": 1024,
+                    "temperature": 0.1,
+                },
+            }
+
+            client = self._get_client()
+            response = client.post(self._build_url(), json=payload)
+
+            if response.status_code != 200:
+                return FigureInfo(
+                    figure_num=0,
+                    page_num=0,
+                    figure_type=figure_type,
+                    description=f"Gemini API error ({response.status_code})",
+                    engine=self.name,
+                )
+
+            description = (
+                _extract_text(response.json())
+                or "Unable to generate description"
+            )
+            detected_type = _detect_figure_type(description, figure_type)
+
+            return FigureInfo(
+                figure_num=0,
+                page_num=0,
+                figure_type=detected_type,
+                description=description,
+                engine=self.name,
+            )
+
+        except Exception as e:
+            return FigureInfo(
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
+                description=f"Gemini API error: {type(e).__name__}: {e}",
+                engine=self.name,
+            )
+
     def close(self) -> None:
         if self._client:
             self._client.close()
@@ -179,6 +253,37 @@ class GeminiAPIEngine(BaseHTTPEngine):
 
     def __del__(self) -> None:
         self.close()
+
+
+def _build_figure_prompt(figure_type: str, context: str) -> str:
+    """Build a prompt for describing a figure image."""
+    base = (
+        "Describe this figure in detail. What does the chart, graph, table, "
+        "or diagram show? Explain the axes, data, key findings, and any "
+        "notable patterns or trends. Be specific about numbers, labels, "
+        "and relationships shown."
+    )
+    if figure_type and figure_type != "unknown":
+        base = f"This appears to be a {figure_type}. {base}"
+    if context:
+        base += f"\n\nContext from surrounding text: {context[:500]}"
+    return base
+
+
+def _detect_figure_type(description: str, default: str) -> str:
+    """Infer figure type from the description text."""
+    desc_lower = description.lower()
+    for fig_type, keywords in {
+        "chart": ["bar chart", "pie chart", "chart"],
+        "graph": ["line graph", "scatter plot", "graph", "plot"],
+        "table": ["table", "tabular"],
+        "diagram": ["diagram", "flowchart", "schematic", "architecture"],
+        "map": ["map", "geographic", "spatial"],
+        "equation": ["equation", "formula", "mathematical"],
+    }.items():
+        if any(kw in desc_lower for kw in keywords):
+            return fig_type
+    return default
 
 
 def image_to_base64(image: Image.Image) -> str:

@@ -1,5 +1,7 @@
 """Tests for OutputNormalizer — engine-specific and generic cleanup."""
 
+from pathlib import Path
+
 from socr.core.normalizer import OutputNormalizer
 
 
@@ -297,3 +299,83 @@ class TestEngineNameCaseInsensitive:
     def test_mixed_case(self) -> None:
         text = "Hello <|ref|>x<|/ref|> world"
         assert _n(text, "DeepSeek") == "Hello  world"
+
+
+# ── Phantom image stripping ─────────────────────────────────────────────
+
+
+class TestStripPhantomImages:
+    """strip_phantom_images removes unreachable markdown image refs."""
+
+    def test_strips_relative_refs_without_output_dir(self) -> None:
+        text = "Before\n\n![img](img-0.jpeg)\n\nAfter"
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=None)
+        assert "![img]" not in result
+        assert "Before" in result
+        assert "After" in result
+
+    def test_strips_extracted_images_path(self) -> None:
+        text = "Content\n\n![Page 1](./extracted_images/page1.png)\n\nMore"
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=None)
+        assert "![Page 1]" not in result
+        assert "Content" in result
+        assert "More" in result
+
+    def test_preserves_http_urls(self) -> None:
+        text = "See ![logo](https://example.com/logo.png) here"
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=None)
+        assert "![logo](https://example.com/logo.png)" in result
+
+    def test_preserves_data_uris(self) -> None:
+        text = "Inline ![x](data:image/png;base64,abc) end"
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=None)
+        assert "![x](data:image/png;base64,abc)" in result
+
+    def test_preserves_existing_files(self, tmp_path: Path) -> None:
+        # Create a real file
+        img = tmp_path / "real.png"
+        img.write_bytes(b"\x89PNG")
+        text = f"See ![fig](real.png) here"
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=tmp_path)
+        assert "![fig](real.png)" in result
+
+    def test_strips_missing_files_with_output_dir(self, tmp_path: Path) -> None:
+        text = "See ![fig](nonexistent.png) here"
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=tmp_path)
+        assert "![fig]" not in result
+        assert "See" in result
+
+    def test_no_op_without_image_refs(self) -> None:
+        text = "Plain text without any images."
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text)
+        assert result == text
+
+    def test_multiple_phantom_refs_stripped(self) -> None:
+        text = (
+            "Para 1\n\n"
+            "![a](img1.png)\n\n"
+            "Para 2\n\n"
+            "![b](img2.jpg)\n\n"
+            "Para 3"
+        )
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=None)
+        assert "![a]" not in result
+        assert "![b]" not in result
+        assert "Para 1" in result
+        assert "Para 2" in result
+        assert "Para 3" in result
+
+    def test_blank_lines_collapsed_after_stripping(self) -> None:
+        text = "A\n\n![x](phantom.png)\n\n\n\nB"
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=None)
+        # Should not have 3+ consecutive newlines
+        assert "\n\n\n" not in result
