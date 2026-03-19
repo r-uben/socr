@@ -28,6 +28,7 @@ from socr.core.chunker import PDFChunker
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
+from socr.core.normalizer import OutputNormalizer
 from socr.core.result import (
     DocumentStatus,
     EngineResult,
@@ -1014,6 +1015,15 @@ class UnifiedPipeline:
         # Compute total processing time
         total_time = sum(r.processing_time for r in state.engine_runs)
 
+        # Strip phantom image references before saving
+        normalizer = OutputNormalizer()
+        stem = sanitize_filename(state.handle.stem)
+        doc_dir = output_dir / stem
+        if has_text:
+            final_text = normalizer.strip_phantom_images(
+                final_text, output_dir=doc_dir
+            )
+
         # Build the final result
         final_result = EngineResult(
             document_path=state.handle.path,
@@ -1033,9 +1043,13 @@ class UnifiedPipeline:
             audit_passed=status == DocumentStatus.SUCCESS,
         )
 
-        # Figure extraction
+        # Figure extraction + description + embedding
         if self.config.save_figures and has_text:
-            self._extract_figures(state, final_result, output_dir)
+            final_text = self._describe_and_embed_figures(
+                state, final_result, output_dir, final_text,
+            )
+            # Update the page text with embedded figure blocks
+            final_result.pages[0].text = final_text
 
         # Save markdown
         if has_text:
@@ -1045,18 +1059,29 @@ class UnifiedPipeline:
 
         return final_result
 
-    def _extract_figures(
+    def _describe_and_embed_figures(
         self,
         state: DocumentState,
         result: EngineResult,
         output_dir: Path,
-    ) -> None:
-        """Extract figures from the PDF."""
+        text: str,
+    ) -> str:
+        """Extract figures, describe with a vision model, embed in markdown.
+
+        1. Extract figures from the PDF (saves PNGs).
+        2. For each figure with an image, send to Gemini API for description.
+        3. Append figure blocks at the end of the markdown.
+        4. Return modified text.
+
+        Graceful degradation: if GEMINI_API_KEY is unavailable the figures
+        are saved without descriptions.
+        """
         if not self.config.quiet:
             console.print("  Extracting figures...")
 
         stem = sanitize_filename(state.handle.stem)
-        figures_dir = output_dir / stem / "figures"
+        doc_dir = output_dir / stem
+        figures_dir = doc_dir / "figures"
         extractor = FigureExtractor(
             max_total=self.config.figures_max_total,
             max_per_page=self.config.figures_max_per_page,
@@ -1064,23 +1089,143 @@ class UnifiedPipeline:
         )
         extracted = extractor.extract(state.handle.path)
 
-        if not self.config.quiet:
-            if extracted:
-                console.print(
-                    f"  Extracted {len(extracted)} figures to {figures_dir}"
-                )
-            else:
+        if not extracted:
+            if not self.config.quiet:
                 console.print("  [dim]No figures detected[/dim]")
+            result.figures = []
+            return text
 
-        result.figures = [
-            FigureInfo(
+        if not self.config.quiet:
+            console.print(
+                f"  Extracted {len(extracted)} figures to {figures_dir}"
+            )
+
+        # Try to get a vision engine for descriptions
+        vision_engine = self._get_vision_engine()
+        figures: list[FigureInfo] = []
+
+        for fig in extracted:
+            description = ""
+            figure_type = "extracted"
+
+            if vision_engine is not None and fig.image is not None:
+                # Get page context for better descriptions
+                context = self._get_page_context(state, fig.page_num)
+                info = vision_engine.describe_figure(
+                    fig.image, context=context,
+                )
+                description = info.description
+                figure_type = info.figure_type or "extracted"
+
+            fig_info = FigureInfo(
                 figure_num=fig.figure_num,
                 page_num=fig.page_num,
-                figure_type="extracted",
+                figure_type=figure_type,
+                description=description,
                 image_path=fig.saved_path,
+                engine=vision_engine.name if vision_engine else "",
             )
-            for fig in extracted
-        ]
+            figures.append(fig_info)
+
+        if vision_engine is not None:
+            vision_engine.close()
+
+        result.figures = figures
+
+        if not self.config.quiet:
+            described = sum(1 for f in figures if f.description)
+            console.print(
+                f"  {len(figures)} figures processed"
+                f" ({described} described)"
+            )
+
+        # Build figure blocks and append to text
+        figure_blocks = self._build_figure_blocks(figures, doc_dir)
+        if figure_blocks:
+            text = text.rstrip() + "\n\n" + figure_blocks
+
+        return text
+
+    def _get_vision_engine(self):
+        """Try to create a Gemini API engine for figure description.
+
+        Returns None if GEMINI_API_KEY is not available.
+        """
+        import os
+
+        api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get(
+            "GOOGLE_API_KEY", ""
+        )
+        if not api_key:
+            if not self.config.quiet:
+                console.print(
+                    "  [dim]No GEMINI_API_KEY — saving figures "
+                    "without descriptions[/dim]"
+                )
+            return None
+
+        from socr.engines.gemini_api import GeminiAPIConfig, GeminiAPIEngine
+
+        engine = GeminiAPIEngine(
+            GeminiAPIConfig(
+                api_key=api_key,
+                model=self.config.gemini_model,
+            )
+        )
+        if engine.initialize():
+            return engine
+
+        if not self.config.quiet:
+            console.print(
+                "  [dim]Gemini API not reachable — saving figures "
+                "without descriptions[/dim]"
+            )
+        return None
+
+    @staticmethod
+    def _get_page_context(state: DocumentState, page_num: int) -> str:
+        """Get text context from a page for figure description."""
+        page_state = state.pages.get(page_num)
+        if page_state and page_state.best_output:
+            return (page_state.best_output.text or "")[:500]
+
+        # Fall back to whole-doc attempts — extract a rough slice
+        for attempt in state.whole_doc_attempts:
+            if attempt.text:
+                return attempt.text[:500]
+        return ""
+
+    @staticmethod
+    def _build_figure_blocks(
+        figures: list[FigureInfo], doc_dir: Path,
+    ) -> str:
+        """Build markdown figure blocks for embedding.
+
+        Each block looks like::
+
+            **Figure N** (page P): [description]
+
+            ![Figure N](figures/figure_N_pageP.png)
+        """
+        blocks = []
+        for fig in figures:
+            # Compute a relative image path from the doc directory
+            if fig.image_path:
+                try:
+                    rel_path = Path(fig.image_path).relative_to(doc_dir)
+                except ValueError:
+                    rel_path = Path(fig.image_path).name
+            else:
+                continue
+
+            header = f"**Figure {fig.figure_num}** (page {fig.page_num})"
+            if fig.description:
+                header += f": {fig.description}"
+
+            block = f"{header}\n\n![Figure {fig.figure_num}]({rel_path})"
+            blocks.append(block)
+
+        return "\n\n".join(blocks)
 
     def _save_markdown(
         self, state: DocumentState, text: str, output_dir: Path
