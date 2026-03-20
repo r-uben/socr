@@ -207,10 +207,30 @@ class UnifiedPipeline:
         bd_count = assessment.born_digital_count
         if not self.config.quiet:
             if bd_count:
-                console.print(
-                    f"  {bd_count}/{assessment.page_count} pages born-digital "
-                    f"(will skip OCR)"
+                # Count pages needing enhancement vs pure prose
+                enhancement_count = sum(
+                    1 for pa in assessment.pages
+                    if pa.is_born_digital and pa.needs_ocr_enhancement
                 )
+                prose_count = bd_count - enhancement_count
+                scanned_count = assessment.scanned_count
+                console.print(
+                    f"  {bd_count}/{assessment.page_count} pages born-digital"
+                )
+                if self.config.native_first and (prose_count or enhancement_count):
+                    if prose_count:
+                        console.print(
+                            f"    {prose_count} prose-only (native text)"
+                        )
+                    if enhancement_count:
+                        console.print(
+                            f"    {enhancement_count} complex "
+                            f"(tables/figures/equations)"
+                        )
+                    if scanned_count:
+                        console.print(
+                            f"    {scanned_count} scanned (no text layer)"
+                        )
             else:
                 console.print("  No born-digital pages detected")
 
@@ -223,6 +243,11 @@ class UnifiedPipeline:
     ) -> EngineResult | None:
         """Run the primary engine on the document.
 
+        When ``native_first`` is enabled and the document is mostly
+        born-digital, uses native text for prose pages and sends only
+        complex pages (tables/figures/equations) and scanned pages to a
+        VLM engine.  Otherwise falls through to the original full-OCR path.
+
         For per-page HTTP engines (``GEMINI_API``, ``DEEPSEEK_VLLM``), render
         each page as an image and process independently via the HTTP API.
 
@@ -230,7 +255,17 @@ class UnifiedPipeline:
         pages, split it into chunks and process each chunk independently via
         :meth:`_backbone_chunked`.
         """
-        # Per-page HTTP engines — bypass CLI entirely
+        # Native-first: use native text for born-digital prose, VLM only
+        # for complex/scanned pages.
+        if self.config.native_first:
+            bd_pages = [
+                p for p in state.pages.values() if p.is_born_digital
+            ]
+            bd_ratio = len(bd_pages) / max(len(state.pages), 1)
+            if bd_ratio >= 0.5:
+                return self._backbone_native_first(state, output_dir)
+
+        # Per-page HTTP engines -- bypass CLI entirely
         if self.config.primary_engine == EngineType.GEMINI_API:
             return self._backbone_per_page(state, output_dir)
 
@@ -267,6 +302,187 @@ class UnifiedPipeline:
 
         result = engine.process_document(state.handle.path, output_dir, self.config)
         result.pages_processed = state.handle.page_count
+        state.apply_result(result)
+        return result
+
+    def _backbone_native_first(
+        self, state: DocumentState, output_dir: Path
+    ) -> EngineResult:
+        """Native text for prose pages, VLM only for complex/scanned pages.
+
+        For each page:
+          - Born-digital prose (no tables/figures/equations): use native text
+            directly as final output.
+          - Born-digital with complex content: send to VLM for enhancement.
+          - Scanned (no text layer): send to VLM for full OCR.
+
+        Only the pages that need VLM processing are rendered and sent to the
+        Gemini API engine.  Prose pages are "free" -- no API calls, no
+        latency, 100% faithful to the original text.
+        """
+        from socr.engines.gemini_api import GeminiAPIConfig, GeminiAPIEngine
+
+        # Classify pages
+        prose_pages: list[int] = []
+        enhancement_pages: list[int] = []
+        scanned_pages: list[int] = []
+
+        for page_num, ps in sorted(state.pages.items()):
+            if ps.is_born_digital and not ps.needs_ocr_enhancement and ps.native_text:
+                prose_pages.append(page_num)
+            elif ps.is_born_digital and ps.needs_ocr_enhancement:
+                enhancement_pages.append(page_num)
+            else:
+                scanned_pages.append(page_num)
+
+        total = len(state.pages)
+        vlm_pages = enhancement_pages + scanned_pages
+
+        if not self.config.quiet:
+            console.print(
+                f"\n[cyan]Phase 2:[/cyan] Text extraction (native-first)"
+            )
+            if prose_pages:
+                console.print(
+                    f"  {len(prose_pages)}/{total} pages: "
+                    f"native text (born-digital prose)"
+                )
+            if enhancement_pages:
+                console.print(
+                    f"  {len(enhancement_pages)}/{total} pages: "
+                    f"VLM (tables/figures/equations)"
+                )
+            if scanned_pages:
+                console.print(
+                    f"  {len(scanned_pages)}/{total} pages: "
+                    f"VLM (scanned, no text layer)"
+                )
+
+        start_time = time.time()
+        page_outputs: list[PageOutput] = []
+
+        # 1. Set native text as final output for prose pages.
+        #    Page outputs are collected here; state.apply_result() at the
+        #    end adds them to attempts and sets best_output.
+        for page_num in prose_pages:
+            ps = state.pages[page_num]
+            page_out = PageOutput(
+                page_num=page_num,
+                text=ps.native_text,
+                status=PageStatus.SUCCESS,
+                engine="native",
+                audit_passed=True,
+            )
+            page_outputs.append(page_out)
+
+        # 2. Process VLM pages (enhancement + scanned) if any
+        if vlm_pages:
+            engine = GeminiAPIEngine(
+                GeminiAPIConfig(model=self.config.gemini_model)
+            )
+
+            if not engine.is_available():
+                logger.warning("Gemini API not available for VLM enhancement")
+                if not self.config.quiet:
+                    console.print(
+                        "  [yellow]Gemini API not available -- "
+                        "using native text as fallback[/yellow]"
+                    )
+                # Fall back to native text for enhancement pages;
+                # scanned pages get an error.
+                for page_num in enhancement_pages:
+                    ps = state.pages[page_num]
+                    if ps.native_text:
+                        page_out = PageOutput(
+                            page_num=page_num,
+                            text=ps.native_text,
+                            status=PageStatus.SUCCESS,
+                            engine="native",
+                            audit_passed=True,
+                        )
+                        page_outputs.append(page_out)
+                for page_num in scanned_pages:
+                    page_out = PageOutput(
+                        page_num=page_num,
+                        text="",
+                        status=PageStatus.ERROR,
+                        engine="gemini-api",
+                        failure_mode=FailureMode.MODEL_UNAVAILABLE,
+                    )
+                    page_outputs.append(page_out)
+            else:
+                for page_num in vlm_pages:
+                    if not self.config.quiet:
+                        label = (
+                            "complex" if page_num in enhancement_pages
+                            else "scanned"
+                        )
+                        console.print(
+                            f"  Page {page_num}/{total} ({label})...",
+                            end=" ",
+                        )
+
+                    image = state.handle.render_page(page_num)
+                    page_result = engine.process_image(
+                        image, page_num=page_num
+                    )
+                    page_outputs.append(page_result)
+
+                    # For enhancement pages where VLM failed, fall back
+                    # to native text.  Add the native fallback to
+                    # page_outputs so apply_result picks it up.
+                    ps = state.pages[page_num]
+                    if (
+                        page_result.status != PageStatus.SUCCESS
+                        and page_num in enhancement_pages
+                        and ps.native_text
+                    ):
+                        native_out = PageOutput(
+                            page_num=page_num,
+                            text=ps.native_text,
+                            status=PageStatus.SUCCESS,
+                            engine="native",
+                            audit_passed=True,
+                        )
+                        page_outputs.append(native_out)
+
+                    if not self.config.quiet:
+                        if page_result.status == PageStatus.SUCCESS:
+                            console.print(
+                                f"[green]{page_result.word_count} words"
+                                f"[/green]"
+                            )
+                        else:
+                            fm = page_result.failure_mode
+                            console.print(
+                                f"[red]{fm.value}[/red]"
+                            )
+
+                engine.close()
+
+        elapsed = time.time() - start_time
+
+        success_count = sum(
+            1 for p in page_outputs if p.status == PageStatus.SUCCESS
+        )
+        overall_status = (
+            DocumentStatus.SUCCESS if success_count > 0
+            else DocumentStatus.ERROR
+        )
+
+        # Build a combined EngineResult so downstream phases work
+        engine_name = "native"
+        if vlm_pages:
+            engine_name = "native+gemini-api"
+
+        result = EngineResult(
+            document_path=state.handle.path,
+            engine=engine_name,
+            status=overall_status,
+            pages=page_outputs,
+            pages_processed=total,
+            processing_time=elapsed,
+        )
         state.apply_result(result)
         return result
 

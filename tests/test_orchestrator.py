@@ -80,18 +80,30 @@ def _make_engine_result(
 def _make_bd_assessment(
     page_count: int,
     born_digital_pages: set[int] | None = None,
+    complex_pages: set[int] | None = None,
 ) -> DocumentAssessment:
-    """Build a DocumentAssessment with specified born-digital pages."""
+    """Build a DocumentAssessment with specified born-digital pages.
+
+    Args:
+        page_count: Total number of pages.
+        born_digital_pages: Set of 1-indexed page numbers that are born-digital.
+        complex_pages: Subset of born_digital_pages that have complex content
+            (tables/figures/equations) and need OCR enhancement.
+    """
     bd = born_digital_pages or set()
+    cx = complex_pages or set()
     pages = []
     for i in range(1, page_count + 1):
         is_bd = i in bd
+        needs_enhancement = is_bd and i in cx
         pages.append(
             PageAssessment(
                 page_num=i,
                 is_born_digital=is_bd,
                 native_text=f"Native text for page {i}" if is_bd else "",
                 confidence=0.9,
+                needs_ocr_enhancement=needs_enhancement,
+                has_tables=needs_enhancement,
             )
         )
     return DocumentAssessment(path=Path("/tmp/fake.pdf"), pages=pages)
@@ -1698,3 +1710,388 @@ class TestPhantomImageStrippingInAssemble:
         assert "![Page 1]" not in final.markdown
         assert "Some OCR text" in final.markdown
         assert "More text" in final.markdown
+
+
+# ---------------------------------------------------------------------------
+# Native-first pipeline
+# ---------------------------------------------------------------------------
+
+class TestNativeFirstPipeline:
+    """Tests for native-first pipeline: prose pages use native text,
+    complex pages (tables/figures/equations) use VLM."""
+
+    def _setup_bd_state(
+        self,
+        page_count: int,
+        bd_pages: set[int],
+        complex_pages: set[int] | None = None,
+        native_first: bool = True,
+    ) -> tuple[UnifiedPipeline, DocumentState]:
+        """Create a pipeline + state with born-digital detection already applied."""
+        config = _make_config(quiet=True, native_first=native_first)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(page_count))
+
+        assessment = _make_bd_assessment(
+            page_count, born_digital_pages=bd_pages, complex_pages=complex_pages,
+        )
+        state.apply_born_digital(assessment)
+        return pipeline, state
+
+    def test_prose_pages_use_native_text(self) -> None:
+        """Born-digital prose pages should use native text directly, no VLM."""
+        pipeline, state = self._setup_bd_state(
+            page_count=5, bd_pages={1, 2, 3, 4, 5},
+        )
+
+        result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        assert result.status == DocumentStatus.SUCCESS
+        assert result.engine == "native"
+
+        # All pages should have best_output from native text
+        for i in range(1, 6):
+            ps = state.pages[i]
+            assert ps.best_output is not None
+            assert ps.best_output.engine == "native"
+            assert ps.best_output.text == f"Native text for page {i}"
+            assert ps.best_output.audit_passed is True
+
+    def test_complex_pages_sent_to_vlm(self) -> None:
+        """Pages with tables/figures/equations should be sent to Gemini API."""
+        pipeline, state = self._setup_bd_state(
+            page_count=4,
+            bd_pages={1, 2, 3, 4},
+            complex_pages={2, 4},
+        )
+
+        def mock_process_image(image, page_num=1):
+            return PageOutput(
+                page_num=page_num,
+                text=f"VLM output for page {page_num}",
+                status=PageStatus.SUCCESS,
+                engine="gemini-api",
+                audit_passed=True,
+            )
+
+        mock_engine_instance = MagicMock()
+        mock_engine_instance.is_available.return_value = True
+        mock_engine_instance.process_image.side_effect = mock_process_image
+
+        with patch(
+            "socr.engines.gemini_api.GeminiAPIEngine",
+            return_value=mock_engine_instance,
+        ):
+            with patch.object(state.handle, "render_page", return_value=MagicMock()):
+                result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        assert result.status == DocumentStatus.SUCCESS
+        assert result.engine == "native+gemini-api"
+
+        # Prose pages (1, 3) should use native text
+        assert state.pages[1].best_output.engine == "native"
+        assert state.pages[3].best_output.engine == "native"
+
+        # Complex pages (2, 4) should use VLM output
+        assert state.pages[2].best_output.engine == "gemini-api"
+        assert state.pages[4].best_output.engine == "gemini-api"
+        assert state.pages[2].best_output.text == "VLM output for page 2"
+
+        # Gemini engine should have been called exactly for the 2 complex pages
+        assert mock_engine_instance.process_image.call_count == 2
+
+    def test_scanned_pages_sent_to_vlm(self) -> None:
+        """Scanned pages (not born-digital) should be sent to VLM."""
+        pipeline, state = self._setup_bd_state(
+            page_count=5,
+            bd_pages={1, 2, 3},  # pages 4, 5 are scanned
+        )
+
+        def mock_process_image(image, page_num=1):
+            return PageOutput(
+                page_num=page_num,
+                text=f"VLM OCR for page {page_num}",
+                status=PageStatus.SUCCESS,
+                engine="gemini-api",
+                audit_passed=True,
+            )
+
+        mock_engine_instance = MagicMock()
+        mock_engine_instance.is_available.return_value = True
+        mock_engine_instance.process_image.side_effect = mock_process_image
+
+        with patch(
+            "socr.engines.gemini_api.GeminiAPIEngine",
+            return_value=mock_engine_instance,
+        ):
+            with patch.object(state.handle, "render_page", return_value=MagicMock()):
+                result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        assert result.status == DocumentStatus.SUCCESS
+
+        # Prose born-digital pages use native text
+        for i in [1, 2, 3]:
+            assert state.pages[i].best_output.engine == "native"
+
+        # Scanned pages use VLM
+        for i in [4, 5]:
+            assert state.pages[i].best_output.engine == "gemini-api"
+            assert state.pages[i].best_output.text == f"VLM OCR for page {i}"
+
+        # VLM called for 2 scanned pages only
+        assert mock_engine_instance.process_image.call_count == 2
+
+    def test_fully_scanned_doc_falls_through_to_ocr(self) -> None:
+        """A fully scanned doc (0% born-digital) should use the old OCR path."""
+        config = _make_config(quiet=True, native_first=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(5))
+
+        assessment = _make_bd_assessment(5, born_digital_pages=set())
+        state.apply_born_digital(assessment)
+
+        good_result = _make_engine_result(text=_good_text())
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = good_result
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        assert result.engine == "deepseek"
+        mock_engine.process_document.assert_called_once()
+
+    def test_mixed_doc_below_threshold_uses_ocr(self) -> None:
+        """A doc with < 50% born-digital pages should use the old OCR path."""
+        config = _make_config(quiet=True, native_first=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(10))
+
+        assessment = _make_bd_assessment(10, born_digital_pages={1, 2, 3, 4})
+        state.apply_born_digital(assessment)
+
+        good_result = _make_engine_result(text=_good_text())
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = good_result
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        assert result.engine == "deepseek"
+        mock_engine.process_document.assert_called_once()
+
+    def test_native_first_disabled_uses_ocr(self) -> None:
+        """When native_first=False, full VLM/OCR runs even on born-digital docs."""
+        config = _make_config(quiet=True, native_first=False)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(3))
+
+        assessment = _make_bd_assessment(3, born_digital_pages={1, 2, 3})
+        state.apply_born_digital(assessment)
+
+        good_result = _make_engine_result(text=_good_text())
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_document.return_value = good_result
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        assert result.engine == "deepseek"
+        mock_engine.process_document.assert_called_once()
+
+    def test_vlm_failure_falls_back_to_native_for_enhancement_pages(self) -> None:
+        """When VLM fails on a complex born-digital page, native text is used."""
+        pipeline, state = self._setup_bd_state(
+            page_count=3,
+            bd_pages={1, 2, 3},
+            complex_pages={2},
+        )
+
+        def mock_process_image(image, page_num=1):
+            return PageOutput(
+                page_num=page_num,
+                text="",
+                status=PageStatus.ERROR,
+                engine="gemini-api",
+                failure_mode=FailureMode.EMPTY_OUTPUT,
+                audit_passed=False,
+            )
+
+        mock_engine_instance = MagicMock()
+        mock_engine_instance.is_available.return_value = True
+        mock_engine_instance.process_image.side_effect = mock_process_image
+
+        with patch(
+            "socr.engines.gemini_api.GeminiAPIEngine",
+            return_value=mock_engine_instance,
+        ):
+            with patch.object(state.handle, "render_page", return_value=MagicMock()):
+                result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Page 2 (complex, VLM failed) should fall back to native text
+        assert state.pages[2].best_output is not None
+        assert state.pages[2].best_output.engine == "native"
+        assert state.pages[2].best_output.text == "Native text for page 2"
+
+    def test_vlm_unavailable_falls_back_to_native(self) -> None:
+        """When Gemini API is unavailable, enhancement pages use native text."""
+        pipeline, state = self._setup_bd_state(
+            page_count=4,
+            bd_pages={1, 2, 3, 4},
+            complex_pages={3},
+        )
+
+        mock_engine_instance = MagicMock()
+        mock_engine_instance.is_available.return_value = False
+
+        with patch(
+            "socr.engines.gemini_api.GeminiAPIEngine",
+            return_value=mock_engine_instance,
+        ):
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Prose pages should still have native text
+        for i in [1, 2, 4]:
+            assert state.pages[i].best_output.engine == "native"
+
+        # Complex page 3 should fall back to native text
+        assert state.pages[3].best_output is not None
+        assert state.pages[3].best_output.engine == "native"
+        assert state.pages[3].best_output.text == "Native text for page 3"
+
+    def test_vlm_unavailable_scanned_pages_get_error(self) -> None:
+        """When VLM is unavailable, scanned pages (no native text) get an error."""
+        pipeline, state = self._setup_bd_state(
+            page_count=3,
+            bd_pages={1, 2},  # page 3 is scanned
+        )
+
+        mock_engine_instance = MagicMock()
+        mock_engine_instance.is_available.return_value = False
+
+        with patch(
+            "socr.engines.gemini_api.GeminiAPIEngine",
+            return_value=mock_engine_instance,
+        ):
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Scanned page 3 should have an error
+        p3 = state.pages[3]
+        assert len(p3.attempts) == 1
+        assert p3.attempts[0].status == PageStatus.ERROR
+        assert p3.attempts[0].failure_mode == FailureMode.MODEL_UNAVAILABLE
+        # But born-digital pages should still succeed
+        assert state.pages[1].best_output.engine == "native"
+        assert state.pages[2].best_output.engine == "native"
+
+    def test_phase_backbone_routes_to_native_first(self) -> None:
+        """_phase_backbone should route to _backbone_native_first when
+        the doc is mostly born-digital and native_first=True."""
+        config = _make_config(quiet=True, native_first=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(4))
+
+        assessment = _make_bd_assessment(4, born_digital_pages={1, 2, 3})
+        state.apply_born_digital(assessment)
+
+        with patch.object(
+            pipeline, "_backbone_native_first"
+        ) as mock_native_first:
+            mock_native_first.return_value = _make_engine_result(
+                text=_good_text(), engine="native",
+            )
+            pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        mock_native_first.assert_called_once()
+
+    def test_exactly_half_bd_triggers_native_first(self) -> None:
+        """A doc with exactly 50% born-digital should trigger native-first."""
+        config = _make_config(quiet=True, native_first=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(4))
+
+        assessment = _make_bd_assessment(4, born_digital_pages={1, 2})
+        state.apply_born_digital(assessment)
+
+        with patch.object(
+            pipeline, "_backbone_native_first"
+        ) as mock_native_first:
+            mock_native_first.return_value = _make_engine_result(
+                text=_good_text(), engine="native",
+            )
+            pipeline._phase_backbone(state, Path("/tmp/out"))
+
+        mock_native_first.assert_called_once()
+
+    def test_full_pipeline_native_first(self, tmp_path: Path) -> None:
+        """End-to-end: native-first pipeline processes a born-digital doc."""
+        config = _make_config(quiet=True, native_first=True)
+        pipeline = UnifiedPipeline(config)
+
+        assessment = _make_bd_assessment(
+            3, born_digital_pages={1, 2, 3}, complex_pages={2},
+        )
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = assessment
+
+        def mock_process_image(image, page_num=1):
+            return PageOutput(
+                page_num=page_num,
+                text=_good_text(),
+                status=PageStatus.SUCCESS,
+                engine="gemini-api",
+                audit_passed=True,
+            )
+
+        mock_engine_instance = MagicMock()
+        mock_engine_instance.is_available.return_value = True
+        mock_engine_instance.process_image.side_effect = mock_process_image
+
+        with (
+            patch.object(DocumentHandle, "from_path", return_value=_make_handle(3)),
+            patch(
+                "socr.engines.gemini_api.GeminiAPIEngine",
+                return_value=mock_engine_instance,
+            ),
+            patch(
+                "socr.core.document.DocumentHandle.render_page",
+                return_value=MagicMock(),
+            ),
+        ):
+            result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
+
+        assert result.success
+        assert result.pages_processed == 3
+
+    def test_config_native_first_default_true(self) -> None:
+        """PipelineConfig default should have native_first=True."""
+        config = PipelineConfig()
+        assert config.native_first is True
+
+    def test_config_native_first_from_yaml(self) -> None:
+        """PipelineConfig.from_file should parse native_first."""
+        import tempfile
+        import yaml
+
+        data = {"native_first": False}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(data, f)
+            f.flush()
+            config = PipelineConfig.from_file(f.name)
+
+        assert config.native_first is False
+
+    def test_cli_no_native_first_flag(self) -> None:
+        """CLI --no-native-first flag should be recognized."""
+        from click.testing import CliRunner
+        from socr.cli import process
+
+        runner = CliRunner()
+        result = runner.invoke(process, ["--help"])
+        assert result.exit_code == 0
+        assert "--no-native-first" in result.output

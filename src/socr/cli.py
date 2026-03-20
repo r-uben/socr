@@ -30,6 +30,7 @@ def common_options(f):
     f = click.option("--primary", type=click.Choice(ENGINE_CHOICES), help="Primary OCR engine")(f)
     f = click.option("--fallback", type=click.Choice(ENGINE_CHOICES), help="Fallback OCR engine")(f)
     f = click.option("--no-audit", is_flag=True, help="Skip quality audit stage")(f)
+    f = click.option("--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages")(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
     f = click.option("--save-figures", is_flag=True, help="Save extracted figure images")(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
@@ -45,6 +46,7 @@ def build_config(
     primary: str | None = None,
     fallback: str | None = None,
     no_audit: bool = False,
+    no_native_first: bool = False,
     timeout: int = 300,
     save_figures: bool = False,
     reprocess: bool = False,
@@ -70,6 +72,8 @@ def build_config(
         config.fallback_engine = EngineType(fallback)
     if no_audit:
         config.audit_enabled = False
+    if no_native_first:
+        config.native_first = False
 
     config.timeout = timeout
     config.save_figures = save_figures

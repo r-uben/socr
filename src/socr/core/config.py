@@ -81,6 +81,9 @@ class PipelineConfig:
     figures_engine: EngineType = EngineType.GEMINI
     enabled_engines: list[EngineType] = field(default_factory=lambda: list(EngineType))
 
+    # --- Native-first ---
+    native_first: bool = True  # Use native text for born-digital prose, VLM only for complex pages
+
     # --- Processing ---
     output_dir: Path = field(default_factory=lambda: Path("output"))
     timeout: int = 1800  # Single timeout for all engine subprocesses
@@ -157,6 +160,7 @@ class PipelineConfig:
 
         # Scalar fields
         scalar_fields = [
+            "native_first",
             "timeout", "max_retries", "truncation_retries",
             "chunk_threshold", "chunk_size",
             "save_figures", "figures_max_total",
