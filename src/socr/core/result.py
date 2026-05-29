@@ -61,6 +61,27 @@ class FigureInfo:
     image_path: str | None = None
     engine: str = ""
 
+    def to_dict(self) -> dict:
+        return {
+            "figure_num": self.figure_num,
+            "page_num": self.page_num,
+            "figure_type": self.figure_type,
+            "description": self.description,
+            "image_path": self.image_path,
+            "engine": self.engine,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FigureInfo":
+        return cls(
+            figure_num=d["figure_num"],
+            page_num=d["page_num"],
+            figure_type=d["figure_type"],
+            description=d.get("description", ""),
+            image_path=d.get("image_path"),
+            engine=d.get("engine", ""),
+        )
+
 
 @dataclass
 class PageOutput:
@@ -92,6 +113,40 @@ class PageOutput:
         if self.status == PageStatus.ERROR:
             return True
         return not self.audit_passed
+
+    def to_dict(self) -> dict:
+        """Serialize to a JSON-safe dict. Used for content-addressed caching."""
+        return {
+            "page_num": self.page_num,
+            "text": self.text,
+            "status": self.status.value,
+            "failure_mode": self.failure_mode.value,
+            "engine": self.engine,
+            "processing_time": self.processing_time,
+            "error": self.error,
+            "confidence": self.confidence,
+            "figures": [f.to_dict() for f in self.figures],
+            "audit_passed": self.audit_passed,
+            "audit_notes": list(self.audit_notes),
+            "escalated_from": self.escalated_from,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PageOutput":
+        return cls(
+            page_num=d["page_num"],
+            text=d.get("text", ""),
+            status=PageStatus(d.get("status", PageStatus.PENDING.value)),
+            failure_mode=FailureMode(d.get("failure_mode", FailureMode.NONE.value)),
+            engine=d.get("engine", ""),
+            processing_time=d.get("processing_time", 0.0),
+            error=d.get("error", ""),
+            confidence=d.get("confidence", 0.0),
+            figures=[FigureInfo.from_dict(f) for f in d.get("figures", [])],
+            audit_passed=d.get("audit_passed", True),
+            audit_notes=list(d.get("audit_notes", [])),
+            escalated_from=d.get("escalated_from", ""),
+        )
 
 
 @dataclass

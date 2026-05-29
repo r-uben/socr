@@ -58,3 +58,4 @@ test_*.md
 
 # Lock files (keep poetry.lock, ignore uv.lock)
 uv.lock
+.envrc

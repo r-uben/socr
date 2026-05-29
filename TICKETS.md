@@ -167,3 +167,148 @@
   - [ ] Version 1.0.0
   - [ ] `marker-ocr-cli` in optional deps
   - [ ] Tests pass for new engine interface and pipeline
+
+---
+
+## v2.5 Consolidation — Hybrid architecture (deterministic backbone + agentic repair)
+
+See decision record: `docs/log/2026-05-29_hybrid-architecture-decision.md`.
+Three-way agreement (Claude + Codex + Gemini): consolidate to ONE orchestrator
+on the existing `DocumentState` blackboard; make only the repair stage agentic,
+on flagged pages, with cached decisions. Do these in order — each ticket should
+be one commit on `refactor/unified-page-contract`.
+
+> **REVISED after the go-team panel (see decision-record addendum).** Two
+> load-bearing corrections, both adopted:
+> 1. **Python-on-top, not agent-on-top.** Python owns the loop/budget/manifest/
+>    error-handling and checkpoints per page; the LLM is a *stateless* per-page
+>    `decide(image, current_ocr) -> action` function. The `.md` is the judge
+>    PROMPT, never the orchestrator. Entry points stay Python: `socr agent`,
+>    `socr replay`, `socr batch`.
+> 2. **Manifest = artifact cache, NOT a re-execution recipe.** VLM OCR is
+>    non-deterministic even at temp 0; `socr replay` serves frozen output blobs
+>    and invokes no engine. Fingerprint keys off the RENDERED-IMAGE hash + render
+>    params + engine/model + prompt + normalizer/assembly versions.
+>
+> TICKET-15 (cache/manifest/replay) and TICKET-16 (judge benchmark) supersede the
+> earlier 11–14 framing; 12–14 still apply but as Python modules, not an agent.
+
+### [TICKET-15] Content-addressed cache + manifest + `socr replay`
+- **Status:** done
+- **Priority:** critical (foundation — everything else sits on this)
+- **Files:** `src/socr/core/cache.py` (new), `src/socr/core/manifest.py` (new),
+  `src/socr/core/result.py` (PageOutput/FigureInfo `to_dict`/`from_dict`),
+  `src/socr/cli.py` (`replay` command), `tests/test_manifest_replay.py` (new)
+- **Description:**
+  - `BlobStore`: filesystem content-addressed store (SHA-256 of canonical JSON,
+    sharded, atomic writes).
+  - `PageFingerprint`: pdf_hash + page_num + render_dpi + engine + model_version
+    + rendered-image hash + prompt_hash + normalizer/assembly versions; `.key()`
+    is the invalidation identity.
+  - `Manifest` (per-doc): page -> (blob_ref, fingerprint, journal); JSON save/load.
+  - `build_manifest(state, blobs)`: freeze winning PageOutput per page; image hash
+    computed only for rasterized (non-native) pages.
+  - `replay(manifest, blobs)`: reconstruct markdown from blobs, ZERO engine calls;
+    `stale_pages` flags missing blobs; `socr replay <manifest> [-o out.md]`.
+- **Acceptance Criteria:**
+  - [x] `replay` rebuilds identical markdown from disk with no model calls
+  - [x] Fingerprint changes on engine/model/image/DPI drift (invalidation)
+  - [x] Broken/empty cache raises rather than emitting a holed document
+  - [x] 8 new tests pass; full suite 442 passed; ruff clean
+
+### [TICKET-16] Judge benchmark — accuracy AND iterations-to-fix
+- **Status:** todo
+- **Priority:** high (gates whether the repair loop is worth building)
+- **Files:** `tests/`/`benchmark/` ground-truth set; a judge harness
+- **Description:**
+  - Label ~50 "good" + ~50 "mangled" OCR pages (Gemini's recommendation).
+  - Measure the lite-model judge's false-positive / false-negative rate: false
+    positives burn budget re-OCRing good pages; false negatives poison the corpus.
+  - ALSO measure **iterations-to-fix**: how many re-OCR attempts actually improve
+    a flagged page. If ~1, build a gate + single escalation (mostly already
+    present), NOT a multi-iteration loop. Let this data set the repair depth.
+- **Acceptance Criteria:**
+  - [ ] Labeled good/mangled page set committed
+  - [ ] Judge FP/FN rates reported
+  - [ ] Iterations-to-fix distribution reported; repair depth decided from it
+
+### [TICKET-10] Move venv off iCloud (environment fix)
+- **Status:** done
+- **Priority:** critical
+- **Files:** none (environment only)
+- **Description:**
+  - The in-iCloud `.venv` corrupts (`RECORD file is invalid ... os error 60`).
+    This was ~half of "can't run it".
+  - `uv venv ~/venvs/socr --python 3.11`; `export UV_PROJECT_ENVIRONMENT=~/venvs/socr`; `uv pip install -e .`
+  - Make sticky (direnv `.envrc` or shell export); confirm `.venv*` is gitignored.
+- **Acceptance Criteria:**
+  - [x] venv lives at `~/venvs/socr`, not in iCloud
+  - [x] `socr engines` runs without RECORD error (broken in-iCloud `.venv` removed)
+  - [x] `UV_PROJECT_ENVIRONMENT` sticky via `.envrc` (gitignored); `~/venvs/socr/bin/socr` works unconditionally
+  - Note: `uv pip install` ignores `UV_PROJECT_ENVIRONMENT` — install with `--python ~/venvs/socr/bin/python`
+
+### [TICKET-11] Enforce per-page PageOutput for whole-doc engines (the key seam)
+- **Status:** todo
+- **Priority:** high
+- **Files:** `src/socr/engines/base.py`, whole-doc CLI adapters (`gemini.py`, `marker.py`, `nougat.py`, `mistral.py`, `deepseek.py`), `src/socr/core/result.py`
+- **Description:**
+  - Whole-doc CLI engines currently return a single `PageOutput(page_num=0)`
+    holding the entire document. Split their monolithic output into per-page
+    `PageOutput`s AFTER OCR.
+  - **Do NOT slice the input PDF before OCR** (Gemini guardrail): Marker/Nougat
+    need full-document context (font dicts, headers/footers, bibliography).
+    Feed the whole PDF; slice the *output*, not the input.
+  - Use page markers / form-feed / page-count alignment to map output→pages.
+    Where an engine gives no reliable page boundaries, store as a single
+    PageOutput but mark `page_split=False` so triage treats it whole-doc.
+- **Acceptance Criteria:**
+  - [ ] Whole-doc engine output is split into per-page `PageOutput`s when boundaries are recoverable
+  - [ ] Input PDF is never pre-sliced before a whole-doc engine
+  - [ ] Per-page API engines (gemini-api) and whole-doc CLIs both populate `DocumentState.pages` uniformly
+
+### [TICKET-12] Collapse 5 orchestrators into ONE blackboard pipeline
+- **Status:** todo
+- **Priority:** high
+- **Files:** delete/absorb `pipeline/processor.py`, `pipeline/consensus.py`, `pipeline/reconciler.py`, `pipeline/repair.py`, `pipeline/hpc_pipeline.py`; keep one orchestrator over `core/state.py`
+- **Description:**
+  - One deterministic orchestrator: analyze → backbone → triage → repair → assemble, all mutating `DocumentState`.
+  - Fold consensus/reconciler logic into a single `best_output` selection step on `PageState.attempts`.
+  - HPC path becomes a flag/config on the one orchestrator, not a separate file.
+- **Acceptance Criteria:**
+  - [ ] Exactly one orchestrator class remains
+  - [ ] consensus.py / reconciler.py / repair.py / processor.py / hpc_pipeline.py removed or reduced to thin helpers
+  - [ ] ~3–4k LOC net removed
+  - [ ] Existing example outputs reproduce within tolerance
+
+### [TICKET-13] Triage gate — calibrated, avoids both failure modes
+- **Status:** todo
+- **Priority:** medium
+- **Files:** `src/socr/audit/*`, `src/socr/core/difficulty.py`
+- **Description:**
+  - Reduce the heuristic stack to a single triage gate that flags suspect pages.
+  - Calibrate against the benchmark so it neither silently passes mangled
+    tables/equations (corpus poisoning) nor over-triggers the LLM (agentic
+    bottleneck) — the two traps Gemini named.
+  - Prefer a hard-data trigger: flag when two engines on the same page diverge
+    (edit distance > threshold) in addition to audit-failure flags.
+- **Acceptance Criteria:**
+  - [ ] Single triage entry point returns the flagged-page set
+  - [ ] Flagged fraction is single-digit-percent on the benchmark corpus
+  - [ ] Trigger includes engine-disagreement (diff) signal, not heuristics alone
+
+### [TICKET-14] Agentic repair stage — flagged pages only, reproducible
+- **Status:** todo
+- **Priority:** medium
+- **Files:** new `src/socr/pipeline/agentic_repair.py`
+- **Description:**
+  - For flagged pages only: an LLM/VLM sees the page image + candidate OCR(s),
+    judges quality, selects the next engine, re-runs. Diff-reconciliation role
+    when engines disagree.
+  - **Reproducibility:** temperature 0; persist every decision artifact keyed by
+    page content hash; re-runs replay the cache instead of re-querying.
+  - **HPC:** stage is skippable/gated; cluster shards run the deterministic
+    backbone, repair runs as a separate pass with API access (or off).
+- **Acceptance Criteria:**
+  - [ ] LLM invoked only on flagged pages
+  - [ ] Decisions cached by page hash; re-run with cache = identical output
+  - [ ] Stage can be disabled for pure-deterministic HPC runs

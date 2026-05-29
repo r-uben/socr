@@ -295,6 +295,50 @@ def engines() -> None:
     console.print(f"\n  [bold]auto[/bold] would select: [cyan]{auto_choice.value}[/cyan]")
 
 
+@cli.command()
+@click.argument("manifest_path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--cache-dir",
+    type=click.Path(path_type=Path),
+    help="Blob cache directory (default: <manifest dir>/cache)",
+)
+@click.option(
+    "-o", "--output", type=click.Path(path_type=Path), help="Write markdown here (default: stdout)"
+)
+def replay(manifest_path: Path, cache_dir: Path | None, output: Path | None) -> None:
+    """Rebuild a document from a manifest + cache — NO engine calls.
+
+    Reproducible reconstruction for a citable corpus: given the manifest written
+    by an earlier run and the content-addressed blob cache, reassemble the exact
+    markdown without invoking any OCR engine or model. Safe to run headless/HPC.
+    """
+    from socr.core.cache import BlobStore
+    from socr.core.manifest import Manifest, stale_pages
+    from socr.core.manifest import replay as do_replay
+
+    cache_dir = cache_dir or manifest_path.parent / "cache"
+    manifest = Manifest.load(manifest_path)
+    store = BlobStore(cache_dir)
+
+    missing = stale_pages(manifest, store)
+    if missing:
+        raise click.ClickException(
+            f"cache at {cache_dir} is missing blobs for pages {missing}; "
+            f"re-run `socr agent` to regenerate them."
+        )
+
+    markdown = do_replay(manifest, store)
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(markdown, encoding="utf-8")
+        console.print(
+            f"[green]Replayed[/green] {manifest.pdf_filename} "
+            f"({manifest.page_count} pages) -> {output} [dim](0 model calls)[/dim]"
+        )
+    else:
+        click.echo(markdown)
+
+
 @cli.group()
 def benchmark() -> None:
     """Benchmark suite for OCR quality evaluation.
@@ -327,9 +371,9 @@ def benchmark_init(papers_dir: Path | None, output_dir: Path) -> None:
     Resolves the 10 benchmark papers from the Papers library, extracts
     native text as ground truth, and creates 2 synthetic scanned PDFs.
     """
-    from socr.benchmark.dataset import build_benchmark_set, BenchmarkPaper
+    from socr.benchmark.dataset import BenchmarkPaper, build_benchmark_set
     from socr.benchmark.ground_truth import GroundTruthExtractor
-    from socr.benchmark.rasterize import PaperRasterizer, RASTERIZE_SPECS
+    from socr.benchmark.rasterize import RASTERIZE_SPECS, PaperRasterizer
 
     output_dir = Path(output_dir)
 
