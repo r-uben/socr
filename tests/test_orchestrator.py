@@ -2206,3 +2206,83 @@ class TestTieredEscalation:
         )
         assert page2.engine == "gemini"
         assert page2.escalated_from == "glm"
+
+
+# ---------------------------------------------------------------------------
+# Default-path parity (TICKET-12): characterize UnifiedPipeline as the CLI
+# default before StandardPipeline is deleted. Pins the behaviors codex flagged:
+# scanned docs OCR + write output, prose-only docs do ZERO OCR, and an
+# unavailable engine yields an ERROR result (not a crash / not silent success).
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultPathParity:
+    """Full process() runs over a real tiny PDF with a mocked engine."""
+
+    @staticmethod
+    def _real_pdf(tmp_path, n_pages=2):
+        fitz = pytest.importorskip("fitz")
+        path = tmp_path / "paper.pdf"
+        doc = fitz.open()
+        for i in range(n_pages):
+            doc.new_page().insert_text((72, 72), f"page {i + 1}")
+        doc.save(str(path))
+        doc.close()
+        return path
+
+    def test_default_scanned_doc_ocrs_and_writes_output(self, tmp_path):
+        pdf = self._real_pdf(tmp_path, n_pages=2)
+        config = _make_config(primary_engine=EngineType.DEEPSEEK)
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            2, born_digital_pages=set()  # all scanned -> must OCR
+        )
+        mock_engine = MagicMock()
+        _setup_mock_engine(mock_engine, name="deepseek")
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline.process(pdf, tmp_path)
+
+        assert result.status == DocumentStatus.SUCCESS
+        md = tmp_path / "paper" / "paper.md"
+        assert md.exists() and md.read_text(encoding="utf-8").strip()
+        mock_engine.process_pages.assert_called()  # OCR actually ran
+
+    def test_default_prose_only_skips_ocr(self, tmp_path):
+        """The fast-path invariant codex required: prose-only born-digital docs
+        do zero OCR work and never call an engine."""
+        pdf = self._real_pdf(tmp_path, n_pages=2)
+        config = _make_config(primary_engine=EngineType.DEEPSEEK)
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            2, born_digital_pages={1, 2}, complex_pages=set()  # prose only
+        )
+        mock_engine = MagicMock()
+        _setup_mock_engine(mock_engine, name="deepseek")
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline.process(pdf, tmp_path)
+
+        assert result.status == DocumentStatus.SUCCESS
+        mock_engine.process_pages.assert_not_called()
+        mock_engine.process_document.assert_not_called()
+        assert "Native text for page 1" in (tmp_path / "paper" / "paper.md").read_text()
+
+    def test_default_engine_unavailable_returns_error(self, tmp_path):
+        pdf = self._real_pdf(tmp_path, n_pages=1)
+        config = _make_config(primary_engine=EngineType.DEEPSEEK)
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            1, born_digital_pages=set()  # scanned -> needs the (unavailable) engine
+        )
+        mock_engine = MagicMock()
+        mock_engine.name = "deepseek"
+        mock_engine.is_available.return_value = False
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline.process(pdf, tmp_path)
+
+        assert result.status == DocumentStatus.ERROR

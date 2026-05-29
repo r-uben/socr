@@ -151,8 +151,7 @@ def process(
             ]
         except ValueError as exc:
             raise click.ClickException(f"Unknown engine: {exc}")
-        # Multi-engine implies unified pipeline + consensus
-        unified = True
+        # Multi-engine implies consensus (pipeline is always UnifiedPipeline now)
         config.consensus_enabled = True
         if consensus_llm:
             config.consensus_use_llm = True
@@ -172,15 +171,13 @@ def process(
         config.hpc.enabled = True
         config.hpc.sequential = True
         pipeline = HPCPipeline(config)
-    elif unified or config.multi_engine:
-        # Multi-engine and explicit --unified require UnifiedPipeline
+    else:
+        # UnifiedPipeline is the single default pipeline (analyze -> backbone ->
+        # score -> repair -> assemble on DocumentState). --unified is kept as a
+        # backwards-compatible no-op; multi-engine mode also runs here.
         from socr.pipeline.orchestrator import UnifiedPipeline
 
         pipeline = UnifiedPipeline(config)
-    else:
-        from socr.pipeline.processor import StandardPipeline
-
-        pipeline = StandardPipeline(config)
 
     try:
         result = pipeline.process(pdf_path, output_dir)
@@ -229,7 +226,6 @@ def batch(
             ]
         except ValueError as exc:
             raise click.ClickException(f"Unknown engine: {exc}")
-        unified = True
         config.consensus_enabled = True
 
     # Resolve AUTO engine
@@ -240,17 +236,11 @@ def batch(
         if not config.quiet:
             console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
 
-    # Select pipeline
-    use_unified = unified or config.multi_engine
+    # UnifiedPipeline is the single pipeline. --unified is a no-op kept for
+    # backwards compatibility.
+    from socr.pipeline.orchestrator import UnifiedPipeline
 
-    if use_unified:
-        from socr.pipeline.orchestrator import UnifiedPipeline
-
-        pipeline = UnifiedPipeline(config)
-    else:
-        from socr.pipeline.processor import StandardPipeline
-
-        pipeline = StandardPipeline(config)
+    pipeline = UnifiedPipeline(config)
 
     # Handle --limit by pre-filtering
     if limit:

@@ -276,18 +276,28 @@ be one commit on `refactor/unified-page-contract`.
   - [ ] Per-page API engines (gemini-api) and whole-doc CLIs both populate `DocumentState.pages` uniformly
 
 ### [TICKET-12] Collapse 5 orchestrators into ONE blackboard pipeline
-- **Status:** todo
+- **Status:** Increment 1 done; Increment 2 (HPC) deferred
 - **Priority:** high
-- **Files:** delete/absorb `pipeline/processor.py`, `pipeline/consensus.py`, `pipeline/reconciler.py`, `pipeline/repair.py`, `pipeline/hpc_pipeline.py`; keep one orchestrator over `core/state.py`
-- **Description:**
-  - One deterministic orchestrator: analyze → backbone → triage → repair → assemble, all mutating `DocumentState`.
-  - Fold consensus/reconciler logic into a single `best_output` selection step on `PageState.attempts`.
-  - HPC path becomes a flag/config on the one orchestrator, not a separate file.
-- **Acceptance Criteria:**
-  - [ ] Exactly one orchestrator class remains
-  - [ ] consensus.py / reconciler.py / repair.py / processor.py / hpc_pipeline.py removed or reduced to thin helpers
-  - [ ] ~3–4k LOC net removed
-  - [ ] Existing example outputs reproduce within tolerance
+- **Files:** keep `pipeline/orchestrator.py` (UnifiedPipeline) as THE pipeline; deleted `pipeline/processor.py`
+- **Codex review (session 13):** "safe to route, not safe to delete blind." UnifiedPipeline
+  is NOT behaviorally identical to StandardPipeline (whole-doc vs per-page OCR; native-text
+  substitution; synthesized `page_num=0` result). Required gate before flipping the default:
+  parity tests + the invariant "prose-only born-digital docs do zero OCR and never enter
+  repair." Keep `--hpc-sequential` as a thin dedicated path (different runtime: vLLM lifecycle,
+  sequential model swap, Nougat reconciliation, frontmatter) — converge its internals onto
+  DocumentState LATER.
+- **Increment 1 (done):**
+  - [x] Verified the fast-path invariant already holds (prose-only → Tier-1 native, no OCR,
+        `needs_repair` False). The benchmark's 90s was *table* pages (legit OCR), not the prose path.
+  - [x] Added parity characterization tests (`TestDefaultPathParity`): scanned→OCR+write,
+        prose-only→zero OCR, unavailable engine→ERROR.
+  - [x] CLI default (`process`/`batch`) now routes to UnifiedPipeline; `--unified` kept as no-op.
+  - [x] Deleted `processor.py` (StandardPipeline); `pipeline/__init__` exports only UnifiedPipeline.
+  - [x] Full suite 454 passed; no new lint.
+- **Increment 2 (todo, higher risk — touches HPC workflow):**
+  - [ ] Refactor `HPCPipeline` internals to reuse DocumentState + scoring + assemble helpers
+  - [ ] Then fold consensus/reconciler selection into a single `best_output` step
+  - [ ] Decide if `hpc_pipeline.py` + `reconciler.py` can be deleted (keep the `--hpc-sequential` flag)
 
 ### [TICKET-13] Triage gate — calibrated, avoids both failure modes
 - **Status:** todo
