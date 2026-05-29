@@ -217,20 +217,29 @@ be one commit on `refactor/unified-page-contract`.
   - [x] 8 new tests pass; full suite 442 passed; ruff clean
 
 ### [TICKET-16] Judge benchmark — accuracy AND iterations-to-fix
-- **Status:** todo
+- **Status:** harness done; awaiting labeled data + live run
 - **Priority:** high (gates whether the repair loop is worth building)
-- **Files:** `tests/`/`benchmark/` ground-truth set; a judge harness
+- **Files:** `src/socr/prompts/judge_page.md` (new), `src/socr/judge/{__init__,judge,ollama_judge,benchmark}.py` (new), `src/socr/cli.py` (`judge-benchmark`), `tests/test_judge_benchmark.py` (new)
 - **Description:**
-  - Label ~50 "good" + ~50 "mangled" OCR pages (Gemini's recommendation).
-  - Measure the lite-model judge's false-positive / false-negative rate: false
-    positives burn budget re-OCRing good pages; false negatives poison the corpus.
-  - ALSO measure **iterations-to-fix**: how many re-OCR attempts actually improve
-    a flagged page. If ~1, build a gate + single escalation (mostly already
-    present), NOT a multi-iteration loop. Let this data set the repair depth.
-- **Acceptance Criteria:**
-  - [ ] Labeled good/mangled page set committed
-  - [ ] Judge FP/FN rates reported
-  - [ ] Iterations-to-fix distribution reported; repair depth decided from it
+  - Judge prompt is POLICY-as-data in `prompts/judge_page.md` (no numeric cutoffs;
+    model reasons about page-vs-transcription faithfulness). This is the only
+    place the `.md` belongs — Python owns control flow.
+  - `JudgeVerdict` + `parse_verdict` (tolerates fences/prose); `Judge` protocol;
+    `OllamaVisionJudge` (local VLM, temp 0, headless — the zero-cost path).
+  - `benchmark.py`: `load_dataset` (labels.json + images/ + ocr/), `run_benchmark`,
+    `BenchmarkReport` with the two headline rates — FN (corpus poisoning) and FP
+    (budget burning).
+  - `socr judge-benchmark <dataset>` runs it against a local Ollama vision model.
+- **Done:**
+  - [x] Harness + prompt + scorer built; 9 tests pass (stub judge); full suite 451
+  - [x] FN/FP reported by `BenchmarkReport.summary()`
+- **Remaining (empirical — needs real data):**
+  - [ ] Label ~50 good / ~50 mangled pages from the corpus into a dataset dir
+  - [ ] Run `socr judge-benchmark` with a real VLM; record FP/FN
+  - [ ] Add iterations-to-fix experiment (run escalation chain, judge after each);
+        decide repair depth from the distribution (if ~1 → gate + single escalation,
+        not a multi-iteration loop)
+  - [ ] Verify `prompts/*.md` ships in the built wheel (hatchling package data)
 
 ### [TICKET-10] Move venv off iCloud (environment fix)
 - **Status:** done

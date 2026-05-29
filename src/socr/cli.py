@@ -339,6 +339,37 @@ def replay(manifest_path: Path, cache_dir: Path | None, output: Path | None) -> 
         click.echo(markdown)
 
 
+@cli.command("judge-benchmark")
+@click.argument("dataset_dir", type=click.Path(exists=True, path_type=Path))
+@click.option("--model", default="qwen2-vl:7b", help="Ollama vision model for the judge")
+@click.option("--host", default="http://localhost:11434", help="Ollama host")
+def judge_benchmark(dataset_dir: Path, model: str, host: str) -> None:
+    """Measure the OCR-faithfulness judge against a labeled page set.
+
+    DATASET_DIR must contain labels.json + referenced images/ and ocr/ files
+    (see socr.judge.benchmark). Reports the two error rates that matter: false
+    negatives (mangled pages let through -> corpus poisoning) and false positives
+    (good pages flagged -> wasted re-OCR budget).
+    """
+    from socr.judge.benchmark import load_dataset, run_benchmark
+    from socr.judge.ollama_judge import OllamaVisionJudge
+
+    judge = OllamaVisionJudge(model=model, host=host)
+    if not judge.is_available():
+        raise click.ClickException(
+            f"Ollama model {model!r} not available at {host}. "
+            f"Pull it (`ollama pull {model}`) or pass --model/--host."
+        )
+    dataset = load_dataset(dataset_dir)
+    if not dataset:
+        raise click.ClickException(f"no labeled pages found in {dataset_dir}")
+
+    console.print(f"[dim]Judging {len(dataset)} pages with {model}...[/dim]")
+    report = run_benchmark(judge, dataset)
+    console.print("\n[bold]Judge benchmark[/bold]")
+    console.print(report.summary())
+
+
 @cli.group()
 def benchmark() -> None:
     """Benchmark suite for OCR quality evaluation.

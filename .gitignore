@@ -46,6 +46,8 @@ output/
 !docs/*.md
 !docs/**/*.md
 !examples/**/*.md
+!src/**/*.md
+!TICKETS.md
 
 # Test artifacts
 test_*.md
