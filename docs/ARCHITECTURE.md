@@ -1,34 +1,87 @@
 # socr Architecture
 
+socr turns a PDF into Markdown by routing each page to an OCR engine, checking
+the result, and re-trying on a different engine when the result is poor. It runs
+in two modes that differ only in **how the engine for a page is chosen**.
+
+## Two routing modes
+
+### Deterministic (default — `socr paper.pdf`)
+The engine is chosen **up front** by predicting page difficulty:
+1. Born-digital prose -> native text (no OCR, free).
+2. "Easy" pages -> the cheap local engine (`config.local_engine`).
+3. "Hard" pages -> the primary engine (`config.primary_engine`, e.g. cloud).
+
+Easy/hard comes from `core/difficulty.py` (tables, equations, multi-column
+layout, drawings, image density). Quality is checked by heuristics
+(`audit/heuristics.py`); failed pages are re-OCR'd by `pipeline/repair.py`
+(`RepairRouter`), which picks the next engine by **failure mode**.
+
+### Agentic, cost-aware (`socr paper.pdf --agentic`)
+The engine is chosen **dynamically** by cost while judging the real output:
+1. Born-digital prose -> native text (free; skip with `--no-native-first`).
+2. Every other page -> a **cost-ordered provider ladder** (cheapest first). Run
+   the cheapest; a **judge** accepts the output or escalates to the next-cheapest;
+   stop at the first accepted output. Bounded by `max_retries` / `cost_budget`.
+
+This mode records the winning provider + cost per page and writes a replayable
+manifest. See `docs/log/2026-05-30_cost-aware-agentic-ocr.md`.
+
 ## Modules
-- `socr/cli.py`: Click commands (`process`, `engines`, `audit-status`, `describe_figures`, shorthand `p`).
-- `core/`: shared types and configuration.
-  - `config.py`: `AgentConfig`, per-engine configs, audit settings, routing overrides, optional cross-check toggle.
-  - `document.py`: PDF loading/rendering, basic document classification.
-  - `result.py`: page/figure/results, stats, markdown export.
-- `engines/`: one adapter per engine implementing `BaseEngine` (`nougat`, `deepseek`, `gemini`, `mistral`).
-- `audit/`: heuristic checks (`HeuristicsChecker`) and failure-mode scoring (`FailureModeScorer`).
+- `cli.py`: Click commands — `process` (default, PDF-path shorthand), `batch`,
+  `engines`, `replay`, `judge-benchmark`. Agentic flags: `--agentic`,
+  `--judge-backend`, `--judge-model`, `--max-cost-per-page`, `--cost-budget`,
+  `--write-manifest`.
+- `core/`:
+  - `config.py`: `PipelineConfig` (single flat config), `EngineType`,
+    `ENGINE_PRIORITY`, agentic flags.
+  - `document.py`: `DocumentHandle` — lazy PDF handle, per-page rendering, hash.
+  - `result.py`: `PageOutput` (now with `cost_usd`), `EngineResult`, enums,
+    `to_dict`/`from_dict` for caching.
+  - `state.py`: `DocumentState` blackboard — per-page `PageState` with `attempts`
+    and `best_output`. The spine both modes mutate.
+  - `providers.py`: provider cost registry + `provider_ladder()` (cheapest-first).
+  - `manifest.py` + `cache.py`: content-addressed blob store + per-document
+    manifest. `build_manifest()` freezes the winning output per page; `replay()`
+    reconstructs the document from cache with **no engine calls**.
+  - `difficulty.py`, `born_digital.py`: page classification used by deterministic
+    routing and native-text extraction.
+- `engines/`: one adapter per CLI engine implementing `BaseEngine`
+  (`gemini`, `deepseek`, `marker`, `glm`, `nougat`, `mistral`) + HPC vLLM engines.
+  `registry.py` resolves/probes engines.
+- `judge/`: the OCR-faithfulness judge. `judge.py` (`JudgeVerdict`, prompt loader,
+  parser), `ollama_judge.py` (local VLM), `benchmark.py` (score a judge against
+  labeled pages). Prompt lives in `prompts/judge_page.md` (policy as data).
+- `audit/`: heuristic checks (`HeuristicsChecker`) + failure-mode scoring.
 - `pipeline/`:
-  - `processor.py`: `StandardPipeline` -- orchestrates stages, output writer, figure pass.
-  - `orchestrator.py`: `UnifiedPipeline` -- 5-phase pipeline (analyze, backbone, score, repair, assemble).
-- `ui/`: Rich-based console/progress/panels/theme.
-- `tests/`: routing/output, figure pass, and heuristic tests (require dev extras).
+  - `orchestrator.py`: `UnifiedPipeline` — the single pipeline. Phases:
+    analyze -> backbone -> score -> repair -> assemble (deterministic), or
+    analyze -> `_phase_agentic` -> assemble (agentic). Writes the manifest.
+  - `agentic.py`: `route_page()` (Python-owned per-page loop) + `PageJudge`
+    adapters (`VLMPageJudge`, `HeuristicPageJudge`).
+  - `repair.py`, `consensus.py`, `reconciler.py`, `hpc_pipeline.py`: repair
+    routing, multi-engine consensus, and the HPC/vLLM path.
+- `figures/`: `FigureExtractor` (PyMuPDF embedded-image extraction + VLM captions).
+- `ui/`: Rich console/progress/panels.
 
-## Pipeline Stages
-1) **Analyze** -- born-digital detection.
-2) **Backbone OCR** -- primary engine extraction.
-3) **Score** -- heuristic quality audit (failure-mode scoring).
-4) **Repair** -- selective fallback on failed pages with alternative engines.
-5) **Assemble** -- stitch final output, figure extraction, save markdown + metadata.
+## Reproducibility
+The judge / VLM OCR is non-deterministic, so reproducibility is **not** "re-run
+and hope for the same bytes." Instead the winning `PageOutput` per page is frozen
+as a content-addressed blob; the manifest maps each page (by a fingerprint over
+the rendered-image hash + engine + render params) to its blob. `socr replay
+<manifest>` serves those blobs — zero model calls, bit-identical output, safe to
+run headless/HPC.
 
-## Verification
-- Heuristics: word count, garbage ratio, structure, repeated patterns.
-- Failure-mode scoring: classifies audit failures (hallucination, truncation, garbled, etc.).
-
-## Figure Pass
-- Uses PyMuPDF to extract embedded images per page, skips tiny/extreme-aspect assets, downscales large images, calls `describe_figure` on first available vision engine (Gemini/DeepSeek/Mistral). Results are attached to `PageResult.figures` and printed.
+## Design principles
+- **Python owns the loop; the LLM is a stateless per-page decider.** The judge
+  prompt is data (`prompts/judge_page.md`), not the orchestrator.
+- **Cost ordering is relative; prices are tunable defaults.** Routing tries
+  cheapest-first and lets the judge escalate — no static "engine X handles math"
+  capability tables.
+- **One pipeline.** `UnifiedPipeline` is the only orchestrator
+  (`StandardPipeline` was removed). `--hpc-sequential` is a thin dedicated path.
 
 ## Testing
-- Install (editable): `uv pip install -e .`
-- Run: `pytest -q --disable-warnings --maxfail=1`.
-- Coverage: figure extraction (`tests/test_figure_pass.py`), heuristics/reprocessing (`tests/test_audit_heuristics.py`). Tests skip if rich/fitz/Pillow aren’t installed.
+- Install (editable, venv off iCloud): `uv pip install -e ".[dev]" --python ~/venvs/socr/bin/python`
+- Run: `pytest -q`. Key suites: `test_providers.py`, `test_agentic.py`,
+  `test_manifest_replay.py`, `test_judge_benchmark.py`, `test_orchestrator.py`.

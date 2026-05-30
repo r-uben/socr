@@ -24,20 +24,24 @@ Engines are installed separately because they have different dependencies (torch
 ## Usage
 
 ```bash
-# Process a PDF
+# Process a PDF (deterministic mode)
 socr paper.pdf
 
-# Choose engine
-socr paper.pdf --primary gemini
-socr paper.pdf --primary marker
+# Cost-aware agentic mode: cheapest provider first, escalate only if rejected
+socr paper.pdf --agentic
+socr paper.pdf --agentic --cost-budget 0.05      # cap spend per document
+socr paper.pdf --agentic --max-cost-per-page 0.0  # local-only (free)
 
-# Save extracted figures
+# Choose engine (deterministic mode)
+socr paper.pdf --primary gemini
 socr paper.pdf --save-figures
 
 # Batch process a directory
 socr batch ~/Papers/ -o ./results/
 socr batch ~/Papers/ --dry-run        # preview what would be processed
-socr batch ~/Papers/ --reprocess      # force reprocess all
+
+# Reproducibly rebuild a document from a manifest (no model calls)
+socr replay output/paper/manifest.json -o paper.md
 
 # Check which engines are available
 socr engines
@@ -45,15 +49,39 @@ socr engines
 
 ## How it works
 
+socr routes **each page** to an OCR engine, checks the result, and re-tries on a
+different engine when the result is poor. It runs in two modes that differ in how
+the engine for a page is chosen.
+
+### Deterministic mode (default)
+
 ```
-PDF → Primary OCR → Quality Audit → (Fallback OCR if needed) → Markdown
+PDF → classify each page → easy: local engine · hard: primary engine
+    → heuristic audit → fallback on failed pages → Markdown
 ```
 
-1. **Primary OCR** — Calls the primary engine CLI on the whole PDF
-2. **Quality audit** — Heuristic checks (word count, garbage ratio, repetition)
-3. **Fallback** — If audit fails, tries a different engine
+The engine is chosen **up front** from predicted page difficulty (tables,
+equations, layout). Born-digital prose uses native text for free. Quality is
+checked by heuristics; failed pages fall back to another engine.
 
-Each engine is a separate CLI binary. `socr` calls it as a subprocess, reads the output markdown, and applies the quality pipeline.
+### Agentic, cost-aware mode (`--agentic`)
+
+```
+PDF → per page: try cheapest provider → judge the output
+    → accept, or escalate up the cost ladder → Markdown (+ replayable manifest)
+```
+
+The engine is chosen **dynamically by cost**: try the cheapest available provider
+first, let a judge (a vision model that looks at the page, or a heuristic
+fallback) decide accept-or-escalate, and climb the cost ladder
+(`local → cheap cloud → premium cloud`) only when the cheaper output is rejected.
+Stops at the first accepted output, bounded by `--cost-budget` / `--max-cost-per-page`.
+Each run records the winning provider + cost per page and writes a **manifest**
+that `socr replay` can reconstruct with zero model calls.
+
+Each engine is a separate CLI binary. `socr` calls it as a subprocess, reads the
+output markdown, and applies the quality pipeline. See `docs/ARCHITECTURE.md` for
+the full design.
 
 ## Engines
 
@@ -84,20 +112,29 @@ socr process <PDF> [OPTIONS]
   --primary ENGINE             Primary OCR engine (gemini, marker, deepseek, etc.)
   --fallback ENGINE            Fallback engine
   --no-audit                   Skip quality audit
+  --no-native-first            OCR every page (don't use native text for prose)
   --save-figures               Save extracted figure images
-  --timeout SECONDS            Subprocess timeout (default: 300)
+  --timeout SECONDS            Subprocess timeout
   --profile NAME               Load ~/.config/socr/{name}.yaml
   --config PATH                Custom YAML config file
-  -q, --quiet                  Suppress non-error output
-  -v, --verbose                Verbose output
-  --dry-run                    List files without processing
-  --reprocess                  Force reprocess already-done files
+  -q, --quiet / -v, --verbose  Output verbosity
+  --dry-run / --reprocess      List-only / force reprocess
+
+  # Agentic cost-aware routing
+  --agentic                    Per page: cheapest provider first, judge escalates
+  --judge-backend MODE         auto | vlm | heuristic (default: auto)
+  --judge-model NAME           VLM model for the judge (e.g. qwen2-vl:7b)
+  --max-cost-per-page USD      Skip providers above this price (0 = no cap)
+  --cost-budget USD            Stop escalating once doc spend hits this (0 = ∞)
+  --write-manifest             Write a replayable manifest + blob cache
 
 socr batch <DIR> [OPTIONS]
   Same options as process, plus:
   --limit N                    Process first N files
 
-socr engines                   Show available engines
+socr replay <MANIFEST> [-o OUT]  Rebuild a document from cache (no model calls)
+socr judge-benchmark <DATASET>   Score the judge against labeled good/mangled pages
+socr engines                     Show available engines
 ```
 
 ## Output
