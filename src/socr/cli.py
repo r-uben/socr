@@ -42,6 +42,30 @@ def common_options(f):
     f = click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")(f)
     f = click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path), help="YAML config file")(f)
     f = click.option("--profile", type=str, help="Load ~/.config/socr/{profile}.yaml")(f)
+    # Agentic cost-aware routing
+    f = click.option(
+        "--agentic", is_flag=True,
+        help="Cost-aware routing: per page, cheapest provider first, judge escalates",
+    )(f)
+    f = click.option(
+        "--judge-backend", type=click.Choice(["auto", "vlm", "heuristic"]),
+        default="auto", help="Quality judge for agentic mode",
+    )(f)
+    f = click.option(
+        "--judge-model", type=str, default="",
+        help="VLM model for the judge (e.g. qwen2-vl:7b)",
+    )(f)
+    f = click.option(
+        "--max-cost-per-page", type=float, default=0.0,
+        help="Skip providers above this $/page (0=no cap)",
+    )(f)
+    f = click.option(
+        "--cost-budget", type=float, default=0.0,
+        help="Stop escalating once doc spend hits this $ (0=unlimited)",
+    )(f)
+    f = click.option(
+        "--write-manifest", is_flag=True, help="Write a replayable manifest + blob cache",
+    )(f)
     return f
 
 
@@ -59,6 +83,12 @@ def build_config(
     config_path: Path | None = None,
     profile: str | None = None,
     output_dir: Path | None = None,
+    agentic: bool = False,
+    judge_backend: str = "auto",
+    judge_model: str = "",
+    max_cost_per_page: float = 0.0,
+    cost_budget: float = 0.0,
+    write_manifest: bool = False,
 ) -> PipelineConfig:
     """Build PipelineConfig from CLI options."""
     if config_path or profile:
@@ -84,6 +114,14 @@ def build_config(
     config.dry_run = dry_run
     config.quiet = quiet
     config.verbose = verbose
+
+    # Agentic cost-aware routing
+    config.agentic = agentic
+    config.judge_backend = judge_backend
+    config.judge_model = judge_model
+    config.max_cost_per_page = max_cost_per_page
+    config.cost_budget = cost_budget
+    config.write_manifest = write_manifest
 
     if output_dir:
         config.output_dir = output_dir

@@ -99,7 +99,11 @@ class UnifiedPipeline:
         # Phase 1: Analyze
         self._phase_analyze(state)
 
-        if is_multi:
+        if self.config.agentic and not is_multi:
+            # Cost-aware agentic routing replaces backbone + score + repair:
+            # per page, try the cheapest provider and let the judge escalate.
+            self._phase_agentic(state, out_dir)
+        elif is_multi:
             # Multi-engine mode: run all engines, score all, consensus
             backbone_results = self._backbone_multi_engine(state, out_dir)
 
@@ -632,6 +636,164 @@ class UnifiedPipeline:
             console.print(f"  {ok}/{len(page_nums)} pages succeeded")
 
         return final
+
+    # ------------------------------------------------------------------
+    # Agentic: cost-aware per-page routing (replaces backbone+score+repair)
+    # ------------------------------------------------------------------
+
+    def _phase_agentic(self, state: DocumentState, output_dir: Path) -> None:
+        """Per OCR page: try the cheapest provider, let the judge escalate.
+
+        Born-digital prose still takes free native text (Tier 1). Every other
+        page is routed through the cost-ordered ladder; the winning provider and
+        its cost are recorded on PageState. Bounded by max_retries and an
+        optional cost_budget.
+        """
+        from socr.core.providers import provider_ladder
+        from socr.pipeline.agentic import route_page
+
+        if not self.config.quiet:
+            console.print("\n[cyan]Agentic routing[/cyan] (cost-ordered, judge-gated)")
+
+        # Tier 1: born-digital prose -> native text (free, no OCR).
+        ocr_pages: list[int] = []
+        for page_num, ps in sorted(state.pages.items()):
+            if ps.is_born_digital and not ps.needs_ocr_enhancement and ps.native_text:
+                native = PageOutput(
+                    page_num=page_num, text=ps.native_text, status=PageStatus.SUCCESS,
+                    engine="native", audit_passed=True, cost_usd=0.0,
+                )
+                ps.attempts.append(native)
+                ps.best_output = native
+            else:
+                ocr_pages.append(page_num)
+
+        if not ocr_pages:
+            if not self.config.quiet:
+                console.print("  All pages born-digital (no OCR needed)")
+            return
+
+        available = self._available_engines_for_agentic()
+        ladder = provider_ladder(
+            available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
+        )
+        if not ladder:
+            logger.warning("agentic: no OCR providers available; pages left unprocessed")
+            if not self.config.quiet:
+                console.print("  [red]No OCR providers available[/red]")
+            return
+
+        judge = self._build_page_judge(state)
+        max_attempts = max(1, self.config.max_retries + 1)
+        enhancement_pages = [p for p in ocr_pages if state.pages[p].needs_ocr_enhancement]
+
+        if not self.config.quiet:
+            ladder_str = " -> ".join(f"{p.engine.value}(${p.cost_per_page_usd:g})" for p in ladder)
+            console.print(f"  ladder: {ladder_str}")
+
+        def run_provider(engine: EngineType, page_num: int) -> PageOutput:
+            outs = self._run_engine_on_pages(
+                state, [page_num], enhancement_pages, engine, "agentic"
+            )
+            return outs[0]
+
+        for page_num in ocr_pages:
+            # Budget guard: once the document budget is spent, only try the cheapest.
+            cap = max_attempts
+            if self.config.cost_budget > 0 and state.total_cost >= self.config.cost_budget:
+                cap = 1
+            decision = route_page(page_num, ladder, run_provider, judge, max_attempts=cap)
+
+            ps = state.pages[page_num]
+            for att in decision.attempts:
+                att.output.cost_usd = att.cost_usd
+                att.output.audit_passed = att.accepted
+                ps.attempts.append(att.output)
+            ps.best_output = decision.final_output
+
+            # Record cost so DocumentState.total_cost reflects spend.
+            state.engine_runs.append(EngineResult(
+                document_path=state.handle.path,
+                engine=decision.winning_engine,
+                status=DocumentStatus.SUCCESS if decision.accepted else DocumentStatus.AUDIT_FAILED,
+                cost=decision.total_cost_usd,
+                processing_time=0.0,
+            ))
+
+            if not self.config.quiet:
+                tag = "accepted" if decision.accepted else "best-effort"
+                console.print(
+                    f"  p{page_num}: {decision.winning_engine} "
+                    f"[{tag}, {len(decision.attempts)} tr, ${decision.total_cost_usd:.4f}]"
+                )
+
+        if not self.config.quiet:
+            console.print(f"  total cost: ${state.total_cost:.4f}")
+
+    def _available_engines_for_agentic(self) -> set[EngineType]:
+        """Probe which known providers are actually usable right now."""
+        from socr.core.providers import DEFAULT_PROVIDERS
+
+        available: set[EngineType] = set()
+        for engine_type in self.config.enabled_engines:
+            if engine_type not in DEFAULT_PROVIDERS:
+                continue
+            try:
+                if get_engine(engine_type).is_available():
+                    available.add(engine_type)
+            except Exception:  # availability probe must never crash routing
+                continue
+        return available
+
+    def _build_page_judge(self, state: DocumentState):
+        """Select the page judge: VLM if requested+available, else heuristics."""
+        from socr.pipeline.agentic import HeuristicPageJudge, VLMPageJudge
+
+        backend = self.config.judge_backend
+        if backend in ("vlm", "auto"):
+            try:
+                from socr.judge.ollama_judge import OllamaVisionJudge
+
+                vj = (
+                    OllamaVisionJudge(model=self.config.judge_model)
+                    if self.config.judge_model
+                    else OllamaVisionJudge()
+                )
+                if vj.is_available():
+                    return VLMPageJudge(vj, self._make_page_renderer(state))
+            except Exception as exc:
+                logger.warning("VLM judge unavailable (%s); using heuristics", exc)
+            if backend == "vlm" and not self.config.quiet:
+                console.print("  [yellow]VLM judge unavailable -> heuristic judge[/yellow]")
+        return HeuristicPageJudge(self.heuristics)
+
+    def _make_page_renderer(self, state: DocumentState):
+        """Return render_image(page_num) -> temp PNG path for the VLM judge."""
+        def render(page_num: int) -> Path:
+            img = state.handle.render_page(page_num, dpi=self.config.render_dpi)
+            tmp = Path(tempfile.gettempdir()) / f"socr_judge_{state.handle.stem}_p{page_num}.png"
+            img.save(tmp)
+            return tmp
+
+        return render
+
+    def _write_manifest(self, state: DocumentState, output_dir: Path) -> None:
+        """Write a reproducibility manifest + blob cache for `socr replay`.
+
+        Non-fatal: a manifest failure must never lose the OCR output.
+        """
+        try:
+            from socr.core.cache import BlobStore
+            from socr.core.manifest import build_manifest
+
+            doc_dir = output_dir / sanitize_filename(state.handle.stem)
+            store = BlobStore(doc_dir / "cache")
+            manifest = build_manifest(state, store, dpi=self.config.render_dpi)
+            manifest.save(doc_dir / "manifest.json")
+            if not self.config.quiet:
+                console.print(f"  [dim]Manifest: {doc_dir / 'manifest.json'} (replayable)[/dim]")
+        except Exception as exc:
+            logger.warning("manifest write failed (non-fatal): %s", exc)
 
     # ------------------------------------------------------------------
     # Phase 2 (multi-engine): Backbone OCR with multiple engines
@@ -1281,6 +1443,10 @@ class UnifiedPipeline:
             saved_path = self._save_markdown(state, final_text, output_dir)
             if not self.config.quiet:
                 console.print(f"  [blue]Output:[/blue] {saved_path}")
+
+        # Reproducibility manifest (opt-in; default-on in agentic mode).
+        if has_text and (self.config.write_manifest or self.config.agentic):
+            self._write_manifest(state, output_dir)
 
         return final_result
 

@@ -118,6 +118,14 @@ class PipelineConfig:
     audit_enabled: bool = True
     audit_min_words: int = 50
 
+    # --- Agentic cost-aware routing (all default-off = unchanged behavior) ---
+    agentic: bool = False  # per-page: try cheapest provider, judge escalates
+    judge_backend: str = "auto"  # "auto" | "vlm" | "heuristic"
+    judge_model: str = ""  # VLM model for the judge (e.g. qwen2-vl:7b); "" = default
+    max_cost_per_page: float = 0.0  # 0 = no per-page price cap
+    cost_budget: float = 0.0  # 0 = unlimited total budget per document
+    write_manifest: bool = False  # write reproducibility manifest + blob cache
+
     # --- Multi-engine ---
     multi_engine: list[EngineType] = field(default_factory=list)  # empty = single engine mode
 

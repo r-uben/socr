@@ -2286,3 +2286,99 @@ class TestDefaultPathParity:
             result = pipeline.process(pdf, tmp_path)
 
         assert result.status == DocumentStatus.ERROR
+
+
+# ---------------------------------------------------------------------------
+# Agentic cost-aware routing integration (config.agentic=True). The judge is
+# forced to "heuristic" so tests are deterministic and never touch Ollama.
+# ---------------------------------------------------------------------------
+
+
+def _mock_engine_named(name: str, text: str, ok: bool = True) -> MagicMock:
+    m = MagicMock()
+    m.name = name
+    m.is_available.return_value = True
+    m.model_version = ""
+
+    def _pp(pdf_path, page_nums, config, dpi=200):
+        status = PageStatus.SUCCESS if ok else PageStatus.ERROR
+        return [
+            PageOutput(page_num=pn, text=text, status=status, engine=name, audit_passed=ok)
+            for pn in page_nums
+        ]
+
+    m.process_pages.side_effect = _pp
+    return m
+
+
+class TestAgenticIntegration:
+    @staticmethod
+    def _real_pdf(tmp_path, n_pages=1):
+        fitz = pytest.importorskip("fitz")
+        path = tmp_path / "paper.pdf"
+        doc = fitz.open()
+        for i in range(n_pages):
+            doc.new_page().insert_text((72, 72), f"page {i + 1}")
+        doc.save(str(path))
+        doc.close()
+        return path
+
+    def test_agentic_records_cost_and_writes_manifest(self, tmp_path):
+        pdf = self._real_pdf(tmp_path, 1)
+        config = _make_config(
+            agentic=True, judge_backend="heuristic", enabled_engines=[EngineType.GEMINI]
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(1, born_digital_pages=set())
+        eng = _mock_engine_named("gemini", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        assert result.status == DocumentStatus.SUCCESS
+        # Gemini is $0.0002/page and one page was routed -> cost recorded.
+        assert result.cost == pytest.approx(0.0002)
+        # agentic mode writes a replayable manifest by default.
+        doc_dir = tmp_path / "paper"
+        assert (doc_dir / "manifest.json").exists()
+        assert (doc_dir / "cache").is_dir()
+
+    def test_agentic_escalates_from_cheap_to_cloud(self, tmp_path):
+        pdf = self._real_pdf(tmp_path, 1)
+        config = _make_config(
+            agentic=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GLM, EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(1, born_digital_pages=set())
+
+        glm = _mock_engine_named("glm", "too short")  # fails heuristic min words
+        gemini = _mock_engine_named("gemini", _good_text())  # passes
+
+        def _get(engine_type):
+            return glm if engine_type == EngineType.GLM else gemini
+
+        with patch("socr.pipeline.orchestrator.get_engine", side_effect=_get):
+            result = pipeline.process(pdf, tmp_path)
+
+        assert result.status == DocumentStatus.SUCCESS
+        # GLM (free) was tried and rejected, escalated to Gemini ($0.0002).
+        assert result.cost == pytest.approx(0.0002)
+        assert _good_text()[:25] in result.markdown  # gemini's output won
+
+    def test_default_mode_writes_no_manifest(self, tmp_path):
+        pdf = self._real_pdf(tmp_path, 1)
+        config = _make_config(agentic=False, enabled_engines=[EngineType.DEEPSEEK])
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(1, born_digital_pages=set())
+        eng = _mock_engine_named("deepseek", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            pipeline.process(pdf, tmp_path)
+
+        # Manifest is opt-in: not written unless agentic or write_manifest.
+        assert not (tmp_path / "paper" / "manifest.json").exists()

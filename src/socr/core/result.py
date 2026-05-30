@@ -104,6 +104,7 @@ class PageOutput:
     audit_passed: bool = True
     audit_notes: list[str] = field(default_factory=list)
     escalated_from: str = ""  # engine that failed, triggering escalation
+    cost_usd: float = 0.0  # estimated USD cost of producing this page output
 
     @property
     def word_count(self) -> int:
@@ -129,6 +130,7 @@ class PageOutput:
             "audit_passed": self.audit_passed,
             "audit_notes": list(self.audit_notes),
             "escalated_from": self.escalated_from,
+            "cost_usd": self.cost_usd,
         }
 
     @classmethod
@@ -146,6 +148,7 @@ class PageOutput:
             audit_passed=d.get("audit_passed", True),
             audit_notes=list(d.get("audit_notes", [])),
             escalated_from=d.get("escalated_from", ""),
+            cost_usd=d.get("cost_usd", 0.0),
         )
 
 
