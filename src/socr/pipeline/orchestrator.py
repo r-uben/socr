@@ -656,9 +656,16 @@ class UnifiedPipeline:
             console.print("\n[cyan]Agentic routing[/cyan] (cost-ordered, judge-gated)")
 
         # Tier 1: born-digital prose -> native text (free, no OCR).
+        # Skipped when --no-native-first: the user wants OCR even on prose, so
+        # every page goes through the cost ladder.
         ocr_pages: list[int] = []
         for page_num, ps in sorted(state.pages.items()):
-            if ps.is_born_digital and not ps.needs_ocr_enhancement and ps.native_text:
+            if (
+                self.config.native_first
+                and ps.is_born_digital
+                and not ps.needs_ocr_enhancement
+                and ps.native_text
+            ):
                 native = PageOutput(
                     page_num=page_num, text=ps.native_text, status=PageStatus.SUCCESS,
                     engine="native", audit_passed=True, cost_usd=0.0,

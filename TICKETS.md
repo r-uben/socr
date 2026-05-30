@@ -331,3 +331,30 @@ be one commit on `refactor/unified-page-contract`.
   - [ ] LLM invoked only on flagged pages
   - [ ] Decisions cached by page hash; re-run with cache = identical output
   - [ ] Stage can be disabled for pure-deterministic HPC runs
+
+### [TICKET-17] Cost-aware agentic OCR — best provider on the go
+- **Status:** done (core + integration + CLI; validated end-to-end on real engines)
+- **Priority:** high (the headline goal)
+- **Files:** `core/providers.py` (new), `pipeline/agentic.py` (new), `pipeline/orchestrator.py` (`_phase_agentic` + helpers), `core/result.py` (`cost_usd`), `core/config.py` (agentic flags), `cli.py` (`--agentic` + flags), `tests/test_providers.py`, `tests/test_agentic.py` (new), `tests/test_orchestrator.py` (TestAgenticIntegration)
+- **What it does:** per OCR page, try the cheapest available provider; an injected
+  judge (VLM via Ollama, or heuristic fallback) accepts or escalates up a
+  cost-ordered ladder; bounded by `max_retries` and `cost_budget`. Born-digital
+  prose takes free native text (unless `--no-native-first`). Winning provider +
+  cost recorded on `PageState`; `DocumentState.total_cost` reflects spend;
+  agentic runs auto-write a replayable manifest.
+- **Design notes:** Python owns the loop (LLM is a stateless per-page decider);
+  prices are tunable DEFAULTS in `core/providers.py`, routing uses RELATIVE
+  cost ordering (no capability tables — the judge escalates dynamically).
+- **Validated:** `socr demo.pdf --agentic --no-native-first` ran the real ladder
+  glm->deepseek->marker (gemini capped out by max_attempts), recorded the
+  attempt chain in the manifest journal, fell back to free native text when OCR
+  was rejected (cost $0), and `socr replay` reconstructed the doc bit-identically
+  with 0 model calls.
+- **Acceptance Criteria:**
+  - [x] Cost-ordered ladder, cheapest-first, judge-driven escalation
+  - [x] Bounded cost (max_attempts, cost_budget, max_cost_per_page)
+  - [x] Cost recorded; manifest written + replayable
+  - [x] CLI `--agentic` (+ judge/cost flags); default-off preserves legacy
+  - [x] Full suite green (475); no new lint
+- **Next (optional):** judge benchmark (TICKET-16) to tune accept thresholds;
+  real per-provider prices; populate model_version/prompt_hash in fingerprints.

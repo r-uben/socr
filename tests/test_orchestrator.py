@@ -2382,3 +2382,29 @@ class TestAgenticIntegration:
 
         # Manifest is opt-in: not written unless agentic or write_manifest.
         assert not (tmp_path / "paper" / "manifest.json").exists()
+
+    def test_no_native_first_forces_ocr_on_prose(self, tmp_path):
+        """--no-native-first routes born-digital prose through the cost ladder
+        instead of taking free native text."""
+        pdf = self._real_pdf(tmp_path, 1)
+        config = _make_config(
+            agentic=True,
+            native_first=False,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        # Page IS born-digital prose -> would normally take native text for free.
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            1, born_digital_pages={1}, complex_pages=set()
+        )
+        eng = _mock_engine_named("gemini", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        # Because native-first is off, the prose page was OCR'd via the ladder
+        # (Gemini, $0.0002) rather than served free from native text.
+        assert result.cost == pytest.approx(0.0002)
+        assert _good_text()[:25] in result.markdown
