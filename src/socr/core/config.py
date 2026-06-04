@@ -21,21 +21,25 @@ class EngineType(str, Enum):
     GEMINI = "gemini"
     MARKER = "marker"
     GLM = "glm"  # GLM-OCR via Ollama or transformers (local)
+    QWEN = "qwen"  # Qwen-VL via ollama/vllm/cloud API (local-or-cloud, best open OCR)
     # HPC-only types (not backed by sibling CLIs — use vLLM HTTP API directly)
     DEEPSEEK_VLLM = "deepseek-vllm"
     VLLM = "vllm"
 
 
-# Default engine priority: local free -> cheap cloud -> expensive cloud
+# Default engine priority: local free -> cheap cloud -> expensive cloud.
+# Qwen-VL leads the local tier: on socOCRbench it scores ~0.47-0.58 vs GLM 0.37 and
+# DeepSeek 0.09, so it is the local model worth trying first.
 ENGINE_PRIORITY: dict[EngineType, int] = {
-    EngineType.GLM: 0,
-    EngineType.NOUGAT: 1,
-    EngineType.DEEPSEEK: 2,
-    EngineType.MARKER: 3,
-    EngineType.GEMINI: 4,
-    EngineType.MISTRAL: 5,
-    EngineType.DEEPSEEK_VLLM: 6,
-    EngineType.VLLM: 7,
+    EngineType.QWEN: 0,
+    EngineType.GLM: 1,
+    EngineType.NOUGAT: 2,
+    EngineType.DEEPSEEK: 3,
+    EngineType.MARKER: 4,
+    EngineType.GEMINI: 5,
+    EngineType.MISTRAL: 6,
+    EngineType.DEEPSEEK_VLLM: 7,
+    EngineType.VLLM: 8,
 }
 
 # Auto-selection order: try CLI engines until one is available.
@@ -150,6 +154,7 @@ class PipelineConfig:
     deepseek_vllm_url: str = "http://localhost:8000/v1"
     glm_backend: str = "ollama"  # "ollama", "transformers", or "vllm"
     glm_task: str = "text"  # "text", "formula", "table", "figure"
+    qwen_backend: str = "auto"  # "auto", "ollama", "vllm", or "api"
     nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
     gemini_model: str = "gemini-3-flash-preview"
@@ -201,7 +206,7 @@ class PipelineConfig:
             "consensus_enabled", "consensus_use_llm", "consensus_ollama_model",
             "reprocess", "dry_run", "quiet", "verbose",
             "deepseek_backend", "deepseek_task", "deepseek_vllm_url",
-            "glm_backend", "glm_task",
+            "glm_backend", "glm_task", "qwen_backend",
             "nougat_model", "marker_device",
             "gemini_model", "gemini_task", "mistral_model",
         ]

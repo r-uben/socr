@@ -50,6 +50,9 @@ class ProviderProfile:
 # per-page prices are rough estimates (see README engine table) and are meant to
 # be tuned, not trusted as exact. Edit here or override via PipelineConfig.
 DEFAULT_PROVIDERS: dict[EngineType, ProviderProfile] = {
+    # Qwen-VL (local Ollama) — free and the best open OCR; ENGINE_PRIORITY=0 makes the
+    # cost-tied sort try it first among free providers.
+    EngineType.QWEN: ProviderProfile(EngineType.QWEN, TIER_LOCAL, 0.0),
     EngineType.GLM: ProviderProfile(EngineType.GLM, TIER_LOCAL, 0.0),
     EngineType.NOUGAT: ProviderProfile(EngineType.NOUGAT, TIER_LOCAL, 0.0),
     EngineType.DEEPSEEK: ProviderProfile(EngineType.DEEPSEEK, TIER_LOCAL, 0.0),

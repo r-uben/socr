@@ -35,6 +35,8 @@ def common_options(f):
     f = click.option("--no-audit", is_flag=True, help="Skip quality audit stage")(f)
     f = click.option("--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages")(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
+    f = click.option("--dpi", type=int, default=None, help="Page render DPI for OCR engines (default 200; higher helps local VLMs)")(f)
+    f = click.option("--qwen-backend", type=click.Choice(["auto", "ollama", "vllm", "api"]), default=None, help="Backend for the qwen engine")(f)
     f = click.option("--save-figures", is_flag=True, help="Save extracted figure images")(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
     f = click.option("--dry-run", is_flag=True, help="List files without processing")(f)
@@ -75,6 +77,8 @@ def build_config(
     no_audit: bool = False,
     no_native_first: bool = False,
     timeout: int = 1800,
+    dpi: int | None = None,
+    qwen_backend: str | None = None,
     save_figures: bool = False,
     reprocess: bool = False,
     dry_run: bool = False,
@@ -109,6 +113,10 @@ def build_config(
         config.native_first = False
 
     config.timeout = timeout
+    if dpi is not None:
+        config.render_dpi = dpi
+    if qwen_backend is not None:
+        config.qwen_backend = qwen_backend
     config.save_figures = save_figures
     config.reprocess = reprocess
     config.dry_run = dry_run
@@ -304,6 +312,7 @@ def engines() -> None:
     console.print("\n[bold]Engines[/bold]\n")
 
     engine_info = [
+        (EngineType.QWEN, "local via Ollama/vLLM or cloud API (Qwen-VL, best open OCR)"),
         (EngineType.GLM, "local via Ollama (0.9B, ~10s/page)"),
         (EngineType.NOUGAT, "local, academic papers"),
         (EngineType.DEEPSEEK, "local via Ollama"),
