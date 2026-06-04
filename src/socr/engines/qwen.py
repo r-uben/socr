@@ -77,6 +77,8 @@ class QwenEngine(BaseEngine):
             "--backend", config.qwen_backend,
             "--dpi", str(config.render_dpi),
         ]
+        if config.qwen_model:
+            cmd.extend(["--model", config.qwen_model])
         if config.workers > 1:
             cmd.extend(["-w", str(config.workers)])
         if config.quiet:

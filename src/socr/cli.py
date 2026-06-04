@@ -37,6 +37,7 @@ def common_options(f):
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
     f = click.option("--dpi", type=int, default=None, help="Page render DPI for OCR engines (default 200; higher helps local VLMs)")(f)
     f = click.option("--qwen-backend", type=click.Choice(["auto", "ollama", "vllm", "api"]), default=None, help="Backend for the qwen engine")(f)
+    f = click.option("--qwen-model", type=str, default=None, help="Qwen model override (e.g. qwen3.5:27b local, qwen3.5:cloud)")(f)
     f = click.option("--save-figures", is_flag=True, help="Save extracted figure images")(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
     f = click.option("--dry-run", is_flag=True, help="List files without processing")(f)
@@ -79,6 +80,7 @@ def build_config(
     timeout: int = 1800,
     dpi: int | None = None,
     qwen_backend: str | None = None,
+    qwen_model: str | None = None,
     save_figures: bool = False,
     reprocess: bool = False,
     dry_run: bool = False,
@@ -117,6 +119,8 @@ def build_config(
         config.render_dpi = dpi
     if qwen_backend is not None:
         config.qwen_backend = qwen_backend
+    if qwen_model is not None:
+        config.qwen_model = qwen_model
     config.save_figures = save_figures
     config.reprocess = reprocess
     config.dry_run = dry_run

@@ -41,3 +41,14 @@ def test_qwen_build_command_matches_cli_contract():
 
 def test_qwen_backend_default_is_auto():
     assert PipelineConfig().qwen_backend == "auto"
+
+
+def test_qwen_model_override_passed_to_cli():
+    cfg = PipelineConfig(qwen_model="qwen3.5:27b")
+    cmd = QwenEngine()._build_command("/tmp/in", "/tmp/out", cfg)
+    assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "qwen3.5:27b"
+
+
+def test_qwen_model_omitted_when_unset():
+    cmd = QwenEngine()._build_command("/tmp/in", "/tmp/out", PipelineConfig())
+    assert "--model" not in cmd  # default ("") -> CLI picks its own default

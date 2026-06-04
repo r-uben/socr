@@ -155,6 +155,7 @@ class PipelineConfig:
     glm_backend: str = "ollama"  # "ollama", "transformers", or "vllm"
     glm_task: str = "text"  # "text", "formula", "table", "figure"
     qwen_backend: str = "auto"  # "auto", "ollama", "vllm", or "api"
+    qwen_model: str = ""  # override qwen-ocr model (e.g. qwen3.5:27b, qwen3.5:cloud); "" = CLI default
     nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
     gemini_model: str = "gemini-3-flash-preview"
@@ -206,7 +207,7 @@ class PipelineConfig:
             "consensus_enabled", "consensus_use_llm", "consensus_ollama_model",
             "reprocess", "dry_run", "quiet", "verbose",
             "deepseek_backend", "deepseek_task", "deepseek_vllm_url",
-            "glm_backend", "glm_task", "qwen_backend",
+            "glm_backend", "glm_task", "qwen_backend", "qwen_model",
             "nougat_model", "marker_device",
             "gemini_model", "gemini_task", "mistral_model",
         ]
