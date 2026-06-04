@@ -1236,6 +1236,19 @@ class UnifiedPipeline:
                 console.print(
                     f"  {len(plan.repairs)} page(s) to repair"
                 )
+                # Surface RECITATION refusals explicitly: a Gemini copyright-filter
+                # refusal must never be silent — name the reason and the recovery
+                # engine so the user knows the page was refused, not just retried.
+                for r in plan.repairs:
+                    ps = state.pages.get(r.page_num)
+                    if ps and any(
+                        a.failure_mode == FailureMode.RECITATION for a in ps.attempts
+                    ):
+                        console.print(
+                            f"  [yellow]p{r.page_num}: Gemini refused "
+                            f"(RECITATION — copyright/recitation filter) "
+                            f"→ recovering via {r.engine.value}[/yellow]"
+                        )
                 if plan.pages_skipped:
                     console.print(
                         f"  {len(plan.pages_skipped)} page(s) skipped "
