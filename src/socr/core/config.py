@@ -155,7 +155,11 @@ class PipelineConfig:
     glm_backend: str = "ollama"  # "ollama", "transformers", or "vllm"
     glm_task: str = "text"  # "text", "formula", "table", "figure"
     qwen_backend: str = "auto"  # "auto", "ollama", "vllm", or "api"
-    qwen_model: str = ""  # override qwen-ocr model (e.g. qwen3.5:27b, qwen3.5:cloud); "" = CLI default
+    # Default to qwen3.5:cloud (Ollama Cloud, vision): ~0.57 quality at ~49s/page on the
+    # owner's Mac — faster AND better than local qwen3-vl:8b, no extra key. Trade-off: it
+    # is ONLINE and uses the Ollama plan. For offline/private or true-free --agentic, pass
+    # --qwen-model qwen3-vl:8b. Empirics in [[reference-sococrbench]].
+    qwen_model: str = "qwen3.5:cloud"
     nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
     gemini_model: str = "gemini-3-flash-preview"

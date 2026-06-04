@@ -49,6 +49,15 @@ def test_qwen_model_override_passed_to_cli():
     assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "qwen3.5:27b"
 
 
-def test_qwen_model_omitted_when_unset():
-    cmd = QwenEngine()._build_command("/tmp/in", "/tmp/out", PipelineConfig())
-    assert "--model" not in cmd  # default ("") -> CLI picks its own default
+def test_qwen_model_defaults_to_cloud():
+    # Default is qwen3.5:cloud (Ollama Cloud) — best quality+speed, no extra key.
+    cfg = PipelineConfig()
+    assert cfg.qwen_model == "qwen3.5:cloud"
+    cmd = QwenEngine()._build_command("/tmp/in", "/tmp/out", cfg)
+    assert cmd[cmd.index("--model") + 1] == "qwen3.5:cloud"
+
+
+def test_qwen_model_omitted_when_blanked():
+    # Explicit "" restores the CLI's own default (no --model passed).
+    cmd = QwenEngine()._build_command("/tmp/in", "/tmp/out", PipelineConfig(qwen_model=""))
+    assert "--model" not in cmd
