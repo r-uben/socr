@@ -592,3 +592,28 @@ class TestEdgeCases:
         assert engines[1] not in {EngineType.DEEPSEEK, EngineType.DEEPSEEK_VLLM}
         # Page 2 (timeout) should get a lighter engine
         assert engines[2] in {EngineType.GLM, EngineType.NOUGAT, EngineType.MARKER}
+
+
+# ---------------------------------------------------------------------------
+# RECITATION → open-model escalation (Gemini's copyright filter)
+# ---------------------------------------------------------------------------
+
+def test_recitation_escalates_to_qwen():
+    """A Gemini RECITATION refusal routes to Qwen (open, no filter)."""
+    router = RepairRouter(
+        _make_config(primary_engine=EngineType.GEMINI, fallback_chain=[EngineType.GEMINI])
+    )
+    eng = router.select_repair_engine(
+        FailureMode.RECITATION, tried_engines={EngineType.GEMINI}
+    )
+    assert eng == EngineType.QWEN
+
+
+def test_recitation_never_routes_back_to_gemini():
+    """Even if Gemini is untried in the chain, RECITATION must not pick it."""
+    router = RepairRouter(
+        _make_config(primary_engine=EngineType.GEMINI, fallback_chain=[EngineType.GEMINI])
+    )
+    eng = router.select_repair_engine(FailureMode.RECITATION, tried_engines=set())
+    assert eng != EngineType.GEMINI
+    assert eng == EngineType.QWEN

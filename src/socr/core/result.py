@@ -45,6 +45,7 @@ class FailureMode(str, Enum):
     AUDIT_FAILED = "audit_failed"
     HALLUCINATION = "hallucination"
     REFUSAL = "refusal"
+    RECITATION = "recitation"  # Gemini copyright/recitation filter blocked verbatim output
     GARBAGE = "garbage"
     LOW_WORD_COUNT = "low_word_count"
     TRUNCATED = "truncated"

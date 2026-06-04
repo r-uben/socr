@@ -208,7 +208,7 @@ class BaseEngine(ABC):
                 return [
                     PageOutput(
                         page_num=pn, status=PageStatus.ERROR, engine=self.name,
-                        failure_mode=FailureMode.TIMEOUT,
+                        failure_mode=FailureMode.TIMEOUT, audit_passed=False,
                         error=f"Timeout after {config.timeout}s",
                     )
                     for pn in page_nums
@@ -219,7 +219,7 @@ class BaseEngine(ABC):
                 return [
                     PageOutput(
                         page_num=pn, status=PageStatus.ERROR, engine=self.name,
-                        failure_mode=FailureMode.CLI_ERROR,
+                        failure_mode=FailureMode.CLI_ERROR, audit_passed=False,
                         error=f"CLI exited {result.returncode}: {stderr}",
                     )
                     for pn in page_nums
@@ -228,6 +228,13 @@ class BaseEngine(ABC):
             # Read per-page output: CLI writes {cli_out}/{stem}/{stem}.md
             elapsed = time.time() - start_time
             outputs: list[PageOutput] = []
+            # A page can come back empty because the model REFUSED, not failed.
+            # Gemini's recitation/copyright filter blocks verbatim output of
+            # memorized (famous) text and exits 0 with no page file, logging
+            # "finish_reason=...RECITATION" to stderr. Detect it so repair can
+            # escalate to an open model instead of uselessly retrying Gemini.
+            stderr_text = result.stderr or ""
+            recitation_in_stderr = "RECITATION" in stderr_text
 
             for page_num in page_nums:
                 stem = page_num_to_stem[page_num]
@@ -243,12 +250,25 @@ class BaseEngine(ABC):
                         processing_time=elapsed / len(page_nums),
                         audit_passed=True,
                     ))
+                elif recitation_in_stderr and stem in stderr_text:
+                    outputs.append(PageOutput(
+                        page_num=page_num,
+                        status=PageStatus.ERROR,
+                        engine=self.name,
+                        failure_mode=FailureMode.RECITATION,
+                        audit_passed=False,
+                        error=(
+                            "model refused (RECITATION: copyright/recitation "
+                            "filter blocked verbatim output)"
+                        ),
+                    ))
                 else:
                     outputs.append(PageOutput(
                         page_num=page_num,
                         status=PageStatus.ERROR,
                         engine=self.name,
                         failure_mode=FailureMode.EMPTY_OUTPUT,
+                        audit_passed=False,
                         error=f"No output for page {page_num}",
                     ))
 

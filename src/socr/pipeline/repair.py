@@ -52,6 +52,17 @@ _CAPABLE_ENGINES: list[EngineType] = [
     EngineType.DEEPSEEK_VLLM,
 ]
 
+# RECITATION recovery: Gemini's copyright filter blocks verbatim output of
+# memorized (famous) documents — retrying Gemini just refuses again. Escalate to
+# an OPEN model with no such filter; Qwen-VL first (best open OCR), then others.
+# Deliberately excludes GEMINI.
+_RECITATION_ENGINES: list[EngineType] = [
+    EngineType.QWEN,
+    EngineType.MISTRAL,
+    EngineType.DEEPSEEK,
+    EngineType.GLM,
+]
+
 
 @dataclass
 class PageRepair:
@@ -123,6 +134,8 @@ class RepairRouter:
         match failure_mode:
             case FailureMode.HALLUCINATION:
                 return self._pick_different_family(tried_engines, candidates)
+            case FailureMode.RECITATION:
+                return self._pick_recitation_fallback(candidates)
             case FailureMode.REFUSAL:
                 return self._pick_cloud(candidates)
             case FailureMode.GARBAGE | FailureMode.LOW_WORD_COUNT:
@@ -229,6 +242,21 @@ class RepairRouter:
             if engine in _CLOUD_ENGINES:
                 return engine
         return candidates[0]
+
+    def _pick_recitation_fallback(
+        self, candidates: list[EngineType]
+    ) -> EngineType:
+        """For RECITATION: prefer an open model (Qwen first); never Gemini.
+
+        Gemini was the one that refused; another Gemini call refuses again.
+        Candidates already exclude tried engines, so Gemini is normally gone —
+        but skip it explicitly in case it re-enters via the chain.
+        """
+        for engine in _RECITATION_ENGINES:
+            if engine in candidates:
+                return engine
+        non_gemini = [e for e in candidates if e != EngineType.GEMINI]
+        return non_gemini[0] if non_gemini else candidates[0]
 
     def _pick_capable(self, candidates: list[EngineType]) -> EngineType:
         """For garbage/low-word-count: prefer more capable engines."""
