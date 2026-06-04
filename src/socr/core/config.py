@@ -112,7 +112,8 @@ class PipelineConfig:
     truncation_retries: int = 1  # Retry same engine on truncation before fallback
     chunk_threshold: int = 30  # Chunk PDFs longer than this many pages
     chunk_size: int = 20  # Pages per chunk
-    render_dpi: int = 200  # DPI for page rendering (used by deepseek/glm CLIs)
+    render_dpi: int = 300  # DPI for page rendering; 300 resolves small table digits/parens
+    #   (200 misreads e.g. "(0.001)" as "(0.007)"); override per-run with --dpi.
     workers: int = 1  # Concurrent workers (passed to CLI --workers flag)
     save_figures: bool = False
     figures_max_total: int = 25
