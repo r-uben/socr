@@ -66,9 +66,31 @@ def locate_tables(page) -> list[TableBox]:
     boxes: list[TableBox] = []
     boxes.extend(_ruled_tables(page))
     boxes.extend(_booktabs_tables(page))
+
+    # Scanned pages expose no vectors, so the detectors above find nothing. Fall
+    # back to detecting rules in the rendered raster. Gated on the scanned
+    # signature (a page image + no vector drawings) so we never run CV on the
+    # born-digital common case, where the vector path already answered.
+    if not boxes and _is_scanned(page):
+        from socr.tables.image_locate import locate_tables_image
+
+        boxes.extend(locate_tables_image(page))
+
     boxes = _dedup(boxes)
     boxes.sort(key=lambda b: (b.bbox[1], b.bbox[0]))  # reading order
     return boxes
+
+
+def _is_scanned(page) -> bool:
+    """Scanned-page signature: a raster image present and no vector drawings.
+
+    Born-digital pages (even table-less prose) carry vector drawings; a scan is a
+    single embedded image with an empty drawing list.
+    """
+    try:
+        return bool(page.get_images()) and not page.get_drawings()
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 def _ruled_tables(page) -> list[TableBox]:
@@ -94,12 +116,32 @@ def _booktabs_tables(page) -> list[TableBox]:
     A single isolated rule is not a table (needs >= 2 rules to bound a band).
     """
     rules = _horizontal_rules(page)
+    return bands_from_rules(rules, page.rect, source="booktabs")
+
+
+def bands_from_rules(
+    rules: list[tuple[float, float, float]], page_rect, source: str
+) -> list[TableBox]:
+    """Group horizontal rules ``(y, x0, x1)`` (PDF points) into table bands.
+
+    Shared by the vector booktabs detector and the image-raster detector. Rules
+    that horizontally overlap are stacked into one band, bounded by their extent
+    and clamped to the page. A band needs >= 2 rules (one rule cannot bound a
+    table).
+
+    NOTE (known limitation): rules alone cannot tell one tall table from two
+    stacked ones. Real pages confirmed both shapes with similar inter-rule gaps
+    (a 238pt gap inside a single full-page table vs a 160pt gap between two small
+    tables), so a gap-split heuristic would mis-handle one to fix the other.
+    Multi-table pages therefore over-merge into one band -> an imprecise crop ->
+    the reconciler's column-count check flags rather than patches. Failing to
+    flag-only is safe; it just forfeits the benefit. Precise multi-table
+    splitting needs content-aware region detection (future work).
+    """
     if len(rules) < 2:
         return []
 
-    # Group rules that share a horizontal span into bands. Rules arrive sorted by
-    # y; a new rule joins the current band if it horizontally overlaps the band's
-    # span (same table column block stacked vertically).
+    rules = sorted(rules)
     groups: list[list[tuple[float, float, float]]] = []
     for rule in rules:  # (y, x0, x1)
         placed = False
@@ -111,25 +153,16 @@ def _booktabs_tables(page) -> list[TableBox]:
         if not placed:
             groups.append([rule])
 
-    # NOTE (known limitation): rules alone cannot tell one tall table from two
-    # stacked ones. Real pages confirmed both shapes with similar inter-rule gaps
-    # (a 238pt gap inside a single full-page table vs a 160pt gap between two small
-    # tables), so a gap-split heuristic would mis-handle one to fix the other.
-    # Multi-table pages therefore over-merge into one band -> an imprecise crop ->
-    # the reconciler's column-count check flags rather than patches. Failing to
-    # flag-only is safe; it just forfeits the benefit. Precise multi-table
-    # splitting needs content-aware region detection (future work).
-    pr = page.rect
     out: list[TableBox] = []
     for group in groups:
         if len(group) < 2:
-            continue  # one rule cannot bound a table band
+            continue
         ys = [r[0] for r in group]
-        x0 = max(pr.x0, min(r[1] for r in group))
-        x1 = min(pr.x1, max(r[2] for r in group))
+        x0 = max(page_rect.x0, min(r[1] for r in group))
+        x1 = min(page_rect.x1, max(r[2] for r in group))
         bbox = (x0, min(ys), x1, max(ys))
         if _plausible(bbox):
-            out.append(TableBox(bbox=bbox, source="booktabs"))
+            out.append(TableBox(bbox=bbox, source=source))
     return out
 
 

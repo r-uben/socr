@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import fitz
+import pytest
 
 from socr.core.born_digital import DocumentAssessment, PageAssessment
 from socr.core.config import PipelineConfig
@@ -127,6 +128,67 @@ def test_locate_ignores_prose_on_mixed_page():
     _x0, y0, _x1, y1 = boxes[0].bbox
     # The band starts at the first rule, not at the "4. Results" title (y~80).
     assert y0 > 120
+
+
+# --------------------------------------------------------------------------
+# Image-based localization (scanned pages: no vectors)
+# --------------------------------------------------------------------------
+
+
+def _image_only_page(style="booktabs"):
+    """A page whose content is a single rendered image and no vector drawings —
+    the scanned-page signature."""
+    src, _ = _build_page(style)
+    pix = src[0].get_pixmap(matrix=fitz.Matrix(150 / 72, 150 / 72))
+    doc = fitz.open()
+    page = doc.new_page(width=src[0].rect.width, height=src[0].rect.height)
+    page.insert_image(page.rect, pixmap=pix)
+    return doc, page
+
+
+def test_is_scanned_signature():
+    from socr.tables.locate import _is_scanned
+
+    _doc, born = _build_page("booktabs")   # vector drawings present
+    assert _is_scanned(born) is False
+    _doc2, scanned = _image_only_page("booktabs")
+    assert _is_scanned(scanned) is True
+
+
+def test_image_detector_finds_scanned_table():
+    pytest.importorskip("cv2")  # detection needs opencv; fail-open returns [] without it
+    _doc, page = _image_only_page("booktabs")
+    boxes = locate_tables(page)
+    assert len(boxes) >= 1
+    assert all(b.source == "image" for b in boxes)
+    # bounds the table region, not the whole page
+    x0, y0, x1, y1 = boxes[0].bbox
+    pr = page.rect
+    assert pr.x0 <= x0 and x1 <= pr.x1 and y1 <= pr.y1
+
+
+def test_image_detector_ignores_scanned_prose():
+    # Render prose to an image-only page: thin/solid/wide filters must reject text
+    # rows (the false-positive failure mode the vector path never had).
+    src = fitz.open()
+    sp = src.new_page()
+    y = 90
+    prose = "This is a justified line of body prose text on the page."
+    for _ in range(30):
+        sp.insert_text((72, y), prose, fontsize=10)
+        y += 18
+    pix = sp.get_pixmap(matrix=fitz.Matrix(150 / 72, 150 / 72))
+    doc = fitz.open()
+    page = doc.new_page(width=sp.rect.width, height=sp.rect.height)
+    page.insert_image(page.rect, pixmap=pix)
+    assert locate_tables(page) == []
+
+
+def test_vector_page_does_not_trigger_image_path():
+    # Born-digital booktabs page: located by the vector detector, source != image.
+    _doc, page = _build_page("booktabs")
+    boxes = locate_tables(page)
+    assert boxes and all(b.source != "image" for b in boxes)
 
 
 # --------------------------------------------------------------------------
