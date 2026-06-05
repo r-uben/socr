@@ -122,6 +122,11 @@ class PipelineConfig:
     # --- Audit ---
     audit_enabled: bool = True
     audit_min_words: int = 50
+    # VLM judge on HARD pages (tables/equations): a vision model checks the OCR
+    # against the page image to catch SEMANTIC corruption the heuristics can't —
+    # flipped signs, wrong digits (0.001->0.007), swapped columns. Rejected pages
+    # re-route through repair. No-ops if no vision judge model is available.
+    judge_hard_pages: bool = True
 
     # --- Agentic cost-aware routing (all default-off = unchanged behavior) ---
     agentic: bool = False  # per-page: try cheapest provider, judge escalates

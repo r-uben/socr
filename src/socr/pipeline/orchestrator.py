@@ -129,6 +129,12 @@ class UnifiedPipeline:
             if backbone_result and backbone_result.success and self.config.audit_enabled:
                 self._phase_score(state, backbone_result)
 
+            # Phase 3b: VLM judge on HARD pages — catch semantic corruption
+            # (wrong digits/signs/columns) the heuristics miss; rejects re-route
+            # through repair.
+            if self.config.audit_enabled and self.config.judge_hard_pages:
+                self._phase_judge_hard_pages(state)
+
             # Phase 4: Selective Repair (loops up to max_retries)
             if self.config.audit_enabled:
                 self._phase_repair(state, out_dir)
@@ -751,6 +757,97 @@ class UnifiedPipeline:
             except Exception:  # availability probe must never crash routing
                 continue
         return available
+
+    # Vision models tried (in order) as the hard-page judge when judge_model is
+    # unset. Cloud-first so the judge is fast; local small VLM as offline fallback.
+    _JUDGE_MODEL_CANDIDATES = ["qwen3.5:cloud", "minicpm-v:8b", "qwen3-vl:8b"]
+
+    def _resolve_judge_model(self) -> str | None:
+        """Pick an available vision model for judging, or None if none usable."""
+        from socr.judge.ollama_judge import OllamaVisionJudge
+
+        if self.config.judge_model:
+            return self.config.judge_model
+        for model in self._JUDGE_MODEL_CANDIDATES:
+            try:
+                if OllamaVisionJudge(model=model).is_available():
+                    return model
+            except Exception:
+                continue
+        return None
+
+    def _phase_judge_hard_pages(self, state: DocumentState) -> None:
+        """Run a VLM judge on HARD pages (tables/equations) to catch semantic
+        corruption the heuristic audit cannot see. Rejected pages lose their
+        best_output, so the repair phase re-routes them to another engine.
+        """
+        from socr.judge.ollama_judge import OllamaVisionJudge
+        from socr.pipeline.agentic import VLMPageJudge
+
+        model = self._resolve_judge_model()
+        if not model:
+            return  # no vision judge available; heuristic audit already ran
+
+        # Which pages are worth the extra call: those with tables or equations,
+        # where wrong digits/signs/columns are both likely and costly.
+        assessment = self._last_assessment
+        hard_pages = {
+            pa.page_num for pa in (assessment.pages if assessment else [])
+            if pa.has_tables or pa.has_equations
+        }
+        if not hard_pages:
+            return
+
+        try:
+            judge = VLMPageJudge(
+                OllamaVisionJudge(model=model), self._make_page_renderer(state)
+            )
+        except Exception as exc:
+            logger.warning("hard-page judge unavailable (%s)", exc)
+            return
+
+        if not self.config.quiet:
+            console.print(
+                f"\n[cyan]Phase 3b:[/cyan] VLM judge on hard pages [{model}]"
+            )
+
+        judged = rejected = 0
+        for page_num in sorted(state.pages):
+            if page_num not in hard_pages:
+                continue
+            ps = state.pages[page_num]
+            bo = ps.best_output
+            # Only judge model-produced OCR (native text is character-exact; the
+            # corruption risk lives in the VLM transcription).
+            if not bo or not bo.text or bo.engine == "native":
+                continue
+            judged += 1
+            try:
+                # VLMPageJudge.assess(output, provider); provider is unused here.
+                decision = judge.assess(bo, None)
+            except Exception as exc:  # a judge failure must never drop the page
+                logger.warning("judge errored on p%d (%s); keeping output", page_num, exc)
+                continue
+            if decision.accept:
+                continue
+            rejected += 1
+            issues = decision.reason if decision.reason and decision.reason != "faithful" else ""
+            bo.audit_passed = False
+            bo.failure_mode = FailureMode.AUDIT_FAILED
+            bo.error = "VLM judge rejected (image mismatch)" + (f": {issues}" if issues else "")
+            ps.best_output = None  # -> needs_repair -> repair escalates
+            if not self.config.quiet:
+                console.print(
+                    f"  [yellow]p{page_num}: judge rejected — re-routing to repair"
+                    + (f" ({issues})" if issues else "")
+                    + "[/yellow]"
+                )
+
+        if not self.config.quiet:
+            if judged == 0:
+                console.print("  No model-OCR'd hard pages to judge")
+            else:
+                console.print(f"  {judged} judged, {rejected} rejected")
 
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics."""

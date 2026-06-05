@@ -33,6 +33,7 @@ def common_options(f):
     f = click.option("--primary", type=click.Choice(ENGINE_CHOICES), help="Primary OCR engine")(f)
     f = click.option("--fallback", type=click.Choice(ENGINE_CHOICES), help="Fallback OCR engine")(f)
     f = click.option("--no-audit", is_flag=True, help="Skip quality audit stage")(f)
+    f = click.option("--no-judge-hard-pages", is_flag=True, help="Disable VLM judge on hard pages (tables/math)")(f)
     f = click.option("--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages")(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
     f = click.option("--dpi", type=int, default=None, help="Page render DPI for OCR engines (default 200; higher helps local VLMs)")(f)
@@ -76,6 +77,7 @@ def build_config(
     primary: str | None = None,
     fallback: str | None = None,
     no_audit: bool = False,
+    no_judge_hard_pages: bool = False,
     no_native_first: bool = False,
     timeout: int = 1800,
     dpi: int | None = None,
@@ -111,6 +113,8 @@ def build_config(
         config.fallback_engine = EngineType(fallback)
     if no_audit:
         config.audit_enabled = False
+    if no_judge_hard_pages:
+        config.judge_hard_pages = False
     if no_native_first:
         config.native_first = False
 
