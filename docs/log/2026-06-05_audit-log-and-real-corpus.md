@@ -63,6 +63,47 @@ detection to produce precise crops on dense / multi-table pages, and (b) the
 crop-read VLM is slow/unreliable on a 64GB Mac + flaky cloud. This echoes the
 qwen-session panel verdict ("near ceiling for page-level OCR on this hardware").
 
+## Image-based table localization (built this session)
+Vector detectors read `get_drawings()`, empty on a true scan (confirmed: no
+scanned page in the pre-1996 set exposes one vector rule), so dual-pass was
+structurally blind on its real target. Added `image_locate.py`: connected-
+component horizontal-rule detection on the rendered raster. The hard part the
+vector case lacked is separating a drawn rule from a justified-prose text row;
+three discriminators (thin / solid >=55% ink / wide >=40%) cleanly separate them
+- validated: a dense table page yields its rules, three REAL scanned prose pages
+yield zero false positives. Gated on the scanned signature (image + no vectors)
+and only when vectors found nothing. Reuses `bands_from_rules`; fail-open without
+opencv. 522 tests pass.
+
+## Corpus-composition findings that reframe the whole feature
+Investigating real scans surfaced two facts that matter more than any code:
+1. **The owner's corpus is overwhelmingly born-digital.** Only ONE scanned paper
+   in the entire pre-1996 set (Christiano-Eichenbaum 1992, table-less theory). No
+   scanned paper has a rule-dense (ruled-table) page. So the scanned slice that
+   image-localization serves is, on this corpus, nearly empty.
+2. **The real defect is structure-loss, not VLM corruption.** On born-digital
+   booktabs tables (the common case) `find_tables` returns 0, so `extract_
+   structured` cannot build a grid, and PyMuPDF native extraction yields correct
+   VALUES but a flat 1-D token stream (`Industry / b / b / s / h / FabPr / 0.253
+   / ...`) - the numbers are char-exact, the table grid is gone.
+
+**Implication / recommended pivot (not yet taken):** the highest-value table work
+is not "catch a VLM corrupting a table" (rare here) but "restore grid structure to
+native-extracted born-digital booktabs tables." The safe design: crop the table,
+use a VLM for LAYOUT ONLY, and anchor every cell to the char-exact native value
+(native = ground truth, so the VLM never supplies a number - no silent corruption,
+which sidesteps codex's crop-fidelity objection entirely). Owner chose to finish
+image-localization first; this pivot is the standout candidate for next.
+
+## Auto-patch default — codex verdict (pending decision)
+Codex (gpt-5.5) strongly recommends flipping AUTO-PATCH -> FLAG-ONLY by default:
+column-count agreement is not real protection (a model can keep table shape and
+still change 0.031->0.037), and a silent wrong patch to a research number is worse
+than a missed correction. Make auto-patch opt-in (`--auto-patch-tables`) until the
+crop reader is proven on held-out ground truth. The graceful-automatic path
+(per-cell confidence via crop self-consistency / zoom-in tiebreak / native anchor)
+all depends on a fast reliable crop reader first. NOT yet implemented.
+
 ## Next (owner's call)
 1. **Content-aware table-region detection** — bound a table by its columnar-numeric
    content, not just rules; would fix fragmentation + multi-table + missing-bottom
