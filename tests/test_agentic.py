@@ -108,8 +108,13 @@ def test_provider_exception_is_recorded_and_skipped():
     def run(engine, page_num):
         if engine == EngineType.GLM:
             raise RuntimeError("ollama down")
-        return PageOutput(page_num=page_num, text="cloud ok", engine=engine.value,
-                          status=PageStatus.SUCCESS, audit_passed=True)
+        return PageOutput(
+            page_num=page_num,
+            text="cloud ok",
+            engine=engine.value,
+            status=PageStatus.SUCCESS,
+            audit_passed=True,
+        )
 
     d = route_page(7, LADDER, run, _StubJudge({EngineType.GEMINI}))
     assert d.accepted and d.winning_engine == "gemini"

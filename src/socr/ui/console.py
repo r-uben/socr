@@ -57,17 +57,17 @@ class AgentConsole:
     ) -> None:
         """Print result for a single page."""
         icon = STATUS_ICONS.get(status, ".")
-        
+
         line = Text("    ")
         line.append(f"[{icon}] ", style=status)
         line.append(f"page {page}", style="" if status == "success" else "bold")
-        
+
         if confidence is not None and confidence < 0.8:
             line.append(f" ({confidence:.0%})", style="warning")
-        
+
         if message:
             line.append(f" {message}", style="dim")
-        
+
         self.console.print(line)
 
     def print_audit_result(
@@ -94,7 +94,9 @@ class AgentConsole:
     ) -> None:
         """Print result for a processed figure."""
         short_desc = description[:40] + "..." if len(description) > 40 else description
-        self.console.print(f"    [+] fig {figure_num} (p.{page}): [info]{fig_type}[/info] [dim]{short_desc}[/dim]")
+        self.console.print(
+            f"    [+] fig {figure_num} (p.{page}): [info]{fig_type}[/info] [dim]{short_desc}[/dim]"
+        )
 
     def print_summary(
         self,
@@ -110,22 +112,22 @@ class AgentConsole:
         self.console.print()
         self.console.print("[dim]---[/dim]")
         self.console.print()
-        
+
         # Stats
         self.console.print(f"[success]done[/success] {pages_success}/{pages_total} pages")
-        
+
         if figures_count > 0:
             self.console.print(f"     {figures_count} figures")
-        
+
         self.console.print(f"     {time_seconds:.1f}s")
-        
+
         if cost > 0:
             self.console.print(f"     ${cost:.4f}")
-        
+
         # Engines
         engine_parts = [f"{ENGINE_LABELS.get(e, e)} ({c})" for e, c in engines_used.items()]
         self.console.print(f"[dim]     {' + '.join(engine_parts)}[/dim]")
-        
+
         self.console.print()
         self.console.print(f"[dim]->[/dim] {output_path}")
         self.console.print()

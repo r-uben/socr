@@ -11,8 +11,7 @@ from socr.core.config import EngineType, PipelineConfig
 console = Console()
 
 ENGINE_CHOICES = [
-    e.value for e in EngineType
-    if e not in (EngineType.DEEPSEEK_VLLM, EngineType.VLLM)
+    e.value for e in EngineType if e not in (EngineType.DEEPSEEK_VLLM, EngineType.VLLM)
 ]
 # "auto" probes CLI engines in priority order
 
@@ -28,48 +27,88 @@ class PDFShortcutGroup(click.Group):
 
 # --- Shared options ---
 
+
 def common_options(f):
     """Options shared between process and batch."""
     f = click.option("--primary", type=click.Choice(ENGINE_CHOICES), help="Primary OCR engine")(f)
     f = click.option("--fallback", type=click.Choice(ENGINE_CHOICES), help="Fallback OCR engine")(f)
     f = click.option("--no-audit", is_flag=True, help="Skip quality audit stage")(f)
-    f = click.option("--no-judge-hard-pages", is_flag=True, help="Disable VLM judge on hard pages (tables/math)")(f)
-    f = click.option("--no-dual-pass-tables", is_flag=True, help="Disable dual-pass table extraction (crop + re-read located tables)")(f)
-    f = click.option("--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages")(f)
+    f = click.option(
+        "--no-judge-hard-pages", is_flag=True, help="Disable VLM judge on hard pages (tables/math)"
+    )(f)
+    f = click.option(
+        "--no-dual-pass-tables",
+        is_flag=True,
+        help="Disable dual-pass table extraction (crop + re-read located tables)",
+    )(f)
+    f = click.option(
+        "--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages"
+    )(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
-    f = click.option("--dpi", type=int, default=None, help="Page render DPI for OCR engines (default 200; higher helps local VLMs)")(f)
-    f = click.option("--qwen-backend", type=click.Choice(["auto", "ollama", "vllm", "api"]), default=None, help="Backend for the qwen engine")(f)
-    f = click.option("--qwen-model", type=str, default=None, help="Qwen model override (e.g. qwen3.5:27b local, qwen3.5:cloud)")(f)
+    f = click.option(
+        "--dpi",
+        type=int,
+        default=None,
+        help="Page render DPI for OCR engines (default 200; higher helps local VLMs)",
+    )(f)
+    f = click.option(
+        "--qwen-backend",
+        type=click.Choice(["auto", "ollama", "vllm", "api"]),
+        default=None,
+        help="Backend for the qwen engine",
+    )(f)
+    f = click.option(
+        "--qwen-model",
+        type=str,
+        default=None,
+        help="Qwen model override (e.g. qwen3.5:27b local, qwen3.5:cloud)",
+    )(f)
     f = click.option("--save-figures", is_flag=True, help="Save extracted figure images")(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
     f = click.option("--dry-run", is_flag=True, help="List files without processing")(f)
     f = click.option("-q", "--quiet", is_flag=True, help="Suppress non-error output")(f)
     f = click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")(f)
-    f = click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path), help="YAML config file")(f)
+    f = click.option(
+        "--config",
+        "config_path",
+        type=click.Path(exists=True, path_type=Path),
+        help="YAML config file",
+    )(f)
     f = click.option("--profile", type=str, help="Load ~/.config/socr/{profile}.yaml")(f)
     # Agentic cost-aware routing
     f = click.option(
-        "--agentic", is_flag=True,
+        "--agentic",
+        is_flag=True,
         help="Cost-aware routing: per page, cheapest provider first, judge escalates",
     )(f)
     f = click.option(
-        "--judge-backend", type=click.Choice(["auto", "vlm", "heuristic"]),
-        default="auto", help="Quality judge for agentic mode",
+        "--judge-backend",
+        type=click.Choice(["auto", "vlm", "heuristic"]),
+        default="auto",
+        help="Quality judge for agentic mode",
     )(f)
     f = click.option(
-        "--judge-model", type=str, default="",
+        "--judge-model",
+        type=str,
+        default="",
         help="VLM model for the judge (e.g. qwen2-vl:7b)",
     )(f)
     f = click.option(
-        "--max-cost-per-page", type=float, default=0.0,
+        "--max-cost-per-page",
+        type=float,
+        default=0.0,
         help="Skip providers above this $/page (0=no cap)",
     )(f)
     f = click.option(
-        "--cost-budget", type=float, default=0.0,
+        "--cost-budget",
+        type=float,
+        default=0.0,
         help="Stop escalating once doc spend hits this $ (0=unlimited)",
     )(f)
     f = click.option(
-        "--write-manifest", is_flag=True, help="Write a replayable manifest + blob cache",
+        "--write-manifest",
+        is_flag=True,
+        help="Write a replayable manifest + blob cache",
     )(f)
     return f
 
@@ -151,6 +190,7 @@ def build_config(
 
 # --- Commands ---
 
+
 @click.group(cls=PDFShortcutGroup, invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="socr")
 @click.pass_context
@@ -172,8 +212,16 @@ def cli(ctx: click.Context) -> None:
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
 @click.option("--hpc-sequential", is_flag=True, help="Use HPC sequential pipeline (vLLM)")
 @click.option("--unified", is_flag=True, help="Use UnifiedPipeline (5-phase orchestrator)")
-@click.option("--multi-engine", "multi_engine_str", type=str, default="", help="Comma-separated engines to run (e.g. gemini,mistral)")
-@click.option("--consensus-llm", type=str, default="", help="Ollama model for LLM consensus (e.g. qwen3.5:4b)")
+@click.option(
+    "--multi-engine",
+    "multi_engine_str",
+    type=str,
+    default="",
+    help="Comma-separated engines to run (e.g. gemini,mistral)",
+)
+@click.option(
+    "--consensus-llm", type=str, default="", help="Ollama model for LLM consensus (e.g. qwen3.5:4b)"
+)
 @common_options
 def process(
     pdf_path: Path,
@@ -203,9 +251,7 @@ def process(
     if multi_engine_str:
         try:
             config.multi_engine = [
-                EngineType(e.strip())
-                for e in multi_engine_str.split(",")
-                if e.strip()
+                EngineType(e.strip()) for e in multi_engine_str.split(",") if e.strip()
             ]
         except ValueError as exc:
             raise click.ClickException(f"Unknown engine: {exc}")
@@ -251,7 +297,13 @@ def process(
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
 @click.option("--limit", type=int, help="Maximum number of PDFs to process")
 @click.option("--unified", is_flag=True, help="Use UnifiedPipeline (5-phase orchestrator)")
-@click.option("--multi-engine", "multi_engine_str", type=str, default="", help="Comma-separated engines (e.g. gemini,mistral)")
+@click.option(
+    "--multi-engine",
+    "multi_engine_str",
+    type=str,
+    default="",
+    help="Comma-separated engines (e.g. gemini,mistral)",
+)
 @common_options
 def batch(
     pdf_dir: Path,
@@ -278,9 +330,7 @@ def batch(
     if multi_engine_str:
         try:
             config.multi_engine = [
-                EngineType(e.strip())
-                for e in multi_engine_str.split(",")
-                if e.strip()
+                EngineType(e.strip()) for e in multi_engine_str.split(",") if e.strip()
             ]
         except ValueError as exc:
             raise click.ClickException(f"Unknown engine: {exc}")
@@ -307,6 +357,7 @@ def batch(
             console.print("[yellow]No PDF files found[/yellow]")
             return
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmpdir:
             limited_dir = Path(tmpdir)
             for pdf in pdfs:
@@ -555,8 +606,7 @@ def benchmark_run(benchmark_dir: Path, output_dir: Path, engine_names: str | Non
     manifest = benchmark_dir / "benchmark.json"
     if not manifest.exists():
         raise click.ClickException(
-            f"Benchmark manifest not found: {manifest}\n"
-            "Run 'socr benchmark init' first."
+            f"Benchmark manifest not found: {manifest}\nRun 'socr benchmark init' first."
         )
 
     bench = BenchmarkSet.load(manifest)
@@ -657,7 +707,11 @@ def benchmark_calibrate(
     # Print engine profiles
     console.print("\n[bold]Engine Profiles[/bold]\n")
     for profile in report.profiles:
-        avg_wer = sum(profile.category_wer.values()) / len(profile.category_wer) if profile.category_wer else float("nan")
+        avg_wer = (
+            sum(profile.category_wer.values()) / len(profile.category_wer)
+            if profile.category_wer
+            else float("nan")
+        )
         console.print(
             f"  {profile.engine:<12} "
             f"avg_wer={avg_wer:.3f}  "

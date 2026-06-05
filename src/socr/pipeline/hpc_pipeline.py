@@ -168,6 +168,7 @@ class HPCPipeline:
                 elif not self.config.quiet:
                     console.print(f"  [red]Page {page_num}:[/red] {result.error}")
         else:
+
             def process_page(pn: int, img: Image.Image):
                 return pn, engine.process_image(img, pn)
 
@@ -202,7 +203,9 @@ class HPCPipeline:
                 outputs.update(gemini_outputs)
 
         if not self.config.quiet:
-            console.print(f"  [green]{len(outputs)}/{len(self._page_images)} pages extracted[/green]")
+            console.print(
+                f"  [green]{len(outputs)}/{len(self._page_images)} pages extracted[/green]"
+            )
 
         return outputs
 
@@ -265,16 +268,19 @@ class HPCPipeline:
                 outputs.append(nougat_outputs[page_num])
 
             if not outputs:
-                results.append(PageOutput(
-                    page_num=page_num,
-                    status=PageStatus.ERROR,
-                    error="No engine produced output",
-                ))
+                results.append(
+                    PageOutput(
+                        page_num=page_num,
+                        status=PageStatus.ERROR,
+                        error="No engine produced output",
+                    )
+                )
                 continue
 
             reconciliation = self.reconciler.reconcile(outputs, page_num)
             page_output = create_page_output_from_reconciliation(
-                reconciliation, page_num,
+                reconciliation,
+                page_num,
                 processing_time=sum(o.processing_time for o in outputs),
             )
             results.append(page_output)
@@ -320,7 +326,9 @@ class HPCPipeline:
 
         # Start vision model for descriptions
         base_url, api_key = self._start_server(self.config.hpc.vision_model)
-        vision_config = VLLMConfig(base_url=base_url, model=self.config.hpc.vision_model, api_key=api_key)
+        vision_config = VLLMConfig(
+            base_url=base_url, model=self.config.hpc.vision_model, api_key=api_key
+        )
         vision_engine = VLLMEngine(vision_config)
 
         figures: list[FigureInfo] = []
@@ -341,17 +349,21 @@ class HPCPipeline:
                         info.image_path = fig.saved_path
                     figures.append(info)
                 else:
-                    figures.append(FigureInfo(
-                        figure_num=fig.figure_num,
-                        page_num=fig.page_num,
-                        figure_type="extracted",
-                        image_path=fig.saved_path,
-                    ))
+                    figures.append(
+                        FigureInfo(
+                            figure_num=fig.figure_num,
+                            page_num=fig.page_num,
+                            figure_type="extracted",
+                            image_path=fig.saved_path,
+                        )
+                    )
 
             vision_engine.close()
         else:
             if not self.config.quiet:
-                console.print("[yellow]Vision model not available, saving figures without descriptions[/yellow]")
+                console.print(
+                    "[yellow]Vision model not available, saving figures without descriptions[/yellow]"
+                )
             figures = [
                 FigureInfo(
                     figure_num=fig.figure_num,
@@ -437,11 +449,17 @@ class HPCPipeline:
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = engine.process_document(
-                self._page_images[1] if 1 in self._page_images else list(self._page_images.values())[0],
-                Path(tmpdir),
-                self.config,
-            ) if False else None  # Gemini needs the PDF path, not images
+            result = (
+                engine.process_document(
+                    self._page_images[1]
+                    if 1 in self._page_images
+                    else list(self._page_images.values())[0],
+                    Path(tmpdir),
+                    self.config,
+                )
+                if False
+                else None
+            )  # Gemini needs the PDF path, not images
 
         # Gemini CLI works on the whole PDF — can't do per-page fallback easily
         # Log this limitation

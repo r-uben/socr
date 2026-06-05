@@ -122,8 +122,7 @@ Prose after.
 """
 
 _CROP_MD = (
-    "| var | (1) | (2) |\n| --- | --- | --- |\n"
-    "| educ | 0.082 | 0.077 |\n| se | (0.009) | (0.010) |"
+    "| var | (1) | (2) |\n| --- | --- | --- |\n| educ | 0.082 | 0.077 |\n| se | (0.009) | (0.010) |"
 )
 
 
@@ -142,7 +141,7 @@ def test_diff_grids_names_the_changed_cell():
 
 
 def test_diff_grids_ignores_formatting_only_differences():
-    a = [["x", "−0.5"]]   # unicode minus, extra spacing
+    a = [["x", "−0.5"]]  # unicode minus, extra spacing
     b = [["x", "  -0.5 "]]
     assert diff_grids(a, b) == []
 
@@ -242,8 +241,12 @@ def _assessment(has_tables=True):
         path=Path("/tmp/fake.pdf"),
         pages=[
             PageAssessment(
-                page_num=1, is_born_digital=True, native_text="",
-                confidence=1.0, has_tables=has_tables, has_equations=False,
+                page_num=1,
+                is_born_digital=True,
+                native_text="",
+                confidence=1.0,
+                has_tables=has_tables,
+                has_equations=False,
             )
         ],
     )
@@ -251,8 +254,9 @@ def _assessment(has_tables=True):
 
 def _state_with_table_page(pdf: Path, page_text: str, engine="gemini"):
     state = DocumentState(handle=DocumentHandle(path=pdf))
-    bo = PageOutput(page_num=1, text=page_text, status=PageStatus.SUCCESS,
-                    engine=engine, audit_passed=True)
+    bo = PageOutput(
+        page_num=1, text=page_text, status=PageStatus.SUCCESS, engine=engine, audit_passed=True
+    )
     state.pages[1].attempts.append(bo)
     state.pages[1].best_output = bo
     return state, bo
@@ -260,6 +264,7 @@ def _state_with_table_page(pdf: Path, page_text: str, engine="gemini"):
 
 def _wire_reader(monkeypatch, reader):
     import socr.tables.extract as extract_mod
+
     monkeypatch.setattr(extract_mod, "OllamaTableReader", lambda *a, **k: reader)
 
 

@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 
 _PIPE_LINE = re.compile(r"^\s*\|?.*\|.*$")  # a markdown table row contains a pipe
-_SEP_CELL = re.compile(r"^:?-{1,}:?$")        # ---, :---, ---:, :---: separator cell
+_SEP_CELL = re.compile(r"^:?-{1,}:?$")  # ---, :---, ---:, :---: separator cell
 
 
 @dataclass
@@ -30,19 +30,19 @@ class CellDiff:
 
     row: int
     col: int
-    page_value: str   # what the whole-page OCR said (Pass A)
-    crop_value: str   # what the crop pass said (Pass B), now authoritative
+    page_value: str  # what the whole-page OCR said (Pass A)
+    crop_value: str  # what the crop pass said (Pass B), now authoritative
 
 
 @dataclass
 class TableDisagreement:
     """A reconciled table where the two passes disagreed."""
 
-    table_index: int            # reading-order index on the page
-    source: str                 # "ruled" | "booktabs" (locator that found it)
-    action: str                 # "patched" | "flagged"
+    table_index: int  # reading-order index on the page
+    source: str  # "ruled" | "booktabs" (locator that found it)
+    action: str  # "patched" | "flagged"
     changed_cells: list[CellDiff] = field(default_factory=list)
-    note: str = ""              # why flagged-only, if applicable
+    note: str = ""  # why flagged-only, if applicable
 
     def summary(self) -> str:
         if self.changed_cells:
@@ -56,7 +56,7 @@ class TableDisagreement:
 class TableReconcileResult:
     """Outcome of reconciling one page's tables."""
 
-    text: str                                       # page markdown (patched if any)
+    text: str  # page markdown (patched if any)
     patched: bool = False
     disagreements: list[TableDisagreement] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -73,8 +73,8 @@ class TableReconcileResult:
 
 @dataclass
 class _Block:
-    start: int            # first line index (inclusive)
-    end: int              # last line index (inclusive)
+    start: int  # first line index (inclusive)
+    end: int  # last line index (inclusive)
     grid: list[list[str]]  # parsed cells, separator row dropped
 
 

@@ -82,14 +82,23 @@ class VLLMServerManager:
 
         # Build command
         cmd = [
-            sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-            "--model", config.model,
-            "--host", config.host,
-            "--port", str(config.port),
-            "--max-model-len", str(config.max_model_len),
-            "--gpu-memory-utilization", str(config.gpu_memory_utilization),
-            "--dtype", config.dtype,
-            "--api-key", config.api_key,
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            config.model,
+            "--host",
+            config.host,
+            "--port",
+            str(config.port),
+            "--max-model-len",
+            str(config.max_model_len),
+            "--gpu-memory-utilization",
+            str(config.gpu_memory_utilization),
+            "--dtype",
+            config.dtype,
+            "--api-key",
+            config.api_key,
         ]
 
         if config.trust_remote_code:
@@ -128,8 +137,7 @@ class VLLMServerManager:
                 self._print_logs()
                 self.stop()
                 raise RuntimeError(
-                    f"vLLM server failed to start within {timeout}s. "
-                    f"Check logs at {self._log_file}"
+                    f"vLLM server failed to start within {timeout}s. Check logs at {self._log_file}"
                 )
 
             if self.verbose:
@@ -138,9 +146,7 @@ class VLLMServerManager:
             return True
 
         except FileNotFoundError:
-            raise RuntimeError(
-                "vLLM not found. Install with: pip install vllm"
-            )
+            raise RuntimeError("vLLM not found. Install with: pip install vllm")
         except Exception as e:
             self.stop()
             raise RuntimeError(f"Failed to start vLLM server: {e}")
@@ -244,6 +250,7 @@ class VLLMServerManager:
         """Force GPU memory release."""
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
@@ -252,6 +259,7 @@ class VLLMServerManager:
 
         # Additional cleanup: run gc
         import gc
+
         gc.collect()
 
     def _print_logs(self, lines: int = 50) -> None:
@@ -288,6 +296,7 @@ def detect_gpu_setup() -> str:
     """
     try:
         import torch
+
         if not torch.cuda.is_available():
             return "cpu"
 
@@ -303,6 +312,7 @@ def get_gpu_memory_gb() -> float:
     """Get total GPU memory in GB."""
     try:
         import torch
+
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(0)
             return props.total_memory / (1024**3)

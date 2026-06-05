@@ -123,28 +123,28 @@ class SummaryPanel:
     def render(self) -> Group:
         """Render the summary."""
         lines = []
-        
+
         lines.append(Text("---", style="dim"))
         lines.append(Text())
-        
+
         # Stats
         lines.append(Text(f"done {self.pages_success}/{self.pages_total} pages", style="success"))
-        
+
         if self.figures_count > 0:
             lines.append(Text(f"     {self.figures_count} figures", style="dim"))
-        
+
         lines.append(Text(f"     {self.time_seconds:.1f}s", style="dim"))
-        
+
         if self.cost > 0:
             lines.append(Text(f"     ${self.cost:.4f}", style="dim"))
-        
+
         # Engines
         engine_parts = [f"{ENGINE_LABELS.get(e, e)} ({c})" for e, c in self.engines_used.items()]
         lines.append(Text(f"     {' + '.join(engine_parts)}", style="dim"))
-        
+
         lines.append(Text())
         lines.append(Text(f"-> {self.output_path}", style="dim"))
-        
+
         return Group(*lines)
 
 
@@ -163,12 +163,14 @@ class AuditPanel:
         passed: bool = True,
     ) -> None:
         """Add an audit metric."""
-        self.metrics.append({
-            "name": name,
-            "value": value,
-            "threshold": threshold,
-            "passed": passed,
-        })
+        self.metrics.append(
+            {
+                "name": name,
+                "value": value,
+                "threshold": threshold,
+                "passed": passed,
+            }
+        )
 
     def add_llm_review(
         self,
@@ -177,27 +179,31 @@ class AuditPanel:
         reason: str = "",
     ) -> None:
         """Add LLM review result."""
-        self.llm_results.append({
-            "item": item,
-            "verdict": verdict,
-            "reason": reason,
-        })
+        self.llm_results.append(
+            {
+                "item": item,
+                "verdict": verdict,
+                "reason": reason,
+            }
+        )
 
     def render(self) -> Group:
         """Render the audit panel."""
         lines = []
-        
+
         for m in self.metrics:
             icon = STATUS_ICONS["success"] if m["passed"] else STATUS_ICONS["warning"]
             style = "success" if m["passed"] else "warning"
             lines.append(Text(f"    [{icon}] {m['name']}: {m['value']}", style=style))
-        
+
         for r in self.llm_results:
             status = "success" if r["verdict"] == "acceptable" else "warning"
-            icon = STATUS_ICONS["success"] if r["verdict"] == "acceptable" else STATUS_ICONS["warning"]
+            icon = (
+                STATUS_ICONS["success"] if r["verdict"] == "acceptable" else STATUS_ICONS["warning"]
+            )
             line = f"    [{icon}] {r['item']}: {r['verdict']}"
             if r["reason"]:
                 line += f" {r['reason']}"
             lines.append(Text(line, style=status))
-        
+
         return Group(*lines)

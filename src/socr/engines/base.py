@@ -215,13 +215,19 @@ class BaseEngine(ABC):
 
             try:
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=config.timeout,
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=config.timeout,
                 )
             except subprocess.TimeoutExpired:
                 return [
                     PageOutput(
-                        page_num=pn, status=PageStatus.ERROR, engine=self.name,
-                        failure_mode=FailureMode.TIMEOUT, audit_passed=False,
+                        page_num=pn,
+                        status=PageStatus.ERROR,
+                        engine=self.name,
+                        failure_mode=FailureMode.TIMEOUT,
+                        audit_passed=False,
                         error=f"Timeout after {config.timeout}s",
                     )
                     for pn in page_nums
@@ -231,8 +237,11 @@ class BaseEngine(ABC):
                 stderr = (result.stderr or "").strip()[:500]
                 return [
                     PageOutput(
-                        page_num=pn, status=PageStatus.ERROR, engine=self.name,
-                        failure_mode=FailureMode.CLI_ERROR, audit_passed=False,
+                        page_num=pn,
+                        status=PageStatus.ERROR,
+                        engine=self.name,
+                        failure_mode=FailureMode.CLI_ERROR,
+                        audit_passed=False,
                         error=f"CLI exited {result.returncode}: {stderr}",
                     )
                     for pn in page_nums
@@ -255,35 +264,41 @@ class BaseEngine(ABC):
 
                 if text:
                     text = self._clean_output(text, self.name)
-                    outputs.append(PageOutput(
-                        page_num=page_num,
-                        text=text,
-                        status=PageStatus.SUCCESS,
-                        engine=self.name,
-                        processing_time=elapsed / len(page_nums),
-                        audit_passed=True,
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            text=text,
+                            status=PageStatus.SUCCESS,
+                            engine=self.name,
+                            processing_time=elapsed / len(page_nums),
+                            audit_passed=True,
+                        )
+                    )
                 elif recitation_in_stderr and stem in stderr_text:
-                    outputs.append(PageOutput(
-                        page_num=page_num,
-                        status=PageStatus.ERROR,
-                        engine=self.name,
-                        failure_mode=FailureMode.RECITATION,
-                        audit_passed=False,
-                        error=(
-                            "model refused (RECITATION: copyright/recitation "
-                            "filter blocked verbatim output)"
-                        ),
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            status=PageStatus.ERROR,
+                            engine=self.name,
+                            failure_mode=FailureMode.RECITATION,
+                            audit_passed=False,
+                            error=(
+                                "model refused (RECITATION: copyright/recitation "
+                                "filter blocked verbatim output)"
+                            ),
+                        )
+                    )
                 else:
-                    outputs.append(PageOutput(
-                        page_num=page_num,
-                        status=PageStatus.ERROR,
-                        engine=self.name,
-                        failure_mode=FailureMode.EMPTY_OUTPUT,
-                        audit_passed=False,
-                        error=f"No output for page {page_num}",
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            status=PageStatus.ERROR,
+                            engine=self.name,
+                            failure_mode=FailureMode.EMPTY_OUTPUT,
+                            audit_passed=False,
+                            error=f"No output for page {page_num}",
+                        )
+                    )
 
             return outputs
 
@@ -402,8 +417,7 @@ class BaseHTTPEngine(ABC):
 
     @property
     @abstractmethod
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     @property
     def model_version(self) -> str:

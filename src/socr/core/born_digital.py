@@ -29,10 +29,10 @@ import fitz
 # Uses re.search (not re.match) to handle subset-prefixed names like
 # "ABCDEF+CMMI10".
 _MATH_FONT_RE = re.compile(
-    r"(?i)(CMMI|CMSY|CMEX|MSAM|MSBM|"          # Computer Modern + AMS math
+    r"(?i)(CMMI|CMSY|CMEX|MSAM|MSBM|"  # Computer Modern + AMS math
     r"STIXMath|XITSMath|LatinModernMath|LMMath|"  # OpenType math (modern LaTeX)
     r"AsanaMath|LibertinusMath|CambriaMath|NewCMMath|"  # other OTF math families
-    r"Euler|rsfs)"                              # Euler script, RSFS (calligraphic)
+    r"Euler|rsfs)"  # Euler script, RSFS (calligraphic)
 )
 
 
@@ -180,9 +180,7 @@ class BornDigitalDetector:
 
         with fitz.open(pdf_path) as doc:
             if page_num < 1 or page_num > len(doc):
-                raise ValueError(
-                    f"Page {page_num} out of range (document has {len(doc)} pages)"
-                )
+                raise ValueError(f"Page {page_num} out of range (document has {len(doc)} pages)")
             return self._assess_page(doc[page_num - 1], page_num)
 
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
@@ -234,9 +232,7 @@ class BornDigitalDetector:
 
         # Too few words: likely just headers, footers, or page numbers
         if word_count < self.MIN_WORDS_PER_PAGE:
-            notes.append(
-                f"too few words ({word_count} < {self.MIN_WORDS_PER_PAGE})"
-            )
+            notes.append(f"too few words ({word_count} < {self.MIN_WORDS_PER_PAGE})")
             return PageAssessment(
                 page_num=page_num,
                 is_born_digital=False,
@@ -383,8 +379,7 @@ class BornDigitalDetector:
             if has_equations:
                 content_types.append("equations")
             notes.append(
-                f"complex content detected ({', '.join(content_types)}); "
-                f"OCR enhancement preferred"
+                f"complex content detected ({', '.join(content_types)}); OCR enhancement preferred"
             )
 
         return PageAssessment(
@@ -611,10 +606,7 @@ class BornDigitalDetector:
         # Clean cell values: replace None with empty string, strip whitespace
         cleaned: list[list[str]] = []
         for row in rows:
-            cleaned.append([
-                (cell.strip() if isinstance(cell, str) else "")
-                for cell in row
-            ])
+            cleaned.append([(cell.strip() if isinstance(cell, str) else "") for cell in row])
 
         if not cleaned:
             return ""

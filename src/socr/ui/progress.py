@@ -107,12 +107,14 @@ class StageProgressContext:
         confidence: float | None = None,
     ) -> None:
         """Record a result (displayed after progress completes)."""
-        self._results.append({
-            "item": item,
-            "status": status,
-            "message": message,
-            "confidence": confidence,
-        })
+        self._results.append(
+            {
+                "item": item,
+                "status": status,
+                "message": message,
+                "confidence": confidence,
+            }
+        )
 
     def print_results(self, show_all: bool = False) -> None:
         """Print recorded results."""

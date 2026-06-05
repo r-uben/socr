@@ -55,7 +55,10 @@ _METRIC_MAP: dict[str, tuple[FailureMode, str]] = {
     ),
     "Word count": (FailureMode.LOW_WORD_COUNT, "Extracted text has too few words"),
     "Garbage ratio": (FailureMode.GARBAGE, "High ratio of non-text characters"),
-    "Truncation check": (FailureMode.TRUNCATED, "Output appears truncated relative to document page count"),
+    "Truncation check": (
+        FailureMode.TRUNCATED,
+        "Output appears truncated relative to document page count",
+    ),
 }
 
 
@@ -129,9 +132,7 @@ class FailureModeScorer:
         return max(modes, key=lambda m: _PRIORITY.get(m, 0))
 
     @staticmethod
-    def _estimate_confidence(
-        modes: list[FailureMode], audit: HeuristicsResult
-    ) -> float:
+    def _estimate_confidence(modes: list[FailureMode], audit: HeuristicsResult) -> float:
         """Rough confidence in the diagnosis.
 
         Multiple corroborating failures increase confidence. A single

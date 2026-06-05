@@ -42,10 +42,7 @@ def _check_ollama_model(model_name: str) -> str | None:
                 name = parts[0].split(":")[0]
                 model_names.append(name)
         if model_name not in model_names:
-            return (
-                f"Ollama model '{model_name}' not found. "
-                f"Pull it with: ollama pull {model_name}"
-            )
+            return f"Ollama model '{model_name}' not found. Pull it with: ollama pull {model_name}"
     except FileNotFoundError:
         return "Ollama is not installed (ollama command not found)"
     except subprocess.TimeoutExpired:
@@ -80,6 +77,7 @@ class DeepSeekEngine(BaseEngine):
             error = _check_ollama_model(OLLAMA_MODEL)
             if error:
                 from socr.core.result import DocumentStatus, EngineResult, FailureMode
+
                 logger.error(f"[{self.name}] {error}")
                 return EngineResult(
                     document_path=pdf_path,
@@ -101,10 +99,14 @@ class DeepSeekEngine(BaseEngine):
             self.cli_command,
             "process",
             str(pdf_path),
-            "-o", str(output_dir),
-            "--task", config.deepseek_task,
-            "--backend", config.deepseek_backend,
-            "--dpi", str(config.render_dpi),
+            "-o",
+            str(output_dir),
+            "--task",
+            config.deepseek_task,
+            "--backend",
+            config.deepseek_backend,
+            "--dpi",
+            str(config.render_dpi),
         ]
         if config.workers > 1:
             cmd.extend(["-w", str(config.workers)])

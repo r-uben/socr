@@ -231,8 +231,13 @@ def test_per_page_fingerprint_carries_model_version(tmp_path):
             status=DocumentStatus.SUCCESS,
             model_version="flash-lite-9",
             pages=[
-                PageOutput(page_num=i, text=f"ocr p{i}", engine="gemini",
-                           status=PageStatus.SUCCESS, audit_passed=True)
+                PageOutput(
+                    page_num=i,
+                    text=f"ocr p{i}",
+                    engine="gemini",
+                    status=PageStatus.SUCCESS,
+                    audit_passed=True,
+                )
                 for i in (1, 2)
             ],
         )
@@ -262,12 +267,20 @@ def test_replay_detects_broken_cache(tmp_path):
 
 def test_fingerprint_changes_invalidate(tmp_path):
     base = PageFingerprint(
-        pdf_file_hash="abc", page_num=1, render_dpi=200, engine="gemini",
-        model_version="flash-lite", image_hash="img1",
+        pdf_file_hash="abc",
+        page_num=1,
+        render_dpi=200,
+        engine="gemini",
+        model_version="flash-lite",
+        image_hash="img1",
     )
     same = PageFingerprint(
-        pdf_file_hash="abc", page_num=1, render_dpi=200, engine="gemini",
-        model_version="flash-lite", image_hash="img1",
+        pdf_file_hash="abc",
+        page_num=1,
+        render_dpi=200,
+        engine="gemini",
+        model_version="flash-lite",
+        image_hash="img1",
     )
     assert base.key() == same.key()
 
@@ -294,8 +307,15 @@ def test_ocr_pages_get_image_hash_native_pages_do_not(tmp_path):
             document_path=pdf,
             engine="gemini",
             status=DocumentStatus.SUCCESS,
-            pages=[PageOutput(page_num=1, text="ocr p1", engine="gemini",
-                              status=PageStatus.SUCCESS, audit_passed=True)],
+            pages=[
+                PageOutput(
+                    page_num=1,
+                    text="ocr p1",
+                    engine="gemini",
+                    status=PageStatus.SUCCESS,
+                    audit_passed=True,
+                )
+            ],
         )
     )
     state.pages[2].is_born_digital = True

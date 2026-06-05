@@ -103,9 +103,7 @@ class RepairRouter:
     # Public API
     # ------------------------------------------------------------------
 
-    def pages_needing_repair(
-        self, state: DocumentState
-    ) -> list[tuple[int, PageState]]:
+    def pages_needing_repair(self, state: DocumentState) -> list[tuple[int, PageState]]:
         """Return (page_num, PageState) pairs that need reprocessing.
 
         A page needs repair if ``page_state.needs_repair`` is True
@@ -243,9 +241,7 @@ class RepairRouter:
                 return engine
         return candidates[0]
 
-    def _pick_recitation_fallback(
-        self, candidates: list[EngineType]
-    ) -> EngineType:
+    def _pick_recitation_fallback(self, candidates: list[EngineType]) -> EngineType:
         """For RECITATION: prefer an open model (Qwen first); never Gemini.
 
         Gemini was the one that refused; another Gemini call refuses again.
@@ -297,13 +293,7 @@ class RepairRouter:
         return engines
 
     @staticmethod
-    def _build_reason(
-        failure: FailureMode, tried: set[EngineType], engine: EngineType
-    ) -> str:
+    def _build_reason(failure: FailureMode, tried: set[EngineType], engine: EngineType) -> str:
         """Human-readable reason for the repair decision."""
         tried_names = ", ".join(sorted(e.value for e in tried)) if tried else "none"
-        return (
-            f"failure={failure.value}, "
-            f"tried=[{tried_names}], "
-            f"selected={engine.value}"
-        )
+        return f"failure={failure.value}, tried=[{tried_names}], selected={engine.value}"

@@ -175,12 +175,14 @@ class TestBenchmarkResults:
         score = _make_score("paper_a", "gemini", wer=0.15, cer=0.08)
         runs = [
             EngineRun(
-                "paper_a", "gemini",
+                "paper_a",
+                "gemini",
                 _make_engine_result("gemini", processing_time=2.5),
                 score=score,
             ),
             EngineRun(
-                "paper_b", "deepseek",
+                "paper_b",
+                "deepseek",
                 _make_engine_result("deepseek", success=False, failure_mode=FailureMode.TIMEOUT),
             ),
         ]
@@ -365,7 +367,10 @@ class TestCalibrationReport:
         ]
         report = CalibrationReport(
             profiles=profiles,
-            recommended_chain={"mixed": ["gemini", "deepseek"], "math_heavy": ["deepseek", "gemini"]},
+            recommended_chain={
+                "mixed": ["gemini", "deepseek"],
+                "math_heavy": ["deepseek", "gemini"],
+            },
         )
 
         out_file = tmp_path / "calibration.json"
@@ -398,39 +403,59 @@ class TestRepairCalibrator:
         runs: list[EngineRun] = []
 
         # Engine A (gemini): good on both papers
-        runs.append(EngineRun(
-            "paper_mixed", "gemini",
-            _make_engine_result("gemini", processing_time=5.0),
-            score=_make_score("paper_mixed", "gemini", wer=0.08, cer=0.04),
-        ))
-        runs.append(EngineRun(
-            "paper_math", "gemini",
-            _make_engine_result("gemini", processing_time=6.0),
-            score=_make_score("paper_math", "gemini", wer=0.12, cer=0.06),
-        ))
+        runs.append(
+            EngineRun(
+                "paper_mixed",
+                "gemini",
+                _make_engine_result("gemini", processing_time=5.0),
+                score=_make_score("paper_mixed", "gemini", wer=0.08, cer=0.04),
+            )
+        )
+        runs.append(
+            EngineRun(
+                "paper_math",
+                "gemini",
+                _make_engine_result("gemini", processing_time=6.0),
+                score=_make_score("paper_math", "gemini", wer=0.12, cer=0.06),
+            )
+        )
 
         # Engine B (deepseek): better on math, worse on mixed
-        runs.append(EngineRun(
-            "paper_mixed", "deepseek",
-            _make_engine_result("deepseek", processing_time=3.0),
-            score=_make_score("paper_mixed", "deepseek", wer=0.20, cer=0.10),
-        ))
-        runs.append(EngineRun(
-            "paper_math", "deepseek",
-            _make_engine_result("deepseek", processing_time=2.0),
-            score=_make_score("paper_math", "deepseek", wer=0.05, cer=0.02),
-        ))
+        runs.append(
+            EngineRun(
+                "paper_mixed",
+                "deepseek",
+                _make_engine_result("deepseek", processing_time=3.0),
+                score=_make_score("paper_mixed", "deepseek", wer=0.20, cer=0.10),
+            )
+        )
+        runs.append(
+            EngineRun(
+                "paper_math",
+                "deepseek",
+                _make_engine_result("deepseek", processing_time=2.0),
+                score=_make_score("paper_math", "deepseek", wer=0.05, cer=0.02),
+            )
+        )
 
         # Engine C (nougat): fails on one paper
-        runs.append(EngineRun(
-            "paper_mixed", "nougat",
-            _make_engine_result("nougat", success=False, failure_mode=FailureMode.TIMEOUT, processing_time=30.0),
-        ))
-        runs.append(EngineRun(
-            "paper_math", "nougat",
-            _make_engine_result("nougat", processing_time=4.0),
-            score=_make_score("paper_math", "nougat", wer=0.15, cer=0.08),
-        ))
+        runs.append(
+            EngineRun(
+                "paper_mixed",
+                "nougat",
+                _make_engine_result(
+                    "nougat", success=False, failure_mode=FailureMode.TIMEOUT, processing_time=30.0
+                ),
+            )
+        )
+        runs.append(
+            EngineRun(
+                "paper_math",
+                "nougat",
+                _make_engine_result("nougat", processing_time=4.0),
+                score=_make_score("paper_math", "nougat", wer=0.15, cer=0.08),
+            )
+        )
 
         return BenchmarkResults(runs=runs)
 
@@ -551,12 +576,14 @@ class TestRepairCalibrator:
         """Engines with same WER should produce a deterministic chain."""
         runs = [
             EngineRun(
-                "paper_a", "alpha",
+                "paper_a",
+                "alpha",
                 _make_engine_result("alpha"),
                 score=_make_score("paper_a", "alpha", wer=0.10),
             ),
             EngineRun(
-                "paper_a", "beta",
+                "paper_a",
+                "beta",
                 _make_engine_result("beta"),
                 score=_make_score("paper_a", "beta", wer=0.10),
             ),

@@ -28,6 +28,7 @@ from socr.pipeline.repair import RepairPlan, RepairRouter
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_handle(page_count: int = 3) -> DocumentHandle:
     """DocumentHandle without touching the filesystem."""
     with patch.object(DocumentHandle, "__post_init__", lambda self: None):
@@ -99,11 +100,15 @@ def _setup_mock_engine(
     def _mock_process_pages(pdf_path, page_nums, config, dpi=200):
         return [
             PageOutput(
-                page_num=pn, text=page_text, status=page_status,
-                engine=name, audit_passed=audit,
+                page_num=pn,
+                text=page_text,
+                status=page_status,
+                engine=name,
+                audit_passed=audit,
             )
             for pn in page_nums
         ]
+
     mock_engine.process_pages.side_effect = _mock_process_pages
 
 
@@ -164,6 +169,7 @@ def _bad_text() -> str:
 # Phase 1: Analyze
 # ---------------------------------------------------------------------------
 
+
 class TestPhaseAnalyze:
     def test_born_digital_pages_marked_in_state(self) -> None:
         config = _make_config()
@@ -216,6 +222,7 @@ class TestPhaseAnalyze:
 # Phase 2: Backbone OCR
 # ---------------------------------------------------------------------------
 
+
 class TestPhaseBackbone:
     def test_backbone_applies_result_to_state(self) -> None:
         config = _make_config()
@@ -257,6 +264,7 @@ class TestPhaseBackbone:
 # Phase 3: Score
 # ---------------------------------------------------------------------------
 
+
 class TestPhaseScore:
     def test_score_whole_doc_passing(self) -> None:
         config = _make_config()
@@ -294,12 +302,16 @@ class TestPhaseScore:
 
         # Create per-page outputs (page_num > 0)
         good_page = PageOutput(
-            page_num=1, text=_good_text(),
-            status=PageStatus.SUCCESS, engine="deepseek",
+            page_num=1,
+            text=_good_text(),
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
         )
         bad_page = PageOutput(
-            page_num=2, text=_bad_text(),
-            status=PageStatus.SUCCESS, engine="deepseek",
+            page_num=2,
+            text=_bad_text(),
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
         )
         result = EngineResult(
             document_path=Path("/tmp/fake.pdf"),
@@ -320,6 +332,7 @@ class TestPhaseScore:
 # Phase 4: Selective Repair
 # ---------------------------------------------------------------------------
 
+
 class TestPhaseRepair:
     def test_no_repair_when_all_pages_pass(self) -> None:
         config = _make_config()
@@ -329,8 +342,10 @@ class TestPhaseRepair:
         # Mark all pages as having good outputs
         for i in range(1, 3):
             state.pages[i].best_output = PageOutput(
-                page_num=i, text=_good_text(),
-                status=PageStatus.SUCCESS, engine="deepseek",
+                page_num=i,
+                text=_good_text(),
+                status=PageStatus.SUCCESS,
+                engine="deepseek",
                 audit_passed=True,
             )
 
@@ -349,9 +364,12 @@ class TestPhaseRepair:
 
         # Page 1 has a failing attempt from deepseek
         bad_attempt = PageOutput(
-            page_num=0, text=_bad_text(),
-            status=PageStatus.SUCCESS, engine="deepseek",
-            audit_passed=False, failure_mode=FailureMode.LOW_WORD_COUNT,
+            page_num=0,
+            text=_bad_text(),
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
+            audit_passed=False,
+            failure_mode=FailureMode.LOW_WORD_COUNT,
         )
         bad_result = EngineResult(
             document_path=Path("/tmp/fake.pdf"),
@@ -363,7 +381,8 @@ class TestPhaseRepair:
 
         # Mock the fallback engine to return a good result
         good_result = _make_engine_result(
-            text=_good_text(), engine="gemini",
+            text=_good_text(),
+            engine="gemini",
         )
 
         mock_engine = MagicMock()
@@ -393,7 +412,8 @@ class TestPhaseRepair:
             mock.is_available.return_value = True
             # Always return a bad result to force retries
             mock.process_document.return_value = _make_engine_result(
-                text=_bad_text(), engine=engine_type.value,
+                text=_bad_text(),
+                engine=engine_type.value,
                 audit_passed=False,
             )
             return mock
@@ -402,8 +422,10 @@ class TestPhaseRepair:
         pipeline.repair_router = RepairRouter(
             _make_config(
                 fallback_chain=[
-                    EngineType.GEMINI, EngineType.MISTRAL,
-                    EngineType.NOUGAT, EngineType.MARKER,
+                    EngineType.GEMINI,
+                    EngineType.MISTRAL,
+                    EngineType.NOUGAT,
+                    EngineType.MARKER,
                 ],
             )
         )
@@ -421,7 +443,8 @@ class TestPhaseRepair:
 
         # The repair engine returns a good whole-doc result
         good_result = _make_engine_result(
-            text=_good_text(), engine="gemini",
+            text=_good_text(),
+            engine="gemini",
         )
         mock_engine = MagicMock()
         mock_engine.name = "gemini"
@@ -441,6 +464,7 @@ class TestPhaseRepair:
 # Phase 5: Assemble
 # ---------------------------------------------------------------------------
 
+
 class TestPhaseAssemble:
     def test_assemble_success(self) -> None:
         config = _make_config()
@@ -450,8 +474,10 @@ class TestPhaseAssemble:
         # Set up passing pages
         for i in range(1, 3):
             state.pages[i].best_output = PageOutput(
-                page_num=i, text=f"Content for page {i}",
-                status=PageStatus.SUCCESS, engine="deepseek",
+                page_num=i,
+                text=f"Content for page {i}",
+                status=PageStatus.SUCCESS,
+                engine="deepseek",
                 audit_passed=True,
             )
 
@@ -469,8 +495,10 @@ class TestPhaseAssemble:
 
         # Only whole-doc output, no per-page
         whole_out = PageOutput(
-            page_num=0, text="Full document text here",
-            status=PageStatus.SUCCESS, engine="deepseek",
+            page_num=0,
+            text="Full document text here",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
             audit_passed=True,
         )
         result = EngineResult(
@@ -502,8 +530,10 @@ class TestPhaseAssemble:
         state = DocumentState(handle=_make_handle(1))
 
         state.pages[1].best_output = PageOutput(
-            page_num=1, text="Hello world",
-            status=PageStatus.SUCCESS, engine="deepseek",
+            page_num=1,
+            text="Hello world",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
             audit_passed=True,
         )
 
@@ -534,8 +564,11 @@ class TestPhaseAssemble:
         pipeline = UnifiedPipeline(config)
         state = DocumentState(handle=DocumentHandle.from_path(pdf))
         state.pages[1].best_output = PageOutput(
-            page_num=1, text="## Page 1\n\nHello canonical world",
-            status=PageStatus.SUCCESS, engine="deepseek", audit_passed=True,
+            page_num=1,
+            text="## Page 1\n\nHello canonical world",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
+            audit_passed=True,
         )
 
         out_root = tmp_path / "out"
@@ -567,8 +600,10 @@ class TestPhaseAssemble:
         state.pages[1].native_text = "Native born-digital content"
         # Page 2 has OCR output
         state.pages[2].best_output = PageOutput(
-            page_num=2, text="OCR content",
-            status=PageStatus.SUCCESS, engine="deepseek",
+            page_num=2,
+            text="OCR content",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
             audit_passed=True,
         )
 
@@ -584,8 +619,10 @@ class TestPhaseAssemble:
 
         # Only page 1 succeeded
         state.pages[1].best_output = PageOutput(
-            page_num=1, text="Only this page worked",
-            status=PageStatus.SUCCESS, engine="deepseek",
+            page_num=1,
+            text="Only this page worked",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
             audit_passed=True,
         )
         # Pages 2 and 3 still need repair
@@ -601,6 +638,7 @@ class TestPhaseAssemble:
 # Full pipeline (end-to-end with mocks)
 # ---------------------------------------------------------------------------
 
+
 class TestFullPipeline:
     def test_full_loop_success(self, tmp_path: Path) -> None:
         """Mock all externals and run the full 5-phase loop."""
@@ -609,9 +647,7 @@ class TestFullPipeline:
 
         # Mock born-digital detection
         pipeline.bd_detector = MagicMock()
-        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            3, born_digital_pages=set()
-        )
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(3, born_digital_pages=set())
 
         # Mock engine
         good_result = _make_engine_result(text=_good_text())
@@ -636,9 +672,7 @@ class TestFullPipeline:
 
         # All pages are born-digital
         pipeline.bd_detector = MagicMock()
-        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            2, born_digital_pages={1, 2}
-        )
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(2, born_digital_pages={1, 2})
 
         # Engine still runs (backbone processes whole doc)
         good_result = _make_engine_result(text=_good_text())
@@ -663,19 +697,20 @@ class TestFullPipeline:
         pipeline = UnifiedPipeline(config)
 
         pipeline.bd_detector = MagicMock()
-        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            1, born_digital_pages=set()
-        )
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(1, born_digital_pages=set())
 
         bad_result = _make_engine_result(
-            text=_bad_text(), engine="deepseek",
+            text=_bad_text(),
+            engine="deepseek",
             audit_passed=False,
         )
         good_result = _make_engine_result(
-            text=_good_text(), engine="gemini",
+            text=_good_text(),
+            engine="gemini",
         )
 
         call_count = [0]
+
         def mock_get(engine_type):
             call_count[0] += 1
             mock = MagicMock()
@@ -705,9 +740,7 @@ class TestFullPipeline:
         pipeline = UnifiedPipeline(config)
 
         pipeline.bd_detector = MagicMock()
-        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            1, born_digital_pages=set()
-        )
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(1, born_digital_pages=set())
 
         good_result = _make_engine_result(text=_good_text())
         mock_engine = MagicMock()
@@ -729,6 +762,7 @@ class TestFullPipeline:
 # Batch processing
 # ---------------------------------------------------------------------------
 
+
 class TestBatchProcessing:
     def test_batch_processes_all_pdfs(self, tmp_path: Path) -> None:
         # Create fake PDFs
@@ -742,9 +776,7 @@ class TestBatchProcessing:
 
         # Mock everything
         pipeline.bd_detector = MagicMock()
-        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            1, born_digital_pages=set()
-        )
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(1, born_digital_pages=set())
 
         good_result = _make_engine_result(text=_good_text())
         mock_engine = MagicMock()
@@ -807,6 +839,7 @@ class TestBatchProcessing:
 # Max retries limiting
 # ---------------------------------------------------------------------------
 
+
 class TestMaxRetries:
     def test_zero_max_retries_skips_repair(self) -> None:
         config = _make_config(max_retries=0)
@@ -841,6 +874,7 @@ class TestMaxRetries:
 # Figure extraction
 # ---------------------------------------------------------------------------
 
+
 class TestFigures:
     def test_figures_extracted_when_enabled(self, tmp_path: Path) -> None:
         config = _make_config(save_figures=True)
@@ -848,8 +882,10 @@ class TestFigures:
         state = DocumentState(handle=_make_handle(1))
 
         state.pages[1].best_output = PageOutput(
-            page_num=1, text="Content",
-            status=PageStatus.SUCCESS, engine="deepseek",
+            page_num=1,
+            text="Content",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
             audit_passed=True,
         )
 
@@ -867,8 +903,10 @@ class TestFigures:
         state = DocumentState(handle=_make_handle(1))
 
         state.pages[1].best_output = PageOutput(
-            page_num=1, text="Content",
-            status=PageStatus.SUCCESS, engine="deepseek",
+            page_num=1,
+            text="Content",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
             audit_passed=True,
         )
 
@@ -882,9 +920,11 @@ class TestFigures:
 # Edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestEdgeCases:
     def test_pipeline_importable_from_package(self) -> None:
         from socr.pipeline import UnifiedPipeline as UP
+
         assert UP is UnifiedPipeline
 
     def test_constructor_creates_all_components(self) -> None:
@@ -916,11 +956,14 @@ class TestEdgeCases:
 # Truncation retry
 # ---------------------------------------------------------------------------
 
+
 class TestTruncationRetry:
     """Tests for retry-on-truncation before fallback (L1B-06)."""
 
     def _make_truncated_state(
-        self, engine: str = "gemini", page_count: int = 10,
+        self,
+        engine: str = "gemini",
+        page_count: int = 10,
     ) -> DocumentState:
         """Build a state with a truncated whole-doc attempt."""
         state = DocumentState(handle=_make_handle(page_count))
@@ -956,7 +999,8 @@ class TestTruncationRetry:
         state = self._make_truncated_state("gemini", page_count=1)
 
         good_result = _make_engine_result(
-            text=_good_text(), engine="gemini",
+            text=_good_text(),
+            engine="gemini",
         )
         mock_engine = MagicMock()
         mock_engine.name = "gemini"
@@ -996,7 +1040,8 @@ class TestTruncationRetry:
 
         # Fallback returns good result
         good_result = _make_engine_result(
-            text=_good_text(), engine="deepseek",
+            text=_good_text(),
+            engine="deepseek",
         )
 
         call_count = [0]
@@ -1053,7 +1098,8 @@ class TestTruncationRetry:
         state.apply_result(halluc_result)
 
         good_result = _make_engine_result(
-            text=_good_text(), engine="deepseek",
+            text=_good_text(),
+            engine="deepseek",
         )
 
         engines_called = []
@@ -1088,7 +1134,8 @@ class TestTruncationRetry:
         state = self._make_truncated_state("gemini")
 
         good_result = _make_engine_result(
-            text=_good_text(), engine="deepseek",
+            text=_good_text(),
+            engine="deepseek",
         )
 
         engines_called = []
@@ -1115,6 +1162,7 @@ class TestTruncationRetry:
 # Chunking is gone — all pages go through process_pages.
 # These tests are intentionally minimal.
 # ---------------------------------------------------------------------------
+
 
 class TestPerPageBackbone:
     """Tests for per-page processing (all docs go through process_pages)."""
@@ -1157,6 +1205,7 @@ class TestPerPageBackbone:
 # ---------------------------------------------------------------------------
 # Multi-engine mode
 # ---------------------------------------------------------------------------
+
 
 class TestMultiEngine:
     """Tests for multi-engine mode (Phase 2 runs multiple engines)."""
@@ -1391,13 +1440,9 @@ class TestDescribeAndEmbedFigures:
         state = DocumentState(handle=_make_handle(1))
         result = _make_engine_result(text=_good_text())
 
-        with patch(
-            "socr.pipeline.orchestrator.FigureExtractor"
-        ) as MockExtractor:
+        with patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor:
             MockExtractor.return_value.extract.return_value = []
-            out = pipeline._describe_and_embed_figures(
-                state, result, tmp_path, "Some text"
-            )
+            out = pipeline._describe_and_embed_figures(state, result, tmp_path, "Some text")
 
         assert out == "Some text"
         assert result.figures == []
@@ -1413,20 +1458,23 @@ class TestDescribeAndEmbedFigures:
         fig_path.write_bytes(b"\x89PNG")
 
         mock_fig = ExtractedFigure(
-            figure_num=1, page_num=1, image=None,
+            figure_num=1,
+            page_num=1,
+            image=None,
             saved_path=str(fig_path),
         )
 
         with (
-            patch(
-                "socr.pipeline.orchestrator.FigureExtractor"
-            ) as MockExtractor,
+            patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor,
             patch.dict("os.environ", {}, clear=False),
             patch.object(pipeline, "_get_vision_engine", return_value=None),
         ):
             MockExtractor.return_value.extract.return_value = [mock_fig]
             out = pipeline._describe_and_embed_figures(
-                state, result, tmp_path, "OCR text",
+                state,
+                result,
+                tmp_path,
+                "OCR text",
             )
 
         assert len(result.figures) == 1
@@ -1448,29 +1496,32 @@ class TestDescribeAndEmbedFigures:
 
         mock_image = MagicMock()
         mock_fig = ExtractedFigure(
-            figure_num=1, page_num=1, image=mock_image,
+            figure_num=1,
+            page_num=1,
+            image=mock_image,
             saved_path=str(fig_path),
         )
 
         mock_engine = MagicMock()
         mock_engine.name = "gemini-api"
         mock_engine.describe_figure.return_value = FigureInfo(
-            figure_num=0, page_num=0, figure_type="chart",
+            figure_num=0,
+            page_num=0,
+            figure_type="chart",
             description="A bar chart showing quarterly revenue.",
             engine="gemini-api",
         )
 
         with (
-            patch(
-                "socr.pipeline.orchestrator.FigureExtractor"
-            ) as MockExtractor,
-            patch.object(
-                pipeline, "_get_vision_engine", return_value=mock_engine
-            ),
+            patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor,
+            patch.object(pipeline, "_get_vision_engine", return_value=mock_engine),
         ):
             MockExtractor.return_value.extract.return_value = [mock_fig]
             out = pipeline._describe_and_embed_figures(
-                state, result, tmp_path, "OCR text",
+                state,
+                result,
+                tmp_path,
+                "OCR text",
             )
 
         assert len(result.figures) == 1
@@ -1491,8 +1542,11 @@ class TestBuildFigureBlocks:
 
         figures = [
             FigureInfo(
-                figure_num=1, page_num=2, figure_type="chart",
-                description="A line chart.", image_path=str(fig_path),
+                figure_num=1,
+                page_num=2,
+                figure_type="chart",
+                description="A line chart.",
+                image_path=str(fig_path),
             )
         ]
         result = UnifiedPipeline._build_figure_blocks(figures, tmp_path)
@@ -1506,8 +1560,11 @@ class TestBuildFigureBlocks:
 
         figures = [
             FigureInfo(
-                figure_num=1, page_num=1, figure_type="extracted",
-                description="", image_path=str(fig_path),
+                figure_num=1,
+                page_num=1,
+                figure_type="extracted",
+                description="",
+                image_path=str(fig_path),
             )
         ]
         result = UnifiedPipeline._build_figure_blocks(figures, tmp_path)
@@ -1517,8 +1574,11 @@ class TestBuildFigureBlocks:
     def test_no_image_path_skipped(self, tmp_path: Path) -> None:
         figures = [
             FigureInfo(
-                figure_num=1, page_num=1, figure_type="extracted",
-                description="desc", image_path=None,
+                figure_num=1,
+                page_num=1,
+                figure_type="extracted",
+                description="desc",
+                image_path=None,
             )
         ]
         result = UnifiedPipeline._build_figure_blocks(figures, tmp_path)
@@ -1562,6 +1622,7 @@ class TestPhantomImageStrippingInAssemble:
 # Native-first pipeline
 # ---------------------------------------------------------------------------
 
+
 class TestNativeFirstPipeline:
     """Tests for native-first pipeline: prose pages use native text,
     complex pages (tables/figures/equations) use VLM."""
@@ -1579,7 +1640,9 @@ class TestNativeFirstPipeline:
         state = DocumentState(handle=_make_handle(page_count))
 
         assessment = _make_bd_assessment(
-            page_count, born_digital_pages=bd_pages, complex_pages=complex_pages,
+            page_count,
+            born_digital_pages=bd_pages,
+            complex_pages=complex_pages,
         )
         state.apply_born_digital(assessment)
         return pipeline, state
@@ -1587,7 +1650,8 @@ class TestNativeFirstPipeline:
     def test_prose_pages_use_native_text(self) -> None:
         """Born-digital prose pages should use native text directly, no VLM."""
         pipeline, state = self._setup_bd_state(
-            page_count=5, bd_pages={1, 2, 3, 4, 5},
+            page_count=5,
+            bd_pages={1, 2, 3, 4, 5},
         )
 
         result = pipeline._backbone_native_first(state, Path("/tmp/out"))
@@ -1615,8 +1679,11 @@ class TestNativeFirstPipeline:
         def mock_process_pages(pdf_path, page_nums, config, dpi=200):
             return [
                 PageOutput(
-                    page_num=pn, text=f"OCR text for page {pn}",
-                    status=PageStatus.SUCCESS, engine="gemini", audit_passed=True,
+                    page_num=pn,
+                    text=f"OCR text for page {pn}",
+                    status=PageStatus.SUCCESS,
+                    engine="gemini",
+                    audit_passed=True,
                 )
                 for pn in page_nums
             ]
@@ -1654,8 +1721,11 @@ class TestNativeFirstPipeline:
         def mock_process_pages(pdf_path, page_nums, config, dpi=200):
             return [
                 PageOutput(
-                    page_num=pn, text=f"OCR for page {pn}",
-                    status=PageStatus.SUCCESS, engine="gemini", audit_passed=True,
+                    page_num=pn,
+                    text=f"OCR for page {pn}",
+                    status=PageStatus.SUCCESS,
+                    engine="gemini",
+                    audit_passed=True,
                 )
                 for pn in page_nums
             ]
@@ -1757,8 +1827,11 @@ class TestNativeFirstPipeline:
         def mock_process_pages(pdf_path, page_nums, config, dpi=200):
             return [
                 PageOutput(
-                    page_num=pn, text="", status=PageStatus.ERROR,
-                    engine="gemini", failure_mode=FailureMode.EMPTY_OUTPUT,
+                    page_num=pn,
+                    text="",
+                    status=PageStatus.ERROR,
+                    engine="gemini",
+                    failure_mode=FailureMode.EMPTY_OUTPUT,
                 )
                 for pn in page_nums
             ]
@@ -1833,11 +1906,10 @@ class TestNativeFirstPipeline:
         assessment = _make_bd_assessment(4, born_digital_pages={1, 2, 3})
         state.apply_born_digital(assessment)
 
-        with patch.object(
-            pipeline, "_backbone_native_first"
-        ) as mock_native_first:
+        with patch.object(pipeline, "_backbone_native_first") as mock_native_first:
             mock_native_first.return_value = _make_engine_result(
-                text=_good_text(), engine="native",
+                text=_good_text(),
+                engine="native",
             )
             pipeline._phase_backbone(state, Path("/tmp/out"))
 
@@ -1852,11 +1924,10 @@ class TestNativeFirstPipeline:
         assessment = _make_bd_assessment(4, born_digital_pages={1, 2})
         state.apply_born_digital(assessment)
 
-        with patch.object(
-            pipeline, "_backbone_native_first"
-        ) as mock_native_first:
+        with patch.object(pipeline, "_backbone_native_first") as mock_native_first:
             mock_native_first.return_value = _make_engine_result(
-                text=_good_text(), engine="native",
+                text=_good_text(),
+                engine="native",
             )
             pipeline._phase_backbone(state, Path("/tmp/out"))
 
@@ -1868,7 +1939,9 @@ class TestNativeFirstPipeline:
         pipeline = UnifiedPipeline(config)
 
         assessment = _make_bd_assessment(
-            3, born_digital_pages={1, 2, 3}, complex_pages={2},
+            3,
+            born_digital_pages={1, 2, 3},
+            complex_pages={2},
         )
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = assessment
@@ -1876,8 +1949,11 @@ class TestNativeFirstPipeline:
         def mock_process_pages(pdf_path, page_nums, config, dpi=200):
             return [
                 PageOutput(
-                    page_num=pn, text=_good_text(),
-                    status=PageStatus.SUCCESS, engine="gemini", audit_passed=True,
+                    page_num=pn,
+                    text=_good_text(),
+                    status=PageStatus.SUCCESS,
+                    engine="gemini",
+                    audit_passed=True,
                 )
                 for pn in page_nums
             ]
@@ -1929,6 +2005,7 @@ class TestNativeFirstPipeline:
 # Tier-2 per-page escalation
 # ---------------------------------------------------------------------------
 
+
 class TestTieredEscalation:
     """Per-page audit scoring inside _backbone_native_first.
 
@@ -1944,6 +2021,7 @@ class TestTieredEscalation:
     ) -> tuple["UnifiedPipeline", "DocumentState"]:
         """Tiered pipeline with all-scanned or custom pages."""
         from socr.core.config import EngineType
+
         config = _make_config(
             quiet=True,
             native_first=True,
@@ -1970,6 +2048,7 @@ class TestTieredEscalation:
                 diff = PageDifficulty.EASY if pn in easy else PageDifficulty.HARD
                 result[pn] = DifficultyAssessment(page_num=pn, difficulty=diff, reasons=[])
             return result
+
         return _classify
 
     def test_failing_local_pages_escalate_to_cloud(self) -> None:
@@ -1981,20 +2060,27 @@ class TestTieredEscalation:
             outputs = []
             for pn in page_nums:
                 text = _bad_text() if pn == 2 else _good_text()
-                outputs.append(PageOutput(
-                    page_num=pn, text=text,
-                    status=PageStatus.SUCCESS, engine="glm",
-                ))
+                outputs.append(
+                    PageOutput(
+                        page_num=pn,
+                        text=text,
+                        status=PageStatus.SUCCESS,
+                        engine="glm",
+                    )
+                )
             return outputs
 
         # Cloud engine: returns good text for whatever pages it receives
         cloud_page_nums_received = []
+
         def cloud_process_pages(pdf_path, page_nums, config, dpi=200):
             cloud_page_nums_received.extend(page_nums)
             return [
                 PageOutput(
-                    page_num=pn, text=_good_text(),
-                    status=PageStatus.SUCCESS, engine="gemini",
+                    page_num=pn,
+                    text=_good_text(),
+                    status=PageStatus.SUCCESS,
+                    engine="gemini",
                 )
                 for pn in page_nums
             ]
@@ -2047,8 +2133,10 @@ class TestTieredEscalation:
             local_calls.append(list(page_nums))
             return [
                 PageOutput(
-                    page_num=pn, text=_good_text(),
-                    status=PageStatus.SUCCESS, engine="glm",
+                    page_num=pn,
+                    text=_good_text(),
+                    status=PageStatus.SUCCESS,
+                    engine="glm",
                 )
                 for pn in page_nums
             ]
@@ -2057,8 +2145,10 @@ class TestTieredEscalation:
             cloud_calls.append(list(page_nums))
             return [
                 PageOutput(
-                    page_num=pn, text=_good_text(),
-                    status=PageStatus.SUCCESS, engine="gemini",
+                    page_num=pn,
+                    text=_good_text(),
+                    status=PageStatus.SUCCESS,
+                    engine="gemini",
                 )
                 for pn in page_nums
             ]
@@ -2119,8 +2209,10 @@ class TestTieredEscalation:
         def cloud_process_pages(pdf_path, page_nums, config, dpi=200):
             return [
                 PageOutput(
-                    page_num=pn, text=_good_text(),
-                    status=PageStatus.SUCCESS, engine="gemini",
+                    page_num=pn,
+                    text=_good_text(),
+                    status=PageStatus.SUCCESS,
+                    engine="gemini",
                 )
                 for pn in page_nums
             ]
@@ -2184,15 +2276,23 @@ class TestTieredEscalation:
             for pn in page_nums:
                 if pn == 2:
                     # Simulate engine hard-error (timeout, OOM, etc.)
-                    outputs.append(PageOutput(
-                        page_num=pn, text="",
-                        status=PageStatus.ERROR, engine="glm",
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=pn,
+                            text="",
+                            status=PageStatus.ERROR,
+                            engine="glm",
+                        )
+                    )
                 else:
-                    outputs.append(PageOutput(
-                        page_num=pn, text=_good_text(),
-                        status=PageStatus.SUCCESS, engine="glm",
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=pn,
+                            text=_good_text(),
+                            status=PageStatus.SUCCESS,
+                            engine="glm",
+                        )
+                    )
             return outputs
 
         cloud_page_nums_received = []
@@ -2201,8 +2301,10 @@ class TestTieredEscalation:
             cloud_page_nums_received.extend(page_nums)
             return [
                 PageOutput(
-                    page_num=pn, text=_good_text(),
-                    status=PageStatus.SUCCESS, engine="gemini",
+                    page_num=pn,
+                    text=_good_text(),
+                    status=PageStatus.SUCCESS,
+                    engine="gemini",
                 )
                 for pn in page_nums
             ]
@@ -2279,7 +2381,8 @@ class TestDefaultPathParity:
         pipeline = UnifiedPipeline(config)
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            2, born_digital_pages=set()  # all scanned -> must OCR
+            2,
+            born_digital_pages=set(),  # all scanned -> must OCR
         )
         mock_engine = MagicMock()
         _setup_mock_engine(mock_engine, name="deepseek")
@@ -2300,7 +2403,9 @@ class TestDefaultPathParity:
         pipeline = UnifiedPipeline(config)
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            2, born_digital_pages={1, 2}, complex_pages=set()  # prose only
+            2,
+            born_digital_pages={1, 2},
+            complex_pages=set(),  # prose only
         )
         mock_engine = MagicMock()
         _setup_mock_engine(mock_engine, name="deepseek")
@@ -2319,7 +2424,8 @@ class TestDefaultPathParity:
         pipeline = UnifiedPipeline(config)
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = _make_bd_assessment(
-            1, born_digital_pages=set()  # scanned -> needs the (unavailable) engine
+            1,
+            born_digital_pages=set(),  # scanned -> needs the (unavailable) engine
         )
         mock_engine = MagicMock()
         mock_engine.name = "deepseek"

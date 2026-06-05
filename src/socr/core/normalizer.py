@@ -74,17 +74,17 @@ class OutputNormalizer:
 
     # Unicode replacements: smart quotes, ligatures, etc.
     _UNICODE_MAP = {
-        "\u2018": "'",   # left single quote
-        "\u2019": "'",   # right single quote
-        "\u201c": '"',   # left double quote
-        "\u201d": '"',   # right double quote
-        "\u2013": "-",   # en dash
+        "\u2018": "'",  # left single quote
+        "\u2019": "'",  # right single quote
+        "\u201c": '"',  # left double quote
+        "\u201d": '"',  # right double quote
+        "\u2013": "-",  # en dash
         "\u2014": "--",  # em dash
-        "\u2026": "...", # ellipsis
+        "\u2026": "...",  # ellipsis
         "\ufb01": "fi",  # fi ligature
         "\ufb02": "fl",  # fl ligature
-        "\ufb03": "ffi", # ffi ligature
-        "\ufb04": "ffl", # ffl ligature
+        "\ufb03": "ffi",  # ffi ligature
+        "\ufb04": "ffl",  # ffl ligature
         "\ufb00": "ff",  # ff ligature
     }
 
@@ -150,9 +150,7 @@ class OutputNormalizer:
 
     # --- phantom image stripping ---
 
-    def strip_phantom_images(
-        self, text: str, output_dir: Path | None = None
-    ) -> str:
+    def strip_phantom_images(self, text: str, output_dir: Path | None = None) -> str:
         """Remove markdown image references that point to nonexistent files.
 
         OCR engines (Gemini, Mistral, etc.) emit ``![alt](path)`` references

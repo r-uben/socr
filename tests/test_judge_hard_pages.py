@@ -20,22 +20,37 @@ def _handle(pages: int = 1) -> DocumentHandle:
 
 def _state_with_page(engine="gemini", has_tables=True, has_equations=False):
     state = DocumentState(handle=_handle(1))
-    bo = PageOutput(page_num=1, text="rows of numbers", status=PageStatus.SUCCESS,
-                    engine=engine, audit_passed=True)
+    bo = PageOutput(
+        page_num=1,
+        text="rows of numbers",
+        status=PageStatus.SUCCESS,
+        engine=engine,
+        audit_passed=True,
+    )
     state.pages[1].attempts.append(bo)
     state.pages[1].best_output = bo
     return state, bo
 
 
 def _assessment(has_tables=True, has_equations=False):
-    return DocumentAssessment(path=Path("/tmp/fake.pdf"), pages=[
-        PageAssessment(page_num=1, is_born_digital=True, native_text="",
-                       confidence=1.0, has_tables=has_tables, has_equations=has_equations)
-    ])
+    return DocumentAssessment(
+        path=Path("/tmp/fake.pdf"),
+        pages=[
+            PageAssessment(
+                page_num=1,
+                is_born_digital=True,
+                native_text="",
+                confidence=1.0,
+                has_tables=has_tables,
+                has_equations=has_equations,
+            )
+        ],
+    )
 
 
 class _FakeJudge:
     """Stand-in for VLMPageJudge: verdict driven by the AcceptDecision we return."""
+
     def __init__(self, decision):
         self._decision = decision
 
@@ -48,58 +63,64 @@ class _FakeJudge:
 
 def _run(monkeypatch, pipe, state, decision, model="mock"):
     from socr.pipeline import agentic
+
     fake = _FakeJudge(decision)
     monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: model)
-    monkeypatch.setattr(pipe, "_make_page_renderer", lambda s: (lambda pn: Path("/tmp/x.png")))
+    monkeypatch.setattr(pipe, "_make_page_renderer", lambda s: lambda pn: Path("/tmp/x.png"))
     monkeypatch.setattr(agentic, "VLMPageJudge", fake.factory)
     pipe._phase_judge_hard_pages(state)
 
 
 def test_rejected_hard_page_loses_best_output(monkeypatch):
     from socr.pipeline.agentic import AcceptDecision
+
     pipe = UnifiedPipeline(PipelineConfig(quiet=True))
     state, bo = _state_with_page()
     pipe._last_assessment = _assessment(has_tables=True)
     _run(monkeypatch, pipe, state, AcceptDecision(accept=False, reason="wrong digits"))
-    assert state.pages[1].best_output is None          # -> needs_repair
+    assert state.pages[1].best_output is None  # -> needs_repair
     assert state.pages[1].needs_repair
     assert bo.failure_mode == FailureMode.AUDIT_FAILED
 
 
 def test_accepted_hard_page_kept(monkeypatch):
     from socr.pipeline.agentic import AcceptDecision
+
     pipe = UnifiedPipeline(PipelineConfig(quiet=True))
     state, bo = _state_with_page()
     pipe._last_assessment = _assessment(has_tables=True)
     _run(monkeypatch, pipe, state, AcceptDecision(accept=True, reason="faithful"))
-    assert state.pages[1].best_output is bo            # untouched
+    assert state.pages[1].best_output is bo  # untouched
 
 
 def test_easy_page_not_judged(monkeypatch):
     from socr.pipeline.agentic import AcceptDecision
+
     pipe = UnifiedPipeline(PipelineConfig(quiet=True))
     state, bo = _state_with_page()
     pipe._last_assessment = _assessment(has_tables=False, has_equations=False)  # not hard
     _run(monkeypatch, pipe, state, AcceptDecision(accept=False, reason="x"))
-    assert state.pages[1].best_output is bo            # skipped (not a hard page)
+    assert state.pages[1].best_output is bo  # skipped (not a hard page)
 
 
 def test_native_text_not_judged(monkeypatch):
     from socr.pipeline.agentic import AcceptDecision
+
     pipe = UnifiedPipeline(PipelineConfig(quiet=True))
     state, bo = _state_with_page(engine="native")
     pipe._last_assessment = _assessment(has_tables=True)
     _run(monkeypatch, pipe, state, AcceptDecision(accept=False, reason="x"))
-    assert state.pages[1].best_output is bo            # native is char-exact; not judged
+    assert state.pages[1].best_output is bo  # native is char-exact; not judged
 
 
 def test_noop_when_no_judge_model(monkeypatch):
     from socr.pipeline.agentic import AcceptDecision
+
     pipe = UnifiedPipeline(PipelineConfig(quiet=True))
     state, bo = _state_with_page()
     pipe._last_assessment = _assessment(has_tables=True)
     _run(monkeypatch, pipe, state, AcceptDecision(accept=False, reason="x"), model=None)
-    assert state.pages[1].best_output is bo            # no vision judge -> no-op
+    assert state.pages[1].best_output is bo  # no vision judge -> no-op
 
 
 def test_disabled_by_config():

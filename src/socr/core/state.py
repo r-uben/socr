@@ -68,8 +68,12 @@ class DocumentState:
     handle: DocumentHandle
     status: DocumentStatus = DocumentStatus.PENDING
     pages: dict[int, PageState] = field(default_factory=dict)
-    whole_doc_attempts: list[PageOutput] = field(default_factory=list)  # page_num=0 from CLI engines
-    engine_runs: list[EngineResult] = field(default_factory=list)  # all EngineResult objects for telemetry
+    whole_doc_attempts: list[PageOutput] = field(
+        default_factory=list
+    )  # page_num=0 from CLI engines
+    engine_runs: list[EngineResult] = field(
+        default_factory=list
+    )  # all EngineResult objects for telemetry
 
     def __post_init__(self) -> None:
         for i in range(1, self.handle.page_count + 1):
@@ -100,9 +104,7 @@ class DocumentState:
                 self.pages[pa.page_num].is_born_digital = pa.is_born_digital
                 if pa.is_born_digital:
                     self.pages[pa.page_num].native_text = pa.native_text
-                    self.pages[pa.page_num].needs_ocr_enhancement = (
-                        pa.needs_ocr_enhancement
-                    )
+                    self.pages[pa.page_num].needs_ocr_enhancement = pa.needs_ocr_enhancement
 
     # ------------------------------------------------------------------
     # Read-only derived properties
@@ -117,9 +119,7 @@ class DocumentState:
         born-digital pages.
         """
         has_per_page = any(p.best_output for p in self.pages.values())
-        has_native = any(
-            p.is_born_digital and p.native_text for p in self.pages.values()
-        )
+        has_native = any(p.is_born_digital and p.native_text for p in self.pages.values())
 
         # If only whole-doc attempts exist (CLI engines) and at least one
         # passed audit, use the best passing attempt.

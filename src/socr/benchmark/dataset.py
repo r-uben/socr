@@ -76,7 +76,9 @@ class BenchmarkSet:
                 pdf_path=Path(p["pdf_path"]),
                 category=p["category"],
                 page_count=p["page_count"],
-                ground_truth_path=Path(p["ground_truth_path"]) if p.get("ground_truth_path") else None,
+                ground_truth_path=Path(p["ground_truth_path"])
+                if p.get("ground_truth_path")
+                else None,
                 notes=p.get("notes", ""),
             )
             for p in data["papers"]

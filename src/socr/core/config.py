@@ -45,12 +45,12 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
 # Auto-selection order: try CLI engines until one is available.
 # Prefers cloud (best quality) > local.
 AUTO_ENGINE_ORDER: list[EngineType] = [
-    EngineType.GEMINI,      # Best quality/price, native PDF via Files API
-    EngineType.MISTRAL,     # Cloud fallback, structured output
-    EngineType.DEEPSEEK,    # Local, needs Ollama + model pulled
-    EngineType.GLM,         # Local, small model, fast
-    EngineType.NOUGAT,      # Local, academic papers only
-    EngineType.MARKER,      # Local, layout-aware
+    EngineType.GEMINI,  # Best quality/price, native PDF via Files API
+    EngineType.MISTRAL,  # Cloud fallback, structured output
+    EngineType.DEEPSEEK,  # Local, needs Ollama + model pulled
+    EngineType.GLM,  # Local, small model, fast
+    EngineType.NOUGAT,  # Local, academic papers only
+    EngineType.MARKER,  # Local, layout-aware
 ]
 
 
@@ -215,17 +215,39 @@ class PipelineConfig:
 
         # Scalar fields
         scalar_fields = [
-            "native_first", "tiered",
-            "timeout", "max_retries", "truncation_retries",
-            "chunk_threshold", "chunk_size", "render_dpi", "workers",
-            "save_figures", "figures_max_total",
-            "figures_max_per_page", "audit_enabled", "audit_min_words",
-            "consensus_enabled", "consensus_use_llm", "consensus_ollama_model",
-            "reprocess", "dry_run", "quiet", "verbose",
-            "deepseek_backend", "deepseek_task", "deepseek_vllm_url",
-            "glm_backend", "glm_task", "qwen_backend", "qwen_model",
-            "nougat_model", "marker_device",
-            "gemini_model", "gemini_task", "mistral_model",
+            "native_first",
+            "tiered",
+            "timeout",
+            "max_retries",
+            "truncation_retries",
+            "chunk_threshold",
+            "chunk_size",
+            "render_dpi",
+            "workers",
+            "save_figures",
+            "figures_max_total",
+            "figures_max_per_page",
+            "audit_enabled",
+            "audit_min_words",
+            "consensus_enabled",
+            "consensus_use_llm",
+            "consensus_ollama_model",
+            "reprocess",
+            "dry_run",
+            "quiet",
+            "verbose",
+            "deepseek_backend",
+            "deepseek_task",
+            "deepseek_vllm_url",
+            "glm_backend",
+            "glm_task",
+            "qwen_backend",
+            "qwen_model",
+            "nougat_model",
+            "marker_device",
+            "gemini_model",
+            "gemini_task",
+            "mistral_model",
         ]
         for key in scalar_fields:
             if key in data:
@@ -243,7 +265,9 @@ class PipelineConfig:
         return config
 
     @classmethod
-    def load(cls, profile: str | None = None, config_path: Path | str | None = None) -> "PipelineConfig":
+    def load(
+        cls, profile: str | None = None, config_path: Path | str | None = None
+    ) -> "PipelineConfig":
         """Load configuration from profile or custom path.
 
         Search order:
@@ -279,10 +303,13 @@ class PipelineConfig:
 # element of ``fallback_chain``.  Defined outside the class body so that
 # @dataclass doesn't treat it as a field.
 
+
 def _fallback_engine_get(self: PipelineConfig) -> EngineType | None:
     return self.fallback_chain[0] if self.fallback_chain else None
 
+
 def _fallback_engine_set(self: PipelineConfig, value: EngineType) -> None:
     self.fallback_chain = [value]
+
 
 PipelineConfig.fallback_engine = property(_fallback_engine_get, _fallback_engine_set)  # type: ignore[attr-defined]

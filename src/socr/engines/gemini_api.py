@@ -128,10 +128,7 @@ class GeminiAPIEngine:
                     engine=self.name,
                 )
 
-            description = (
-                _extract_text(response.json())
-                or "Unable to generate description"
-            )
+            description = _extract_text(response.json()) or "Unable to generate description"
             detected_type = _detect_figure_type(description, figure_type)
 
             return FigureInfo(

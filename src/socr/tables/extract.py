@@ -93,9 +93,7 @@ class TableCropExtractor:
         self._reader = reader
         self._crop_dpi = crop_dpi
 
-    def extract(
-        self, pdf_path: Path, page_num: int, boxes: list[TableBox]
-    ) -> list[CropTable]:
+    def extract(self, pdf_path: Path, page_num: int, boxes: list[TableBox]) -> list[CropTable]:
         """Crop each box on ``page_num`` (1-indexed) and read it. Never raises.
 
         A failed crop/read drops that table (returns no entry for it) rather than
@@ -120,16 +118,12 @@ class TableCropExtractor:
                 try:
                     md = self._reader.read(img_path)
                 except Exception as exc:
-                    logger.warning(
-                        "dual-pass: crop read failed p%d (%s)", page_num, exc
-                    )
+                    logger.warning("dual-pass: crop read failed p%d (%s)", page_num, exc)
                     continue
                 finally:
                     img_path.unlink(missing_ok=True)
                 if md.strip():
-                    out.append(
-                        CropTable(markdown=md, source=box.source, bbox=box.bbox)
-                    )
+                    out.append(CropTable(markdown=md, source=box.source, bbox=box.bbox))
         finally:
             doc.close()
         return out

@@ -370,7 +370,9 @@ def _create_pdf_with_table(path: Path) -> None:
         x_pos += col_w
         shape.draw_line(
             fitz.Point(x_pos - col_widths[0] if col_w == 0 else x_pos, table_top),
-            fitz.Point(x_pos - col_widths[0] if col_w == 0 else x_pos, table_top + num_rows * row_height),
+            fitz.Point(
+                x_pos - col_widths[0] if col_w == 0 else x_pos, table_top + num_rows * row_height
+            ),
         )
 
     # Actually, let's draw vertical lines properly
@@ -385,7 +387,9 @@ def _create_pdf_with_table(path: Path) -> None:
     # Vertical lines
     x_pos = x_start
     for i in range(len(col_widths) + 1):
-        shape.draw_line(fitz.Point(x_pos, table_top), fitz.Point(x_pos, table_top + num_rows * row_height))
+        shape.draw_line(
+            fitz.Point(x_pos, table_top), fitz.Point(x_pos, table_top + num_rows * row_height)
+        )
         if i < len(col_widths):
             x_pos += col_widths[i]
 
@@ -529,7 +533,9 @@ def _create_pdf_with_mixed_content(path: Path) -> None:
         shape.draw_line(fitz.Point(x_start, y_pos), fitz.Point(x_start + total_width, y_pos))
     x_pos = x_start
     for i in range(len(col_widths) + 1):
-        shape.draw_line(fitz.Point(x_pos, table_top), fitz.Point(x_pos, table_top + num_rows * row_height))
+        shape.draw_line(
+            fitz.Point(x_pos, table_top), fitz.Point(x_pos, table_top + num_rows * row_height)
+        )
         if i < len(col_widths):
             x_pos += col_widths[i]
     shape.finish(color=(0, 0, 0), width=0.5)
@@ -806,7 +812,7 @@ class TestMathFontDetection:
         page = MagicMock()
         page.get_fonts.return_value = [
             (1, "otf", "TrueType", "Times-Roman", "Times-Roman", "WinAnsi"),
-            (2, "otf", "Type1", "CMMI10", "CMMI10", "WinAnsi"),   # inline math
+            (2, "otf", "Type1", "CMMI10", "CMMI10", "WinAnsi"),  # inline math
             (3, "otf", "TrueType", "Helvetica", "Helvetica", "WinAnsi"),
         ]
         assert BornDigitalDetector._detect_math_fonts(page)

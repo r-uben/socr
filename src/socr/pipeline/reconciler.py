@@ -146,37 +146,43 @@ class OutputReconciler:
         blocks = []
 
         # Pattern for display math ($$...$$)
-        display_pattern = r'\$\$([^$]+)\$\$'
+        display_pattern = r"\$\$([^$]+)\$\$"
         for match in re.finditer(display_pattern, text, re.DOTALL):
-            blocks.append(LaTeXBlock(
-                content=match.group(0),
-                is_display=True,
-                start_pos=match.start(),
-                end_pos=match.end(),
-                normalized=self._normalize_latex(match.group(1)),
-            ))
+            blocks.append(
+                LaTeXBlock(
+                    content=match.group(0),
+                    is_display=True,
+                    start_pos=match.start(),
+                    end_pos=match.end(),
+                    normalized=self._normalize_latex(match.group(1)),
+                )
+            )
 
         # Pattern for LaTeX environments
-        env_pattern = r'\\begin\{(equation|align|gather|multline)\*?\}(.+?)\\end\{\1\*?\}'
+        env_pattern = r"\\begin\{(equation|align|gather|multline)\*?\}(.+?)\\end\{\1\*?\}"
         for match in re.finditer(env_pattern, text, re.DOTALL):
-            blocks.append(LaTeXBlock(
-                content=match.group(0),
-                is_display=True,
-                start_pos=match.start(),
-                end_pos=match.end(),
-                normalized=self._normalize_latex(match.group(2)),
-            ))
+            blocks.append(
+                LaTeXBlock(
+                    content=match.group(0),
+                    is_display=True,
+                    start_pos=match.start(),
+                    end_pos=match.end(),
+                    normalized=self._normalize_latex(match.group(2)),
+                )
+            )
 
         # Pattern for inline math ($...$) - avoid matching $$
-        inline_pattern = r'(?<!\$)\$(?!\$)([^$]+)\$(?!\$)'
+        inline_pattern = r"(?<!\$)\$(?!\$)([^$]+)\$(?!\$)"
         for match in re.finditer(inline_pattern, text):
-            blocks.append(LaTeXBlock(
-                content=match.group(0),
-                is_display=False,
-                start_pos=match.start(),
-                end_pos=match.end(),
-                normalized=self._normalize_latex(match.group(1)),
-            ))
+            blocks.append(
+                LaTeXBlock(
+                    content=match.group(0),
+                    is_display=False,
+                    start_pos=match.start(),
+                    end_pos=match.end(),
+                    normalized=self._normalize_latex(match.group(1)),
+                )
+            )
 
         # Sort by position
         blocks.sort(key=lambda b: b.start_pos)
@@ -185,10 +191,10 @@ class OutputReconciler:
     def _normalize_latex(self, latex: str) -> str:
         """Normalize LaTeX for comparison."""
         # Remove whitespace variations
-        normalized = re.sub(r'\s+', ' ', latex.strip())
+        normalized = re.sub(r"\s+", " ", latex.strip())
         # Remove common formatting differences
-        normalized = normalized.replace(r'\ ', ' ')
-        normalized = normalized.replace(r'\,', ' ')
+        normalized = normalized.replace(r"\ ", " ")
+        normalized = normalized.replace(r"\,", " ")
         return normalized
 
     def _merge_latex_into_text(
@@ -226,9 +232,11 @@ class OutputReconciler:
                     insertion_point = self._find_insertion_point(merged, block)
                     if insertion_point >= 0:
                         merged = (
-                            merged[:insertion_point] +
-                            "\n\n" + block.content + "\n\n" +
-                            merged[insertion_point:]
+                            merged[:insertion_point]
+                            + "\n\n"
+                            + block.content
+                            + "\n\n"
+                            + merged[insertion_point:]
                         )
                         merged_count += 1
 
@@ -265,8 +273,8 @@ class OutputReconciler:
 
         # Check for common equation patterns
         # E.g., both might have "frac" or specific variable names
-        common_tokens = set(re.findall(r'\\?\w+', norm1)) & set(re.findall(r'\\?\w+', norm2))
-        total_tokens = set(re.findall(r'\\?\w+', norm1)) | set(re.findall(r'\\?\w+', norm2))
+        common_tokens = set(re.findall(r"\\?\w+", norm1)) & set(re.findall(r"\\?\w+", norm2))
+        total_tokens = set(re.findall(r"\\?\w+", norm1)) | set(re.findall(r"\\?\w+", norm2))
 
         if total_tokens and len(common_tokens) / len(total_tokens) > 0.6:
             return True
@@ -280,12 +288,12 @@ class OutputReconciler:
         """
         # Look for equation references like "equation (1)" or "formula"
         patterns = [
-            r'equation\s*\(\d+\)',
-            r'formula\s*\(\d+\)',
-            r'as follows:',
-            r'given by:',
-            r'defined as:',
-            r'where:',
+            r"equation\s*\(\d+\)",
+            r"formula\s*\(\d+\)",
+            r"as follows:",
+            r"given by:",
+            r"defined as:",
+            r"where:",
         ]
 
         for pattern in patterns:
@@ -295,7 +303,7 @@ class OutputReconciler:
                 return match.end()
 
         # Find the first paragraph break
-        para_break = text.find('\n\n')
+        para_break = text.find("\n\n")
         if para_break > 0:
             return para_break
 

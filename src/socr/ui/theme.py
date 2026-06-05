@@ -4,20 +4,20 @@ from rich.style import Style
 from rich.theme import Theme
 
 # Muted, zen-like colors
-PRIMARY_COLOR = "#7C9CB5"      # Muted blue
-ACCENT_COLOR = "#A8B5A0"       # Sage green  
-WARN_COLOR = "#C9A86C"         # Muted gold
-ERROR_COLOR = "#B07878"        # Muted red
-DIM_COLOR = "#6B7280"          # Gray
+PRIMARY_COLOR = "#7C9CB5"  # Muted blue
+ACCENT_COLOR = "#A8B5A0"  # Sage green
+WARN_COLOR = "#C9A86C"  # Muted gold
+ERROR_COLOR = "#B07878"  # Muted red
+DIM_COLOR = "#6B7280"  # Gray
 
 # Engine colors (muted)
-NOUGAT_COLOR = "#B08968"       # Warm brown
-DEEPSEEK_COLOR = "#7C9CB5"     # Muted blue
+NOUGAT_COLOR = "#B08968"  # Warm brown
+DEEPSEEK_COLOR = "#7C9CB5"  # Muted blue
 DEEPSEEK_VLLM_COLOR = "#6B8FAB"  # Deeper blue (HPC mode)
-MISTRAL_COLOR = "#9B8AA6"      # Muted purple
-GEMINI_COLOR = "#7BA695"       # Sage
-OLLAMA_COLOR = "#8BA888"       # Soft green
-VLLM_COLOR = "#C9A86C"         # Muted gold (local vision)
+MISTRAL_COLOR = "#9B8AA6"  # Muted purple
+GEMINI_COLOR = "#7BA695"  # Sage
+OLLAMA_COLOR = "#8BA888"  # Soft green
+VLLM_COLOR = "#C9A86C"  # Muted gold (local vision)
 
 STAGE_COLORS = {
     "classify": "#9B8AA6",
@@ -69,21 +69,23 @@ STATUS_ICONS = {
     "skipped": "-",
 }
 
-AGENT_THEME = Theme({
-    "nougat": ENGINE_STYLES["nougat"],
-    "deepseek": ENGINE_STYLES["deepseek"],
-    "deepseek-vllm": ENGINE_STYLES["deepseek-vllm"],
-    "mistral": ENGINE_STYLES["mistral"],
-    "gemini": ENGINE_STYLES["gemini"],
-    "ollama": ENGINE_STYLES["ollama"],
-    "vllm": ENGINE_STYLES["vllm"],
-    "success": Style(color=ACCENT_COLOR),
-    "warning": Style(color=WARN_COLOR),
-    "error": Style(color=ERROR_COLOR),
-    "info": Style(color=PRIMARY_COLOR),
-    "dim": Style(color=DIM_COLOR),
-    "stage.title": Style(color="#D1D5DB"),
-    "stage.border": Style(color="#4B5563"),
-    "header": Style(color="#D1D5DB"),
-    "highlight": Style(color=WARN_COLOR),
-})
+AGENT_THEME = Theme(
+    {
+        "nougat": ENGINE_STYLES["nougat"],
+        "deepseek": ENGINE_STYLES["deepseek"],
+        "deepseek-vllm": ENGINE_STYLES["deepseek-vllm"],
+        "mistral": ENGINE_STYLES["mistral"],
+        "gemini": ENGINE_STYLES["gemini"],
+        "ollama": ENGINE_STYLES["ollama"],
+        "vllm": ENGINE_STYLES["vllm"],
+        "success": Style(color=ACCENT_COLOR),
+        "warning": Style(color=WARN_COLOR),
+        "error": Style(color=ERROR_COLOR),
+        "info": Style(color=PRIMARY_COLOR),
+        "dim": Style(color=DIM_COLOR),
+        "stage.title": Style(color="#D1D5DB"),
+        "stage.border": Style(color="#4B5563"),
+        "header": Style(color="#D1D5DB"),
+        "highlight": Style(color=WARN_COLOR),
+    }
+)

@@ -138,18 +138,14 @@ class TestAgreementScore:
 
     def test_word_order_matters(self) -> None:
         """Unlike Jaccard, reversed word order should not score 1.0."""
-        score = _agreement_score(
-            "the dog bit the man", "the man bit the dog"
-        )
+        score = _agreement_score("the dog bit the man", "the man bit the dog")
         # Same word set but different order -> WER > 0 -> agreement < 1.0
         assert score < 1.0
 
     def test_clamped_to_zero(self) -> None:
         """WER can exceed 1.0; agreement should clamp at 0.0."""
         # Very short reference, very long hypothesis
-        score = _agreement_score(
-            "a b c d e f g h i j k l m n", "x"
-        )
+        score = _agreement_score("a b c d e f g h i j k l m n", "x")
         assert score >= 0.0
 
 
@@ -263,7 +259,9 @@ class TestScoreAttemptGrounded:
         reference = "hello world"
         passed = _make_page_output(1, text="hello world", audit_passed=True)
         failed = _make_page_output(1, text="hello world", audit_passed=False)
-        assert _score_attempt_grounded(passed, reference) > _score_attempt_grounded(failed, reference)
+        assert _score_attempt_grounded(passed, reference) > _score_attempt_grounded(
+            failed, reference
+        )
 
     def test_dispatches_to_grounded_when_reference_provided(self) -> None:
         """_score_attempt with reference should use grounded path."""
@@ -338,9 +336,7 @@ class TestSelectBest:
 
     def test_structured_text_wins(self) -> None:
         engine = ConsensusEngine()
-        plain = _make_page_output(
-            1, "word " * 50, engine="engine-a"
-        )
+        plain = _make_page_output(1, "word " * 50, engine="engine-a")
         structured = _make_page_output(
             1,
             "# Title\n\n" + "word " * 45 + "\n\n## Section\n\n- item\n- item",
@@ -360,12 +356,8 @@ class TestSelectBest:
 
     def test_all_failed_attempts(self) -> None:
         engine = ConsensusEngine()
-        a = _make_page_output(
-            1, "", engine="engine-a", status=PageStatus.ERROR
-        )
-        b = _make_page_output(
-            1, "", engine="engine-b", status=PageStatus.ERROR
-        )
+        a = _make_page_output(1, "", engine="engine-a", status=PageStatus.ERROR)
+        b = _make_page_output(1, "", engine="engine-b", status=PageStatus.ERROR)
         result = engine.select_best([a, b])
         # Falls back to first attempt
         assert result.selected_engine == "engine-a"
@@ -382,9 +374,7 @@ class TestSelectBest:
     def test_discrepancies_on_word_count_divergence(self) -> None:
         engine = ConsensusEngine()
         short = _make_page_output(1, "short", engine="engine-a")
-        long = _make_page_output(
-            1, "a much longer text with many more words", engine="engine-b"
-        )
+        long = _make_page_output(1, "a much longer text with many more words", engine="engine-b")
         result = engine.select_best([short, long])
         assert any("Word count" in d for d in result.discrepancies)
 
@@ -433,9 +423,7 @@ class TestSelectBestGrounded:
             text=reference + " " + "hallucinated " * 20,
             engine="engine-bad",
         )
-        result = engine.select_best(
-            [faithful, hallucinated], reference_text=reference
-        )
+        result = engine.select_best([faithful, hallucinated], reference_text=reference)
         assert result.selected_engine == "engine-good"
 
     def test_falls_back_to_ungrounded_with_empty_reference(self) -> None:
@@ -476,14 +464,14 @@ class TestSelectBestWithLLM:
         a = _make_page_output(1, "text from engine a", engine="engine-a")
         b = _make_page_output(1, "text from engine b", engine="engine-b")
 
-        llm_response = json.dumps({
-            "selected": 2,
-            "text": "text from engine b",
-        })
+        llm_response = json.dumps(
+            {
+                "selected": 2,
+                "text": "text from engine b",
+            }
+        )
 
-        with patch(
-            "socr.pipeline.consensus._call_ollama", return_value=llm_response
-        ):
+        with patch("socr.pipeline.consensus._call_ollama", return_value=llm_response):
             result = engine.select_best_with_llm([a, b])
 
         assert result.selected_engine == "engine-b"
@@ -494,14 +482,14 @@ class TestSelectBestWithLLM:
         a = _make_page_output(1, "text from engine a", engine="engine-a")
         b = _make_page_output(1, "text from engine b", engine="engine-b")
 
-        llm_response = json.dumps({
-            "selected": 0,
-            "text": "merged best of both",
-        })
+        llm_response = json.dumps(
+            {
+                "selected": 0,
+                "text": "merged best of both",
+            }
+        )
 
-        with patch(
-            "socr.pipeline.consensus._call_ollama", return_value=llm_response
-        ):
+        with patch("socr.pipeline.consensus._call_ollama", return_value=llm_response):
             result = engine.select_best_with_llm([a, b])
 
         assert result.selected_engine == "llm-merged"
@@ -512,9 +500,7 @@ class TestSelectBestWithLLM:
         a = _make_page_output(1, "text from engine a" + " word" * 50, engine="engine-a")
         b = _make_page_output(1, "short", engine="engine-b")
 
-        with patch(
-            "socr.pipeline.consensus._call_ollama", return_value=None
-        ):
+        with patch("socr.pipeline.consensus._call_ollama", return_value=None):
             result = engine.select_best_with_llm([a, b])
 
         # Falls back to heuristic -- engine-a has more words
@@ -540,9 +526,7 @@ class TestSelectBestWithLLM:
 
         llm_response = json.dumps({"selected": 1, "text": ""})
 
-        with patch(
-            "socr.pipeline.consensus._call_ollama", return_value=llm_response
-        ):
+        with patch("socr.pipeline.consensus._call_ollama", return_value=llm_response):
             result = engine.select_best_with_llm([a, b])
 
         # Empty text -> parse returns None -> falls back to heuristic
@@ -558,14 +542,10 @@ class TestReconcileDocument:
     def test_skips_pages_with_single_attempt(self) -> None:
         state = DocumentState(handle=_make_handle(2))
         state.apply_result(
-            _make_engine_result(
-                [_make_page_output(1, "page 1 text")], engine="deepseek"
-            )
+            _make_engine_result([_make_page_output(1, "page 1 text")], engine="deepseek")
         )
         state.apply_result(
-            _make_engine_result(
-                [_make_page_output(2, "page 2 text")], engine="deepseek"
-            )
+            _make_engine_result([_make_page_output(2, "page 2 text")], engine="deepseek")
         )
 
         engine = ConsensusEngine()
@@ -640,15 +620,15 @@ class TestReconcileDocument:
         state.apply_result(_make_engine_result([a], engine="engine-a"))
         state.apply_result(_make_engine_result([b], engine="engine-b"))
 
-        llm_response = json.dumps({
-            "selected": 1,
-            "text": "text a",
-        })
+        llm_response = json.dumps(
+            {
+                "selected": 1,
+                "text": "text a",
+            }
+        )
 
         engine = ConsensusEngine(use_llm=True, ollama_model="llama3")
-        with patch(
-            "socr.pipeline.consensus._call_ollama", return_value=llm_response
-        ):
+        with patch("socr.pipeline.consensus._call_ollama", return_value=llm_response):
             results = engine.reconcile_document(state)
 
         assert len(results) == 1

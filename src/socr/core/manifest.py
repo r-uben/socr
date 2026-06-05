@@ -131,9 +131,7 @@ class Manifest:
             page_count=d["page_count"],
             render_dpi=d["render_dpi"],
             schema_version=d.get("schema_version", MANIFEST_SCHEMA_VERSION),
-            entries={
-                int(k): ManifestEntry.from_dict(v) for k, v in d.get("entries", {}).items()
-            },
+            entries={int(k): ManifestEntry.from_dict(v) for k, v in d.get("entries", {}).items()},
         )
 
     def save(self, path: Path | str) -> None:

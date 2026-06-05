@@ -111,10 +111,7 @@ class UnifiedPipeline:
 
             # Phase 4: Repair — skip (multiple engines already provide coverage)
             if not self.config.quiet:
-                console.print(
-                    "\n[cyan]Phase 4:[/cyan] Repair "
-                    "(skipped — multi-engine mode)"
-                )
+                console.print("\n[cyan]Phase 4:[/cyan] Repair (skipped — multi-engine mode)")
 
             # Phase 4b: Consensus — always run in multi-engine mode
             self._phase_consensus(state)
@@ -156,9 +153,7 @@ class UnifiedPipeline:
 
         return final_result
 
-    def process_batch(
-        self, input_dir: Path, output_dir: Path | None = None
-    ) -> list[EngineResult]:
+    def process_batch(self, input_dir: Path, output_dir: Path | None = None) -> list[EngineResult]:
         """Process all PDFs in a directory with incremental tracking."""
         input_dir = Path(input_dir)
         out_dir = output_dir or self.config.output_dir
@@ -235,28 +230,18 @@ class UnifiedPipeline:
             if bd_count:
                 # Count pages needing enhancement vs pure prose
                 enhancement_count = sum(
-                    1 for pa in assessment.pages
-                    if pa.is_born_digital and pa.needs_ocr_enhancement
+                    1 for pa in assessment.pages if pa.is_born_digital and pa.needs_ocr_enhancement
                 )
                 prose_count = bd_count - enhancement_count
                 scanned_count = assessment.scanned_count
-                console.print(
-                    f"  {bd_count}/{assessment.page_count} pages born-digital"
-                )
+                console.print(f"  {bd_count}/{assessment.page_count} pages born-digital")
                 if self.config.native_first and (prose_count or enhancement_count):
                     if prose_count:
-                        console.print(
-                            f"    {prose_count} prose-only (native text)"
-                        )
+                        console.print(f"    {prose_count} prose-only (native text)")
                     if enhancement_count:
-                        console.print(
-                            f"    {enhancement_count} complex "
-                            f"(tables/figures/equations)"
-                        )
+                        console.print(f"    {enhancement_count} complex (tables/figures/equations)")
                     if scanned_count:
-                        console.print(
-                            f"    {scanned_count} scanned (no text layer)"
-                        )
+                        console.print(f"    {scanned_count} scanned (no text layer)")
             else:
                 console.print("  No born-digital pages detected")
 
@@ -264,9 +249,7 @@ class UnifiedPipeline:
     # Phase 2: Backbone OCR
     # ------------------------------------------------------------------
 
-    def _phase_backbone(
-        self, state: DocumentState, output_dir: Path
-    ) -> EngineResult | None:
+    def _phase_backbone(self, state: DocumentState, output_dir: Path) -> EngineResult | None:
         """Run the primary engine on the document.
 
         When ``native_first`` is enabled and the document is mostly
@@ -280,9 +263,7 @@ class UnifiedPipeline:
         # Native-first: use native text for born-digital prose, CLI only
         # for complex/scanned pages.
         if self.config.native_first:
-            bd_pages = [
-                p for p in state.pages.values() if p.is_born_digital
-            ]
+            bd_pages = [p for p in state.pages.values() if p.is_born_digital]
             bd_ratio = len(bd_pages) / max(len(state.pages), 1)
             if bd_ratio >= 0.5:
                 return self._backbone_native_first(state, output_dir)
@@ -301,8 +282,7 @@ class UnifiedPipeline:
                 engine=engine.name,
                 status=DocumentStatus.ERROR,
                 error=(
-                    f"Engine {engine.name} not available "
-                    f"(CLI not installed or missing API key)"
+                    f"Engine {engine.name} not available (CLI not installed or missing API key)"
                 ),
             )
             state.apply_result(err_result)
@@ -311,9 +291,7 @@ class UnifiedPipeline:
         # Per-page processing: render all pages to images → CLI
         all_pages = list(range(1, state.handle.page_count + 1))
         if not self.config.quiet:
-            console.print(
-                f"  Processing {len(all_pages)} pages (per-page)..."
-            )
+            console.print(f"  Processing {len(all_pages)} pages (per-page)...")
 
         start_time = time.time()
         page_outputs = engine.process_pages(
@@ -324,13 +302,8 @@ class UnifiedPipeline:
         )
         elapsed = time.time() - start_time
 
-        success_count = sum(
-            1 for p in page_outputs if p.status == PageStatus.SUCCESS
-        )
-        overall_status = (
-            DocumentStatus.SUCCESS if success_count > 0
-            else DocumentStatus.ERROR
-        )
+        success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
+        overall_status = DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR
 
         if not self.config.quiet:
             console.print(f"  {success_count}/{len(all_pages)} pages succeeded")
@@ -347,9 +320,7 @@ class UnifiedPipeline:
         state.apply_result(result)
         return result
 
-    def _backbone_native_first(
-        self, state: DocumentState, output_dir: Path
-    ) -> EngineResult:
+    def _backbone_native_first(self, state: DocumentState, output_dir: Path) -> EngineResult:
         """3-tier routing: native → local → cloud.
 
         Tier 1: Born-digital prose → native text (free, instant)
@@ -396,8 +367,14 @@ class UnifiedPipeline:
             for page_num in ocr_pages:
                 ps = state.pages[page_num]
                 bd_assessment = next(
-                    (pa for pa in (self._last_assessment or DocumentAssessment(path=state.handle.path, pages=[])).pages
-                     if pa.page_num == page_num),
+                    (
+                        pa
+                        for pa in (
+                            self._last_assessment
+                            or DocumentAssessment(path=state.handle.path, pages=[])
+                        ).pages
+                        if pa.page_num == page_num
+                    ),
                     None,
                 )
                 if bd_assessment:
@@ -414,7 +391,8 @@ class UnifiedPipeline:
 
             # Classify page difficulty with hints
             difficulty_map = classify_pages(
-                str(state.handle.path), ocr_pages,
+                str(state.handle.path),
+                ocr_pages,
                 page_hints=page_hints,
             )
             for page_num in ocr_pages:
@@ -432,8 +410,7 @@ class UnifiedPipeline:
             console.print(f"\n[cyan]Phase 2:[/cyan] Text extraction ({label})")
             if prose_pages:
                 console.print(
-                    f"  {len(prose_pages)}/{total} pages: "
-                    "native text (born-digital prose)"
+                    f"  {len(prose_pages)}/{total} pages: native text (born-digital prose)"
                 )
             if easy_pages:
                 console.print(
@@ -454,13 +431,15 @@ class UnifiedPipeline:
         # Tier 1: Native text for prose pages
         for page_num in prose_pages:
             ps = state.pages[page_num]
-            page_outputs.append(PageOutput(
-                page_num=page_num,
-                text=ps.native_text,
-                status=PageStatus.SUCCESS,
-                engine="native",
-                audit_passed=True,
-            ))
+            page_outputs.append(
+                PageOutput(
+                    page_num=page_num,
+                    text=ps.native_text,
+                    status=PageStatus.SUCCESS,
+                    engine="native",
+                    audit_passed=True,
+                )
+            )
 
         # Tier 2: Local engine for easy pages
         escalated_pages: list[int] = []
@@ -468,8 +447,11 @@ class UnifiedPipeline:
         local_engine_name = ""
         if easy_pages and local_engine_type:
             local_outputs = self._run_engine_on_pages(
-                state, easy_pages, enhancement_pages,
-                local_engine_type, "local",
+                state,
+                easy_pages,
+                enhancement_pages,
+                local_engine_type,
+                "local",
             )
 
             # Per-page quality scoring on local outputs → auto-escalate failures
@@ -499,7 +481,8 @@ class UnifiedPipeline:
                     escalated_reasons[po.page_num] = scoring.primary_failure.value
                     logger.info(
                         "Page %d failed local audit (%s) — escalating to cloud",
-                        po.page_num, scoring.primary_failure.value,
+                        po.page_num,
+                        scoring.primary_failure.value,
                     )
 
             page_outputs.extend(passed_outputs)
@@ -516,8 +499,11 @@ class UnifiedPipeline:
         cloud_pages = hard_pages + escalated_pages
         if cloud_pages:
             cloud_outputs = self._run_engine_on_pages(
-                state, cloud_pages, enhancement_pages,
-                self.config.primary_engine, "cloud",
+                state,
+                cloud_pages,
+                enhancement_pages,
+                self.config.primary_engine,
+                "cloud",
             )
             # Tag escalated pages so metadata tracks the promotion
             for co in cloud_outputs:
@@ -527,13 +513,8 @@ class UnifiedPipeline:
 
         elapsed = time.time() - start_time
 
-        success_count = sum(
-            1 for p in page_outputs if p.status == PageStatus.SUCCESS
-        )
-        overall_status = (
-            DocumentStatus.SUCCESS if success_count > 0
-            else DocumentStatus.ERROR
-        )
+        success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
+        overall_status = DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR
 
         engines_used = set()
         for p in page_outputs:
@@ -592,27 +573,30 @@ class UnifiedPipeline:
             for page_num in page_nums:
                 ps = state.pages[page_num]
                 if page_num in enhancement_pages and ps.native_text:
-                    outputs.append(PageOutput(
-                        page_num=page_num,
-                        text=ps.native_text,
-                        status=PageStatus.SUCCESS,
-                        engine="native",
-                        audit_passed=True,
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            text=ps.native_text,
+                            status=PageStatus.SUCCESS,
+                            engine="native",
+                            audit_passed=True,
+                        )
+                    )
                 else:
-                    outputs.append(PageOutput(
-                        page_num=page_num,
-                        text="",
-                        status=PageStatus.ERROR,
-                        engine=engine.name,
-                        failure_mode=FailureMode.MODEL_UNAVAILABLE,
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            text="",
+                            status=PageStatus.ERROR,
+                            engine=engine.name,
+                            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+                        )
+                    )
             return outputs
 
         if not self.config.quiet:
             console.print(
-                f"  Running {engine.name} on "
-                f"{len(page_nums)} {label} pages (per-page)..."
+                f"  Running {engine.name} on {len(page_nums)} {label} pages (per-page)..."
             )
 
         # Render pages to images → CLI processes images → per-page results
@@ -626,19 +610,18 @@ class UnifiedPipeline:
         # For enhancement pages where OCR failed, fall back to native text
         final: list[PageOutput] = []
         for po in page_outputs:
-            if (
-                po.status != PageStatus.SUCCESS
-                and po.page_num in enhancement_pages
-            ):
+            if po.status != PageStatus.SUCCESS and po.page_num in enhancement_pages:
                 ps = state.pages[po.page_num]
                 if ps.native_text:
-                    final.append(PageOutput(
-                        page_num=po.page_num,
-                        text=ps.native_text,
-                        status=PageStatus.SUCCESS,
-                        engine="native",
-                        audit_passed=True,
-                    ))
+                    final.append(
+                        PageOutput(
+                            page_num=po.page_num,
+                            text=ps.native_text,
+                            status=PageStatus.SUCCESS,
+                            engine="native",
+                            audit_passed=True,
+                        )
+                    )
                     continue
             final.append(po)
 
@@ -678,8 +661,12 @@ class UnifiedPipeline:
                 and ps.native_text
             ):
                 native = PageOutput(
-                    page_num=page_num, text=ps.native_text, status=PageStatus.SUCCESS,
-                    engine="native", audit_passed=True, cost_usd=0.0,
+                    page_num=page_num,
+                    text=ps.native_text,
+                    status=PageStatus.SUCCESS,
+                    engine="native",
+                    audit_passed=True,
+                    cost_usd=0.0,
                 )
                 ps.attempts.append(native)
                 ps.best_output = native
@@ -730,13 +717,17 @@ class UnifiedPipeline:
             ps.best_output = decision.final_output
 
             # Record cost so DocumentState.total_cost reflects spend.
-            state.engine_runs.append(EngineResult(
-                document_path=state.handle.path,
-                engine=decision.winning_engine,
-                status=DocumentStatus.SUCCESS if decision.accepted else DocumentStatus.AUDIT_FAILED,
-                cost=decision.total_cost_usd,
-                processing_time=0.0,
-            ))
+            state.engine_runs.append(
+                EngineResult(
+                    document_path=state.handle.path,
+                    engine=decision.winning_engine,
+                    status=DocumentStatus.SUCCESS
+                    if decision.accepted
+                    else DocumentStatus.AUDIT_FAILED,
+                    cost=decision.total_cost_usd,
+                    processing_time=0.0,
+                )
+            )
 
             if not self.config.quiet:
                 tag = "accepted" if decision.accepted else "best-effort"
@@ -797,24 +788,21 @@ class UnifiedPipeline:
         # where wrong digits/signs/columns are both likely and costly.
         assessment = self._last_assessment
         hard_pages = {
-            pa.page_num for pa in (assessment.pages if assessment else [])
+            pa.page_num
+            for pa in (assessment.pages if assessment else [])
             if pa.has_tables or pa.has_equations
         }
         if not hard_pages:
             return
 
         try:
-            judge = VLMPageJudge(
-                OllamaVisionJudge(model=model), self._make_page_renderer(state)
-            )
+            judge = VLMPageJudge(OllamaVisionJudge(model=model), self._make_page_renderer(state))
         except Exception as exc:
             logger.warning("hard-page judge unavailable (%s)", exc)
             return
 
         if not self.config.quiet:
-            console.print(
-                f"\n[cyan]Phase 3b:[/cyan] VLM judge on hard pages [{model}]"
-            )
+            console.print(f"\n[cyan]Phase 3b:[/cyan] VLM judge on hard pages [{model}]")
 
         judged = rejected = 0
         for page_num in sorted(state.pages):
@@ -885,9 +873,7 @@ class UnifiedPipeline:
             return
 
         if not self.config.quiet:
-            console.print(
-                f"\n[cyan]Phase 4c:[/cyan] dual-pass table extraction [{model}]"
-            )
+            console.print(f"\n[cyan]Phase 4c:[/cyan] dual-pass table extraction [{model}]")
 
         import fitz
 
@@ -911,9 +897,7 @@ class UnifiedPipeline:
                 crops = extractor.extract(pdf_path, page_num, boxes)
                 if not crops:
                     continue
-                result = reconcile_page_tables(
-                    bo.text, [(c.markdown, c.source) for c in crops]
-                )
+                result = reconcile_page_tables(bo.text, [(c.markdown, c.source) for c in crops])
             except Exception as exc:  # a dual-pass failure must never drop a page
                 logger.warning("dual-pass errored on p%d (%s); keeping text", page_num, exc)
                 continue
@@ -927,17 +911,13 @@ class UnifiedPipeline:
             if result.disagreements and not self.config.quiet:
                 for d in result.disagreements:
                     color = "green" if d.action == "patched" else "yellow"
-                    console.print(
-                        f"  [{color}]p{page_num}: {d.action} — {d.summary()}[/{color}]"
-                    )
+                    console.print(f"  [{color}]p{page_num}: {d.action} — {d.summary()}[/{color}]")
 
         if not self.config.quiet:
             if scanned == 0:
                 console.print("  No model-OCR'd table pages to re-read")
             else:
-                console.print(
-                    f"  {scanned} pages scanned, {patched} patched, {flagged} flagged"
-                )
+                console.print(f"  {scanned} pages scanned, {patched} patched, {flagged} flagged")
 
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics."""
@@ -963,6 +943,7 @@ class UnifiedPipeline:
 
     def _make_page_renderer(self, state: DocumentState):
         """Return render_image(page_num) -> temp PNG path for the VLM judge."""
+
         def render(page_num: int) -> Path:
             img = state.handle.render_page(page_num, dpi=self.config.render_dpi)
             tmp = Path(tempfile.gettempdir()) / f"socr_judge_{state.handle.stem}_p{page_num}.png"
@@ -1011,10 +992,7 @@ class UnifiedPipeline:
         engine_names = [e.value for e in engines]
 
         if not self.config.quiet:
-            console.print(
-                f"\n[cyan]Phase 2:[/cyan] Multi-engine OCR "
-                f"[{', '.join(engine_names)}]"
-            )
+            console.print(f"\n[cyan]Phase 2:[/cyan] Multi-engine OCR [{', '.join(engine_names)}]")
 
         results: list[EngineResult] = []
 
@@ -1045,16 +1023,11 @@ class UnifiedPipeline:
                 config=self.config,
                 dpi=self.config.render_dpi,
             )
-            success_count = sum(
-                1 for p in page_outputs if p.status == PageStatus.SUCCESS
-            )
+            success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
             result = EngineResult(
                 document_path=state.handle.path,
                 engine=engine.name,
-                status=(
-                    DocumentStatus.SUCCESS if success_count > 0
-                    else DocumentStatus.ERROR
-                ),
+                status=(DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR),
                 pages=page_outputs,
                 pages_processed=state.handle.page_count,
                 model_version=engine.model_version,
@@ -1066,9 +1039,7 @@ class UnifiedPipeline:
                 if result.success:
                     console.print(f"... [green]{word_count} words[/green]")
                 else:
-                    console.print(
-                        f"... [red]{result.error or result.status.value}[/red]"
-                    )
+                    console.print(f"... [red]{result.error or result.status.value}[/red]")
 
             results.append(result)
 
@@ -1078,9 +1049,7 @@ class UnifiedPipeline:
     # Phase 3: Score
     # ------------------------------------------------------------------
 
-    def _phase_score(
-        self, state: DocumentState, backbone_result: EngineResult
-    ) -> None:
+    def _phase_score(self, state: DocumentState, backbone_result: EngineResult) -> None:
         """Run quality scoring on engine outputs.
 
         For CLI engines that produce page_num=0 (whole-doc), score the
@@ -1097,13 +1066,9 @@ class UnifiedPipeline:
         else:
             self._score_per_page(state)
 
-    def _score_whole_doc(
-        self, state: DocumentState, result: EngineResult
-    ) -> None:
+    def _score_whole_doc(self, state: DocumentState, result: EngineResult) -> None:
         """Score a whole-document output (CLI engine, page_num=0)."""
-        whole_doc_page = next(
-            (p for p in result.pages if p.page_num == 0), None
-        )
+        whole_doc_page = next((p for p in result.pages if p.page_num == 0), None)
         if not whole_doc_page:
             return
 
@@ -1113,7 +1078,8 @@ class UnifiedPipeline:
         # words-per-page ratio.
         was_chunked = state.handle.page_count > self.config.chunk_threshold
         scoring = self.scorer.score(
-            whole_doc_page.text, engine=result.engine,
+            whole_doc_page.text,
+            engine=result.engine,
             expected_pages=0 if was_chunked else state.handle.page_count,
         )
 
@@ -1130,9 +1096,7 @@ class UnifiedPipeline:
             result.status = DocumentStatus.AUDIT_FAILED
             result.failure_mode = scoring.primary_failure
             if not self.config.quiet:
-                console.print(
-                    f"  [red]FAIL:[/red] {scoring.primary_failure.value}"
-                )
+                console.print(f"  [red]FAIL:[/red] {scoring.primary_failure.value}")
                 for mode, detail in scoring.details.items():
                     console.print(f"    {detail}")
 
@@ -1185,24 +1149,18 @@ class UnifiedPipeline:
         for result in backbone_results:
             if not result.success:
                 if not self.config.quiet:
-                    console.print(
-                        f"  {result.engine}: [red]skipped (engine failed)[/red]"
-                    )
+                    console.print(f"  {result.engine}: [red]skipped (engine failed)[/red]")
                 continue
 
             has_whole_doc = any(p.page_num == 0 for p in result.pages)
 
             if has_whole_doc:
                 whole_page = next(p for p in result.pages if p.page_num == 0)
-                was_chunked = (
-                    state.handle.page_count > self.config.chunk_threshold
-                )
+                was_chunked = state.handle.page_count > self.config.chunk_threshold
                 scoring = self.scorer.score(
                     whole_page.text,
                     engine=result.engine,
-                    expected_pages=(
-                        0 if was_chunked else state.handle.page_count
-                    ),
+                    expected_pages=(0 if was_chunked else state.handle.page_count),
                 )
                 whole_page.audit_passed = scoring.passed
                 if scoring.passed:
@@ -1214,22 +1172,17 @@ class UnifiedPipeline:
 
                 if not self.config.quiet:
                     if scoring.passed:
-                        console.print(
-                            f"  {result.engine}: [green]passed[/green]"
-                        )
+                        console.print(f"  {result.engine}: [green]passed[/green]")
                     else:
                         console.print(
-                            f"  {result.engine}: "
-                            f"[red]{scoring.primary_failure.value}[/red]"
+                            f"  {result.engine}: [red]{scoring.primary_failure.value}[/red]"
                         )
             else:
                 # Per-page outputs: score each page
                 passed = 0
                 failed = 0
                 for page_out in result.pages:
-                    scoring = self.scorer.score(
-                        page_out.text, engine=result.engine
-                    )
+                    scoring = self.scorer.score(page_out.text, engine=result.engine)
                     page_out.audit_passed = scoring.passed
                     if scoring.passed:
                         page_out.failure_mode = FailureMode.NONE
@@ -1265,23 +1218,15 @@ class UnifiedPipeline:
         # If a CLI engine produced a passing whole-doc output, per-page
         # states won't have best_outputs but the document is covered.
         # Skip repair entirely in that case.
-        has_passing_whole_doc = any(
-            w.audit_passed for w in state.whole_doc_attempts
-        )
+        has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
         # Also check if there's a failing whole-doc attempt that needs
         # document-level retry (e.g. truncated output).
-        has_failing_whole_doc = any(
-            not w.audit_passed for w in state.whole_doc_attempts
-        )
-        needs_whole_doc_retry = (
-            has_failing_whole_doc and not has_passing_whole_doc
-        )
+        has_failing_whole_doc = any(not w.audit_passed for w in state.whole_doc_attempts)
+        needs_whole_doc_retry = has_failing_whole_doc and not has_passing_whole_doc
 
         if has_passing_whole_doc and not state.pages_needing_repair:
             if not self.config.quiet:
-                console.print(
-                    "\n[cyan]Phase 4:[/cyan] Repair (not needed)"
-                )
+                console.print("\n[cyan]Phase 4:[/cyan] Repair (not needed)")
             return
 
         # Retry-on-truncation: if the latest whole-doc attempt failed
@@ -1294,10 +1239,7 @@ class UnifiedPipeline:
             and state.whole_doc_attempts
         ):
             latest_whole = state.whole_doc_attempts[-1]
-            if (
-                not latest_whole.audit_passed
-                and latest_whole.failure_mode == FailureMode.TRUNCATED
-            ):
+            if not latest_whole.audit_passed and latest_whole.failure_mode == FailureMode.TRUNCATED:
                 # Identify which engine produced the truncated output
                 truncated_engine_name = latest_whole.engine
                 truncated_engine_type = None
@@ -1320,26 +1262,27 @@ class UnifiedPipeline:
                             break
                         all_pages = list(range(1, state.handle.page_count + 1))
                         page_outputs = engine.process_pages(
-                            state.handle.path, all_pages, self.config,
+                            state.handle.path,
+                            all_pages,
+                            self.config,
                             dpi=self.config.render_dpi,
                         )
                         retry_result = EngineResult(
                             document_path=state.handle.path,
                             engine=engine.name,
-                            status=DocumentStatus.SUCCESS if any(
-                                p.status == PageStatus.SUCCESS for p in page_outputs
-                            ) else DocumentStatus.ERROR,
+                            status=DocumentStatus.SUCCESS
+                            if any(p.status == PageStatus.SUCCESS for p in page_outputs)
+                            else DocumentStatus.ERROR,
                             pages=page_outputs,
                             pages_processed=state.handle.page_count,
                         )
                         state.apply_result(retry_result)
                         if retry_result.success:
-                            self._score_repair_result(
-                                state, retry_result, []
-                            )
+                            self._score_repair_result(state, retry_result, [])
                         # Check if per-page results pass
                         ok = sum(
-                            1 for p in page_outputs
+                            1
+                            for p in page_outputs
                             if p.status == PageStatus.SUCCESS and p.audit_passed
                         )
                         if ok == state.handle.page_count:
@@ -1350,10 +1293,7 @@ class UnifiedPipeline:
                     # If truncation retry resolved it, we're done
                     if not needs_whole_doc_retry:
                         if not self.config.quiet:
-                            console.print(
-                                "  [green]Truncation retry "
-                                "succeeded[/green]"
-                            )
+                            console.print("  [green]Truncation retry succeeded[/green]")
                         return
 
         for attempt in range(self.config.max_retries):
@@ -1379,23 +1319,23 @@ class UnifiedPipeline:
                     if engine.is_available():
                         all_pages = list(range(1, state.handle.page_count + 1))
                         page_outputs = engine.process_pages(
-                            state.handle.path, all_pages, self.config,
+                            state.handle.path,
+                            all_pages,
+                            self.config,
                             dpi=self.config.render_dpi,
                         )
                         repair_result = EngineResult(
                             document_path=state.handle.path,
                             engine=engine.name,
-                            status=DocumentStatus.SUCCESS if any(
-                                p.status == PageStatus.SUCCESS for p in page_outputs
-                            ) else DocumentStatus.ERROR,
+                            status=DocumentStatus.SUCCESS
+                            if any(p.status == PageStatus.SUCCESS for p in page_outputs)
+                            else DocumentStatus.ERROR,
                             pages=page_outputs,
                             pages_processed=state.handle.page_count,
                         )
                         state.apply_result(repair_result)
                         if repair_result.success:
-                            self._score_repair_result(
-                                state, repair_result, []
-                            )
+                            self._score_repair_result(state, repair_result, [])
                             if not state.pages_needing_repair:
                                 needs_whole_doc_retry = False
                                 break
@@ -1405,35 +1345,26 @@ class UnifiedPipeline:
                 if not self.config.quiet and attempt == 0:
                     if state.pages_needing_repair:
                         console.print(
-                            "\n[cyan]Phase 4:[/cyan] Repair "
-                            "(all engines exhausted, skipping)"
+                            "\n[cyan]Phase 4:[/cyan] Repair (all engines exhausted, skipping)"
                         )
                     else:
-                        console.print(
-                            "\n[cyan]Phase 4:[/cyan] Repair (not needed)"
-                        )
+                        console.print("\n[cyan]Phase 4:[/cyan] Repair (not needed)")
                 break
 
             if not self.config.quiet:
-                engines_str = ", ".join(
-                    e.value for e in plan.by_engine.keys()
-                )
+                engines_str = ", ".join(e.value for e in plan.by_engine.keys())
                 console.print(
                     f"\n[cyan]Phase 4:[/cyan] Repair "
                     f"(attempt {attempt + 1}/{self.config.max_retries}) "
                     f"[{engines_str}]"
                 )
-                console.print(
-                    f"  {len(plan.repairs)} page(s) to repair"
-                )
+                console.print(f"  {len(plan.repairs)} page(s) to repair")
                 # Surface RECITATION refusals explicitly: a Gemini copyright-filter
                 # refusal must never be silent — name the reason and the recovery
                 # engine so the user knows the page was refused, not just retried.
                 for r in plan.repairs:
                     ps = state.pages.get(r.page_num)
-                    if ps and any(
-                        a.failure_mode == FailureMode.RECITATION for a in ps.attempts
-                    ):
+                    if ps and any(a.failure_mode == FailureMode.RECITATION for a in ps.attempts):
                         console.print(
                             f"  [yellow]p{r.page_num}: Gemini refused "
                             f"(RECITATION — copyright/recitation filter) "
@@ -1441,8 +1372,7 @@ class UnifiedPipeline:
                         )
                 if plan.pages_skipped:
                     console.print(
-                        f"  {len(plan.pages_skipped)} page(s) skipped "
-                        f"(engines exhausted)"
+                        f"  {len(plan.pages_skipped)} page(s) skipped (engines exhausted)"
                     )
 
             # Execute repairs grouped by engine
@@ -1451,24 +1381,23 @@ class UnifiedPipeline:
 
                 if not engine.is_available():
                     if not self.config.quiet:
-                        console.print(
-                            f"  [yellow]{engine.name} not available, "
-                            f"skipping[/yellow]"
-                        )
+                        console.print(f"  [yellow]{engine.name} not available, skipping[/yellow]")
                     continue
 
                 # Only process the failed pages, not the whole document
                 failed_pages = [r.page_num for r in repairs]
                 page_outputs = engine.process_pages(
-                    state.handle.path, failed_pages, self.config,
+                    state.handle.path,
+                    failed_pages,
+                    self.config,
                     dpi=self.config.render_dpi,
                 )
                 repair_result = EngineResult(
                     document_path=state.handle.path,
                     engine=engine.name,
-                    status=DocumentStatus.SUCCESS if any(
-                        p.status == PageStatus.SUCCESS for p in page_outputs
-                    ) else DocumentStatus.ERROR,
+                    status=DocumentStatus.SUCCESS
+                    if any(p.status == PageStatus.SUCCESS for p in page_outputs)
+                    else DocumentStatus.ERROR,
                     pages=page_outputs,
                     pages_processed=len(failed_pages),
                 )
@@ -1498,7 +1427,8 @@ class UnifiedPipeline:
         if has_whole_doc:
             whole_page = next(p for p in result.pages if p.page_num == 0)
             scoring = self.scorer.score(
-                whole_page.text, engine=result.engine,
+                whole_page.text,
+                engine=result.engine,
                 expected_pages=state.handle.page_count,
             )
             whole_page.audit_passed = scoring.passed
@@ -1511,9 +1441,7 @@ class UnifiedPipeline:
             for page_out in result.pages:
                 if page_out.page_num not in repair_page_nums:
                     continue
-                scoring = self.scorer.score(
-                    page_out.text, engine=result.engine
-                )
+                scoring = self.scorer.score(page_out.text, engine=result.engine)
                 page_out.audit_passed = scoring.passed
                 if not scoring.passed:
                     page_out.failure_mode = scoring.primary_failure
@@ -1540,8 +1468,7 @@ class UnifiedPipeline:
         if not has_multi_pages and not has_multi_whole_doc:
             if not self.config.quiet:
                 console.print(
-                    "\n[cyan]Phase 4b:[/cyan] Consensus (not needed — "
-                    "no multi-attempt pages)"
+                    "\n[cyan]Phase 4b:[/cyan] Consensus (not needed — no multi-attempt pages)"
                 )
             return
 
@@ -1550,14 +1477,9 @@ class UnifiedPipeline:
             if has_multi_whole_doc:
                 parts.append(f"{len(state.whole_doc_attempts)} whole-doc attempts")
             if has_multi_pages:
-                count = sum(
-                    1 for pn in state.pages
-                    if len(state.pages[pn].attempts) >= 2
-                )
+                count = sum(1 for pn in state.pages if len(state.pages[pn].attempts) >= 2)
                 parts.append(f"{count} multi-attempt pages")
-            console.print(
-                f"\n[cyan]Phase 4b:[/cyan] Consensus ({', '.join(parts)})"
-            )
+            console.print(f"\n[cyan]Phase 4b:[/cyan] Consensus ({', '.join(parts)})")
 
         engine = ConsensusEngine(
             use_llm=self.config.consensus_use_llm,
@@ -1579,9 +1501,7 @@ class UnifiedPipeline:
     # Phase 5: Assemble
     # ------------------------------------------------------------------
 
-    def _phase_assemble(
-        self, state: DocumentState, output_dir: Path
-    ) -> EngineResult:
+    def _phase_assemble(self, state: DocumentState, output_dir: Path) -> EngineResult:
         """Build the final EngineResult from DocumentState and save to disk."""
         if not self.config.quiet:
             console.print("\n[cyan]Phase 5:[/cyan] Assemble")
@@ -1593,12 +1513,8 @@ class UnifiedPipeline:
         # For CLI engines that produce whole-doc output (page_num=0), pages
         # won't have per-page best_outputs.  A passing whole-doc attempt
         # covers the entire document -- treat it as success.
-        has_passing_whole_doc = any(
-            w.audit_passed for w in state.whole_doc_attempts
-        )
-        pages_ok = (
-            not state.pages_needing_repair or has_passing_whole_doc
-        )
+        has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
+        pages_ok = not state.pages_needing_repair or has_passing_whole_doc
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -1614,14 +1530,11 @@ class UnifiedPipeline:
 
         # Strip phantom image references before saving
         from ocr_output_contract import doc_dir_for, relative_key
+
         normalizer = OutputNormalizer()
-        doc_dir = doc_dir_for(
-            output_dir, relative_key(state.handle.path, state.handle.path.parent)
-        )
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, state.handle.path.parent))
         if has_text:
-            final_text = normalizer.strip_phantom_images(
-                final_text, output_dir=doc_dir
-            )
+            final_text = normalizer.strip_phantom_images(final_text, output_dir=doc_dir)
 
         # Build the final result
         final_result = EngineResult(
@@ -1645,7 +1558,10 @@ class UnifiedPipeline:
         # Figure extraction + description + embedding
         if self.config.save_figures and has_text:
             final_text = self._describe_and_embed_figures(
-                state, final_result, output_dir, final_text,
+                state,
+                final_result,
+                output_dir,
+                final_text,
             )
             # Update the page text with embedded figure blocks
             final_result.pages[0].text = final_text
@@ -1747,9 +1663,8 @@ class UnifiedPipeline:
             console.print("  Extracting figures...")
 
         from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
-        doc_dir = doc_dir_for(
-            output_dir, relative_key(state.handle.path, state.handle.path.parent)
-        )
+
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, state.handle.path.parent))
         figures_dir = figures_dir_for(doc_dir)
         extractor = FigureExtractor(
             max_total=self.config.figures_max_total,
@@ -1765,9 +1680,7 @@ class UnifiedPipeline:
             return text
 
         if not self.config.quiet:
-            console.print(
-                f"  Extracted {len(extracted)} figures to {figures_dir}"
-            )
+            console.print(f"  Extracted {len(extracted)} figures to {figures_dir}")
 
         # Try to get a vision engine for descriptions
         vision_engine = self._get_vision_engine()
@@ -1781,7 +1694,8 @@ class UnifiedPipeline:
                 # Get page context for better descriptions
                 context = self._get_page_context(state, fig.page_num)
                 info = vision_engine.describe_figure(
-                    fig.image, context=context,
+                    fig.image,
+                    context=context,
                 )
                 description = info.description
                 figure_type = info.figure_type or "extracted"
@@ -1803,10 +1717,7 @@ class UnifiedPipeline:
 
         if not self.config.quiet:
             described = sum(1 for f in figures if f.description)
-            console.print(
-                f"  {len(figures)} figures processed"
-                f" ({described} described)"
-            )
+            console.print(f"  {len(figures)} figures processed ({described} described)")
 
         # Build figure blocks and append to text
         figure_blocks = self._build_figure_blocks(figures, doc_dir)
@@ -1822,14 +1733,11 @@ class UnifiedPipeline:
         """
         import os
 
-        api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get(
-            "GOOGLE_API_KEY", ""
-        )
+        api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
         if not api_key:
             if not self.config.quiet:
                 console.print(
-                    "  [dim]No GEMINI_API_KEY — saving figures "
-                    "without descriptions[/dim]"
+                    "  [dim]No GEMINI_API_KEY — saving figures without descriptions[/dim]"
                 )
             return None
 
@@ -1846,8 +1754,7 @@ class UnifiedPipeline:
 
         if not self.config.quiet:
             console.print(
-                "  [dim]Gemini API not reachable — saving figures "
-                "without descriptions[/dim]"
+                "  [dim]Gemini API not reachable — saving figures without descriptions[/dim]"
             )
         return None
 
@@ -1866,7 +1773,8 @@ class UnifiedPipeline:
 
     @staticmethod
     def _build_figure_blocks(
-        figures: list[FigureInfo], doc_dir: Path,
+        figures: list[FigureInfo],
+        doc_dir: Path,
     ) -> str:
         """Build markdown figure blocks for embedding.
 
@@ -1896,9 +1804,7 @@ class UnifiedPipeline:
 
         return "\n\n".join(blocks)
 
-    def _save_markdown(
-        self, state: DocumentState, text: str, output_dir: Path
-    ) -> Path:
+    def _save_markdown(self, state: DocumentState, text: str, output_dir: Path) -> Path:
         """Save the assembled markdown at the canonical contract path.
 
         Layout matches the family canon and the read-back path exactly:
@@ -1924,9 +1830,7 @@ class UnifiedPipeline:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _print_summary(
-        self, result: EngineResult, state: DocumentState
-    ) -> None:
+    def _print_summary(self, result: EngineResult, state: DocumentState) -> None:
         """Print a final summary line."""
         if result.success:
             status_str = "[green]Success[/green]"
@@ -1935,19 +1839,12 @@ class UnifiedPipeline:
 
         engine_str = result.engine
         if self.config.multi_engine:
-            engine_str = (
-                "+".join(e.value for e in self.config.multi_engine)
-                + " (consensus)"
-            )
+            engine_str = "+".join(e.value for e in self.config.multi_engine) + " (consensus)"
 
-        console.print(
-            f"\n{status_str} | {engine_str} | "
-            f"{result.processing_time:.1f}s"
-        )
+        console.print(f"\n{status_str} | {engine_str} | {result.processing_time:.1f}s")
         if state.pages_needing_repair:
             console.print(
-                f"[yellow]{len(state.pages_needing_repair)} page(s) "
-                f"still failing[/yellow]"
+                f"[yellow]{len(state.pages_needing_repair)} page(s) still failing[/yellow]"
             )
         if result.error:
             console.print(f"[dim]{result.error}[/dim]")

@@ -190,7 +190,8 @@ def classify_pages(
             page = doc[page_num - 1]
             h = hints.get(page_num, {})
             results[page_num] = classify_page(
-                page, page_num,
+                page,
+                page_num,
                 has_tables_hint=h.get("has_tables", False),
                 has_equations_hint=h.get("has_equations", False),
             )
