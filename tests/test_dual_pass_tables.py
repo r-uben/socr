@@ -238,8 +238,18 @@ def test_diff_grids_ignores_formatting_only_differences():
 # --------------------------------------------------------------------------
 
 
-def test_reconcile_patches_misread_and_preserves_prose():
+def test_reconcile_flag_only_by_default():
+    # Default (auto_patch=False): report the disagreement, NEVER edit the corpus.
     r = reconcile_page_tables(_PAGE_MD, [(_CROP_MD, "booktabs")])
+    assert not r.patched and r.flagged
+    assert r.text == _PAGE_MD                       # untouched
+    assert r.disagreements[0].action == "flagged"
+    assert r.disagreements[0].changed_cells          # but the misread is recorded
+    assert "--auto-patch-tables" in r.disagreements[0].note
+
+
+def test_reconcile_patches_misread_when_auto_patch_enabled():
+    r = reconcile_page_tables(_PAGE_MD, [(_CROP_MD, "booktabs")], auto_patch=True)
     assert r.patched and r.flagged
     assert "(0.010)" in r.text and "(0.0l0)" not in r.text
     assert "Prose before." in r.text and "Prose after." in r.text
@@ -349,12 +359,30 @@ def _wire_reader(monkeypatch, reader):
     monkeypatch.setattr(extract_mod, "OllamaTableReader", lambda *a, **k: reader)
 
 
-def test_phase_patches_corrupted_table_on_real_pdf(tmp_path, monkeypatch):
+def test_phase_flag_only_by_default_does_not_edit(tmp_path, monkeypatch):
     doc, _ = _build_page("booktabs")
     pdf = tmp_path / "doc.pdf"
     doc.save(pdf)
 
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))  # auto_patch_tables default False
+    pipe._last_assessment = _assessment(has_tables=True)
+    state, bo = _state_with_table_page(pdf, _PAGE_MD)  # contains the (0.0l0) misread
+    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
+    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
+
+    pipe._phase_dual_pass_tables(state)
+
+    assert bo.text == _PAGE_MD                                  # corpus untouched
+    assert any("dual-pass flagged" in n for n in bo.audit_notes)  # but recorded
+    assert any(e.kind == "dualpass_flagged" for e in state.events)
+
+
+def test_phase_patches_when_auto_patch_enabled(tmp_path, monkeypatch):
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
     pipe._last_assessment = _assessment(has_tables=True)
     state, bo = _state_with_table_page(pdf, _PAGE_MD)  # contains the (0.0l0) misread
     monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")

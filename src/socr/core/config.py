@@ -133,6 +133,11 @@ class PipelineConfig:
     # corruption flag; the crop reading is authoritative and patched in. No-ops
     # if no vision model is available. Reuses the judge model ladder.
     dual_pass_tables: bool = True
+    # Auto-patch the crop reading into the page on disagreement. Default OFF
+    # (flag-only): the crop reader's numeric fidelity is unproven, and a silent
+    # wrong patch to a research number is worse than a missed correction. Opt in
+    # with --auto-patch-tables once the crop reader is trusted on held-out data.
+    auto_patch_tables: bool = False
 
     # --- Agentic cost-aware routing (all default-off = unchanged behavior) ---
     agentic: bool = False  # per-page: try cheapest provider, judge escalates

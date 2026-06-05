@@ -35,6 +35,7 @@ def common_options(f):
     f = click.option("--no-audit", is_flag=True, help="Skip quality audit stage")(f)
     f = click.option("--no-judge-hard-pages", is_flag=True, help="Disable VLM judge on hard pages (tables/math)")(f)
     f = click.option("--no-dual-pass-tables", is_flag=True, help="Disable dual-pass table extraction (crop + re-read located tables)")(f)
+    f = click.option("--auto-patch-tables", is_flag=True, help="Let dual-pass auto-patch crop readings into the page (default: flag-only, never edits)")(f)
     f = click.option("--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages")(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
     f = click.option("--dpi", type=int, default=None, help="Page render DPI for OCR engines (default 200; higher helps local VLMs)")(f)
@@ -80,6 +81,7 @@ def build_config(
     no_audit: bool = False,
     no_judge_hard_pages: bool = False,
     no_dual_pass_tables: bool = False,
+    auto_patch_tables: bool = False,
     no_native_first: bool = False,
     timeout: int = 1800,
     dpi: int | None = None,
@@ -119,6 +121,8 @@ def build_config(
         config.judge_hard_pages = False
     if no_dual_pass_tables:
         config.dual_pass_tables = False
+    if auto_patch_tables:
+        config.auto_patch_tables = True
     if no_native_first:
         config.native_first = False
 

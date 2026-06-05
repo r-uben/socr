@@ -919,7 +919,8 @@ class UnifiedPipeline:
                 if not crops:
                     continue
                 result = reconcile_page_tables(
-                    bo.text, [(c.markdown, c.source) for c in crops]
+                    bo.text, [(c.markdown, c.source) for c in crops],
+                    auto_patch=self.config.auto_patch_tables,
                 )
             except Exception as exc:  # a dual-pass failure must never drop a page
                 logger.warning("dual-pass errored on p%d (%s); keeping text", page_num, exc)

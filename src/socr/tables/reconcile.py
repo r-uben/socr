@@ -181,11 +181,21 @@ def _col_count(grid: list[list[str]]) -> int:
 def reconcile_page_tables(
     page_markdown: str,
     crop_tables: list[tuple[str, str]],
+    *,
+    auto_patch: bool = False,
 ) -> TableReconcileResult:
     """Reconcile a page's OCR tables against crop-pass readings.
 
     ``crop_tables`` is a list of ``(markdown, source)`` in reading order, where
     ``source`` is the locator tag ("ruled"/"booktabs") for reporting.
+
+    ``auto_patch`` (default False = flag-only): when False, the page text is never
+    modified — disagreements are reported but the corpus is left untouched. The
+    crop reader's numeric fidelity is unproven, and a silent wrong patch to a
+    research number (a model can keep table shape and still change 0.031->0.037)
+    is worse than a missed correction. Opt in with ``--auto-patch-tables`` once the
+    crop reader is trusted. When True, an eligible disagreement (well-formed crop,
+    matching column count) is patched in; the rest are still flag-only.
 
     Returns the (possibly patched) page text plus per-table disagreements.
     """
@@ -227,12 +237,25 @@ def reconcile_page_tables(
             continue  # passes agree — high confidence, nothing to do
 
         if _well_formed(crop_grid) and _col_count(crop_grid) == _col_count(block.grid):
-            patches.append((block, crop_md.strip()))
-            result.disagreements.append(
-                TableDisagreement(
-                    table_index=idx, source=source, action="patched", changed_cells=diffs
+            if auto_patch:
+                patches.append((block, crop_md.strip()))
+                result.disagreements.append(
+                    TableDisagreement(
+                        table_index=idx, source=source, action="patched", changed_cells=diffs
+                    )
                 )
-            )
+            else:
+                # Eligible to patch, but flag-only by default: surface the exact
+                # changes for review without editing the corpus.
+                result.disagreements.append(
+                    TableDisagreement(
+                        table_index=idx,
+                        source=source,
+                        action="flagged",
+                        changed_cells=diffs,
+                        note="eligible for patch; flag-only (enable --auto-patch-tables)",
+                    )
+                )
         else:
             result.disagreements.append(
                 TableDisagreement(
