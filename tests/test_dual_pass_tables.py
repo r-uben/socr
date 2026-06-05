@@ -85,6 +85,30 @@ def test_locate_borderless_returns_nothing():
     assert locate_tables(page) == []
 
 
+def test_locate_rejects_out_of_page_frame_rules():
+    # Real dense pages (Fama-French 1997) carry page-frame / crop-mark lines drawn
+    # at y < 0 and y > page height. Including them stretched a table band to the
+    # whole page with negative coords. The detector must drop them and keep the
+    # bbox inside the page.
+    doc = fitz.open()
+    page = doc.new_page()
+    pr = page.rect
+    cols = [100, 220, 300, 380]
+    rows = [200 + i * 22 for i in range(len(_DATA))]
+    _draw_table(page, cols, rows)
+    for yy in [rows[0] - 4, rows[1] - 2, rows[-1] + 12]:  # real table rules
+        page.draw_line((100, yy), (460, yy))
+    # Frame/crop-mark rules outside the visible page:
+    page.draw_line((-30, -15), (560, -15))
+    page.draw_line((-30, pr.y1 + 40), (560, pr.y1 + 40))
+
+    boxes = locate_tables(page)
+    assert len(boxes) == 1
+    x0, y0, x1, y1 = boxes[0].bbox
+    assert pr.x0 <= x0 and x1 <= pr.x1 and pr.y0 <= y0 and y1 <= pr.y1  # in-bounds
+    assert y1 - y0 < 250  # bounds the table, not the whole 792pt page
+
+
 def test_locate_ignores_prose_on_mixed_page():
     doc = fitz.open()
     page = doc.new_page()

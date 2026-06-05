@@ -111,13 +111,22 @@ def _booktabs_tables(page) -> list[TableBox]:
         if not placed:
             groups.append([rule])
 
+    # NOTE (known limitation): rules alone cannot tell one tall table from two
+    # stacked ones. Real pages confirmed both shapes with similar inter-rule gaps
+    # (a 238pt gap inside a single full-page table vs a 160pt gap between two small
+    # tables), so a gap-split heuristic would mis-handle one to fix the other.
+    # Multi-table pages therefore over-merge into one band -> an imprecise crop ->
+    # the reconciler's column-count check flags rather than patches. Failing to
+    # flag-only is safe; it just forfeits the benefit. Precise multi-table
+    # splitting needs content-aware region detection (future work).
+    pr = page.rect
     out: list[TableBox] = []
     for group in groups:
         if len(group) < 2:
             continue  # one rule cannot bound a table band
         ys = [r[0] for r in group]
-        x0 = min(r[1] for r in group)
-        x1 = max(r[2] for r in group)
+        x0 = max(pr.x0, min(r[1] for r in group))
+        x1 = min(pr.x1, max(r[2] for r in group))
         bbox = (x0, min(ys), x1, max(ys))
         if _plausible(bbox):
             out.append(TableBox(bbox=bbox, source="booktabs"))
@@ -136,6 +145,12 @@ def _horizontal_rules(page) -> list[tuple[float, float, float]]:
         logger.debug("get_drawings failed: %s", exc)
         return []
 
+    # Reject rules outside the visible page: real papers carry page-frame lines
+    # and crop marks drawn in the margin (observed at y < 0 and y > page height on
+    # dense Fama-French pages). Including them stretches a table band to the whole
+    # page. Clamp x to the page so a rule bleeding into the margin still anchors
+    # the band sanely.
+    page_rect = page.rect
     rules: list[tuple[float, float, float]] = []
     for d in drawings:
         for item in d.get("items", []):
@@ -151,6 +166,11 @@ def _horizontal_rules(page) -> list[tuple[float, float, float]]:
                 if h <= _RULE_FLATNESS_PT and w >= _RULE_MIN_WIDTH_PT:
                     y = (rect.y0 + rect.y1) / 2.0
                     rules.append((y, min(rect.x0, rect.x1), max(rect.x0, rect.x1)))
+    rules = [
+        (y, max(page_rect.x0, x0), min(page_rect.x1, x1))
+        for (y, x0, x1) in rules
+        if page_rect.y0 <= y <= page_rect.y1
+    ]
     rules.sort()
     return rules
 
