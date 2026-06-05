@@ -521,15 +521,21 @@ class BornDigitalDetector:
         except Exception:
             return page.get_text("text").strip()
 
-        if not tables_result.tables:
-            return page.get_text("text").strip()
-
         # Collect table bounding boxes and their markdown representations
         table_regions: list[tuple[fitz.Rect, str]] = []
         for table in tables_result.tables:
             md = self._table_to_markdown(table)
             if md:
                 table_regions.append((fitz.Rect(table.bbox), md))
+
+        # Born-digital booktabs tables (top/mid/bottom rules only) make the
+        # default lines strategy return nothing, so the table would otherwise be
+        # dumped as a flat token stream. When there IS columnar-numeric evidence,
+        # recover the grid from text alignment (char-exact native values, no model).
+        if not table_regions and self._detect_columnar_numbers(page):
+            from socr.tables.reconstruct import reconstruct_table_regions
+
+            table_regions = reconstruct_table_regions(page)
 
         if not table_regions:
             return page.get_text("text").strip()
