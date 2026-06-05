@@ -150,6 +150,98 @@ def test_replay_from_disk_invokes_no_engine(tmp_path):
     assert out == expected
 
 
+def _whole_doc_state(pdf_path, n_pages=2, engine="gemini"):
+    """A DocumentState as if a CLI engine OCR'd the whole PDF in one call.
+
+    This is the path that triggered the historical replay/manifest empty-doc
+    bug: the engine returns a single ``page_num=0`` PageOutput (stored in
+    ``whole_doc_attempts``) holding the full ``## Page N`` markdown, and the
+    per-page ``best_output`` slots are never populated.
+    """
+    handle = DocumentHandle.from_path(pdf_path)
+    state = DocumentState(handle=handle)
+    body = "\n\n".join(
+        f"## Page {i}\n\nWhole-doc OCR text for page {i}" for i in range(1, n_pages + 1)
+    )
+    state.apply_result(
+        EngineResult(
+            document_path=pdf_path,
+            engine=engine,
+            status=DocumentStatus.SUCCESS,
+            model_version="flash-2.0",
+            pages=[
+                PageOutput(
+                    page_num=0,
+                    text=body,
+                    status=PageStatus.SUCCESS,
+                    engine=engine,
+                    audit_passed=True,
+                )
+            ],
+        )
+    )
+    # Mirror the orchestrator: a passing whole-doc attempt sets audit_passed.
+    state.whole_doc_attempts[-1].audit_passed = True
+    return state, body
+
+
+def test_whole_doc_replay_is_not_empty(tmp_path):
+    """Regression: a whole-document CLI run must replay its full text, not an
+    empty document. Before the fix, build_manifest froze empty per-page blobs
+    because it only read per-page best_output (never populated on this path)."""
+    pdf = _make_pdf(tmp_path / "paper.pdf", n_pages=3)
+    state, body = _whole_doc_state(pdf, n_pages=3)
+    store = BlobStore(tmp_path / "cache")
+
+    manifest = build_manifest(state, store, dpi=120)
+    out = replay(manifest, store)
+
+    # Every page's text was recovered from the '## Page N' split — no empties.
+    assert out.strip() != ""
+    for i in range(1, 4):
+        assert f"Whole-doc OCR text for page {i}" in out
+    # One blob per page, each non-empty.
+    for pn in range(1, 4):
+        page = store.get_page(manifest.entries[pn].blob_ref)
+        assert page.text.strip() != ""
+
+
+def test_whole_doc_fingerprint_carries_model_version(tmp_path):
+    """The fingerprint must record the engine's model_version so a model swap
+    invalidates cached pages (previously it was always '')."""
+    pdf = _make_pdf(tmp_path / "paper.pdf", n_pages=2)
+    state, _ = _whole_doc_state(pdf, n_pages=2, engine="gemini")
+    store = BlobStore(tmp_path / "cache")
+
+    manifest = build_manifest(state, store, dpi=120)
+
+    for pn in (1, 2):
+        assert manifest.entries[pn].fingerprint.model_version == "flash-2.0"
+
+
+def test_per_page_fingerprint_carries_model_version(tmp_path):
+    """Per-page path also records model_version from its EngineResult."""
+    pdf = _make_pdf(tmp_path / "paper.pdf", n_pages=2)
+    handle = DocumentHandle.from_path(pdf)
+    state = DocumentState(handle=handle)
+    state.apply_result(
+        EngineResult(
+            document_path=pdf,
+            engine="gemini",
+            status=DocumentStatus.SUCCESS,
+            model_version="flash-lite-9",
+            pages=[
+                PageOutput(page_num=i, text=f"ocr p{i}", engine="gemini",
+                           status=PageStatus.SUCCESS, audit_passed=True)
+                for i in (1, 2)
+            ],
+        )
+    )
+    store = BlobStore(tmp_path / "cache")
+    manifest = build_manifest(state, store, dpi=120)
+    assert manifest.entries[1].fingerprint.model_version == "flash-lite-9"
+
+
 def test_replay_detects_broken_cache(tmp_path):
     pdf = _make_pdf(tmp_path / "paper.pdf", n_pages=2)
     state = _ocr_state(pdf, n_pages=2)

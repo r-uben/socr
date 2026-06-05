@@ -26,6 +26,10 @@ dependencies = [
     "pymupdf>=1.24.0",
     "httpx>=0.27.0",
     "pyyaml>=6.0.0",
+    # Canonical OCR output contract: shared by every engine CLI. socr reuses its
+    # readers (split_native_pages, path helpers) and metadata writers so it
+    # consumes the engines' canonical output by construction, not ad-hoc parsing.
+    "ocr-output-contract @ git+https://github.com/r-uben/ocr-output-contract@v0.1.0",
 ]
 
 [project.urls]
@@ -57,6 +61,10 @@ socr = "socr.cli:main"
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# Required for the direct git reference to ocr-output-contract above.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/socr"]

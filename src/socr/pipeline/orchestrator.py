@@ -38,7 +38,6 @@ from socr.core.result import (
     PageStatus,
 )
 from socr.core.state import DocumentState
-from socr.engines.base import BaseEngine, sanitize_filename
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import FigureExtractor
 from socr.pipeline.consensus import ConsensusEngine
@@ -978,10 +977,13 @@ class UnifiedPipeline:
         Non-fatal: a manifest failure must never lose the OCR output.
         """
         try:
+            from ocr_output_contract import doc_dir_for, relative_key
+
             from socr.core.cache import BlobStore
             from socr.core.manifest import build_manifest
 
-            doc_dir = output_dir / sanitize_filename(state.handle.stem)
+            pdf_path = state.handle.path
+            doc_dir = doc_dir_for(output_dir, relative_key(pdf_path, pdf_path.parent))
             store = BlobStore(doc_dir / "cache")
             manifest = build_manifest(state, store, dpi=self.config.render_dpi)
             manifest.save(doc_dir / "manifest.json")
@@ -1611,9 +1613,11 @@ class UnifiedPipeline:
         total_time = sum(r.processing_time for r in state.engine_runs)
 
         # Strip phantom image references before saving
+        from ocr_output_contract import doc_dir_for, relative_key
         normalizer = OutputNormalizer()
-        stem = sanitize_filename(state.handle.stem)
-        doc_dir = output_dir / stem
+        doc_dir = doc_dir_for(
+            output_dir, relative_key(state.handle.path, state.handle.path.parent)
+        )
         if has_text:
             final_text = normalizer.strip_phantom_images(
                 final_text, output_dir=doc_dir
@@ -1652,11 +1656,75 @@ class UnifiedPipeline:
             if not self.config.quiet:
                 console.print(f"  [blue]Output:[/blue] {saved_path}")
 
+        # Canonical dual-level metadata sidecars (per-doc + root index), keyed by
+        # input-relative path. Always written — including failures (status=failed)
+        # — so the corpus has a machine-readable record for every run.
+        self._write_metadata(state, final_result, output_dir, has_text)
+
         # Reproducibility manifest (opt-in; default-on in agentic mode).
         if has_text and (self.config.write_manifest or self.config.agentic):
             self._write_manifest(state, output_dir)
 
         return final_result
+
+    def _write_metadata(
+        self,
+        state: DocumentState,
+        result: EngineResult,
+        output_dir: Path,
+        has_text: bool,
+    ) -> None:
+        """Write canonical per-doc + root-index ``metadata.json`` via the contract.
+
+        Uses ``ocr-output-contract`` so socr's sidecars are byte-shape-identical
+        to what the engine CLIs emit, keyed by the input-RELATIVE path (never the
+        basename — two same-named PDFs in different dirs stay distinct). Both
+        levels are kept in sync. Non-fatal: a metadata write must never lose OCR
+        output.
+        """
+        from ocr_output_contract import (
+            DocMetadata,
+            RootIndex,
+            Status,
+            doc_dir_for,
+            markdown_path_for,
+            relative_key,
+            sha256_checksum,
+            utc_timestamp,
+        )
+
+        try:
+            pdf_path = state.handle.path
+            scan_root = pdf_path.parent
+            rel_key = relative_key(pdf_path, scan_root)
+            doc_dir = doc_dir_for(output_dir, rel_key)
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            md_path = markdown_path_for(doc_dir, rel_key)
+
+            if result.status == DocumentStatus.SUCCESS:
+                status = Status.COMPLETED
+            elif has_text:
+                status = Status.PARTIAL
+            else:
+                status = Status.FAILED
+
+            meta = DocMetadata(
+                status=status,
+                checksum=sha256_checksum(pdf_path),
+                model=result.engine or "none",
+                backend="socr",
+                processing_time=result.processing_time,
+                timestamp=utc_timestamp(),
+                output_path=str(md_path) if has_text else "",
+                pages=state.handle.page_count,
+                error=result.error or None,
+            )
+            from ocr_output_contract import write_doc_metadata
+
+            write_doc_metadata(doc_dir, rel_key, meta)
+            RootIndex(output_dir).record(rel_key, meta)
+        except Exception as exc:  # never lose output over a metadata write
+            logger.warning("metadata write failed (non-fatal): %s", exc)
 
     def _describe_and_embed_figures(
         self,
@@ -1678,9 +1746,11 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print("  Extracting figures...")
 
-        stem = sanitize_filename(state.handle.stem)
-        doc_dir = output_dir / stem
-        figures_dir = doc_dir / "figures"
+        from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
+        doc_dir = doc_dir_for(
+            output_dir, relative_key(state.handle.path, state.handle.path.parent)
+        )
+        figures_dir = figures_dir_for(doc_dir)
         extractor = FigureExtractor(
             max_total=self.config.figures_max_total,
             max_per_page=self.config.figures_max_per_page,
@@ -1829,11 +1899,24 @@ class UnifiedPipeline:
     def _save_markdown(
         self, state: DocumentState, text: str, output_dir: Path
     ) -> Path:
-        """Save the assembled markdown to output_dir/{stem}/{stem}.md."""
-        stem = sanitize_filename(state.handle.stem)
-        doc_dir = output_dir / stem
+        """Save the assembled markdown at the canonical contract path.
+
+        Layout matches the family canon and the read-back path exactly:
+        ``output_dir/<rel/dir>/<stem>/<stem>.md`` keyed by the input-relative
+        path (via the shared contract helpers), so the written ``.md``, the
+        per-doc ``metadata.json`` and ``output_path`` all agree.
+        """
+        from ocr_output_contract import (
+            doc_dir_for,
+            markdown_path_for,
+            relative_key,
+        )
+
+        pdf_path = state.handle.path
+        rel_key = relative_key(pdf_path, pdf_path.parent)
+        doc_dir = doc_dir_for(output_dir, rel_key)
         doc_dir.mkdir(parents=True, exist_ok=True)
-        md_path = doc_dir / f"{stem}.md"
+        md_path = markdown_path_for(doc_dir, rel_key)
         md_path.write_text(text, encoding="utf-8")
         return md_path
 

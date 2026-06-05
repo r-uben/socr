@@ -12,6 +12,12 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from ocr_output_contract import (
+    doc_dir_for,
+    markdown_path_for,
+    relative_key,
+)
+
 from socr.core.config import PipelineConfig
 from socr.core.normalizer import OutputNormalizer
 from socr.core.result import (
@@ -36,9 +42,16 @@ def sanitize_filename(name: str) -> str:
 class BaseEngine(ABC):
     """Abstract base class for CLI-based OCR engines.
 
-    Each engine wraps a sibling CLI tool (gemini-ocr, nougat-ocr, etc.).
-    The contract: call CLI once per PDF, read output markdown from
-    {output_dir}/{stem}/{stem}.md.
+    Each engine wraps a sibling CLI tool (gemini-ocr, nougat-ocr, etc.). Every
+    engine now emits the family-wide *canonical* output structure via the shared
+    ``ocr-output-contract`` package, so read-back is the same for all of them:
+
+        ``<output_dir>/<rel/dir>/<stem>/<stem>.md``
+
+    where ``<rel/dir>`` mirrors the input's path relative to the scanned root.
+    socr passes a single file (the PDF, or a page-image directory) and reads the
+    one aggregated ``<stem>.md`` back via the contract's path helpers — no
+    per-engine layout special-casing and no ``rglob`` guessing.
     """
 
     @property
@@ -238,7 +251,7 @@ class BaseEngine(ABC):
 
             for page_num in page_nums:
                 stem = page_num_to_stem[page_num]
-                text = self._read_page_output(stem, cli_out)
+                text = self._read_page_output(stem, cli_out, scan_root=images_dir)
 
                 if text:
                     text = self._clean_output(text, self.name)
@@ -274,33 +287,27 @@ class BaseEngine(ABC):
 
             return outputs
 
-    def _read_page_output(self, stem: str, output_dir: Path) -> str | None:
-        """Read output markdown for a single page image.
+    def _read_page_output(
+        self, stem: str, output_dir: Path, scan_root: Path | None = None
+    ) -> str | None:
+        """Read canonical output markdown for a single page image.
 
-        Tries the standard CLI output layouts:
-          - {output_dir}/{stem}/{stem}.md (subdirectory)
-          - {output_dir}/{stem}.md (flat)
+        Each rendered page image ``<stem>.png`` lives under ``scan_root`` and the
+        engine was invoked with ``-o <output_dir>``, so the canon places its
+        output at ``<output_dir>/<stem>/<stem>.md`` (the page image has no
+        subdirectory, so the mirrored rel dir is empty). We resolve that path via
+        the contract's helpers rather than guessing layouts.
+
+        ``scan_root`` defaults to ``output_dir`` for backwards compatibility, but
+        callers should pass the image directory the page was rendered into so the
+        relative key matches what the engine mirrored.
         """
-        # Subdirectory layout
-        md_path = output_dir / stem / f"{stem}.md"
+        root = scan_root if scan_root is not None else output_dir
+        rel_key = relative_key(root / f"{stem}.png", root)
+        doc_dir = doc_dir_for(output_dir, rel_key)
+        md_path = markdown_path_for(doc_dir, rel_key)
         if md_path.exists():
             return md_path.read_text(encoding="utf-8")
-
-        # Flat layout
-        flat_path = output_dir / f"{stem}.md"
-        if flat_path.exists():
-            return flat_path.read_text(encoding="utf-8")
-
-        # Sanitized name variant (some CLIs sanitize differently)
-        sanitized = sanitize_filename(stem)
-        if sanitized != stem:
-            for variant in [
-                output_dir / sanitized / f"{sanitized}.md",
-                output_dir / f"{sanitized}.md",
-            ]:
-                if variant.exists():
-                    return variant.read_text(encoding="utf-8")
-
         return None
 
     @abstractmethod
@@ -314,33 +321,36 @@ class BaseEngine(ABC):
         ...
 
     def _read_output(self, pdf_path: Path, output_dir: Path) -> str | None:
-        """Read the output markdown from the CLI's output directory.
+        """Read the canonical aggregated markdown from the CLI's output dir.
 
-        Sibling CLIs use different output structures:
-          - gemini-ocr: {output_dir}/{sanitized_stem}/{sanitized_stem}.md
-          - deepseek-ocr: {output_dir}/{stem}/{stem}.md
-          - mistral-ocr: {output_dir}/{stem}.md (flat, no subdirectory)
-          - nougat-ocr/marker-ocr: {output_dir}/{stem}/{stem}.md
+        Every engine now emits the same canonical structure (via
+        ``ocr-output-contract``): ``<output_dir>/<stem>/<stem>.md`` for a
+        single-file PDF input (the input subtree, here empty, is mirrored under
+        the root). We resolve that path with the contract helpers — no
+        per-engine layout branching.
+
+        A single ``rglob`` is kept only as a last-resort safety net (and is
+        logged loudly) so an unexpected layout surfaces rather than silently
+        producing an empty document.
         """
-        stem = sanitize_filename(pdf_path.stem)
-
-        # Try subdirectory layout first: {output_dir}/{stem}/{stem}.md
-        md_path = output_dir / stem / f"{stem}.md"
+        scan_root = pdf_path.parent
+        rel_key = relative_key(pdf_path, scan_root)
+        doc_dir = doc_dir_for(output_dir, rel_key)
+        md_path = markdown_path_for(doc_dir, rel_key)
         if md_path.exists():
             return self._clean_output(md_path.read_text(encoding="utf-8"), self.name)
 
-        # Try flat layout: {output_dir}/{stem}.md
-        flat_path = output_dir / f"{stem}.md"
-        if flat_path.exists():
-            return self._clean_output(flat_path.read_text(encoding="utf-8"), self.name)
-
-        # Fallback: find any .md file (handles sanitization mismatches)
+        # Last-resort fallback: an engine deviated from the canon. Find any .md,
+        # but log it as an anomaly so the divergence is visible, not silent.
         for md_file in output_dir.rglob("*.md"):
-            # Guard against symlinks escaping the temp directory
+            # Guard against symlinks escaping the output directory.
             if not md_file.resolve().is_relative_to(output_dir.resolve()):
                 logger.warning(f"[{self.name}] Skipping symlink outside output dir: {md_file}")
                 continue
-            logger.warning(f"[{self.name}] Output found via rglob fallback: {md_file}")
+            logger.warning(
+                f"[{self.name}] Canonical output {md_path} missing; "
+                f"using non-canonical {md_file} via rglob fallback"
+            )
             return self._clean_output(md_file.read_text(encoding="utf-8"), self.name)
 
         return None

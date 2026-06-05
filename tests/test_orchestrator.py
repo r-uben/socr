@@ -514,6 +514,49 @@ class TestPhaseAssemble:
         assert md_path.exists()
         assert md_path.read_text() == "Hello world"
 
+    def test_assemble_writes_canonical_metadata(self, tmp_path: Path) -> None:
+        """_phase_assemble writes per-doc + root metadata.json keyed by the
+        input-relative path, validated against the contract conformance harness."""
+        import json
+
+        fitz = pytest.importorskip("fitz")
+        from ocr_output_contract.conformance import ExpectedDoc, assert_conforms
+
+        # A real PDF on disk so the checksum can be computed.
+        pdf = tmp_path / "src" / "paper.pdf"
+        pdf.parent.mkdir(parents=True)
+        doc = fitz.open()
+        doc.new_page()
+        doc.save(str(pdf))
+        doc.close()
+
+        config = _make_config()
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        state.pages[1].best_output = PageOutput(
+            page_num=1, text="## Page 1\n\nHello canonical world",
+            status=PageStatus.SUCCESS, engine="deepseek", audit_passed=True,
+        )
+
+        out_root = tmp_path / "out"
+        pipeline._phase_assemble(state, out_root)
+
+        # Per-doc sidecar exists beside the .md, keyed by the relative path.
+        doc_meta = out_root / "paper" / "metadata.json"
+        root_meta = out_root / "metadata.json"
+        assert doc_meta.exists()
+        assert root_meta.exists()
+
+        root = json.loads(root_meta.read_text())
+        assert "paper.pdf" in root["files"]  # input-relative key, not basename-mangled
+        entry = root["files"]["paper.pdf"]
+        assert entry["status"] == "completed"
+        assert entry["checksum"].startswith("sha256:")
+        assert entry["backend"] == "socr"
+
+        # The output conforms to the canonical contract.
+        assert_conforms(out_root, [ExpectedDoc(rel_key="paper.pdf", pages=1)])
+
     def test_assemble_born_digital_text_used(self) -> None:
         config = _make_config()
         pipeline = UnifiedPipeline(config)

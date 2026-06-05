@@ -29,6 +29,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from ocr_output_contract import split_native_pages
+
 from socr.core.cache import BlobStore
 from socr.core.document import DocumentHandle
 from socr.core.result import PageOutput, PageStatus
@@ -144,12 +146,44 @@ class Manifest:
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def _winning_page_output(state: DocumentState, page_num: int) -> PageOutput:
+def _whole_doc_page_texts(state: DocumentState) -> dict[int, str]:
+    """Per-page texts recovered from a whole-document CLI attempt.
+
+    CLI engines that process a whole PDF in one shot return a single
+    ``PageOutput(page_num=0)`` stored in ``state.whole_doc_attempts``; the
+    per-page ``best_output`` slots are never populated. Without this, the
+    manifest would freeze empty pages and ``replay`` would reconstruct an empty
+    document even though the saved ``.md`` has the full text (the historical
+    replay/manifest bug).
+
+    We recover per-page text by splitting the winning whole-doc markdown on the
+    canonical ``## Page N`` headers via the shared contract splitter. Returns a
+    1-indexed ``{page_num: text}`` map, or an empty map when there is no usable
+    whole-doc attempt (so the per-page path is used unchanged).
+    """
+    if not state.whole_doc_attempts:
+        return {}
+    passing = [w for w in state.whole_doc_attempts if w.audit_passed]
+    chosen = passing[-1] if passing else state.whole_doc_attempts[-1]
+    text = chosen.text or ""
+    if not text.strip():
+        return {}
+    pages = split_native_pages(text)
+    return {i: t for i, t in enumerate(pages, start=1)}
+
+
+def _winning_page_output(
+    state: DocumentState,
+    page_num: int,
+    whole_doc_texts: dict[int, str] | None = None,
+) -> PageOutput:
     """The PageOutput that should be frozen for this page.
 
     Mirrors ``DocumentState.text`` selection: a passing OCR best_output wins;
-    otherwise born-digital native text; otherwise the best attempt we have.
-    Native fallback is wrapped in a synthetic PageOutput(engine="native").
+    otherwise born-digital native text; otherwise text recovered from a
+    whole-document CLI attempt (split on ``## Page N``); otherwise the best
+    attempt we have. Native and whole-doc fallbacks are wrapped in a synthetic
+    PageOutput so the manifest always records real content, never an empty page.
     """
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
@@ -164,6 +198,16 @@ def _winning_page_output(state: DocumentState, page_num: int) -> PageOutput:
         )
     if p.best_output:
         return p.best_output
+    # Whole-document CLI path: recover this page's text from the split markdown.
+    if whole_doc_texts and page_num in whole_doc_texts:
+        engine = state.whole_doc_attempts[-1].engine if state.whole_doc_attempts else ""
+        return PageOutput(
+            page_num=page_num,
+            text=whole_doc_texts[page_num],
+            status=PageStatus.SUCCESS,
+            engine=engine or "cli",
+            audit_passed=True,
+        )
     return PageOutput(page_num=page_num, text="", status=PageStatus.ERROR, audit_passed=False)
 
 
@@ -188,8 +232,13 @@ def build_manifest(
         page_count=handle.page_count,
         render_dpi=dpi,
     )
+    # Recover per-page text from a whole-document CLI attempt (page_num=0) so the
+    # manifest never freezes empty pages when per-page best_outputs are absent.
+    whole_doc_texts = _whole_doc_page_texts(state)
+    # Model version per engine, so a model swap/drift invalidates the fingerprint.
+    model_versions = {r.engine: r.model_version for r in state.engine_runs if r.model_version}
     for page_num in range(1, handle.page_count + 1):
-        page = _winning_page_output(state, page_num)
+        page = _winning_page_output(state, page_num, whole_doc_texts)
         blob_ref = blobs.put_page(page)
         image_hash = ""
         if page.engine and page.engine != "native":
@@ -199,6 +248,7 @@ def build_manifest(
             page_num=page_num,
             render_dpi=dpi,
             engine=page.engine,
+            model_version=model_versions.get(page.engine, ""),
             image_hash=image_hash,
         )
         journal = [
