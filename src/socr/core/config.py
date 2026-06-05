@@ -127,6 +127,12 @@ class PipelineConfig:
     # flipped signs, wrong digits (0.001->0.007), swapped columns. Rejected pages
     # re-route through repair. No-ops if no vision judge model is available.
     judge_hard_pages: bool = True
+    # Dual-pass table extraction: on table pages, crop each precisely-located
+    # table (ruled or booktabs), re-read the crop with the judge VLM, and
+    # reconcile against the whole-page OCR. Crop-vs-page disagreement is a
+    # corruption flag; the crop reading is authoritative and patched in. No-ops
+    # if no vision model is available. Reuses the judge model ladder.
+    dual_pass_tables: bool = True
 
     # --- Agentic cost-aware routing (all default-off = unchanged behavior) ---
     agentic: bool = False  # per-page: try cheapest provider, judge escalates

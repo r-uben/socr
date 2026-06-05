@@ -19,7 +19,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import fitz
 from rich.console import Console
 
 from socr.audit.heuristics import HeuristicsChecker
@@ -142,6 +141,13 @@ class UnifiedPipeline:
             # Phase 4b: Consensus (optional, after repair)
             if self.config.consensus_enabled:
                 self._phase_consensus(state)
+
+        # Phase 4c: Dual-pass table extraction — crop precisely-located tables,
+        # re-read each crop with the judge VLM, and patch the authoritative crop
+        # reading back into the page on disagreement. Runs for every mode, on the
+        # final per-page text, just before assembly.
+        if self.config.dual_pass_tables:
+            self._phase_dual_pass_tables(state)
 
         # Phase 5: Assemble
         final_result = self._phase_assemble(state, out_dir)
@@ -848,6 +854,91 @@ class UnifiedPipeline:
                 console.print("  No model-OCR'd hard pages to judge")
             else:
                 console.print(f"  {judged} judged, {rejected} rejected")
+
+    def _phase_dual_pass_tables(self, state: DocumentState) -> None:
+        """Crop precisely-located tables, re-read each with the judge VLM, and
+        reconcile against the whole-page OCR.
+
+        On disagreement the crop reading (higher-resolution, table-focused) is
+        authoritative and patched into the page; the disagreement is surfaced and
+        recorded in the page's audit notes. Tables whose count can't be safely
+        mapped, or whose crop reading is malformed, are flagged but never edited.
+        Fail-open throughout: any error keeps the page's existing text.
+        """
+        from socr.tables import locate_tables, reconcile_page_tables
+        from socr.tables.extract import OllamaTableReader, TableCropExtractor
+
+        model = self._resolve_judge_model()
+        if not model:
+            return  # no vision model available; nothing to do
+
+        assessment = self._last_assessment
+        table_pages = {
+            pa.page_num for pa in (assessment.pages if assessment else []) if pa.has_tables
+        }
+        if not table_pages:
+            return
+
+        try:
+            extractor = TableCropExtractor(OllamaTableReader(model=model))
+        except Exception as exc:
+            logger.warning("dual-pass extractor unavailable (%s)", exc)
+            return
+
+        if not self.config.quiet:
+            console.print(
+                f"\n[cyan]Phase 4c:[/cyan] dual-pass table extraction [{model}]"
+            )
+
+        import fitz
+
+        pdf_path = state.handle.path
+        scanned = patched = flagged = 0
+        for page_num in sorted(state.pages):
+            if page_num not in table_pages:
+                continue
+            ps = state.pages[page_num]
+            bo = ps.best_output
+            # Only model-OCR'd pages carry transcription corruption risk; native
+            # text is character-exact and its tables come straight from the PDF.
+            if not bo or not bo.text or bo.engine == "native":
+                continue
+            scanned += 1
+            try:
+                with fitz.open(pdf_path) as doc:
+                    boxes = locate_tables(doc[page_num - 1])
+                if not boxes:
+                    continue
+                crops = extractor.extract(pdf_path, page_num, boxes)
+                if not crops:
+                    continue
+                result = reconcile_page_tables(
+                    bo.text, [(c.markdown, c.source) for c in crops]
+                )
+            except Exception as exc:  # a dual-pass failure must never drop a page
+                logger.warning("dual-pass errored on p%d (%s); keeping text", page_num, exc)
+                continue
+
+            if result.patched:
+                bo.text = result.text
+                patched += 1
+            for d in result.disagreements:
+                flagged += 1
+                bo.audit_notes.append(f"dual-pass {d.action}: {d.summary()}")
+            if result.disagreements and not self.config.quiet:
+                for d in result.disagreements:
+                    color = "green" if d.action == "patched" else "yellow"
+                    console.print(
+                        f"  [{color}]p{page_num}: {d.action} — {d.summary()}[/{color}]"
+                    )
+
+        if not self.config.quiet:
+            if scanned == 0:
+                console.print("  No model-OCR'd table pages to re-read")
+            else:
+                console.print(
+                    f"  {scanned} pages scanned, {patched} patched, {flagged} flagged"
+                )
 
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics."""
