@@ -25,6 +25,14 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# Performance guard, not a data threshold: PyMuPDF's text-strategy find_tables
+# cost grows ~quadratically with the token count, and on dense non-table pages
+# that slip through the columnar gate (reference lists, full-page equation pages)
+# it can run for minutes. A genuine data table is a few hundred words (Fama-French
+# p8 = 213). Skip pages far above that — they are both slow and unlikely to be a
+# clean table. Raise if a legitimately huge table is ever missed.
+_MAX_PAGE_WORDS = 1500
+
 # A reconstructed grid is kept only if it still looks like a table after cleaning:
 # enough rows, at least two columns, and a real share of numeric cells (econ
 # tables are mostly numbers). These guard against text-strategy firing on prose.
@@ -53,6 +61,10 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
     try:
         import fitz
 
+        # Guard against pathological pages before the expensive text-strategy call.
+        if len(page.get_text("words")) > _MAX_PAGE_WORDS:
+            logger.debug("skipping text-strategy reconstruct: page too dense")
+            return []
         result = page.find_tables(vertical_strategy="text", horizontal_strategy="text")
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("text-strategy find_tables failed: %s", exc)

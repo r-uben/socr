@@ -104,6 +104,24 @@ def test_extract_structured_emits_grid_for_booktabs_table():
     assert "0.253" in out                 # char-exact native value preserved
 
 
+def test_reconstruct_skips_pathological_dense_page():
+    # A page with thousands of words (reference list / equation dump) must be
+    # skipped before the expensive text-strategy call — never hang the pipeline.
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 40
+    line = "Author A 2020 Journal 10 200 some reference text et al pages " * 4
+    for _ in range(60):                      # ~14k words, far over the guard
+        page.insert_text((40, y), line, fontsize=6)
+        y += 11
+        if y > 780:
+            page = doc.new_page()
+            y = 40
+    page0 = doc[0]
+    assert len(page0.get_text("words")) > 1500
+    assert reconstruct_table_regions(page0) == []   # guarded, returns fast
+
+
 def test_extract_structured_leaves_prose_alone():
     doc = fitz.open()
     page = doc.new_page()
