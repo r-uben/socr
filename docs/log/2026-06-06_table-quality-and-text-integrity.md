@@ -68,6 +68,41 @@ started:
 - cv2 + numpy were added to both `~/venvs/socr` and the in-iCloud `.venv` (the
   stale test env). Canonical env is `~/venvs/socr`.
 
+## End-to-end reality check + engine benchmark (the humbling part)
+Ran a DEFAULT `socr process` on a 3-page born-digital FF excerpt and watched the
+whole pipeline — which corrected the narrative:
+
+- **Born-digital TABLE pages do NOT use native text in the default pipeline.**
+  `has_tables -> has_complex_content -> needs_ocr_enhancement=True -> route to the
+  VLM` (Gemini). So the clean grid that ships for a table page is Gemini's OCR;
+  **structure-restore never fires on the default table path.** It computes the
+  native grid only as a fallback / agentic cheap-rung / scoring baseline.
+- **What DID run correctly in the default pipeline:** dual-pass (flagged 6 table
+  mismatches, 0 patches — flag-only held, no corruption) and the audit log
+  (`audit_log.json`, 6 events). Structure-restore + corruption detection live on
+  the native path, exercised on PROSE pages and in agentic/offline/fallback runs.
+
+**Table-digit benchmark (FF p8, 18 industries; PDF text layer = ground truth):**
+
+| Engine | time | cell errors | notes |
+|--------|------|-------------|-------|
+| Gemini (cloud) | ~7s | **0 / 64** | cleanest full grid |
+| minicpm-v:8b (local) | 15s | **0** (17/18 rows aligned) | fast + free; minor structure gaps |
+| qwen3-vl:8b (local) | 88s | **0** (16/18 rows aligned) | slow on dense pages |
+
+- **On clean born-digital table DIGITS, all three tie at zero errors.** Native
+  structure-restore reads the same text layer, so it matches by construction.
+- So "char-exact native beats VLM OCR" is theoretical here — Gemini (and the local
+  VLMs) read every digit right. The structure-restore value is **cost / offline /
+  fallback**, NOT a default-path accuracy win.
+- **Local VLMs are viable for clean-table digits** (minicpm-v: 15s, free, 0 errors).
+  The cloud's edge is structural cleanliness and harder content (scans, dense
+  math), not numeric fidelity on clean tables. socOCRbench (qwen ~0.57 vs Gemini
+  ~0.60-0.64) measures that broader doc quality, not table digits.
+- **Decision:** keep Gemini as the default for tables (cleanest structure); local
+  VLMs (minicpm-v) are a strong free/offline alternative worth the agentic ladder.
+  No routing change — the accuracy case for preferring native didn't materialize.
+
 ## Open (see TODO.md / TICKETS.md TICKET-18)
 - Per-page provenance record (engine + model version + native/model + table-
   reconstructed + corruption flag), written by default. The natural home is the
