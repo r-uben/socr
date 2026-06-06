@@ -26,7 +26,6 @@ from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.metadata import MetadataManager
 from socr.core.normalizer import OutputNormalizer
 from socr.core.result import (
     DocumentStatus,
@@ -94,6 +93,94 @@ class UnifiedPipeline:
             return Path(configured)
         return resolve_output_root(Path(input_path))
 
+    def _resolve_primary_engine(self) -> EngineType:
+        """The concrete primary engine, resolving ``AUTO`` WITHOUT mutating config.
+
+        ``process()`` resolves and writes back ``AUTO`` on entry; the batch resume
+        gate runs BEFORE ``process()`` per file and must derive the SAME engine to
+        compute an identical run fingerprint. We resolve here read-only so the
+        gate and ``process()`` agree.
+        """
+        if self.config.primary_engine == EngineType.AUTO:
+            return resolve_auto_engine()
+        return self.config.primary_engine
+
+    def _resume_skip(self, pdf_path: Path, out_dir: Path) -> EngineResult | None:
+        """Return a SKIPPED result if this doc is already completed, else None.
+
+        Consults the canonical :meth:`RootIndex.is_completed` (status==completed
+        AND input checksum match AND output .md still on disk AND run-fingerprint
+        match), so a re-run under a different model / task / output-affecting flag
+        reprocesses instead of silently reusing the cached output. ``--reprocess``
+        forces a re-run. An unreadable input (``safe_checksum`` None) is never
+        treated as completed.
+        """
+        if self.config.reprocess:
+            return None
+        try:
+            from ocr_output_contract import RootIndex, relative_key, safe_checksum
+
+            checksum = safe_checksum(pdf_path)
+            if checksum is None:
+                return None
+            scan_root = self._scan_root or pdf_path.parent
+            rel_key = relative_key(pdf_path, scan_root)
+            if not RootIndex(out_dir).is_completed(
+                rel_key, checksum, fingerprint=self._run_fingerprint()
+            ):
+                return None
+        except Exception as exc:  # never let the resume check break a run
+            logger.warning("resume check failed (non-fatal): %s", exc)
+            return None
+
+        if not self.config.quiet:
+            console.print(f"[dim]Skipping (already processed): {pdf_path.name}[/dim]")
+        return EngineResult(
+            document_path=pdf_path,
+            engine=self.config.primary_engine.value,
+            status=DocumentStatus.SKIPPED,
+        )
+
+    def _run_fingerprint(self, engine_type: EngineType | None = None) -> str:
+        """Run-config fingerprint for idempotency, from the RESOLVED run config.
+
+        Captures what changes *what output an input produces*: the resolved
+        engine's model id, backend, and task, plus socr's output-affecting
+        orchestration flags (render DPI, native-first, agentic/multi-engine/
+        consensus routing, dual-pass tables, hard-page judge). Stored in
+        :class:`DocMetadata.fingerprint` and consulted by
+        :meth:`RootIndex.is_completed`, so a re-run under a different model / task
+        / flag reprocesses instead of silently reusing the cached output.
+
+        Resolved (not the AUTO sentinel) so the single-file gate, the batch gate,
+        and the recorded metadata all agree on one value.
+        """
+        from ocr_output_contract import run_fingerprint
+
+        from socr.engines.registry import get_engine
+
+        engine_type = engine_type or self._resolve_primary_engine()
+        try:
+            engine = get_engine(engine_type)
+            model = engine.resolved_model_version(self.config)
+            backend, task = engine.fingerprint_determinants(self.config)
+        except Exception:
+            # Never let fingerprinting break a run; degrade to the engine name.
+            model, backend, task = str(engine_type.value), "socr", None
+
+        extra = {
+            "primary_engine": engine_type.value,
+            "render_dpi": self.config.render_dpi,
+            "native_first": self.config.native_first,
+            "agentic": self.config.agentic,
+            "multi_engine": sorted(e.value for e in self.config.multi_engine),
+            "consensus": self.config.consensus_enabled,
+            "dual_pass_tables": self.config.dual_pass_tables,
+            "judge_hard_pages": self.config.judge_hard_pages,
+            "audit": self.config.audit_enabled,
+        }
+        return run_fingerprint(model, backend or "socr", task, None, extra=extra)
+
     def process(
         self,
         pdf_path: Path,
@@ -124,6 +211,15 @@ class UnifiedPipeline:
                 console.print(
                     f"[dim]Auto-selected engine: {self.config.primary_engine.value}[/dim]"
                 )
+
+        # Single-file resume gate (canon): skip a doc already completed under the
+        # SAME input checksum AND run fingerprint, with its .md still on disk.
+        # Consulted here (not just in batch) so a re-run under a different model /
+        # task / flag reprocesses. --reprocess forces a re-run. Batch enters via
+        # process_batch's own gate, so this only fires on the single-file path.
+        skipped = self._resume_skip(pdf_path, out_dir)
+        if skipped is not None:
+            return skipped
 
         doc = DocumentHandle.from_path(pdf_path)
         state = DocumentState(handle=doc)
@@ -200,18 +296,34 @@ class UnifiedPipeline:
         contract :class:`RunOutcome`); the CLI consults it so the batch exit
         code is nonzero when any file failed (the canon's uniform exit policy).
         """
-        from ocr_output_contract import RunOutcome, Status
+        from ocr_output_contract import (
+            RootIndex,
+            RunOutcome,
+            Status,
+            is_within_output_root,
+            relative_key,
+            safe_checksum,
+        )
 
         input_dir = Path(input_dir)
         out_dir = self._resolve_output_root(input_dir, output_dir)
         outcome = RunOutcome()
         self.last_outcome = outcome
-        meta = MetadataManager(out_dir)
+
+        # The canonical contract RootIndex is the SINGLE authoritative writer of
+        # <root>/metadata.json and the SINGLE resume index. The legacy
+        # MetadataManager (basename-keyed, TZ-naive, no fingerprint, no
+        # output-existence check) is no longer used here: it used to CLOBBER the
+        # RootIndex written by process()->_phase_assemble. RootIndex.record is
+        # already called per-doc inside process(); the batch loop only READS it
+        # for the resume gate.
+        root_index = RootIndex(out_dir)
+        # Resolve AUTO -> concrete ONCE so the gate's fingerprint matches the one
+        # process() records for every file in this batch.
+        run_fp = self._run_fingerprint(self._resolve_primary_engine())
 
         # Exclude anything under the resolved output root so a re-run never
         # re-ingests socr's own .md/figure outputs as fresh inputs.
-        from ocr_output_contract import is_within_output_root
-
         pdfs = sorted(p for p in input_dir.glob("*.pdf") if not is_within_output_root(p, out_dir))
         if not pdfs:
             if not self.config.quiet:
@@ -220,7 +332,15 @@ class UnifiedPipeline:
 
         to_process = []
         for pdf in pdfs:
-            if meta.is_processed(pdf) and not self.config.reprocess:
+            # Resume gate via the canon: an unreadable input (safe_checksum None)
+            # is NEVER treated as completed — it falls through to process(), which
+            # records a per-file failure rather than aborting the batch (SYS-02).
+            checksum = safe_checksum(pdf)
+            rel_key = relative_key(pdf, input_dir)
+            already_done = checksum is not None and root_index.is_completed(
+                rel_key, checksum, fingerprint=run_fp
+            )
+            if already_done and not self.config.reprocess:
                 if self.config.verbose:
                     console.print(f"[dim]Skipping: {pdf.name}[/dim]")
             else:
@@ -266,13 +386,11 @@ class UnifiedPipeline:
                 continue
             results.append(result)
             if result.success:
+                # process()->_phase_assemble already recorded this doc in the
+                # canonical RootIndex with the contract schema (model/backend/
+                # fingerprint/UTC timestamp). No legacy second write — that was
+                # the clobber that downgraded the root index to legacy shape.
                 outcome.add(Status.COMPLETED, output_path=str(pdf))
-                meta.record(
-                    pdf,
-                    engine=result.engine,
-                    processing_time=result.processing_time,
-                    pages=result.pages_processed,
-                )
             elif result.status == DocumentStatus.AUDIT_FAILED:
                 outcome.add(Status.PARTIAL, detail=str(pdf))
             else:
@@ -1768,7 +1886,7 @@ class UnifiedPipeline:
             doc_dir_for,
             markdown_path_for,
             relative_key,
-            sha256_checksum,
+            safe_checksum,
             utc_timestamp,
         )
 
@@ -1787,9 +1905,12 @@ class UnifiedPipeline:
             else:
                 status = Status.FAILED
 
+            # safe_checksum: an input unreadable at metadata time records an empty
+            # checksum (never matches on resume -> forces reprocess) instead of
+            # raising and losing the metadata record entirely (SYS-02).
             meta = DocMetadata(
                 status=status,
-                checksum=sha256_checksum(pdf_path),
+                checksum=safe_checksum(pdf_path) or "",
                 model=result.engine or "none",
                 backend="socr",
                 processing_time=result.processing_time,
@@ -1797,6 +1918,12 @@ class UnifiedPipeline:
                 output_path=str(md_path) if has_text else "",
                 pages=state.handle.page_count,
                 error=result.error or None,
+                # Run-config fingerprint: a re-run under a different model / task /
+                # output-affecting flag is forced to reprocess instead of being
+                # skipped by RootIndex.is_completed on input-checksum alone. By the
+                # time _phase_assemble runs, process() has resolved AUTO into a
+                # concrete primary_engine, so this matches the batch resume gate.
+                fingerprint=self._run_fingerprint(),
             )
             from ocr_output_contract import write_doc_metadata
 

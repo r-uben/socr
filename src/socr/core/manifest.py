@@ -229,9 +229,10 @@ def _winning_page_output(
             engine="native",
             audit_passed=True,
         )
-    if p.best_output:
-        return p.best_output
     # Whole-document CLI path: recover this page's text from the split markdown.
+    # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
+    # carries real content for this page is not shadowed (the prior ordering left
+    # whole-doc recovery dead-coded behind any non-None best_output).
     if whole_doc and page_num in whole_doc.texts:
         # A blob that FAILED audit is frozen with audit_passed=False and a
         # non-SUCCESS status (WARNING: content present, audit not passed) so the
@@ -243,6 +244,10 @@ def _winning_page_output(
             engine=whole_doc.engine,
             audit_passed=whole_doc.audit_passed,
         )
+    # Last resort: a failed per-page attempt (content present, audit not passed)
+    # beats an empty page so the manifest preserves what little we have.
+    if p.best_output:
+        return p.best_output
     return PageOutput(page_num=page_num, text="", status=PageStatus.ERROR, audit_passed=False)
 
 

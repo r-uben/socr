@@ -16,6 +16,7 @@ from ocr_output_contract import (
     doc_dir_for,
     markdown_path_for,
     relative_key,
+    split_native_pages,
 )
 
 from socr.core.config import PipelineConfig
@@ -288,9 +289,32 @@ class BaseEngine(ABC):
             stderr_text = result.stderr or ""
             recitation_in_stderr = "RECITATION" in stderr_text
 
+            # Aggregated read-back (qwen and other canon engines that fold a
+            # dir-of-images into ONE '## Page N' doc instead of per-page files).
+            # Returns {page_num: text} mapped to socr's original page numbers, or
+            # an all-pages count-mismatch error, or None when no aggregate exists.
+            aggregate, aggregate_error = self._read_aggregated_pages(
+                cli_out, images_dir, page_num_to_stem
+            )
+            if aggregate_error is not None:
+                return [
+                    PageOutput(
+                        page_num=pn,
+                        status=PageStatus.ERROR,
+                        engine=self.name,
+                        failure_mode=FailureMode.EMPTY_OUTPUT,
+                        audit_passed=False,
+                        error=aggregate_error,
+                    )
+                    for pn in page_nums
+                ]
+
             for page_num in page_nums:
                 stem = page_num_to_stem[page_num]
                 text = self._read_page_output(stem, cli_out, scan_root=images_dir)
+                # Fall back to the aggregated split when there is no per-page file.
+                if not text and aggregate is not None:
+                    text = aggregate.get(page_num)
 
                 if text:
                     text = self._clean_output(text, self.name)
@@ -409,6 +433,66 @@ class BaseEngine(ABC):
             )
             return md_file
         return None
+
+    def _read_aggregated_pages(
+        self,
+        cli_out: Path,
+        images_dir: Path,
+        page_num_to_stem: dict[int, str],
+    ) -> tuple[dict[int, str] | None, str | None]:
+        """Recover per-page text from a canon engine's AGGREGATED output.
+
+        Some canon engines (qwen) treat the rendered page-image directory as ONE
+        document and emit a single ``<images_dir.stem>/<images_dir.stem>.md`` with
+        ``## Page N`` headers, rather than one ``.md`` per input image. socr's
+        per-page read-back then finds no per-page files and would record every
+        page as ``EMPTY_OUTPUT``. This recovers the pages by splitting that
+        aggregate on the canonical headers and mapping each section back to the
+        original socr page number.
+
+        Returns ``(mapping, None)`` where ``mapping`` is ``{original_page_num:
+        text}``; ``(None, None)`` when no aggregate exists (per-page engines);
+        or ``(None, error)`` when the aggregate's page count does not match the
+        number of rendered images (a corrupt/truncated aggregate — fail ALL pages
+        rather than silently mis-aligning the mapping).
+
+        Mapping rule (ordering-safe): qwen orders its ``## Page N`` sections by the
+        SORTED image filenames it saw, so we map the k-th split section to the
+        page whose rendered image is k-th in filename-sorted order — NOT to
+        ``page_nums[k-1]`` (``page_nums`` may be non-contiguous / non-ascending).
+        """
+        # Locate the aggregate by the contract's canonical path (no glob): the
+        # images dir is the engine's single "document", so its doc dir mirrors
+        # the dir name under cli_out.
+        rel_key = relative_key(images_dir, images_dir.parent)
+        agg_doc_dir = doc_dir_for(cli_out, rel_key)
+        agg_md = markdown_path_for(agg_doc_dir, rel_key)
+        if not agg_md.exists():
+            return None, None
+
+        try:
+            blob = agg_md.read_text(encoding="utf-8")
+        except OSError as exc:
+            return None, f"aggregate read failed: {exc}"
+
+        sections = split_native_pages(self._clean_output(blob, self.name))
+        # Engine-saw order: the SAME filename sort the canon engine applies to the
+        # image dir. Each rendered image stem is page_{orig:04d}, so a filename
+        # sort yields ascending original page order — robust to a non-ascending
+        # page_nums request.
+        engine_order = sorted(page_num_to_stem.items(), key=lambda kv: f"{kv[1]}.png")
+        ordered_page_nums = [orig for orig, _stem in engine_order]
+
+        if len(sections) != len(ordered_page_nums):
+            return (
+                None,
+                (
+                    f"aggregated output page count mismatch at {agg_md}: "
+                    f"split {len(sections)} section(s) but rendered "
+                    f"{len(ordered_page_nums)} image(s)"
+                ),
+            )
+        return {orig: sections[i] for i, orig in enumerate(ordered_page_nums)}, None
 
     @abstractmethod
     def _build_command(

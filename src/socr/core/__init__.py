@@ -8,7 +8,6 @@ from socr.core.born_digital import (
 from socr.core.chunker import PDFChunk, PDFChunker
 from socr.core.config import EngineType, HPCConfig, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.metadata import MetadataManager
 from socr.core.normalizer import OutputNormalizer
 from socr.core.result import (
     DocumentStatus,
@@ -33,7 +32,6 @@ __all__ = [
     "FailureMode",
     "FigureInfo",
     "HPCConfig",
-    "MetadataManager",
     "OutputNormalizer",
     "PageAssessment",
     "PageOutput",

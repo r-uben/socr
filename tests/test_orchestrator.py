@@ -829,11 +829,12 @@ class TestBatchProcessing:
         config = _make_config(quiet=True)
         pipeline = UnifiedPipeline(config)
 
-        # Mark as already processed via metadata
-        with patch("socr.pipeline.orchestrator.MetadataManager") as MockMeta:
-            mock_meta = MockMeta.return_value
-            mock_meta.is_processed.return_value = True
-
+        # Mark as already processed via the canonical RootIndex resume gate
+        # (MetadataManager no longer participates — RootIndex is the sole index).
+        # process_batch imports RootIndex lazily from the contract package, so we
+        # patch it at its source module.
+        with patch("ocr_output_contract.RootIndex") as MockIndex:
+            MockIndex.return_value.is_completed.return_value = True
             results = pipeline.process_batch(pdf_dir, out_dir)
 
         assert results == []
