@@ -10,6 +10,7 @@ from socr.tables.reconstruct import (
     _grid_to_markdown,
     _is_runhead,
     _looks_tabular,
+    has_numeric_columns,
     reconstruct_table_regions,
 )
 
@@ -102,6 +103,40 @@ def test_extract_structured_emits_grid_for_booktabs_table():
     out = BornDigitalDetector().extract_structured(page)
     assert "| --- |" in out               # a markdown table, not a flat dump
     assert "0.253" in out                 # char-exact native value preserved
+
+
+def test_numeric_columns_gate_accepts_table_rejects_references():
+    # Table: numbers stack into lanes, each data row populates several -> True.
+    _doc, page = _booktabs_page()
+    assert has_numeric_columns(page) is True
+
+    # References list: numbers scattered one-per-line (year, volume, pages) at
+    # ragged x, never co-occupying multiple lanes in a row -> False.
+    rdoc = fitz.open()
+    rpage = rdoc.new_page()
+    y = 80
+    cites = [
+        "Fama, E. and K. French (1992), Journal of Finance 47, 427-465.",
+        "Jensen, M. (1968), Journal of Finance 23, 389-416.",
+        "Sharpe, W. (1964), Journal of Finance 19, 425-442.",
+        "Black, F. (1972), Journal of Business 45, 444-455.",
+        "Banz, R. (1981), Journal of Financial Economics 9, 3-18.",
+    ]
+    for c in cites:
+        rpage.insert_text((72, y), c, fontsize=10)
+        y += 18
+    assert has_numeric_columns(rpage) is False
+
+
+def test_extract_structured_leaves_references_alone():
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 80
+    for i in range(8):
+        page.insert_text((72, y), f"Author {i} (199{i}), Journal of X {i}, 1{i}-2{i}.", fontsize=10)
+        y += 18
+    out = BornDigitalDetector().extract_structured(page)
+    assert "| --- |" not in out          # references never become a table
 
 
 def test_reconstruct_skips_pathological_dense_page():

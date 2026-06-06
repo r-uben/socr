@@ -530,9 +530,10 @@ class BornDigitalDetector:
 
         # Born-digital booktabs tables (top/mid/bottom rules only) make the
         # default lines strategy return nothing, so the table would otherwise be
-        # dumped as a flat token stream. When there IS columnar-numeric evidence,
-        # recover the grid from text alignment (char-exact native values, no model).
-        if not table_regions and self._detect_columnar_numbers(page):
+        # dumped as a flat token stream. Recover the grid from text alignment
+        # (char-exact native values, no model). reconstruct_table_regions self-
+        # gates on numeric-column structure, so it is safe to call on any page.
+        if not table_regions:
             from socr.tables.reconstruct import reconstruct_table_regions
 
             table_regions = reconstruct_table_regions(page)

@@ -41,6 +41,18 @@ _MIN_COLS = 2
 _MIN_NUMERIC_FRAC = 0.20
 
 _NUMERIC_RE = re.compile(r"-?\d")
+# A token that is essentially a number (table value): 0.253, (0.014), 1,204, 45%.
+_NUM_TOKEN_RE = re.compile(r"^[\(\[]?-?\d[\d.,]*[\)\]%]?$")
+
+# The structural table gate. A real data table puts numbers in vertical lanes and
+# each data ROW populates several lanes at once (FabPr | 0.253 | 0.124 | 0.179 |
+# 0.211). A reference list scatters numbers one-per-line, so no row co-occupies
+# multiple numeric lanes. These distinguish a grid from prose/references without
+# the cost (or truncation risk) of running text-strategy first. Validated on real
+# pages: a table page yields ~10-50 multi-column rows; a references page yields 0.
+_LANE_X_TOL_PT = 6.0       # numeric tokens within this x distance share a lane
+_MIN_LANES_PER_ROW = 3     # a data row must populate this many numeric lanes
+_MIN_TABLE_ROWS = 3        # and there must be this many such rows
 # A running-head row swept in from the page margin reads like a journal/volume
 # line. Matched with OCR tolerance because older PDFs carry corrupted text layers
 # (observed "Joumal" for "Journal", "(/997)" for "(1997)"): journal-name tokens
@@ -61,7 +73,13 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
     try:
         import fitz
 
-        # Guard against pathological pages before the expensive text-strategy call.
+        # Structural gate: only reconstruct where numbers actually form a grid
+        # (multiple numeric lanes co-occupied per row). This skips references /
+        # prose pages that the cheap columnar heuristic false-fires on — and which
+        # make text-strategy run for minutes — without the truncation risk of
+        # clipping to a rule band. The word cap stays as a final cost backstop.
+        if not has_numeric_columns(page):
+            return []
         if len(page.get_text("words")) > _MAX_PAGE_WORDS:
             logger.debug("skipping text-strategy reconstruct: page too dense")
             return []
@@ -83,6 +101,42 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
         if md:
             out.append((fitz.Rect(table.bbox), md))
     return out
+
+
+def has_numeric_columns(page) -> bool:
+    """True if the page's numeric tokens form a real grid (not a reference list).
+
+    Clusters numeric token x-positions into lanes, then counts rows that populate
+    at least ``_MIN_LANES_PER_ROW`` lanes at once. Cheap (text only, no table
+    inference) and truncation-free, so it is the gate before the expensive
+    text-strategy call. Never raises.
+    """
+    try:
+        words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_no)
+    except Exception:  # pragma: no cover - defensive
+        return False
+    nums = [
+        (w[0], round(w[1]))
+        for w in words
+        if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])
+    ]
+    if len(nums) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
+        return False
+
+    xs = sorted({x for x, _ in nums})
+    lanes: list[list[float]] = []
+    for x in xs:
+        if lanes and x - lanes[-1][-1] <= _LANE_X_TOL_PT:
+            lanes[-1].append(x)
+        else:
+            lanes.append([x])
+    lane_of = {x: i for i, lane in enumerate(lanes) for x in lane}
+
+    row_lanes: dict[float, set] = {}
+    for x, y in nums:
+        row_lanes.setdefault(y, set()).add(lane_of[x])
+    grid_rows = sum(1 for ls in row_lanes.values() if len(ls) >= _MIN_LANES_PER_ROW)
+    return grid_rows >= _MIN_TABLE_ROWS
 
 
 def _clean_grid(grid) -> list[list[str]]:
