@@ -50,9 +50,9 @@ _NUM_TOKEN_RE = re.compile(r"^[\(\[]?-?\d[\d.,]*[\)\]%]?$")
 # multiple numeric lanes. These distinguish a grid from prose/references without
 # the cost (or truncation risk) of running text-strategy first. Validated on real
 # pages: a table page yields ~10-50 multi-column rows; a references page yields 0.
-_LANE_X_TOL_PT = 6.0       # numeric tokens within this x distance share a lane
-_MIN_LANES_PER_ROW = 3     # a data row must populate this many numeric lanes
-_MIN_TABLE_ROWS = 3        # and there must be this many such rows
+_LANE_X_TOL_PT = 6.0  # numeric tokens within this x distance share a lane
+_MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes
+_MIN_TABLE_ROWS = 3  # and there must be this many such rows
 # A running-head row swept in from the page margin reads like a journal/volume
 # line. Matched with OCR tolerance because older PDFs carry corrupted text layers
 # (observed "Joumal" for "Journal", "(/997)" for "(1997)"): journal-name tokens
@@ -116,9 +116,7 @@ def has_numeric_columns(page) -> bool:
     except Exception:  # pragma: no cover - defensive
         return False
     nums = [
-        (w[0], round(w[1]))
-        for w in words
-        if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])
+        (w[0], round(w[1])) for w in words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])
     ]
     if len(nums) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
         return False
@@ -142,7 +140,7 @@ def has_numeric_columns(page) -> bool:
 def _clean_grid(grid) -> list[list[str]]:
     """Normalise cells, drop empty rows, a leading running-head row, empty columns."""
     g = [[("" if c is None else str(c)).replace("\n", " ").strip() for c in row] for row in grid]
-    g = [r for r in g if any(r)]                       # drop fully-empty rows
+    g = [r for r in g if any(r)]  # drop fully-empty rows
     # Drop a leading row that is a page running-head (one populated cell, journal-ish).
     while g and _is_runhead(g[0]):
         g = g[1:]

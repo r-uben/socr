@@ -44,6 +44,7 @@ class GLMEngine(BaseEngine):
             error = _check_ollama_model(OLLAMA_MODEL)
             if error:
                 from socr.core.result import DocumentStatus, EngineResult, FailureMode
+
                 logger.error(f"[{self.name}] {error}")
                 return EngineResult(
                     document_path=pdf_path,
@@ -65,10 +66,14 @@ class GLMEngine(BaseEngine):
             self.cli_command,
             "process",
             str(pdf_path),
-            "-o", str(output_dir),
-            "--task", config.glm_task,
-            "--backend", config.glm_backend,
-            "--dpi", str(config.render_dpi),
+            "-o",
+            str(output_dir),
+            "--task",
+            config.glm_task,
+            "--backend",
+            config.glm_backend,
+            "--dpi",
+            str(config.render_dpi),
         ]
         if config.workers > 1:
             cmd.extend(["-w", str(config.workers)])

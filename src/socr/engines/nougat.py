@@ -31,8 +31,10 @@ class NougatEngine(BaseEngine):
         cmd = [
             self.cli_command,
             str(pdf_path),
-            "-o", str(output_dir),
-            "--model", config.nougat_model,
+            "-o",
+            str(output_dir),
+            "--model",
+            config.nougat_model,
         ]
         if config.quiet:
             cmd.append("-q")

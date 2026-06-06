@@ -73,9 +73,9 @@ def _levenshtein(seq_a: list[str], seq_b: list[str]) -> int:
         for j in range(1, n + 1):
             cost = 0 if seq_a[i - 1] == seq_b[j - 1] else 1
             curr[j] = min(
-                curr[j - 1] + 1,      # insertion
-                prev[j] + 1,          # deletion
-                prev[j - 1] + cost,   # substitution
+                curr[j - 1] + 1,  # insertion
+                prev[j] + 1,  # deletion
+                prev[j - 1] + cost,  # substitution
             )
         prev, curr = curr, prev
 
@@ -245,8 +245,7 @@ def _find_discrepancies(attempts: list[PageOutput]) -> list[str]:
     failed = [e for e, v in audit_statuses.items() if not v]
     if passed and failed:
         discs.append(
-            f"Audit divergence: passed=[{', '.join(passed)}], "
-            f"failed=[{', '.join(failed)}]"
+            f"Audit divergence: passed=[{', '.join(passed)}], failed=[{', '.join(failed)}]"
         )
 
     return discs
@@ -296,9 +295,7 @@ def _call_ollama(
         return None
 
 
-def _parse_llm_response(
-    raw: str, attempts: list[PageOutput]
-) -> tuple[str, str] | None:
+def _parse_llm_response(raw: str, attempts: list[PageOutput]) -> tuple[str, str] | None:
     """Parse the LLM JSON response.
 
     Returns (selected_engine, merged_text) or None on parse failure.
@@ -350,9 +347,7 @@ class ConsensusEngine:
     # Heuristic selection
     # ------------------------------------------------------------------
 
-    def select_best(
-        self, attempts: list[PageOutput], reference_text: str = ""
-    ) -> ConsensusResult:
+    def select_best(self, attempts: list[PageOutput], reference_text: str = "") -> ConsensusResult:
         """Pick the best output from multiple attempts using heuristics.
 
         When *reference_text* is provided (e.g. native text from a
@@ -374,11 +369,7 @@ class ConsensusEngine:
         page_num = attempts[0].page_num
 
         # Filter out empty / error attempts
-        viable = [
-            a
-            for a in attempts
-            if a.text.strip() and a.status != PageStatus.ERROR
-        ]
+        viable = [a for a in attempts if a.text.strip() and a.status != PageStatus.ERROR]
 
         if not viable:
             # All failed -- return the first attempt's text as a last resort
@@ -433,11 +424,7 @@ class ConsensusEngine:
             return self.select_best(attempts)
 
         # Pre-filter viable
-        viable = [
-            a
-            for a in attempts
-            if a.text.strip() and a.status != PageStatus.ERROR
-        ]
+        viable = [a for a in attempts if a.text.strip() and a.status != PageStatus.ERROR]
         if len(viable) < 2:
             return self.select_best(attempts)
 
@@ -445,12 +432,9 @@ class ConsensusEngine:
         scored = sorted(viable, key=_score_attempt, reverse=True)[:3]
 
         outputs_block = "\n\n".join(
-            f"--- Output {i + 1} (engine: {a.engine}) ---\n{a.text}"
-            for i, a in enumerate(scored)
+            f"--- Output {i + 1} (engine: {a.engine}) ---\n{a.text}" for i, a in enumerate(scored)
         )
-        prompt = _OLLAMA_COMPARE_PROMPT.format(
-            n=len(scored), outputs_block=outputs_block
-        )
+        prompt = _OLLAMA_COMPARE_PROMPT.format(n=len(scored), outputs_block=outputs_block)
 
         raw = _call_ollama(prompt, model, base_url=self.ollama_url)
         if raw is None:
@@ -480,9 +464,7 @@ class ConsensusEngine:
     # Document-level reconciliation
     # ------------------------------------------------------------------
 
-    def reconcile_document(
-        self, state: DocumentState
-    ) -> list[ConsensusResult]:
+    def reconcile_document(self, state: DocumentState) -> list[ConsensusResult]:
         """Run per-page consensus across all engine attempts.
 
         For each page with 2+ attempts from different engines, compares

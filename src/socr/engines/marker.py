@@ -31,8 +31,10 @@ class MarkerEngine(BaseEngine):
         cmd = [
             self.cli_command,
             str(pdf_path),
-            "-o", str(output_dir),
-            "--device", config.marker_device,
+            "-o",
+            str(output_dir),
+            "--device",
+            config.marker_device,
         ]
         if config.quiet:
             cmd.append("-q")

@@ -12,6 +12,7 @@ from socr.core.chunker import PDFChunk, PDFChunker
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _create_pdf(path: Path, num_pages: int) -> Path:
     """Create a minimal PDF with *num_pages* pages."""
     doc = fitz.open()
@@ -26,6 +27,7 @@ def _create_pdf(path: Path, num_pages: int) -> Path:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestNeedsChunking:
     def test_small_pdf_does_not_need_chunking(self, tmp_path: Path) -> None:

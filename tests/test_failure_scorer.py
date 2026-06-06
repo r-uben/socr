@@ -13,6 +13,7 @@ from socr.core.result import FailureMode
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _long_clean_text(n_words: int = 200) -> str:
     """Generate clean, varied text with roughly *n_words* words.
 
@@ -144,13 +145,14 @@ class TestPrimarySelection:
         # Construct text that triggers both hallucination loops AND low word count.
         repeated = "Model generated this fake sentence again. "
         text = repeated * 4  # short (triggers low word count) + loops
-        scorer = FailureModeScorer(
-            checker=HeuristicsChecker(min_word_count=100)
-        )
+        scorer = FailureModeScorer(checker=HeuristicsChecker(min_word_count=100))
         result = scorer.score(text)
         assert not result.passed
         # Hallucination has higher priority than low word count.
-        if FailureMode.HALLUCINATION in result.failure_modes and FailureMode.LOW_WORD_COUNT in result.failure_modes:
+        if (
+            FailureMode.HALLUCINATION in result.failure_modes
+            and FailureMode.LOW_WORD_COUNT in result.failure_modes
+        ):
             assert result.primary_failure == FailureMode.HALLUCINATION
 
     def test_refusal_over_garbage(self) -> None:
@@ -159,24 +161,44 @@ class TestPrimarySelection:
         # co-occur with garbage — but if we construct it manually via
         # score_from_audit we can verify priority logic.
         audit = HeuristicsResult(passed=False)
-        audit.add_metric(AuditMetric(
-            name="Garbage ratio", value="50%", passed=False, severity="error",
-        ))
-        audit.add_metric(AuditMetric(
-            name="LLM refusal", value="refused", passed=False, severity="error",
-        ))
+        audit.add_metric(
+            AuditMetric(
+                name="Garbage ratio",
+                value="50%",
+                passed=False,
+                severity="error",
+            )
+        )
+        audit.add_metric(
+            AuditMetric(
+                name="LLM refusal",
+                value="refused",
+                passed=False,
+                severity="error",
+            )
+        )
         scorer = FailureModeScorer()
         result = scorer.score_from_audit(audit)
         assert result.primary_failure == FailureMode.REFUSAL
 
     def test_hallucination_over_garbage(self) -> None:
         audit = HeuristicsResult(passed=False)
-        audit.add_metric(AuditMetric(
-            name="Garbage ratio", value="30%", passed=False, severity="error",
-        ))
-        audit.add_metric(AuditMetric(
-            name="Hallucination loops", value="loops", passed=False, severity="error",
-        ))
+        audit.add_metric(
+            AuditMetric(
+                name="Garbage ratio",
+                value="30%",
+                passed=False,
+                severity="error",
+            )
+        )
+        audit.add_metric(
+            AuditMetric(
+                name="Hallucination loops",
+                value="loops",
+                passed=False,
+                severity="error",
+            )
+        )
         scorer = FailureModeScorer()
         result = scorer.score_from_audit(audit)
         assert result.primary_failure == FailureMode.HALLUCINATION
@@ -190,15 +212,31 @@ class TestPrimarySelection:
 class TestCombinedModes:
     def test_multiple_failures_all_captured(self) -> None:
         audit = HeuristicsResult(passed=False)
-        audit.add_metric(AuditMetric(
-            name="Word count", value=10, threshold=50, passed=False, severity="error",
-        ))
-        audit.add_metric(AuditMetric(
-            name="Garbage ratio", value="40%", passed=False, severity="error",
-        ))
-        audit.add_metric(AuditMetric(
-            name="Hallucination loops", value="loops", passed=False, severity="error",
-        ))
+        audit.add_metric(
+            AuditMetric(
+                name="Word count",
+                value=10,
+                threshold=50,
+                passed=False,
+                severity="error",
+            )
+        )
+        audit.add_metric(
+            AuditMetric(
+                name="Garbage ratio",
+                value="40%",
+                passed=False,
+                severity="error",
+            )
+        )
+        audit.add_metric(
+            AuditMetric(
+                name="Hallucination loops",
+                value="loops",
+                passed=False,
+                severity="error",
+            )
+        )
         scorer = FailureModeScorer()
         result = scorer.score_from_audit(audit)
         assert FailureMode.LOW_WORD_COUNT in result.failure_modes
@@ -208,12 +246,23 @@ class TestCombinedModes:
 
     def test_details_populated_per_mode(self) -> None:
         audit = HeuristicsResult(passed=False)
-        audit.add_metric(AuditMetric(
-            name="Word count", value=5, threshold=50, passed=False, severity="error",
-        ))
-        audit.add_metric(AuditMetric(
-            name="CID artifacts", value="CID refs", passed=False, severity="error",
-        ))
+        audit.add_metric(
+            AuditMetric(
+                name="Word count",
+                value=5,
+                threshold=50,
+                passed=False,
+                severity="error",
+            )
+        )
+        audit.add_metric(
+            AuditMetric(
+                name="CID artifacts",
+                value="CID refs",
+                passed=False,
+                severity="error",
+            )
+        )
         scorer = FailureModeScorer()
         result = scorer.score_from_audit(audit)
         assert FailureMode.LOW_WORD_COUNT in result.details
@@ -236,9 +285,15 @@ class TestCleanText:
 
     def test_score_from_passing_audit(self) -> None:
         audit = HeuristicsResult(passed=True)
-        audit.add_metric(AuditMetric(
-            name="Word count", value=500, threshold=50, passed=True, severity="info",
-        ))
+        audit.add_metric(
+            AuditMetric(
+                name="Word count",
+                value=500,
+                threshold=50,
+                passed=True,
+                severity="info",
+            )
+        )
         scorer = FailureModeScorer()
         result = scorer.score_from_audit(audit)
         assert result.passed
@@ -253,21 +308,36 @@ class TestCleanText:
 class TestConfidence:
     def test_multiple_errors_high_confidence(self) -> None:
         audit = HeuristicsResult(passed=False)
-        audit.add_metric(AuditMetric(
-            name="Word count", value=5, passed=False, severity="error",
-        ))
-        audit.add_metric(AuditMetric(
-            name="Garbage ratio", value="50%", passed=False, severity="error",
-        ))
+        audit.add_metric(
+            AuditMetric(
+                name="Word count",
+                value=5,
+                passed=False,
+                severity="error",
+            )
+        )
+        audit.add_metric(
+            AuditMetric(
+                name="Garbage ratio",
+                value="50%",
+                passed=False,
+                severity="error",
+            )
+        )
         scorer = FailureModeScorer()
         result = scorer.score_from_audit(audit)
         assert result.confidence >= 0.9
 
     def test_single_error_moderate_confidence(self) -> None:
         audit = HeuristicsResult(passed=False)
-        audit.add_metric(AuditMetric(
-            name="Word count", value=5, passed=False, severity="error",
-        ))
+        audit.add_metric(
+            AuditMetric(
+                name="Word count",
+                value=5,
+                passed=False,
+                severity="error",
+            )
+        )
         scorer = FailureModeScorer()
         result = scorer.score_from_audit(audit)
         assert 0.5 < result.confidence < 0.9

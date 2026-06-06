@@ -18,8 +18,14 @@ def _handle(pages: int = 1) -> DocumentHandle:
 
 
 def _attempt(engine, mode=FailureMode.NONE, passed=True):
-    return PageOutput(page_num=1, text="x", status=PageStatus.SUCCESS,
-                      engine=engine, failure_mode=mode, audit_passed=passed)
+    return PageOutput(
+        page_num=1,
+        text="x",
+        status=PageStatus.SUCCESS,
+        engine=engine,
+        failure_mode=mode,
+        audit_passed=passed,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -66,12 +72,19 @@ def test_source_events_merge_and_order_by_page_then_phase():
         _attempt("gemini", FailureMode.TRUNCATED, passed=False),
         _attempt("qwen"),
     ]
-    state.events.append(AuditEvent(page_num=1, kind="dualpass_patch", engine="qwen",
-                                   detail="table 0: '(0.0l0)' -> '(0.010)'"))
+    state.events.append(
+        AuditEvent(
+            page_num=1,
+            kind="dualpass_patch",
+            engine="qwen",
+            detail="table 0: '(0.0l0)' -> '(0.010)'",
+        )
+    )
     # page 2: a judge reject (appended)
     state.pages[2].attempts = [_attempt("gemini")]
-    state.events.append(AuditEvent(page_num=2, kind="judge_reject", engine="gemini",
-                                   detail="wrong digits"))
+    state.events.append(
+        AuditEvent(page_num=2, kind="judge_reject", engine="gemini", detail="wrong digits")
+    )
 
     audit = build_run_audit(state)
     seq = [(e.page_num, e.kind) for e in audit.events]
@@ -80,20 +93,33 @@ def test_source_events_merge_and_order_by_page_then_phase():
 
 
 def test_counts_and_summary_line():
-    audit = RunAudit(pdf_filename="p.pdf", events=[
-        AuditEvent(1, "dualpass_patch"), AuditEvent(2, "dualpass_patch"),
-        AuditEvent(3, "recitation_escalation"),
-    ])
+    audit = RunAudit(
+        pdf_filename="p.pdf",
+        events=[
+            AuditEvent(1, "dualpass_patch"),
+            AuditEvent(2, "dualpass_patch"),
+            AuditEvent(3, "recitation_escalation"),
+        ],
+    )
     assert audit.counts() == {"dualpass_patch": 2, "recitation_escalation": 1}
     assert "2 dualpass_patch" in audit.summary_line()
 
 
 def test_save_writes_structured_json(tmp_path):
-    audit = RunAudit(pdf_filename="p.pdf", events=[
-        AuditEvent(1, "dualpass_patch", engine="qwen", detail="x",
-                   data={"changed_cells": [{"row": 3, "col": 2,
-                                            "page": "(0.0l0)", "crop": "(0.010)"}]}),
-    ])
+    audit = RunAudit(
+        pdf_filename="p.pdf",
+        events=[
+            AuditEvent(
+                1,
+                "dualpass_patch",
+                engine="qwen",
+                detail="x",
+                data={
+                    "changed_cells": [{"row": 3, "col": 2, "page": "(0.0l0)", "crop": "(0.010)"}]
+                },
+            ),
+        ],
+    )
     out = tmp_path / "audit_log.json"
     audit.save(out)
     loaded = json.loads(out.read_text())

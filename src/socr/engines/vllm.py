@@ -97,7 +97,9 @@ class VLLMEngine(BaseHTTPEngine):
     ) -> FigureInfo:
         if not self._initialized and not self.initialize():
             return FigureInfo(
-                figure_num=0, page_num=0, figure_type=figure_type,
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
                 description=f"vLLM server not available at {self.config.base_url}",
             )
 
@@ -114,7 +116,10 @@ class VLLMEngine(BaseHTTPEngine):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"},
+                        },
                         {"type": "text", "text": prompt},
                     ],
                 }
@@ -133,32 +138,46 @@ class VLLMEngine(BaseHTTPEngine):
 
             if response.status_code != 200:
                 return FigureInfo(
-                    figure_num=0, page_num=0, figure_type=figure_type,
-                    description=f"vLLM API error ({response.status_code})", engine=self.name,
+                    figure_num=0,
+                    page_num=0,
+                    figure_type=figure_type,
+                    description=f"vLLM API error ({response.status_code})",
+                    engine=self.name,
                 )
 
             data = response.json()
             choices = data.get("choices", [])
-            description = choices[0].get("message", {}).get("content", "").strip() if choices else ""
+            description = (
+                choices[0].get("message", {}).get("content", "").strip() if choices else ""
+            )
             if not description or len(description) < 10:
                 description = "Unable to generate meaningful description"
 
             detected_type = self._detect_figure_type(description, figure_type)
 
             return FigureInfo(
-                figure_num=0, page_num=0, figure_type=detected_type,
-                description=description, engine=self.name,
+                figure_num=0,
+                page_num=0,
+                figure_type=detected_type,
+                description=description,
+                engine=self.name,
             )
 
         except httpx.TimeoutException:
             return FigureInfo(
-                figure_num=0, page_num=0, figure_type=figure_type,
-                description=f"vLLM request timed out after {self.config.timeout}s", engine=self.name,
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
+                description=f"vLLM request timed out after {self.config.timeout}s",
+                engine=self.name,
             )
         except Exception as e:
             return FigureInfo(
-                figure_num=0, page_num=0, figure_type=figure_type,
-                description=f"vLLM error: {type(e).__name__}: {e}", engine=self.name,
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
+                description=f"vLLM error: {type(e).__name__}: {e}",
+                engine=self.name,
             )
 
     @staticmethod

@@ -34,9 +34,9 @@ DETECT_DPI = 150
 # Rule geometry. Width/fill are DPI-independent ratios; thickness scales with DPI
 # (a typeset rule is ~0.5-1pt; at 150 DPI that is ~1-2px, so allow a little slack
 # for scan blur). Derived from the rule's physical size, not tuned to a corpus.
-_MIN_WIDTH_FRAC = 0.40   # span >= 40% of page width
-_MIN_FILL_FRAC = 0.55    # >= 55% of the bbox width is continuous ink (solid)
-_MAX_THICK_PT = 2.0      # <= 2pt tall -> thin; excludes text rows
+_MIN_WIDTH_FRAC = 0.40  # span >= 40% of page width
+_MIN_FILL_FRAC = 0.55  # >= 55% of the bbox width is continuous ink (solid)
+_MAX_THICK_PT = 2.0  # <= 2pt tall -> thin; excludes text rows
 
 
 def locate_tables_image(page, dpi: int = DETECT_DPI) -> list[TableBox]:
@@ -72,23 +72,21 @@ def _raster_rules(page, dpi: int) -> list[tuple[float, float, float]]:
 
     h, w = gray.shape
     # Ink -> white on black, robust to scan shading.
-    bw = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, -2
-    )
+    bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, -2)
     # Isolate horizontal structure: opening with a long thin horizontal kernel
     # survives only where continuous horizontal ink ran (rules), not glyph rows.
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, w // 8), 1))
     horiz = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
 
     n_labels, _, stats, _ = cv2.connectedComponentsWithStats(horiz, connectivity=8)
-    scale = 72.0 / dpi               # px -> PDF points
+    scale = 72.0 / dpi  # px -> PDF points
     max_thick_px = max(2.0, _MAX_THICK_PT * dpi / 72.0)
     rules: list[tuple[float, float, float]] = []
     for i in range(1, n_labels):  # 0 is background
         x, y, cw, ch, area = stats[i]
-        if cw < w * _MIN_WIDTH_FRAC:    # wide
+        if cw < w * _MIN_WIDTH_FRAC:  # wide
             continue
-        if ch > max_thick_px:           # thin
+        if ch > max_thick_px:  # thin
             continue
         if area < cw * _MIN_FILL_FRAC:  # solid
             continue

@@ -26,13 +26,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from ocr_output_contract import (
+    PAGE_MARKER_RE,
+    assemble_pages,
+    run_fingerprint,
+    split_native_pages,
+)
 
 from socr.core.cache import BlobStore
 from socr.core.document import DocumentHandle
 from socr.core.result import PageOutput, PageStatus
 from socr.core.state import DocumentState
+
+logger = logging.getLogger(__name__)
 
 # Bump these when the corresponding logic changes in a way that should
 # invalidate cached pages. They are part of every page fingerprint.
@@ -40,6 +50,9 @@ MANIFEST_SCHEMA_VERSION = "1"
 NORMALIZER_VERSION = "1"
 ASSEMBLY_VERSION = "1"
 
+# Legacy page separator. socr now assembles bodies and replays with the
+# contract's ``assemble_pages`` (``## Page N`` headers); this constant is kept
+# only for backward-compatible imports and is no longer used to join pages.
 PAGE_SEPARATOR = "\n\n---\n\n"
 
 
@@ -129,9 +142,7 @@ class Manifest:
             page_count=d["page_count"],
             render_dpi=d["render_dpi"],
             schema_version=d.get("schema_version", MANIFEST_SCHEMA_VERSION),
-            entries={
-                int(k): ManifestEntry.from_dict(v) for k, v in d.get("entries", {}).items()
-            },
+            entries={int(k): ManifestEntry.from_dict(v) for k, v in d.get("entries", {}).items()},
         )
 
     def save(self, path: Path | str) -> None:
@@ -144,12 +155,68 @@ class Manifest:
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def _winning_page_output(state: DocumentState, page_num: int) -> PageOutput:
+@dataclass
+class _WholeDoc:
+    """The whole-document attempt chosen to recover per-page text from."""
+
+    texts: dict[int, str]
+    engine: str
+    audit_passed: bool
+
+
+def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
+    """Per-page texts recovered from a whole-document CLI attempt.
+
+    CLI engines that process a whole PDF in one shot return a single
+    ``PageOutput(page_num=0)`` stored in ``state.whole_doc_attempts``; the
+    per-page ``best_output`` slots are never populated. Without this, the
+    manifest would freeze empty pages and ``replay`` would reconstruct an empty
+    document even though the saved ``.md`` has the full text (the historical
+    replay/manifest bug).
+
+    We recover per-page text by splitting the winning whole-doc markdown on the
+    canonical ``## Page N`` headers via the shared contract splitter. socr now
+    emits ``## Page N`` bodies (via the contract's ``assemble_pages``), so a
+    well-formed whole-doc blob round-trips. A blob with no markers (a legacy or
+    non-converged engine) splits to a single page; the caller reconciles the
+    split count against ``handle.page_count`` rather than trusting it blindly.
+
+    Returns ``None`` when there is no usable whole-doc attempt (so the per-page
+    path is used unchanged). The chosen attempt's REAL ``engine`` and
+    ``audit_passed`` are carried through so the synthetic per-page output is NOT
+    fabricated as a passing page when the only attempt FAILED audit.
+    """
+    if not state.whole_doc_attempts:
+        return None
+    passing = [w for w in state.whole_doc_attempts if w.audit_passed]
+    chosen = passing[-1] if passing else state.whole_doc_attempts[-1]
+    text = chosen.text or ""
+    if not text.strip():
+        return None
+    pages = split_native_pages(text)
+    return _WholeDoc(
+        texts={i: t for i, t in enumerate(pages, start=1)},
+        engine=chosen.engine or "cli",
+        audit_passed=bool(chosen.audit_passed),
+    )
+
+
+def _winning_page_output(
+    state: DocumentState,
+    page_num: int,
+    whole_doc: _WholeDoc | None = None,
+) -> PageOutput:
     """The PageOutput that should be frozen for this page.
 
     Mirrors ``DocumentState.text`` selection: a passing OCR best_output wins;
-    otherwise born-digital native text; otherwise the best attempt we have.
-    Native fallback is wrapped in a synthetic PageOutput(engine="native").
+    otherwise born-digital native text; otherwise text recovered from a
+    whole-document CLI attempt (split on ``## Page N``); otherwise the best
+    attempt we have. Native and whole-doc fallbacks are wrapped in a synthetic
+    PageOutput so the manifest always records real content, never an empty page.
+
+    The whole-doc fallback carries the CHOSEN attempt's real ``engine`` and
+    ``audit_passed``/status — a blob that FAILED audit is frozen as
+    ``AUDIT_FAILED`` / ``audit_passed=False``, never fabricated as SUCCESS.
     """
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
@@ -162,9 +229,72 @@ def _winning_page_output(state: DocumentState, page_num: int) -> PageOutput:
             engine="native",
             audit_passed=True,
         )
+    # Whole-document CLI path: recover this page's text from the split markdown.
+    # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
+    # carries real content for this page is not shadowed (the prior ordering left
+    # whole-doc recovery dead-coded behind any non-None best_output).
+    if whole_doc and page_num in whole_doc.texts:
+        # A blob that FAILED audit is frozen with audit_passed=False and a
+        # non-SUCCESS status (WARNING: content present, audit not passed) so the
+        # manifest never fabricates known-bad output as a passing page.
+        return PageOutput(
+            page_num=page_num,
+            text=whole_doc.texts[page_num],
+            status=PageStatus.SUCCESS if whole_doc.audit_passed else PageStatus.WARNING,
+            engine=whole_doc.engine,
+            audit_passed=whole_doc.audit_passed,
+        )
+    # Last resort: a failed per-page attempt (content present, audit not passed)
+    # beats an empty page so the manifest preserves what little we have.
     if p.best_output:
         return p.best_output
     return PageOutput(page_num=page_num, text="", status=PageStatus.ERROR, audit_passed=False)
+
+
+def _strip_leading_page_marker(text: str) -> str:
+    """Drop a leading ``## Page N`` header from a per-page text, if present.
+
+    A page's recovered text may already carry its own ``## Page N`` header (e.g.
+    a whole-doc CLI blob split back into pages, or a page that came from a CLI
+    that emitted the canonical header). ``assemble_pages`` re-adds the canonical
+    header, so stripping a pre-existing leading marker prevents a DOUBLE header
+    (``## Page 1\\n\\n## Page 1\\n\\n...``) and keeps the marker count == pages.
+    """
+    stripped = text.lstrip()
+    m = PAGE_MARKER_RE.match(stripped)
+    if m:
+        return stripped[m.end() :].lstrip("\n")
+    return text
+
+
+def canonical_page_texts(state: DocumentState) -> list[str]:
+    """Per-page winning texts for the document, length == ``handle.page_count``.
+
+    The SINGLE source of truth for both the saved ``.md`` body and the manifest
+    blobs, so the saved document and ``replay`` are bit-consistent. Each entry is
+    the winning page's text selected exactly as :func:`_winning_page_output`
+    selects it (passing OCR > native > best attempt > whole-doc split), with any
+    pre-existing leading ``## Page N`` header stripped so ``assemble_pages`` adds
+    exactly one canonical header per page. ``split_native_pages`` round-trips it.
+    """
+    whole_doc = _whole_doc_page_texts(state)
+    return [
+        _strip_leading_page_marker(_winning_page_output(state, page_num, whole_doc).text)
+        for page_num in range(1, state.handle.page_count + 1)
+    ]
+
+
+def _base_engine_name(engine: str) -> str:
+    """Strip the ``consensus(<engine>)`` wrapper to the underlying engine name.
+
+    The LLM-consensus producer labels its output ``consensus(qwen)`` etc., which
+    does not match any ``EngineResult.engine`` key in the model/fingerprint maps.
+    Stripping the wrapper lets the fingerprint resolve the real model/prompt for
+    the consensus-frozen page instead of recording an empty determinant.
+    """
+    if engine.startswith("consensus(") and engine.endswith(")"):
+        return engine[len("consensus(") : -1]
+    return engine
 
 
 def build_manifest(
@@ -172,6 +302,8 @@ def build_manifest(
     blobs: BlobStore,
     *,
     dpi: int | None = None,
+    fingerprint_inputs: dict[str, tuple[str, str, str | None, str | None]] | None = None,
+    saved_body: str | None = None,
 ) -> Manifest:
     """Freeze a completed ``DocumentState`` into (manifest, cached blobs).
 
@@ -179,27 +311,91 @@ def build_manifest(
     record a fingerprinted ManifestEntry pointing at it. The rendered-image hash
     is computed only for pages that were actually OCR'd (an engine touched the
     raster); native-text pages don't depend on rasterization.
+
+    ``fingerprint_inputs`` maps an engine name to its RESOLVED run determinants
+    ``(model, backend, task, prompt)`` (computed by the orchestrator from the
+    live config). When present, the page's ``prompt_hash`` is the contract's
+    :func:`run_fingerprint` of those determinants AND ``model_version`` is taken
+    from the resolved model — so a model/backend/task/prompt swap invalidates
+    the cache, across configurable-model engines AND the consensus producer.
+    Without it, the per-engine ``EngineResult.model_version`` is used as before.
+
+    ``saved_body`` is the FINAL ``## Page N`` markdown actually written to disk
+    (post strip-phantom-images / figure-embed). When given, each page blob's
+    TEXT is taken from splitting that saved body, so ``replay`` reproduces the
+    on-disk document bit-for-bit instead of diverging via pre-transform state.
+    The fingerprint/engine metadata still comes from the winning PageOutput.
     """
     handle = state.handle
     dpi = dpi if dpi is not None else 200
+    fingerprint_inputs = fingerprint_inputs or {}
+    saved_pages: list[str] | None = None
+    if saved_body is not None:
+        saved_pages = split_native_pages(saved_body)
+        if len(saved_pages) != handle.page_count:
+            logger.warning(
+                "manifest: saved body split into %d page(s) but the document has "
+                "%d page(s); replay may diverge from the saved .md",
+                len(saved_pages),
+                handle.page_count,
+            )
     manifest = Manifest(
         pdf_filename=handle.filename,
         pdf_file_hash=handle.file_hash,
         page_count=handle.page_count,
         render_dpi=dpi,
     )
+    # Recover per-page text from a whole-document CLI attempt (page_num=0) so the
+    # manifest never freezes empty pages when per-page best_outputs are absent.
+    whole_doc = _whole_doc_page_texts(state)
+    # Validate the recovered split count against the real page count: a mismatch
+    # (the '---'-only legacy case, or dropped/merged markers) would silently
+    # freeze trailing pages empty or drop extras. Log loudly rather than corrupt.
+    if whole_doc is not None and len(whole_doc.texts) != handle.page_count:
+        logger.warning(
+            "manifest: whole-doc split yielded %d page(s) but the document has "
+            "%d page(s) (engine=%s); trailing pages may be empty or extras dropped",
+            len(whole_doc.texts),
+            handle.page_count,
+            whole_doc.engine,
+        )
+    # Model version per engine, so a model swap/drift invalidates the fingerprint.
+    model_versions = {r.engine: r.model_version for r in state.engine_runs if r.model_version}
     for page_num in range(1, handle.page_count + 1):
-        page = _winning_page_output(state, page_num)
+        page = _winning_page_output(state, page_num, whole_doc)
+        # Freeze the EXACT on-disk page text when the saved body is supplied, so
+        # replay reproduces the saved .md (post-transform); fall back to the
+        # winning page text otherwise. Engine/fingerprint metadata is unchanged.
+        if saved_pages is not None and page_num - 1 < len(saved_pages):
+            from dataclasses import replace as _dc_replace
+
+            page = _dc_replace(page, text=saved_pages[page_num - 1])
         blob_ref = blobs.put_page(page)
         image_hash = ""
         if page.engine and page.engine != "native":
             image_hash = compute_image_hash(handle, page_num, dpi)
+
+        # Resolve the run determinants for this page's engine (consensus-aware).
+        base_engine = _base_engine_name(page.engine)
+        determinants = fingerprint_inputs.get(base_engine) or fingerprint_inputs.get(page.engine)
+        prompt_hash = ""
+        if determinants is not None:
+            model, backend, task, prompt = determinants
+            model_version = (
+                model or model_versions.get(base_engine) or model_versions.get(page.engine, "")
+            )
+            prompt_hash = run_fingerprint(model_version, backend, task, prompt)
+        else:
+            model_version = model_versions.get(base_engine) or model_versions.get(page.engine, "")
+
         fp = PageFingerprint(
             pdf_file_hash=handle.file_hash,
             page_num=page_num,
             render_dpi=dpi,
             engine=page.engine,
+            model_version=model_version,
             image_hash=image_hash,
+            prompt_hash=prompt_hash,
         )
         journal = [
             {
@@ -221,6 +417,10 @@ def replay(manifest: Manifest, blobs: BlobStore) -> str:
     Invokes NO engine. Raises KeyError if a referenced blob is missing (a broken
     or partially-deleted cache), which is preferable to silently emitting a
     document with holes.
+
+    Joined with the contract's ``assemble_pages`` (``## Page N`` headers), the
+    SAME assembler socr uses for the saved ``.md`` body, so replay output is
+    canonical and consistent with the document written to disk.
     """
     texts: list[str] = []
     for page_num in range(1, manifest.page_count + 1):
@@ -229,7 +429,7 @@ def replay(manifest: Manifest, blobs: BlobStore) -> str:
             raise KeyError(f"manifest has no entry for page {page_num}")
         page = blobs.get_page(entry.blob_ref)
         texts.append(page.text)
-    return PAGE_SEPARATOR.join(texts)
+    return assemble_pages(texts)
 
 
 def stale_pages(manifest: Manifest, blobs: BlobStore) -> list[int]:

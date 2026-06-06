@@ -52,6 +52,7 @@ class QwenEngine(BaseEngine):
             error = _check_ollama_model(OLLAMA_MODEL)
             if error:
                 from socr.core.result import DocumentStatus, EngineResult, FailureMode
+
                 logger.error(f"[{self.name}] {error}")
                 return EngineResult(
                     document_path=pdf_path,
@@ -73,9 +74,12 @@ class QwenEngine(BaseEngine):
             self.cli_command,
             "process",
             str(pdf_path),
-            "-o", str(output_dir),
-            "--backend", config.qwen_backend,
-            "--dpi", str(config.render_dpi),
+            "-o",
+            str(output_dir),
+            "--backend",
+            config.qwen_backend,
+            "--dpi",
+            str(config.render_dpi),
         ]
         if config.qwen_model:
             cmd.extend(["--model", config.qwen_model])

@@ -37,17 +37,20 @@ def test_judge_prompt_loads_and_is_policy():
 
 
 def test_parse_plain_json():
-    v = parse_verdict('{"faithful": true, "issues": [], "confidence": 0.9, '
-                      '"suggested_action": "accept"}')
+    v = parse_verdict(
+        '{"faithful": true, "issues": [], "confidence": 0.9, "suggested_action": "accept"}'
+    )
     assert v.faithful and v.is_good
     assert v.confidence == 0.9
     assert v.suggested_action == "accept"
 
 
 def test_parse_fenced_json_with_prose():
-    raw = 'Here is my verdict:\n```json\n{"faithful": false, ' \
-          '"issues": ["table garbled"], "confidence": 0.8, ' \
-          '"suggested_action": "escalate_engine"}\n```\nDone.'
+    raw = (
+        'Here is my verdict:\n```json\n{"faithful": false, '
+        '"issues": ["table garbled"], "confidence": 0.8, '
+        '"suggested_action": "escalate_engine"}\n```\nDone.'
+    )
     v = parse_verdict(raw)
     assert not v.faithful
     assert v.issues == ["table garbled"]
@@ -55,8 +58,7 @@ def test_parse_fenced_json_with_prose():
 
 
 def test_parse_coerces_bad_action_and_clamps_confidence():
-    v = parse_verdict('{"faithful": false, "confidence": 5.0, '
-                      '"suggested_action": "nonsense"}')
+    v = parse_verdict('{"faithful": false, "confidence": 5.0, "suggested_action": "nonsense"}')
     assert v.confidence == 1.0  # clamped to [0,1]
     assert v.suggested_action == "escalate_engine"  # not-faithful default
 
@@ -121,8 +123,11 @@ class _StubJudge:
 
     def judge(self, image_path: Path, ocr_text: str) -> JudgeVerdict:
         faithful = "good" in ocr_text
-        return JudgeVerdict(faithful=faithful, confidence=1.0,
-                            suggested_action="accept" if faithful else "escalate_engine")
+        return JudgeVerdict(
+            faithful=faithful,
+            confidence=1.0,
+            suggested_action="accept" if faithful else "escalate_engine",
+        )
 
 
 def test_benchmark_confusion_matrix():

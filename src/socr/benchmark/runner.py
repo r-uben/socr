@@ -219,11 +219,13 @@ def _available_engines() -> list[EngineType]:
 
 def _unavailable_status():
     from socr.core.result import DocumentStatus
+
     return DocumentStatus.ERROR
 
 
 def _unavailable_failure():
     from socr.core.result import FailureMode
+
     return FailureMode.MODEL_UNAVAILABLE
 
 

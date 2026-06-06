@@ -107,16 +107,29 @@ class FigureExtractor:
                     is_landscape = page_width > page_height
 
                     # Landscape adjustments
-                    min_area_ratio = MIN_VECTOR_AREA_RATIO * 0.5 if is_landscape else MIN_VECTOR_AREA_RATIO
+                    min_area_ratio = (
+                        MIN_VECTOR_AREA_RATIO * 0.5 if is_landscape else MIN_VECTOR_AREA_RATIO
+                    )
                     max_area_ratio = 0.98 if is_landscape else MAX_VECTOR_AREA_RATIO
                     min_drawings = 3 if is_landscape else MIN_DRAWINGS_FOR_VECTOR
 
                     try:
                         with _timeout_guard(PAGE_EXTRACTION_TIMEOUT, f"page {page_num}"):
                             counter, per_page = self._extract_page_figures(
-                                page, page_num, pdf, figures, counter, per_page,
-                                processed, page_width, page_height, page_area,
-                                is_landscape, min_area_ratio, max_area_ratio, min_drawings,
+                                page,
+                                page_num,
+                                pdf,
+                                figures,
+                                counter,
+                                per_page,
+                                processed,
+                                page_width,
+                                page_height,
+                                page_area,
+                                is_landscape,
+                                min_area_ratio,
+                                max_area_ratio,
+                                min_drawings,
                             )
                     except TimeoutError:
                         logger.warning(
@@ -181,7 +194,9 @@ class FigureExtractor:
                     # Skip header/footer
                     if not is_landscape:
                         cy = (y0 + y1) / 2
-                        in_margin = cy < page_height * HEADER_FOOTER_MARGIN or cy > page_height * (1 - HEADER_FOOTER_MARGIN)
+                        in_margin = cy < page_height * HEADER_FOOTER_MARGIN or cy > page_height * (
+                            1 - HEADER_FOOTER_MARGIN
+                        )
                         if in_margin and len(region_drawings) < 20:
                             continue
 
@@ -205,9 +220,12 @@ class FigureExtractor:
                 if is_landscape and per_page == 0 and len(drawings) >= 10:
                     img = _render_region(
                         page,
-                        page_width * 0.05, page_height * 0.15,
-                        page_width * 0.95, page_height * 0.90,
-                        page_width, page_height,
+                        page_width * 0.05,
+                        page_height * 0.15,
+                        page_width * 0.95,
+                        page_height * 0.90,
+                        page_width,
+                        page_height,
                     )
                     if img:
                         fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
@@ -298,10 +316,15 @@ class FigureExtractor:
 
 # --- Helpers ---
 
+
 def _render_region(
     page,
-    x0: float, y0: float, x1: float, y1: float,
-    page_width: float, page_height: float,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    page_width: float,
+    page_height: float,
     padding: int = 10,
 ) -> "Image.Image | None":
     """Render a rectangular region of a PDF page to PIL Image."""
@@ -309,8 +332,10 @@ def _render_region(
     from PIL import Image
 
     clip = fitz.Rect(
-        max(0, x0 - padding), max(0, y0 - padding),
-        min(page_width, x1 + padding), min(page_height, y1 + padding),
+        max(0, x0 - padding),
+        max(0, y0 - padding),
+        min(page_width, x1 + padding),
+        min(page_height, y1 + padding),
     )
     mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
     try:
@@ -387,8 +412,12 @@ def _cluster_drawings(
             x0_i, y0_i, x1_i, y1_i = box_i
             x0_j, y0_j, x1_j, y1_j = box_j
 
-            h_gap = max(0, x0_j - x1_i) if x1_i < x0_j else max(0, x0_i - x1_j) if x1_j < x0_i else 0
-            v_gap = max(0, y0_j - y1_i) if y1_i < y0_j else max(0, y0_i - y1_j) if y1_j < y0_i else 0
+            h_gap = (
+                max(0, x0_j - x1_i) if x1_i < x0_j else max(0, x0_i - x1_j) if x1_j < x0_i else 0
+            )
+            v_gap = (
+                max(0, y0_j - y1_i) if y1_i < y0_j else max(0, y0_i - y1_j) if y1_j < y0_i else 0
+            )
 
             if h_gap <= cluster_gap and v_gap <= cluster_gap:
                 union(idx_i, idx_j)

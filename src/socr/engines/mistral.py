@@ -40,8 +40,10 @@ class MistralEngine(BaseEngine):
         cmd = [
             self.cli_command,
             str(pdf_path),
-            "-o", str(output_dir),
-            "--model", config.mistral_model,
+            "-o",
+            str(output_dir),
+            "--model",
+            config.mistral_model,
         ]
         if config.workers > 1:
             cmd.extend(["-w", str(config.workers)])

@@ -32,12 +32,12 @@ logger = logging.getLogger(__name__)
 # meaningful width — short ticks, underlines and inline rules are excluded. The
 # width floor is in PDF points (~1 inch); derived from the geometry of the line,
 # not a tuned percentage.
-_RULE_FLATNESS_PT = 1.0   # |y0 - y1| below this => horizontal
+_RULE_FLATNESS_PT = 1.0  # |y0 - y1| below this => horizontal
 _RULE_MIN_WIDTH_PT = 72.0  # >= ~1 inch wide to be a table rule, not an underline
 # Two rules belong to the same table if they share most of their horizontal span
 # and are not separated by a large vertical gap. Both are geometric, not tuned.
-_RULE_X_OVERLAP = 0.6     # fraction of shared width to be the "same" table column band
-_BOX_IOU_DEDUP = 0.5      # ruled/booktabs boxes overlapping this much are the same table
+_RULE_X_OVERLAP = 0.6  # fraction of shared width to be the "same" table column band
+_BOX_IOU_DEDUP = 0.5  # ruled/booktabs boxes overlapping this much are the same table
 
 
 @dataclass(frozen=True)

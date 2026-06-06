@@ -231,9 +231,7 @@ class RepairCalibrator:
 
         profiles: list[EngineProfile] = []
         for engine_name, runs in sorted(by_engine.items()):
-            profile = self._build_profile_with_categories(
-                engine_name, runs, paper_categories
-            )
+            profile = self._build_profile_with_categories(engine_name, runs, paper_categories)
             profiles.append(profile)
 
         categories = set(paper_categories.values())

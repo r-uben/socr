@@ -50,7 +50,7 @@ def test_pervasive_corruption_routes_to_ocr():
     det = BornDigitalDetector()
     _doc, page = _page([_CORRUPT] * 12)
     a = det._assess_page(page, 1)
-    assert a.is_born_digital is False                 # not trusted -> OCR
+    assert a.is_born_digital is False  # not trusted -> OCR
     assert any("encoding corrupted" in n for n in a.notes)
 
 
@@ -60,7 +60,7 @@ def test_mild_corruption_is_flagged_not_escalated():
     lines = [_CLEAN] * 11 + ["FrenchfJoumal ofFinancial Economics 43 (/997) /53-/93"]
     _doc, page = _page(lines)
     a = det._assess_page(page, 1)
-    assert a.is_born_digital is True                  # body still trusted
+    assert a.is_born_digital is True  # body still trusted
     assert any("encoding suspect" in n for n in a.notes)  # but recorded
 
 

@@ -18,6 +18,7 @@ from socr.core.state import DocumentState, PageState
 # Helpers — build a DocumentHandle without touching the filesystem
 # ---------------------------------------------------------------------------
 
+
 def _make_handle(page_count: int = 3) -> DocumentHandle:
     """Create a DocumentHandle with a fake path and preset page count."""
     with patch.object(DocumentHandle, "__post_init__", lambda self: None):
@@ -57,6 +58,7 @@ def _make_engine_result(
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------
+
 
 class TestConstruction:
     def test_creates_page_states_from_handle(self) -> None:
@@ -101,6 +103,7 @@ class TestConstruction:
 # ---------------------------------------------------------------------------
 # apply_result — per-page outputs
 # ---------------------------------------------------------------------------
+
 
 class TestApplyResultPerPage:
     def test_stores_attempts_on_correct_page(self) -> None:
@@ -168,6 +171,7 @@ class TestApplyResultPerPage:
 # apply_result — whole-doc outputs (page_num=0)
 # ---------------------------------------------------------------------------
 
+
 class TestApplyResultWholeDoc:
     def test_whole_doc_output_goes_to_whole_doc_attempts(self) -> None:
         state = DocumentState(handle=_make_handle(2))
@@ -194,15 +198,20 @@ class TestApplyResultWholeDoc:
 # apply_born_digital
 # ---------------------------------------------------------------------------
 
+
 class TestApplyBornDigital:
     def test_marks_born_digital_pages(self) -> None:
         state = DocumentState(handle=_make_handle(3))
         assessment = DocumentAssessment(
             path=Path("/tmp/fake.pdf"),
             pages=[
-                PageAssessment(page_num=1, is_born_digital=True, native_text="native p1", confidence=0.9),
+                PageAssessment(
+                    page_num=1, is_born_digital=True, native_text="native p1", confidence=0.9
+                ),
                 PageAssessment(page_num=2, is_born_digital=False, native_text="", confidence=0.95),
-                PageAssessment(page_num=3, is_born_digital=True, native_text="native p3", confidence=0.85),
+                PageAssessment(
+                    page_num=3, is_born_digital=True, native_text="native p3", confidence=0.85
+                ),
             ],
         )
         state.apply_born_digital(assessment)
@@ -220,7 +229,9 @@ class TestApplyBornDigital:
             path=Path("/tmp/fake.pdf"),
             pages=[
                 PageAssessment(page_num=1, is_born_digital=True, native_text="ok", confidence=0.9),
-                PageAssessment(page_num=5, is_born_digital=True, native_text="ghost", confidence=0.9),
+                PageAssessment(
+                    page_num=5, is_born_digital=True, native_text="ghost", confidence=0.9
+                ),
             ],
         )
         state.apply_born_digital(assessment)
@@ -232,6 +243,7 @@ class TestApplyBornDigital:
 # ---------------------------------------------------------------------------
 # needs_repair
 # ---------------------------------------------------------------------------
+
 
 class TestNeedsRepair:
     def test_fresh_page_needs_repair(self) -> None:
@@ -328,32 +340,51 @@ class TestNeedsRepair:
 # text assembly
 # ---------------------------------------------------------------------------
 
+
 class TestTextAssembly:
     def test_per_page_text(self) -> None:
         state = DocumentState(handle=_make_handle(3))
-        state.apply_result(_make_engine_result([
-            _make_page_output(1, "alpha"),
-            _make_page_output(2, "beta"),
-            _make_page_output(3, "gamma"),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(1, "alpha"),
+                    _make_page_output(2, "beta"),
+                    _make_page_output(3, "gamma"),
+                ]
+            )
+        )
         assert state.text == "alpha\n\n---\n\nbeta\n\n---\n\ngamma"
 
     def test_whole_doc_fallback(self) -> None:
         """When no per-page best outputs exist, use the last whole-doc attempt."""
         state = DocumentState(handle=_make_handle(2))
-        state.apply_result(_make_engine_result([
-            _make_page_output(0, "full doc text"),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(0, "full doc text"),
+                ]
+            )
+        )
         assert state.text == "full doc text"
 
     def test_whole_doc_uses_last_attempt(self) -> None:
         state = DocumentState(handle=_make_handle(1))
-        state.apply_result(_make_engine_result([
-            _make_page_output(0, "attempt 1"),
-        ], engine="engine-a"))
-        state.apply_result(_make_engine_result([
-            _make_page_output(0, "attempt 2"),
-        ], engine="engine-b"))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(0, "attempt 1"),
+                ],
+                engine="engine-a",
+            )
+        )
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(0, "attempt 2"),
+                ],
+                engine="engine-b",
+            )
+        )
 
         assert state.text == "attempt 2"
 
@@ -363,15 +394,21 @@ class TestTextAssembly:
         assessment = DocumentAssessment(
             path=Path("/tmp/fake.pdf"),
             pages=[
-                PageAssessment(page_num=1, is_born_digital=True, native_text="native text", confidence=0.9),
+                PageAssessment(
+                    page_num=1, is_born_digital=True, native_text="native text", confidence=0.9
+                ),
                 PageAssessment(page_num=2, is_born_digital=False, native_text="", confidence=0.9),
             ],
         )
         state.apply_born_digital(assessment)
         # Provide OCR output only for page 2
-        state.apply_result(_make_engine_result([
-            _make_page_output(2, "ocr text"),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(2, "ocr text"),
+                ]
+            )
+        )
 
         assert state.text == "native text\n\n---\n\nocr text"
 
@@ -382,20 +419,28 @@ class TestTextAssembly:
     def test_pages_without_output_are_skipped(self) -> None:
         """Pages with no best_output and not born-digital are excluded."""
         state = DocumentState(handle=_make_handle(3))
-        state.apply_result(_make_engine_result([
-            _make_page_output(1, "alpha"),
-            # page 2 has no output
-            _make_page_output(3, "gamma"),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(1, "alpha"),
+                    # page 2 has no output
+                    _make_page_output(3, "gamma"),
+                ]
+            )
+        )
         assert state.text == "alpha\n\n---\n\ngamma"
 
     def test_per_page_takes_priority_over_whole_doc(self) -> None:
         """If any per-page best_output exists, whole-doc fallback is not used."""
         state = DocumentState(handle=_make_handle(2))
-        state.apply_result(_make_engine_result([
-            _make_page_output(0, "whole doc text"),
-            _make_page_output(1, "page 1 text"),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(0, "whole doc text"),
+                    _make_page_output(1, "page 1 text"),
+                ]
+            )
+        )
         # page 1 has best_output, so whole-doc is not used
         assert state.text == "page 1 text"
 
@@ -417,9 +462,13 @@ class TestTextAssembly:
         )
         state.apply_born_digital(assessment)
         # OCR also succeeds
-        state.apply_result(_make_engine_result([
-            _make_page_output(1, "ocr text with table", audit_passed=True),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(1, "ocr text with table", audit_passed=True),
+                ]
+            )
+        )
         # OCR output should be preferred
         assert state.text == "ocr text with table"
 
@@ -440,9 +489,13 @@ class TestTextAssembly:
         )
         state.apply_born_digital(assessment)
         # OCR fails
-        state.apply_result(_make_engine_result([
-            _make_page_output(1, "bad ocr", audit_passed=False),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(1, "bad ocr", audit_passed=False),
+                ]
+            )
+        )
         # Native text should be the fallback
         assert state.text == "native fallback"
 
@@ -451,6 +504,7 @@ class TestTextAssembly:
 # pages_needing_repair
 # ---------------------------------------------------------------------------
 
+
 class TestPagesNeedingRepair:
     def test_all_pages_need_repair_initially(self) -> None:
         state = DocumentState(handle=_make_handle(3))
@@ -458,10 +512,14 @@ class TestPagesNeedingRepair:
 
     def test_repaired_pages_removed(self) -> None:
         state = DocumentState(handle=_make_handle(3))
-        state.apply_result(_make_engine_result([
-            _make_page_output(1, "good", audit_passed=True),
-            _make_page_output(2, "bad", audit_passed=False),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(1, "good", audit_passed=True),
+                    _make_page_output(2, "bad", audit_passed=False),
+                ]
+            )
+        )
         # page 1 is good, page 2 failed audit, page 3 has no output
         assert state.pages_needing_repair == [2, 3]
 
@@ -470,7 +528,9 @@ class TestPagesNeedingRepair:
         assessment = DocumentAssessment(
             path=Path("/tmp/fake.pdf"),
             pages=[
-                PageAssessment(page_num=1, is_born_digital=True, native_text="native", confidence=0.9),
+                PageAssessment(
+                    page_num=1, is_born_digital=True, native_text="native", confidence=0.9
+                ),
                 PageAssessment(page_num=2, is_born_digital=False, native_text="", confidence=0.9),
             ],
         )
@@ -480,10 +540,14 @@ class TestPagesNeedingRepair:
 
     def test_empty_when_all_done(self) -> None:
         state = DocumentState(handle=_make_handle(2))
-        state.apply_result(_make_engine_result([
-            _make_page_output(1, "ok"),
-            _make_page_output(2, "ok"),
-        ]))
+        state.apply_result(
+            _make_engine_result(
+                [
+                    _make_page_output(1, "ok"),
+                    _make_page_output(2, "ok"),
+                ]
+            )
+        )
         assert state.pages_needing_repair == []
 
 
@@ -491,15 +555,24 @@ class TestPagesNeedingRepair:
 # total_cost and engines_used
 # ---------------------------------------------------------------------------
 
+
 class TestTelemetry:
     def test_total_cost_sums_all_runs(self) -> None:
         state = DocumentState(handle=_make_handle(1))
-        state.apply_result(_make_engine_result(
-            [_make_page_output(1, "a")], engine="deepseek", cost=0.002,
-        ))
-        state.apply_result(_make_engine_result(
-            [_make_page_output(1, "b")], engine="gemini", cost=0.005,
-        ))
+        state.apply_result(
+            _make_engine_result(
+                [_make_page_output(1, "a")],
+                engine="deepseek",
+                cost=0.002,
+            )
+        )
+        state.apply_result(
+            _make_engine_result(
+                [_make_page_output(1, "b")],
+                engine="gemini",
+                cost=0.005,
+            )
+        )
         assert abs(state.total_cost - 0.007) < 1e-9
 
     def test_total_cost_zero_initially(self) -> None:
@@ -523,8 +596,10 @@ class TestTelemetry:
 # Import from socr.core
 # ---------------------------------------------------------------------------
 
+
 class TestExports:
     def test_importable_from_core_package(self) -> None:
         from socr.core import DocumentState as DS, PageState as PS
+
         assert DS is DocumentState
         assert PS is PageState

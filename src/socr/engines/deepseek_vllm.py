@@ -95,7 +95,8 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
     def process_image(self, image: Image.Image, page_num: int = 1) -> PageOutput:
         if not self._initialized and not self.initialize():
             return self._create_error_result(
-                page_num, f"vLLM server not available at {self.config.base_url}",
+                page_num,
+                f"vLLM server not available at {self.config.base_url}",
                 failure_mode=FailureMode.MODEL_UNAVAILABLE,
             )
 
@@ -106,7 +107,10 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"},
+                        },
                         {"type": "text", "text": self._build_ocr_prompt()},
                     ],
                 }
@@ -129,30 +133,37 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
 
             if response.status_code != 200:
                 return self._create_error_result(
-                    page_num, f"vLLM API error ({response.status_code}): {response.text[:200]}",
+                    page_num,
+                    f"vLLM API error ({response.status_code}): {response.text[:200]}",
                     failure_mode=FailureMode.API_ERROR,
                 )
 
             text = self._extract_text(response.json())
             if not text or len(text) < 10:
                 return self._create_error_result(
-                    page_num, "OCR produced empty or minimal output",
+                    page_num,
+                    "OCR produced empty or minimal output",
                     failure_mode=FailureMode.EMPTY_OUTPUT,
                 )
 
             return self._create_success_result(
-                page_num=page_num, text=text, engine=self.name,
-                confidence=0.85, processing_time=processing_time,
+                page_num=page_num,
+                text=text,
+                engine=self.name,
+                confidence=0.85,
+                processing_time=processing_time,
             )
 
         except httpx.TimeoutException:
             return self._create_error_result(
-                page_num, f"Timeout after {self.config.timeout}s",
+                page_num,
+                f"Timeout after {self.config.timeout}s",
                 failure_mode=FailureMode.TIMEOUT,
             )
         except Exception as e:
             return self._create_error_result(
-                page_num, f"vLLM error: {type(e).__name__}: {e}",
+                page_num,
+                f"vLLM error: {type(e).__name__}: {e}",
                 failure_mode=FailureMode.API_ERROR,
             )
 
@@ -161,7 +172,9 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
     ) -> FigureInfo:
         if not self._initialized and not self.initialize():
             return FigureInfo(
-                figure_num=0, page_num=0, figure_type=figure_type,
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
                 description=f"vLLM server not available at {self.config.base_url}",
             )
 
@@ -172,7 +185,10 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"},
+                        },
                         {"type": "text", "text": prompt},
                     ],
                 }
@@ -181,27 +197,41 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
             client = self._get_client()
             response = client.post(
                 "/chat/completions",
-                json={"model": self.config.model, "messages": messages, "max_tokens": 1024, "temperature": 0.1},
+                json={
+                    "model": self.config.model,
+                    "messages": messages,
+                    "max_tokens": 1024,
+                    "temperature": 0.1,
+                },
             )
 
             if response.status_code != 200:
                 return FigureInfo(
-                    figure_num=0, page_num=0, figure_type=figure_type,
-                    description=f"vLLM API error ({response.status_code})", engine=self.name,
+                    figure_num=0,
+                    page_num=0,
+                    figure_type=figure_type,
+                    description=f"vLLM API error ({response.status_code})",
+                    engine=self.name,
                 )
 
             description = self._extract_text(response.json()) or "Unable to generate description"
             detected_type = self._detect_figure_type(description, figure_type)
 
             return FigureInfo(
-                figure_num=0, page_num=0, figure_type=detected_type,
-                description=description, engine=self.name,
+                figure_num=0,
+                page_num=0,
+                figure_type=detected_type,
+                description=description,
+                engine=self.name,
             )
 
         except Exception as e:
             return FigureInfo(
-                figure_num=0, page_num=0, figure_type=figure_type,
-                description=f"vLLM error: {type(e).__name__}: {e}", engine=self.name,
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
+                description=f"vLLM error: {type(e).__name__}: {e}",
+                engine=self.name,
             )
 
     @staticmethod
@@ -232,19 +262,19 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
     def _clean_ocr_output(text: str) -> str:
         """Strip grounding tags and bounding boxes from DeepSeek-OCR output."""
         # Remove <|ref|>...<|/ref|> inline references
-        text = re.sub(r'<\|ref\|>.*?<\|/ref\|>', '', text)
+        text = re.sub(r"<\|ref\|>.*?<\|/ref\|>", "", text)
         # Remove <|det|>[[x,y,w,h]]<|/det|> detection boxes
-        text = re.sub(r'<\|det\|>\[\[.*?\]\]<\|/det\|>', '', text)
+        text = re.sub(r"<\|det\|>\[\[.*?\]\]<\|/det\|>", "", text)
         # Remove any remaining special tokens
-        text = re.sub(r'<\|[^|]+\|>', '', text)
+        text = re.sub(r"<\|[^|]+\|>", "", text)
         # Remove bare bounding box coordinates
-        text = re.sub(r'\[\[\d+,\s*\d+,\s*\d+,\s*\d+\]\]', '', text)
+        text = re.sub(r"\[\[\d+,\s*\d+,\s*\d+,\s*\d+\]\]", "", text)
         # Normalize HTML line breaks
-        text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
         # Strip remaining HTML tags
-        text = re.sub(r'<[^>]+>', '', text)
+        text = re.sub(r"<[^>]+>", "", text)
         # Collapse excessive blank lines
-        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
     @staticmethod

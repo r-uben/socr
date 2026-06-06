@@ -60,22 +60,11 @@ class TestMistral:
         assert _n(text, "mistral") == "Actual content here."
 
     def test_metadata_lines_stripped(self) -> None:
-        text = (
-            "**Original File:** paper.pdf\n"
-            "**Processed:** 2025-01-01\n"
-            "\n"
-            "Real content."
-        )
+        text = "**Original File:** paper.pdf\n**Processed:** 2025-01-01\n\nReal content."
         assert _n(text, "mistral") == "Real content."
 
     def test_mixed_header_and_meta(self) -> None:
-        text = (
-            "# OCR Results\n\n"
-            "**Original File:** test.pdf\n"
-            "**Processing Time:** 5s\n"
-            "\n"
-            "Body text."
-        )
+        text = "# OCR Results\n\n**Original File:** test.pdf\n**Processing Time:** 5s\n\nBody text."
         assert _n(text, "mistral") == "Body text."
 
 
@@ -87,10 +76,7 @@ class TestNougat:
 
     def test_latex_preamble_stripped(self) -> None:
         text = (
-            "\\documentclass{article}\n"
-            "\\usepackage{amsmath}\n"
-            "\\begin{document}\n"
-            "Real content here."
+            "\\documentclass{article}\n\\usepackage{amsmath}\n\\begin{document}\nReal content here."
         )
         assert _n(text, "nougat") == "Real content here."
 
@@ -99,11 +85,7 @@ class TestNougat:
         assert _n(text, "nougat") == "Some content."
 
     def test_preamble_with_options(self) -> None:
-        text = (
-            "\\documentclass[12pt]{article}\n"
-            "\\begin{document}\n"
-            "Body."
-        )
+        text = "\\documentclass[12pt]{article}\n\\begin{document}\nBody."
         assert _n(text, "nougat") == "Body."
 
 
@@ -162,7 +144,7 @@ class TestGenericNormalization:
 
     def test_smart_quotes_normalized(self) -> None:
         text = "\u201cHello\u201d and \u2018world\u2019"
-        assert _n(text) == '"Hello" and \'world\''
+        assert _n(text) == "\"Hello\" and 'world'"
 
     def test_em_dash_normalized(self) -> None:
         text = "word\u2014word"
@@ -358,13 +340,7 @@ class TestStripPhantomImages:
         assert result == text
 
     def test_multiple_phantom_refs_stripped(self) -> None:
-        text = (
-            "Para 1\n\n"
-            "![a](img1.png)\n\n"
-            "Para 2\n\n"
-            "![b](img2.jpg)\n\n"
-            "Para 3"
-        )
+        text = "Para 1\n\n![a](img1.png)\n\nPara 2\n\n![b](img2.jpg)\n\nPara 3"
         norm = OutputNormalizer()
         result = norm.strip_phantom_images(text, output_dir=None)
         assert "![a]" not in result

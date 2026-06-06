@@ -78,7 +78,7 @@ def test_looks_tabular_rejects_prose_accepts_numbers():
     numbers = [["v", "b", "s"], ["x", "0.1", "0.2"], ["y", "0.3", "0.4"]]
     prose = [["The", "quick", "brown"], ["fox", "jumps", "over"], ["the", "lazy", "dog"]]
     assert _looks_tabular(numbers)
-    assert not _looks_tabular(prose)         # no numeric content
+    assert not _looks_tabular(prose)  # no numeric content
     assert not _looks_tabular([["a", "1"]])  # too few rows
 
 
@@ -101,8 +101,8 @@ def test_reconstruct_recovers_grid_from_booktabs_page():
 def test_extract_structured_emits_grid_for_booktabs_table():
     _doc, page = _booktabs_page()
     out = BornDigitalDetector().extract_structured(page)
-    assert "| --- |" in out               # a markdown table, not a flat dump
-    assert "0.253" in out                 # char-exact native value preserved
+    assert "| --- |" in out  # a markdown table, not a flat dump
+    assert "0.253" in out  # char-exact native value preserved
 
 
 def test_numeric_columns_gate_accepts_table_rejects_references():
@@ -136,7 +136,7 @@ def test_extract_structured_leaves_references_alone():
         page.insert_text((72, y), f"Author {i} (199{i}), Journal of X {i}, 1{i}-2{i}.", fontsize=10)
         y += 18
     out = BornDigitalDetector().extract_structured(page)
-    assert "| --- |" not in out          # references never become a table
+    assert "| --- |" not in out  # references never become a table
 
 
 def test_reconstruct_skips_pathological_dense_page():
@@ -146,7 +146,7 @@ def test_reconstruct_skips_pathological_dense_page():
     page = doc.new_page()
     y = 40
     line = "Author A 2020 Journal 10 200 some reference text et al pages " * 4
-    for _ in range(60):                      # ~14k words, far over the guard
+    for _ in range(60):  # ~14k words, far over the guard
         page.insert_text((40, y), line, fontsize=6)
         y += 11
         if y > 780:
@@ -154,7 +154,7 @@ def test_reconstruct_skips_pathological_dense_page():
             y = 40
     page0 = doc[0]
     assert len(page0.get_text("words")) > 1500
-    assert reconstruct_table_regions(page0) == []   # guarded, returns fast
+    assert reconstruct_table_regions(page0) == []  # guarded, returns fast
 
 
 def test_extract_structured_leaves_prose_alone():
@@ -166,4 +166,4 @@ def test_extract_structured_leaves_prose_alone():
         page.insert_text((72, y), para, fontsize=11)
         y += 16
     out = BornDigitalDetector().extract_structured(page)
-    assert "| --- |" not in out           # prose must never become a table
+    assert "| --- |" not in out  # prose must never become a table

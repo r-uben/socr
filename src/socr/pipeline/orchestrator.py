@@ -24,10 +24,8 @@ from rich.console import Console
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
-from socr.core.chunker import PDFChunker
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.metadata import MetadataManager
 from socr.core.normalizer import OutputNormalizer
 from socr.core.result import (
     DocumentStatus,
@@ -38,7 +36,6 @@ from socr.core.result import (
     PageStatus,
 )
 from socr.core.state import DocumentState
-from socr.engines.base import BaseEngine, sanitize_filename
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import FigureExtractor
 from socr.pipeline.consensus import ConsensusEngine
@@ -65,18 +62,207 @@ class UnifiedPipeline:
         self.repair_router = RepairRouter(config)
         self.bd_detector = BornDigitalDetector()
         self._last_assessment: DocumentAssessment | None = None
+        # Directory the current input was discovered under (batch input dir or
+        # the file's parent). Threaded into every contract key so per-doc output
+        # mirrors the input subtree relative to it, not the bare basename.
+        self._scan_root: Path | None = None
+        # Set by process_batch: the contract RunOutcome that drives the exit code.
+        from ocr_output_contract import RunOutcome
+
+        self.last_outcome: RunOutcome = RunOutcome()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def process(self, pdf_path: Path, output_dir: Path | None = None) -> EngineResult:
+    def _resolve_output_root(self, input_path: Path, output_dir: Path | None) -> Path:
+        """Resolve the output root per the canon.
+
+        An explicit ``output_dir`` (``-o``) is used verbatim. A non-default
+        ``config.output_dir`` (anything the user set away from the legacy
+        ``Path('output')`` sentinel) is also honored verbatim. Otherwise the
+        canon default ``<input-parent>/ocr/`` is computed via the contract's
+        :func:`resolve_output_root` rather than the legacy ``output`` folder.
+        """
+        from ocr_output_contract import resolve_output_root
+
+        if output_dir is not None:
+            return Path(output_dir)
+        configured = self.config.output_dir
+        if configured is not None and Path(configured) != Path("output"):
+            return Path(configured)
+        return resolve_output_root(Path(input_path))
+
+    def _resolve_primary_engine(self) -> EngineType:
+        """The concrete primary engine, resolving ``AUTO`` WITHOUT mutating config.
+
+        ``process()`` resolves and writes back ``AUTO`` on entry; the batch resume
+        gate runs BEFORE ``process()`` per file and must derive the SAME engine to
+        compute an identical run fingerprint. We resolve here read-only so the
+        gate and ``process()`` agree.
+        """
+        if self.config.primary_engine == EngineType.AUTO:
+            return resolve_auto_engine()
+        return self.config.primary_engine
+
+    def _resume_skip(self, pdf_path: Path, out_dir: Path) -> EngineResult | None:
+        """Return a SKIPPED result if this doc is already completed, else None.
+
+        Consults the canonical :meth:`RootIndex.is_completed` (status==completed
+        AND input checksum match AND output .md still on disk AND run-fingerprint
+        match), so a re-run under a different model / task / output-affecting flag
+        reprocesses instead of silently reusing the cached output. ``--reprocess``
+        forces a re-run. An unreadable input (``safe_checksum`` None) is never
+        treated as completed.
+        """
+        if self.config.reprocess:
+            return None
+        try:
+            from ocr_output_contract import RootIndex, relative_key, safe_checksum
+
+            checksum = safe_checksum(pdf_path)
+            if checksum is None:
+                return None
+            scan_root = self._scan_root or pdf_path.parent
+            rel_key = relative_key(pdf_path, scan_root)
+            if not RootIndex(out_dir).is_completed(
+                rel_key, checksum, fingerprint=self._run_fingerprint()
+            ):
+                return None
+        except Exception as exc:  # never let the resume check break a run
+            logger.warning("resume check failed (non-fatal): %s", exc)
+            return None
+
+        if not self.config.quiet:
+            console.print(f"[dim]Skipping (already processed): {pdf_path.name}[/dim]")
+        return EngineResult(
+            document_path=pdf_path,
+            engine=self.config.primary_engine.value,
+            status=DocumentStatus.SKIPPED,
+        )
+
+    def _engine_determinants(self, engine_type: EngineType) -> dict[str, str | None]:
+        """Resolved ``{model, backend, task}`` for an engine, never raising.
+
+        Used to fold the model/backend/task of EVERY engine that can contribute
+        text (primary, local, fallback-chain, multi-engine members) into the run
+        fingerprint. A swap of a SECONDARY engine's model/task/backend changes
+        the saved output (the orchestrator routes pages to it), so it must
+        invalidate the resume cache just like a primary-engine swap. Degrades to
+        the engine name on any error so fingerprinting never breaks a run.
+        """
+        from socr.engines.registry import get_engine
+
+        try:
+            engine = get_engine(engine_type)
+            backend, task = engine.fingerprint_determinants(self.config)
+            return {
+                "model": engine.resolved_model_version(self.config),
+                "backend": backend or "socr",
+                "task": task,
+            }
+        except Exception:
+            return {"model": str(engine_type.value), "backend": "socr", "task": None}
+
+    def _run_fingerprint(self, engine_type: EngineType | None = None) -> str:
+        """Run-config fingerprint for idempotency, from the RESOLVED run config.
+
+        Captures what changes *what output an input produces*: the resolved
+        primary engine's model id, backend, and task, the resolved determinants
+        of every SECONDARY engine that can contribute text (local, fallback
+        chain, multi-engine members — codex round-3: a secondary-engine model
+        swap changes output without changing the primary), and socr's
+        output-affecting orchestration flags. Stored in
+        :class:`DocMetadata.fingerprint` and consulted by
+        :meth:`RootIndex.is_completed`, so a re-run under a different model / task
+        / flag reprocesses instead of silently reusing the cached output.
+
+        Round-3 expansion (HIGH): the prior ``extra`` omitted ``save_figures``
+        (and figure limits), the figures/consensus/judge model+backend knobs,
+        ``fallback_chain``, ``local_engine``, ``tiered`` routing, and chunking
+        thresholds — all of which change the saved ``.md``/figures. Toggling any
+        of them now invalidates the cache. ``multi_engine`` is fingerprinted in
+        USER ORDER (not sorted) so a reordering that changes consensus tie-break
+        / first-best selection reprocesses (codex round-3 under-invalidation).
+
+        Knobs deliberately EXCLUDED (do not change selected output bytes):
+        display/scripting (``quiet``/``verbose``/``dry_run``), force-run
+        (``reprocess``), parallelism (``workers``), and ``timeout`` — including
+        them would force needless reprocessing.
+
+        Resolved (not the AUTO sentinel) so the single-file gate, the batch gate,
+        and the recorded metadata all agree on one value.
+        """
+        from ocr_output_contract import run_fingerprint
+
+        engine_type = engine_type or self._resolve_primary_engine()
+        primary = self._engine_determinants(engine_type)
+
+        cfg = self.config
+        extra: dict[str, object] = {
+            # --- routing / engine selection (all contributing engines) ---
+            "primary_engine": engine_type.value,
+            "local_engine": cfg.local_engine.value,
+            "fallback_chain": [e.value for e in cfg.fallback_chain],
+            # User order, NOT sorted: order affects consensus/first-best output.
+            "multi_engine": [e.value for e in cfg.multi_engine],
+            # Resolved model/backend/task of every secondary engine, so a swap of
+            # a local/fallback/multi member's model invalidates the cache too.
+            "local_engine_determinants": self._engine_determinants(cfg.local_engine),
+            "fallback_determinants": [self._engine_determinants(e) for e in cfg.fallback_chain],
+            "multi_engine_determinants": [self._engine_determinants(e) for e in cfg.multi_engine],
+            # --- rendering / chunking (change the bytes fed to the engine) ---
+            "render_dpi": cfg.render_dpi,
+            "native_first": cfg.native_first,
+            "tiered": cfg.tiered,
+            "chunk_threshold": cfg.chunk_threshold,
+            "chunk_size": cfg.chunk_size,
+            # --- quality gates / repair / routing ---
+            "agentic": cfg.agentic,
+            "audit": cfg.audit_enabled,
+            "audit_min_words": cfg.audit_min_words,
+            "judge_hard_pages": cfg.judge_hard_pages,
+            "judge_backend": cfg.judge_backend,
+            "judge_model": cfg.judge_model,
+            "dual_pass_tables": cfg.dual_pass_tables,
+            "truncation_retries": cfg.truncation_retries,
+            "max_retries": cfg.max_retries,
+            # --- consensus ---
+            "consensus": cfg.consensus_enabled,
+            "consensus_use_llm": cfg.consensus_use_llm,
+            "consensus_ollama_model": cfg.consensus_ollama_model,
+            # --- figures (save_figures embeds figure blocks into the saved .md) ---
+            "save_figures": cfg.save_figures,
+            "figures_engine": cfg.figures_engine.value,
+            "figures_max_total": cfg.figures_max_total,
+            "figures_max_per_page": cfg.figures_max_per_page,
+        }
+        return run_fingerprint(
+            primary["model"], primary["backend"] or "socr", primary["task"], None, extra=extra
+        )
+
+    def process(
+        self,
+        pdf_path: Path,
+        output_dir: Path | None = None,
+        scan_root: Path | None = None,
+    ) -> EngineResult:
         """Process a single PDF through the 5-phase loop.
 
         Returns an EngineResult summarising the best extraction.
+
+        ``output_dir`` overrides the output root verbatim (``-o``); when omitted
+        the canon default ``<input-parent>/ocr/`` is resolved via the contract's
+        :func:`resolve_output_root`. ``scan_root`` is the directory the input was
+        discovered under: the batch input dir for a batch member (so the
+        per-doc key mirrors the input subtree relative to it), or the file's
+        parent for a standalone single-file run. It is NEVER ``pdf.parent`` for
+        a batch member, which would collapse the key to the basename and defeat
+        the canon's basename-collision fix.
         """
         pdf_path = Path(pdf_path)
-        out_dir = output_dir or self.config.output_dir
+        out_dir = self._resolve_output_root(pdf_path, output_dir)
+        self._scan_root = scan_root if scan_root is not None else pdf_path.parent
 
         # Resolve AUTO engine before starting
         if self.config.primary_engine == EngineType.AUTO:
@@ -85,6 +271,15 @@ class UnifiedPipeline:
                 console.print(
                     f"[dim]Auto-selected engine: {self.config.primary_engine.value}[/dim]"
                 )
+
+        # Single-file resume gate (canon): skip a doc already completed under the
+        # SAME input checksum AND run fingerprint, with its .md still on disk.
+        # Consulted here (not just in batch) so a re-run under a different model /
+        # task / flag reprocesses. --reprocess forces a re-run. Batch enters via
+        # process_batch's own gate, so this only fires on the single-file path.
+        skipped = self._resume_skip(pdf_path, out_dir)
+        if skipped is not None:
+            return skipped
 
         doc = DocumentHandle.from_path(pdf_path)
         state = DocumentState(handle=doc)
@@ -112,10 +307,7 @@ class UnifiedPipeline:
 
             # Phase 4: Repair — skip (multiple engines already provide coverage)
             if not self.config.quiet:
-                console.print(
-                    "\n[cyan]Phase 4:[/cyan] Repair "
-                    "(skipped — multi-engine mode)"
-                )
+                console.print("\n[cyan]Phase 4:[/cyan] Repair (skipped — multi-engine mode)")
 
             # Phase 4b: Consensus — always run in multi-engine mode
             self._phase_consensus(state)
@@ -157,15 +349,42 @@ class UnifiedPipeline:
 
         return final_result
 
-    def process_batch(
-        self, input_dir: Path, output_dir: Path | None = None
-    ) -> list[EngineResult]:
-        """Process all PDFs in a directory with incremental tracking."""
-        input_dir = Path(input_dir)
-        out_dir = output_dir or self.config.output_dir
-        meta = MetadataManager(out_dir)
+    def process_batch(self, input_dir: Path, output_dir: Path | None = None) -> list[EngineResult]:
+        """Process all PDFs in a directory with incremental tracking.
 
-        pdfs = sorted(input_dir.glob("*.pdf"))
+        The exit-code-bearing summary is exposed on ``self.last_outcome`` (a
+        contract :class:`RunOutcome`); the CLI consults it so the batch exit
+        code is nonzero when any file failed (the canon's uniform exit policy).
+        """
+        from ocr_output_contract import (
+            RootIndex,
+            RunOutcome,
+            Status,
+            is_within_output_root,
+            relative_key,
+            safe_checksum,
+        )
+
+        input_dir = Path(input_dir)
+        out_dir = self._resolve_output_root(input_dir, output_dir)
+        outcome = RunOutcome()
+        self.last_outcome = outcome
+
+        # The canonical contract RootIndex is the SINGLE authoritative writer of
+        # <root>/metadata.json and the SINGLE resume index. The legacy
+        # MetadataManager (basename-keyed, TZ-naive, no fingerprint, no
+        # output-existence check) is no longer used here: it used to CLOBBER the
+        # RootIndex written by process()->_phase_assemble. RootIndex.record is
+        # already called per-doc inside process(); the batch loop only READS it
+        # for the resume gate.
+        root_index = RootIndex(out_dir)
+        # Resolve AUTO -> concrete ONCE so the gate's fingerprint matches the one
+        # process() records for every file in this batch.
+        run_fp = self._run_fingerprint(self._resolve_primary_engine())
+
+        # Exclude anything under the resolved output root so a re-run never
+        # re-ingests socr's own .md/figure outputs as fresh inputs.
+        pdfs = sorted(p for p in input_dir.glob("*.pdf") if not is_within_output_root(p, out_dir))
         if not pdfs:
             if not self.config.quiet:
                 console.print("[yellow]No PDF files found[/yellow]")
@@ -173,7 +392,15 @@ class UnifiedPipeline:
 
         to_process = []
         for pdf in pdfs:
-            if meta.is_processed(pdf) and not self.config.reprocess:
+            # Resume gate via the canon: an unreadable input (safe_checksum None)
+            # is NEVER treated as completed — it falls through to process(), which
+            # records a per-file failure rather than aborting the batch (SYS-02).
+            checksum = safe_checksum(pdf)
+            rel_key = relative_key(pdf, input_dir)
+            already_done = checksum is not None and root_index.is_completed(
+                rel_key, checksum, fingerprint=run_fp
+            )
+            if already_done and not self.config.reprocess:
                 if self.config.verbose:
                     console.print(f"[dim]Skipping: {pdf.name}[/dim]")
             else:
@@ -201,19 +428,41 @@ class UnifiedPipeline:
         start = time.time()
 
         for pdf in to_process:
-            result = self.process(pdf, out_dir)
+            # Thread the BATCH input dir as scan_root so each per-doc key is the
+            # path relative to input_dir (subtree-mirrored), NOT the basename.
+            try:
+                result = self.process(pdf, out_dir, scan_root=input_dir)
+            except Exception as exc:  # one bad file must not abort the batch
+                logger.warning("batch: %s failed: %s", pdf.name, exc)
+                outcome.add(Status.FAILED, detail=str(pdf))
+                results.append(
+                    EngineResult(
+                        document_path=pdf,
+                        engine="none",
+                        status=DocumentStatus.ERROR,
+                        error=str(exc),
+                    )
+                )
+                continue
             results.append(result)
             if result.success:
-                meta.record(
-                    pdf,
-                    engine=result.engine,
-                    processing_time=result.processing_time,
-                    pages=result.pages_processed,
-                )
+                # process()->_phase_assemble already recorded this doc in the
+                # canonical RootIndex with the contract schema (model/backend/
+                # fingerprint/UTC timestamp). No legacy second write — that was
+                # the clobber that downgraded the root index to legacy shape.
+                outcome.add(Status.COMPLETED, output_path=str(pdf))
+            elif result.status == DocumentStatus.AUDIT_FAILED:
+                outcome.add(Status.PARTIAL, detail=str(pdf))
+            else:
+                outcome.add(Status.FAILED, detail=str(pdf))
 
         if not self.config.quiet:
-            ok = sum(1 for r in results if r.success)
+            ok = outcome.completed
             console.print(f"\n[green]Completed:[/green] {ok}/{len(to_process)} files")
+            if outcome.has_failures:
+                console.print(
+                    f"[yellow]Failed/partial:[/yellow] {outcome.failed + outcome.partial}"
+                )
             console.print(f"[dim]Total time: {time.time() - start:.1f}s[/dim]")
 
         return results
@@ -236,28 +485,18 @@ class UnifiedPipeline:
             if bd_count:
                 # Count pages needing enhancement vs pure prose
                 enhancement_count = sum(
-                    1 for pa in assessment.pages
-                    if pa.is_born_digital and pa.needs_ocr_enhancement
+                    1 for pa in assessment.pages if pa.is_born_digital and pa.needs_ocr_enhancement
                 )
                 prose_count = bd_count - enhancement_count
                 scanned_count = assessment.scanned_count
-                console.print(
-                    f"  {bd_count}/{assessment.page_count} pages born-digital"
-                )
+                console.print(f"  {bd_count}/{assessment.page_count} pages born-digital")
                 if self.config.native_first and (prose_count or enhancement_count):
                     if prose_count:
-                        console.print(
-                            f"    {prose_count} prose-only (native text)"
-                        )
+                        console.print(f"    {prose_count} prose-only (native text)")
                     if enhancement_count:
-                        console.print(
-                            f"    {enhancement_count} complex "
-                            f"(tables/figures/equations)"
-                        )
+                        console.print(f"    {enhancement_count} complex (tables/figures/equations)")
                     if scanned_count:
-                        console.print(
-                            f"    {scanned_count} scanned (no text layer)"
-                        )
+                        console.print(f"    {scanned_count} scanned (no text layer)")
             else:
                 console.print("  No born-digital pages detected")
 
@@ -265,9 +504,7 @@ class UnifiedPipeline:
     # Phase 2: Backbone OCR
     # ------------------------------------------------------------------
 
-    def _phase_backbone(
-        self, state: DocumentState, output_dir: Path
-    ) -> EngineResult | None:
+    def _phase_backbone(self, state: DocumentState, output_dir: Path) -> EngineResult | None:
         """Run the primary engine on the document.
 
         When ``native_first`` is enabled and the document is mostly
@@ -281,9 +518,7 @@ class UnifiedPipeline:
         # Native-first: use native text for born-digital prose, CLI only
         # for complex/scanned pages.
         if self.config.native_first:
-            bd_pages = [
-                p for p in state.pages.values() if p.is_born_digital
-            ]
+            bd_pages = [p for p in state.pages.values() if p.is_born_digital]
             bd_ratio = len(bd_pages) / max(len(state.pages), 1)
             if bd_ratio >= 0.5:
                 return self._backbone_native_first(state, output_dir)
@@ -302,8 +537,7 @@ class UnifiedPipeline:
                 engine=engine.name,
                 status=DocumentStatus.ERROR,
                 error=(
-                    f"Engine {engine.name} not available "
-                    f"(CLI not installed or missing API key)"
+                    f"Engine {engine.name} not available (CLI not installed or missing API key)"
                 ),
             )
             state.apply_result(err_result)
@@ -312,9 +546,7 @@ class UnifiedPipeline:
         # Per-page processing: render all pages to images → CLI
         all_pages = list(range(1, state.handle.page_count + 1))
         if not self.config.quiet:
-            console.print(
-                f"  Processing {len(all_pages)} pages (per-page)..."
-            )
+            console.print(f"  Processing {len(all_pages)} pages (per-page)...")
 
         start_time = time.time()
         page_outputs = engine.process_pages(
@@ -325,13 +557,8 @@ class UnifiedPipeline:
         )
         elapsed = time.time() - start_time
 
-        success_count = sum(
-            1 for p in page_outputs if p.status == PageStatus.SUCCESS
-        )
-        overall_status = (
-            DocumentStatus.SUCCESS if success_count > 0
-            else DocumentStatus.ERROR
-        )
+        success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
+        overall_status = DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR
 
         if not self.config.quiet:
             console.print(f"  {success_count}/{len(all_pages)} pages succeeded")
@@ -343,14 +570,12 @@ class UnifiedPipeline:
             pages=page_outputs,
             pages_processed=state.handle.page_count,
             processing_time=elapsed,
-            model_version=engine.model_version,
+            model_version=engine.resolved_model_version(self.config),
         )
         state.apply_result(result)
         return result
 
-    def _backbone_native_first(
-        self, state: DocumentState, output_dir: Path
-    ) -> EngineResult:
+    def _backbone_native_first(self, state: DocumentState, output_dir: Path) -> EngineResult:
         """3-tier routing: native → local → cloud.
 
         Tier 1: Born-digital prose → native text (free, instant)
@@ -397,8 +622,14 @@ class UnifiedPipeline:
             for page_num in ocr_pages:
                 ps = state.pages[page_num]
                 bd_assessment = next(
-                    (pa for pa in (self._last_assessment or DocumentAssessment(path=state.handle.path, pages=[])).pages
-                     if pa.page_num == page_num),
+                    (
+                        pa
+                        for pa in (
+                            self._last_assessment
+                            or DocumentAssessment(path=state.handle.path, pages=[])
+                        ).pages
+                        if pa.page_num == page_num
+                    ),
                     None,
                 )
                 if bd_assessment:
@@ -415,7 +646,8 @@ class UnifiedPipeline:
 
             # Classify page difficulty with hints
             difficulty_map = classify_pages(
-                str(state.handle.path), ocr_pages,
+                str(state.handle.path),
+                ocr_pages,
                 page_hints=page_hints,
             )
             for page_num in ocr_pages:
@@ -433,8 +665,7 @@ class UnifiedPipeline:
             console.print(f"\n[cyan]Phase 2:[/cyan] Text extraction ({label})")
             if prose_pages:
                 console.print(
-                    f"  {len(prose_pages)}/{total} pages: "
-                    "native text (born-digital prose)"
+                    f"  {len(prose_pages)}/{total} pages: native text (born-digital prose)"
                 )
             if easy_pages:
                 console.print(
@@ -455,13 +686,15 @@ class UnifiedPipeline:
         # Tier 1: Native text for prose pages
         for page_num in prose_pages:
             ps = state.pages[page_num]
-            page_outputs.append(PageOutput(
-                page_num=page_num,
-                text=ps.native_text,
-                status=PageStatus.SUCCESS,
-                engine="native",
-                audit_passed=True,
-            ))
+            page_outputs.append(
+                PageOutput(
+                    page_num=page_num,
+                    text=ps.native_text,
+                    status=PageStatus.SUCCESS,
+                    engine="native",
+                    audit_passed=True,
+                )
+            )
 
         # Tier 2: Local engine for easy pages
         escalated_pages: list[int] = []
@@ -469,8 +702,11 @@ class UnifiedPipeline:
         local_engine_name = ""
         if easy_pages and local_engine_type:
             local_outputs = self._run_engine_on_pages(
-                state, easy_pages, enhancement_pages,
-                local_engine_type, "local",
+                state,
+                easy_pages,
+                enhancement_pages,
+                local_engine_type,
+                "local",
             )
 
             # Per-page quality scoring on local outputs → auto-escalate failures
@@ -500,7 +736,8 @@ class UnifiedPipeline:
                     escalated_reasons[po.page_num] = scoring.primary_failure.value
                     logger.info(
                         "Page %d failed local audit (%s) — escalating to cloud",
-                        po.page_num, scoring.primary_failure.value,
+                        po.page_num,
+                        scoring.primary_failure.value,
                     )
 
             page_outputs.extend(passed_outputs)
@@ -517,8 +754,11 @@ class UnifiedPipeline:
         cloud_pages = hard_pages + escalated_pages
         if cloud_pages:
             cloud_outputs = self._run_engine_on_pages(
-                state, cloud_pages, enhancement_pages,
-                self.config.primary_engine, "cloud",
+                state,
+                cloud_pages,
+                enhancement_pages,
+                self.config.primary_engine,
+                "cloud",
             )
             # Tag escalated pages so metadata tracks the promotion
             for co in cloud_outputs:
@@ -528,13 +768,8 @@ class UnifiedPipeline:
 
         elapsed = time.time() - start_time
 
-        success_count = sum(
-            1 for p in page_outputs if p.status == PageStatus.SUCCESS
-        )
-        overall_status = (
-            DocumentStatus.SUCCESS if success_count > 0
-            else DocumentStatus.ERROR
-        )
+        success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
+        overall_status = DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR
 
         engines_used = set()
         for p in page_outputs:
@@ -593,27 +828,30 @@ class UnifiedPipeline:
             for page_num in page_nums:
                 ps = state.pages[page_num]
                 if page_num in enhancement_pages and ps.native_text:
-                    outputs.append(PageOutput(
-                        page_num=page_num,
-                        text=ps.native_text,
-                        status=PageStatus.SUCCESS,
-                        engine="native",
-                        audit_passed=True,
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            text=ps.native_text,
+                            status=PageStatus.SUCCESS,
+                            engine="native",
+                            audit_passed=True,
+                        )
+                    )
                 else:
-                    outputs.append(PageOutput(
-                        page_num=page_num,
-                        text="",
-                        status=PageStatus.ERROR,
-                        engine=engine.name,
-                        failure_mode=FailureMode.MODEL_UNAVAILABLE,
-                    ))
+                    outputs.append(
+                        PageOutput(
+                            page_num=page_num,
+                            text="",
+                            status=PageStatus.ERROR,
+                            engine=engine.name,
+                            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+                        )
+                    )
             return outputs
 
         if not self.config.quiet:
             console.print(
-                f"  Running {engine.name} on "
-                f"{len(page_nums)} {label} pages (per-page)..."
+                f"  Running {engine.name} on {len(page_nums)} {label} pages (per-page)..."
             )
 
         # Render pages to images → CLI processes images → per-page results
@@ -627,19 +865,18 @@ class UnifiedPipeline:
         # For enhancement pages where OCR failed, fall back to native text
         final: list[PageOutput] = []
         for po in page_outputs:
-            if (
-                po.status != PageStatus.SUCCESS
-                and po.page_num in enhancement_pages
-            ):
+            if po.status != PageStatus.SUCCESS and po.page_num in enhancement_pages:
                 ps = state.pages[po.page_num]
                 if ps.native_text:
-                    final.append(PageOutput(
-                        page_num=po.page_num,
-                        text=ps.native_text,
-                        status=PageStatus.SUCCESS,
-                        engine="native",
-                        audit_passed=True,
-                    ))
+                    final.append(
+                        PageOutput(
+                            page_num=po.page_num,
+                            text=ps.native_text,
+                            status=PageStatus.SUCCESS,
+                            engine="native",
+                            audit_passed=True,
+                        )
+                    )
                     continue
             final.append(po)
 
@@ -679,8 +916,12 @@ class UnifiedPipeline:
                 and ps.native_text
             ):
                 native = PageOutput(
-                    page_num=page_num, text=ps.native_text, status=PageStatus.SUCCESS,
-                    engine="native", audit_passed=True, cost_usd=0.0,
+                    page_num=page_num,
+                    text=ps.native_text,
+                    status=PageStatus.SUCCESS,
+                    engine="native",
+                    audit_passed=True,
+                    cost_usd=0.0,
                 )
                 ps.attempts.append(native)
                 ps.best_output = native
@@ -731,13 +972,17 @@ class UnifiedPipeline:
             ps.best_output = decision.final_output
 
             # Record cost so DocumentState.total_cost reflects spend.
-            state.engine_runs.append(EngineResult(
-                document_path=state.handle.path,
-                engine=decision.winning_engine,
-                status=DocumentStatus.SUCCESS if decision.accepted else DocumentStatus.AUDIT_FAILED,
-                cost=decision.total_cost_usd,
-                processing_time=0.0,
-            ))
+            state.engine_runs.append(
+                EngineResult(
+                    document_path=state.handle.path,
+                    engine=decision.winning_engine,
+                    status=DocumentStatus.SUCCESS
+                    if decision.accepted
+                    else DocumentStatus.AUDIT_FAILED,
+                    cost=decision.total_cost_usd,
+                    processing_time=0.0,
+                )
+            )
 
             if not self.config.quiet:
                 tag = "accepted" if decision.accepted else "best-effort"
@@ -798,24 +1043,21 @@ class UnifiedPipeline:
         # where wrong digits/signs/columns are both likely and costly.
         assessment = self._last_assessment
         hard_pages = {
-            pa.page_num for pa in (assessment.pages if assessment else [])
+            pa.page_num
+            for pa in (assessment.pages if assessment else [])
             if pa.has_tables or pa.has_equations
         }
         if not hard_pages:
             return
 
         try:
-            judge = VLMPageJudge(
-                OllamaVisionJudge(model=model), self._make_page_renderer(state)
-            )
+            judge = VLMPageJudge(OllamaVisionJudge(model=model), self._make_page_renderer(state))
         except Exception as exc:
             logger.warning("hard-page judge unavailable (%s)", exc)
             return
 
         if not self.config.quiet:
-            console.print(
-                f"\n[cyan]Phase 3b:[/cyan] VLM judge on hard pages [{model}]"
-            )
+            console.print(f"\n[cyan]Phase 3b:[/cyan] VLM judge on hard pages [{model}]")
 
         judged = rejected = 0
         for page_num in sorted(state.pages):
@@ -842,11 +1084,16 @@ class UnifiedPipeline:
             bo.failure_mode = FailureMode.AUDIT_FAILED
             bo.error = "VLM judge rejected (image mismatch)" + (f": {issues}" if issues else "")
             from socr.core.audit_log import AuditEvent
-            state.events.append(AuditEvent(
-                page_num=page_num, kind="judge_reject", engine=bo.engine,
-                detail=issues or "image mismatch",
-                data={"issues": issues, "judge_model": model},
-            ))
+
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="judge_reject",
+                    engine=bo.engine,
+                    detail=issues or "image mismatch",
+                    data={"issues": issues, "judge_model": model},
+                )
+            )
             ps.best_output = None  # -> needs_repair -> repair escalates
             if not self.config.quiet:
                 console.print(
@@ -892,9 +1139,7 @@ class UnifiedPipeline:
             return
 
         if not self.config.quiet:
-            console.print(
-                f"\n[cyan]Phase 4c:[/cyan] dual-pass table extraction [{model}]"
-            )
+            console.print(f"\n[cyan]Phase 4c:[/cyan] dual-pass table extraction [{model}]")
 
         import fitz
 
@@ -919,7 +1164,8 @@ class UnifiedPipeline:
                 if not crops:
                     continue
                 result = reconcile_page_tables(
-                    bo.text, [(c.markdown, c.source) for c in crops],
+                    bo.text,
+                    [(c.markdown, c.source) for c in crops],
                     auto_patch=self.config.auto_patch_tables,
                 )
             except Exception as exc:  # a dual-pass failure must never drop a page
@@ -930,36 +1176,41 @@ class UnifiedPipeline:
                 bo.text = result.text
                 patched += 1
             from socr.core.audit_log import AuditEvent
+
             for d in result.disagreements:
                 flagged += 1
                 bo.audit_notes.append(f"dual-pass {d.action}: {d.summary()}")
-                state.events.append(AuditEvent(
-                    page_num=page_num, kind=f"dualpass_{d.action}", engine=bo.engine,
-                    detail=d.summary(),
-                    data={
-                        "source": d.source,
-                        "note": d.note,
-                        "changed_cells": [
-                            {"row": c.row, "col": c.col,
-                             "page": c.page_value, "crop": c.crop_value}
-                            for c in d.changed_cells
-                        ],
-                    },
-                ))
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=f"dualpass_{d.action}",
+                        engine=bo.engine,
+                        detail=d.summary(),
+                        data={
+                            "source": d.source,
+                            "note": d.note,
+                            "changed_cells": [
+                                {
+                                    "row": c.row,
+                                    "col": c.col,
+                                    "page": c.page_value,
+                                    "crop": c.crop_value,
+                                }
+                                for c in d.changed_cells
+                            ],
+                        },
+                    )
+                )
             if result.disagreements and not self.config.quiet:
                 for d in result.disagreements:
                     color = "green" if d.action == "patched" else "yellow"
-                    console.print(
-                        f"  [{color}]p{page_num}: {d.action} — {d.summary()}[/{color}]"
-                    )
+                    console.print(f"  [{color}]p{page_num}: {d.action} — {d.summary()}[/{color}]")
 
         if not self.config.quiet:
             if scanned == 0:
                 console.print("  No model-OCR'd table pages to re-read")
             else:
-                console.print(
-                    f"  {scanned} pages scanned, {patched} patched, {flagged} flagged"
-                )
+                console.print(f"  {scanned} pages scanned, {patched} patched, {flagged} flagged")
 
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics."""
@@ -985,6 +1236,7 @@ class UnifiedPipeline:
 
     def _make_page_renderer(self, state: DocumentState):
         """Return render_image(page_num) -> temp PNG path for the VLM judge."""
+
         def render(page_num: int) -> Path:
             img = state.handle.render_page(page_num, dpi=self.config.render_dpi)
             tmp = Path(tempfile.gettempdir()) / f"socr_judge_{state.handle.stem}_p{page_num}.png"
@@ -993,18 +1245,70 @@ class UnifiedPipeline:
 
         return render
 
-    def _write_manifest(self, state: DocumentState, output_dir: Path) -> None:
+    def _fingerprint_inputs(
+        self, state: DocumentState
+    ) -> dict[str, tuple[str, str, str | None, str | None]]:
+        """Resolve ``{engine: (model, backend, task, prompt)}`` for the manifest.
+
+        For every engine that produced output on this doc, ask the engine
+        adapter for its RESOLVED model id and ``(backend, task)`` determinants
+        from the live config (not the hardcoded ``model_version`` literal). This
+        is what makes the manifest fingerprint actually invalidate on model /
+        backend / task drift, uniformly across the configurable-model engines.
+        socr does not own the OCR prompt (the sibling CLIs do, selected via
+        ``--task``), so ``prompt`` is the task selector's effect, left ``None``.
+        """
+        from socr.core.config import EngineType
+        from socr.engines.registry import get_engine
+
+        inputs: dict[str, tuple[str, str, str | None, str | None]] = {}
+        names: set[str] = set()
+        for run in state.engine_runs:
+            for part in str(run.engine).replace("+", ",").split(","):
+                part = part.strip()
+                if part and part != "native":
+                    # Strip a consensus(...) wrapper to the underlying engine.
+                    if part.startswith("consensus(") and part.endswith(")"):
+                        part = part[len("consensus(") : -1]
+                    names.add(part)
+        for name in names:
+            try:
+                engine = get_engine(EngineType(name))
+            except (ValueError, KeyError):
+                continue
+            backend, task = engine.fingerprint_determinants(self.config)
+            inputs[name] = (
+                engine.resolved_model_version(self.config),
+                backend,
+                task,
+                None,
+            )
+        return inputs
+
+    def _write_manifest(
+        self, state: DocumentState, output_dir: Path, saved_body: str | None = None
+    ) -> None:
         """Write a reproducibility manifest + blob cache for `socr replay`.
 
         Non-fatal: a manifest failure must never lose the OCR output.
         """
         try:
+            from ocr_output_contract import doc_dir_for, relative_key
+
             from socr.core.cache import BlobStore
             from socr.core.manifest import build_manifest
 
-            doc_dir = output_dir / sanitize_filename(state.handle.stem)
+            pdf_path = state.handle.path
+            scan_root = self._scan_root or pdf_path.parent
+            doc_dir = doc_dir_for(output_dir, relative_key(pdf_path, scan_root))
             store = BlobStore(doc_dir / "cache")
-            manifest = build_manifest(state, store, dpi=self.config.render_dpi)
+            manifest = build_manifest(
+                state,
+                store,
+                dpi=self.config.render_dpi,
+                fingerprint_inputs=self._fingerprint_inputs(state),
+                saved_body=saved_body,
+            )
             manifest.save(doc_dir / "manifest.json")
             if not self.config.quiet:
                 console.print(f"  [dim]Manifest: {doc_dir / 'manifest.json'} (replayable)[/dim]")
@@ -1030,10 +1334,7 @@ class UnifiedPipeline:
         engine_names = [e.value for e in engines]
 
         if not self.config.quiet:
-            console.print(
-                f"\n[cyan]Phase 2:[/cyan] Multi-engine OCR "
-                f"[{', '.join(engine_names)}]"
-            )
+            console.print(f"\n[cyan]Phase 2:[/cyan] Multi-engine OCR [{', '.join(engine_names)}]")
 
         results: list[EngineResult] = []
 
@@ -1064,19 +1365,14 @@ class UnifiedPipeline:
                 config=self.config,
                 dpi=self.config.render_dpi,
             )
-            success_count = sum(
-                1 for p in page_outputs if p.status == PageStatus.SUCCESS
-            )
+            success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
             result = EngineResult(
                 document_path=state.handle.path,
                 engine=engine.name,
-                status=(
-                    DocumentStatus.SUCCESS if success_count > 0
-                    else DocumentStatus.ERROR
-                ),
+                status=(DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR),
                 pages=page_outputs,
                 pages_processed=state.handle.page_count,
-                model_version=engine.model_version,
+                model_version=engine.resolved_model_version(self.config),
             )
             state.apply_result(result)
 
@@ -1085,9 +1381,7 @@ class UnifiedPipeline:
                 if result.success:
                     console.print(f"... [green]{word_count} words[/green]")
                 else:
-                    console.print(
-                        f"... [red]{result.error or result.status.value}[/red]"
-                    )
+                    console.print(f"... [red]{result.error or result.status.value}[/red]")
 
             results.append(result)
 
@@ -1097,9 +1391,7 @@ class UnifiedPipeline:
     # Phase 3: Score
     # ------------------------------------------------------------------
 
-    def _phase_score(
-        self, state: DocumentState, backbone_result: EngineResult
-    ) -> None:
+    def _phase_score(self, state: DocumentState, backbone_result: EngineResult) -> None:
         """Run quality scoring on engine outputs.
 
         For CLI engines that produce page_num=0 (whole-doc), score the
@@ -1116,13 +1408,9 @@ class UnifiedPipeline:
         else:
             self._score_per_page(state)
 
-    def _score_whole_doc(
-        self, state: DocumentState, result: EngineResult
-    ) -> None:
+    def _score_whole_doc(self, state: DocumentState, result: EngineResult) -> None:
         """Score a whole-document output (CLI engine, page_num=0)."""
-        whole_doc_page = next(
-            (p for p in result.pages if p.page_num == 0), None
-        )
+        whole_doc_page = next((p for p in result.pages if p.page_num == 0), None)
         if not whole_doc_page:
             return
 
@@ -1132,7 +1420,8 @@ class UnifiedPipeline:
         # words-per-page ratio.
         was_chunked = state.handle.page_count > self.config.chunk_threshold
         scoring = self.scorer.score(
-            whole_doc_page.text, engine=result.engine,
+            whole_doc_page.text,
+            engine=result.engine,
             expected_pages=0 if was_chunked else state.handle.page_count,
         )
 
@@ -1149,9 +1438,7 @@ class UnifiedPipeline:
             result.status = DocumentStatus.AUDIT_FAILED
             result.failure_mode = scoring.primary_failure
             if not self.config.quiet:
-                console.print(
-                    f"  [red]FAIL:[/red] {scoring.primary_failure.value}"
-                )
+                console.print(f"  [red]FAIL:[/red] {scoring.primary_failure.value}")
                 for mode, detail in scoring.details.items():
                     console.print(f"    {detail}")
 
@@ -1204,24 +1491,18 @@ class UnifiedPipeline:
         for result in backbone_results:
             if not result.success:
                 if not self.config.quiet:
-                    console.print(
-                        f"  {result.engine}: [red]skipped (engine failed)[/red]"
-                    )
+                    console.print(f"  {result.engine}: [red]skipped (engine failed)[/red]")
                 continue
 
             has_whole_doc = any(p.page_num == 0 for p in result.pages)
 
             if has_whole_doc:
                 whole_page = next(p for p in result.pages if p.page_num == 0)
-                was_chunked = (
-                    state.handle.page_count > self.config.chunk_threshold
-                )
+                was_chunked = state.handle.page_count > self.config.chunk_threshold
                 scoring = self.scorer.score(
                     whole_page.text,
                     engine=result.engine,
-                    expected_pages=(
-                        0 if was_chunked else state.handle.page_count
-                    ),
+                    expected_pages=(0 if was_chunked else state.handle.page_count),
                 )
                 whole_page.audit_passed = scoring.passed
                 if scoring.passed:
@@ -1233,22 +1514,17 @@ class UnifiedPipeline:
 
                 if not self.config.quiet:
                     if scoring.passed:
-                        console.print(
-                            f"  {result.engine}: [green]passed[/green]"
-                        )
+                        console.print(f"  {result.engine}: [green]passed[/green]")
                     else:
                         console.print(
-                            f"  {result.engine}: "
-                            f"[red]{scoring.primary_failure.value}[/red]"
+                            f"  {result.engine}: [red]{scoring.primary_failure.value}[/red]"
                         )
             else:
                 # Per-page outputs: score each page
                 passed = 0
                 failed = 0
                 for page_out in result.pages:
-                    scoring = self.scorer.score(
-                        page_out.text, engine=result.engine
-                    )
+                    scoring = self.scorer.score(page_out.text, engine=result.engine)
                     page_out.audit_passed = scoring.passed
                     if scoring.passed:
                         page_out.failure_mode = FailureMode.NONE
@@ -1284,23 +1560,15 @@ class UnifiedPipeline:
         # If a CLI engine produced a passing whole-doc output, per-page
         # states won't have best_outputs but the document is covered.
         # Skip repair entirely in that case.
-        has_passing_whole_doc = any(
-            w.audit_passed for w in state.whole_doc_attempts
-        )
+        has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
         # Also check if there's a failing whole-doc attempt that needs
         # document-level retry (e.g. truncated output).
-        has_failing_whole_doc = any(
-            not w.audit_passed for w in state.whole_doc_attempts
-        )
-        needs_whole_doc_retry = (
-            has_failing_whole_doc and not has_passing_whole_doc
-        )
+        has_failing_whole_doc = any(not w.audit_passed for w in state.whole_doc_attempts)
+        needs_whole_doc_retry = has_failing_whole_doc and not has_passing_whole_doc
 
         if has_passing_whole_doc and not state.pages_needing_repair:
             if not self.config.quiet:
-                console.print(
-                    "\n[cyan]Phase 4:[/cyan] Repair (not needed)"
-                )
+                console.print("\n[cyan]Phase 4:[/cyan] Repair (not needed)")
             return
 
         # Retry-on-truncation: if the latest whole-doc attempt failed
@@ -1313,10 +1581,7 @@ class UnifiedPipeline:
             and state.whole_doc_attempts
         ):
             latest_whole = state.whole_doc_attempts[-1]
-            if (
-                not latest_whole.audit_passed
-                and latest_whole.failure_mode == FailureMode.TRUNCATED
-            ):
+            if not latest_whole.audit_passed and latest_whole.failure_mode == FailureMode.TRUNCATED:
                 # Identify which engine produced the truncated output
                 truncated_engine_name = latest_whole.engine
                 truncated_engine_type = None
@@ -1339,26 +1604,27 @@ class UnifiedPipeline:
                             break
                         all_pages = list(range(1, state.handle.page_count + 1))
                         page_outputs = engine.process_pages(
-                            state.handle.path, all_pages, self.config,
+                            state.handle.path,
+                            all_pages,
+                            self.config,
                             dpi=self.config.render_dpi,
                         )
                         retry_result = EngineResult(
                             document_path=state.handle.path,
                             engine=engine.name,
-                            status=DocumentStatus.SUCCESS if any(
-                                p.status == PageStatus.SUCCESS for p in page_outputs
-                            ) else DocumentStatus.ERROR,
+                            status=DocumentStatus.SUCCESS
+                            if any(p.status == PageStatus.SUCCESS for p in page_outputs)
+                            else DocumentStatus.ERROR,
                             pages=page_outputs,
                             pages_processed=state.handle.page_count,
                         )
                         state.apply_result(retry_result)
                         if retry_result.success:
-                            self._score_repair_result(
-                                state, retry_result, []
-                            )
+                            self._score_repair_result(state, retry_result, [])
                         # Check if per-page results pass
                         ok = sum(
-                            1 for p in page_outputs
+                            1
+                            for p in page_outputs
                             if p.status == PageStatus.SUCCESS and p.audit_passed
                         )
                         if ok == state.handle.page_count:
@@ -1369,10 +1635,7 @@ class UnifiedPipeline:
                     # If truncation retry resolved it, we're done
                     if not needs_whole_doc_retry:
                         if not self.config.quiet:
-                            console.print(
-                                "  [green]Truncation retry "
-                                "succeeded[/green]"
-                            )
+                            console.print("  [green]Truncation retry succeeded[/green]")
                         return
 
         for attempt in range(self.config.max_retries):
@@ -1398,23 +1661,23 @@ class UnifiedPipeline:
                     if engine.is_available():
                         all_pages = list(range(1, state.handle.page_count + 1))
                         page_outputs = engine.process_pages(
-                            state.handle.path, all_pages, self.config,
+                            state.handle.path,
+                            all_pages,
+                            self.config,
                             dpi=self.config.render_dpi,
                         )
                         repair_result = EngineResult(
                             document_path=state.handle.path,
                             engine=engine.name,
-                            status=DocumentStatus.SUCCESS if any(
-                                p.status == PageStatus.SUCCESS for p in page_outputs
-                            ) else DocumentStatus.ERROR,
+                            status=DocumentStatus.SUCCESS
+                            if any(p.status == PageStatus.SUCCESS for p in page_outputs)
+                            else DocumentStatus.ERROR,
                             pages=page_outputs,
                             pages_processed=state.handle.page_count,
                         )
                         state.apply_result(repair_result)
                         if repair_result.success:
-                            self._score_repair_result(
-                                state, repair_result, []
-                            )
+                            self._score_repair_result(state, repair_result, [])
                             if not state.pages_needing_repair:
                                 needs_whole_doc_retry = False
                                 break
@@ -1424,35 +1687,26 @@ class UnifiedPipeline:
                 if not self.config.quiet and attempt == 0:
                     if state.pages_needing_repair:
                         console.print(
-                            "\n[cyan]Phase 4:[/cyan] Repair "
-                            "(all engines exhausted, skipping)"
+                            "\n[cyan]Phase 4:[/cyan] Repair (all engines exhausted, skipping)"
                         )
                     else:
-                        console.print(
-                            "\n[cyan]Phase 4:[/cyan] Repair (not needed)"
-                        )
+                        console.print("\n[cyan]Phase 4:[/cyan] Repair (not needed)")
                 break
 
             if not self.config.quiet:
-                engines_str = ", ".join(
-                    e.value for e in plan.by_engine.keys()
-                )
+                engines_str = ", ".join(e.value for e in plan.by_engine.keys())
                 console.print(
                     f"\n[cyan]Phase 4:[/cyan] Repair "
                     f"(attempt {attempt + 1}/{self.config.max_retries}) "
                     f"[{engines_str}]"
                 )
-                console.print(
-                    f"  {len(plan.repairs)} page(s) to repair"
-                )
+                console.print(f"  {len(plan.repairs)} page(s) to repair")
                 # Surface RECITATION refusals explicitly: a Gemini copyright-filter
                 # refusal must never be silent — name the reason and the recovery
                 # engine so the user knows the page was refused, not just retried.
                 for r in plan.repairs:
                     ps = state.pages.get(r.page_num)
-                    if ps and any(
-                        a.failure_mode == FailureMode.RECITATION for a in ps.attempts
-                    ):
+                    if ps and any(a.failure_mode == FailureMode.RECITATION for a in ps.attempts):
                         console.print(
                             f"  [yellow]p{r.page_num}: Gemini refused "
                             f"(RECITATION — copyright/recitation filter) "
@@ -1460,8 +1714,7 @@ class UnifiedPipeline:
                         )
                 if plan.pages_skipped:
                     console.print(
-                        f"  {len(plan.pages_skipped)} page(s) skipped "
-                        f"(engines exhausted)"
+                        f"  {len(plan.pages_skipped)} page(s) skipped (engines exhausted)"
                     )
 
             # Execute repairs grouped by engine
@@ -1470,24 +1723,23 @@ class UnifiedPipeline:
 
                 if not engine.is_available():
                     if not self.config.quiet:
-                        console.print(
-                            f"  [yellow]{engine.name} not available, "
-                            f"skipping[/yellow]"
-                        )
+                        console.print(f"  [yellow]{engine.name} not available, skipping[/yellow]")
                     continue
 
                 # Only process the failed pages, not the whole document
                 failed_pages = [r.page_num for r in repairs]
                 page_outputs = engine.process_pages(
-                    state.handle.path, failed_pages, self.config,
+                    state.handle.path,
+                    failed_pages,
+                    self.config,
                     dpi=self.config.render_dpi,
                 )
                 repair_result = EngineResult(
                     document_path=state.handle.path,
                     engine=engine.name,
-                    status=DocumentStatus.SUCCESS if any(
-                        p.status == PageStatus.SUCCESS for p in page_outputs
-                    ) else DocumentStatus.ERROR,
+                    status=DocumentStatus.SUCCESS
+                    if any(p.status == PageStatus.SUCCESS for p in page_outputs)
+                    else DocumentStatus.ERROR,
                     pages=page_outputs,
                     pages_processed=len(failed_pages),
                 )
@@ -1517,7 +1769,8 @@ class UnifiedPipeline:
         if has_whole_doc:
             whole_page = next(p for p in result.pages if p.page_num == 0)
             scoring = self.scorer.score(
-                whole_page.text, engine=result.engine,
+                whole_page.text,
+                engine=result.engine,
                 expected_pages=state.handle.page_count,
             )
             whole_page.audit_passed = scoring.passed
@@ -1530,9 +1783,7 @@ class UnifiedPipeline:
             for page_out in result.pages:
                 if page_out.page_num not in repair_page_nums:
                     continue
-                scoring = self.scorer.score(
-                    page_out.text, engine=result.engine
-                )
+                scoring = self.scorer.score(page_out.text, engine=result.engine)
                 page_out.audit_passed = scoring.passed
                 if not scoring.passed:
                     page_out.failure_mode = scoring.primary_failure
@@ -1559,8 +1810,7 @@ class UnifiedPipeline:
         if not has_multi_pages and not has_multi_whole_doc:
             if not self.config.quiet:
                 console.print(
-                    "\n[cyan]Phase 4b:[/cyan] Consensus (not needed — "
-                    "no multi-attempt pages)"
+                    "\n[cyan]Phase 4b:[/cyan] Consensus (not needed — no multi-attempt pages)"
                 )
             return
 
@@ -1569,14 +1819,9 @@ class UnifiedPipeline:
             if has_multi_whole_doc:
                 parts.append(f"{len(state.whole_doc_attempts)} whole-doc attempts")
             if has_multi_pages:
-                count = sum(
-                    1 for pn in state.pages
-                    if len(state.pages[pn].attempts) >= 2
-                )
+                count = sum(1 for pn in state.pages if len(state.pages[pn].attempts) >= 2)
                 parts.append(f"{count} multi-attempt pages")
-            console.print(
-                f"\n[cyan]Phase 4b:[/cyan] Consensus ({', '.join(parts)})"
-            )
+            console.print(f"\n[cyan]Phase 4b:[/cyan] Consensus ({', '.join(parts)})")
 
         engine = ConsensusEngine(
             use_llm=self.config.consensus_use_llm,
@@ -1598,26 +1843,54 @@ class UnifiedPipeline:
     # Phase 5: Assemble
     # ------------------------------------------------------------------
 
-    def _phase_assemble(
-        self, state: DocumentState, output_dir: Path
-    ) -> EngineResult:
+    def _canonical_body(self, state: DocumentState) -> tuple[str, bool]:
+        """Assemble the document body with canonical ``## Page N`` headers.
+
+        Replaces socr's legacy ``\\n\\n---\\n\\n`` join: the saved ``.md`` now
+        carries one ``## Page N`` header per page (via the contract's
+        ``assemble_pages``), so the contract's ``split_native_pages`` round-trips
+        it and the manifest/replay is bit-consistent with the saved file.
+        Validates the resulting marker count against ``handle.page_count`` and
+        logs loudly on mismatch (the legacy ``---``-only or dropped-marker case)
+        rather than silently corrupting the per-page structure.
+
+        Returns ``(body, has_content)`` where ``has_content`` reflects whether
+        any page carries real text — an all-empty document yields header-only
+        markup, which must NOT count as content (else an empty doc would be
+        recorded as success).
+        """
+        from ocr_output_contract import PAGE_MARKER_RE, assemble_pages
+
+        from socr.core.manifest import canonical_page_texts
+
+        texts = canonical_page_texts(state)
+        has_content = any(t.strip() for t in texts)
+        if not has_content:
+            return "", False
+        body = assemble_pages(texts)
+        markers = len(PAGE_MARKER_RE.findall(body))
+        if markers != state.handle.page_count:
+            logger.warning(
+                "assemble: produced %d '## Page N' marker(s) but the document has "
+                "%d page(s); per-page structure may be incomplete",
+                markers,
+                state.handle.page_count,
+            )
+        return body, True
+
+    def _phase_assemble(self, state: DocumentState, output_dir: Path) -> EngineResult:
         """Build the final EngineResult from DocumentState and save to disk."""
         if not self.config.quiet:
             console.print("\n[cyan]Phase 5:[/cyan] Assemble")
 
-        final_text = state.text
-        has_text = bool(final_text.strip())
+        final_text, has_text = self._canonical_body(state)
 
         # Determine overall status.
         # For CLI engines that produce whole-doc output (page_num=0), pages
         # won't have per-page best_outputs.  A passing whole-doc attempt
         # covers the entire document -- treat it as success.
-        has_passing_whole_doc = any(
-            w.audit_passed for w in state.whole_doc_attempts
-        )
-        pages_ok = (
-            not state.pages_needing_repair or has_passing_whole_doc
-        )
+        has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
+        pages_ok = not state.pages_needing_repair or has_passing_whole_doc
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -1632,13 +1905,13 @@ class UnifiedPipeline:
         total_time = sum(r.processing_time for r in state.engine_runs)
 
         # Strip phantom image references before saving
+        from ocr_output_contract import doc_dir_for, relative_key
+
         normalizer = OutputNormalizer()
-        stem = sanitize_filename(state.handle.stem)
-        doc_dir = output_dir / stem
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         if has_text:
-            final_text = normalizer.strip_phantom_images(
-                final_text, output_dir=doc_dir
-            )
+            final_text = normalizer.strip_phantom_images(final_text, output_dir=doc_dir)
 
         # Build the final result
         final_result = EngineResult(
@@ -1662,7 +1935,10 @@ class UnifiedPipeline:
         # Figure extraction + description + embedding
         if self.config.save_figures and has_text:
             final_text = self._describe_and_embed_figures(
-                state, final_result, output_dir, final_text,
+                state,
+                final_result,
+                output_dir,
+                final_text,
             )
             # Update the page text with embedded figure blocks
             final_result.pages[0].text = final_text
@@ -1673,15 +1949,94 @@ class UnifiedPipeline:
             if not self.config.quiet:
                 console.print(f"  [blue]Output:[/blue] {saved_path}")
 
-        # Reproducibility manifest (opt-in; default-on in agentic mode).
+        # Canonical dual-level metadata sidecars (per-doc + root index), keyed by
+        # input-relative path. Always written — including failures (status=failed)
+        # — so the corpus has a machine-readable record for every run.
+        self._write_metadata(state, final_result, output_dir, has_text)
+
+        # Reproducibility manifest (opt-in; default-on in agentic mode). Pass the
+        # FINAL saved body so the manifest blobs (and thus replay) reproduce the
+        # on-disk .md bit-for-bit, not the pre-transform state.
         if has_text and (self.config.write_manifest or self.config.agentic):
-            self._write_manifest(state, output_dir)
+            self._write_manifest(state, output_dir, saved_body=final_text)
 
         # Durable per-run audit log of notable events (RECITATION escalations,
         # judge rejections, dual-pass patches). Always written; never fatal.
         self._write_audit_log(state, doc_dir)
 
         return final_result
+
+    def _write_metadata(
+        self,
+        state: DocumentState,
+        result: EngineResult,
+        output_dir: Path,
+        has_text: bool,
+    ) -> None:
+        """Write canonical per-doc + root-index ``metadata.json`` via the contract.
+
+        Uses ``ocr-output-contract`` so socr's sidecars are byte-shape-identical
+        to what the engine CLIs emit, keyed by the input-RELATIVE path (never the
+        basename — two same-named PDFs in different dirs stay distinct). Both
+        levels are kept in sync. Non-fatal: a metadata write must never lose OCR
+        output.
+        """
+        from ocr_output_contract import (
+            DocMetadata,
+            RootIndex,
+            Status,
+            doc_dir_for,
+            failure_checksum,
+            markdown_path_for,
+            relative_key,
+            utc_timestamp,
+        )
+
+        try:
+            pdf_path = state.handle.path
+            scan_root = self._scan_root or pdf_path.parent
+            rel_key = relative_key(pdf_path, scan_root)
+            doc_dir = doc_dir_for(output_dir, rel_key)
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            md_path = markdown_path_for(doc_dir, rel_key)
+
+            if result.status == DocumentStatus.SUCCESS:
+                status = Status.COMPLETED
+            elif has_text:
+                status = Status.PARTIAL
+            else:
+                status = Status.FAILED
+
+            # failure_checksum (round-3): the real sha256 digest if the input is
+            # readable, else the contract's UNREADABLE_CHECKSUM sentinel
+            # (``sha256:0...0``). This keeps a FAILED/unreadable record schema-
+            # conformant (the conformance harness rejects a ``""`` / non-
+            # ``sha256:`` checksum) AND never matches on resume (the sentinel or a
+            # changed digest forces reprocess), all without raising and losing the
+            # metadata record (SYS-02).
+            meta = DocMetadata(
+                status=status,
+                checksum=failure_checksum(pdf_path),
+                model=result.engine or "none",
+                backend="socr",
+                processing_time=result.processing_time,
+                timestamp=utc_timestamp(),
+                output_path=str(md_path) if has_text else "",
+                pages=state.handle.page_count,
+                error=result.error or None,
+                # Run-config fingerprint: a re-run under a different model / task /
+                # output-affecting flag is forced to reprocess instead of being
+                # skipped by RootIndex.is_completed on input-checksum alone. By the
+                # time _phase_assemble runs, process() has resolved AUTO into a
+                # concrete primary_engine, so this matches the batch resume gate.
+                fingerprint=self._run_fingerprint(),
+            )
+            from ocr_output_contract import write_doc_metadata
+
+            write_doc_metadata(doc_dir, rel_key, meta)
+            RootIndex(output_dir).record(rel_key, meta)
+        except Exception as exc:  # never lose output over a metadata write
+            logger.warning("metadata write failed (non-fatal): %s", exc)
 
     def _write_audit_log(self, state: DocumentState, doc_dir: Path) -> None:
         """Write audit_log.json next to the output; surface a one-line summary."""
@@ -1694,8 +2049,7 @@ class UnifiedPipeline:
             audit.save(doc_dir / "audit_log.json")
             if not self.config.quiet:
                 console.print(
-                    f"  [dim]Audit log: {doc_dir / 'audit_log.json'} "
-                    f"({audit.summary_line()})[/dim]"
+                    f"  [dim]Audit log: {doc_dir / 'audit_log.json'} ({audit.summary_line()})[/dim]"
                 )
         except Exception as exc:  # never lose output over an audit-log write
             logger.warning("audit log write failed (non-fatal): %s", exc)
@@ -1720,9 +2074,11 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print("  Extracting figures...")
 
-        stem = sanitize_filename(state.handle.stem)
-        doc_dir = output_dir / stem
-        figures_dir = doc_dir / "figures"
+        from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
+
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        figures_dir = figures_dir_for(doc_dir)
         extractor = FigureExtractor(
             max_total=self.config.figures_max_total,
             max_per_page=self.config.figures_max_per_page,
@@ -1737,9 +2093,7 @@ class UnifiedPipeline:
             return text
 
         if not self.config.quiet:
-            console.print(
-                f"  Extracted {len(extracted)} figures to {figures_dir}"
-            )
+            console.print(f"  Extracted {len(extracted)} figures to {figures_dir}")
 
         # Try to get a vision engine for descriptions
         vision_engine = self._get_vision_engine()
@@ -1753,7 +2107,8 @@ class UnifiedPipeline:
                 # Get page context for better descriptions
                 context = self._get_page_context(state, fig.page_num)
                 info = vision_engine.describe_figure(
-                    fig.image, context=context,
+                    fig.image,
+                    context=context,
                 )
                 description = info.description
                 figure_type = info.figure_type or "extracted"
@@ -1775,10 +2130,7 @@ class UnifiedPipeline:
 
         if not self.config.quiet:
             described = sum(1 for f in figures if f.description)
-            console.print(
-                f"  {len(figures)} figures processed"
-                f" ({described} described)"
-            )
+            console.print(f"  {len(figures)} figures processed ({described} described)")
 
         # Build figure blocks and append to text
         figure_blocks = self._build_figure_blocks(figures, doc_dir)
@@ -1794,14 +2146,11 @@ class UnifiedPipeline:
         """
         import os
 
-        api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get(
-            "GOOGLE_API_KEY", ""
-        )
+        api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
         if not api_key:
             if not self.config.quiet:
                 console.print(
-                    "  [dim]No GEMINI_API_KEY — saving figures "
-                    "without descriptions[/dim]"
+                    "  [dim]No GEMINI_API_KEY — saving figures without descriptions[/dim]"
                 )
             return None
 
@@ -1818,8 +2167,7 @@ class UnifiedPipeline:
 
         if not self.config.quiet:
             console.print(
-                "  [dim]Gemini API not reachable — saving figures "
-                "without descriptions[/dim]"
+                "  [dim]Gemini API not reachable — saving figures without descriptions[/dim]"
             )
         return None
 
@@ -1838,7 +2186,8 @@ class UnifiedPipeline:
 
     @staticmethod
     def _build_figure_blocks(
-        figures: list[FigureInfo], doc_dir: Path,
+        figures: list[FigureInfo],
+        doc_dir: Path,
     ) -> str:
         """Build markdown figure blocks for embedding.
 
@@ -1868,14 +2217,26 @@ class UnifiedPipeline:
 
         return "\n\n".join(blocks)
 
-    def _save_markdown(
-        self, state: DocumentState, text: str, output_dir: Path
-    ) -> Path:
-        """Save the assembled markdown to output_dir/{stem}/{stem}.md."""
-        stem = sanitize_filename(state.handle.stem)
-        doc_dir = output_dir / stem
+    def _save_markdown(self, state: DocumentState, text: str, output_dir: Path) -> Path:
+        """Save the assembled markdown at the canonical contract path.
+
+        Layout matches the family canon and the read-back path exactly:
+        ``output_dir/<rel/dir>/<stem>/<stem>.md`` keyed by the input-relative
+        path (via the shared contract helpers), so the written ``.md``, the
+        per-doc ``metadata.json`` and ``output_path`` all agree.
+        """
+        from ocr_output_contract import (
+            doc_dir_for,
+            markdown_path_for,
+            relative_key,
+        )
+
+        pdf_path = state.handle.path
+        scan_root = self._scan_root or pdf_path.parent
+        rel_key = relative_key(pdf_path, scan_root)
+        doc_dir = doc_dir_for(output_dir, rel_key)
         doc_dir.mkdir(parents=True, exist_ok=True)
-        md_path = doc_dir / f"{stem}.md"
+        md_path = markdown_path_for(doc_dir, rel_key)
         md_path.write_text(text, encoding="utf-8")
         return md_path
 
@@ -1883,9 +2244,7 @@ class UnifiedPipeline:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _print_summary(
-        self, result: EngineResult, state: DocumentState
-    ) -> None:
+    def _print_summary(self, result: EngineResult, state: DocumentState) -> None:
         """Print a final summary line."""
         if result.success:
             status_str = "[green]Success[/green]"
@@ -1894,19 +2253,12 @@ class UnifiedPipeline:
 
         engine_str = result.engine
         if self.config.multi_engine:
-            engine_str = (
-                "+".join(e.value for e in self.config.multi_engine)
-                + " (consensus)"
-            )
+            engine_str = "+".join(e.value for e in self.config.multi_engine) + " (consensus)"
 
-        console.print(
-            f"\n{status_str} | {engine_str} | "
-            f"{result.processing_time:.1f}s"
-        )
+        console.print(f"\n{status_str} | {engine_str} | {result.processing_time:.1f}s")
         if state.pages_needing_repair:
             console.print(
-                f"[yellow]{len(state.pages_needing_repair)} page(s) "
-                f"still failing[/yellow]"
+                f"[yellow]{len(state.pages_needing_repair)} page(s) still failing[/yellow]"
             )
         if result.error:
             console.print(f"[dim]{result.error}[/dim]")

@@ -30,11 +30,7 @@ def _make_engine(api_key: str = "test-key", **kwargs) -> GeminiAPIEngine:
 
 
 def _gemini_response(text: str) -> dict:
-    return {
-        "candidates": [
-            {"content": {"parts": [{"text": text}]}}
-        ]
-    }
+    return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
 
 
 class TestImageToBase64:

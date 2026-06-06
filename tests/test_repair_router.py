@@ -14,6 +14,7 @@ from socr.pipeline.repair import PageRepair, RepairPlan, RepairRouter
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_handle(page_count: int = 5) -> DocumentHandle:
     with patch.object(DocumentHandle, "__post_init__", lambda self: None):
         h = DocumentHandle(path=Path("/tmp/fake.pdf"), page_count=page_count)
@@ -79,6 +80,7 @@ def _make_state(
 # ---------------------------------------------------------------------------
 # Page selection
 # ---------------------------------------------------------------------------
+
 
 class TestPagesNeedingRepair:
     def test_all_pages_need_repair_initially(self) -> None:
@@ -151,6 +153,7 @@ class TestPagesNeedingRepair:
 # Engine routing by failure mode
 # ---------------------------------------------------------------------------
 
+
 class TestSelectRepairEngine:
     def test_hallucination_picks_different_family(self) -> None:
         router = RepairRouter(_make_config())
@@ -163,9 +166,11 @@ class TestSelectRepairEngine:
         assert engine not in {EngineType.DEEPSEEK, EngineType.DEEPSEEK_VLLM}
 
     def test_hallucination_different_family_from_gemini(self) -> None:
-        router = RepairRouter(_make_config(
-            fallback_chain=[EngineType.DEEPSEEK, EngineType.MISTRAL],
-        ))
+        router = RepairRouter(
+            _make_config(
+                fallback_chain=[EngineType.DEEPSEEK, EngineType.MISTRAL],
+            )
+        )
         engine = router.select_repair_engine(
             FailureMode.HALLUCINATION,
             tried_engines={EngineType.GEMINI},
@@ -192,8 +197,10 @@ class TestSelectRepairEngine:
         )
         assert engine is not None
         assert engine in {
-            EngineType.GEMINI, EngineType.MISTRAL,
-            EngineType.DEEPSEEK, EngineType.DEEPSEEK_VLLM,
+            EngineType.GEMINI,
+            EngineType.MISTRAL,
+            EngineType.DEEPSEEK,
+            EngineType.DEEPSEEK_VLLM,
         }
 
     def test_low_word_count_picks_capable_engine(self) -> None:
@@ -204,14 +211,18 @@ class TestSelectRepairEngine:
         )
         assert engine is not None
         assert engine in {
-            EngineType.GEMINI, EngineType.MISTRAL,
-            EngineType.DEEPSEEK, EngineType.DEEPSEEK_VLLM,
+            EngineType.GEMINI,
+            EngineType.MISTRAL,
+            EngineType.DEEPSEEK,
+            EngineType.DEEPSEEK_VLLM,
         }
 
     def test_timeout_picks_lighter_engine(self) -> None:
-        router = RepairRouter(_make_config(
-            fallback_chain=[EngineType.GLM, EngineType.NOUGAT, EngineType.GEMINI],
-        ))
+        router = RepairRouter(
+            _make_config(
+                fallback_chain=[EngineType.GLM, EngineType.NOUGAT, EngineType.GEMINI],
+            )
+        )
         engine = router.select_repair_engine(
             FailureMode.TIMEOUT,
             tried_engines={EngineType.DEEPSEEK},
@@ -247,6 +258,7 @@ class TestSelectRepairEngine:
 # Skipping already-tried engines
 # ---------------------------------------------------------------------------
 
+
 class TestSkipTriedEngines:
     def test_skips_tried_engine(self) -> None:
         config = _make_config(
@@ -274,7 +286,12 @@ class TestSkipTriedEngines:
     def test_hallucination_falls_back_to_same_family_if_all_other_families_tried(self) -> None:
         config = _make_config(
             fallback_chain=[EngineType.DEEPSEEK_VLLM, EngineType.GEMINI, EngineType.MISTRAL],
-            enabled_engines=[EngineType.DEEPSEEK, EngineType.DEEPSEEK_VLLM, EngineType.GEMINI, EngineType.MISTRAL],
+            enabled_engines=[
+                EngineType.DEEPSEEK,
+                EngineType.DEEPSEEK_VLLM,
+                EngineType.GEMINI,
+                EngineType.MISTRAL,
+            ],
         )
         router = RepairRouter(config)
         # Tried DeepSeek + Gemini + Mistral — all families covered
@@ -303,6 +320,7 @@ class TestSkipTriedEngines:
 # ---------------------------------------------------------------------------
 # Repair plan generation
 # ---------------------------------------------------------------------------
+
 
 class TestPlanRepairs:
     def test_plan_for_fresh_document(self) -> None:
@@ -337,7 +355,8 @@ class TestPlanRepairs:
             fallback_chain=[EngineType.GEMINI, EngineType.MISTRAL],
         )
         hallu_attempt = _make_page_output(
-            1, "repeat repeat repeat",
+            1,
+            "repeat repeat repeat",
             audit_passed=False,
             engine="deepseek",
             failure_mode=FailureMode.HALLUCINATION,
@@ -403,14 +422,17 @@ class TestPlanRepairs:
 # Grouping by engine
 # ---------------------------------------------------------------------------
 
+
 class TestGroupByEngine:
     def test_groups_repairs_by_engine(self) -> None:
-        plan = RepairPlan(repairs=[
-            PageRepair(page_num=1, engine=EngineType.GEMINI, reason="r1"),
-            PageRepair(page_num=2, engine=EngineType.MISTRAL, reason="r2"),
-            PageRepair(page_num=3, engine=EngineType.GEMINI, reason="r3"),
-            PageRepair(page_num=4, engine=EngineType.GEMINI, reason="r4"),
-        ])
+        plan = RepairPlan(
+            repairs=[
+                PageRepair(page_num=1, engine=EngineType.GEMINI, reason="r1"),
+                PageRepair(page_num=2, engine=EngineType.MISTRAL, reason="r2"),
+                PageRepair(page_num=3, engine=EngineType.GEMINI, reason="r3"),
+                PageRepair(page_num=4, engine=EngineType.GEMINI, reason="r4"),
+            ]
+        )
 
         groups = plan.by_engine
         assert set(groups.keys()) == {EngineType.GEMINI, EngineType.MISTRAL}
@@ -418,11 +440,13 @@ class TestGroupByEngine:
         assert len(groups[EngineType.MISTRAL]) == 1
 
     def test_groups_page_nums_correct(self) -> None:
-        plan = RepairPlan(repairs=[
-            PageRepair(page_num=3, engine=EngineType.GEMINI, reason="r"),
-            PageRepair(page_num=7, engine=EngineType.GEMINI, reason="r"),
-            PageRepair(page_num=12, engine=EngineType.GEMINI, reason="r"),
-        ])
+        plan = RepairPlan(
+            repairs=[
+                PageRepair(page_num=3, engine=EngineType.GEMINI, reason="r"),
+                PageRepair(page_num=7, engine=EngineType.GEMINI, reason="r"),
+                PageRepair(page_num=12, engine=EngineType.GEMINI, reason="r"),
+            ]
+        )
 
         gemini_pages = [r.page_num for r in plan.by_engine[EngineType.GEMINI]]
         assert gemini_pages == [3, 7, 12]
@@ -432,10 +456,12 @@ class TestGroupByEngine:
         assert plan.by_engine == {}
 
     def test_single_engine_group(self) -> None:
-        plan = RepairPlan(repairs=[
-            PageRepair(page_num=1, engine=EngineType.MISTRAL, reason="r"),
-            PageRepair(page_num=2, engine=EngineType.MISTRAL, reason="r"),
-        ])
+        plan = RepairPlan(
+            repairs=[
+                PageRepair(page_num=1, engine=EngineType.MISTRAL, reason="r"),
+                PageRepair(page_num=2, engine=EngineType.MISTRAL, reason="r"),
+            ]
+        )
 
         groups = plan.by_engine
         assert len(groups) == 1
@@ -445,6 +471,7 @@ class TestGroupByEngine:
 # ---------------------------------------------------------------------------
 # Exhausted engines
 # ---------------------------------------------------------------------------
+
 
 class TestExhaustedEngines:
     def test_all_fallback_chain_exhausted(self) -> None:
@@ -508,15 +535,18 @@ class TestExhaustedEngines:
 # RepairPlan dataclass
 # ---------------------------------------------------------------------------
 
+
 class TestRepairPlanDataclass:
     def test_is_empty_true_for_no_repairs(self) -> None:
         plan = RepairPlan()
         assert plan.is_empty
 
     def test_is_empty_false_with_repairs(self) -> None:
-        plan = RepairPlan(repairs=[
-            PageRepair(page_num=1, engine=EngineType.GEMINI, reason="r"),
-        ])
+        plan = RepairPlan(
+            repairs=[
+                PageRepair(page_num=1, engine=EngineType.GEMINI, reason="r"),
+            ]
+        )
         assert not plan.is_empty
 
     def test_is_empty_true_even_with_skipped(self) -> None:
@@ -527,6 +557,7 @@ class TestRepairPlanDataclass:
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     def test_page_with_no_attempts_uses_empty_output_routing(self) -> None:
@@ -548,11 +579,17 @@ class TestEdgeCases:
             fallback_chain=[EngineType.GLM, EngineType.NOUGAT, EngineType.GEMINI],
         )
         old = _make_page_output(
-            1, "bad", audit_passed=False, engine="deepseek",
+            1,
+            "bad",
+            audit_passed=False,
+            engine="deepseek",
             failure_mode=FailureMode.GARBAGE,
         )
         recent = _make_page_output(
-            1, "bad", audit_passed=False, engine="gemini",
+            1,
+            "bad",
+            audit_passed=False,
+            engine="gemini",
             failure_mode=FailureMode.TIMEOUT,
         )
         state = _make_state(
@@ -569,14 +606,25 @@ class TestEdgeCases:
     def test_mixed_failure_modes_across_pages(self) -> None:
         """Different pages can get different engines based on their failure."""
         config = _make_config(
-            fallback_chain=[EngineType.GEMINI, EngineType.GLM, EngineType.NOUGAT, EngineType.MISTRAL],
+            fallback_chain=[
+                EngineType.GEMINI,
+                EngineType.GLM,
+                EngineType.NOUGAT,
+                EngineType.MISTRAL,
+            ],
         )
         hallu = _make_page_output(
-            1, "bad", audit_passed=False, engine="deepseek",
+            1,
+            "bad",
+            audit_passed=False,
+            engine="deepseek",
             failure_mode=FailureMode.HALLUCINATION,
         )
         timeout = _make_page_output(
-            2, "bad", audit_passed=False, engine="deepseek",
+            2,
+            "bad",
+            audit_passed=False,
+            engine="deepseek",
             failure_mode=FailureMode.TIMEOUT,
         )
         state = _make_state(
@@ -598,14 +646,13 @@ class TestEdgeCases:
 # RECITATION → open-model escalation (Gemini's copyright filter)
 # ---------------------------------------------------------------------------
 
+
 def test_recitation_escalates_to_qwen():
     """A Gemini RECITATION refusal routes to Qwen (open, no filter)."""
     router = RepairRouter(
         _make_config(primary_engine=EngineType.GEMINI, fallback_chain=[EngineType.GEMINI])
     )
-    eng = router.select_repair_engine(
-        FailureMode.RECITATION, tried_engines={EngineType.GEMINI}
-    )
+    eng = router.select_repair_engine(FailureMode.RECITATION, tried_engines={EngineType.GEMINI})
     assert eng == EngineType.QWEN
 
 

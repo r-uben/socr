@@ -41,9 +41,12 @@ class GeminiEngine(BaseEngine):
         cmd = [
             self.cli_command,
             str(pdf_path),
-            "-o", str(output_dir),
-            "--model", config.gemini_model,
-            "--task", config.gemini_task,
+            "-o",
+            str(output_dir),
+            "--model",
+            config.gemini_model,
+            "--task",
+            config.gemini_task,
         ]
         if config.workers > 1:
             cmd.extend(["-w", str(config.workers)])
