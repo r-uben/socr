@@ -16,6 +16,7 @@ from ocr_output_contract import (
     doc_dir_for,
     markdown_path_for,
     relative_key,
+    resolve_output_root,
     split_native_pages,
 )
 
@@ -362,17 +363,20 @@ class BaseEngine(ABC):
         """Read output markdown for a single page image, canonical-first.
 
         Each rendered page image ``<stem>.png`` lives under ``scan_root`` and the
-        engine was invoked with ``-o <output_dir>``, so the canon places its
-        output at ``<output_dir>/<stem>/<stem>.md`` (the page image has no
-        subdirectory, so the mirrored rel dir is empty). We resolve that path via
-        the contract's helpers FIRST.
+        engine was invoked with ``-o <output_dir>``. For a per-page-writing engine
+        the canon places its output at ``doc_dir_for(output_dir, "<stem>.png")``,
+        i.e. ``<output_dir>/<stem>_png/<stem>.md`` (``doc_dir_for`` disambiguates
+        the non-PDF ``.png`` extension as ``<stem>_png``; the page image has no
+        subdirectory, so the mirrored rel dir is empty). We resolve that exact
+        path via the contract's helpers FIRST (keyed on the ``.png`` rel key, so
+        the ``_png`` folder is computed correctly — never hand-built).
 
         socr ships independently of the sibling engine CLIs, so a not-yet-
         converged (or legacy) engine may write a non-canonical layout. To avoid
         silently yielding an EMPTY page for the DEFAULT per-page pipeline path,
         we keep a GUARDED legacy fallback ladder after the canonical path:
 
-          1. canonical ``<output_dir>/<stem>/<stem>.md``  (preferred)
+          1. canonical ``<output_dir>/<stem>_png/<stem>.md``  (preferred)
           2. flat ``<output_dir>/<stem>.md``
           3. sanitized-stem variants (``<sanitized>/<sanitized>.md`` + flat)
           4. a LOUD, stem-filtered ``rglob`` net (warns expected-vs-found)
@@ -461,11 +465,20 @@ class BaseEngine(ABC):
         page whose rendered image is k-th in filename-sorted order — NOT to
         ``page_nums[k-1]`` (``page_nums`` may be non-contiguous / non-ascending).
         """
-        # Locate the aggregate by the contract's canonical path (no glob): the
-        # images dir is the engine's single "document", so its doc dir mirrors
-        # the dir name under cli_out.
+        # Locate the aggregate by the contract's canonical helpers (no glob).
+        # A canon engine invoked as ``<engine> process <images_dir> -o <cli_out>``
+        # treats the pure page-image dir as ONE document and writes its aggregate
+        # at ``resolve_output_root(images_dir, cli_out)/<images_dir_stem>/<images_dir_stem>.md``.
+        # Round-3 fix: resolve the root through ``resolve_output_root`` keyed on
+        # the IMAGES dir (rather than hardcoding ``cli_out`` as the root) so the
+        # path matches the engine's own computation exactly even if ``-o``
+        # resolution semantics change. With ``-o cli_out`` given,
+        # ``resolve_output_root(images_dir, cli_out) == cli_out``; the engine's
+        # ``scan_root`` for a single image-dir document is ``images_dir.parent``,
+        # so its ``rel_key`` is the dir name and ``doc_dir_for`` mirrors it.
+        agg_root = resolve_output_root(images_dir, cli_out)
         rel_key = relative_key(images_dir, images_dir.parent)
-        agg_doc_dir = doc_dir_for(cli_out, rel_key)
+        agg_doc_dir = doc_dir_for(agg_root, rel_key)
         agg_md = markdown_path_for(agg_doc_dir, rel_key)
         if not agg_md.exists():
             return None, None

@@ -141,45 +141,105 @@ class UnifiedPipeline:
             status=DocumentStatus.SKIPPED,
         )
 
+    def _engine_determinants(self, engine_type: EngineType) -> dict[str, str | None]:
+        """Resolved ``{model, backend, task}`` for an engine, never raising.
+
+        Used to fold the model/backend/task of EVERY engine that can contribute
+        text (primary, local, fallback-chain, multi-engine members) into the run
+        fingerprint. A swap of a SECONDARY engine's model/task/backend changes
+        the saved output (the orchestrator routes pages to it), so it must
+        invalidate the resume cache just like a primary-engine swap. Degrades to
+        the engine name on any error so fingerprinting never breaks a run.
+        """
+        from socr.engines.registry import get_engine
+
+        try:
+            engine = get_engine(engine_type)
+            backend, task = engine.fingerprint_determinants(self.config)
+            return {
+                "model": engine.resolved_model_version(self.config),
+                "backend": backend or "socr",
+                "task": task,
+            }
+        except Exception:
+            return {"model": str(engine_type.value), "backend": "socr", "task": None}
+
     def _run_fingerprint(self, engine_type: EngineType | None = None) -> str:
         """Run-config fingerprint for idempotency, from the RESOLVED run config.
 
         Captures what changes *what output an input produces*: the resolved
-        engine's model id, backend, and task, plus socr's output-affecting
-        orchestration flags (render DPI, native-first, agentic/multi-engine/
-        consensus routing, dual-pass tables, hard-page judge). Stored in
+        primary engine's model id, backend, and task, the resolved determinants
+        of every SECONDARY engine that can contribute text (local, fallback
+        chain, multi-engine members — codex round-3: a secondary-engine model
+        swap changes output without changing the primary), and socr's
+        output-affecting orchestration flags. Stored in
         :class:`DocMetadata.fingerprint` and consulted by
         :meth:`RootIndex.is_completed`, so a re-run under a different model / task
         / flag reprocesses instead of silently reusing the cached output.
+
+        Round-3 expansion (HIGH): the prior ``extra`` omitted ``save_figures``
+        (and figure limits), the figures/consensus/judge model+backend knobs,
+        ``fallback_chain``, ``local_engine``, ``tiered`` routing, and chunking
+        thresholds — all of which change the saved ``.md``/figures. Toggling any
+        of them now invalidates the cache. ``multi_engine`` is fingerprinted in
+        USER ORDER (not sorted) so a reordering that changes consensus tie-break
+        / first-best selection reprocesses (codex round-3 under-invalidation).
+
+        Knobs deliberately EXCLUDED (do not change selected output bytes):
+        display/scripting (``quiet``/``verbose``/``dry_run``), force-run
+        (``reprocess``), parallelism (``workers``), and ``timeout`` — including
+        them would force needless reprocessing.
 
         Resolved (not the AUTO sentinel) so the single-file gate, the batch gate,
         and the recorded metadata all agree on one value.
         """
         from ocr_output_contract import run_fingerprint
 
-        from socr.engines.registry import get_engine
-
         engine_type = engine_type or self._resolve_primary_engine()
-        try:
-            engine = get_engine(engine_type)
-            model = engine.resolved_model_version(self.config)
-            backend, task = engine.fingerprint_determinants(self.config)
-        except Exception:
-            # Never let fingerprinting break a run; degrade to the engine name.
-            model, backend, task = str(engine_type.value), "socr", None
+        primary = self._engine_determinants(engine_type)
 
-        extra = {
+        cfg = self.config
+        extra: dict[str, object] = {
+            # --- routing / engine selection (all contributing engines) ---
             "primary_engine": engine_type.value,
-            "render_dpi": self.config.render_dpi,
-            "native_first": self.config.native_first,
-            "agentic": self.config.agentic,
-            "multi_engine": sorted(e.value for e in self.config.multi_engine),
-            "consensus": self.config.consensus_enabled,
-            "dual_pass_tables": self.config.dual_pass_tables,
-            "judge_hard_pages": self.config.judge_hard_pages,
-            "audit": self.config.audit_enabled,
+            "local_engine": cfg.local_engine.value,
+            "fallback_chain": [e.value for e in cfg.fallback_chain],
+            # User order, NOT sorted: order affects consensus/first-best output.
+            "multi_engine": [e.value for e in cfg.multi_engine],
+            # Resolved model/backend/task of every secondary engine, so a swap of
+            # a local/fallback/multi member's model invalidates the cache too.
+            "local_engine_determinants": self._engine_determinants(cfg.local_engine),
+            "fallback_determinants": [self._engine_determinants(e) for e in cfg.fallback_chain],
+            "multi_engine_determinants": [self._engine_determinants(e) for e in cfg.multi_engine],
+            # --- rendering / chunking (change the bytes fed to the engine) ---
+            "render_dpi": cfg.render_dpi,
+            "native_first": cfg.native_first,
+            "tiered": cfg.tiered,
+            "chunk_threshold": cfg.chunk_threshold,
+            "chunk_size": cfg.chunk_size,
+            # --- quality gates / repair / routing ---
+            "agentic": cfg.agentic,
+            "audit": cfg.audit_enabled,
+            "audit_min_words": cfg.audit_min_words,
+            "judge_hard_pages": cfg.judge_hard_pages,
+            "judge_backend": cfg.judge_backend,
+            "judge_model": cfg.judge_model,
+            "dual_pass_tables": cfg.dual_pass_tables,
+            "truncation_retries": cfg.truncation_retries,
+            "max_retries": cfg.max_retries,
+            # --- consensus ---
+            "consensus": cfg.consensus_enabled,
+            "consensus_use_llm": cfg.consensus_use_llm,
+            "consensus_ollama_model": cfg.consensus_ollama_model,
+            # --- figures (save_figures embeds figure blocks into the saved .md) ---
+            "save_figures": cfg.save_figures,
+            "figures_engine": cfg.figures_engine.value,
+            "figures_max_total": cfg.figures_max_total,
+            "figures_max_per_page": cfg.figures_max_per_page,
         }
-        return run_fingerprint(model, backend or "socr", task, None, extra=extra)
+        return run_fingerprint(
+            primary["model"], primary["backend"] or "socr", primary["task"], None, extra=extra
+        )
 
     def process(
         self,
@@ -1884,9 +1944,9 @@ class UnifiedPipeline:
             RootIndex,
             Status,
             doc_dir_for,
+            failure_checksum,
             markdown_path_for,
             relative_key,
-            safe_checksum,
             utc_timestamp,
         )
 
@@ -1905,12 +1965,16 @@ class UnifiedPipeline:
             else:
                 status = Status.FAILED
 
-            # safe_checksum: an input unreadable at metadata time records an empty
-            # checksum (never matches on resume -> forces reprocess) instead of
-            # raising and losing the metadata record entirely (SYS-02).
+            # failure_checksum (round-3): the real sha256 digest if the input is
+            # readable, else the contract's UNREADABLE_CHECKSUM sentinel
+            # (``sha256:0...0``). This keeps a FAILED/unreadable record schema-
+            # conformant (the conformance harness rejects a ``""`` / non-
+            # ``sha256:`` checksum) AND never matches on resume (the sentinel or a
+            # changed digest forces reprocess), all without raising and losing the
+            # metadata record (SYS-02).
             meta = DocMetadata(
                 status=status,
-                checksum=safe_checksum(pdf_path) or "",
+                checksum=failure_checksum(pdf_path),
                 model=result.engine or "none",
                 backend="socr",
                 processing_time=result.processing_time,

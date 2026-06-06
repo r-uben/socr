@@ -358,11 +358,20 @@ def batch(
             return
         import tempfile
 
+        # DATA-LOSS FIX (round-3 HIGH): the limited PDFs are symlinked into a
+        # TemporaryDirectory that is destroyed on block exit. If we passed
+        # output_dir=None, process_batch would resolve the output root relative
+        # to that tmpdir (<tmpdir>/ocr) and ALL output would be deleted on exit.
+        # Resolve the REAL, persistent output root from the ORIGINAL pdf_dir
+        # FIRST (honoring -o and any non-default configured output_dir via the
+        # pipeline's own resolver) and pass it as a concrete dir, so output is
+        # written next to the real input, never into the ephemeral tmpdir.
+        persistent_out = pipeline._resolve_output_root(pdf_dir, output_dir)
         with tempfile.TemporaryDirectory() as tmpdir:
             limited_dir = Path(tmpdir)
             for pdf in pdfs:
                 (limited_dir / pdf.name).symlink_to(pdf)
-            pipeline.process_batch(limited_dir, output_dir)
+            pipeline.process_batch(limited_dir, persistent_out)
     else:
         pipeline.process_batch(pdf_dir, output_dir)
 
