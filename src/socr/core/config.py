@@ -106,6 +106,11 @@ class PipelineConfig:
     tiered: bool = True  # Route easy pages to local engine, hard pages to primary
 
     # --- Processing ---
+    # ``Path("output")`` is the LEGACY SENTINEL meaning "unset". The canon
+    # default output root is ``<input-parent>/ocr/`` (resolved per-input via the
+    # contract's ``resolve_output_root`` in UnifiedPipeline._resolve_output_root);
+    # this default never becomes a literal ``output/`` directory unless a user
+    # explicitly sets it. A user-set value (incl. -o) is honored verbatim.
     output_dir: Path = field(default_factory=lambda: Path("output"))
     timeout: int = 1800  # Single timeout for all engine subprocesses
     max_retries: int = 2

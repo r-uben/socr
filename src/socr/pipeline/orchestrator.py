@@ -24,7 +24,6 @@ from rich.console import Console
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
-from socr.core.chunker import PDFChunker
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.metadata import MetadataManager
@@ -64,18 +63,59 @@ class UnifiedPipeline:
         self.repair_router = RepairRouter(config)
         self.bd_detector = BornDigitalDetector()
         self._last_assessment: DocumentAssessment | None = None
+        # Directory the current input was discovered under (batch input dir or
+        # the file's parent). Threaded into every contract key so per-doc output
+        # mirrors the input subtree relative to it, not the bare basename.
+        self._scan_root: Path | None = None
+        # Set by process_batch: the contract RunOutcome that drives the exit code.
+        from ocr_output_contract import RunOutcome
+
+        self.last_outcome: RunOutcome = RunOutcome()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def process(self, pdf_path: Path, output_dir: Path | None = None) -> EngineResult:
+    def _resolve_output_root(self, input_path: Path, output_dir: Path | None) -> Path:
+        """Resolve the output root per the canon.
+
+        An explicit ``output_dir`` (``-o``) is used verbatim. A non-default
+        ``config.output_dir`` (anything the user set away from the legacy
+        ``Path('output')`` sentinel) is also honored verbatim. Otherwise the
+        canon default ``<input-parent>/ocr/`` is computed via the contract's
+        :func:`resolve_output_root` rather than the legacy ``output`` folder.
+        """
+        from ocr_output_contract import resolve_output_root
+
+        if output_dir is not None:
+            return Path(output_dir)
+        configured = self.config.output_dir
+        if configured is not None and Path(configured) != Path("output"):
+            return Path(configured)
+        return resolve_output_root(Path(input_path))
+
+    def process(
+        self,
+        pdf_path: Path,
+        output_dir: Path | None = None,
+        scan_root: Path | None = None,
+    ) -> EngineResult:
         """Process a single PDF through the 5-phase loop.
 
         Returns an EngineResult summarising the best extraction.
+
+        ``output_dir`` overrides the output root verbatim (``-o``); when omitted
+        the canon default ``<input-parent>/ocr/`` is resolved via the contract's
+        :func:`resolve_output_root`. ``scan_root`` is the directory the input was
+        discovered under: the batch input dir for a batch member (so the
+        per-doc key mirrors the input subtree relative to it), or the file's
+        parent for a standalone single-file run. It is NEVER ``pdf.parent`` for
+        a batch member, which would collapse the key to the basename and defeat
+        the canon's basename-collision fix.
         """
         pdf_path = Path(pdf_path)
-        out_dir = output_dir or self.config.output_dir
+        out_dir = self._resolve_output_root(pdf_path, output_dir)
+        self._scan_root = scan_root if scan_root is not None else pdf_path.parent
 
         # Resolve AUTO engine before starting
         if self.config.primary_engine == EngineType.AUTO:
@@ -154,12 +194,25 @@ class UnifiedPipeline:
         return final_result
 
     def process_batch(self, input_dir: Path, output_dir: Path | None = None) -> list[EngineResult]:
-        """Process all PDFs in a directory with incremental tracking."""
+        """Process all PDFs in a directory with incremental tracking.
+
+        The exit-code-bearing summary is exposed on ``self.last_outcome`` (a
+        contract :class:`RunOutcome`); the CLI consults it so the batch exit
+        code is nonzero when any file failed (the canon's uniform exit policy).
+        """
+        from ocr_output_contract import RunOutcome, Status
+
         input_dir = Path(input_dir)
-        out_dir = output_dir or self.config.output_dir
+        out_dir = self._resolve_output_root(input_dir, output_dir)
+        outcome = RunOutcome()
+        self.last_outcome = outcome
         meta = MetadataManager(out_dir)
 
-        pdfs = sorted(input_dir.glob("*.pdf"))
+        # Exclude anything under the resolved output root so a re-run never
+        # re-ingests socr's own .md/figure outputs as fresh inputs.
+        from ocr_output_contract import is_within_output_root
+
+        pdfs = sorted(p for p in input_dir.glob("*.pdf") if not is_within_output_root(p, out_dir))
         if not pdfs:
             if not self.config.quiet:
                 console.print("[yellow]No PDF files found[/yellow]")
@@ -195,19 +248,43 @@ class UnifiedPipeline:
         start = time.time()
 
         for pdf in to_process:
-            result = self.process(pdf, out_dir)
+            # Thread the BATCH input dir as scan_root so each per-doc key is the
+            # path relative to input_dir (subtree-mirrored), NOT the basename.
+            try:
+                result = self.process(pdf, out_dir, scan_root=input_dir)
+            except Exception as exc:  # one bad file must not abort the batch
+                logger.warning("batch: %s failed: %s", pdf.name, exc)
+                outcome.add(Status.FAILED, detail=str(pdf))
+                results.append(
+                    EngineResult(
+                        document_path=pdf,
+                        engine="none",
+                        status=DocumentStatus.ERROR,
+                        error=str(exc),
+                    )
+                )
+                continue
             results.append(result)
             if result.success:
+                outcome.add(Status.COMPLETED, output_path=str(pdf))
                 meta.record(
                     pdf,
                     engine=result.engine,
                     processing_time=result.processing_time,
                     pages=result.pages_processed,
                 )
+            elif result.status == DocumentStatus.AUDIT_FAILED:
+                outcome.add(Status.PARTIAL, detail=str(pdf))
+            else:
+                outcome.add(Status.FAILED, detail=str(pdf))
 
         if not self.config.quiet:
-            ok = sum(1 for r in results if r.success)
+            ok = outcome.completed
             console.print(f"\n[green]Completed:[/green] {ok}/{len(to_process)} files")
+            if outcome.has_failures:
+                console.print(
+                    f"[yellow]Failed/partial:[/yellow] {outcome.failed + outcome.partial}"
+                )
             console.print(f"[dim]Total time: {time.time() - start:.1f}s[/dim]")
 
         return results
@@ -315,7 +392,7 @@ class UnifiedPipeline:
             pages=page_outputs,
             pages_processed=state.handle.page_count,
             processing_time=elapsed,
-            model_version=engine.model_version,
+            model_version=engine.resolved_model_version(self.config),
         )
         state.apply_result(result)
         return result
@@ -952,7 +1029,49 @@ class UnifiedPipeline:
 
         return render
 
-    def _write_manifest(self, state: DocumentState, output_dir: Path) -> None:
+    def _fingerprint_inputs(
+        self, state: DocumentState
+    ) -> dict[str, tuple[str, str, str | None, str | None]]:
+        """Resolve ``{engine: (model, backend, task, prompt)}`` for the manifest.
+
+        For every engine that produced output on this doc, ask the engine
+        adapter for its RESOLVED model id and ``(backend, task)`` determinants
+        from the live config (not the hardcoded ``model_version`` literal). This
+        is what makes the manifest fingerprint actually invalidate on model /
+        backend / task drift, uniformly across the configurable-model engines.
+        socr does not own the OCR prompt (the sibling CLIs do, selected via
+        ``--task``), so ``prompt`` is the task selector's effect, left ``None``.
+        """
+        from socr.core.config import EngineType
+        from socr.engines.registry import get_engine
+
+        inputs: dict[str, tuple[str, str, str | None, str | None]] = {}
+        names: set[str] = set()
+        for run in state.engine_runs:
+            for part in str(run.engine).replace("+", ",").split(","):
+                part = part.strip()
+                if part and part != "native":
+                    # Strip a consensus(...) wrapper to the underlying engine.
+                    if part.startswith("consensus(") and part.endswith(")"):
+                        part = part[len("consensus(") : -1]
+                    names.add(part)
+        for name in names:
+            try:
+                engine = get_engine(EngineType(name))
+            except (ValueError, KeyError):
+                continue
+            backend, task = engine.fingerprint_determinants(self.config)
+            inputs[name] = (
+                engine.resolved_model_version(self.config),
+                backend,
+                task,
+                None,
+            )
+        return inputs
+
+    def _write_manifest(
+        self, state: DocumentState, output_dir: Path, saved_body: str | None = None
+    ) -> None:
         """Write a reproducibility manifest + blob cache for `socr replay`.
 
         Non-fatal: a manifest failure must never lose the OCR output.
@@ -964,9 +1083,16 @@ class UnifiedPipeline:
             from socr.core.manifest import build_manifest
 
             pdf_path = state.handle.path
-            doc_dir = doc_dir_for(output_dir, relative_key(pdf_path, pdf_path.parent))
+            scan_root = self._scan_root or pdf_path.parent
+            doc_dir = doc_dir_for(output_dir, relative_key(pdf_path, scan_root))
             store = BlobStore(doc_dir / "cache")
-            manifest = build_manifest(state, store, dpi=self.config.render_dpi)
+            manifest = build_manifest(
+                state,
+                store,
+                dpi=self.config.render_dpi,
+                fingerprint_inputs=self._fingerprint_inputs(state),
+                saved_body=saved_body,
+            )
             manifest.save(doc_dir / "manifest.json")
             if not self.config.quiet:
                 console.print(f"  [dim]Manifest: {doc_dir / 'manifest.json'} (replayable)[/dim]")
@@ -1030,7 +1156,7 @@ class UnifiedPipeline:
                 status=(DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR),
                 pages=page_outputs,
                 pages_processed=state.handle.page_count,
-                model_version=engine.model_version,
+                model_version=engine.resolved_model_version(self.config),
             )
             state.apply_result(result)
 
@@ -1501,13 +1627,47 @@ class UnifiedPipeline:
     # Phase 5: Assemble
     # ------------------------------------------------------------------
 
+    def _canonical_body(self, state: DocumentState) -> tuple[str, bool]:
+        """Assemble the document body with canonical ``## Page N`` headers.
+
+        Replaces socr's legacy ``\\n\\n---\\n\\n`` join: the saved ``.md`` now
+        carries one ``## Page N`` header per page (via the contract's
+        ``assemble_pages``), so the contract's ``split_native_pages`` round-trips
+        it and the manifest/replay is bit-consistent with the saved file.
+        Validates the resulting marker count against ``handle.page_count`` and
+        logs loudly on mismatch (the legacy ``---``-only or dropped-marker case)
+        rather than silently corrupting the per-page structure.
+
+        Returns ``(body, has_content)`` where ``has_content`` reflects whether
+        any page carries real text — an all-empty document yields header-only
+        markup, which must NOT count as content (else an empty doc would be
+        recorded as success).
+        """
+        from ocr_output_contract import PAGE_MARKER_RE, assemble_pages
+
+        from socr.core.manifest import canonical_page_texts
+
+        texts = canonical_page_texts(state)
+        has_content = any(t.strip() for t in texts)
+        if not has_content:
+            return "", False
+        body = assemble_pages(texts)
+        markers = len(PAGE_MARKER_RE.findall(body))
+        if markers != state.handle.page_count:
+            logger.warning(
+                "assemble: produced %d '## Page N' marker(s) but the document has "
+                "%d page(s); per-page structure may be incomplete",
+                markers,
+                state.handle.page_count,
+            )
+        return body, True
+
     def _phase_assemble(self, state: DocumentState, output_dir: Path) -> EngineResult:
         """Build the final EngineResult from DocumentState and save to disk."""
         if not self.config.quiet:
             console.print("\n[cyan]Phase 5:[/cyan] Assemble")
 
-        final_text = state.text
-        has_text = bool(final_text.strip())
+        final_text, has_text = self._canonical_body(state)
 
         # Determine overall status.
         # For CLI engines that produce whole-doc output (page_num=0), pages
@@ -1532,7 +1692,8 @@ class UnifiedPipeline:
         from ocr_output_contract import doc_dir_for, relative_key
 
         normalizer = OutputNormalizer()
-        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, state.handle.path.parent))
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         if has_text:
             final_text = normalizer.strip_phantom_images(final_text, output_dir=doc_dir)
 
@@ -1577,9 +1738,11 @@ class UnifiedPipeline:
         # — so the corpus has a machine-readable record for every run.
         self._write_metadata(state, final_result, output_dir, has_text)
 
-        # Reproducibility manifest (opt-in; default-on in agentic mode).
+        # Reproducibility manifest (opt-in; default-on in agentic mode). Pass the
+        # FINAL saved body so the manifest blobs (and thus replay) reproduce the
+        # on-disk .md bit-for-bit, not the pre-transform state.
         if has_text and (self.config.write_manifest or self.config.agentic):
-            self._write_manifest(state, output_dir)
+            self._write_manifest(state, output_dir, saved_body=final_text)
 
         return final_result
 
@@ -1611,7 +1774,7 @@ class UnifiedPipeline:
 
         try:
             pdf_path = state.handle.path
-            scan_root = pdf_path.parent
+            scan_root = self._scan_root or pdf_path.parent
             rel_key = relative_key(pdf_path, scan_root)
             doc_dir = doc_dir_for(output_dir, rel_key)
             doc_dir.mkdir(parents=True, exist_ok=True)
@@ -1664,7 +1827,8 @@ class UnifiedPipeline:
 
         from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
 
-        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, state.handle.path.parent))
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         figures_dir = figures_dir_for(doc_dir)
         extractor = FigureExtractor(
             max_total=self.config.figures_max_total,
@@ -1819,7 +1983,8 @@ class UnifiedPipeline:
         )
 
         pdf_path = state.handle.path
-        rel_key = relative_key(pdf_path, pdf_path.parent)
+        scan_root = self._scan_root or pdf_path.parent
+        rel_key = relative_key(pdf_path, scan_root)
         doc_dir = doc_dir_for(output_dir, rel_key)
         doc_dir.mkdir(parents=True, exist_ok=True)
         md_path = markdown_path_for(doc_dir, rel_key)

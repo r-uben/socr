@@ -366,6 +366,11 @@ def batch(
     else:
         pipeline.process_batch(pdf_dir, output_dir)
 
+    # Canon uniform exit policy: nonzero if ANY file failed or was partial.
+    # The batch path previously always exited 0 even on total failure.
+    if pipeline.last_outcome.exit_code != 0:
+        raise SystemExit(pipeline.last_outcome.exit_code)
+
 
 @cli.command()
 def engines() -> None:

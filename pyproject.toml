@@ -29,7 +29,7 @@ dependencies = [
     # Canonical OCR output contract: shared by every engine CLI. socr reuses its
     # readers (split_native_pages, path helpers) and metadata writers so it
     # consumes the engines' canonical output by construction, not ad-hoc parsing.
-    "ocr-output-contract @ git+https://github.com/r-uben/ocr-output-contract@v0.1.0",
+    "ocr-output-contract @ git+https://github.com/r-uben/ocr-output-contract@v0.1.1",
 ]
 
 [project.urls]

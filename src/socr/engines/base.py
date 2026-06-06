@@ -71,6 +71,36 @@ class BaseEngine(ABC):
         """Model version string. Override in subclasses that know their model."""
         return ""
 
+    def resolved_model_version(self, config: PipelineConfig) -> str:
+        """The model id ACTUALLY used for this run, for the manifest fingerprint.
+
+        The static :attr:`model_version` property is a hardcoded literal that
+        does not track ``--model`` overrides (e.g. gemini hardcodes
+        ``gemini-3-flash-preview`` while the CLI is invoked with
+        ``config.gemini_model``). The manifest fingerprint must reflect the
+        RESOLVED model so a model swap invalidates the cache.
+
+        Resolution: read ``config.<name>_model`` when the engine exposes a
+        configurable model attribute; fall back to the static literal otherwise.
+        """
+        configured = getattr(config, f"{self.name}_model", None)
+        if isinstance(configured, str) and configured.strip():
+            return configured
+        return self.model_version
+
+    def fingerprint_determinants(self, config: PipelineConfig) -> tuple[str, str | None]:
+        """Return ``(backend, task)`` for the run fingerprint.
+
+        Mirrors the resolved-model logic: a swap of backend or task must
+        invalidate the cache. Engines without a configurable backend report
+        ``"socr"`` (the orchestrator's umbrella backend) and ``None`` task.
+        """
+        backend = getattr(config, f"{self.name}_backend", None)
+        task = getattr(config, f"{self.name}_task", None)
+        backend_str = backend if isinstance(backend, str) and backend.strip() else "socr"
+        task_str = task if isinstance(task, str) and task.strip() else None
+        return backend_str, task_str
+
     def is_available(self) -> bool:
         """Check if the CLI tool is installed and callable."""
         try:
@@ -121,7 +151,7 @@ class BaseEngine(ABC):
                         failure_mode=FailureMode.CLI_ERROR,
                         error=f"CLI exited {result.returncode}: {stderr[:500]}",
                         processing_time=time.time() - start_time,
-                        model_version=self.model_version,
+                        model_version=self.resolved_model_version(config),
                     )
 
                 # Read output markdown
@@ -134,7 +164,7 @@ class BaseEngine(ABC):
                         failure_mode=FailureMode.EMPTY_OUTPUT,
                         error="CLI produced no output markdown",
                         processing_time=time.time() - start_time,
-                        model_version=self.model_version,
+                        model_version=self.resolved_model_version(config),
                     )
 
                 elapsed = time.time() - start_time
@@ -152,7 +182,7 @@ class BaseEngine(ABC):
                         )
                     ],
                     processing_time=elapsed,
-                    model_version=self.model_version,
+                    model_version=self.resolved_model_version(config),
                 )
 
             except subprocess.TimeoutExpired:
@@ -163,7 +193,7 @@ class BaseEngine(ABC):
                     failure_mode=FailureMode.TIMEOUT,
                     error=f"Timeout after {config.timeout}s",
                     processing_time=time.time() - start_time,
-                    model_version=self.model_version,
+                    model_version=self.resolved_model_version(config),
                 )
 
     def process_pages(
@@ -305,17 +335,29 @@ class BaseEngine(ABC):
     def _read_page_output(
         self, stem: str, output_dir: Path, scan_root: Path | None = None
     ) -> str | None:
-        """Read canonical output markdown for a single page image.
+        """Read output markdown for a single page image, canonical-first.
 
         Each rendered page image ``<stem>.png`` lives under ``scan_root`` and the
         engine was invoked with ``-o <output_dir>``, so the canon places its
         output at ``<output_dir>/<stem>/<stem>.md`` (the page image has no
         subdirectory, so the mirrored rel dir is empty). We resolve that path via
-        the contract's helpers rather than guessing layouts.
+        the contract's helpers FIRST.
 
-        ``scan_root`` defaults to ``output_dir`` for backwards compatibility, but
-        callers should pass the image directory the page was rendered into so the
-        relative key matches what the engine mirrored.
+        socr ships independently of the sibling engine CLIs, so a not-yet-
+        converged (or legacy) engine may write a non-canonical layout. To avoid
+        silently yielding an EMPTY page for the DEFAULT per-page pipeline path,
+        we keep a GUARDED legacy fallback ladder after the canonical path:
+
+          1. canonical ``<output_dir>/<stem>/<stem>.md``  (preferred)
+          2. flat ``<output_dir>/<stem>.md``
+          3. sanitized-stem variants (``<sanitized>/<sanitized>.md`` + flat)
+          4. a LOUD, stem-filtered ``rglob`` net (warns expected-vs-found)
+
+        Each non-canonical hit is logged as an anomaly so divergence surfaces
+        rather than passing silently. ``scan_root`` defaults to ``output_dir``
+        for backwards compatibility, but callers should pass the image directory
+        the page was rendered into so the relative key matches what the engine
+        mirrored.
         """
         root = scan_root if scan_root is not None else output_dir
         rel_key = relative_key(root / f"{stem}.png", root)
@@ -323,6 +365,49 @@ class BaseEngine(ABC):
         md_path = markdown_path_for(doc_dir, rel_key)
         if md_path.exists():
             return md_path.read_text(encoding="utf-8")
+
+        legacy = self._legacy_page_md(stem, output_dir, expected=md_path)
+        if legacy is not None:
+            return legacy.read_text(encoding="utf-8")
+        return None
+
+    def _legacy_page_md(self, stem: str, output_dir: Path, *, expected: Path) -> Path | None:
+        """Guarded legacy read-back for a single page (non-canonical layouts).
+
+        Tries flat and sanitized-stem variants, then a stem-filtered ``rglob``
+        net. Returns the resolved path (logging the anomaly) or ``None``. The
+        rglob net requires the filename stem to match the page stem so a stray
+        aggregate ``images.md`` (qwen's pre-canon layout) cannot be mistaken for
+        a specific page; it also guards against symlinks escaping ``output_dir``.
+        """
+        sanitized = sanitize_filename(stem)
+        candidates = [
+            output_dir / f"{stem}.md",
+            output_dir / sanitized / f"{sanitized}.md",
+            output_dir / f"{sanitized}.md",
+        ]
+        for cand in candidates:
+            if cand != expected and cand.exists():
+                logger.warning(
+                    f"[{self.name}] Canonical page output {expected} missing; "
+                    f"using non-canonical {cand} (legacy layout fallback)"
+                )
+                return cand
+
+        # Stem-filtered rglob net: only files whose stem matches the page stem
+        # (canonical or sanitized), so an aggregate/stray .md is never returned.
+        wanted_stems = {stem, sanitized}
+        for md_file in sorted(output_dir.rglob("*.md")):
+            if md_file.stem not in wanted_stems:
+                continue
+            if not md_file.resolve().is_relative_to(output_dir.resolve()):
+                logger.warning(f"[{self.name}] Skipping symlink outside output dir: {md_file}")
+                continue
+            logger.warning(
+                f"[{self.name}] Canonical page output {expected} missing; "
+                f"using non-canonical {md_file} via stem-filtered rglob fallback"
+            )
+            return md_file
         return None
 
     @abstractmethod
@@ -336,17 +421,20 @@ class BaseEngine(ABC):
         ...
 
     def _read_output(self, pdf_path: Path, output_dir: Path) -> str | None:
-        """Read the canonical aggregated markdown from the CLI's output dir.
+        """Read the aggregated markdown from the CLI's output dir, canonical-first.
 
-        Every engine now emits the same canonical structure (via
+        Every engine now emits the canonical structure (via
         ``ocr-output-contract``): ``<output_dir>/<stem>/<stem>.md`` for a
-        single-file PDF input (the input subtree, here empty, is mirrored under
-        the root). We resolve that path with the contract helpers — no
-        per-engine layout branching.
+        single-file PDF input. We resolve that path with the contract helpers
+        FIRST, then fall back through a GUARDED legacy ladder so a not-yet-
+        converged or legacy engine surfaces (logged) rather than silently
+        yielding an empty document:
 
-        A single ``rglob`` is kept only as a last-resort safety net (and is
-        logged loudly) so an unexpected layout surfaces rather than silently
-        producing an empty document.
+          1. canonical ``<output_dir>/<stem>/<stem>.md``  (preferred)
+          2. flat ``<output_dir>/<stem>.md``
+          3. sanitized-stem variants (``<sanitized>/<sanitized>.md`` + flat)
+          4. a LOUD, stem-filtered ``rglob`` net (no longer returns the first
+             arbitrary ``.md`` — only one whose stem matches the doc stem)
         """
         scan_root = pdf_path.parent
         rel_key = relative_key(pdf_path, scan_root)
@@ -355,19 +443,9 @@ class BaseEngine(ABC):
         if md_path.exists():
             return self._clean_output(md_path.read_text(encoding="utf-8"), self.name)
 
-        # Last-resort fallback: an engine deviated from the canon. Find any .md,
-        # but log it as an anomaly so the divergence is visible, not silent.
-        for md_file in output_dir.rglob("*.md"):
-            # Guard against symlinks escaping the output directory.
-            if not md_file.resolve().is_relative_to(output_dir.resolve()):
-                logger.warning(f"[{self.name}] Skipping symlink outside output dir: {md_file}")
-                continue
-            logger.warning(
-                f"[{self.name}] Canonical output {md_path} missing; "
-                f"using non-canonical {md_file} via rglob fallback"
-            )
-            return self._clean_output(md_file.read_text(encoding="utf-8"), self.name)
-
+        legacy = self._legacy_page_md(pdf_path.stem, output_dir, expected=md_path)
+        if legacy is not None:
+            return self._clean_output(legacy.read_text(encoding="utf-8"), self.name)
         return None
 
     @staticmethod

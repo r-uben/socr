@@ -16,7 +16,6 @@ fitz = pytest.importorskip("fitz")  # PyMuPDF; skip whole module if unavailable
 from socr.core.cache import BlobStore, blob_hash  # noqa: E402
 from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.manifest import (  # noqa: E402
-    PAGE_SEPARATOR,
     Manifest,
     PageFingerprint,
     build_manifest,
@@ -118,7 +117,9 @@ def test_blobstore_missing_blob_raises(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_build_and_replay_matches_state_text(tmp_path):
+def test_build_and_replay_matches_canonical_body(tmp_path):
+    from ocr_output_contract import assemble_pages, split_native_pages
+
     pdf = _make_pdf(tmp_path / "paper.pdf", n_pages=2)
     state = _ocr_state(pdf, n_pages=2)
     store = BlobStore(tmp_path / "cache")
@@ -126,8 +127,13 @@ def test_build_and_replay_matches_state_text(tmp_path):
     manifest = build_manifest(state, store, dpi=120)
     out = replay(manifest, store)
 
-    assert out == state.text
-    assert out == "OCR output for page 1\n\n---\n\nOCR output for page 2"
+    # Replay now emits the canonical '## Page N' body (assemble_pages), the same
+    # assembler socr uses for the saved .md — bit-consistent with disk.
+    assert out == assemble_pages(["OCR output for page 1", "OCR output for page 2"])
+    assert split_native_pages(out) == [
+        "OCR output for page 1",
+        "OCR output for page 2",
+    ]
 
 
 def test_replay_from_disk_invokes_no_engine(tmp_path):
@@ -146,7 +152,9 @@ def test_replay_from_disk_invokes_no_engine(tmp_path):
     cold_store = BlobStore(cache_root)
     out = replay(reloaded, cold_store)
 
-    expected = PAGE_SEPARATOR.join(f"OCR output for page {i}" for i in range(1, 4))
+    from ocr_output_contract import assemble_pages
+
+    expected = assemble_pages([f"OCR output for page {i}" for i in range(1, 4)])
     assert out == expected
 
 
@@ -328,4 +336,7 @@ def test_ocr_pages_get_image_hash_native_pages_do_not(tmp_path):
     assert manifest.entries[1].fingerprint.image_hash != ""  # rasterized → hashed
     assert manifest.entries[2].fingerprint.engine == "native"
     assert manifest.entries[2].fingerprint.image_hash == ""  # no rasterization
-    assert replay(manifest, store) == "ocr p1\n\n---\n\nnative p2"
+
+    from ocr_output_contract import assemble_pages
+
+    assert replay(manifest, store) == assemble_pages(["ocr p1", "native p2"])

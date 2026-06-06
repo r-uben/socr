@@ -542,7 +542,11 @@ class TestPhaseAssemble:
         stem = "fake"
         md_path = tmp_path / stem / f"{stem}.md"
         assert md_path.exists()
-        assert md_path.read_text() == "Hello world"
+        # Canon body: '## Page N' header per page, splittable back to the text.
+        from ocr_output_contract import assemble_pages, split_native_pages
+
+        assert md_path.read_text() == assemble_pages(["Hello world"])
+        assert split_native_pages(md_path.read_text()) == ["Hello world"]
 
     def test_assemble_writes_canonical_metadata(self, tmp_path: Path) -> None:
         """_phase_assemble writes per-doc + root metadata.json keyed by the
