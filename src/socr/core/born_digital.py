@@ -130,6 +130,19 @@ class BornDigitalDetector:
     # non-word strings.
     MAX_AVG_WORD_LENGTH = 20.0
 
+    # Encoding-corruption ratio: a born-digital PDF can have a broken font/ToUnicode
+    # map that yields VALID characters in wrong positions ("Journal"->"Joumal",
+    # "1997"->"(/997)") — invisible to the garbage-char check. Signals: mid-word
+    # capitals ("ofFinancial"), slash-for-digit ("(/997)"), run-on words. Calibrated
+    # on real pages: clean prose ~0.000, a header-only glitch (Fama-French) ~0.019,
+    # pervasive data corruption ~0.095.
+    # FLAG threshold: record the page as suspect (visibility) but still trust native.
+    ENCODING_CORRUPTION_FLAG = 0.01
+    # ESCALATE threshold: native is untrustworthy page-wide -> route to OCR (read the
+    # image, not the broken encoding). Set well above the header-only case so a clean
+    # body is never sent to a slower/lossier VLM over a few bad header tokens.
+    MAX_ENCODING_CORRUPTION = 0.05
+
     def __init__(
         self,
         min_chars: int | None = None,
@@ -343,6 +356,28 @@ class BornDigitalDetector:
                 notes=notes,
             )
 
+        # Encoding corruption: a broken font/ToUnicode map yields valid characters
+        # in wrong positions, invisible to the garbage-char check. Pervasive
+        # corruption means the text layer can't be trusted page-wide -> read the
+        # image instead. (Mild, header-only glitches are flagged below, not escalated.)
+        encoding_corruption = self._encoding_corruption_ratio(raw_text)
+        if encoding_corruption > self.MAX_ENCODING_CORRUPTION:
+            notes.append(f"text-layer encoding corrupted ({encoding_corruption:.1%}) -> OCR")
+            return PageAssessment(
+                page_num=page_num,
+                is_born_digital=False,
+                native_text="",
+                confidence=0.75,
+                char_count=char_count,
+                word_count=word_count,
+                font_count=font_count,
+                has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
+                notes=notes,
+            )
+
         # --- All checks passed: page is born-digital ---
 
         # Compute confidence based on signal strength
@@ -361,6 +396,12 @@ class BornDigitalDetector:
         # Also flag that OCR is preferred for these pages.
         has_complex_content = has_tables or has_figures or has_equations
         needs_ocr_enhancement = has_complex_content
+
+        # Flag mild encoding corruption (e.g. a broken header font) for visibility
+        # without escalating: the body is still trustworthy, but the page is marked
+        # suspect so it is never silently relied on.
+        if encoding_corruption > self.ENCODING_CORRUPTION_FLAG:
+            notes.append(f"text-layer encoding suspect ({encoding_corruption:.1%})")
 
         if has_tables:
             # Use structured extraction that renders tables as markdown
@@ -516,15 +557,22 @@ class BornDigitalDetector:
         except Exception:
             return page.get_text("text").strip()
 
-        if not tables_result.tables:
-            return page.get_text("text").strip()
-
         # Collect table bounding boxes and their markdown representations
         table_regions: list[tuple[fitz.Rect, str]] = []
         for table in tables_result.tables:
             md = self._table_to_markdown(table)
             if md:
                 table_regions.append((fitz.Rect(table.bbox), md))
+
+        # Born-digital booktabs tables (top/mid/bottom rules only) make the
+        # default lines strategy return nothing, so the table would otherwise be
+        # dumped as a flat token stream. Recover the grid from text alignment
+        # (char-exact native values, no model). reconstruct_table_regions self-
+        # gates on numeric-column structure, so it is safe to call on any page.
+        if not table_regions:
+            from socr.tables.reconstruct import reconstruct_table_regions
+
+            table_regions = reconstruct_table_regions(page)
 
         if not table_regions:
             return page.get_text("text").strip()
@@ -656,6 +704,29 @@ class BornDigitalDetector:
         """
         images = page.get_images()
         return len(images) > 0
+
+    def _encoding_corruption_ratio(self, text: str) -> float:
+        """Fraction of word tokens that show font/ToUnicode encoding corruption.
+
+        Catches the failure mode the garbage-char check misses: VALID characters
+        in wrong positions from a broken font map. Three structural signals, none
+        of which clean prose produces in quantity:
+
+        - mid-word capital ("ofFinancial", "FrenchfJoumal") — a capital after a
+          lowercase inside a token, from dropped inter-word spaces;
+        - slash-for-digit ("(/997)", "/53") — a stroke glyph decoded as '/';
+        - run-on tokens (>= 16 chars) — fused words.
+
+        Returns 0.0 for fewer than 20 alpha tokens (too little to judge).
+        """
+        tokens = text.split()
+        alpha = [t for t in tokens if any(c.isalpha() for c in t)]
+        if len(alpha) < 20:
+            return 0.0
+        midcap = sum(1 for t in alpha if re.search(r"[a-z][A-Z]", t))
+        slash_digit = sum(1 for t in tokens if re.search(r"/\d|\d/|\(/", t))
+        run_on = sum(1 for t in alpha if len(t) >= 16)
+        return (midcap + slash_digit + run_on) / len(alpha)
 
     def _garbage_ratio(self, text: str) -> float:
         """Ratio of garbage characters to total characters.

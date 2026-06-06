@@ -358,3 +358,35 @@ be one commit on `refactor/unified-page-contract`.
   - [x] Full suite green (475); no new lint
 - **Next (optional):** judge benchmark (TICKET-16) to tune accept thresholds;
   real per-provider prices; populate model_version/prompt_hash in fingerprints.
+
+### [TICKET-18] Table quality + text-layer integrity
+- **Status:** done (core program; see `docs/log/2026-06-05_*` and `2026-06-06_table-quality-and-text-integrity.md`)
+- **Priority:** high (corpus correctness — owner reads these for research)
+- **Branch:** `feat/audit-log` (9 commits, off `main`)
+- **Files:** `tables/{reconstruct,locate,image_locate,extract,reconcile}.py`, `core/{audit_log,born_digital,config,state}.py`, `pipeline/orchestrator.py`, `cli.py`, `tests/test_{reconstruct,encoding_corruption,dual_pass_tables,audit_log}.py`
+- **What it does:** evidence-driven program that hardened table extraction and
+  native-text trust after a real-corpus audit. The corpus is overwhelmingly
+  born-digital, so the work landed on deterministic, no-model fixes.
+  - **Structure-restore:** born-digital booktabs tables (no vertical rules) made
+    `find_tables(lines)` return 0 and were dumped as a flat token stream; recover
+    the grid via PyMuPDF text strategy + cleanup, char-exact, no model.
+  - **Numeric-column gate:** only reconstruct where numbers co-occupy >=3 x-lanes
+    per row (a grid); skips references pages that hung text-strategy for minutes.
+  - **Text-layer corruption detection:** two-tier (flag mild / escalate pervasive
+    to OCR) for broken font maps ("Journal"->"Joumal") the garbage check misses.
+  - **Dual-pass tables:** crop + re-read located tables, reconcile vs page OCR;
+    default flag-only (`--auto-patch-tables` to opt in), never silently edits.
+  - **Image-based localization:** connected-component rule detection for scanned
+    pages (vector detectors are blind there).
+  - **Durable audit log:** `audit_log.json` of RECITATION / judge / dual-pass events.
+- **Design notes:** auto-patch reversal and the gate design cross-checked with codex
+  (gpt-5.5); rejected clipping text-strategy to the rule band (silently truncated a
+  table when the bottom rule was undetected — unacceptable for a research corpus).
+- **Acceptance Criteria:**
+  - [x] Born-digital booktabs tables emit a markdown grid, not a flat dump
+  - [x] References/prose never trigger reconstruction (numeric-column gate)
+  - [x] Corrupted text layers flagged; pervasive ones routed to OCR
+  - [x] Dual-pass flag-only by default; opt-in auto-patch
+  - [x] Full suite green (541); new code lint-clean
+- **Next (see TODO.md):** per-page provenance by default; firing-rate validation;
+  `model_version` in fingerprints; judge spot-check on native table pages.

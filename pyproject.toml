@@ -30,6 +30,8 @@ dependencies = [
     # readers (split_native_pages, path helpers) and metadata writers so it
     # consumes the engines' canonical output by construction, not ad-hoc parsing.
     "ocr-output-contract @ git+https://github.com/r-uben/ocr-output-contract@v0.1.3",
+    "numpy>=1.26.0",
+    "opencv-python-headless>=4.9.0",  # image-based table localization on scanned pages
 ]
 
 [project.urls]

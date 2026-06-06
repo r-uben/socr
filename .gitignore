@@ -48,6 +48,7 @@ output/
 !examples/**/*.md
 !src/**/*.md
 !TICKETS.md
+!TODO.md
 
 # Test artifacts
 test_*.md

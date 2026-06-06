@@ -74,6 +74,7 @@ class DocumentState:
     engine_runs: list[EngineResult] = field(
         default_factory=list
     )  # all EngineResult objects for telemetry
+    events: list = field(default_factory=list)  # AuditEvent stream for the run audit log
 
     def __post_init__(self) -> None:
         for i in range(1, self.handle.page_count + 1):

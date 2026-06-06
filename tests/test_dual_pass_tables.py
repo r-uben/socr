@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import fitz
+import pytest
 
 from socr.core.born_digital import DocumentAssessment, PageAssessment
 from socr.core.config import PipelineConfig
@@ -85,6 +86,30 @@ def test_locate_borderless_returns_nothing():
     assert locate_tables(page) == []
 
 
+def test_locate_rejects_out_of_page_frame_rules():
+    # Real dense pages (Fama-French 1997) carry page-frame / crop-mark lines drawn
+    # at y < 0 and y > page height. Including them stretched a table band to the
+    # whole page with negative coords. The detector must drop them and keep the
+    # bbox inside the page.
+    doc = fitz.open()
+    page = doc.new_page()
+    pr = page.rect
+    cols = [100, 220, 300, 380]
+    rows = [200 + i * 22 for i in range(len(_DATA))]
+    _draw_table(page, cols, rows)
+    for yy in [rows[0] - 4, rows[1] - 2, rows[-1] + 12]:  # real table rules
+        page.draw_line((100, yy), (460, yy))
+    # Frame/crop-mark rules outside the visible page:
+    page.draw_line((-30, -15), (560, -15))
+    page.draw_line((-30, pr.y1 + 40), (560, pr.y1 + 40))
+
+    boxes = locate_tables(page)
+    assert len(boxes) == 1
+    x0, y0, x1, y1 = boxes[0].bbox
+    assert pr.x0 <= x0 and x1 <= pr.x1 and pr.y0 <= y0 and y1 <= pr.y1  # in-bounds
+    assert y1 - y0 < 250  # bounds the table, not the whole 792pt page
+
+
 def test_locate_ignores_prose_on_mixed_page():
     doc = fitz.open()
     page = doc.new_page()
@@ -103,6 +128,67 @@ def test_locate_ignores_prose_on_mixed_page():
     _x0, y0, _x1, y1 = boxes[0].bbox
     # The band starts at the first rule, not at the "4. Results" title (y~80).
     assert y0 > 120
+
+
+# --------------------------------------------------------------------------
+# Image-based localization (scanned pages: no vectors)
+# --------------------------------------------------------------------------
+
+
+def _image_only_page(style="booktabs"):
+    """A page whose content is a single rendered image and no vector drawings —
+    the scanned-page signature."""
+    src, _ = _build_page(style)
+    pix = src[0].get_pixmap(matrix=fitz.Matrix(150 / 72, 150 / 72))
+    doc = fitz.open()
+    page = doc.new_page(width=src[0].rect.width, height=src[0].rect.height)
+    page.insert_image(page.rect, pixmap=pix)
+    return doc, page
+
+
+def test_is_scanned_signature():
+    from socr.tables.locate import _is_scanned
+
+    _doc, born = _build_page("booktabs")  # vector drawings present
+    assert _is_scanned(born) is False
+    _doc2, scanned = _image_only_page("booktabs")
+    assert _is_scanned(scanned) is True
+
+
+def test_image_detector_finds_scanned_table():
+    pytest.importorskip("cv2")  # detection needs opencv; fail-open returns [] without it
+    _doc, page = _image_only_page("booktabs")
+    boxes = locate_tables(page)
+    assert len(boxes) >= 1
+    assert all(b.source == "image" for b in boxes)
+    # bounds the table region, not the whole page
+    x0, y0, x1, y1 = boxes[0].bbox
+    pr = page.rect
+    assert pr.x0 <= x0 and x1 <= pr.x1 and y1 <= pr.y1
+
+
+def test_image_detector_ignores_scanned_prose():
+    # Render prose to an image-only page: thin/solid/wide filters must reject text
+    # rows (the false-positive failure mode the vector path never had).
+    src = fitz.open()
+    sp = src.new_page()
+    y = 90
+    prose = "This is a justified line of body prose text on the page."
+    for _ in range(30):
+        sp.insert_text((72, y), prose, fontsize=10)
+        y += 18
+    pix = sp.get_pixmap(matrix=fitz.Matrix(150 / 72, 150 / 72))
+    doc = fitz.open()
+    page = doc.new_page(width=sp.rect.width, height=sp.rect.height)
+    page.insert_image(page.rect, pixmap=pix)
+    assert locate_tables(page) == []
+
+
+def test_vector_page_does_not_trigger_image_path():
+    # Born-digital booktabs page: located by the vector detector, source != image.
+    _doc, page = _build_page("booktabs")
+    boxes = locate_tables(page)
+    assert boxes and all(b.source != "image" for b in boxes)
 
 
 # --------------------------------------------------------------------------
@@ -151,8 +237,18 @@ def test_diff_grids_ignores_formatting_only_differences():
 # --------------------------------------------------------------------------
 
 
-def test_reconcile_patches_misread_and_preserves_prose():
+def test_reconcile_flag_only_by_default():
+    # Default (auto_patch=False): report the disagreement, NEVER edit the corpus.
     r = reconcile_page_tables(_PAGE_MD, [(_CROP_MD, "booktabs")])
+    assert not r.patched and r.flagged
+    assert r.text == _PAGE_MD  # untouched
+    assert r.disagreements[0].action == "flagged"
+    assert r.disagreements[0].changed_cells  # but the misread is recorded
+    assert "--auto-patch-tables" in r.disagreements[0].note
+
+
+def test_reconcile_patches_misread_when_auto_patch_enabled():
+    r = reconcile_page_tables(_PAGE_MD, [(_CROP_MD, "booktabs")], auto_patch=True)
     assert r.patched and r.flagged
     assert "(0.010)" in r.text and "(0.0l0)" not in r.text
     assert "Prose before." in r.text and "Prose after." in r.text
@@ -268,12 +364,30 @@ def _wire_reader(monkeypatch, reader):
     monkeypatch.setattr(extract_mod, "OllamaTableReader", lambda *a, **k: reader)
 
 
-def test_phase_patches_corrupted_table_on_real_pdf(tmp_path, monkeypatch):
+def test_phase_flag_only_by_default_does_not_edit(tmp_path, monkeypatch):
     doc, _ = _build_page("booktabs")
     pdf = tmp_path / "doc.pdf"
     doc.save(pdf)
 
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))  # auto_patch_tables default False
+    pipe._last_assessment = _assessment(has_tables=True)
+    state, bo = _state_with_table_page(pdf, _PAGE_MD)  # contains the (0.0l0) misread
+    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
+    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
+
+    pipe._phase_dual_pass_tables(state)
+
+    assert bo.text == _PAGE_MD  # corpus untouched
+    assert any("dual-pass flagged" in n for n in bo.audit_notes)  # but recorded
+    assert any(e.kind == "dualpass_flagged" for e in state.events)
+
+
+def test_phase_patches_when_auto_patch_enabled(tmp_path, monkeypatch):
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
     pipe._last_assessment = _assessment(has_tables=True)
     state, bo = _state_with_table_page(pdf, _PAGE_MD)  # contains the (0.0l0) misread
     monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")

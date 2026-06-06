@@ -1083,6 +1083,17 @@ class UnifiedPipeline:
             bo.audit_passed = False
             bo.failure_mode = FailureMode.AUDIT_FAILED
             bo.error = "VLM judge rejected (image mismatch)" + (f": {issues}" if issues else "")
+            from socr.core.audit_log import AuditEvent
+
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="judge_reject",
+                    engine=bo.engine,
+                    detail=issues or "image mismatch",
+                    data={"issues": issues, "judge_model": model},
+                )
+            )
             ps.best_output = None  # -> needs_repair -> repair escalates
             if not self.config.quiet:
                 console.print(
@@ -1152,7 +1163,11 @@ class UnifiedPipeline:
                 crops = extractor.extract(pdf_path, page_num, boxes)
                 if not crops:
                     continue
-                result = reconcile_page_tables(bo.text, [(c.markdown, c.source) for c in crops])
+                result = reconcile_page_tables(
+                    bo.text,
+                    [(c.markdown, c.source) for c in crops],
+                    auto_patch=self.config.auto_patch_tables,
+                )
             except Exception as exc:  # a dual-pass failure must never drop a page
                 logger.warning("dual-pass errored on p%d (%s); keeping text", page_num, exc)
                 continue
@@ -1160,9 +1175,32 @@ class UnifiedPipeline:
             if result.patched:
                 bo.text = result.text
                 patched += 1
+            from socr.core.audit_log import AuditEvent
+
             for d in result.disagreements:
                 flagged += 1
                 bo.audit_notes.append(f"dual-pass {d.action}: {d.summary()}")
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=f"dualpass_{d.action}",
+                        engine=bo.engine,
+                        detail=d.summary(),
+                        data={
+                            "source": d.source,
+                            "note": d.note,
+                            "changed_cells": [
+                                {
+                                    "row": c.row,
+                                    "col": c.col,
+                                    "page": c.page_value,
+                                    "crop": c.crop_value,
+                                }
+                                for c in d.changed_cells
+                            ],
+                        },
+                    )
+                )
             if result.disagreements and not self.config.quiet:
                 for d in result.disagreements:
                     color = "green" if d.action == "patched" else "yellow"
@@ -1922,6 +1960,10 @@ class UnifiedPipeline:
         if has_text and (self.config.write_manifest or self.config.agentic):
             self._write_manifest(state, output_dir, saved_body=final_text)
 
+        # Durable per-run audit log of notable events (RECITATION escalations,
+        # judge rejections, dual-pass patches). Always written; never fatal.
+        self._write_audit_log(state, doc_dir)
+
         return final_result
 
     def _write_metadata(
@@ -1995,6 +2037,22 @@ class UnifiedPipeline:
             RootIndex(output_dir).record(rel_key, meta)
         except Exception as exc:  # never lose output over a metadata write
             logger.warning("metadata write failed (non-fatal): %s", exc)
+
+    def _write_audit_log(self, state: DocumentState, doc_dir: Path) -> None:
+        """Write audit_log.json next to the output; surface a one-line summary."""
+        try:
+            from socr.core.audit_log import build_run_audit
+
+            audit = build_run_audit(state)
+            if not audit.events:
+                return  # a clean run leaves no audit log to inspect
+            audit.save(doc_dir / "audit_log.json")
+            if not self.config.quiet:
+                console.print(
+                    f"  [dim]Audit log: {doc_dir / 'audit_log.json'} ({audit.summary_line()})[/dim]"
+                )
+        except Exception as exc:  # never lose output over an audit-log write
+            logger.warning("audit log write failed (non-fatal): %s", exc)
 
     def _describe_and_embed_figures(
         self,
