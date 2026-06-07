@@ -309,7 +309,20 @@ def process(
     try:
         result = pipeline.process(pdf_path, output_dir)
         if not result.success:
-            raise click.ClickException(f"Processing failed: {result.error}")
+            from socr.core.result import DocumentStatus
+
+            # A complete markdown was written but some pages failed audit (e.g.
+            # local-only run where cloud escalation is unavailable). This is a
+            # partial success, not a hard failure: keep the usable output and exit
+            # 0 with a warning rather than aborting. Only a true ERROR (no text
+            # produced) is fatal.
+            if result.status == DocumentStatus.AUDIT_FAILED:
+                console.print(
+                    "[yellow]Completed with warnings:[/yellow] some pages failed "
+                    "audit; output written. See audit_log.json."
+                )
+            else:
+                raise click.ClickException(f"Processing failed: {result.error}")
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
         raise click.Abort()
