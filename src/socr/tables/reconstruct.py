@@ -39,6 +39,10 @@ _MAX_PAGE_WORDS = 1500
 _MIN_ROWS = 3
 _MIN_COLS = 2
 _MIN_NUMERIC_FRAC = 0.20
+# Majority of non-empty rows must be real data rows (>=2 numeric cells) for a
+# text-strategy grid to be trusted. Rejects whole-page over-capture on
+# prose/references pages that merely contain a small embedded table.
+_MIN_DATA_ROW_FRAC = 0.5
 
 _NUMERIC_RE = re.compile(r"-?\d")
 # A token that is essentially a number (table value): 0.253, (0.014), 1,204, 45%.
@@ -172,7 +176,25 @@ def _looks_tabular(grid: list[list[str]]) -> bool:
     if not nonempty:
         return False
     numeric = sum(1 for c in nonempty if _NUMERIC_RE.search(c))
-    return numeric / len(nonempty) >= _MIN_NUMERIC_FRAC
+    if numeric / len(nonempty) < _MIN_NUMERIC_FRAC:
+        return False
+
+    # Localization guard against whole-page over-capture: PyMuPDF's text-strategy
+    # grids EVERYTHING on a page by whitespace alignment, so a page that is mostly
+    # prose/references with one small embedded data table comes back as a single
+    # page-spanning "table" whose prose lines are shredded into cells. A genuine
+    # data table has most of its rows populate multiple numeric lanes; a prose page
+    # with a small table does not. Require a MAJORITY of non-empty rows to be real
+    # data rows (>=2 numeric cells). Empirically separates a clean booktabs grid
+    # (~0.83) from a prose+references+small-table page (~0.40). Rejected pages fall
+    # back to plain get_text() (clean linearized prose), never a shredded grid.
+    data_rows = sum(
+        1 for row in grid if sum(1 for c in row if c and _NUMERIC_RE.search(c)) >= 2
+    )
+    nonempty_rows = sum(1 for row in grid if any(row))
+    if not nonempty_rows:
+        return False
+    return data_rows / nonempty_rows >= _MIN_DATA_ROW_FRAC
 
 
 def _grid_to_markdown(grid: list[list[str]]) -> str:

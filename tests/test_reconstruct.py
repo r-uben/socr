@@ -167,3 +167,43 @@ def test_extract_structured_leaves_prose_alone():
         y += 16
     out = BornDigitalDetector().extract_structured(page)
     assert "| --- |" not in out  # prose must never become a table
+
+
+def test_prose_with_small_embedded_table_is_not_whole_page_gridded():
+    """Regression (issue #32): an exercises+references page with one small data
+    table made has_numeric_columns fire, then text-strategy find_tables grids the
+    WHOLE page, shredding prose/references into character-split cells. The
+    data-row-majority guard must reject the over-capture and leave clean prose."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 80
+    # prose / exercise text
+    for line in [
+        "3. Consider the following items bought in a supermarket and some of",
+        "their characteristics:",
+    ]:
+        page.insert_text((54, y), line, fontsize=10)
+        y += 16
+    # a small 3-numeric-column data table (the real signal that trips the gate)
+    cols = [60, 130, 200]
+    for no, cost, vol in [("1", "20", "6"), ("2", "50", "8"), ("3", "90", "10")]:
+        for x, cell in zip(cols, (no, cost, vol)):
+            page.insert_text((x, y), cell, fontsize=10)
+        y += 16
+    y += 8
+    # references (single-token wraps that make _detect_columnar_numbers fire)
+    for cite in [
+        "Alpaydin, E.: Introduction to Machine Learning, 2nd edn. MIT Press (2010)",
+        "Bishop, C.M.: Neural Networks for Pattern Recognition. Oxford (2006)",
+        "Duda, R.O., Hart, P.E., Stork, D.G.: Pattern Classification. Wiley (2001)",
+    ]:
+        page.insert_text((54, y), cite, fontsize=10)
+        y += 16
+
+    out = BornDigitalDetector().extract_structured(page)
+    # the prose must survive intact, not be shredded into a grid
+    assert "Consider the following items bought in a supermarket" in out
+    assert "| --- |" not in out  # no whole-page fake grid
+    import re
+
+    assert not re.search(r"\| [a-z] \|", out)  # no mid-word character-split cells
