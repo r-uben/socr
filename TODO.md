@@ -1,9 +1,16 @@
 # socr — TODO
 
 Live, prioritized next-actions. Detail lives in `TICKETS.md` and `docs/log/`.
-Last updated: 2026-06-06.
+Last updated: 2026-06-07.
 
 ## Now / next
+- [ ] **Textbook-class failures (TICKET-19..24)** — first equation-heavy textbook
+      run surfaced 6 issues; see `docs/log/2026-06-07_math-textbook-failures.md`.
+      Highest: **TICKET-19** — `extract_structured()` shreds a prose+references page
+      (Dougherty p19) into a fake 9-col grid; contradicts TICKET-18's met criterion
+      "references/prose never trigger reconstruction". Then **TICKET-23** (no
+      equation→LaTeX path; the central gap for math books) and **TICKET-21**
+      (local-only run hard-errors on a fully-written `.md`).
 - [ ] **Land `feat/audit-log` -> main** — 9 commits, all tested (541 pass). The
       table-quality + text-integrity program (see `docs/log/2026-06-06_*`).
 - [ ] **Per-page provenance, written by default** — record per page: engine,

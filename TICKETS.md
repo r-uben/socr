@@ -390,3 +390,90 @@ be one commit on `refactor/unified-page-contract`.
   - [x] Full suite green (541); new code lint-clean
 - **Next (see TODO.md):** per-page provenance by default; firing-rate validation;
   `model_version` in fingerprints; judge spot-check on native table pages.
+
+---
+
+## Tickets — equation-heavy textbook failures (see docs/log/2026-06-07_*)
+
+Opened 2026-06-07 from the first textbook-class run (Dougherty 2013, 203 pp,
+born-digital, clean text layer; local-first, no cloud). Evidence and reproducers
+in `docs/log/2026-06-07_math-textbook-failures.md`.
+
+### [TICKET-19] `extract_structured()` shreds prose/reference pages into fake grids
+- **Status:** open
+- **Priority:** highest (corrupts clean native text)
+- **Files:** `core/born_digital.py` (`extract_structured`), `tables/reconstruct.py`, `tables/locate.py`
+- **Description:** A born-digital exercises+references page with one small embedded
+  data table (Dougherty p19) is rendered *entirely* as a 9-column markdown grid,
+  splitting words mid-token ("Consider th | e | following"). ~62 corrupted lines
+  doc-wide. Reproduced byte-identically on native-only AND VLM runs → root cause is
+  the native structured-table path (`find_tables` text-strategy over-firing), not the
+  VLM. Directly contradicts TICKET-18's met criterion "References/prose never trigger
+  reconstruction (numeric-column gate)" — the gate does not catch this mixed
+  prose+small-table page.
+- **Acceptance Criteria:**
+  - [ ] p19 emits clean prose + the small table only (or linearized table), no full-page grid
+  - [ ] Regression test: a prose page with one embedded ≤N-row table is not gridded
+  - [ ] Firing-rate check confirms no new false-negatives on real booktabs tables
+
+### [TICKET-20] Born-digital pages over-classified as "complex"
+- **Status:** open
+- **Priority:** high
+- **Files:** `core/born_digital.py` (`needs_ocr_enhancement`), `pipeline/orchestrator.py`
+- **Description:** `has_tables or has_figures or has_equations` flagged 129/203 pages
+  for OCR enhancement, routing clean native text onto slower, worse local VLMs. On a
+  clean text layer this pays model time to degrade correct text. Enhancement should be
+  gated on evidence the native text is actually deficient, not merely on
+  presence-of-complex-content.
+- **Acceptance Criteria:**
+  - [ ] Clean-text-layer pages with figures/equations stay native unless native is shown deficient
+  - [ ] Figures still extracted without forcing whole-page OCR
+
+### [TICKET-21] Local-only run hard-errors on a fully-written output
+- **Status:** open
+- **Priority:** high (offline UX)
+- **Files:** `pipeline/orchestrator.py` (escalation + exit-status logic)
+- **Description:** With no cloud key, a page that fails local audit has escalation
+  target = cloud → impossible → run ends `Error: Processing failed` (non-zero exit)
+  although the full `.md` is written. Also: p3 logged "recovered by deepseek" but the
+  page is blank ("recovered" to empty). No "local-only: accept best local output,
+  exit 0" mode.
+- **Acceptance Criteria:**
+  - [ ] Local-only mode exits 0 when a complete `.md` is produced, with failed pages flagged in audit_log
+  - [ ] "recovered" requires non-empty output; empty fallback is reported as a failure not a recovery
+
+### [TICKET-22] "Scanned" over-count on full-page-figure / sparse pages
+- **Status:** open
+- **Priority:** medium
+- **Files:** `core/born_digital.py` (`MIN_WORDS_PER_PAGE`, `MIN_CHARS_FOR_TEXT_LAYER`)
+- **Description:** Detector reported 13 scanned pages; only 4 are truly image-only
+  (`get_text()` < 40 chars: front matter pp 1,2,3,9). The other 9 are full-page-figure
+  or sparse pages tripping the min-words/min-chars gates and getting needlessly OCR'd.
+- **Acceptance Criteria:**
+  - [ ] A born-digital page dominated by one full-page figure is not classed "scanned"
+  - [ ] Scanned-count on Dougherty matches ground truth (≈4)
+
+### [TICKET-23] No math-aware (equation→LaTeX) extraction path
+- **Status:** open
+- **Priority:** high (the central gap for math textbooks)
+- **Files:** new `engines/` math step; `pipeline/orchestrator.py` routing
+- **Description:** Detected math pages (`_MATH_FONT_RE`) route only to general VLMs
+  (no LaTeX) or native `get_text()` (linearizes math). No equation→LaTeX route. Per a
+  /consilium panel (Codex): add a local math-aware step — marker-pdf / Texify on MPS —
+  run on detected equation regions only, always storing the crop PNG beside any LaTeX
+  so bad LaTeX never silently replaces a faithful image. Validate LaTeX renders; on
+  failure keep crop + linearized text.
+- **Acceptance Criteria:**
+  - [ ] Display equations on a sample chapter emit LaTeX that renders, with crop PNG retained
+  - [ ] Throughput measured on M3 Max MPS for 200 pp and 1220 pp (region-only vs full-page)
+
+### [TICKET-24] No native-only / enhancement-threshold CLI knob
+- **Status:** open
+- **Priority:** medium
+- **Files:** `cli.py`, `core/config.py`, `core/born_digital.py`
+- **Description:** To trust a clean text layer and OCR only genuine scans we had to
+  patch source (a `SOCR_NATIVE_ONLY` env gate). No supported flag expresses "this is
+  born-digital with a clean layer; do not enhance prose." `--no-native-first` is the
+  opposite lever.
+- **Acceptance Criteria:**
+  - [ ] `--native-only` (or `--enhancement-threshold`) flag, documented, with a test
