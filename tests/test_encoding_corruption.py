@@ -70,3 +70,33 @@ def test_clean_page_not_flagged():
     a = det._assess_page(page, 1)
     assert a.is_born_digital is True
     assert not any("encoding" in n for n in a.notes)
+
+
+# --------------------------------------------------------------------------
+# Math-font mojibake (issue: corruption ratio doesn't weight math substitutions)
+# --------------------------------------------------------------------------
+
+# '=' -> '¼', '(' -> 'ð', ')' -> 'Þ', '+' -> 'þ', '-' -> control char
+_CORRUPT_MATH = "PðA or BÞ ¼ PðAÞ þ PðBÞ \x02 PðA and BÞ ¼ 6=36 þ 6=36 \x02 1=36 ¼ 11=36"
+
+
+def test_corrupt_math_detected_where_prose_ratio_is_blind():
+    det = BornDigitalDetector()
+    # mostly clean prose + a few corrupted equation lines: the prose-oriented
+    # ratio stays low, but the math-mojibake detector must still fire.
+    lines = [_CLEAN] * 10 + [_CORRUPT_MATH] * 3
+    _doc, page = _page(lines)
+    a = det._assess_page(page, 1)
+    assert a.is_born_digital is True  # prose still trusted (not whole-page OCR)
+    assert a.has_corrupt_math is True
+    assert a.has_equations is True
+    assert any("corrupt math" in n for n in a.notes)
+
+
+def test_clean_math_with_greek_and_real_typography_not_flagged():
+    det = BornDigitalDetector()
+    # Greek letters, en-dash, real minus, ligature — all legitimate, must NOT flag
+    lines = [_CLEAN] * 10 + ["the ratio sigma rho is 0.5 to 0.7 and the difference", "f(x) = a + b for x in 1 to 9"] * 2
+    _doc, page = _page(lines)
+    a = det._assess_page(page, 1)
+    assert a.has_corrupt_math is False

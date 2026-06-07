@@ -35,6 +35,25 @@ _MATH_FONT_RE = re.compile(
     r"Euler|rsfs)"  # Euler script, RSFS (calligraphic)
 )
 
+# Math typeset with a broken font/ToUnicode map decodes operators and delimiters
+# as Latin-1 letters and fraction glyphs: '=' -> '¼', '(' -> 'ð', ')' -> 'Þ',
+# '+' -> 'þ', '-' -> a C0 control char. These glyphs do not occur in clean
+# English or math prose, so even a few per line are a near-perfect signal of
+# corrupted math — which the prose-oriented `_encoding_corruption_ratio`
+# (mid-caps / slash-digits / run-on words) misses entirely. Greek (σ, ρ) and real
+# typography (en-dash, U+2212 minus, ﬁ ligature, curly quotes) are deliberately
+# NOT in this set: they are legitimate and must never trip math-corruption.
+_MATH_MOJIBAKE_CHARS = frozenset("ðÞþÐ¼½¾")
+# C0 control characters (excluding tab/newline/CR) — '-' and other operators
+# decode to these on this font class.
+_C0_CONTROL_CHARS = frozenset(chr(c) for c in range(0x20) if c not in (0x09, 0x0A, 0x0D))
+_MATH_CORRUPTION_GLYPHS = _MATH_MOJIBAKE_CHARS | _C0_CONTROL_CHARS
+
+
+def line_has_corrupt_math(line: str) -> bool:
+    """True if a line contains font-map mojibake standing in for math symbols."""
+    return any(ch in _MATH_CORRUPTION_GLYPHS for ch in line)
+
 
 @dataclass
 class PageAssessment:
@@ -52,6 +71,7 @@ class PageAssessment:
     has_figures: bool = False  # page contains embedded images (alias for has_images)
     has_equations: bool = False  # page contains math/equations
     needs_ocr_enhancement: bool = False  # OCR preferred over native text for this page
+    has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     notes: list[str] = field(default_factory=list)
 
 
@@ -219,7 +239,12 @@ class BornDigitalDetector:
         # Detect structured content types
         has_tables = self._detect_tables(page)
         has_figures = has_images  # figures = embedded raster images
-        has_equations = self._detect_math_fonts(page) or self._detect_equations(raw_text)
+        has_corrupt_math = self._detect_corrupt_math(raw_text)
+        has_equations = (
+            self._detect_math_fonts(page)
+            or self._detect_equations(raw_text)
+            or has_corrupt_math
+        )
 
         # --- Decision logic ---
 
@@ -423,6 +448,12 @@ class BornDigitalDetector:
                 f"complex content detected ({', '.join(content_types)}); OCR enhancement preferred"
             )
 
+        if has_corrupt_math:
+            notes.append(
+                f"corrupt math text layer ({self._count_math_corruption(raw_text)} mojibake "
+                "glyphs); equation regions need image-OCR -> LaTeX"
+            )
+
         return PageAssessment(
             page_num=page_num,
             is_born_digital=True,
@@ -436,6 +467,7 @@ class BornDigitalDetector:
             has_figures=has_figures,
             has_equations=has_equations,
             needs_ocr_enhancement=needs_ocr_enhancement,
+            has_corrupt_math=has_corrupt_math,
             notes=notes,
         )
 
@@ -509,6 +541,28 @@ class BornDigitalDetector:
         except Exception:
             pass
         return False
+
+    # Minimum corrupt-math glyphs on a page before it is flagged. A couple of
+    # stray control chars can occur incidentally; systematic math corruption
+    # produces dozens (observed 5-145 per affected page on the test corpus).
+    MIN_MATH_CORRUPTION_GLYPHS = 4
+
+    @staticmethod
+    def _count_math_corruption(text: str) -> int:
+        """Count font-map mojibake glyphs standing in for math symbols."""
+        return sum(1 for ch in text if ch in _MATH_CORRUPTION_GLYPHS)
+
+    def _detect_corrupt_math(self, text: str) -> bool:
+        """True if the page's math is font-map corrupted (operators/delimiters
+        decoded as Latin-1 letters / fraction glyphs / control chars).
+
+        Distinct from `_encoding_corruption_ratio`, which targets *prose*
+        corruption (mid-caps, slash-digits, run-ons) and is blind to these math
+        substitutions. The text layer is unrecoverable here, so a flagged page
+        routes its equation regions to image-OCR -> LaTeX rather than being
+        trusted or whole-page OCR'd.
+        """
+        return self._count_math_corruption(text) >= self.MIN_MATH_CORRUPTION_GLYPHS
 
     def _detect_equations(self, text: str) -> bool:
         """Check if text contains raw LaTeX math markup.
