@@ -105,6 +105,13 @@ class PipelineConfig:
     native_first: bool = True  # Use native text for born-digital prose
     tiered: bool = True  # Route easy pages to local engine, hard pages to primary
 
+    # --- Math recovery (font-corrupted equations) ---
+    # When a born-digital page's prose is clean but its math is font-map corrupted
+    # ('=' -> '¼', '(' -> 'ð'), keep the native prose and image-OCR only the
+    # equation regions to LaTeX. Opt-in: needs a local vision model (Ollama).
+    recover_corrupt_math: bool = False
+    math_model: str = "qwen3-vl:8b"  # local Ollama VLM used for equation -> LaTeX
+
     # --- Processing ---
     # ``Path("output")`` is the LEGACY SENTINEL meaning "unset". The canon
     # default output root is ``<input-parent>/ocr/`` (resolved per-input via the
@@ -227,6 +234,8 @@ class PipelineConfig:
         scalar_fields = [
             "native_first",
             "tiered",
+            "recover_corrupt_math",
+            "math_model",
             "timeout",
             "max_retries",
             "truncation_retries",

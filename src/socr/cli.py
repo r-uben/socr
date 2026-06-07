@@ -49,6 +49,16 @@ def common_options(f):
     f = click.option(
         "--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages"
     )(f)
+    f = click.option(
+        "--recover-corrupt-math",
+        is_flag=True,
+        help="Keep native prose but image-OCR font-corrupted equations to LaTeX (local VLM)",
+    )(f)
+    f = click.option(
+        "--math-model",
+        default="qwen3-vl:8b",
+        help="Local Ollama vision model for equation -> LaTeX recovery",
+    )(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
     f = click.option(
         "--dpi",
@@ -126,6 +136,8 @@ def build_config(
     no_dual_pass_tables: bool = False,
     auto_patch_tables: bool = False,
     no_native_first: bool = False,
+    recover_corrupt_math: bool = False,
+    math_model: str = "qwen3-vl:8b",
     timeout: int = 1800,
     dpi: int | None = None,
     qwen_backend: str | None = None,
@@ -168,6 +180,9 @@ def build_config(
         config.auto_patch_tables = True
     if no_native_first:
         config.native_first = False
+    if recover_corrupt_math:
+        config.recover_corrupt_math = True
+    config.math_model = math_model
 
     config.timeout = timeout
     if dpi is not None:

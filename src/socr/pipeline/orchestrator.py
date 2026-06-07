@@ -592,9 +592,27 @@ class UnifiedPipeline:
         prose_pages: list[int] = []
         enhancement_pages: list[int] = []
         scanned_pages: list[int] = []
+        # Born-digital pages whose prose is clean but whose math is font-corrupted:
+        # keep native prose, recover only the equation regions to LaTeX (Tier 1).
+        math_recovery_pages: set[int] = set()
+        corrupt_math_pages = {
+            pa.page_num
+            for pa in (self._last_assessment.pages if self._last_assessment else [])
+            if pa.has_corrupt_math
+        }
 
         for page_num, ps in sorted(state.pages.items()):
-            if ps.is_born_digital and not ps.needs_ocr_enhancement and ps.native_text:
+            if (
+                self.config.recover_corrupt_math
+                and page_num in corrupt_math_pages
+                and ps.is_born_digital
+                and ps.native_text
+            ):
+                # Trust the native prose layer; math is spliced in Tier 1. This
+                # also avoids whole-page VLM OCR that would degrade the prose.
+                prose_pages.append(page_num)
+                math_recovery_pages.add(page_num)
+            elif ps.is_born_digital and not ps.needs_ocr_enhancement and ps.native_text:
                 prose_pages.append(page_num)
             elif ps.is_born_digital and ps.needs_ocr_enhancement:
                 enhancement_pages.append(page_num)
@@ -683,18 +701,47 @@ class UnifiedPipeline:
         start_time = time.time()
         page_outputs: list[PageOutput] = []
 
-        # Tier 1: Native text for prose pages
+        # Tier 1: Native text for prose pages (with math recovery where flagged)
+        math_doc = None
+        if math_recovery_pages:
+            try:
+                import fitz
+
+                math_doc = fitz.open(state.handle.path)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("math recovery disabled (cannot open PDF): %s", exc)
+                math_recovery_pages = set()
+            if math_recovery_pages and not self.config.quiet:
+                console.print(
+                    f"  [cyan]{len(math_recovery_pages)} page(s): recovering "
+                    f"corrupt math -> LaTeX [{self.config.math_model}][/cyan]"
+                )
+
         for page_num in prose_pages:
             ps = state.pages[page_num]
+            text = ps.native_text
+            engine = "native"
+            if page_num in math_recovery_pages and math_doc is not None:
+                from socr.math.recover import recover_math_regions, splice_math
+
+                try:
+                    page = math_doc[page_num - 1]
+                    regions = recover_math_regions(page, model=self.config.math_model)
+                    text = splice_math(page, ps.native_text, regions)
+                    engine = "native+math"
+                except Exception as exc:
+                    logger.warning("math recovery failed on p%d: %s", page_num, exc)
             page_outputs.append(
                 PageOutput(
                     page_num=page_num,
-                    text=ps.native_text,
+                    text=text,
                     status=PageStatus.SUCCESS,
-                    engine="native",
+                    engine=engine,
                     audit_passed=True,
                 )
             )
+        if math_doc is not None:
+            math_doc.close()
 
         # Tier 2: Local engine for easy pages
         escalated_pages: list[int] = []
@@ -1066,8 +1113,11 @@ class UnifiedPipeline:
             ps = state.pages[page_num]
             bo = ps.best_output
             # Only judge model-produced OCR (native text is character-exact; the
-            # corruption risk lives in the VLM transcription).
-            if not bo or not bo.text or bo.engine == "native":
+            # corruption risk lives in the VLM transcription). "native+math" is
+            # native prose with equation regions already recovered to LaTeX via
+            # image-OCR — authoritative; the image-vs-text judge spuriously flags
+            # its reading order and would revert the LaTeX to raw mojibake.
+            if not bo or not bo.text or (bo.engine or "").startswith("native"):
                 continue
             judged += 1
             try:
