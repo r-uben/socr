@@ -717,6 +717,8 @@ class UnifiedPipeline:
                     f"corrupt math -> LaTeX [{self.config.math_model}][/cyan]"
                 )
 
+        math_done = 0
+        math_total = len(math_recovery_pages)
         for page_num in prose_pages:
             ps = state.pages[page_num]
             text = ps.native_text
@@ -729,6 +731,13 @@ class UnifiedPipeline:
                     regions = recover_math_regions(page, model=self.config.math_model)
                     text = splice_math(page, ps.native_text, regions)
                     engine = "native+math"
+                    math_done += 1
+                    recovered = sum(1 for _, tex in regions if tex)
+                    if not self.config.quiet:
+                        console.print(
+                            f"    [dim]math {math_done}/{math_total}: p{page_num} "
+                            f"{recovered}/{len(regions)} equations -> LaTeX[/dim]"
+                        )
                 except Exception as exc:
                     logger.warning("math recovery failed on p%d: %s", page_num, exc)
             page_outputs.append(

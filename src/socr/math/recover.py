@@ -112,7 +112,8 @@ def latex_for_image(
     png_bytes: bytes,
     model: str = DEFAULT_MODEL,
     host: str = DEFAULT_HOST,
-    timeout: float = 240.0,
+    timeout: float = 300.0,
+    keep_alive: str = "30m",
 ) -> str:
     """OCR a rendered equation crop to LaTeX via the local Ollama API.
 
@@ -125,6 +126,11 @@ def latex_for_image(
             "prompt": _PROMPT,
             "images": [base64.b64encode(png_bytes).decode()],
             "stream": False,
+            # Keep the model resident between region calls. Without this, Ollama
+            # unloads after its default 5-minute idle and every subsequent crop
+            # pays a multi-minute cold reload — the cause of mass 240s timeouts on
+            # a full-book run. 30m comfortably bridges per-page native/render gaps.
+            "keep_alive": keep_alive,
             # Cap the context window: qwen3-vl otherwise loads its full 262k
             # context (~48 GB, slow first token). A single equation crop needs
             # only a few k tokens, so a small num_ctx is dramatically faster with
@@ -173,7 +179,12 @@ def recover_math_regions(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("failed to render math region %s: %s", rect, exc)
             continue
+        # Local VLM calls are slow and occasionally return empty (timeout / cold
+        # reload). Retry once before giving up; the splice keeps the page image as
+        # the faithful fallback for a region that still yields nothing.
         latex = ocr(png, model=model, host=host)
+        if not latex:
+            latex = ocr(png, model=model, host=host)
         out.append((fitz.Rect(rect), latex))
     return out
 
