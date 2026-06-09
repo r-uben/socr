@@ -13,6 +13,14 @@ from dataclasses import dataclass, field
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.result import FailureMode
 from socr.core.state import DocumentState, PageState
+from socr.engines.registry import _ENGINES
+
+# Engines the repair loop can actually instantiate and run. The config's
+# ``enabled_engines`` defaults to ``list(EngineType)``, which includes the
+# AUTO sentinel and the HTTP-only DEEPSEEK_VLLM/VLLM pseudo-engines —
+# ``get_engine()`` raises ValueError on those, which used to kill the whole
+# run whenever the repair plan reached them (every VLM-judge rejection did).
+_RUNNABLE_ENGINES: frozenset[EngineType] = frozenset(_ENGINES)
 
 # Engine families — used to pick a *different* family when the failure mode
 # suggests the current family is fundamentally unsuited (e.g. hallucination).
@@ -22,6 +30,7 @@ _ENGINE_FAMILIES: dict[str, set[EngineType]] = {
     "mistral": {EngineType.MISTRAL},
     "meta": {EngineType.NOUGAT, EngineType.MARKER},
     "local": {EngineType.GLM, EngineType.VLLM},
+    "qwen": {EngineType.QWEN},
 }
 
 # Reverse lookup: engine -> family name
@@ -142,6 +151,10 @@ class RepairRouter:
                 return self._pick_capable(candidates)
             case FailureMode.TIMEOUT:
                 return self._pick_light(candidates)
+            case FailureMode.AUDIT_FAILED:
+                # The VLM judge just rejected this engine's reading of the
+                # page; a same-family retry tends to repeat the mistake.
+                return self._pick_different_family(tried_engines, candidates)
             case _:
                 # EMPTY_OUTPUT, NONE, API_ERROR, CLI_ERROR, etc.
                 return candidates[0]
@@ -197,24 +210,25 @@ class RepairRouter:
         Starts with the configured fallback_chain, then appends the
         primary engine (it might not have been used on a specific page
         during a partial re-run), then any remaining enabled engines.
-        Deduplicates while preserving order.
+        Deduplicates while preserving order. Filtered to engines the
+        registry can actually instantiate: AUTO and the HTTP-only
+        pseudo-engines must never be selected as repair candidates.
         """
         seen: set[EngineType] = set()
         result: list[EngineType] = []
 
-        for engine in self.config.fallback_chain:
-            if engine not in seen:
+        def _add(engine: EngineType) -> None:
+            if engine in _RUNNABLE_ENGINES and engine not in seen:
                 result.append(engine)
                 seen.add(engine)
 
-        if self.config.primary_engine not in seen:
-            result.append(self.config.primary_engine)
-            seen.add(self.config.primary_engine)
+        for engine in self.config.fallback_chain:
+            _add(engine)
+
+        _add(self.config.primary_engine)
 
         for engine in self.config.enabled_engines:
-            if engine not in seen:
-                result.append(engine)
-                seen.add(engine)
+            _add(engine)
 
         return result
 

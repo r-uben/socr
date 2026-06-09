@@ -12,6 +12,8 @@ import re
 import unicodedata
 from pathlib import Path
 
+from socr.core.html_tables import clean_residual_html
+
 
 class OutputNormalizer:
     """Normalize OCR engine output to consistent markdown.
@@ -54,10 +56,11 @@ class OutputNormalizer:
     )
 
     # --- generic patterns ---
+    # NOTE: the old blanket ``<[^>]+>`` tag-strip lived here. It flattened
+    # DeepSeek/GLM HTML tables into fused digit-streams and deleted
+    # inequality spans; HTML handling now lives in socr.core.html_tables.
     _RE_TRAILING_WS = re.compile(r"[ \t]+$", re.MULTILINE)
     _RE_EXCESS_BLANK = re.compile(r"\n{3,}")
-    _RE_HTML_BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
-    _RE_HTML_TAG = re.compile(r"<[^>]+>")
 
     # Markdown image references: ![alt](path)
     _RE_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
@@ -121,14 +124,18 @@ class OutputNormalizer:
     # --- engine-specific cleaners ---
 
     def _clean_deepseek_glm(self, text: str) -> str:
-        """Strip grounding tags and bounding boxes (DeepSeek / GLM)."""
+        """Strip grounding tags/bboxes, then convert HTML structure (DeepSeek / GLM).
+
+        DeepSeek-OCR emits tables as HTML. Tables are converted to markdown
+        BEFORE any tag stripping (a blanket strip fuses adjacent cell digits
+        into fabricated numbers), and only tag-shaped, known-HTML markup is
+        removed — inequalities and literal ``<EOS>``-style tokens survive.
+        """
         text = self._RE_REF_TAG.sub("", text)
         text = self._RE_DET_TAG.sub("", text)
         text = self._RE_SPECIAL_TOKEN.sub("", text)
         text = self._RE_BBOX.sub("", text)
-        text = self._RE_HTML_BR.sub("\n", text)
-        text = self._RE_HTML_TAG.sub("", text)
-        return text
+        return clean_residual_html(text)
 
     def _clean_mistral(self, text: str) -> str:
         """Strip Mistral-specific header/meta lines."""
@@ -204,6 +211,41 @@ class OutputNormalizer:
 
     # --- generic normalization ---
 
+    # Codepoints NFKC would fold into semantically different ASCII. These are
+    # MEANING-BEARING in OCR'd math and must survive normalization:
+    # superscripts/subscripts (x², ⁻¹), vulgar fractions (½), letterlike
+    # symbols (ℝ, ℏ), and the math-alphanumeric block (𝛽, 𝒙).
+    @staticmethod
+    def _is_math_preserved(ch: str) -> bool:
+        cp = ord(ch)
+        return (
+            cp in (0x00B2, 0x00B3, 0x00B9)  # ² ³ ¹
+            or 0x00BC <= cp <= 0x00BE  # ¼ ½ ¾
+            or 0x2070 <= cp <= 0x209F  # superscripts and subscripts block
+            or 0x2100 <= cp <= 0x214F  # letterlike symbols (ℝ, ℵ, ℏ, ...)
+            or 0x2150 <= cp <= 0x215E  # additional vulgar fractions
+            or 0x1D400 <= cp <= 0x1D7FF  # mathematical alphanumeric symbols
+        )
+
+    @classmethod
+    def _math_safe_nfkc(cls, text: str) -> str:
+        """NFKC-normalize everything except math-meaning-bearing codepoints."""
+        if not any(cls._is_math_preserved(ch) for ch in text):
+            return unicodedata.normalize("NFKC", text)
+        out: list[str] = []
+        segment: list[str] = []
+        for ch in text:
+            if cls._is_math_preserved(ch):
+                if segment:
+                    out.append(unicodedata.normalize("NFKC", "".join(segment)))
+                    segment.clear()
+                out.append(ch)
+            else:
+                segment.append(ch)
+        if segment:
+            out.append(unicodedata.normalize("NFKC", "".join(segment)))
+        return "".join(out)
+
     def _normalize_generic(self, text: str) -> str:
         """Apply generic markdown normalization."""
         # CRLF -> LF
@@ -222,8 +264,11 @@ class OutputNormalizer:
         # can be salvaged rather than discarded entirely.
         text = self._RE_LINE_REPEAT.sub(r"\1\n", text)
 
-        # Unicode NFKC normalization (handles compatibility chars)
-        text = unicodedata.normalize("NFKC", text)
+        # Unicode NFKC normalization (handles compatibility chars), but
+        # math-preserving: blanket NFKC folds superscripts (x² -> x2),
+        # vulgar fractions (½ -> 1/2) and math-alphanumeric symbols into
+        # ASCII, silently corrupting equations in EVERY engine's output.
+        text = self._math_safe_nfkc(text)
 
         # Smart quotes / ligatures -> ASCII equivalents
         for src, dst in self._UNICODE_MAP.items():

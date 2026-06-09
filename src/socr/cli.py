@@ -315,8 +315,17 @@ def process(
             # local-only run where cloud escalation is unavailable). This is a
             # partial success, not a hard failure: keep the usable output and exit
             # 0 with a warning rather than aborting. Only a true ERROR (no text
-            # produced) is fatal.
+            # produced) or ERASED CONTENT (pages with no usable output at all)
+            # is fatal — a batch pipeline must not record a run that lost pages
+            # as a success.
             if result.status == DocumentStatus.AUDIT_FAILED:
+                from socr.core.result import LOST_CONTENT_NOTE
+
+                if result.error and LOST_CONTENT_NOTE in result.error:
+                    raise click.ClickException(
+                        f"Completed but lost content: {result.error}. "
+                        "Output written; see audit_log.json."
+                    )
                 console.print(
                     "[yellow]Completed with warnings:[/yellow] some pages failed "
                     "audit; output written. See audit_log.json."

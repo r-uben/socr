@@ -18,11 +18,11 @@ class TestDeepSeekGLM:
 
     def test_ref_tags_removed(self) -> None:
         text = "Hello <|ref|>some ref<|/ref|> world"
-        assert _n(text, "deepseek") == "Hello  world"
+        assert _n(text, "deepseek") == "Hello world"
 
     def test_det_tags_removed(self) -> None:
         text = "Token <|det|>[[10,20,30,40]]<|/det|> rest"
-        assert _n(text, "deepseek") == "Token  rest"
+        assert _n(text, "deepseek") == "Token rest"
 
     def test_bare_special_tokens_removed(self) -> None:
         text = "<|im_start|>system\nContent<|im_end|>"
@@ -30,7 +30,7 @@ class TestDeepSeekGLM:
 
     def test_bare_bounding_boxes_removed(self) -> None:
         text = "Text [[100, 200, 300, 400]] more"
-        assert _n(text, "deepseek") == "Text  more"
+        assert _n(text, "deepseek") == "Text more"
 
     def test_html_br_converted(self) -> None:
         text = "Line one<br/>Line two<BR>Line three"
@@ -42,11 +42,11 @@ class TestDeepSeekGLM:
 
     def test_glm_uses_same_cleanup(self) -> None:
         text = "Hello <|ref|>x<|/ref|> world"
-        assert _n(text, "glm") == "Hello  world"
+        assert _n(text, "glm") == "Hello world"
 
     def test_deepseek_vllm_uses_same_cleanup(self) -> None:
         text = "Hello <|ref|>x<|/ref|> world"
-        assert _n(text, "deepseek-vllm") == "Hello  world"
+        assert _n(text, "deepseek-vllm") == "Hello world"
 
 
 # ── Mistral engine-specific ─────────────────────────────────────────────
@@ -178,12 +178,19 @@ class TestGenericNormalization:
         text = "ba\ufb04e"
         assert _n(text) == "baffle"
 
-    def test_nfkc_normalization(self) -> None:
-        # Superscript 2 -> regular 2 under NFKC
-        text = "x\u00b2 + y\u00b2"
+    def test_nfkc_preserves_math_codepoints(self) -> None:
+        # Math-meaning-bearing codepoints survive normalization: folding
+        # x\u00b2 -> x2 silently corrupts equations.
+        text = "x\u00b2 + y\u207b\u00b9 and \u00bd"
         result = _n(text)
-        assert "\u00b2" not in result
-        assert "2" in result
+        assert "\u00b2" in result
+        assert "\u207b\u00b9" in result
+        assert "\u00bd" in result
+
+    def test_nfkc_still_folds_compatibility_chars(self) -> None:
+        # Non-math compatibility chars still normalize (fullwidth -> ASCII).
+        text = "\uff21\uff22\uff23"  # fullwidth ABC
+        assert _n(text) == "ABC"
 
     def test_empty_string(self) -> None:
         assert _n("") == ""
@@ -276,11 +283,11 @@ class TestBaseEngineIntegration:
 class TestEngineNameCaseInsensitive:
     def test_uppercase(self) -> None:
         text = "Hello <|ref|>x<|/ref|> world"
-        assert _n(text, "DEEPSEEK") == "Hello  world"
+        assert _n(text, "DEEPSEEK") == "Hello world"
 
     def test_mixed_case(self) -> None:
         text = "Hello <|ref|>x<|/ref|> world"
-        assert _n(text, "DeepSeek") == "Hello  world"
+        assert _n(text, "DeepSeek") == "Hello world"
 
 
 # ── Phantom image stripping ─────────────────────────────────────────────

@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+# Shared sentinel for the lost-content contract between _phase_assemble
+# (which composes EngineResult.error) and the CLI (which exits non-zero when
+# content was erased). A shared constant, not a magic string in two modules.
+LOST_CONTENT_NOTE = "produced no usable output"
+
 
 class DocumentStatus(str, Enum):
     """Status of document-level OCR processing."""

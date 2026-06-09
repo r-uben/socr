@@ -511,8 +511,14 @@ class TestPhaseAssemble:
 
         final = pipeline._phase_assemble(state, tmp_path)
 
-        assert final.status == DocumentStatus.SUCCESS
+        # A markerless whole-doc blob on a 2-page document covers only page 1
+        # after splitting; page 2 ships an explicit failure marker and the
+        # run is demoted from SUCCESS instead of silently recording a clean
+        # pass with an empty page.
+        assert final.status == DocumentStatus.AUDIT_FAILED
         assert "Full document text here" in final.markdown
+        assert "[page 2 failed: no usable OCR output]" in final.markdown
+        assert final.error and "page(s) 2" in final.error
 
     def test_assemble_empty_doc(self) -> None:
         config = _make_config()

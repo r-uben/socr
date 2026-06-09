@@ -32,6 +32,7 @@ class PageState:
     needs_ocr_enhancement: bool = False  # OCR preferred (tables/figures/equations)
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
+    judge_rejected: bool = False  # VLM judge rejected the best output
 
     @property
     def needs_repair(self) -> bool:
@@ -41,7 +42,12 @@ class PageState:
         Born-digital pages with complex content (tables/figures/equations)
         prefer OCR, so they need repair until a passing OCR attempt exists.
         If OCR has been attempted and failed, native_text serves as fallback
-        (needs_repair returns False to avoid infinite repair loops).
+        (needs_repair returns False to avoid infinite repair loops) — UNLESS
+        the VLM judge explicitly rejected the output: a judge rejection means
+        the existing reading is semantically wrong, so the page must get a
+        real repair pass instead of silently reverting to flat native text.
+        The repair loop still terminates: the router excludes tried engines,
+        so a judge-rejected page runs out of candidates and is skipped.
         """
         if self.is_born_digital and self.native_text:
             if self.needs_ocr_enhancement:
@@ -50,11 +56,28 @@ class PageState:
                 # passed, fall back to native text.
                 if self.best_output and self.best_output.audit_passed:
                     return False  # OCR succeeded
+                if self.judge_rejected:
+                    return True  # judge rejection demands a real repair pass
                 if self.attempts:
                     return False  # OCR tried but failed; native text is fallback
                 return True  # No OCR attempted yet; request it
             return False
         return not self.best_output or not self.best_output.audit_passed
+
+    @property
+    def best_attempt(self) -> PageOutput | None:
+        """The most usable attempt when no passing ``best_output`` exists.
+
+        Audit-passing attempts win (most recent first); otherwise the attempt
+        with the most text. Returns None when no attempt carries any text.
+        """
+        with_text = [a for a in self.attempts if a.text and a.text.strip()]
+        if not with_text:
+            return None
+        passing = [a for a in with_text if a.audit_passed]
+        if passing:
+            return passing[-1]
+        return max(with_text, key=lambda a: len(a.text))
 
 
 @dataclass
@@ -95,7 +118,14 @@ class DocumentState:
                 page_state = self.pages.get(page_out.page_num)
                 if page_state:
                     page_state.attempts.append(page_out)
-                    if not page_state.best_output and page_out.audit_passed:
+                    # A passing attempt is promoted when there is no best yet
+                    # OR the current best has since FAILED audit (scoring
+                    # demotes in place). Without the second clause, a failed
+                    # round-1 repair pinned best_output forever and every
+                    # later PASSING repair attempt was silently discarded.
+                    if page_out.audit_passed and (
+                        not page_state.best_output or not page_state.best_output.audit_passed
+                    ):
                         page_state.best_output = page_out
 
     def apply_born_digital(self, assessment: DocumentAssessment) -> None:
@@ -146,6 +176,10 @@ class DocumentState:
                 texts.append(p.native_text)
             elif p.best_output:
                 texts.append(p.best_output.text)
+            elif p.best_attempt:
+                # A rejected-but-substantial attempt (e.g. judge-cleared
+                # best_output) beats silently dropping the page.
+                texts.append(p.best_attempt.text)
         return "\n\n---\n\n".join(texts)
 
     def _assemble_native_text(self) -> str:

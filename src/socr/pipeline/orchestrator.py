@@ -45,6 +45,48 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def _manifest_versions() -> tuple[str, str]:
+    """(NORMALIZER_VERSION, ASSEMBLY_VERSION), read at call time.
+
+    Late attribute access (not a from-import) so the run fingerprint always
+    reflects the live values and tests can monkeypatch them.
+    """
+    from socr.core import manifest
+
+    return manifest.NORMALIZER_VERSION, manifest.ASSEMBLY_VERSION
+
+
+def _resume_skippable(
+    index, rel_key: str, checksum: str, fingerprint: str, out_dir: Path
+) -> bool:
+    """Whether a doc can be skipped by the resume gate.
+
+    Canonically completed docs skip via :meth:`RootIndex.is_completed`. A
+    PARTIAL doc additionally skips when its recorded checksum AND run
+    fingerprint match and its output still exists: re-running the identical
+    config cannot improve a partial result, and without this rule every doc
+    demoted to AUDIT_FAILED (flagged native fallback, lost pages) would be
+    re-processed at full judge/repair cost on EVERY batch resume, forever.
+    ``--reprocess`` still forces a retry (checked by the callers).
+    """
+    if index.is_completed(rel_key, checksum, fingerprint=fingerprint):
+        return True
+    entry = index.files.get(rel_key)
+    if not entry or entry.get("status") != "partial":
+        return False
+    if entry.get("checksum") != checksum:
+        return False
+    if not entry.get("fingerprint") or entry.get("fingerprint") != fingerprint:
+        return False
+    out = entry.get("output_path") or ""
+    if not out:
+        return False
+    p = Path(out)
+    if not p.is_absolute():
+        p = out_dir / p
+    return p.exists()
+
+
 class UnifiedPipeline:
     """5-phase OCR pipeline orchestrator.
 
@@ -125,8 +167,8 @@ class UnifiedPipeline:
                 return None
             scan_root = self._scan_root or pdf_path.parent
             rel_key = relative_key(pdf_path, scan_root)
-            if not RootIndex(out_dir).is_completed(
-                rel_key, checksum, fingerprint=self._run_fingerprint()
+            if not _resume_skippable(
+                RootIndex(out_dir), rel_key, checksum, self._run_fingerprint(), out_dir
             ):
                 return None
         except Exception as exc:  # never let the resume check break a run
@@ -236,6 +278,14 @@ class UnifiedPipeline:
             "figures_engine": cfg.figures_engine.value,
             "figures_max_total": cfg.figures_max_total,
             "figures_max_per_page": cfg.figures_max_per_page,
+            # --- output-semantics code versions (issue #38) ---
+            # The normalizer/assembler can change what bytes an identical
+            # engine response produces. Without these, corpora cached under
+            # the digit-fusing v1 normalizer pass the resume gate forever and
+            # the fix never reaches them. Late import so monkeypatched
+            # versions (tests) flow through.
+            "normalizer_version": _manifest_versions()[0],
+            "assembly_version": _manifest_versions()[1],
         }
         return run_fingerprint(
             primary["model"], primary["backend"] or "socr", primary["task"], None, extra=extra
@@ -397,8 +447,8 @@ class UnifiedPipeline:
             # records a per-file failure rather than aborting the batch (SYS-02).
             checksum = safe_checksum(pdf)
             rel_key = relative_key(pdf, input_dir)
-            already_done = checksum is not None and root_index.is_completed(
-                rel_key, checksum, fingerprint=run_fp
+            already_done = checksum is not None and _resume_skippable(
+                root_index, rel_key, checksum, run_fp, out_dir
             )
             if already_done and not self.config.reprocess:
                 if self.config.verbose:
@@ -1154,6 +1204,10 @@ class UnifiedPipeline:
                 )
             )
             ps.best_output = None  # -> needs_repair -> repair escalates
+            # Without this flag, born-digital pages are exempt from repair once
+            # any attempt exists (the anti-loop rule), so a judge rejection
+            # silently reverted to flat native text while reporting SUCCESS.
+            ps.judge_rejected = True
             if not self.config.quiet:
                 console.print(
                     f"  [yellow]p{page_num}: judge rejected — re-routing to repair"
@@ -1778,7 +1832,13 @@ class UnifiedPipeline:
 
             # Execute repairs grouped by engine
             for engine_type, repairs in plan.by_engine.items():
-                engine = get_engine(engine_type)
+                # A routing bug must skip one engine, never kill the document
+                # run (get_engine raises ValueError on non-CLI engine types).
+                try:
+                    engine = get_engine(engine_type)
+                except ValueError as exc:
+                    logger.warning("repair: skipping %s (%s)", engine_type.value, exc)
+                    continue
 
                 if not engine.is_available():
                     if not self.config.quiet:
@@ -1920,10 +1980,12 @@ class UnifiedPipeline:
         """
         from ocr_output_contract import PAGE_MARKER_RE, assemble_pages
 
-        from socr.core.manifest import canonical_page_texts
+        from socr.core.manifest import canonical_page_texts, is_page_failed_marker
 
         texts = canonical_page_texts(state)
-        has_content = any(t.strip() for t in texts)
+        # Failure markers are honesty, not content: an all-failed document
+        # must still be recorded as having produced nothing.
+        has_content = any(t.strip() and not is_page_failed_marker(t) for t in texts)
         if not has_content:
             return "", False
         body = assemble_pages(texts)
@@ -1944,12 +2006,32 @@ class UnifiedPipeline:
 
         final_text, has_text = self._canonical_body(state)
 
+        # Pages that produced no usable text anywhere (shipped as explicit
+        # failure markers) and enhancement pages that silently reverted to
+        # native text after OCR was tried and never passed. Both demote the
+        # document from SUCCESS: a run that lost content or shipped known-
+        # lossy fallbacks must not report a clean pass.
+        from socr.core.manifest import canonical_page_texts, is_page_failed_marker
+
+        page_texts = canonical_page_texts(state)
+        failed_pages = [i for i, t in enumerate(page_texts, start=1) if is_page_failed_marker(t)]
+        native_fallback_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.is_born_digital
+            and p.native_text
+            and p.needs_ocr_enhancement
+            and p.attempts
+            and not (p.best_output and p.best_output.audit_passed)
+        ]
+
         # Determine overall status.
         # For CLI engines that produce whole-doc output (page_num=0), pages
         # won't have per-page best_outputs.  A passing whole-doc attempt
         # covers the entire document -- treat it as success.
         has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
+        pages_ok = pages_ok and not failed_pages and not native_fallback_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -1959,6 +2041,40 @@ class UnifiedPipeline:
             status = DocumentStatus.ERROR
 
         state.status = status
+
+        if failed_pages or native_fallback_pages:
+            from socr.core.audit_log import AuditEvent
+
+            for n in failed_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="page_failed",
+                        engine="",
+                        detail="no usable OCR output; failure marker shipped",
+                    )
+                )
+            for n in native_fallback_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="native_fallback",
+                        engine="native",
+                        detail="OCR tried and never passed on an enhancement page; "
+                        "native text shipped flagged",
+                    )
+                )
+            if not self.config.quiet:
+                if failed_pages:
+                    console.print(
+                        f"  [red]{len(failed_pages)} page(s) produced no usable "
+                        f"output: {failed_pages}[/red]"
+                    )
+                if native_fallback_pages:
+                    console.print(
+                        f"  [yellow]{len(native_fallback_pages)} enhancement page(s) "
+                        f"fell back to native text: {native_fallback_pages}[/yellow]"
+                    )
 
         # Compute total processing time
         total_time = sum(r.processing_time for r in state.engine_runs)
@@ -1990,28 +2106,56 @@ class UnifiedPipeline:
             cost=state.total_cost,
             audit_passed=status == DocumentStatus.SUCCESS,
         )
+        if failed_pages:
+            from socr.core.result import LOST_CONTENT_NOTE
 
-        # Figure extraction + description + embedding
-        if self.config.save_figures and has_text:
-            final_text = self._describe_and_embed_figures(
-                state,
-                final_result,
-                output_dir,
-                final_text,
+            final_result.error = (
+                f"page(s) {', '.join(str(n) for n in failed_pages)} {LOST_CONTENT_NOTE}"
             )
-            # Update the page text with embedded figure blocks
-            final_result.pages[0].text = final_text
 
-        # Save markdown
+        # Save markdown + metadata BEFORE the figure phase: the describe loop
+        # makes long paid API calls, and any exception there used to lose the
+        # fully-extracted OCR text with no record at all (no .md, no
+        # metadata.json — observed on real runs). Text is final at this point;
+        # figures only append to it. When the figure phase is still pending,
+        # the metadata is PROVISIONAL: a ":pre-figures" fingerprint suffix
+        # guarantees the resume gate never matches it, so a hard crash during
+        # figures leaves a retryable record instead of a skipped-forever doc.
+        runs_figures = self.config.save_figures and has_text
         if has_text:
             saved_path = self._save_markdown(state, final_text, output_dir)
             if not self.config.quiet:
                 console.print(f"  [blue]Output:[/blue] {saved_path}")
+        self._write_metadata(state, final_result, output_dir, has_text, provisional=runs_figures)
 
-        # Canonical dual-level metadata sidecars (per-doc + root index), keyed by
-        # input-relative path. Always written — including failures (status=failed)
-        # — so the corpus has a machine-readable record for every run.
-        self._write_metadata(state, final_result, output_dir, has_text)
+        # Figure extraction + description + embedding. A figure-phase failure
+        # must never destroy the completed OCR run — fall back to the already-
+        # saved un-embedded text.
+        if runs_figures:
+            try:
+                embedded_text = self._describe_and_embed_figures(
+                    state,
+                    final_result,
+                    output_dir,
+                    final_text,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "figure phase failed (%s); keeping the un-embedded markdown", exc
+                )
+                if not self.config.quiet:
+                    console.print(
+                        f"  [yellow]Figure phase failed ({exc}); output saved "
+                        "without figure descriptions[/yellow]"
+                    )
+                embedded_text = final_text
+            if embedded_text != final_text:
+                final_text = embedded_text
+                final_result.pages[0].text = final_text
+                self._save_markdown(state, final_text, output_dir)
+            # Always finalize the record (real fingerprint, final status),
+            # replacing the provisional pre-figures entry.
+            self._write_metadata(state, final_result, output_dir, has_text)
 
         # Reproducibility manifest (opt-in; default-on in agentic mode). Pass the
         # FINAL saved body so the manifest blobs (and thus replay) reproduce the
@@ -2031,6 +2175,7 @@ class UnifiedPipeline:
         result: EngineResult,
         output_dir: Path,
         has_text: bool,
+        provisional: bool = False,
     ) -> None:
         """Write canonical per-doc + root-index ``metadata.json`` via the contract.
 
@@ -2065,6 +2210,10 @@ class UnifiedPipeline:
                 status = Status.PARTIAL
             else:
                 status = Status.FAILED
+            # Pre-figures record: never COMPLETED (figures pending), and
+            # fingerprint-suffixed below so the resume gate cannot match it.
+            if provisional and status == Status.COMPLETED:
+                status = Status.PARTIAL
 
             # failure_checksum (round-3): the real sha256 digest if the input is
             # readable, else the contract's UNREADABLE_CHECKSUM sentinel
@@ -2088,7 +2237,10 @@ class UnifiedPipeline:
                 # skipped by RootIndex.is_completed on input-checksum alone. By the
                 # time _phase_assemble runs, process() has resolved AUTO into a
                 # concrete primary_engine, so this matches the batch resume gate.
-                fingerprint=self._run_fingerprint(),
+                # A provisional (pre-figures) record is suffix-marked so the
+                # gate can never match it — a crash during figures must leave
+                # a retryable record.
+                fingerprint=self._run_fingerprint() + (":pre-figures" if provisional else ""),
             )
             from ocr_output_contract import write_doc_metadata
 

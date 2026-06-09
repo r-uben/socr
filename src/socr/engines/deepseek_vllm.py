@@ -260,7 +260,14 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
 
     @staticmethod
     def _clean_ocr_output(text: str) -> str:
-        """Strip grounding tags and bounding boxes from DeepSeek-OCR output."""
+        """Strip grounding tags/bboxes, then convert HTML structure.
+
+        DeepSeek-OCR emits tables as HTML; they are converted to markdown
+        before any tag stripping (a blanket ``<[^>]+>`` strip used to fuse
+        adjacent cell digits into fabricated numbers on this exact path).
+        """
+        from socr.core.html_tables import clean_residual_html
+
         # Remove <|ref|>...<|/ref|> inline references
         text = re.sub(r"<\|ref\|>.*?<\|/ref\|>", "", text)
         # Remove <|det|>[[x,y,w,h]]<|/det|> detection boxes
@@ -269,10 +276,7 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
         text = re.sub(r"<\|[^|]+\|>", "", text)
         # Remove bare bounding box coordinates
         text = re.sub(r"\[\[\d+,\s*\d+,\s*\d+,\s*\d+\]\]", "", text)
-        # Normalize HTML line breaks
-        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-        # Strip remaining HTML tags
-        text = re.sub(r"<[^>]+>", "", text)
+        text = clean_residual_html(text)
         # Collapse excessive blank lines
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()

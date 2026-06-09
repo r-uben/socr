@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -46,14 +47,36 @@ logger = logging.getLogger(__name__)
 
 # Bump these when the corresponding logic changes in a way that should
 # invalidate cached pages. They are part of every page fingerprint.
+# v2 (issue #38): normalizer — HTML tables converted to markdown instead of
+# tag-stripped into fused digit-streams, math-preserving NFKC; assembly —
+# attempts fallback, explicit failure markers, flagged native fallback.
+# Pages cached under v1 carry the fabricated-number corruption and MUST be
+# invalidated.
 MANIFEST_SCHEMA_VERSION = "1"
-NORMALIZER_VERSION = "1"
-ASSEMBLY_VERSION = "1"
+NORMALIZER_VERSION = "2"
+ASSEMBLY_VERSION = "2"
 
 # Legacy page separator. socr now assembles bodies and replays with the
 # contract's ``assemble_pages`` (``## Page N`` headers); this constant is kept
 # only for backward-compatible imports and is no longer used to join pages.
 PAGE_SEPARATOR = "\n\n---\n\n"
+
+_PAGE_FAILED_RE = re.compile(r"^\[page \d+ failed: no usable OCR output\]$")
+
+
+def page_failed_marker(page_num: int) -> str:
+    """Explicit in-document marker for a page that produced nothing.
+
+    Shipped instead of silent emptiness: a reader diffing the output against
+    the source must not need to count page headers to notice a missing page
+    (the Kuttner-Table-2 failure mode).
+    """
+    return f"[page {page_num} failed: no usable OCR output]"
+
+
+def is_page_failed_marker(text: str) -> bool:
+    """True if a page's canonical text is the failure marker (not content)."""
+    return bool(_PAGE_FAILED_RE.match(text.strip()))
 
 
 def compute_image_hash(handle: DocumentHandle, page_num: int, dpi: int) -> str:
@@ -222,21 +245,30 @@ def _winning_page_output(
     if p.best_output and p.best_output.audit_passed:
         return p.best_output
     if p.is_born_digital and p.native_text:
+        # An enhancement page (tables/equations — native extraction known
+        # lossy there) whose OCR was tried and never passed ships native text
+        # as a FALLBACK, not a success: flagged WARNING / audit_passed=False
+        # so the manifest and run summary stop stamping silent reversions as
+        # passing pages.
+        native_is_fallback = p.needs_ocr_enhancement and bool(p.attempts)
         return PageOutput(
             page_num=page_num,
             text=p.native_text,
-            status=PageStatus.SUCCESS,
+            status=PageStatus.WARNING if native_is_fallback else PageStatus.SUCCESS,
             engine="native",
-            audit_passed=True,
+            audit_passed=not native_is_fallback,
         )
     # Whole-document CLI path: recover this page's text from the split markdown.
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
     # carries real content for this page is not shadowed (the prior ordering left
     # whole-doc recovery dead-coded behind any non-None best_output).
-    if whole_doc and page_num in whole_doc.texts:
+    if whole_doc and page_num in whole_doc.texts and whole_doc.texts[page_num].strip():
         # A blob that FAILED audit is frozen with audit_passed=False and a
         # non-SUCCESS status (WARNING: content present, audit not passed) so the
-        # manifest never fabricates known-bad output as a passing page.
+        # manifest never fabricates known-bad output as a passing page. An
+        # EMPTY section in the split (``## Page N`` headers with nothing
+        # between) falls through to the attempts/marker logic below instead of
+        # shipping a silent empty page stamped with the blob's passing audit.
         return PageOutput(
             page_num=page_num,
             text=whole_doc.texts[page_num],
@@ -244,11 +276,32 @@ def _winning_page_output(
             engine=whole_doc.engine,
             audit_passed=whole_doc.audit_passed,
         )
-    # Last resort: a failed per-page attempt (content present, audit not passed)
-    # beats an empty page so the manifest preserves what little we have.
+    # A failed per-page attempt (content present, audit not passed) beats an
+    # empty page so the manifest preserves what little we have.
     if p.best_output:
         return p.best_output
-    return PageOutput(page_num=page_num, text="", status=PageStatus.ERROR, audit_passed=False)
+    # The documented-but-previously-missing fallback: when scoring/judging
+    # cleared ``best_output`` and repair produced nothing, the rejected text
+    # still lives in ``attempts``. Ship it flagged rather than erasing the
+    # page (the silent-empty-page failure mode).
+    attempt = p.best_attempt
+    if attempt is not None:
+        return PageOutput(
+            page_num=page_num,
+            text=attempt.text,
+            status=PageStatus.WARNING,
+            engine=attempt.engine,
+            audit_passed=False,
+            failure_mode=attempt.failure_mode,
+        )
+    # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
+    # a silent gap between page headers.
+    return PageOutput(
+        page_num=page_num,
+        text=page_failed_marker(page_num),
+        status=PageStatus.ERROR,
+        audit_passed=False,
+    )
 
 
 def _strip_leading_page_marker(text: str) -> str:

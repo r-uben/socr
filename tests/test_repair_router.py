@@ -285,22 +285,23 @@ class TestSkipTriedEngines:
 
     def test_hallucination_falls_back_to_same_family_if_all_other_families_tried(self) -> None:
         config = _make_config(
-            fallback_chain=[EngineType.DEEPSEEK_VLLM, EngineType.GEMINI, EngineType.MISTRAL],
+            primary_engine=EngineType.MARKER,
+            fallback_chain=[EngineType.NOUGAT, EngineType.GEMINI, EngineType.MISTRAL],
             enabled_engines=[
-                EngineType.DEEPSEEK,
-                EngineType.DEEPSEEK_VLLM,
+                EngineType.MARKER,
+                EngineType.NOUGAT,
                 EngineType.GEMINI,
                 EngineType.MISTRAL,
             ],
         )
         router = RepairRouter(config)
-        # Tried DeepSeek + Gemini + Mistral — all families covered
+        # Tried Marker + Gemini + Mistral — all candidate families covered
         engine = router.select_repair_engine(
             FailureMode.HALLUCINATION,
-            tried_engines={EngineType.DEEPSEEK, EngineType.GEMINI, EngineType.MISTRAL},
+            tried_engines={EngineType.MARKER, EngineType.GEMINI, EngineType.MISTRAL},
         )
-        # Only DEEPSEEK_VLLM is left (same family as deepseek), should still return it
-        assert engine == EngineType.DEEPSEEK_VLLM
+        # Only NOUGAT is left (same family as marker), should still return it
+        assert engine == EngineType.NOUGAT
 
     def test_primary_engine_included_in_candidates(self) -> None:
         """Primary engine can be used for repair if not already tried on that page."""
