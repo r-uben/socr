@@ -37,20 +37,20 @@ def classify_page_type(assessment, min_word_count: int) -> str:
 
     ``min_word_count`` is the audit gate's configured minimum (the same
     threshold the pipeline uses), not a benchmark-specific constant: a page
-    whose own text layer carries fewer words than the gate minimum is
-    legitimately sparse.
+    whose own text layer carries fewer words than the gate minimum —
+    including zero words — is legitimately sparse.
 
-    Structured content (tables/equations) outranks sparseness: a figure page
-    that also carries a table is a table page for routing purposes.
+    Sparseness is WORD-COUNT-derived, not figure-derived (issue #39 review):
+    a dense page that merely contains an embedded image is a prose page; a
+    figure-DOMINATED page has few words and qualifies through them.
+    Structured content (tables/equations) outranks sparseness.
     """
     structured = assessment.has_tables or assessment.has_equations
     if not assessment.is_born_digital:
         return SCANNED_TABLE_OR_EQUATION if structured else SCANNED_PROSE
     if structured:
         return NATIVE_TABLE_OR_EQUATION
-    if assessment.has_figures or (
-        assessment.word_count and assessment.word_count < min_word_count
-    ):
+    if (assessment.word_count or 0) < min_word_count:
         return SPARSE_OR_FIGURE
     return NATIVE_PROSE
 

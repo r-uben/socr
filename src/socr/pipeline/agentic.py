@@ -211,15 +211,22 @@ class HeuristicPageJudge:
     """Cheap, no-model judge: accept if the output passes the heuristic checker.
 
     The graceful fallback so the agentic loop runs anywhere, even with no VLM.
+
+    ``sparse_ok(page_num) -> bool`` marks pages where low word count is
+    expected. Without it, a correct sparse caption page is rejected at EVERY
+    rung and — with uncapped escalation — deterministically walks the paid
+    ladder before shipping best-effort: the judge must be sparse-aware at the
+    decision point, not only in post-hoc scoring (issue #39 review).
     """
 
-    def __init__(self, checker) -> None:
+    def __init__(self, checker, sparse_ok=None) -> None:
         self._checker = checker
+        self._sparse_ok = sparse_ok if sparse_ok is not None else (lambda page_num: False)
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         if output.status == PageStatus.ERROR or not output.text.strip():
             return AcceptDecision(accept=False, reason="empty/error output")
-        check = self._checker.check(output.text)
+        check = self._checker.check(output.text, sparse_ok=self._sparse_ok(output.page_num))
         if check.passed:
             reason = "heuristics passed"
         else:

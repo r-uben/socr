@@ -832,7 +832,9 @@ class UnifiedPipeline:
                         po.page_num,
                     )
                     continue
-                scoring = self.scorer.score(po.text, engine=po.engine)
+                scoring = self.scorer.score(
+                    po.text, engine=po.engine, sparse_ok=self._sparse_page_ok(po.page_num)
+                )
                 if scoring.passed:
                     po.audit_passed = True
                     passed_outputs.append(po)
@@ -1352,7 +1354,10 @@ class UnifiedPipeline:
                 logger.warning("VLM judge unavailable (%s); using heuristics", exc)
             if backend == "vlm" and not self.config.quiet:
                 console.print("  [yellow]VLM judge unavailable -> heuristic judge[/yellow]")
-        return HeuristicPageJudge(self.heuristics)
+        # Sparse-aware at the DECISION point: without this, the heuristic
+        # fallback judge rejects correct sparse pages at every rung and the
+        # uncapped ladder pays the cloud engines for nothing.
+        return HeuristicPageJudge(self.heuristics, sparse_ok=self._sparse_page_ok)
 
     def _make_page_renderer(self, state: DocumentState):
         """Return render_image(page_num) -> temp PNG path for the VLM judge."""
@@ -1565,21 +1570,24 @@ class UnifiedPipeline:
     def _sparse_page_ok(self, page_num: int) -> bool:
         """Whether low word count is expected on this page.
 
-        Derived from the page itself, not an absolute threshold: a page is
-        legitimately sparse when it is figure-dominated or when its OWN
-        native text layer carries fewer words than the audit minimum —
-        demanding 50 words of OCR from a 24-word source page is how good
-        sparse pages used to escalate straight to paid engines.
+        Derived from the page itself, not an absolute threshold: a
+        BORN-DIGITAL page whose own text layer carries fewer words than the
+        audit minimum is legitimately sparse — demanding 50 words of OCR
+        from a 24-word source page is how good sparse pages used to escalate
+        straight to paid engines.
+
+        Deliberately narrow (issue #39 review): ``has_figures`` alone does
+        NOT qualify — a dense page that merely contains an image must keep
+        the full gate, and scanned pages (whose text-layer word counts are
+        junk) never earn leniency from this.
         """
         assessment = self._last_assessment
         if not assessment:
             return False
         pa = next((p for p in assessment.pages if p.page_num == page_num), None)
-        if pa is None:
+        if pa is None or not pa.is_born_digital:
             return False
-        if pa.has_figures:
-            return True
-        return bool(pa.word_count) and pa.word_count < self.config.audit_min_words
+        return (pa.word_count or 0) < self.config.audit_min_words
 
     def _score_per_page(self, state: DocumentState) -> None:
         """Score each page's best output individually."""

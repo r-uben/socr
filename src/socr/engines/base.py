@@ -659,4 +659,8 @@ class BaseHTTPEngine(ABC):
             status=PageStatus.ERROR,
             failure_mode=failure_mode,
             error=error,
+            # PageOutput defaults audit_passed=True; an ERROR output claiming
+            # a passing audit gets promoted to best_output by apply_result
+            # and ships as clean (review finding, issue #39).
+            audit_passed=False,
         )

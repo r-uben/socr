@@ -189,6 +189,8 @@ class BenchmarkRunner:
 
         if not engine.is_available():
             logger.warning("Engine %s is not available, skipping %s", engine_name, paper.name)
+            # Falls through to scoring: an unavailable engine scores zero
+            # coverage instead of silently dropping out of the ranking.
             result = EngineResult(
                 document_path=paper.pdf_path,
                 engine=engine_name,
@@ -196,13 +198,11 @@ class BenchmarkRunner:
                 failure_mode=_unavailable_failure(),
                 error=f"Engine {engine_name} not available",
             )
-            return EngineRun(paper_name=paper.name, engine=engine_name, result=result)
-
-        logger.info("Running %s on %s (%d pages)", engine_name, paper.name, paper.page_count)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_out = Path(tmpdir)
-            result = engine.process_document(paper.pdf_path, tmp_out, self.config)
+        else:
+            logger.info("Running %s on %s (%d pages)", engine_name, paper.name, paper.page_count)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_out = Path(tmpdir)
+                result = engine.process_document(paper.pdf_path, tmp_out, self.config)
 
         score: DocumentScore | None = None
         if paper.ground_truth_path and paper.ground_truth_path.exists():

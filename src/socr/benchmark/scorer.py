@@ -58,10 +58,17 @@ class DocumentScore:
 
     @property
     def coverage(self) -> float:
-        """Fraction of expected pages the engine actually covered."""
-        if not self.expected_pages:
-            return 1.0 if not self.pages_missing else 0.0
-        return 1.0 - (len(self.pages_missing) / self.expected_pages)
+        """Fraction of SCORED pages the engine actually covered.
+
+        Denominated in scored pages (the GT set), not the PDF's page count:
+        when hand-verified GT covers a subset of pages, a run that produced
+        nothing must score coverage 0.0 — not 1 - few/many (issue #39
+        review). With no scored pages at all, coverage is 0 when pages are
+        known missing (e.g. empty GT dir against a real page count).
+        """
+        if self.pages:
+            return sum(1 for p in self.pages if p.covered) / len(self.pages)
+        return 0.0 if self.pages_missing else 1.0
 
     def by_page_type(self) -> dict[str, dict[str, float]]:
         """Macro-averaged metrics per page type.
@@ -268,7 +275,25 @@ class BenchmarkScorer:
             for f in ground_truth_dir.glob("page_*.txt")
             if (m := re.fullmatch(r"page_(\d+)\.txt", f.name))
         )
-        if expected_pages and gt_pages and len(gt_pages) != expected_pages:
+        if not gt_pages:
+            # No text GT at all: this must be a zero score, never a vacuous
+            # perfect one (the 0.0-WER catastrophe's Stage-2 corner: a GT dir
+            # that exists but has no page_N.txt yet).
+            logger.error(
+                "benchmark: %s contains no page_N.txt ground truth — scoring zero",
+                ground_truth_dir,
+            )
+            return DocumentScore(
+                paper_name=result.document_path.stem,
+                engine=result.engine,
+                overall_wer=1.0,
+                overall_cer=1.0,
+                overall_nes=0.0,
+                processing_time=result.processing_time,
+                expected_pages=expected_pages,
+                pages_missing=list(range(1, expected_pages + 1)),
+            )
+        if expected_pages and len(gt_pages) != expected_pages:
             logger.warning(
                 "benchmark: %s has GT for %d page(s) but the PDF has %d",
                 ground_truth_dir,
@@ -290,7 +315,9 @@ class BenchmarkScorer:
                 encoding="utf-8"
             ).strip()
             pred_text = (predictions.get(page_num) or "").strip()
-            covered = bool(pred_text)
+            # A legitimately blank GT page is covered by a (correctly) empty
+            # prediction — an honest engine must not be punished for it.
+            covered = bool(pred_text) or not gt_text
 
             page_score = self.score_page(pred_text, gt_text, page_num)
             page_score.page_type = page_types.get(page_num, "")
@@ -345,10 +372,11 @@ class BenchmarkScorer:
         """page_num -> predicted text, resolving whole-document outputs.
 
         A single ``page_num=0`` output (document-level CLI engines) is split
-        on the contract's ``## Page N`` markers. A markerless blob splits to
-        one page; the coverage gate then counts pages 2..N as missing — the
-        engine genuinely failed to provide page-attributable output, and that
-        must show up in its score, not vanish (the 0.0-WER bug).
+        on the contract's ``## Page N`` markers, keyed by the marker's OWN
+        page number — positional renumbering would misattribute every page
+        after a skipped one, scoring page 3's correct text against page 2's
+        GT (issue #39 review, critical). A markerless blob maps to page 1
+        only; the coverage gate then counts pages 2..N as missing.
         """
         pages = [p for p in result.pages if p.page_num > 0]
         if pages:
@@ -358,24 +386,63 @@ class BenchmarkScorer:
         if whole is None or not (whole.text or "").strip():
             return {}
 
-        from ocr_output_contract import split_native_pages
+        from ocr_output_contract import PAGE_MARKER_RE
 
-        split = split_native_pages(whole.text)
-        if expected_pages and len(split) != expected_pages:
+        text = whole.text
+        matches = list(PAGE_MARKER_RE.finditer(text))
+        if not matches:
+            return {1: text}
+
+        predictions: dict[int, str] = {}
+        for idx, m in enumerate(matches):
+            n = int(m.group(1))
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            body = text[m.end() : end].strip()
+            if idx == 0:
+                # Preamble before the first marker belongs to that page.
+                preamble = text[: m.start()].strip()
+                if preamble:
+                    body = f"{preamble}\n\n{body}".strip()
+            if n in predictions:
+                logger.warning(
+                    "benchmark: duplicate '## Page %d' marker in %s output; keeping first",
+                    n,
+                    result.document_path.name,
+                )
+                continue
+            predictions[n] = body
+
+        if expected_pages and len(predictions) != expected_pages:
             logger.warning(
-                "benchmark: whole-doc output for %s split into %d page(s), "
+                "benchmark: whole-doc output for %s covers %d page(s), "
                 "expected %d — uncovered pages score as failures",
                 result.document_path.name,
-                len(split),
+                len(predictions),
                 expected_pages,
             )
-        return {i: t for i, t in enumerate(split, start=1)}
+        return predictions
 
     # ------------------------------------------------------------------
     # Table fidelity (vs hand-verified grid GT)
     # ------------------------------------------------------------------
 
-    _NUMERIC_CELL_RE = re.compile(r"[-+(]?\s*\d[\d,]*(?:\.\d+)?\s*[)%*]*")
+    # Sign may be ASCII hyphen, Unicode minus (U+2212), or en-dash (U+2013) —
+    # GT typed by hand and engine output legitimately differ here, so cells
+    # are normalized before detection AND comparison. Stars/percent/dagger
+    # significance markers and currency prefixes stay part of the cell.
+    _NUMERIC_CELL_RE = re.compile(r"[-+(]?\s*[$€£]?\s*\d[\d,]*(?:\.\d+)?\s*[)%*†]*")
+    # An escaped pipe (``a\|b``, the form core/html_tables emits inside
+    # cells) is content, not a column separator.
+    _CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
+
+    @classmethod
+    def _norm_cell(cls, cell: str) -> str:
+        return (
+            cell.replace("−", "-")
+            .replace("–", "-")
+            .replace("\\|", "|")
+            .strip()
+        )
 
     @classmethod
     def _markdown_table_cells(cls, text: str) -> list[list[str]]:
@@ -389,7 +456,7 @@ class BenchmarkScorer:
             # Skip separator rows (|---|---|)
             if set(inner.replace("|", "").strip()) <= set("-: "):
                 continue
-            rows.append([c.strip() for c in inner.split("|")])
+            rows.append([cls._norm_cell(c) for c in cls._CELL_SPLIT_RE.split(inner)])
         return rows
 
     @classmethod

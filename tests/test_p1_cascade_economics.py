@@ -92,18 +92,32 @@ class TestBudgetPreCheck:
         assert d.total_cost_usd == 0.0
 
     def test_budget_covers_first_paid_rung_only(self) -> None:
-        """Within one page the budget decrements: gemini fits, mistral no
-        longer does afterwards."""
+        """Within one page the budget decrements: with $0.0011, mistral
+        ($0.001) would fit BEFORE gemini spends $0.0002 but must not fit
+        after — only the decrement makes it skipped."""
         d = route_page(
             1,
             FULL_LADDER,
             _run(),
             _AcceptOnly(set()),  # nothing accepted -> walk the whole ladder
-            remaining_budget=0.0005,  # gemini (0.0002) fits; mistral (0.001) never
+            remaining_budget=0.0011,
         )
         tried = {a.engine for a in d.attempts}
         assert EngineType.GEMINI in tried
         assert EngineType.MISTRAL not in tried
+
+    def test_budget_exactly_covering_a_rung_runs_it(self) -> None:
+        """Boundary: a rung that exactly fits the remaining budget runs
+        (a '>' vs '>=' slip in the pre-check would strand it)."""
+        d = route_page(
+            1,
+            FULL_LADDER,
+            _run(),
+            _AcceptOnly(set()),
+            remaining_budget=0.0002,  # == gemini's price
+        )
+        tried = {a.engine for a in d.attempts}
+        assert EngineType.GEMINI in tried
 
     def test_no_budget_means_whole_ladder(self) -> None:
         d = route_page(1, FULL_LADDER, _run(), _AcceptOnly(set()))
@@ -171,6 +185,84 @@ class TestSparsePageGate:
         assert not scorer.score(self.CAPTION, sparse_ok=False).passed
 
 
+class TestSparseRoutingEndToEnd:
+    """The issue #39 review critical: sparse_ok must act at the ESCALATION
+    decision point, not only in post-hoc scoring — otherwise a correct
+    sparse caption page walks the whole uncapped ladder, paying the paid
+    rungs for deterministic rejections."""
+
+    CAPTION = (
+        "Figure 2: Impulse responses of the federal funds rate to a "
+        "one basis point monetary policy surprise, 1989 to 2002."
+    )
+
+    def test_sparse_caption_accepted_at_first_free_rung(self) -> None:
+        from socr.audit.heuristics import HeuristicsChecker
+        from socr.pipeline.agentic import HeuristicPageJudge
+
+        judge = HeuristicPageJudge(
+            HeuristicsChecker(min_word_count=50), sparse_ok=lambda page_num: True
+        )
+        d = route_page(1, FULL_LADDER, _run(text=self.CAPTION), judge)
+        assert d.accepted
+        assert len(d.attempts) == 1
+        assert d.total_cost_usd == 0.0
+
+    def test_dense_page_garbage_still_walks_ladder(self) -> None:
+        from socr.audit.heuristics import HeuristicsChecker
+        from socr.pipeline.agentic import HeuristicPageJudge
+
+        judge = HeuristicPageJudge(
+            HeuristicsChecker(min_word_count=50), sparse_ok=lambda page_num: False
+        )
+        d = route_page(1, FULL_LADDER, _run(text=self.CAPTION), judge)
+        assert not d.accepted
+        assert len(d.attempts) == len(FULL_LADDER)
+
+    def test_build_page_judge_wires_sparse_predicate(self) -> None:
+        from socr.core.document import DocumentHandle
+        from socr.core.state import DocumentState
+        from socr.pipeline.agentic import HeuristicPageJudge
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        pipeline = UnifiedPipeline(
+            PipelineConfig(quiet=True, tiered=False, judge_backend="heuristic")
+        )
+        with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+            handle = DocumentHandle(path=Path("/tmp/fake.pdf"), page_count=1)
+        judge = pipeline._build_page_judge(DocumentState(handle=handle))
+        assert isinstance(judge, HeuristicPageJudge)
+        assert judge._sparse_ok == pipeline._sparse_page_ok
+
+    def test_agentic_call_site_passes_no_cap(self) -> None:
+        """Pin the production call site: reintroducing a max_attempts cap in
+        _phase_agentic must fail a test, not just route_page's default."""
+        import inspect
+
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        src = inspect.getsource(UnifiedPipeline._phase_agentic)
+        assert "max_attempts" not in src
+        assert "remaining_budget=remaining" in src
+
+
+class TestTruncatedRoutsToCapable:
+    def test_repair_router_maps_truncated_to_capable_engine(self) -> None:
+        from socr.pipeline.repair import _CAPABLE_ENGINES, RepairRouter
+
+        router = RepairRouter(PipelineConfig(quiet=True))
+        engine = router.select_repair_engine(FailureMode.TRUNCATED, tried_engines=set())
+        assert engine in _CAPABLE_ENGINES
+
+    def test_truncated_output_not_promoted_to_best(self) -> None:
+        """_create_error_result must set audit_passed=False so apply_result
+        never promotes a truncated/error page as clean."""
+        from socr.engines.base import BaseHTTPEngine
+
+        out = BaseHTTPEngine._create_error_result(1, "truncated", FailureMode.TRUNCATED)
+        assert out.audit_passed is False
+
+
 class TestSparsePageDetection:
     def _pipeline_with_assessment(self, pa_kwargs):
         from socr.core.born_digital import DocumentAssessment, PageAssessment
@@ -187,13 +279,24 @@ class TestSparsePageDetection:
             )
         return pipeline
 
-    def test_figure_page_is_sparse_ok(self) -> None:
-        p = self._pipeline_with_assessment({"has_figures": True})
-        assert p._sparse_page_ok(1) is True
-
     def test_source_page_with_few_words_is_sparse_ok(self) -> None:
         p = self._pipeline_with_assessment({"word_count": 24})
         assert p._sparse_page_ok(1) is True
+
+    def test_blank_source_page_is_sparse_ok(self) -> None:
+        p = self._pipeline_with_assessment({"word_count": 0})
+        assert p._sparse_page_ok(1) is True
+
+    def test_dense_page_with_figure_is_not_sparse(self) -> None:
+        """has_figures alone must NOT unlock the relaxed gate — garbage on a
+        dense page that merely contains an image must still fail (review)."""
+        p = self._pipeline_with_assessment({"has_figures": True, "word_count": 400})
+        assert p._sparse_page_ok(1) is False
+
+    def test_scanned_page_never_sparse(self) -> None:
+        """Scanned text-layer word counts are junk; they earn no leniency."""
+        p = self._pipeline_with_assessment({"is_born_digital": False, "word_count": 3})
+        assert p._sparse_page_ok(1) is False
 
     def test_word_rich_page_is_not_sparse(self) -> None:
         p = self._pipeline_with_assessment({"word_count": 400})
