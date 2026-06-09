@@ -125,23 +125,47 @@ def route_page(
     judge: PageJudge,
     *,
     max_attempts: int = 0,
+    remaining_budget: float | None = None,
 ) -> PageDecision:
     """Route one page: cheapest provider first, escalate until the judge accepts.
+
+    Escalation is bounded by ladder exhaustion and the cost controls — NOT by
+    a retry count. The historical ``max_retries + 1`` cap made the paid rungs
+    mathematically unreachable whenever 3+ free local engines were installed,
+    so "escalate to cloud when needed" never happened (issue #39).
 
     Args:
         page_num: 1-indexed page.
         ladder: providers ordered cheapest-first (see ``provider_ladder``).
         run_provider: runs one engine on one page.
         judge: accept/escalate decision per output.
-        max_attempts: cap on providers tried (0 = whole ladder). Bounds cost.
+        max_attempts: optional cap on providers tried (0 = whole ladder, the
+            default). Kept for explicit user overrides and tests only.
+        remaining_budget: document budget left, in USD. Checked BEFORE each
+            rung: a paid provider that does not fit is skipped (free rungs
+            always fit), instead of discovering the overrun after spending.
+            ``None`` = unbounded.
     """
     if not ladder:
         return PageDecision(page_num, _error_output(page_num, "no providers available"))
 
     limit = len(ladder) if max_attempts <= 0 else min(max_attempts, len(ladder))
     attempts: list[ProviderAttempt] = []
+    tried = 0
 
-    for prof in ladder[:limit]:
+    for prof in ladder:
+        if tried >= limit:
+            break
+        if remaining_budget is not None and prof.cost_per_page_usd > remaining_budget:
+            logger.info(
+                "page %s: skipping %s ($%g/page exceeds remaining budget $%g)",
+                page_num,
+                prof.engine.value,
+                prof.cost_per_page_usd,
+                remaining_budget,
+            )
+            continue
+        tried += 1
         try:
             output = run_provider(prof.engine, page_num)
         except Exception as exc:  # a provider blowing up must not kill the page
@@ -156,6 +180,9 @@ def route_page(
                 )
             )
             continue
+
+        if remaining_budget is not None:
+            remaining_budget -= prof.cost_per_page_usd
 
         decision = judge.assess(output, prof)
         attempts.append(

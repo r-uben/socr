@@ -138,13 +138,27 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
                     failure_mode=FailureMode.API_ERROR,
                 )
 
-            text = self._extract_text(response.json())
+            data = response.json()
+            text = self._extract_text(data)
             if not text or len(text) < 10:
                 return self._create_error_result(
                     page_num,
                     "OCR produced empty or minimal output",
                     failure_mode=FailureMode.EMPTY_OUTPUT,
                 )
+
+            # A completion stopped by the token limit is a truncated page.
+            # Returning it as SUCCESS (the historical behavior) shipped
+            # partial pages with a fabricated confidence; mark TRUNCATED so
+            # the repair router retries instead.
+            if self._finish_reason(data) == "length":
+                result = self._create_error_result(
+                    page_num,
+                    f"output truncated at max_tokens={self.config.max_tokens}",
+                    failure_mode=FailureMode.TRUNCATED,
+                )
+                result.text = text  # keep the partial text for best-effort fallback
+                return result
 
             return self._create_success_result(
                 page_num=page_num,
@@ -249,6 +263,18 @@ class DeepSeekVLLMEngine(BaseHTTPEngine):
             return ""
         raw = choices[0].get("message", {}).get("content", "").strip()
         return DeepSeekVLLMEngine._clean_ocr_output(raw)
+
+    @staticmethod
+    def _finish_reason(data: dict) -> str:
+        """The first choice's finish/done reason, "" when absent.
+
+        OpenAI-compatible servers use ``finish_reason``; Ollama-style
+        responses use ``done_reason``.
+        """
+        choices = data.get("choices", [])
+        if choices:
+            return str(choices[0].get("finish_reason") or "")
+        return str(data.get("done_reason") or "")
 
     @staticmethod
     def _build_ocr_prompt() -> str:

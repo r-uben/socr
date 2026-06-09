@@ -77,9 +77,21 @@ class FailureModeScorer:
     # Public API
     # ------------------------------------------------------------------
 
-    def score(self, text: str, engine: str = "", expected_pages: int = 0) -> ScoringResult:
-        """Run heuristic checks on *text* and classify any failures."""
-        audit = self.checker.check(text, expected_pages=expected_pages)
+    def score(
+        self,
+        text: str,
+        engine: str = "",
+        expected_pages: int = 0,
+        sparse_ok: bool = False,
+    ) -> ScoringResult:
+        """Run heuristic checks on *text* and classify any failures.
+
+        ``sparse_ok`` marks a page that is legitimately sparse (figure page,
+        or the source carries fewer words than the minimum): low word count
+        then warns instead of failing, so good sparse pages stop escalating
+        to paid engines.
+        """
+        audit = self.checker.check(text, expected_pages=expected_pages, sparse_ok=sparse_ok)
         return self.score_from_audit(audit)
 
     def score_from_audit(self, audit: HeuristicsResult) -> ScoringResult:

@@ -82,12 +82,19 @@ class HeuristicsChecker:
         self.min_avg_word_length = min_avg_word_length
         self.max_avg_word_length = max_avg_word_length
 
-    def check(self, text: str, expected_pages: int = 0) -> HeuristicsResult:
+    def check(
+        self, text: str, expected_pages: int = 0, sparse_ok: bool = False
+    ) -> HeuristicsResult:
         """Run all heuristic checks on OCR output.
 
         Args:
             text: The OCR output text to check.
             expected_pages: If > 0, check for truncation based on expected page count.
+            sparse_ok: The page is legitimately sparse (figure-dominated, or
+                the source page itself carries fewer words than the minimum).
+                Low word count is then a warning, not an error — a correct
+                24-word figure-caption page must not hard-fail the gate and
+                trigger paid escalation.
         """
         result = HeuristicsResult()
 
@@ -151,14 +158,19 @@ class HeuristicsChecker:
         # Word count check
         words = text.split()
         word_count = len(words)
+        if word_count < self.min_word_count:
+            # On a sparse page the low count is expected, not evidence of a
+            # bad extraction — record it as a warning for visibility only.
+            wc_severity = "warning" if sparse_ok else "error"
+        else:
+            wc_severity = "info"
         result.add_metric(
             AuditMetric(
                 name="Word count",
                 value=word_count,
                 threshold=self.min_word_count,
                 passed=word_count >= self.min_word_count,
-                # Low word count almost always indicates a bad extraction; treat as failing.
-                severity="error" if word_count < self.min_word_count else "info",
+                severity=wc_severity,
             )
         )
 

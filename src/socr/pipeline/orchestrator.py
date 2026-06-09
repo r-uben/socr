@@ -1001,8 +1001,10 @@ class UnifiedPipeline:
 
         Born-digital prose still takes free native text (Tier 1). Every other
         page is routed through the cost-ordered ladder; the winning provider and
-        its cost are recorded on PageState. Bounded by max_retries and an
-        optional cost_budget.
+        its cost are recorded on PageState. Bounded by ladder exhaustion,
+        ``max_cost_per_page``, and ``cost_budget`` — never by a retry count
+        (issue #39: the old ``max_retries + 1`` cap made the paid rungs
+        unreachable whenever 3+ free local engines were installed).
         """
         from socr.core.providers import provider_ladder
         from socr.pipeline.agentic import route_page
@@ -1050,7 +1052,6 @@ class UnifiedPipeline:
             return
 
         judge = self._build_page_judge(state)
-        max_attempts = max(1, self.config.max_retries + 1)
         enhancement_pages = [p for p in ocr_pages if state.pages[p].needs_ocr_enhancement]
 
         if not self.config.quiet:
@@ -1064,11 +1065,17 @@ class UnifiedPipeline:
             return outs[0]
 
         for page_num in ocr_pages:
-            # Budget guard: once the document budget is spent, only try the cheapest.
-            cap = max_attempts
-            if self.config.cost_budget > 0 and state.total_cost >= self.config.cost_budget:
-                cap = 1
-            decision = route_page(page_num, ladder, run_provider, judge, max_attempts=cap)
+            # Escalation is bounded by the ladder + cost controls, never a
+            # retry count (the old max_retries+1 cap made paid rungs
+            # unreachable with 3+ free locals installed). The budget is
+            # enforced BEFORE each paid rung inside route_page; free rungs
+            # always remain available.
+            remaining = None
+            if self.config.cost_budget > 0:
+                remaining = max(self.config.cost_budget - state.total_cost, 0.0)
+            decision = route_page(
+                page_num, ladder, run_provider, judge, remaining_budget=remaining
+            )
 
             ps = state.pages[page_num]
             for att in decision.attempts:
@@ -1555,6 +1562,25 @@ class UnifiedPipeline:
                 for mode, detail in scoring.details.items():
                     console.print(f"    {detail}")
 
+    def _sparse_page_ok(self, page_num: int) -> bool:
+        """Whether low word count is expected on this page.
+
+        Derived from the page itself, not an absolute threshold: a page is
+        legitimately sparse when it is figure-dominated or when its OWN
+        native text layer carries fewer words than the audit minimum —
+        demanding 50 words of OCR from a 24-word source page is how good
+        sparse pages used to escalate straight to paid engines.
+        """
+        assessment = self._last_assessment
+        if not assessment:
+            return False
+        pa = next((p for p in assessment.pages if p.page_num == page_num), None)
+        if pa is None:
+            return False
+        if pa.has_figures:
+            return True
+        return bool(pa.word_count) and pa.word_count < self.config.audit_min_words
+
     def _score_per_page(self, state: DocumentState) -> None:
         """Score each page's best output individually."""
         failures = 0
@@ -1567,7 +1593,9 @@ class UnifiedPipeline:
 
             # Score the most recent attempt
             latest = page_state.attempts[-1]
-            scoring = self.scorer.score(latest.text, engine=latest.engine)
+            scoring = self.scorer.score(
+                latest.text, engine=latest.engine, sparse_ok=self._sparse_page_ok(page_num)
+            )
 
             latest.audit_passed = scoring.passed
             if not scoring.passed:
@@ -1902,7 +1930,11 @@ class UnifiedPipeline:
             for page_out in result.pages:
                 if page_out.page_num not in repair_page_nums:
                     continue
-                scoring = self.scorer.score(page_out.text, engine=result.engine)
+                scoring = self.scorer.score(
+                    page_out.text,
+                    engine=result.engine,
+                    sparse_ok=self._sparse_page_ok(page_out.page_num),
+                )
                 page_out.audit_passed = scoring.passed
                 if not scoring.passed:
                     page_out.failure_mode = scoring.primary_failure
