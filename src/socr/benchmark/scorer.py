@@ -1,18 +1,30 @@
-"""Benchmark scoring: WER, CER, and NES for OCR quality evaluation.
+"""Benchmark scoring: WER, CER, NES, and table-cell fidelity.
 
 Compares OCR output against ground truth using:
   - WER: Word Error Rate (edit_distance / ref_words)
   - CER: Character Error Rate (edit_distance / ref_chars)
   - NES: Normalized Edit Similarity (1 - edit_distance / max(len_pred, len_gt))
     More robust than WER for OCR evaluation (per socOCRbench).
+  - Table cells: structure + numeric-cell EXACTNESS against hand-verified
+    grid GT (``page_N.table.md``) — a pretty table with wrong digits is
+    unacceptable in a research corpus.
+
+Coverage is a HARD GATE: every expected page must be scored; a page the
+engine did not cover scores as a total failure, never as a silent skip.
+(The historical scorer skipped unmatched pages, so a page_num=0 whole-doc
+output matched nothing and every engine scored a perfect 0.0 WER.)
 """
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from socr.core.result import EngineResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,6 +36,10 @@ class PageScore:
     character_error_rate: float  # CER
     normalized_edit_similarity: float  # NES (0-1, higher is better)
     word_count_ratio: float  # predicted/actual word count
+    page_type: str = ""  # benchmark page-type taxonomy (page_types.py)
+    covered: bool = True  # engine produced output for this page
+    table_cell_accuracy: float | None = None  # numeric-cell exactness vs grid GT
+    table_structure_ok: bool | None = None  # row/col shape matches grid GT
 
 
 @dataclass
@@ -37,6 +53,42 @@ class DocumentScore:
     overall_cer: float = 0.0
     overall_nes: float = 0.0  # Normalized Edit Similarity
     processing_time: float = 0.0
+    expected_pages: int = 0
+    pages_missing: list[int] = field(default_factory=list)  # expected but not covered
+
+    @property
+    def coverage(self) -> float:
+        """Fraction of expected pages the engine actually covered."""
+        if not self.expected_pages:
+            return 1.0 if not self.pages_missing else 0.0
+        return 1.0 - (len(self.pages_missing) / self.expected_pages)
+
+    def by_page_type(self) -> dict[str, dict[str, float]]:
+        """Macro-averaged metrics per page type.
+
+        The corpus is prose-dominant, so a single micro-average drowns the
+        table/equation pages where engine quality actually differs; macro
+        aggregation by type is what calibration consumes.
+        """
+        groups: dict[str, list[PageScore]] = {}
+        for p in self.pages:
+            groups.setdefault(p.page_type or "untyped", []).append(p)
+        out: dict[str, dict[str, float]] = {}
+        for ptype, scores in groups.items():
+            n = len(scores)
+            out[ptype] = {
+                "pages": float(n),
+                "wer": sum(s.word_error_rate for s in scores) / n,
+                "cer": sum(s.character_error_rate for s in scores) / n,
+                "nes": sum(s.normalized_edit_similarity for s in scores) / n,
+                "coverage": sum(1.0 for s in scores if s.covered) / n,
+            }
+            cell_scores = [
+                s.table_cell_accuracy for s in scores if s.table_cell_accuracy is not None
+            ]
+            if cell_scores:
+                out[ptype]["table_cell_accuracy"] = sum(cell_scores) / len(cell_scores)
+        return out
 
 
 def _levenshtein(seq_a: list[str], seq_b: list[str]) -> int:
@@ -180,22 +232,52 @@ class BenchmarkScorer:
         self,
         result: EngineResult,
         ground_truth_dir: Path,
+        expected_pages: int = 0,
+        page_types: dict[int, str] | None = None,
     ) -> DocumentScore:
         """Score a full document against per-page ground truth files.
 
         Expects ground truth files at:
-            ground_truth_dir/page_1.txt
-            ground_truth_dir/page_2.txt
-            ...
+            ground_truth_dir/page_1.txt          (text GT, one per page)
+            ground_truth_dir/page_N.table.md     (optional hand-verified grid
+                                                  GT for table pages)
+
+        COVERAGE IS A HARD GATE. Every page with ground truth must be scored:
+        a page the engine produced no output for scores WER=1, CER=1, NES=0
+        and is listed in ``pages_missing``. A single whole-document
+        ``page_num=0`` output is split into pages via the contract's
+        ``## Page N`` markers first; a markerless blob covers page 1 only and
+        every other page counts as missing (loudly logged).
 
         Args:
             result: EngineResult from an OCR engine.
             ground_truth_dir: Directory with per-page ground truth text files.
+            expected_pages: Real page count of the source PDF. 0 = derive
+                from the ground-truth files present.
+            page_types: Optional page_num -> page-type map (page_types.py),
+                recorded on each PageScore for macro aggregation.
 
         Returns:
             DocumentScore with per-page and overall metrics.
         """
+        page_types = page_types or {}
+        predictions = self._per_page_predictions(result, expected_pages)
+
+        gt_pages = sorted(
+            int(m.group(1))
+            for f in ground_truth_dir.glob("page_*.txt")
+            if (m := re.fullmatch(r"page_(\d+)\.txt", f.name))
+        )
+        if expected_pages and gt_pages and len(gt_pages) != expected_pages:
+            logger.warning(
+                "benchmark: %s has GT for %d page(s) but the PDF has %d",
+                ground_truth_dir,
+                len(gt_pages),
+                expected_pages,
+            )
+
         page_scores: list[PageScore] = []
+        pages_missing: list[int] = []
 
         # Collect all ground truth text and predicted text for overall scoring
         all_gt_words: list[str] = []
@@ -203,19 +285,32 @@ class BenchmarkScorer:
         all_gt_chars: list[str] = []
         all_pred_chars: list[str] = []
 
-        for page_output in result.pages:
-            page_num = page_output.page_num
-            gt_file = ground_truth_dir / f"page_{page_num}.txt"
-
-            if not gt_file.exists():
-                continue
-
-            gt_text = gt_file.read_text(encoding="utf-8").strip()
-            pred_text = page_output.text.strip() if page_output.text else ""
+        for page_num in gt_pages:
+            gt_text = (ground_truth_dir / f"page_{page_num}.txt").read_text(
+                encoding="utf-8"
+            ).strip()
+            pred_text = (predictions.get(page_num) or "").strip()
+            covered = bool(pred_text)
 
             page_score = self.score_page(pred_text, gt_text, page_num)
-            page_scores.append(page_score)
+            page_score.page_type = page_types.get(page_num, "")
+            page_score.covered = covered
+            if not covered:
+                # The hard gate: an uncovered page is a total failure, never
+                # a silent skip (score_page already yields WER>=1/NES=0 for
+                # empty predictions against non-empty GT).
+                pages_missing.append(page_num)
 
+            # Hand-verified grid GT, when present, scores table fidelity.
+            table_gt = ground_truth_dir / f"page_{page_num}.table.md"
+            if table_gt.exists():
+                accuracy, structure_ok = self.score_table_cells(
+                    pred_text, table_gt.read_text(encoding="utf-8")
+                )
+                page_score.table_cell_accuracy = accuracy
+                page_score.table_structure_ok = structure_ok
+
+            page_scores.append(page_score)
             all_gt_words.extend(gt_text.split())
             all_pred_words.extend(pred_text.split())
             all_gt_chars.extend(list(gt_text))
@@ -241,4 +336,108 @@ class BenchmarkScorer:
             overall_cer=overall_cer,
             overall_nes=overall_nes,
             processing_time=result.processing_time,
+            expected_pages=expected_pages or len(gt_pages),
+            pages_missing=pages_missing,
         )
+
+    @staticmethod
+    def _per_page_predictions(result: EngineResult, expected_pages: int) -> dict[int, str]:
+        """page_num -> predicted text, resolving whole-document outputs.
+
+        A single ``page_num=0`` output (document-level CLI engines) is split
+        on the contract's ``## Page N`` markers. A markerless blob splits to
+        one page; the coverage gate then counts pages 2..N as missing — the
+        engine genuinely failed to provide page-attributable output, and that
+        must show up in its score, not vanish (the 0.0-WER bug).
+        """
+        pages = [p for p in result.pages if p.page_num > 0]
+        if pages:
+            return {p.page_num: p.text or "" for p in pages}
+
+        whole = next((p for p in result.pages if p.page_num == 0), None)
+        if whole is None or not (whole.text or "").strip():
+            return {}
+
+        from ocr_output_contract import split_native_pages
+
+        split = split_native_pages(whole.text)
+        if expected_pages and len(split) != expected_pages:
+            logger.warning(
+                "benchmark: whole-doc output for %s split into %d page(s), "
+                "expected %d — uncovered pages score as failures",
+                result.document_path.name,
+                len(split),
+                expected_pages,
+            )
+        return {i: t for i, t in enumerate(split, start=1)}
+
+    # ------------------------------------------------------------------
+    # Table fidelity (vs hand-verified grid GT)
+    # ------------------------------------------------------------------
+
+    _NUMERIC_CELL_RE = re.compile(r"[-+(]?\s*\d[\d,]*(?:\.\d+)?\s*[)%*]*")
+
+    @classmethod
+    def _markdown_table_cells(cls, text: str) -> list[list[str]]:
+        """Cell grid from the markdown pipe-table rows in *text*."""
+        rows: list[list[str]] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("|"):
+                continue
+            inner = stripped.strip("|")
+            # Skip separator rows (|---|---|)
+            if set(inner.replace("|", "").strip()) <= set("-: "):
+                continue
+            rows.append([c.strip() for c in inner.split("|")])
+        return rows
+
+    @classmethod
+    def _is_numeric_cell(cls, cell: str) -> bool:
+        return bool(cls._NUMERIC_CELL_RE.fullmatch(cell.strip()))
+
+    @classmethod
+    def score_table_cells(cls, predicted: str, gt_table_md: str) -> tuple[float, bool]:
+        """(numeric-cell exactness, structure_ok) against a grid GT.
+
+        When the predicted grid has the same shape as the GT, numeric cells
+        are compared position-by-position (exact string match after
+        whitespace normalization). When shapes differ, structure is failed
+        and exactness degrades to multiset recall of the GT's numeric values
+        in the prediction — content-presence credit without structure credit.
+        """
+        gt_rows = cls._markdown_table_cells(gt_table_md)
+        pred_rows = cls._markdown_table_cells(predicted)
+        gt_numeric = [
+            (r, c, cell.strip())
+            for r, row in enumerate(gt_rows)
+            for c, cell in enumerate(row)
+            if cls._is_numeric_cell(cell)
+        ]
+        if not gt_numeric:
+            return 1.0, bool(gt_rows) == bool(pred_rows)
+
+        structure_ok = len(pred_rows) == len(gt_rows) and all(
+            len(p) == len(g) for p, g in zip(pred_rows, gt_rows)
+        )
+        if structure_ok:
+            hits = sum(
+                1
+                for r, c, value in gt_numeric
+                if pred_rows[r][c].strip() == value
+            )
+            return hits / len(gt_numeric), True
+
+        pred_values: list[str] = [
+            cell.strip()
+            for row in pred_rows
+            for cell in row
+            if cls._is_numeric_cell(cell)
+        ]
+        pool = list(pred_values)
+        hits = 0
+        for _, _, value in gt_numeric:
+            if value in pool:
+                pool.remove(value)
+                hits += 1
+        return hits / len(gt_numeric), False

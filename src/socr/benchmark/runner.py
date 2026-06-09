@@ -120,6 +120,27 @@ class BenchmarkRunner:
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
         self.scorer = BenchmarkScorer()
+        self._page_types: dict[str, dict[int, str]] = {}  # paper name -> page types
+
+    def _paper_page_types(self, paper: BenchmarkPaper) -> dict[int, str]:
+        """Page-type map for a paper, computed once and reused across engines.
+
+        Uses the same born-digital detector as production routing, so the
+        benchmark's page types and the pipeline's routing decisions share one
+        source of truth. Non-fatal: an assessment failure yields untyped
+        pages, never a skipped run.
+        """
+        if paper.name not in self._page_types:
+            try:
+                from socr.benchmark.page_types import classify_document_pages
+
+                self._page_types[paper.name] = classify_document_pages(
+                    paper.pdf_path, self.config.audit_min_words
+                )
+            except Exception as exc:
+                logger.warning("page-type tagging failed for %s: %s", paper.name, exc)
+                self._page_types[paper.name] = {}
+        return self._page_types[paper.name]
 
     def run(
         self,
@@ -184,8 +205,17 @@ class BenchmarkRunner:
             result = engine.process_document(paper.pdf_path, tmp_out, self.config)
 
         score: DocumentScore | None = None
-        if result.success and paper.ground_truth_path and paper.ground_truth_path.exists():
-            score = self.scorer.score_document(result, paper.ground_truth_path)
+        if paper.ground_truth_path and paper.ground_truth_path.exists():
+            # Score FAILED runs too: an engine that produced nothing scores
+            # zero coverage, it does not silently drop out of the ranking
+            # (calibrating on successful runs only systematically flattered
+            # flaky engines).
+            score = self.scorer.score_document(
+                result,
+                paper.ground_truth_path,
+                expected_pages=paper.page_count,
+                page_types=self._paper_page_types(paper),
+            )
             score.paper_name = paper.name
             score.engine = engine_name
 
@@ -230,19 +260,33 @@ def _unavailable_failure():
 
 
 def _score_to_dict(score: DocumentScore) -> dict:
-    """Serialize a DocumentScore to a JSON-safe dict."""
+    """Serialize a DocumentScore to a JSON-safe dict.
+
+    Persists EVERYTHING calibration needs — NES (historically dropped on
+    serialization), page types, coverage, and table fidelity.
+    """
     return {
         "paper_name": score.paper_name,
         "engine": score.engine,
         "overall_wer": score.overall_wer,
         "overall_cer": score.overall_cer,
+        "overall_nes": score.overall_nes,
         "processing_time": score.processing_time,
+        "expected_pages": score.expected_pages,
+        "pages_missing": score.pages_missing,
+        "coverage": score.coverage,
+        "by_page_type": score.by_page_type(),
         "pages": [
             {
                 "page_num": p.page_num,
                 "word_error_rate": p.word_error_rate,
                 "character_error_rate": p.character_error_rate,
+                "normalized_edit_similarity": p.normalized_edit_similarity,
                 "word_count_ratio": p.word_count_ratio,
+                "page_type": p.page_type,
+                "covered": p.covered,
+                "table_cell_accuracy": p.table_cell_accuracy,
+                "table_structure_ok": p.table_structure_ok,
             }
             for p in score.pages
         ],
@@ -260,6 +304,10 @@ def _dict_to_score(d: dict) -> DocumentScore:
             character_error_rate=p["character_error_rate"],
             normalized_edit_similarity=p.get("normalized_edit_similarity", 0.0),
             word_count_ratio=p["word_count_ratio"],
+            page_type=p.get("page_type", ""),
+            covered=p.get("covered", True),
+            table_cell_accuracy=p.get("table_cell_accuracy"),
+            table_structure_ok=p.get("table_structure_ok"),
         )
         for p in d.get("pages", [])
     ]
@@ -271,4 +319,6 @@ def _dict_to_score(d: dict) -> DocumentScore:
         overall_cer=d["overall_cer"],
         overall_nes=d.get("overall_nes", 0.0),
         processing_time=d.get("processing_time", 0.0),
+        expected_pages=d.get("expected_pages", 0),
+        pages_missing=d.get("pages_missing", []),
     )
