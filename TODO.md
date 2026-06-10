@@ -1,25 +1,43 @@
 # socr — TODO
 
 Live, prioritized next-actions. Detail lives in `TICKETS.md` and `docs/log/`.
-Last updated: 2026-06-07.
+Last updated: 2026-06-10.
 
 ## Now / next
-- [ ] **Textbook-class failures (TICKET-19..24)** — first equation-heavy textbook
-      run surfaced 6 issues; see `docs/log/2026-06-07_math-textbook-failures.md`.
-      Highest: **TICKET-19** — `extract_structured()` shreds a prose+references page
-      (Dougherty p19) into a fake 9-col grid; contradicts TICKET-18's met criterion
-      "references/prose never trigger reconstruction". Then **TICKET-23** (no
-      equation→LaTeX path; the central gap for math books) and **TICKET-21**
-      (local-only run hard-errors on a fully-written `.md`).
-- [ ] **Land `feat/audit-log` -> main** — 9 commits, all tested (541 pass). The
-      table-quality + text-integrity program (see `docs/log/2026-06-06_*`).
+- [ ] **#39 Stage 2 — hand-verified ground truth** for table/equation pages of the
+      10-paper benchmark set (seed candidates from native/premium-VLM output as
+      `page_N.table.md` grids; human checks the numbers). Blocks Stage 3.
+- [ ] **#39 Stage 3 — calibration artifact**: run `socr benchmark run` across the
+      now-validated CLI fleet, `calibrate --apply` writes `calibration.lock.json`
+      (page-type ladders, benchmark hash, engine+model+backend identity), and
+      AUTO_ENGINE_ORDER / _LOCAL_ENGINE_ORDER / RepairRouter / provider_ladder all
+      delegate to it. Design: `docs/log/2026-06-10_p1-routing-design.md`.
+- [ ] **Agentic live test** — uncapped cheapest-first ladder on the 6-page
+      Shrimali-Ahmad benchmark paper (waiting for the ocr-fleet session's
+      marker/nougat chain to free local compute).
+- [ ] **Regenerate the corrupted-era library copies** (Kuttner 2001, Bernanke-
+      Kuttner 2005) with the fixed pipeline; full corpus re-sweep waits for Stage 3.
+- [ ] **Textbook-class failures (TICKET-19..24)** — TICKET-19 prose-shredding fixed
+      on main (dc9e773); TICKET-23 equation→LaTeX partially addressed by
+      `--recover-corrupt-math` (opt-in, corrupt-math only); TICKET-20/22/24 open.
+      See `docs/log/2026-06-07_math-textbook-failures.md`.
 - [ ] **Per-page provenance, written by default** — record per page: engine,
       model version, native-vs-model, table-reconstructed flag, encoding-corruption
       score. Extend `core/audit_log.py`. Closes "which model read page N, and was
       native trusted?" — the manifest is opt-in and `model_version` is often blank.
+      (Pairs naturally with Stage 3's engine+model identity work.)
 - [ ] **Firing-rate validation of structure-restore** across the corpus — how often
       booktabs grids are recovered, false-positive check on prose/references. Sweeps
       stalled on Google Drive I/O; the numeric-column gate makes them fast now.
+
+## Done 2026-06-09/10 (detail in docs/log/)
+- P0 #38: pipeline no longer silently destroys content (html_tables, attempts
+  fallback, repair AUTO crash, judge wiring, figures ordering, flagged native).
+- P1 #39 Stage 1: uncapped escalation + budget pre-check, truncation gate,
+  sparse-page gate at decision points, benchmark coverage hard gate + page types
+  + table-cell fidelity. Two adversarial review rounds. 702 tests.
+- Validated end-to-end twice on Bernanke-Kuttner 2005 (the old total-failure
+  paper): 37/37 pages, judge 19/19 operational, clean tables, honest audit log.
 
 ## Soon
 - [ ] **Populate `model_version`** in manifest fingerprints (long-standing gap).
