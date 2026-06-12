@@ -90,6 +90,7 @@ def test_corrupt_math_detected_where_prose_ratio_is_blind():
     assert a.is_born_digital is True  # prose still trusted (not whole-page OCR)
     assert a.has_corrupt_math is True
     assert a.has_equations is True
+    assert a.needs_ocr_enhancement is True
     assert any("corrupt math" in n for n in a.notes)
 
 
@@ -103,3 +104,4 @@ def test_clean_math_with_greek_and_real_typography_not_flagged():
     _doc, page = _page(lines)
     a = det._assess_page(page, 1)
     assert a.has_corrupt_math is False
+    assert a.needs_ocr_enhancement is False

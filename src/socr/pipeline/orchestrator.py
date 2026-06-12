@@ -531,18 +531,18 @@ class UnifiedPipeline:
         bd_count = assessment.born_digital_count
         if not self.config.quiet:
             if bd_count:
-                # Count pages needing enhancement vs pure prose
+                # Count pages needing enhancement vs trusted native text.
                 enhancement_count = sum(
                     1 for pa in assessment.pages if pa.is_born_digital and pa.needs_ocr_enhancement
                 )
-                prose_count = bd_count - enhancement_count
+                native_count = bd_count - enhancement_count
                 scanned_count = assessment.scanned_count
                 console.print(f"  {bd_count}/{assessment.page_count} pages born-digital")
-                if self.config.native_first and (prose_count or enhancement_count):
-                    if prose_count:
-                        console.print(f"    {prose_count} prose-only (native text)")
+                if self.config.native_first and (native_count or enhancement_count):
+                    if native_count:
+                        console.print(f"    {native_count} trusted native text")
                     if enhancement_count:
-                        console.print(f"    {enhancement_count} complex (tables/figures/equations)")
+                        console.print(f"    {enhancement_count} native-layer recovery needed")
                     if scanned_count:
                         console.print(f"    {scanned_count} scanned (no text layer)")
             else:
@@ -626,7 +626,7 @@ class UnifiedPipeline:
     def _backbone_native_first(self, state: DocumentState, output_dir: Path) -> EngineResult:
         """3-tier routing: native → local → cloud.
 
-        Tier 1: Born-digital prose → native text (free, instant)
+        Tier 1: Born-digital trusted native text (free, instant)
         Tier 2: Easy scanned pages → local engine (free, fast)
         Tier 3: Hard pages (tables, multi-column, degraded) → primary engine (cloud)
 
@@ -1012,8 +1012,8 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print("\n[cyan]Agentic routing[/cyan] (cost-ordered, judge-gated)")
 
-        # Tier 1: born-digital prose -> native text (free, no OCR).
-        # Skipped when --no-native-first: the user wants OCR even on prose, so
+        # Tier 1: born-digital trusted native text (free, no OCR).
+        # Skipped when --no-native-first: the user wants OCR even here, so
         # every page goes through the cost ladder.
         ocr_pages: list[int] = []
         for page_num, ps in sorted(state.pages.items()):
@@ -2044,8 +2044,8 @@ class UnifiedPipeline:
 
         # Pages that produced no usable text anywhere (shipped as explicit
         # failure markers) and enhancement pages that silently reverted to
-        # native text after OCR was tried and never passed. Both demote the
-        # document from SUCCESS: a run that lost content or shipped known-
+        # native text after recovery was tried and never passed. Both demote
+        # the document from SUCCESS: a run that lost content or shipped known-
         # lossy fallbacks must not report a clean pass.
         from socr.core.manifest import canonical_page_texts, is_page_failed_marker
 

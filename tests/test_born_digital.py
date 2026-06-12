@@ -598,8 +598,8 @@ class TestTableDetection:
         assert page.is_born_digital
         assert not page.has_tables
 
-    def test_table_page_needs_ocr_enhancement(self, tmp_path: Path) -> None:
-        """Pages with tables should be flagged for OCR enhancement."""
+    def test_clean_table_page_does_not_need_ocr_enhancement(self, tmp_path: Path) -> None:
+        """A clean native table should stay native/structured, not whole-page OCR."""
         pdf_path = tmp_path / "table.pdf"
         _create_pdf_with_table(pdf_path)
 
@@ -607,7 +607,8 @@ class TestTableDetection:
         result = detector.detect(pdf_path)
         page = result.pages[0]
 
-        assert page.needs_ocr_enhancement
+        assert page.has_tables
+        assert not page.needs_ocr_enhancement
 
     def test_prose_only_no_ocr_enhancement(self, tmp_path: Path) -> None:
         """Prose-only pages should not need OCR enhancement."""
@@ -654,8 +655,8 @@ class TestFigureDetection:
         assert page.is_born_digital
         assert not page.has_figures
 
-    def test_figure_page_needs_ocr_enhancement(self, tmp_path: Path) -> None:
-        """Pages with figures should be flagged for OCR enhancement."""
+    def test_clean_figure_page_does_not_need_ocr_enhancement(self, tmp_path: Path) -> None:
+        """Figures are extracted/described separately; they do not require OCR."""
         pdf_path = tmp_path / "figure.pdf"
         _create_pdf_with_image(pdf_path)
 
@@ -663,7 +664,8 @@ class TestFigureDetection:
         result = detector.detect(pdf_path)
         page = result.pages[0]
 
-        assert page.needs_ocr_enhancement
+        assert page.has_figures
+        assert not page.needs_ocr_enhancement
 
 
 # ---------------------------------------------------------------------------
@@ -716,8 +718,8 @@ class TestEquationDetection:
         assert not detector._detect_equations("The price is $50 per unit.")
         assert not detector._detect_equations("")
 
-    def test_equation_page_needs_ocr_enhancement(self, tmp_path: Path) -> None:
-        """Pages with equations should be flagged for OCR enhancement."""
+    def test_clean_equation_page_does_not_need_whole_page_ocr(self, tmp_path: Path) -> None:
+        """Clean equations are metadata for future regional recovery, not VLM routing."""
         pdf_path = tmp_path / "equations.pdf"
         _create_pdf_with_equations(pdf_path)
 
@@ -725,7 +727,8 @@ class TestEquationDetection:
         result = detector.detect(pdf_path)
         page = result.pages[0]
 
-        assert page.needs_ocr_enhancement
+        assert page.has_equations
+        assert not page.needs_ocr_enhancement
 
 
 class TestMathFontDetection:
@@ -944,8 +947,9 @@ class TestMixedContent:
         # Page 2: table + image
         page2 = result.pages[1]
         assert page2.is_born_digital
+        assert page2.has_tables
         assert page2.has_figures  # has embedded image
-        assert page2.needs_ocr_enhancement
+        assert not page2.needs_ocr_enhancement
 
     def test_complex_content_notes_list_types(self, tmp_path: Path) -> None:
         """Notes field lists the detected content types."""
@@ -957,7 +961,7 @@ class TestMixedContent:
         page2 = result.pages[1]
 
         notes_text = " ".join(page2.notes)
-        assert "complex content" in notes_text.lower() or "ocr enhancement" in notes_text.lower()
+        assert "complex content" in notes_text.lower()
 
     def test_backward_compatible_defaults(self) -> None:
         """New PageAssessment fields have safe defaults for backward compat."""

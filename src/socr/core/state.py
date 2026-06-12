@@ -29,7 +29,7 @@ class PageState:
     page_num: int
     is_born_digital: bool = False
     native_text: str | None = None
-    needs_ocr_enhancement: bool = False  # OCR preferred (tables/figures/equations)
+    needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
@@ -38,9 +38,9 @@ class PageState:
     def needs_repair(self) -> bool:
         """Whether this page still needs (re)processing.
 
-        Born-digital prose-only pages with native text never need repair.
-        Born-digital pages with complex content (tables/figures/equations)
-        prefer OCR, so they need repair until a passing OCR attempt exists.
+        Born-digital pages with trusted native text never need repair.
+        Born-digital pages with a known native-layer deficiency request
+        enhancement, so they need repair until a passing attempt exists.
         If OCR has been attempted and failed, native_text serves as fallback
         (needs_repair returns False to avoid infinite repair loops) — UNLESS
         the VLM judge explicitly rejected the output: a judge rejection means
@@ -51,9 +51,8 @@ class PageState:
         """
         if self.is_born_digital and self.native_text:
             if self.needs_ocr_enhancement:
-                # Prefer OCR for pages with complex content, but if OCR
-                # has been attempted (at least one attempt exists) and none
-                # passed, fall back to native text.
+                # Prefer enhancement for pages with deficient native text, but
+                # if it has been attempted and none passed, fall back to native.
                 if self.best_output and self.best_output.audit_passed:
                     return False  # OCR succeeded
                 if self.judge_rejected:
@@ -169,8 +168,8 @@ class DocumentState:
         for i in range(1, self.handle.page_count + 1):
             p = self.pages[i]
             if p.best_output and p.best_output.audit_passed:
-                # Prefer passing OCR output (especially for pages with
-                # tables/figures/equations where OCR is better than native)
+                # Prefer passing enhanced output where the native layer is known
+                # deficient; otherwise native text below is authoritative.
                 texts.append(p.best_output.text)
             elif p.is_born_digital and p.native_text:
                 texts.append(p.native_text)

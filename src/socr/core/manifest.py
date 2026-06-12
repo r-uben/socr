@@ -245,8 +245,8 @@ def _winning_page_output(
     if p.best_output and p.best_output.audit_passed:
         return p.best_output
     if p.is_born_digital and p.native_text:
-        # An enhancement page (tables/equations — native extraction known
-        # lossy there) whose OCR was tried and never passed ships native text
+        # An enhancement page (native layer known deficient) whose recovery was
+        # tried and never passed ships native text
         # as a FALLBACK, not a success: flagged WARNING / audit_passed=False
         # so the manifest and run summary stop stamping silent reversions as
         # passing pages.

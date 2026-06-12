@@ -70,7 +70,7 @@ class PageAssessment:
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded images (alias for has_images)
     has_equations: bool = False  # page contains math/equations
-    needs_ocr_enhancement: bool = False  # OCR preferred over native text for this page
+    needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     notes: list[str] = field(default_factory=list)
 
@@ -414,11 +414,13 @@ class BornDigitalDetector:
             has_images=has_images,
         )
 
-        # For born-digital pages with complex content, use structured
-        # extraction (markdown tables) instead of plain get_text().
-        # Also flag that OCR is preferred for these pages.
+        # Complex content is metadata, not a routing decision. Clean native
+        # tables are extracted from the PDF text layer, figures are handled by
+        # the figure pass, and clean equations should not force whole-page OCR.
+        # Only evidence that the native layer itself is deficient should request
+        # enhancement.
         has_complex_content = has_tables or has_figures or has_equations
-        needs_ocr_enhancement = has_complex_content
+        needs_ocr_enhancement = has_corrupt_math
 
         # Flag mild encoding corruption (e.g. a broken header font) for visibility
         # without escalating: the body is still trustworthy, but the page is marked
@@ -442,9 +444,7 @@ class BornDigitalDetector:
                 content_types.append("figures")
             if has_equations:
                 content_types.append("equations")
-            notes.append(
-                f"complex content detected ({', '.join(content_types)}); OCR enhancement preferred"
-            )
+            notes.append(f"complex content detected ({', '.join(content_types)})")
 
         if has_corrupt_math:
             notes.append(
