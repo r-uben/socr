@@ -4,12 +4,9 @@ from pathlib import Path
 import pytest
 
 fitz = pytest.importorskip("fitz")
-PIL = pytest.importorskip("PIL")
+pytest.importorskip("PIL")
 
-from socr.core.config import PipelineConfig
-from socr.core.document import DocumentHandle
-from socr.core.result import FigureInfo
-from socr.figures.extractor import FigureExtractor
+from socr.figures.extractor import FigureExtractor  # noqa: E402
 
 
 def _make_pdf_with_image(tmp_path: Path) -> Path:
@@ -158,3 +155,94 @@ def test_figure_extractor_crops_vector_figure_on_rotated_page(tmp_path: Path) ->
         "no extracted figure contains the chart: the crop was taken in "
         "unrotated coordinates on a rotated page"
     )
+
+
+def _draw_vector_chart(page, rect: fitz.Rect, color: tuple[float, float, float]) -> None:
+    """Dense vector chart panel with bars, gridlines, and a line series."""
+    page.draw_rect(rect, color=color, width=0.7)
+    for i in range(1, 6):
+        y = rect.y0 + i * rect.height / 7
+        page.draw_line((rect.x0 + 8, y), (rect.x1 - 8, y), color=(0.6, 0.6, 0.6), width=0.4)
+    for i in range(12):
+        x = rect.x0 + 12 + i * (rect.width - 24) / 12
+        height = (i % 5 + 2) * (rect.height - 22) / 8
+        page.draw_rect(
+            fitz.Rect(x, rect.y1 - 10 - height, x + 5, rect.y1 - 10),
+            color=color,
+            fill=color,
+            width=0.3,
+        )
+    pts = []
+    for i in range(12):
+        x = rect.x0 + 12 + i * (rect.width - 24) / 11
+        y = rect.y0 + 18 + ((i * 7) % 10) * (rect.height - 36) / 10
+        pts.append(fitz.Point(x, y))
+    for a, b in zip(pts, pts[1:]):
+        page.draw_line(a, b, color=color, width=1.2)
+
+
+def _make_vector_dashboard_pdf(tmp_path: Path) -> Path:
+    """Consensus-style page: one large vector table plus three small charts.
+
+    With the old coarse vector clustering, the header/table/charts are bridged
+    into a single ~full-page region, while two real charts are below the 5%
+    area gate and disappear.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+
+    # Page-spanning header and a large left table. These are not figures.
+    page.draw_rect(
+        fitz.Rect(34, 34, 562, 52),
+        color=(0.2, 0.4, 0.7),
+        fill=(0.7, 0.8, 0.9),
+        width=0.5,
+    )
+    table = fitz.Rect(34, 62, 292, 564)
+    page.draw_rect(table, color=(0, 0, 0), width=0.5)
+    for i in range(10):
+        x = table.x0 + i * table.width / 9
+        page.draw_line((x, table.y0), (x, table.y1), color=(0.65, 0.65, 0.65), width=0.3)
+    for j in range(32):
+        y = table.y0 + j * table.height / 31
+        page.draw_line((table.x0, y), (table.x1, y), color=(0.65, 0.65, 0.65), width=0.3)
+
+    # Small vector decorations that bridge clusters under the old 30pt gap.
+    page.draw_rect(fitz.Rect(29, 568, 301, 617), color=(1, 0, 0), width=0.7)
+    page.draw_line((318, 590), (558, 590), color=(0.5, 0.5, 0.5), width=0.4)
+    page.draw_line((324, 612), (553, 612), color=(0.5, 0.5, 0.5), width=0.4)
+
+    _draw_vector_chart(page, fitz.Rect(318, 519, 558, 586), (1, 0, 0))
+    _draw_vector_chart(page, fitz.Rect(45, 713, 282, 792), (0, 0.6, 0))
+    _draw_vector_chart(page, fitz.Rect(324, 632, 553, 807), (0, 0, 1))
+
+    pdf_path = tmp_path / "vector_dashboard.pdf"
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
+def _has_color(img, channel: str) -> bool:
+    pixels = img.convert("RGB").getdata()
+    if channel == "red":
+        return any(r > 180 and g < 90 and b < 90 for r, g, b in pixels)
+    if channel == "green":
+        return any(g > 120 and r < 90 and b < 90 for r, g, b in pixels)
+    if channel == "blue":
+        return any(b > 180 and r < 90 and g < 90 for r, g, b in pixels)
+    raise ValueError(channel)
+
+
+def test_figure_extractor_splits_vector_dashboard_charts(tmp_path: Path) -> None:
+    """Issue #43: dense vector dashboards need chart crops, not a full-page PNG."""
+    pdf_path = _make_vector_dashboard_pdf(tmp_path)
+
+    extracted = FigureExtractor(max_total=10, max_per_page=5).extract(pdf_path)
+
+    assert len(extracted) == 3
+    assert all(max(fig.image.size) < 900 for fig in extracted), (
+        "a chart crop should not be a full-page render"
+    )
+    assert any(_has_color(fig.image, "red") for fig in extracted)
+    assert any(_has_color(fig.image, "green") for fig in extracted)
+    assert any(_has_color(fig.image, "blue") for fig in extracted)

@@ -9,11 +9,17 @@ Three extraction strategies (applied per page, in order):
   2. Raw embedded images via xref
 """
 
+from __future__ import annotations
+
 import logging
 import signal
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +57,7 @@ class ExtractedFigure:
 
     figure_num: int
     page_num: int
-    image: "Image.Image"  # PIL Image (lazy import)
+    image: Image.Image  # PIL Image (lazy import)
     saved_path: str | None = None
 
 
@@ -64,6 +70,12 @@ MIN_VECTOR_AREA_RATIO = 0.05
 MAX_VECTOR_AREA_RATIO = 0.85
 HEADER_FOOTER_MARGIN = 0.1
 CLUSTER_GAP = 30
+FINE_CLUSTER_GAP = 3
+VECTOR_SPLIT_AREA_RATIO = 0.50
+DENSE_VECTOR_MIN_AREA_RATIO = MIN_VECTOR_AREA_RATIO * 0.5
+TABLE_GRID_MIN_AREA_RATIO = MIN_VECTOR_AREA_RATIO * 4
+MIN_DATA_MARKS = 3
+DATA_STROKE_MIN_WIDTH = 1.0
 
 
 class FigureExtractor:
@@ -88,7 +100,6 @@ class FigureExtractor:
         calls; the OCR engine's inline description already covers them.
         """
         import fitz
-        from PIL import Image
 
         if self.save_dir:
             self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -193,7 +204,7 @@ class FigureExtractor:
                     if rect is not None:
                         d["rect"] = (rect * rot).normalize()
             if len(drawings) >= min_drawings:
-                regions = _cluster_drawings(drawings, page_width, page_height, CLUSTER_GAP)
+                regions = _vector_regions(drawings, page_width, page_height, page_area)
 
                 for region_drawings, bbox in regions:
                     if counter > self.max_total or per_page >= self.max_per_page:
@@ -203,12 +214,19 @@ class FigureExtractor:
                     w, h = x1 - x0, y1 - y0
                     area = w * h
                     ratio = area / page_area
+                    has_data_marks = _has_vector_data_marks(region_drawings)
 
                     if area < MIN_AREA or w < 50 or h < 50:
                         continue
-                    if ratio < min_area_ratio or ratio > max_area_ratio:
+                    if ratio > max_area_ratio:
                         continue
+                    if ratio < min_area_ratio:
+                        dense_min_ratio = min(min_area_ratio, DENSE_VECTOR_MIN_AREA_RATIO)
+                        if ratio < dense_min_ratio or not has_data_marks:
+                            continue
                     if len(region_drawings) < min_drawings:
+                        continue
+                    if _looks_like_table_grid(region_drawings, bbox, ratio, has_data_marks):
                         continue
 
                     # Skip header/footer
@@ -342,7 +360,7 @@ class FigureExtractor:
 
         return counter, per_page
 
-    def _save(self, img: "Image.Image", fig_num: int, page_num: int) -> Path:
+    def _save(self, img: Image.Image, fig_num: int, page_num: int) -> Path:
         path = self.save_dir / f"figure_{fig_num}_page{page_num}.png"
         img.save(path)
         return path
@@ -360,7 +378,7 @@ def _render_region(
     page_width: float,
     page_height: float,
     padding: int = 10,
-) -> "Image.Image | None":
+) -> Image.Image | None:
     """Render a rectangular region of a PDF page to PIL Image."""
     import fitz
     from PIL import Image
@@ -382,7 +400,7 @@ def _render_region(
         return None
 
 
-def _extract_xref_image(pdf, xref: int) -> "Image.Image | None":
+def _extract_xref_image(pdf, xref: int) -> Image.Image | None:
     """Extract an embedded image by xref and convert to RGB PIL Image."""
     import fitz
     from PIL import Image
@@ -474,3 +492,116 @@ def _cluster_drawings(
 
     results.sort(key=lambda r: (r[1][1], r[1][0]))
     return results
+
+
+def _vector_regions(
+    drawings: list[dict],
+    page_width: float,
+    page_height: float,
+    page_area: float,
+) -> list[tuple[list[dict], tuple[float, float, float, float]]]:
+    """Return vector regions, splitting page-spanning bridged clusters.
+
+    A coarse gap keeps legitimate multi-part figures together, but dense
+    dashboard pages can bridge unrelated table/chart panels into one near-page
+    crop. Oversized coarse regions are reclustered with a fine gap; ordinary
+    regions keep the historical behavior.
+    """
+    coarse = _cluster_drawings(drawings, page_width, page_height, CLUSTER_GAP)
+    regions: list[tuple[list[dict], tuple[float, float, float, float]]] = []
+    for region_drawings, bbox in coarse:
+        ratio = _bbox_area_ratio(bbox, page_area)
+        if ratio > VECTOR_SPLIT_AREA_RATIO:
+            fine = _cluster_drawings(region_drawings, page_width, page_height, FINE_CLUSTER_GAP)
+            if len(fine) > 1:
+                regions.extend(fine)
+                continue
+        regions.append((region_drawings, bbox))
+    return _dedupe_regions(regions)
+
+
+def _dedupe_regions(
+    regions: list[tuple[list[dict], tuple[float, float, float, float]]],
+) -> list[tuple[list[dict], tuple[float, float, float, float]]]:
+    seen: set[tuple[int, int, int, int]] = set()
+    out = []
+    for drawings, bbox in sorted(regions, key=lambda r: (r[1][1], r[1][0])):
+        key = tuple(int(v) for v in bbox)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((drawings, bbox))
+    return out
+
+
+def _bbox_area_ratio(bbox: tuple[float, float, float, float], page_area: float) -> float:
+    x0, y0, x1, y1 = bbox
+    return ((x1 - x0) * (y1 - y0)) / max(page_area, 1)
+
+
+def _has_vector_data_marks(drawings: list[dict]) -> bool:
+    """True for clusters with chart-like bars/series rather than pure ruling.
+
+    Small vector charts in reports are often below the normal area gate, so they
+    need a positive visual signal: colored fills (bars/points) or thick strokes
+    (line series). Thin gray/black ruling alone is treated as table/layout.
+    """
+    marks = 0
+    for d in drawings:
+        fill = d.get("fill")
+        if fill is not None and not _is_neutral_color(fill):
+            marks += 1
+        width = float(d.get("width") or 0)
+        color = d.get("color")
+        if width >= DATA_STROKE_MIN_WIDTH and (
+            not _is_neutral_color(color) or width >= DATA_STROKE_MIN_WIDTH * 2
+        ):
+            marks += 1
+        if marks >= MIN_DATA_MARKS:
+            return True
+    return False
+
+
+def _is_neutral_color(color) -> bool:
+    if color is None:
+        return True
+    try:
+        r, g, b = (float(c) for c in color[:3])
+    except Exception:
+        return True
+    return max(r, g, b) - min(r, g, b) < 0.08
+
+
+def _looks_like_table_grid(
+    drawings: list[dict],
+    bbox: tuple[float, float, float, float],
+    ratio: float,
+    has_data_marks: bool,
+) -> bool:
+    """Reject large ruling-only grids so tables are not emitted as figures."""
+    if has_data_marks or ratio < TABLE_GRID_MIN_AREA_RATIO:
+        return False
+
+    x0, y0, x1, y1 = bbox
+    width = x1 - x0
+    height = y1 - y0
+    horizontal = 0
+    vertical = 0
+    for d in drawings:
+        for item in d.get("items", []):
+            kind = item[0] if item else None
+            if kind == "l" and len(item) >= 3:
+                p1, p2 = item[1], item[2]
+                dx = abs(p2.x - p1.x)
+                dy = abs(p2.y - p1.y)
+                if dy <= 1 and dx >= width * 0.4:
+                    horizontal += 1
+                elif dx <= 1 and dy >= height * 0.4:
+                    vertical += 1
+            elif kind == "re" and len(item) >= 2:
+                rect = item[1]
+                if rect.width >= width * 0.4:
+                    horizontal += 2
+                if rect.height >= height * 0.4:
+                    vertical += 2
+    return horizontal >= 3 and vertical >= 2
