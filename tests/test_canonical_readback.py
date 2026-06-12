@@ -26,7 +26,7 @@ from ocr_output_contract import (
 )
 
 from socr.core.config import PipelineConfig
-from socr.core.result import DocumentStatus, PageStatus
+from socr.core.result import DocumentStatus, FailureMode, PageStatus
 from socr.engines.base import BaseEngine
 
 
@@ -146,6 +146,77 @@ def test_process_pages_reads_each_canonical_page(tmp_path):
     assert "page-image OCR 1" in by_page[1]
     assert "page-image OCR 2" in by_page[2]
     assert "page-image OCR 3" in by_page[3]
+
+
+def test_process_pages_salvages_partial_results_on_nonzero_exit(tmp_path):
+    """Issue #40: one RECITATION-blocked page must not nuke the whole batch.
+
+    Engine CLIs follow a uniform exit policy (nonzero if ANY page failed)
+    while still writing the successful pages' files. socr must read back the
+    pages that succeeded and classify the missing one as RECITATION from
+    stderr — not discard all pages as CLI_ERROR.
+    """
+    pdf = _make_pdf(tmp_path / "doc.pdf", n_pages=3)
+    engine = _CanonicalEngine()
+    config = PipelineConfig(timeout=30)
+
+    def fake(cmd, *args, **kwargs):
+        images_dir = Path(cmd[1])
+        out_dir = Path(cmd[cmd.index("-o") + 1])
+        blocked = images_dir / "page_0003.png"
+        for img in sorted(images_dir.glob("*.png")):
+            if img == blocked:
+                continue  # RECITATION-blocked: no output file for this page
+            rel_key = relative_key(img, images_dir)
+            doc_dir = doc_dir_for(out_dir, rel_key)
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            md_path = markdown_path_for(doc_dir, rel_key)
+            idx = int(img.stem.split("_")[-1])
+            md_path.write_text(assemble_pages([f"page-image OCR {idx}"]), encoding="utf-8")
+        result = MagicMock()
+        result.returncode = 1  # uniform exit policy: any page failed -> nonzero
+        result.stdout = ""
+        result.stderr = (
+            f"ERROR:gemini_ocr.processor:Error processing {blocked}: "
+            "Empty response: finish_reason=FinishReason.RECITATION, "
+            "len(parts)=0, part_types=[], safety_ratings=None"
+        )
+        return result
+
+    with patch("socr.engines.base.subprocess.run", side_effect=fake):
+        outputs = engine.process_pages(pdf, [1, 2, 3], config, dpi=72)
+
+    by_page = {po.page_num: po for po in outputs}
+    assert by_page[1].status == PageStatus.SUCCESS
+    assert "page-image OCR 1" in by_page[1].text
+    assert by_page[2].status == PageStatus.SUCCESS
+    assert "page-image OCR 2" in by_page[2].text
+    # The blocked page fails alone, classified for the repair router.
+    assert by_page[3].status == PageStatus.ERROR
+    assert by_page[3].failure_mode == FailureMode.RECITATION
+
+
+def test_process_pages_total_cli_failure_marks_all_cli_error(tmp_path):
+    """A CLI that exits nonzero and writes nothing still fails every page."""
+    pdf = _make_pdf(tmp_path / "doc.pdf", n_pages=2)
+    engine = _CanonicalEngine()
+    config = PipelineConfig(timeout=30)
+
+    def fake(cmd, *args, **kwargs):  # writes no files
+        result = MagicMock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "Error: GEMINI_API_KEY not set"
+        return result
+
+    with patch("socr.engines.base.subprocess.run", side_effect=fake):
+        outputs = engine.process_pages(pdf, [1, 2], config, dpi=72)
+
+    assert len(outputs) == 2
+    for po in outputs:
+        assert po.status == PageStatus.ERROR
+        assert po.failure_mode == FailureMode.CLI_ERROR
+        assert "CLI exited 1" in po.error
 
 
 def test_missing_canonical_output_is_empty_not_crash(tmp_path):

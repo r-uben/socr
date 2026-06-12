@@ -265,26 +265,26 @@ class BaseEngine(ABC):
                     for pn in page_nums
                 ]
 
+            # Engine CLIs follow a uniform exit policy: nonzero if ANY page
+            # failed, while the successful pages' files are already on disk.
+            # A wholesale error here would discard those partial results (one
+            # RECITATION-blocked page used to nuke a whole 7-page batch, #40).
+            # Instead, always read back per page below and fail only the pages
+            # that produced nothing, carrying the CLI exit info into their error.
+            cli_error_note = ""
             if result.returncode != 0:
                 stderr = (result.stderr or "").strip()[:500]
-                return [
-                    PageOutput(
-                        page_num=pn,
-                        status=PageStatus.ERROR,
-                        engine=self.name,
-                        failure_mode=FailureMode.CLI_ERROR,
-                        audit_passed=False,
-                        error=f"CLI exited {result.returncode}: {stderr}",
-                    )
-                    for pn in page_nums
-                ]
+                cli_error_note = f"CLI exited {result.returncode}: {stderr}"
+                logger.warning(
+                    f"[{self.name}] {cli_error_note} — attempting per-page salvage"
+                )
 
             # Read per-page output: CLI writes {cli_out}/{stem}/{stem}.md
             elapsed = time.time() - start_time
             outputs: list[PageOutput] = []
             # A page can come back empty because the model REFUSED, not failed.
             # Gemini's recitation/copyright filter blocks verbatim output of
-            # memorized (famous) text and exits 0 with no page file, logging
+            # memorized (famous) text and skips that page's file, logging
             # "finish_reason=...RECITATION" to stderr. Detect it so repair can
             # escalate to an open model instead of uselessly retrying Gemini.
             stderr_text = result.stderr or ""
@@ -298,6 +298,10 @@ class BaseEngine(ABC):
                 cli_out, images_dir, page_num_to_stem
             )
             if aggregate_error is not None:
+                # A miscounted aggregate cannot be mapped to socr's page numbers
+                # safely, so this stays all-pages; carry the CLI exit info too.
+                if cli_error_note:
+                    aggregate_error = f"{aggregate_error} ({cli_error_note})"
                 return [
                     PageOutput(
                         page_num=pn,
@@ -349,9 +353,16 @@ class BaseEngine(ABC):
                             page_num=page_num,
                             status=PageStatus.ERROR,
                             engine=self.name,
-                            failure_mode=FailureMode.EMPTY_OUTPUT,
+                            failure_mode=(
+                                FailureMode.CLI_ERROR
+                                if cli_error_note
+                                else FailureMode.EMPTY_OUTPUT
+                            ),
                             audit_passed=False,
-                            error=f"No output for page {page_num}",
+                            error=(
+                                f"No output for page {page_num}"
+                                + (f" ({cli_error_note})" if cli_error_note else "")
+                            ),
                         )
                     )
 
