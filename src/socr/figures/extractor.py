@@ -172,6 +172,16 @@ class FigureExtractor:
         # --- Strategy 0: Vector figures ---
         try:
             drawings = page.get_drawings()
+            if page.rotation:
+                # get_drawings() reports rects in unrotated (mediabox) space,
+                # while page.rect and get_pixmap(clip=...) use rotated page
+                # space. Map the rects so clustering, the area/margin gates,
+                # and the render clip all share the rotated frame (#41).
+                rot = page.rotation_matrix
+                for d in drawings:
+                    rect = d.get("rect")
+                    if rect is not None:
+                        d["rect"] = (rect * rot).normalize()
             if len(drawings) >= min_drawings:
                 regions = _cluster_drawings(drawings, page_width, page_height, CLUSTER_GAP)
 
