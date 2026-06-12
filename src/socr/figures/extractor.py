@@ -79,8 +79,14 @@ class FigureExtractor:
         self.max_per_page = max_per_page
         self.save_dir = save_dir
 
-    def extract(self, pdf_path: Path) -> list[ExtractedFigure]:
-        """Extract all figures from a PDF. Returns list of ExtractedFigure."""
+    def extract(self, pdf_path: Path, skip_pages: set[int] | None = None) -> list[ExtractedFigure]:
+        """Extract all figures from a PDF. Returns list of ExtractedFigure.
+
+        ``skip_pages`` (1-indexed) drops those pages entirely. Meant for
+        scanned pages, where the only extractable "figure" is the full-page
+        raster itself — noise that crowds out real figures and burns vision
+        calls; the OCR engine's inline description already covers them.
+        """
         import fitz
         from PIL import Image
 
@@ -89,6 +95,8 @@ class FigureExtractor:
 
         figures: list[ExtractedFigure] = []
         counter = 1
+        if skip_pages:
+            logger.info(f"Figure extraction skipping {len(skip_pages)} page(s) of {pdf_path.name}")
 
         try:
             with fitz.open(pdf_path) as pdf:
@@ -98,6 +106,8 @@ class FigureExtractor:
 
                     page = pdf[page_index]
                     page_num = page_index + 1
+                    if skip_pages and page_num in skip_pages:
+                        continue
                     per_page = 0
                     processed: set[tuple[int, int, int, int]] = set()
 
@@ -296,6 +306,20 @@ class FigureExtractor:
             aspect = w / max(h, 1)
             if area < MIN_AREA or aspect > 8 or aspect < 0.125:
                 continue
+
+            # Dedupe against placement-based captures: the same raster placed
+            # on the page reports its bbox via get_image_rects, which matches
+            # the IMAGE-block bbox Strategy 1 recorded in `processed` (#42).
+            try:
+                placement_keys = [
+                    (int(r.x0), int(r.y0), int(r.x1), int(r.y1))
+                    for r in page.get_image_rects(img_info)
+                ]
+            except Exception:
+                placement_keys = []
+            if any(k in processed for k in placement_keys):
+                continue
+            processed.update(placement_keys)
 
             try:
                 raw = pdf.extract_image(xref)

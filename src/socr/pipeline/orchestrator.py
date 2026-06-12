@@ -2329,7 +2329,20 @@ class UnifiedPipeline:
             max_per_page=self.config.figures_max_per_page,
             save_dir=figures_dir,
         )
-        extracted = extractor.extract(state.handle.path)
+        # Scanned pages have no localizable figures — the whole page is one
+        # raster, which the extractor would emit as a full-page "figure" and
+        # send to the vision model (#42). Skip them when the born-digital
+        # phase classified this document; PageState.is_born_digital defaults
+        # to False, so the assessment is the only safe source of skips.
+        skip_pages: set[int] | None = None
+        if self._last_assessment is not None:
+            skip_pages = set(self._last_assessment.scanned_pages()) or None
+            if skip_pages and not self.config.quiet:
+                console.print(
+                    f"  [dim]Skipping {len(skip_pages)} scanned page(s) "
+                    f"(no localizable figures)[/dim]"
+                )
+        extracted = extractor.extract(state.handle.path, skip_pages=skip_pages)
 
         if not extracted:
             if not self.config.quiet:

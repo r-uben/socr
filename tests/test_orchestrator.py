@@ -908,6 +908,36 @@ class TestFigures:
 
         MockExtractor.assert_called_once()
 
+    def test_scanned_pages_excluded_from_figure_extraction(self, tmp_path: Path) -> None:
+        """Issue #42: the assessment's scanned pages are passed as skips."""
+        config = _make_config(save_figures=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(2))
+
+        for n in (1, 2):
+            state.pages[n].best_output = PageOutput(
+                page_num=n,
+                text="Content",
+                status=PageStatus.SUCCESS,
+                engine="deepseek",
+                audit_passed=True,
+            )
+        pipeline._last_assessment = DocumentAssessment(
+            path=state.handle.path,
+            pages=[
+                PageAssessment(page_num=1, is_born_digital=True, native_text="x", confidence=1.0),
+                PageAssessment(page_num=2, is_born_digital=False, native_text="", confidence=1.0),
+            ],
+        )
+
+        with patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor:
+            mock_extractor = MockExtractor.return_value
+            mock_extractor.extract.return_value = []
+
+            pipeline._phase_assemble(state, tmp_path)
+
+        mock_extractor.extract.assert_called_once_with(state.handle.path, skip_pages={2})
+
     def test_figures_skipped_when_disabled(self, tmp_path: Path) -> None:
         config = _make_config(save_figures=False)
         pipeline = UnifiedPipeline(config)
