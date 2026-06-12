@@ -311,9 +311,9 @@ class BenchmarkScorer:
         all_pred_chars: list[str] = []
 
         for page_num in gt_pages:
-            gt_text = (ground_truth_dir / f"page_{page_num}.txt").read_text(
-                encoding="utf-8"
-            ).strip()
+            gt_text = (
+                (ground_truth_dir / f"page_{page_num}.txt").read_text(encoding="utf-8").strip()
+            )
             pred_text = (predictions.get(page_num) or "").strip()
             # A legitimately blank GT page is covered by a (correctly) empty
             # prediction — an honest engine must not be punished for it.
@@ -437,12 +437,7 @@ class BenchmarkScorer:
 
     @classmethod
     def _norm_cell(cls, cell: str) -> str:
-        return (
-            cell.replace("−", "-")
-            .replace("–", "-")
-            .replace("\\|", "|")
-            .strip()
-        )
+        return cell.replace("−", "-").replace("–", "-").replace("\\|", "|").strip()
 
     @classmethod
     def _markdown_table_cells(cls, text: str) -> list[list[str]]:
@@ -488,18 +483,11 @@ class BenchmarkScorer:
             len(p) == len(g) for p, g in zip(pred_rows, gt_rows)
         )
         if structure_ok:
-            hits = sum(
-                1
-                for r, c, value in gt_numeric
-                if pred_rows[r][c].strip() == value
-            )
+            hits = sum(1 for r, c, value in gt_numeric if pred_rows[r][c].strip() == value)
             return hits / len(gt_numeric), True
 
         pred_values: list[str] = [
-            cell.strip()
-            for row in pred_rows
-            for cell in row
-            if cls._is_numeric_cell(cell)
+            cell.strip() for row in pred_rows for cell in row if cls._is_numeric_cell(cell)
         ]
         pool = list(pred_values)
         hits = 0

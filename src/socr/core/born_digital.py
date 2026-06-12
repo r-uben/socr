@@ -241,9 +241,7 @@ class BornDigitalDetector:
         has_figures = has_images  # figures = embedded raster images
         has_corrupt_math = self._detect_corrupt_math(raw_text)
         has_equations = (
-            self._detect_math_fonts(page)
-            or self._detect_equations(raw_text)
-            or has_corrupt_math
+            self._detect_math_fonts(page) or self._detect_equations(raw_text) or has_corrupt_math
         )
 
         # --- Decision logic ---

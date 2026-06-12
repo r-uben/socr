@@ -64,6 +64,4 @@ def classify_document_pages(pdf_path: Path, min_word_count: int) -> dict[int, st
     from socr.core.born_digital import BornDigitalDetector
 
     assessment = BornDigitalDetector().detect(pdf_path)
-    return {
-        pa.page_num: classify_page_type(pa, min_word_count) for pa in assessment.pages
-    }
+    return {pa.page_num: classify_page_type(pa, min_word_count) for pa in assessment.pages}

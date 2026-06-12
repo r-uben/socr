@@ -275,9 +275,7 @@ class BaseEngine(ABC):
             if result.returncode != 0:
                 stderr = (result.stderr or "").strip()[:500]
                 cli_error_note = f"CLI exited {result.returncode}: {stderr}"
-                logger.warning(
-                    f"[{self.name}] {cli_error_note} — attempting per-page salvage"
-                )
+                logger.warning(f"[{self.name}] {cli_error_note} — attempting per-page salvage")
 
             # Read per-page output: CLI writes {cli_out}/{stem}/{stem}.md
             elapsed = time.time() - start_time

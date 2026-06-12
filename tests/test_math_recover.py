@@ -36,7 +36,11 @@ def test_clean_latex_strips_fences_and_dollars():
 
 def test_corrupt_math_lines_detected_and_prose_skipped():
     _doc, page = _page(
-        [(100, "This is clean prose with no math at all."), (140, _EQ), (180, "More clean prose here.")]
+        [
+            (100, "This is clean prose with no math at all."),
+            (140, _EQ),
+            (180, "More clean prose here."),
+        ]
     )
     rects = corrupt_math_line_rects(page)
     assert len(rects) == 1  # only the corrupt line

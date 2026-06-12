@@ -110,8 +110,7 @@ class TestTableCellFidelity:
 
     def test_shape_mismatch_fails_structure_keeps_content_credit(self) -> None:
         pred = (
-            "| Year | Coef | Extra |\n|---|---|---|\n"
-            "| 1994 | 0.040 | x |\n| 1995 | -0.213 | y |\n"
+            "| Year | Coef | Extra |\n|---|---|---|\n| 1994 | 0.040 | x |\n| 1995 | -0.213 | y |\n"
         )
         acc, ok = BenchmarkScorer.score_table_cells(pred, self.GT)
         assert ok is False

@@ -66,9 +66,7 @@ class TestPaidRungsReachable:
         assert len(d.attempts) == 6
 
     def test_explicit_max_attempts_still_caps(self) -> None:
-        d = route_page(
-            1, FULL_LADDER, _run(), _AcceptOnly({EngineType.GEMINI}), max_attempts=2
-        )
+        d = route_page(1, FULL_LADDER, _run(), _AcceptOnly({EngineType.GEMINI}), max_attempts=2)
         assert not d.accepted
         assert len(d.attempts) == 2
 

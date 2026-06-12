@@ -162,8 +162,7 @@ class TestSafeTagStrip:
 
     def test_deepseek_vllm_cleaner_preserves_tables(self) -> None:
         raw = (
-            "<|ref|>title<|/ref|>Results below.\n"
-            "<table><tr><td>4.4</td><td>79.1</td></tr></table>"
+            "<|ref|>title<|/ref|>Results below.\n<table><tr><td>4.4</td><td>79.1</td></tr></table>"
         )
         cleaned = DeepSeekVLLMEngine._clean_ocr_output(raw)
         assert "4.479.1" not in cleaned
@@ -321,7 +320,7 @@ class TestJudgeRejectionRepairsBornDigital:
                     native_text="native",
                     has_tables=True,
                 )
-            ]
+            ],
         )
 
         class _RejectingJudge:

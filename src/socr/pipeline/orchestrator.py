@@ -56,9 +56,7 @@ def _manifest_versions() -> tuple[str, str]:
     return manifest.NORMALIZER_VERSION, manifest.ASSEMBLY_VERSION
 
 
-def _resume_skippable(
-    index, rel_key: str, checksum: str, fingerprint: str, out_dir: Path
-) -> bool:
+def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_dir: Path) -> bool:
     """Whether a doc can be skipped by the resume gate.
 
     Canonically completed docs skip via :meth:`RootIndex.is_completed`. A
@@ -1075,9 +1073,7 @@ class UnifiedPipeline:
             remaining = None
             if self.config.cost_budget > 0:
                 remaining = max(self.config.cost_budget - state.total_cost, 0.0)
-            decision = route_page(
-                page_num, ladder, run_provider, judge, remaining_budget=remaining
-            )
+            decision = route_page(page_num, ladder, run_provider, judge, remaining_budget=remaining)
 
             ps = state.pages[page_num]
             for att in decision.attempts:
@@ -2180,9 +2176,7 @@ class UnifiedPipeline:
                     final_text,
                 )
             except Exception as exc:
-                logger.warning(
-                    "figure phase failed (%s); keeping the un-embedded markdown", exc
-                )
+                logger.warning("figure phase failed (%s); keeping the un-embedded markdown", exc)
                 if not self.config.quiet:
                     console.print(
                         f"  [yellow]Figure phase failed ({exc}); output saved "

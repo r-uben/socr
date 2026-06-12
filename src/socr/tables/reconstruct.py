@@ -188,9 +188,7 @@ def _looks_tabular(grid: list[list[str]]) -> bool:
     # data rows (>=2 numeric cells). Empirically separates a clean booktabs grid
     # (~0.83) from a prose+references+small-table page (~0.40). Rejected pages fall
     # back to plain get_text() (clean linearized prose), never a shredded grid.
-    data_rows = sum(
-        1 for row in grid if sum(1 for c in row if c and _NUMERIC_RE.search(c)) >= 2
-    )
+    data_rows = sum(1 for row in grid if sum(1 for c in row if c and _NUMERIC_RE.search(c)) >= 2)
     nonempty_rows = sum(1 for row in grid if any(row))
     if not nonempty_rows:
         return False
