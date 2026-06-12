@@ -38,6 +38,33 @@ class HeuristicsResult:
 class HeuristicsChecker:
     """Fast heuristic checks for OCR quality."""
 
+    NATIVE_TABLE_STRUCTURE_METRIC = "Native table structure"
+
+    # Markdown/HTML table structure is already usable downstream.
+    _MARKDOWN_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+    _MARKDOWN_TABLE_SEPARATOR_RE = re.compile(
+        r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+    )
+    _HTML_TABLE_RE = re.compile(r"<\s*table\b", re.IGNORECASE)
+
+    # Native table failures from PyMuPDF usually arrive as one cell per line:
+    # header, year, year, row-label, number, number... A small list or glossary
+    # can look similar, so the flat-stream gate also requires numeric content.
+    _MIN_FLAT_TABLE_LINES = 12
+    _MIN_FLAT_TABLE_NUMERIC_LINES = 6
+    _NUMERIC_CELL_RE = re.compile(r"^[\(\[]?-?\d[\d,]*(?:\.\d+)?[\)\]%]?$")
+    _NUMERIC_TOKEN_RE = re.compile(r"(?<![A-Za-z])-?\d[\d,]*(?:\.\d+)?%?")
+
+    # Markdown table sanity checks: these ratios tolerate occasional section
+    # labels, spanning notes, and footnotes while failing grids whose data rows
+    # mostly collapsed into one or two cells.
+    _MIN_MARKDOWN_DATA_ROWS_FOR_RATIO = 3
+    _WIDE_MARKDOWN_TABLE_COLS = 4
+    _GRID_STABILITY_COLS = 3
+    _MAX_COLLAPSED_ROW_SHARE = 0.50
+    _MAX_GLUED_NUMERIC_ROW_SHARE = 0.25
+    _MIN_ALIGNED_ROW_SHARE = 0.40
+
     # LLM refusal patterns (case-insensitive)
     REFUSAL_PATTERNS = [
         r"I cannot read",
@@ -183,7 +210,10 @@ class HeuristicsChecker:
             result.add_metric(
                 AuditMetric(
                     name="Truncation check",
-                    value=f"{words_per_page:.0f} words/page ({word_count} words / {expected_pages} pages)",
+                    value=(
+                        f"{words_per_page:.0f} words/page "
+                        f"({word_count} words / {expected_pages} pages)"
+                    ),
                     threshold=">50 words/page",
                     passed=not is_truncated,
                     severity="error" if is_truncated else "info",
@@ -256,6 +286,28 @@ class HeuristicsChecker:
 
         return result
 
+    def check_native_table_structure(self, text: str) -> HeuristicsResult:
+        """Check whether native text preserved a usable table structure.
+
+        This is intentionally narrower than the general OCR audit. It only
+        answers: "a source page known to contain a table came through native
+        extraction; did the Markdown still preserve a grid?" Clean prose metrics
+        such as word count are irrelevant here and would recreate the old
+        over-escalation behavior for sparse but correct born-digital pages.
+        """
+        result = HeuristicsResult()
+        failure_reason = self._native_table_structure_failure_reason(text)
+        failed = failure_reason is not None
+        result.add_metric(
+            AuditMetric(
+                name=self.NATIVE_TABLE_STRUCTURE_METRIC,
+                value=failure_reason or "usable",
+                passed=not failed,
+                severity="error" if failed else "info",
+            )
+        )
+        return result
+
     def _check_formatting_hallucination(self, text: str) -> int:
         """Count formatting instruction hallucination patterns.
 
@@ -268,6 +320,196 @@ class HeuristicsChecker:
             if re.search(pattern, text, re.IGNORECASE):
                 count += 1
         return count
+
+    def _native_table_structure_failed(self, text: str) -> bool:
+        return self._native_table_structure_failure_reason(text) is not None
+
+    def _native_table_structure_failure_reason(self, text: str) -> str | None:
+        """Why a table page's native extraction lost the grid, if it did.
+
+        Accepts three usable structures:
+        - GitHub-style Markdown tables.
+        - HTML tables.
+        - Plain aligned rows with multiple whitespace-separated cells.
+
+        Flags only the high-confidence bad shape: many single-cell lines,
+        with enough numeric cells to look like a data table rather than a
+        glossary, TOC, or bullet list.
+        """
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return None
+
+        markdown_quality = self._markdown_table_structure_quality(text, lines)
+        if markdown_quality == "malformed":
+            return "malformed Markdown table structure"
+        if markdown_quality == "valid":
+            return None
+
+        if len(lines) < self._MIN_FLAT_TABLE_LINES:
+            return None
+
+        single_cell_lines = [line for line in lines if len(line.split()) == 1]
+        numeric_single_cell_lines = [
+            line for line in single_cell_lines if self._NUMERIC_CELL_RE.match(line)
+        ]
+        if (
+            len(single_cell_lines) > len(lines) / 2
+            and len(numeric_single_cell_lines) >= self._MIN_FLAT_TABLE_NUMERIC_LINES
+        ):
+            return "flat cell stream without Markdown/HTML/column structure"
+        return None
+
+    def _markdown_table_structure_quality(self, text: str, lines: list[str]) -> str:
+        """Return ``valid``, ``malformed``, or ``none`` for table-like markup."""
+        if self._HTML_TABLE_RE.search(text):
+            return "valid"
+
+        context_quality = self._markdown_separator_context_quality(lines)
+        if context_quality != "none":
+            return context_quality
+
+        saw_valid = False
+        for block in self._pipe_line_blocks(lines):
+            quality = self._markdown_pipe_block_quality(block)
+            if quality == "malformed":
+                return "malformed"
+            if quality == "valid":
+                saw_valid = True
+        if saw_valid:
+            return "valid"
+        return "none"
+
+    def _markdown_separator_context_quality(self, lines: list[str]) -> str:
+        """Evaluate rows around Markdown separators, including broken rows.
+
+        PyMuPDF can emit a syntactically valid header+separator, then put the
+        data rows on later pipe-containing lines that are not valid Markdown
+        rows because cell bodies spilled across intervening lines. Treat those
+        later pipe-lines as the separator's data context so a valid-looking
+        header cannot mask a collapsed table body.
+        """
+        saw_valid = False
+        for sep_idx, line in enumerate(lines):
+            if not self._MARKDOWN_TABLE_SEPARATOR_RE.match(line):
+                continue
+            if sep_idx == 0 or "|" not in lines[sep_idx - 1]:
+                continue
+
+            header_cols = len(self._markdown_cells(lines[sep_idx - 1]))
+            separator_cols = len(self._markdown_cells(line))
+            if header_cols < 2 or separator_cols < 2:
+                continue
+            if abs(header_cols - separator_cols) > 1:
+                return "malformed"
+
+            data_rows: list[list[str]] = []
+            for data_line in lines[sep_idx + 1 :]:
+                if self._MARKDOWN_TABLE_SEPARATOR_RE.match(data_line):
+                    break
+                if "|" in data_line:
+                    data_rows.append(self._markdown_cells(data_line))
+
+            if not data_rows:
+                continue
+            rows_quality = self._markdown_data_rows_quality(separator_cols, data_rows)
+            if rows_quality == "malformed":
+                return "malformed"
+            if rows_quality == "valid":
+                saw_valid = True
+
+        if saw_valid:
+            return "valid"
+        return "none"
+
+    @staticmethod
+    def _pipe_line_blocks(lines: list[str]) -> list[list[str]]:
+        """Group adjacent non-empty pipe lines; non-pipe text ends a block."""
+        blocks: list[list[str]] = []
+        current: list[str] = []
+        for line in lines:
+            if "|" in line:
+                current.append(line)
+            elif current:
+                blocks.append(current)
+                current = []
+        if current:
+            blocks.append(current)
+        return blocks
+
+    def _markdown_pipe_block_quality(self, block: list[str]) -> str:
+        saw_valid = False
+        for sep_idx, line in enumerate(block):
+            if not self._MARKDOWN_TABLE_SEPARATOR_RE.match(line):
+                continue
+            if sep_idx == 0 or not self._MARKDOWN_TABLE_ROW_RE.match(block[sep_idx - 1]):
+                continue
+
+            header_cols = len(self._markdown_cells(block[sep_idx - 1]))
+            separator_cols = len(self._markdown_cells(line))
+            expected_cols = separator_cols
+            if header_cols < 2 or separator_cols < 2:
+                continue
+            if abs(header_cols - separator_cols) > 1:
+                return "malformed"
+
+            data_rows: list[list[str]] = []
+            for data_line in block[sep_idx + 1 :]:
+                if self._MARKDOWN_TABLE_SEPARATOR_RE.match(data_line):
+                    break
+                if self._MARKDOWN_TABLE_ROW_RE.match(data_line):
+                    data_rows.append(self._markdown_cells(data_line))
+
+            if not data_rows:
+                continue
+            rows_quality = self._markdown_data_rows_quality(expected_cols, data_rows)
+            if rows_quality == "malformed":
+                return "malformed"
+            if rows_quality == "valid":
+                saw_valid = True
+
+        if saw_valid:
+            return "valid"
+        return "none"
+
+    @staticmethod
+    def _markdown_cells(line: str) -> list[str]:
+        return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+    def _markdown_data_rows_quality(self, expected_cols: int, rows: list[list[str]]) -> str:
+        row_count = len(rows)
+        aligned_rows = sum(1 for cells in rows if abs(len(cells) - expected_cols) <= 1)
+
+        if row_count >= self._MIN_MARKDOWN_DATA_ROWS_FOR_RATIO:
+            collapsed_limit = max(1, expected_cols // 2)
+            collapsed_rows = sum(1 for cells in rows if len(cells) <= collapsed_limit)
+            glued_numeric_rows = sum(
+                1 for cells in rows if any(self._cell_has_multiple_numbers(cell) for cell in cells)
+            )
+            aligned_share = aligned_rows / row_count
+
+            if (
+                expected_cols >= self._WIDE_MARKDOWN_TABLE_COLS
+                and collapsed_rows / row_count >= self._MAX_COLLAPSED_ROW_SHARE
+            ):
+                return "malformed"
+            if (
+                expected_cols >= self._WIDE_MARKDOWN_TABLE_COLS
+                and glued_numeric_rows / row_count >= self._MAX_GLUED_NUMERIC_ROW_SHARE
+            ):
+                return "malformed"
+            if (
+                expected_cols >= self._GRID_STABILITY_COLS
+                and aligned_share < self._MIN_ALIGNED_ROW_SHARE
+            ):
+                return "malformed"
+
+        if aligned_rows:
+            return "valid"
+        return "none"
+
+    def _cell_has_multiple_numbers(self, cell: str) -> bool:
+        return len(self._NUMERIC_TOKEN_RE.findall(cell)) >= 2
 
     def _check_llm_refusal(self, text: str) -> bool:
         """Detect LLM refusal patterns indicating model couldn't process image.

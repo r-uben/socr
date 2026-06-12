@@ -5,9 +5,8 @@ import pytest
 pytest.importorskip("rich")
 
 from socr.audit.heuristics import AuditMetric, HeuristicsChecker, HeuristicsResult
-from socr.audit.scorer import FailureModeScorer, ScoringResult
+from socr.audit.scorer import FailureModeScorer
 from socr.core.result import FailureMode
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,6 +92,31 @@ class TestGarbage:
         assert not result.passed
         assert FailureMode.GARBAGE in result.failure_modes
         assert "CID" in result.details.get(FailureMode.GARBAGE, "")
+
+
+class TestNativeTableStructure:
+    def test_flat_native_table_maps_to_specific_failure_mode(self) -> None:
+        text = "\n".join(
+            [
+                "Forecast",
+                "2026",
+                "2027",
+                "2028",
+                "CountryA",
+                "1.2",
+                "1.3",
+                "1.4",
+                "CountryB",
+                "2.1",
+                "2.2",
+                "2.3",
+            ]
+        )
+        scorer = FailureModeScorer()
+        result = scorer.score_native_table_structure(text)
+
+        assert not result.passed
+        assert result.primary_failure == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
 
 
 class TestHallucination:

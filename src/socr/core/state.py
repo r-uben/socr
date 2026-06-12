@@ -33,6 +33,7 @@ class PageState:
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
+    native_table_structure_failed: bool = False  # native table text lost its grid
 
     @property
     def needs_repair(self) -> bool:
@@ -43,11 +44,12 @@ class PageState:
         enhancement, so they need repair until a passing attempt exists.
         If OCR has been attempted and failed, native_text serves as fallback
         (needs_repair returns False to avoid infinite repair loops) — UNLESS
-        the VLM judge explicitly rejected the output: a judge rejection means
-        the existing reading is semantically wrong, so the page must get a
-        real repair pass instead of silently reverting to flat native text.
+        an audit explicitly rejected the output: a judge rejection or failed
+        native table-structure gate means the existing reading is semantically
+        wrong, so the page must get a real repair pass instead of silently
+        reverting to flat native text.
         The repair loop still terminates: the router excludes tried engines,
-        so a judge-rejected page runs out of candidates and is skipped.
+        so an audit-rejected page runs out of candidates and is skipped.
         """
         if self.is_born_digital and self.native_text:
             if self.needs_ocr_enhancement:
@@ -55,9 +57,12 @@ class PageState:
                 # if it has been attempted and none passed, fall back to native.
                 if self.best_output and self.best_output.audit_passed:
                     return False  # OCR succeeded
-                if self.judge_rejected:
-                    return True  # judge rejection demands a real repair pass
-                if self.attempts:
+                if self.judge_rejected or self.native_table_structure_failed:
+                    return True  # audit rejection demands a real repair pass
+                non_native_attempts = [
+                    a for a in self.attempts if not (a.engine or "").startswith("native")
+                ]
+                if non_native_attempts:
                     return False  # OCR tried but failed; native text is fallback
                 return True  # No OCR attempted yet; request it
             return False

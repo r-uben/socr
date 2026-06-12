@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from socr.audit.heuristics import HeuristicsChecker, HeuristicsResult
 from socr.core.result import FailureMode
 
-
 # Priority order: higher index = higher priority when selecting primary failure.
 # Rationale: hallucination and refusal are the most actionable (they tell
 # the router to switch models), while low word count is often a symptom
@@ -20,6 +19,7 @@ _PRIORITY: dict[FailureMode, int] = {
     FailureMode.LOW_WORD_COUNT: 1,
     FailureMode.GARBAGE: 2,
     FailureMode.TRUNCATED: 3,
+    FailureMode.NATIVE_TABLE_STRUCTURE_FAILED: 4,
     FailureMode.EMPTY_OUTPUT: 4,
     FailureMode.REFUSAL: 5,
     FailureMode.HALLUCINATION: 6,
@@ -58,6 +58,10 @@ _METRIC_MAP: dict[str, tuple[FailureMode, str]] = {
     "Truncation check": (
         FailureMode.TRUNCATED,
         "Output appears truncated relative to document page count",
+    ),
+    HeuristicsChecker.NATIVE_TABLE_STRUCTURE_METRIC: (
+        FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+        "Native table page lacks usable Markdown table structure",
     ),
 }
 
@@ -133,6 +137,10 @@ class FailureModeScorer:
             confidence=confidence,
             details=details,
         )
+
+    def score_native_table_structure(self, text: str) -> ScoringResult:
+        """Classify whether native text preserved table structure."""
+        return self.score_from_audit(self.checker.check_native_table_structure(text))
 
     # ------------------------------------------------------------------
     # Internal helpers

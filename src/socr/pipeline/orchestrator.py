@@ -1674,18 +1674,52 @@ class UnifiedPipeline:
             return False
         return (pa.word_count or 0) < self.config.audit_min_words
 
+    def _native_table_structure_gate_applies(self, page_num: int, output: PageOutput) -> bool:
+        """Whether a native output should be audited for table grid loss."""
+        if not (output.engine or "").startswith("native"):
+            return False
+        assessment = self._last_assessment
+        if not assessment:
+            return False
+        pa = next((p for p in assessment.pages if p.page_num == page_num), None)
+        return bool(pa and pa.has_tables)
+
     def _score_per_page(self, state: DocumentState) -> None:
         """Score each page's best output individually."""
         failures = 0
         for page_num in sorted(state.pages):
             page_state = state.pages[page_num]
-            if page_state.is_born_digital and page_state.native_text:
-                continue
             if not page_state.attempts:
                 continue
 
             # Score the most recent attempt
             latest = page_state.attempts[-1]
+            if page_state.is_born_digital and page_state.native_text:
+                latest_is_native = (latest.engine or "").startswith("native")
+                if latest_is_native:
+                    if self._native_table_structure_gate_applies(page_num, latest):
+                        scoring = self.scorer.score_native_table_structure(latest.text)
+                        latest.audit_passed = scoring.passed
+                        if not scoring.passed:
+                            latest.failure_mode = scoring.primary_failure
+                            detail = scoring.details.get(scoring.primary_failure, "")
+                            if detail:
+                                latest.error = detail
+                                latest.audit_notes.append(detail)
+                            page_state.native_table_structure_failed = True
+                            page_state.needs_ocr_enhancement = True
+                            failures += 1
+                            if page_state.best_output is latest:
+                                page_state.best_output = None
+                        else:
+                            latest.failure_mode = FailureMode.NONE
+                            page_state.native_table_structure_failed = False
+                    # Preserve the native-text exemption unless the narrow
+                    # table-structure gate above rejected this exact attempt.
+                    continue
+                if not page_state.needs_ocr_enhancement:
+                    continue
+
             scoring = self.scorer.score(
                 latest.text, engine=latest.engine, sparse_ok=self._sparse_page_ok(page_num)
             )

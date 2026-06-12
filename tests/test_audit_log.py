@@ -60,6 +60,22 @@ def test_clean_run_produces_no_events():
     assert audit.events == [] and audit.summary_line() == ""
 
 
+def test_native_table_structure_failure_is_logged_as_escalation():
+    state = DocumentState(handle=_handle(1))
+    state.pages[1].attempts = [
+        _attempt("native", FailureMode.NATIVE_TABLE_STRUCTURE_FAILED, passed=False),
+        _attempt("gemini"),
+    ]
+
+    audit = build_run_audit(state)
+
+    assert len(audit.events) == 1
+    ev = audit.events[0]
+    assert ev.kind == "escalation"
+    assert ev.data["failure_mode"] == "native_table_structure_failed"
+    assert ev.data["recovered_by"] == "gemini"
+
+
 # --------------------------------------------------------------------------
 # Source-appended events merge + ordering
 # --------------------------------------------------------------------------

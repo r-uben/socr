@@ -9,7 +9,6 @@ from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState, PageState
 from socr.pipeline.repair import PageRepair, RepairPlan, RepairRouter
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -241,6 +240,18 @@ class TestSelectRepairEngine:
         )
         # First in fallback chain that wasn't tried
         assert engine == EngineType.GEMINI
+
+    def test_native_table_structure_failure_respects_configured_ladder(self) -> None:
+        config = _make_config(
+            fallback_chain=[EngineType.QWEN, EngineType.GEMINI],
+        )
+        router = RepairRouter(config)
+        engine = router.select_repair_engine(
+            FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+            tried_engines={EngineType.DEEPSEEK},
+        )
+
+        assert engine == EngineType.QWEN
 
     def test_api_error_picks_first_untried(self) -> None:
         config = _make_config(
