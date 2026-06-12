@@ -54,6 +54,7 @@ class FailureMode(str, Enum):
     GARBAGE = "garbage"
     LOW_WORD_COUNT = "low_word_count"
     TRUNCATED = "truncated"
+    NATIVE_TABLE_STRUCTURE_FAILED = "native_table_structure_failed"
 
 
 @dataclass

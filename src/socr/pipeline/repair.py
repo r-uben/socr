@@ -151,6 +151,12 @@ class RepairRouter:
                 return self._pick_capable(candidates)
             case FailureMode.TIMEOUT:
                 return self._pick_light(candidates)
+            case FailureMode.NATIVE_TABLE_STRUCTURE_FAILED:
+                # Respect the configured ladder: users can put a local table
+                # reader first (e.g. qwen) and cloud second, while the default
+                # remains the existing Gemini fallback rather than assuming a
+                # slow local model is safe for every run.
+                return candidates[0]
             case FailureMode.AUDIT_FAILED:
                 # The VLM judge just rejected this engine's reading of the
                 # page; a same-family retry tends to repeat the mistake.

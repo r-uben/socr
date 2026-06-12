@@ -35,6 +35,7 @@ _ESCALATION_MODES = {
     FailureMode.TRUNCATED,
     FailureMode.GARBAGE,
     FailureMode.REFUSAL,
+    FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
 }
 
 

@@ -113,6 +113,91 @@ def test_native_text_not_judged(monkeypatch):
     assert state.pages[1].best_output is bo  # native is char-exact; not judged
 
 
+def test_native_table_flat_structure_fails_audit_for_repair():
+    flat_table_text = "\n".join(
+        [
+            "Forecast",
+            "2026",
+            "2027",
+            "2028",
+            "CountryA",
+            "1.2",
+            "1.3",
+            "1.4",
+            "CountryB",
+            "2.1",
+            "2.2",
+            "2.3",
+            "CountryC",
+            "3.1",
+            "3.2",
+            "3.3",
+            "CountryD",
+            "4.1",
+            "4.2",
+            "4.3",
+        ]
+    )
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    state, bo = _state_with_page(engine="native")
+    bo.text = flat_table_text
+    state.pages[1].is_born_digital = True
+    state.pages[1].native_text = flat_table_text
+    pipe._last_assessment = _assessment(has_tables=True)
+
+    pipe._score_per_page(state)
+
+    assert bo.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+    assert state.pages[1].best_output is None
+    assert state.pages[1].needs_repair
+
+
+def test_native_table_markdown_structure_stays_native():
+    markdown_table_text = (
+        "| Forecast | 2026 | 2027 | 2028 |\n"
+        "| --- | --- | --- | --- |\n"
+        "| CountryA | 1.2 | 1.3 | 1.4 |\n"
+        "| CountryB | 2.1 | 2.2 | 2.3 |"
+    )
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    state, bo = _state_with_page(engine="native")
+    bo.text = markdown_table_text
+    state.pages[1].is_born_digital = True
+    state.pages[1].native_text = markdown_table_text
+    pipe._last_assessment = _assessment(has_tables=True)
+
+    pipe._score_per_page(state)
+
+    assert bo.failure_mode == FailureMode.NONE
+    assert state.pages[1].best_output is bo
+    assert not state.pages[1].needs_repair
+
+
+def test_native_table_malformed_markdown_fails_audit_for_repair():
+    malformed_table_text = "\n".join(
+        [
+            "| Name | 2026 | 2027 | 2028 | 2029 | 2030 |",
+            "| --- | --- | --- | --- | --- | --- |",
+            "| collapsed labels | 1.0 2.0 3.0 4.0 5.0 |",
+            "| more labels | 1.1 2.1 3.1 4.1 5.1 |",
+            "| another row | 1.2 2.2 3.2 4.2 5.2 |",
+            "| final row | 1.3 2.3 3.3 4.3 5.3 |",
+        ]
+    )
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    state, bo = _state_with_page(engine="native")
+    bo.text = malformed_table_text
+    state.pages[1].is_born_digital = True
+    state.pages[1].native_text = malformed_table_text
+    pipe._last_assessment = _assessment(has_tables=True)
+
+    pipe._score_per_page(state)
+
+    assert bo.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+    assert state.pages[1].best_output is None
+    assert state.pages[1].needs_repair
+
+
 def test_noop_when_no_judge_model(monkeypatch):
     from socr.pipeline.agentic import AcceptDecision
 

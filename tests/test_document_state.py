@@ -8,11 +8,11 @@ from socr.core.document import DocumentHandle
 from socr.core.result import (
     DocumentStatus,
     EngineResult,
+    FailureMode,
     PageOutput,
     PageStatus,
 )
 from socr.core.state import DocumentState, PageState
-
 
 # ---------------------------------------------------------------------------
 # Helpers — build a DocumentHandle without touching the filesystem
@@ -304,6 +304,25 @@ class TestNeedsRepair:
             attempts=[failed],
         )
         assert not ps.needs_repair
+
+    def test_native_table_structure_failure_still_needs_repair(self) -> None:
+        """A failed native table attempt is not evidence that OCR fallback failed."""
+        native_failed = _make_page_output(
+            1,
+            "flat table stream",
+            audit_passed=False,
+            engine="native",
+        )
+        native_failed.failure_mode = FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+        ps = PageState(
+            page_num=1,
+            is_born_digital=True,
+            native_text="flat table stream",
+            needs_ocr_enhancement=True,
+            native_table_structure_failed=True,
+            attempts=[native_failed],
+        )
+        assert ps.needs_repair
 
     def test_ocr_enhancement_propagated_via_apply_born_digital(self) -> None:
         """apply_born_digital propagates needs_ocr_enhancement to PageState."""
@@ -599,7 +618,8 @@ class TestTelemetry:
 
 class TestExports:
     def test_importable_from_core_package(self) -> None:
-        from socr.core import DocumentState as DS, PageState as PS
+        from socr.core import DocumentState as ExportedDocumentState
+        from socr.core import PageState as ExportedPageState
 
-        assert DS is DocumentState
-        assert PS is PageState
+        assert ExportedDocumentState is DocumentState
+        assert ExportedPageState is PageState
