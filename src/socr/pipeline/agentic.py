@@ -176,6 +176,20 @@ def route_page(
                 prof.cost_per_page_usd,
                 remaining_budget,
             )
+            # Record a stub attempt so the manifest journal captures the skip
+            # reason for every rung (not just the ones that ran).
+            attempts.append(
+                ProviderAttempt(
+                    engine=prof.engine,
+                    output=_error_output(page_num, "budget exceeded"),
+                    cost_usd=0.0,
+                    accepted=False,
+                    reason="budget exceeded",
+                    provider_id=prof.id,
+                    model=prof.model,
+                    backend=prof.backend,
+                )
+            )
             continue
         tried += 1
         timeout_sec: float | None = (

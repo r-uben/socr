@@ -1051,6 +1051,21 @@ class UnifiedPipeline:
                 console.print("  [red]No OCR providers available[/red]")
             return
 
+        # Snapshot the ladder for manifest provenance (B3): ordered list of
+        # providers, with their identity/cost/tier fields, frozen at routing time.
+        state.agentic_ladder = [
+            {
+                "provider_id": p.id,
+                "model": p.model,
+                "backend": p.backend,
+                "cost_per_page_usd": p.cost_per_page_usd,
+                "tier": p.tier,
+            }
+            for p in ladder
+        ]
+
+        # Record judge model for manifest provenance (B3).
+        state.agentic_judge_model = self._resolve_judge_model() or ""
         judge = self._build_page_judge(state)
         enhancement_pages = [p for p in ocr_pages if state.pages[p].needs_ocr_enhancement]
 
@@ -1088,6 +1103,13 @@ class UnifiedPipeline:
             for att in decision.attempts:
                 att.output.cost_usd = att.cost_usd
                 att.output.audit_passed = att.accepted
+                att.output.provider_id = att.provider_id  # B3: agentic provenance
+                att.output.provider_model = att.model  # B3
+                att.output.provider_backend = att.backend  # B3
+                # skip_reason: populated for budget-exceeded stubs (no OCR ran).
+                att.output.skip_reason = (
+                    att.reason if not att.accepted and not att.output.text else ""
+                )  # B3
                 ps.attempts.append(att.output)
             ps.best_output = decision.final_output
 

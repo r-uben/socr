@@ -146,9 +146,14 @@ class Manifest:
     render_dpi: int
     entries: dict[int, ManifestEntry] = field(default_factory=dict)
     schema_version: str = MANIFEST_SCHEMA_VERSION
+    # Agentic routing ladder snapshot (B3): ordered list of providers tried,
+    # with their cost/tier info. None when run was NOT in agentic mode.
+    agentic_ladder: list[dict] | None = None
+    # Judge model used for agentic routing (B3) — "" when heuristic judge was used.
+    agentic_judge_model: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "schema_version": self.schema_version,
             "pdf_filename": self.pdf_filename,
             "pdf_file_hash": self.pdf_file_hash,
@@ -156,6 +161,11 @@ class Manifest:
             "render_dpi": self.render_dpi,
             "entries": {str(k): v.to_dict() for k, v in sorted(self.entries.items())},
         }
+        if self.agentic_ladder is not None:
+            d["agentic_ladder"] = self.agentic_ladder
+        if self.agentic_judge_model:
+            d["agentic_judge_model"] = self.agentic_judge_model
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> Manifest:
@@ -166,6 +176,8 @@ class Manifest:
             render_dpi=d["render_dpi"],
             schema_version=d.get("schema_version", MANIFEST_SCHEMA_VERSION),
             entries={int(k): ManifestEntry.from_dict(v) for k, v in d.get("entries", {}).items()},
+            agentic_ladder=d.get("agentic_ladder"),
+            agentic_judge_model=d.get("agentic_judge_model", ""),
         )
 
     def save(self, path: Path | str) -> None:
@@ -397,6 +409,8 @@ def build_manifest(
         pdf_file_hash=handle.file_hash,
         page_count=handle.page_count,
         render_dpi=dpi,
+        agentic_ladder=state.agentic_ladder if state.agentic_ladder else None,
+        agentic_judge_model=getattr(state, "agentic_judge_model", ""),
     )
     # Recover per-page text from a whole-document CLI attempt (page_num=0) so the
     # manifest never freezes empty pages when per-page best_outputs are absent.
@@ -450,11 +464,19 @@ def build_manifest(
             image_hash=image_hash,
             prompt_hash=prompt_hash,
         )
+        _judge_model = getattr(state, "agentic_judge_model", "")
         journal = [
             {
                 "engine": a.engine,
-                "audit_passed": a.audit_passed,
+                "provider_id": getattr(a, "provider_id", ""),
+                "model": getattr(a, "provider_model", ""),
+                "backend": getattr(a, "provider_backend", ""),
+                "cost_usd": a.cost_usd,
+                "accepted": a.audit_passed,
+                "confidence": a.confidence,
                 "failure_mode": a.failure_mode.value,
+                "reason": getattr(a, "skip_reason", "") or a.failure_mode.value,
+                "judge_model": _judge_model,
             }
             for a in state.pages[page_num].attempts
         ]

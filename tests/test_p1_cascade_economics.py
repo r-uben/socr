@@ -78,7 +78,8 @@ class TestPaidRungsReachable:
 class TestBudgetPreCheck:
     def test_unaffordable_paid_rungs_skipped_free_kept(self) -> None:
         """Budget too small for any paid rung: paid rungs are skipped BEFORE
-        spending, free rungs still run, page ships best-effort."""
+        spending (stub attempts recorded for journal), free rungs still run,
+        page ships best-effort."""
         d = route_page(
             1,
             FULL_LADDER,
@@ -87,10 +88,15 @@ class TestBudgetPreCheck:
             remaining_budget=0.0001,  # < gemini's 0.0002
         )
         assert not d.accepted
-        tried = {a.engine for a in d.attempts}
-        assert EngineType.GEMINI not in tried
-        assert EngineType.MISTRAL not in tried
-        assert EngineType.QWEN in tried  # free rungs always fit
+        # Skipped rungs now appear as stub attempts with reason="budget exceeded".
+        # Distinguish "actually ran OCR" from "budget-skip stub" by cost_usd > 0
+        # OR by looking at reason.  Paid engines that ran would have cost_usd > 0;
+        # skipped stubs have cost_usd == 0.0 and reason == "budget exceeded".
+        skipped = {a.engine for a in d.attempts if a.reason == "budget exceeded"}
+        ran = {a.engine for a in d.attempts if a.reason != "budget exceeded"}
+        assert EngineType.GEMINI in skipped  # skipped, not run
+        assert EngineType.MISTRAL in skipped  # skipped, not run
+        assert EngineType.QWEN in ran  # free rungs always fit
         assert d.total_cost_usd == 0.0
 
     def test_budget_covers_first_paid_rung_only(self) -> None:
@@ -104,9 +110,10 @@ class TestBudgetPreCheck:
             _AcceptOnly(set()),  # nothing accepted -> walk the whole ladder
             remaining_budget=0.0011,
         )
-        tried = {a.engine for a in d.attempts}
-        assert EngineType.GEMINI in tried
-        assert EngineType.MISTRAL not in tried
+        skipped = {a.engine for a in d.attempts if a.reason == "budget exceeded"}
+        ran = {a.engine for a in d.attempts if a.reason != "budget exceeded"}
+        assert EngineType.GEMINI in ran  # gemini ran (fits budget)
+        assert EngineType.MISTRAL in skipped  # mistral skipped after gemini decrements budget
 
     def test_budget_exactly_covering_a_rung_runs_it(self) -> None:
         """Boundary: a rung that exactly fits the remaining budget runs
