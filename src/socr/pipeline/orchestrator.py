@@ -2416,32 +2416,53 @@ class UnifiedPipeline:
     def _get_vision_engine(self):
         """Try to create a Gemini API engine for figure description.
 
-        Returns None if GEMINI_API_KEY is not available.
+        When Ollama is available, returns a LocalFirstFigureEngine that tries
+        qwen3-vl:30b-a3b-instruct first on every call and falls back to Gemini
+        per-call on empty or error result.  When Ollama is unavailable, returns
+        GeminiAPIEngine directly.  Returns None only when both are unreachable.
         """
         import os
 
-        api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
-        if not api_key:
-            if not self.config.quiet:
-                console.print(
-                    "  [dim]No GEMINI_API_KEY — saving figures without descriptions[/dim]"
-                )
-            return None
-
-        from socr.engines.gemini_api import GeminiAPIConfig, GeminiAPIEngine
-
-        engine = GeminiAPIEngine(
-            GeminiAPIConfig(
-                api_key=api_key,
-                model=self.config.gemini_model,
-            )
+        from socr.engines.gemini_api import (
+            GeminiAPIConfig,
+            GeminiAPIEngine,
+            LocalFirstFigureEngine,
+            OllamaFigureEngine,
         )
-        if engine.initialize():
-            return engine
+
+        # Build a Gemini engine if credentials are available (used as fallback)
+        def _try_gemini() -> GeminiAPIEngine | None:
+            api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+            if not api_key:
+                return None
+            engine = GeminiAPIEngine(
+                GeminiAPIConfig(api_key=api_key, model=self.config.gemini_model)
+            )
+            return engine if engine.initialize() else None
+
+        ollama = OllamaFigureEngine()
+        if ollama.is_available():
+            gemini_fallback = _try_gemini()
+            if not self.config.quiet:
+                fb = " + Gemini fallback" if gemini_fallback else ""
+                console.print(
+                    f"  [dim]Using local Ollama ({ollama.model}) for figure descriptions{fb}[/dim]"
+                )
+            return LocalFirstFigureEngine(ollama, gemini_fallback)
 
         if not self.config.quiet:
             console.print(
-                "  [dim]Gemini API not reachable — saving figures without descriptions[/dim]"
+                "  [dim]Ollama not available — trying Gemini API for figure descriptions[/dim]"
+            )
+
+        gemini = _try_gemini()
+        if gemini is not None:
+            return gemini
+
+        if not self.config.quiet:
+            console.print(
+                "  [dim]No figure description engine available"
+                " — saving figures without descriptions[/dim]"
             )
         return None
 
