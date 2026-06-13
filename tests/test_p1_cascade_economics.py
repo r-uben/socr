@@ -20,6 +20,9 @@ from socr.pipeline.agentic import AcceptDecision, route_page
 
 # Five free locals + two paid cloud rungs — the configuration under which the
 # old max_retries+1=3 cap made GEMINI/MISTRAL mathematically unreachable.
+# include_ineligible=True so DeepSeek and Mistral appear (they are auto_eligible=False
+# by default and excluded from the production ladder; the cascade tests need them to
+# validate reachability of all rungs).
 FULL_LADDER = provider_ladder(
     {
         EngineType.QWEN,
@@ -29,7 +32,8 @@ FULL_LADDER = provider_ladder(
         EngineType.MARKER,
         EngineType.GEMINI,
         EngineType.MISTRAL,
-    }
+    },
+    include_ineligible=True,
 )
 
 

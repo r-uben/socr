@@ -3,19 +3,19 @@
 Last updated: 2026-06-14
 
 ## Stage
-Wave-1 execution in progress. D1 DONE.
+Wave-1 execution in progress. D1 DONE, A1 DONE.
 
 ## Base state (clean before tickets)
 - **Repo now at `~/repos/socr`** (moved off iCloud 2026-06-14; git/uv/pytest native here).
-- Branch `feat/46-model-lineup-refresh`, last commits: instruct-encoding (`qwen.py` local tier =
-  `qwen3-vl:30b-a3b-instruct`, MODELS.md trap) + this plan. Full suite green (710).
-- Commits are local-only (unpushed): `git push -u origin feat/46-model-lineup-refresh` to back up.
+- Branch `feat/46-model-lineup-refresh`. Full suite green (716 after A1).
 - `scratch/` gitignored (D1's `scratch/bench/ce/202606_p4.png` carried over for validation).
+- A1 committed: `ProviderProfile` now carries `id/backend/model/auto_eligible`; named profile
+  constants defined; `provider_ladder()` gained `include_ineligible` param and direct-profile path.
 
 ## Ticket board
 | Ticket | Stream | Status | depends-on | Parallel group |
 |--------|--------|--------|------------|----------------|
-| A1 | provider identity | TODO | — | wave 1 (alone) |
+| A1 | provider identity | DONE | — | wave 1 (alone) |
 | B1 | drop DeepSeek/demote Mistral | TODO | A1 | wave 2 |
 | B2 | agentic default + flags | TODO | A1 | wave 2 |
 | B3 | enrich manifest | TODO | A1 | wave 2 |
@@ -33,8 +33,7 @@ Wave-1 execution in progress. D1 DONE.
 > agent an isolated worktree and merge. Reviewer must check for collision.
 
 ## Next action
-Fresh session: read this file + TICKETS.md, dispatch wave-1 implementer agents, review, commit
-per ticket, then wave 2.
+Dispatch B1, B2, B3 (all depend on A1, now DONE). C1, C2, D1 can run in parallel.
 
 ## Open questions deferred to execution
 - Preflight skill (frozen-profile advisor) — Codex says optional; decide AFTER the refactor.

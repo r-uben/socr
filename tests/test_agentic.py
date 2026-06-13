@@ -19,7 +19,10 @@ from socr.pipeline.agentic import (
     route_page,
 )
 
-LADDER = provider_ladder({EngineType.GLM, EngineType.GEMINI, EngineType.MISTRAL})
+LADDER = provider_ladder(
+    {EngineType.GLM, EngineType.GEMINI, EngineType.MISTRAL},
+    include_ineligible=True,
+)
 # -> [GLM(free), GEMINI(0.0002), MISTRAL(0.001)]
 
 
@@ -163,3 +166,12 @@ def test_vlm_page_judge_uses_verdict():
 
     judge_bad = VLMPageJudge(_VJ(False), render_image=lambda pn: f"/img/{pn}.png")
     assert not judge_bad.assess(out, LADDER[0]).accept
+
+
+def test_provider_attempt_records_id_model_backend():
+    d = route_page(1, LADDER, _run(), _StubJudge({EngineType.GLM}))
+    assert d.accepted
+    attempt = d.attempts[0]
+    assert attempt.provider_id != ""
+    assert attempt.model != ""
+    assert attempt.backend != ""

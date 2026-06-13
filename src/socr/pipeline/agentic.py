@@ -60,6 +60,9 @@ class ProviderAttempt:
     accepted: bool
     reason: str = ""
     raw_verdict: object | None = None
+    provider_id: str = ""
+    model: str = ""
+    backend: str = ""
 
 
 @dataclass
@@ -177,6 +180,9 @@ def route_page(
                     cost_usd=0.0,
                     accepted=False,
                     reason="provider raised",
+                    provider_id=prof.id,
+                    model=prof.model,
+                    backend=prof.backend,
                 )
             )
             continue
@@ -193,6 +199,9 @@ def route_page(
                 accepted=decision.accept,
                 reason=decision.reason,
                 raw_verdict=decision.raw_verdict,
+                provider_id=prof.id,
+                model=prof.model,
+                backend=prof.backend,
             )
         )
         if decision.accept:
