@@ -141,3 +141,34 @@ def test_direct_profile_list_makes_qwen_local_cloud_distinct_rungs():
 
 def test_gemini_profile_model_matches_engine_default():
     assert PROFILE_GEMINI.model == "gemini-3-flash-preview"
+
+
+# --- B1 verification tests ---
+# provider_ladder(None) is the "all known providers" path;
+# these confirm DeepSeek/Mistral are excluded by default and reachable explicitly.
+
+
+def test_default_ladder_excludes_deepseek_and_mistral():
+    """Default ladder (include_ineligible=False, all providers) must omit both."""
+    ladder = provider_ladder(None)
+    engines = {p.engine for p in ladder}
+    assert EngineType.DEEPSEEK not in engines
+    assert EngineType.MISTRAL not in engines
+
+
+def test_include_ineligible_includes_deepseek_and_mistral():
+    """include_ineligible=True must bring both back into the all-providers ladder."""
+    ladder = provider_ladder(None, include_ineligible=True)
+    engines = {p.engine for p in ladder}
+    assert EngineType.DEEPSEEK in engines
+    assert EngineType.MISTRAL in engines
+
+
+def test_cost_of_deepseek_still_works():
+    """DeepSeek remains in DEFAULT_PROVIDERS so cost_of works for replay."""
+    assert cost_of(EngineType.DEEPSEEK, 5) == 0.0
+
+
+def test_cost_of_mistral_still_works():
+    """Mistral remains in DEFAULT_PROVIDERS so cost_of works for replay."""
+    assert cost_of(EngineType.MISTRAL, 5) == 0.001 * 5

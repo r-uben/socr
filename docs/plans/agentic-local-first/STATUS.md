@@ -3,7 +3,7 @@
 Last updated: 2026-06-14
 
 ## Stage
-Wave-1 execution in progress. D1 DONE, A1 DONE.
+Wave-2 execution in progress. D1 DONE, A1 DONE, B1 DONE.
 
 ## Base state (clean before tickets)
 - **Repo now at `~/repos/socr`** (moved off iCloud 2026-06-14; git/uv/pytest native here).
@@ -16,7 +16,7 @@ Wave-1 execution in progress. D1 DONE, A1 DONE.
 | Ticket | Stream | Status | depends-on | Parallel group |
 |--------|--------|--------|------------|----------------|
 | A1 | provider identity | DONE | — | wave 1 (alone) |
-| B1 | drop DeepSeek/demote Mistral | TODO | A1 | wave 2 |
+| B1 | drop DeepSeek/demote Mistral | DONE | A1 | wave 2 |
 | B2 | agentic default + flags | TODO | A1 | wave 2 |
 | B3 | enrich manifest | TODO | A1 | wave 2 |
 | C1 | thinking/stall guard | TODO | — | wave 1 (parallel) |
@@ -33,7 +33,7 @@ Wave-1 execution in progress. D1 DONE, A1 DONE.
 > agent an isolated worktree and merge. Reviewer must check for collision.
 
 ## Next action
-Dispatch B1, B2, B3 (all depend on A1, now DONE). C1, C2, D1 can run in parallel.
+Dispatch B2, B3 (depend on A1, now DONE). C1, C2 can run in parallel. B1 is DONE.
 
 ## Open questions deferred to execution
 - Preflight skill (frozen-profile advisor) — Codex says optional; decide AFTER the refactor.
