@@ -40,9 +40,26 @@ part of the Ollama subscription, treated as the cheap "cloud" rung.
 
 socr produces **markdown**. Three sub-tasks, three routing rules:
 
+### Local tier model — `qwen3-vl:30b-a3b-instruct` (validated 2026-06-13)
+
+The `QWEN` engine's **local** (ollama) backend uses `qwen3-vl:30b-a3b-instruct` — the
+Qwen3-VL-30B **A3B MoE** (~3B active/token). On the owner's 64GB Mac it reconstructs dense
+multi-column tables with exact digits (verified against native ground truth), recovers math
+the native text layer mangles, and runs at ~1-2 min/page. It is the local frontier for this
+hardware (Gemini web research: everything better is too big or API-only).
+
+> **Trap — use the INSTRUCT build, never the default `qwen3-vl:30b`.** The default `:30b`
+> is the *thinking* build; on dense 11-column tables it emits 5000+ thinking tokens and
+> never reaches the transcription within any sane timeout. Neither `think:false` (API) nor
+> `/no_think` (prompt) suppress it on Ollama 0.30.8 — only the `-instruct` *variant* does.
+> The dense `qwen3-vl:8b` collapses dense tables and is slow; not a local-tier option.
+> `minicpm-v4.5:8b` emits a degenerate loop on Ollama (broken). See
+> `[[reference-local-ocr-benchmark-jun2026]]`.
+
 ### 1. Text & formulas (LaTeX in markdown)
 - **Default:** native PyMuPDF text for born-digital prose (free).
-- **Hard / scanned / math pages:** `qwen3.5:cloud` (the `QWEN` engine's default backend).
+- **Hard / scanned / math pages:** local `qwen3-vl:30b-a3b-instruct` (free) or `qwen3.5:cloud`
+  (Ollama Cloud) depending on backend.
 - **Escalation:** Gemini when Qwen is unavailable or returns empty.
 - **Font-corrupted equations** (`recover_corrupt_math`): `config.math_model` =
   `qwen3.5:cloud`. Override with `--math-model qwen3-vl:8b` for fully offline runs.
