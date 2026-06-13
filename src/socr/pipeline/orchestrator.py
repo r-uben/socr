@@ -1043,9 +1043,14 @@ class UnifiedPipeline:
             return
 
         available = self._available_engines_for_agentic()
-        # --strict-local: drop cloud rungs so only free/local providers are tried.
+        # --strict-local: drop cloud-tier rungs (including free-cloud providers such
+        # as QWEN Cloud / Ollama Cloud) so only local/on-device providers are tried.
+        # Filter by tier, not by cost: PROFILE_QWEN_CLOUD is free (cost=0) but its
+        # tier is TIER_CLOUD and it requires internet — it must be excluded here.
         if self.config.strict_local:
-            available = [p for p in available if p.is_free]
+            from socr.core.providers import TIER_LOCAL
+
+            available = [p for p in available if p.tier == TIER_LOCAL]
         ladder = provider_ladder(
             available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
         )

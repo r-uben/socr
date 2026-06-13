@@ -13,7 +13,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from socr.core.config import EngineType, PipelineConfig
-from socr.core.providers import PROFILE_GEMINI, PROFILE_GLM, ProviderProfile
+from socr.core.providers import (
+    PROFILE_GEMINI,
+    PROFILE_GLM,
+    PROFILE_QWEN_CLOUD,
+    TIER_LOCAL,
+    ProviderProfile,
+)
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 # ---------------------------------------------------------------------------
@@ -81,37 +87,25 @@ def test_strict_local_default_in_build_config() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_provider_profile(engine: EngineType, cost: float) -> ProviderProfile:
-    return ProviderProfile(
-        engine=engine,
-        tier="local" if cost == 0.0 else "cloud",
-        cost_per_page_usd=cost,
-        id=engine.value,
-        backend="test",
-        model="test",
-    )
-
-
 class TestStrictLocalFiltersCloudRungs:
-    """strict_local=True must remove paid providers from the agentic ladder."""
+    """strict_local=True must remove ALL cloud-tier providers from the agentic ladder,
+    including free-cloud providers like PROFILE_QWEN_CLOUD (tier=cloud, cost=0).
+    The filter is by tier, not by cost."""
 
     def _make_pipeline(self, strict_local: bool) -> UnifiedPipeline:
         config = PipelineConfig(
             agentic=True,
             strict_local=strict_local,
             judge_backend="heuristic",
-            enabled_engines=[EngineType.GLM, EngineType.GEMINI],
+            enabled_engines=[EngineType.GLM, EngineType.QWEN, EngineType.GEMINI],
             quiet=True,
         )
         return UnifiedPipeline(config)
 
-    def test_strict_local_drops_paid_from_available(self) -> None:
-        """_phase_agentic should filter to is_free profiles when strict_local=True."""
-        pipeline = self._make_pipeline(strict_local=True)
-
-        # Mock _available_engines_for_agentic to return one free + one paid profile.
-        mixed_profiles = [PROFILE_GLM, PROFILE_GEMINI]  # GLM free, Gemini paid
-
+    def _run_phase_agentic_collecting_ladder(
+        self, pipeline: UnifiedPipeline, profiles: list[ProviderProfile]
+    ) -> list[list]:
+        """Run _phase_agentic with a mocked available set; collect what reaches provider_ladder."""
         collected_ladders: list[list] = []
 
         def mock_provider_ladder(available, **kwargs):
@@ -119,69 +113,64 @@ class TestStrictLocalFiltersCloudRungs:
             return []  # short-circuit; we only care about what was passed
 
         with (
-            patch.object(pipeline, "_available_engines_for_agentic", return_value=mixed_profiles),
+            patch.object(pipeline, "_available_engines_for_agentic", return_value=profiles),
             # provider_ladder is a local import inside _phase_agentic; patch at source.
-            patch(
-                "socr.core.providers.provider_ladder",
-                side_effect=mock_provider_ladder,
-            ),
+            patch("socr.core.providers.provider_ladder", side_effect=mock_provider_ladder),
         ):
-            # We need a state object to call _phase_agentic; build a minimal one.
             from socr.core.document import DocumentHandle
             from socr.core.state import DocumentState
 
             with patch.object(DocumentHandle, "__post_init__", lambda self: None):
                 handle = DocumentHandle(path=Path("/tmp/fake.pdf"), page_count=1)
             state = DocumentState(handle=handle)
-            # Mark the single page as scanned (not born-digital) so it goes to OCR.
+            # Mark page as scanned (not born-digital) so it goes to OCR.
             state.pages[1].is_born_digital = False
-
             pipeline._phase_agentic(state, Path("/tmp/out"))
 
-        # provider_ladder should have been called with only the free profile
-        assert collected_ladders, "provider_ladder was never called"
-        passed = collected_ladders[0]
-        assert all(p.is_free for p in passed), (
-            f"strict_local=True should only pass free profiles; got: {passed}"
-        )
-        # Gemini (paid) must NOT be in the list
-        assert PROFILE_GEMINI not in passed
-        # GLM (free) must be in the list
-        assert PROFILE_GLM in passed
+        return collected_ladders
 
-    def test_no_strict_local_keeps_paid_rungs(self) -> None:
-        """Without strict_local, paid profiles are passed to provider_ladder unchanged."""
+    def test_strict_local_drops_cloud_rungs_by_tier(self) -> None:
+        """_phase_agentic with strict_local=True must exclude ALL cloud-tier profiles.
+
+        This includes both paid cloud (Gemini) and FREE cloud (QWEN Cloud / Ollama Cloud):
+        the predicate is tier==TIER_LOCAL, not is_free, so a zero-cost cloud provider
+        such as PROFILE_QWEN_CLOUD is still excluded.
+        """
+        pipeline = self._make_pipeline(strict_local=True)
+
+        # Three profiles: local-free (GLM), cloud-free (QWEN Cloud), cloud-paid (Gemini).
+        mixed_profiles = [PROFILE_GLM, PROFILE_QWEN_CLOUD, PROFILE_GEMINI]
+        collected = self._run_phase_agentic_collecting_ladder(pipeline, mixed_profiles)
+
+        assert collected, "provider_ladder was never called"
+        passed = collected[0]
+
+        # Only local-tier profiles must survive.
+        assert all(p.tier == TIER_LOCAL for p in passed), (
+            f"strict_local=True should only pass TIER_LOCAL profiles; got: {passed}"
+        )
+        # GLM (local) is kept.
+        assert PROFILE_GLM in passed
+        # QWEN Cloud (cloud-tier, cost=0) is excluded — this is the key regression test.
+        assert PROFILE_QWEN_CLOUD not in passed, (
+            "PROFILE_QWEN_CLOUD is free but cloud-tier and must be excluded by --strict-local"
+        )
+        # Gemini (cloud-tier, paid) is also excluded.
+        assert PROFILE_GEMINI not in passed
+
+    def test_no_strict_local_keeps_all_rungs(self) -> None:
+        """Without strict_local, all profiles (local and cloud) reach provider_ladder."""
         pipeline = self._make_pipeline(strict_local=False)
 
-        mixed_profiles = [PROFILE_GLM, PROFILE_GEMINI]
-        collected_ladders: list[list] = []
+        mixed_profiles = [PROFILE_GLM, PROFILE_QWEN_CLOUD, PROFILE_GEMINI]
+        collected = self._run_phase_agentic_collecting_ladder(pipeline, mixed_profiles)
 
-        def mock_provider_ladder(available, **kwargs):
-            collected_ladders.append(list(available))
-            return []
-
-        with (
-            patch.object(pipeline, "_available_engines_for_agentic", return_value=mixed_profiles),
-            patch(
-                "socr.core.providers.provider_ladder",
-                side_effect=mock_provider_ladder,
-            ),
-        ):
-            from socr.core.document import DocumentHandle
-            from socr.core.state import DocumentState
-
-            with patch.object(DocumentHandle, "__post_init__", lambda self: None):
-                handle = DocumentHandle(path=Path("/tmp/fake.pdf"), page_count=1)
-            state = DocumentState(handle=handle)
-            state.pages[1].is_born_digital = False
-
-            pipeline._phase_agentic(state, Path("/tmp/out"))
-
-        assert collected_ladders
-        passed = collected_ladders[0]
-        # Both profiles should be present when strict_local is False
-        assert PROFILE_GEMINI in passed
+        assert collected
+        passed = collected[0]
+        # All three profiles should reach provider_ladder unchanged.
         assert PROFILE_GLM in passed
+        assert PROFILE_QWEN_CLOUD in passed
+        assert PROFILE_GEMINI in passed
 
 
 # ---------------------------------------------------------------------------
