@@ -11,6 +11,9 @@ see, not about generic quality heuristics. Consider, as relevant to THIS page:
 - Does the body text match the page, in the right reading order?
 - Are equations, tables, figures, footnotes, and references represented (or
   faithfully marked as present) rather than dropped, garbled, or invented?
+- For tables with paired columns (e.g. two year columns per variable): summary rows
+  (Consensus, High, Low, Std Dev, Mean) must have the same column count as data
+  rows. Collapsed or merged summary rows are a transcription defect — mark as mangled.
 - Are there signs of OCR failure: repeated/looping lines, truncation partway down
   the page, hallucinated content not on the page, refusal text, or empty output?
 - Is anything on the page that carries meaning missing from the transcription?

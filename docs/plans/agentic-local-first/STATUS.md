@@ -1,9 +1,9 @@
 # STATUS — agentic local-first routing (#46 phase 2)
 
-Last updated: 2026-06-13 (planning session, pre-execution)
+Last updated: 2026-06-14
 
 ## Stage
-Scaffolding written. **Not yet executed.** Awaiting fresh-session parallel dispatch.
+Wave-1 execution in progress. D1 DONE.
 
 ## Base state (clean before tickets)
 - **Repo now at `~/repos/socr`** (moved off iCloud 2026-06-14; git/uv/pytest native here).
@@ -21,7 +21,7 @@ Scaffolding written. **Not yet executed.** Awaiting fresh-session parallel dispa
 | B3 | enrich manifest | TODO | A1 | wave 2 |
 | C1 | thinking/stall guard | TODO | — | wave 1 (parallel) |
 | C2 | local-first figure desc | TODO | — | wave 1 (parallel) |
-| D1 | dense-table summary-row prompt | TODO | — | wave 1 (parallel) |
+| D1 | dense-table summary-row prompt | DONE | — | wave 1 (parallel) |
 
 ## Dispatch waves
 - **Wave 1 (parallel now):** A1, C1, C2, D1 — no cross-deps, mostly disjoint files
