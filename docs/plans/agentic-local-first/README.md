@@ -37,13 +37,10 @@ dispatch one `socr-implementer` subagent per ready ticket (respecting `depends-o
 (volatile) and per-ticket logs in `logs/`.
 
 **Hard conventions (every agent MUST follow — baked into the subagent defs):**
-- **NEVER `uv run`** in this repo — it hangs on the iCloud venv. Use the venv binaries directly:
-  `~/venvs/socr/bin/python`, `~/venvs/socr/bin/pytest`, `~/venvs/socr/bin/ruff`.
-- `ruff format --check` is a **BLOCKING CI gate** — run it before declaring a ticket done.
-- Branch `feat/46-model-lineup-refresh`. **Commit with `git-icommit -m "<msg>" <file>...`**
-  (`~/.local/bin`), NOT `git commit` — plain `git commit`/`git status` HANG on this iCloud
-  working tree (fileproviderd stall) and leave stuck procs. `git-icommit` stages the named files
-  and commits via plumbing (no working-tree scan). Stage by name (never `git add -A`). One commit
-  per ticket, message references the ticket id. Don't push unless asked.
+- This repo lives at **`~/repos/socr`** (moved off iCloud 2026-06-14). `uv run`, pytest, git and
+  commits all work **natively** — no special handling. (`ruff format --check .` before declaring
+  a ticket done — it's a BLOCKING CI gate.)
+- Branch `feat/46-model-lineup-refresh`. Commit with plain `git commit`; stage by name (never
+  `git add -A`). One commit per ticket, message references the ticket id. Don't push unless asked.
 - Local model = `qwen3-vl:30b-a3b-instruct` (instruct/non-thinking). Never the thinking `:30b`.
 - Update `STATUS.md` and append a `logs/<date>_<ticket>.md` note when finishing a ticket.

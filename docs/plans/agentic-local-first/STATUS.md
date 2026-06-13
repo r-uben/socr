@@ -6,10 +6,11 @@ Last updated: 2026-06-13 (planning session, pre-execution)
 Scaffolding written. **Not yet executed.** Awaiting fresh-session parallel dispatch.
 
 ## Base state (clean before tickets)
-- Branch `feat/46-model-lineup-refresh`, last commit `6d6ee79` (deterministic lineup refresh).
-- Instruct-encoding committed on top (qwen.py local tier = `qwen3-vl:30b-a3b-instruct`,
-  MODELS.md trap documented). Full suite green via `~/venvs/socr/bin/pytest`.
-- `scratch/` gitignored.
+- **Repo now at `~/repos/socr`** (moved off iCloud 2026-06-14; git/uv/pytest native here).
+- Branch `feat/46-model-lineup-refresh`, last commits: instruct-encoding (`qwen.py` local tier =
+  `qwen3-vl:30b-a3b-instruct`, MODELS.md trap) + this plan. Full suite green (710).
+- Commits are local-only (unpushed): `git push -u origin feat/46-model-lineup-refresh` to back up.
+- `scratch/` gitignored (D1's `scratch/bench/ce/202606_p4.png` carried over for validation).
 
 ## Ticket board
 | Ticket | Stream | Status | depends-on | Parallel group |
