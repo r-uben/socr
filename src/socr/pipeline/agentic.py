@@ -22,6 +22,7 @@ winning provider and the total cost is known.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -129,6 +130,7 @@ def route_page(
     *,
     max_attempts: int = 0,
     remaining_budget: float | None = None,
+    provider_timeout: dict[EngineType, float] | None = None,
 ) -> PageDecision:
     """Route one page: cheapest provider first, escalate until the judge accepts.
 
@@ -148,6 +150,13 @@ def route_page(
             rung: a paid provider that does not fit is skipped (free rungs
             always fit), instead of discovering the overrun after spending.
             ``None`` = unbounded.
+        provider_timeout: optional per-provider wall-clock timeout in seconds.
+            When a provider's ``EngineType`` is present in this dict, the
+            ``run_provider`` call is wrapped with a
+            ``concurrent.futures.ThreadPoolExecutor`` timeout. On timeout the
+            provider is treated like a raised exception: an ERROR attempt is
+            recorded and the loop escalates to the next rung.
+            ``None`` (the default) disables all timeouts (backward-compatible).
     """
     if not ladder:
         return PageDecision(page_num, _error_output(page_num, "no providers available"))
@@ -169,8 +178,45 @@ def route_page(
             )
             continue
         tried += 1
+        timeout_sec: float | None = (
+            provider_timeout.get(prof.engine) if provider_timeout is not None else None
+        )
         try:
-            output = run_provider(prof.engine, page_num)
+            if timeout_sec is not None:
+                ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = ex.submit(run_provider, prof.engine, page_num)
+                try:
+                    output = future.result(timeout=timeout_sec)
+                except concurrent.futures.TimeoutError:
+                    future.cancel()
+                    # Abandon the executor without waiting for the stalled thread:
+                    # wait=False lets us escalate immediately; the daemon thread
+                    # will be cleaned up when the process exits or the thread
+                    # eventually unblocks.
+                    ex.shutdown(wait=False)
+                    logger.warning(
+                        "provider %s timed out on page %s (%.2fs) — escalating",
+                        prof.engine.value,
+                        page_num,
+                        timeout_sec,
+                    )
+                    attempts.append(
+                        ProviderAttempt(
+                            engine=prof.engine,
+                            output=_error_output(
+                                page_num,
+                                f"{prof.engine.value}: timed out after {timeout_sec}s",
+                            ),
+                            cost_usd=0.0,
+                            accepted=False,
+                            reason="provider timeout",
+                        )
+                    )
+                    continue
+                else:
+                    ex.shutdown(wait=False)
+            else:
+                output = run_provider(prof.engine, page_num)
         except Exception as exc:  # a provider blowing up must not kill the page
             logger.warning("provider %s failed on page %s: %s", prof.engine.value, page_num, exc)
             attempts.append(

@@ -3,7 +3,7 @@
 Last updated: 2026-06-14
 
 ## Stage
-Wave-2 execution in progress. D1 DONE, A1 DONE, B1 DONE.
+Wave-2 execution in progress. D1 DONE, A1 DONE, B1 DONE, C1 DONE.
 
 ## Base state (clean before tickets)
 - **Repo now at `~/repos/socr`** (moved off iCloud 2026-06-14; git/uv/pytest native here).
@@ -19,7 +19,7 @@ Wave-2 execution in progress. D1 DONE, A1 DONE, B1 DONE.
 | B1 | drop DeepSeek/demote Mistral | DONE | A1 | wave 2 |
 | B2 | agentic default + flags | TODO | A1 | wave 2 |
 | B3 | enrich manifest | TODO | A1 | wave 2 |
-| C1 | thinking/stall guard | TODO | — | wave 1 (parallel) |
+| C1 | thinking/stall guard | DONE | — | wave 1 (parallel) |
 | C2 | local-first figure desc | TODO | — | wave 1 (parallel) |
 | D1 | dense-table summary-row prompt | DONE | — | wave 1 (parallel) |
 

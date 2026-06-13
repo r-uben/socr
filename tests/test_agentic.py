@@ -7,6 +7,8 @@ escalate only on rejection, bound by max_attempts, keep best on total failure.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from socr.core.config import EngineType
@@ -175,3 +177,57 @@ def test_provider_attempt_records_id_model_backend():
     assert attempt.provider_id != ""
     assert attempt.model != ""
     assert attempt.backend != ""
+
+
+# --- provider timeout (TICKET-C1) -----------------------------------------
+
+
+def test_slow_provider_timeout_escalates():
+    """A provider that exceeds its timeout must escalate, not hang the batch.
+
+    Scenario: GLM is given a 50 ms timeout but sleeps 10 s.
+    GEMINI is instant and accepted.  Expected:
+      (1) GLM attempt recorded with ERROR status,
+      (2) GEMINI was tried and accepted,
+      (3) total elapsed < 2 s.
+    """
+
+    def run(engine: EngineType, page_num: int) -> PageOutput:
+        if engine == EngineType.GLM:
+            time.sleep(10)  # simulate a stall
+        return PageOutput(
+            page_num=page_num,
+            text=f"ok from {engine.value}",
+            status=PageStatus.SUCCESS,
+            engine=engine.value,
+            audit_passed=True,
+        )
+
+    t0 = time.monotonic()
+    d = route_page(
+        1,
+        LADDER,
+        run,
+        _StubJudge({EngineType.GEMINI}),
+        provider_timeout={EngineType.GLM: 0.05},
+    )
+    elapsed = time.monotonic() - t0
+
+    # (1) GLM attempt must be recorded as ERROR
+    glm_att = next(a for a in d.attempts if a.engine == EngineType.GLM)
+    assert glm_att.output.status == PageStatus.ERROR
+
+    # (2) GEMINI must have been tried and accepted
+    assert d.accepted
+    assert d.winning_engine == "gemini"
+
+    # (3) wall-clock must be well under 2 s (GLM did NOT sleep 10 s)
+    assert elapsed < 2.0, f"route_page took {elapsed:.2f}s — GLM stall not intercepted"
+
+
+def test_no_timeout_runs_normally():
+    """Backward compat: omitting provider_timeout must not change routing behaviour."""
+    d = route_page(1, LADDER, _run(), _StubJudge({EngineType.GLM}))
+    assert d.accepted
+    assert d.winning_engine == "glm"
+    assert len(d.attempts) == 1

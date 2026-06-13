@@ -1064,6 +1064,8 @@ class UnifiedPipeline:
             )
             return outs[0]
 
+        provider_timeout = getattr(self.config, "agentic_provider_timeout", None)
+
         for page_num in ocr_pages:
             # Escalation is bounded by the ladder + cost controls, never a
             # retry count (the old max_retries+1 cap made paid rungs
@@ -1073,7 +1075,14 @@ class UnifiedPipeline:
             remaining = None
             if self.config.cost_budget > 0:
                 remaining = max(self.config.cost_budget - state.total_cost, 0.0)
-            decision = route_page(page_num, ladder, run_provider, judge, remaining_budget=remaining)
+            decision = route_page(
+                page_num,
+                ladder,
+                run_provider,
+                judge,
+                remaining_budget=remaining,
+                provider_timeout=provider_timeout,
+            )
 
             ps = state.pages[page_num]
             for att in decision.attempts:
