@@ -5,6 +5,8 @@ from __future__ import annotations
 from socr.core.config import EngineType
 from socr.core.providers import (
     DEFAULT_PROVIDERS,
+    PROFILE_GEMINI,
+    PROFILE_QWEN_CLOUD,
     PROFILE_QWEN_LOCAL,
     ProviderProfile,
     cost_of,
@@ -123,3 +125,19 @@ def test_include_ineligible_shows_all():
     engines = {p.engine for p in ladder}
     assert EngineType.DEEPSEEK in engines
     assert EngineType.MISTRAL in engines
+
+
+def test_direct_profile_list_makes_qwen_local_cloud_distinct_rungs():
+    # QWEN local and QWEN cloud share EngineType.QWEN; only the direct-profile
+    # path lets both appear as distinct rungs in the same ladder.
+    profiles = [PROFILE_QWEN_LOCAL, PROFILE_QWEN_CLOUD, PROFILE_GEMINI]
+    ladder = provider_ladder(profiles)
+    assert len(ladder) == 3
+    ids = [p.id for p in ladder]
+    assert "qwen-local-instruct" in ids
+    assert "qwen-cloud" in ids
+    assert "gemini" in ids
+
+
+def test_gemini_profile_model_matches_engine_default():
+    assert PROFILE_GEMINI.model == "gemini-3-flash-preview"

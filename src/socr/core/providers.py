@@ -22,6 +22,11 @@ Design choices (deliberate):
   it covers both local qwen3-vl:30b-a3b-instruct (Ollama, free) and cloud
   qwen3.5:cloud (Ollama Cloud, ~free). Named profiles carry all three fields
   so the manifest and replay logic can distinguish them unambiguously.
+- **Direct profile injection.** ``provider_ladder`` accepts either a set of
+  ``EngineType`` values (dict-lookup path, backward-compatible) or a list of
+  ``ProviderProfile`` objects (direct path, skips dict). The direct path lets
+  callers like ``_available_engines_for_agentic`` supply two QWEN profiles
+  (local + cloud) as distinct rungs without needing two ``EngineType`` keys.
 """
 
 from __future__ import annotations
@@ -81,7 +86,7 @@ PROFILE_GEMINI = ProviderProfile(
     cost_per_page_usd=0.0002,
     id="gemini",
     backend="gemini-api",
-    model="gemini-1.5-flash",
+    model="gemini-3-flash-preview",
 )
 
 PROFILE_MARKER = ProviderProfile(
@@ -154,9 +159,10 @@ PROFILE_VLLM = ProviderProfile(
 # per-page prices are rough estimates (see README engine table) and are meant to
 # be tuned, not trusted as exact. Edit here or override via PipelineConfig.
 #
-# QWEN maps to the local-instruct profile by default; the cloud variant is
-# reachable via PROFILE_QWEN_CLOUD but does not get its own EngineType key
-# because EngineType.QWEN is the shared key for both backends.
+# QWEN maps to the local-instruct profile by default. PROFILE_QWEN_CLOUD shares
+# the same EngineType.QWEN key and cannot coexist in this dict — callers that
+# need both as distinct rungs (e.g. _available_engines_for_agentic) pass a
+# list[ProviderProfile] directly to provider_ladder() instead of using this dict.
 DEFAULT_PROVIDERS: dict[EngineType, ProviderProfile] = {
     EngineType.QWEN: PROFILE_QWEN_LOCAL,
     EngineType.GLM: PROFILE_GLM,
@@ -176,7 +182,7 @@ def _sort_key(p: ProviderProfile) -> tuple[float, int]:
 
 
 def provider_ladder(
-    available: set[EngineType] | list[EngineType] | None = None,
+    available: set[EngineType] | list[EngineType] | list[ProviderProfile] | None = None,
     *,
     registry: dict[EngineType, ProviderProfile] | None = None,
     per_page_only: bool = False,
@@ -186,22 +192,35 @@ def provider_ladder(
     """Providers ordered cheapest-first — the escalation ladder for a page.
 
     Args:
-        available: engines that are actually usable right now (probed). None =
-            all known providers.
-        registry: cost table override (defaults to DEFAULT_PROVIDERS).
+        available: engines or profiles available right now. Three forms:
+            - ``None``: all providers in the registry.
+            - ``set[EngineType] | list[EngineType]``: look up each engine in
+              the registry (backward-compatible path).
+            - ``list[ProviderProfile]``: use these profiles directly, bypassing
+              the registry. Enables two profiles with the same EngineType (e.g.
+              QWEN local + QWEN cloud) as distinct rungs.
+        registry: cost table override (defaults to DEFAULT_PROVIDERS). Ignored
+            when ``available`` is a ``list[ProviderProfile]``.
         per_page_only: keep only providers that can OCR individual pages.
         max_cost_per_page: if > 0, drop providers above this price cap.
         include_ineligible: if True, include providers with auto_eligible=False
             (DeepSeek, Mistral). Default False — they are excluded from the
             automatic routing ladder and only reachable via explicit --primary.
     """
-    reg = registry or DEFAULT_PROVIDERS
-    avail = set(available) if available is not None else set(reg.keys())
+    if available is not None and available and isinstance(next(iter(available)), ProviderProfile):
+        profiles: list[ProviderProfile] = list(available)  # type: ignore[arg-type]
+    else:
+        reg = registry or DEFAULT_PROVIDERS
+        if available is None:
+            avail: set[EngineType] = set(reg.keys())
+        else:
+            avail = set(available)  # type: ignore[arg-type]
+        profiles = [p for e, p in reg.items() if e in avail]
+
     ladder = [
         p
-        for e, p in reg.items()
-        if e in avail
-        and (not per_page_only or p.supports_per_page)
+        for p in profiles
+        if (not per_page_only or p.supports_per_page)
         and (max_cost_per_page <= 0.0 or p.cost_per_page_usd <= max_cost_per_page)
         and (include_ineligible or p.auto_eligible)
     ]

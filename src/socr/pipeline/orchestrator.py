@@ -1105,17 +1105,24 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(f"  total cost: ${state.total_cost:.4f}")
 
-    def _available_engines_for_agentic(self) -> set[EngineType]:
-        """Probe which known providers are actually usable right now."""
+    def _available_engines_for_agentic(self) -> list:
+        """Probe which known providers are actually usable right now.
+
+        Returns a list of ``ProviderProfile`` objects (not EngineType values) so
+        that two profiles sharing the same ``EngineType`` — e.g. QWEN local and
+        QWEN cloud — can appear as distinct rungs in the ladder. Pass the result
+        directly to ``provider_ladder()`` which accepts ``list[ProviderProfile]``.
+        """
         from socr.core.providers import DEFAULT_PROVIDERS
 
-        available: set[EngineType] = set()
+        available = []
         for engine_type in self.config.enabled_engines:
-            if engine_type not in DEFAULT_PROVIDERS:
+            prof = DEFAULT_PROVIDERS.get(engine_type)
+            if prof is None:
                 continue
             try:
                 if get_engine(engine_type).is_available():
-                    available.add(engine_type)
+                    available.append(prof)
             except Exception:  # availability probe must never crash routing
                 continue
         return available
