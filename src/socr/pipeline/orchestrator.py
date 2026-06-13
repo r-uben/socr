@@ -259,6 +259,7 @@ class UnifiedPipeline:
             "chunk_size": cfg.chunk_size,
             # --- quality gates / repair / routing ---
             "agentic": cfg.agentic,
+            "strict_local": cfg.strict_local,
             "audit": cfg.audit_enabled,
             "audit_min_words": cfg.audit_min_words,
             "judge_hard_pages": cfg.judge_hard_pages,
@@ -1042,6 +1043,9 @@ class UnifiedPipeline:
             return
 
         available = self._available_engines_for_agentic()
+        # --strict-local: drop cloud rungs so only free/local providers are tried.
+        if self.config.strict_local:
+            available = [p for p in available if p.is_free]
         ladder = provider_ladder(
             available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
         )

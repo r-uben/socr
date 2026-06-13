@@ -159,8 +159,12 @@ class PipelineConfig:
     # with --auto-patch-tables once the crop reader is trusted on held-out data.
     auto_patch_tables: bool = False
 
-    # --- Agentic cost-aware routing (all default-off = unchanged behavior) ---
-    agentic: bool = False  # per-page: try cheapest provider, judge escalates
+    # --- Agentic cost-aware routing ---
+    # Agentic is now the DEFAULT mode: per-page cheapest-first routing with
+    # judge-gated escalation. Use --legacy-routing to opt out of agentic and
+    # run the old deterministic backbone → audit → repair pipeline.
+    agentic: bool = True  # per-page: try cheapest provider, judge escalates
+    strict_local: bool = False  # if True, agentic ladder uses only local/free rungs
     judge_backend: str = "auto"  # "auto" | "vlm" | "heuristic"
     judge_model: str = ""  # VLM model for the judge (e.g. qwen2-vl:7b); "" = default
     max_cost_per_page: float = 0.0  # 0 = no per-page price cap

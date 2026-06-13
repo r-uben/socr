@@ -90,11 +90,21 @@ def common_options(f):
         help="YAML config file",
     )(f)
     f = click.option("--profile", type=str, help="Load ~/.config/socr/{profile}.yaml")(f)
-    # Agentic cost-aware routing
+    # Agentic cost-aware routing (now the default; use --legacy-routing to opt out)
     f = click.option(
         "--agentic",
         is_flag=True,
-        help="Cost-aware routing: per page, cheapest provider first, judge escalates",
+        help="Cost-aware routing: cheapest-first, judge escalates (default; kept for compat)",
+    )(f)
+    f = click.option(
+        "--legacy-routing",
+        is_flag=True,
+        help="Use old deterministic pipeline (backbone → audit → repair) instead of agentic",
+    )(f)
+    f = click.option(
+        "--strict-local",
+        is_flag=True,
+        help="Agentic routing: only local/free rungs, no cloud escalation",
     )(f)
     f = click.option(
         "--judge-backend",
@@ -151,6 +161,8 @@ def build_config(
     profile: str | None = None,
     output_dir: Path | None = None,
     agentic: bool = False,
+    legacy_routing: bool = False,
+    strict_local: bool = False,
     judge_backend: str = "auto",
     judge_model: str = "",
     max_cost_per_page: float = 0.0,
@@ -197,8 +209,17 @@ def build_config(
     config.quiet = quiet
     config.verbose = verbose
 
-    # Agentic cost-aware routing
-    config.agentic = agentic
+    # Agentic cost-aware routing.
+    # --legacy-routing overrides the new default (agentic=True) back to False.
+    # --agentic is kept for backward compatibility: if passed explicitly, honor it.
+    # --legacy-routing takes precedence over --agentic.
+    if legacy_routing:
+        config.agentic = False
+    elif agentic:
+        config.agentic = True
+    # else: keep the config default (True from PipelineConfig or loaded YAML)
+    if strict_local:
+        config.strict_local = True
     config.judge_backend = judge_backend
     config.judge_model = judge_model
     config.max_cost_per_page = max_cost_per_page
