@@ -43,14 +43,19 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
 }
 
 # Auto-selection order: try CLI engines until one is available.
-# Prefers cloud (best quality) > local.
+# Local-first -> Ollama Cloud -> paid cloud edge case. Qwen leads because its
+# default backend is qwen3.5:cloud (Ollama Cloud, no extra key): ~0.57 quality
+# at ~49s/page on the owner's Mac and the only engine that cleared all three
+# hard page types (math/table/equation). Gemini is the quality escalation when
+# Qwen is unavailable. DeepSeek-OCR (~0.085 socOCRbench) and Mistral (worse AND
+# ~5x pricier than Gemini) are deliberately OUT of the auto path; reach them
+# only via an explicit --primary. Empirics in [[reference-sococrbench]].
 AUTO_ENGINE_ORDER: list[EngineType] = [
-    EngineType.GEMINI,  # Best quality/price, native PDF via Files API
-    EngineType.MISTRAL,  # Cloud fallback, structured output
-    EngineType.DEEPSEEK,  # Local, needs Ollama + model pulled
+    EngineType.QWEN,  # qwen3.5:cloud — practical cheap winner; native PDF-free per-page
+    EngineType.GEMINI,  # Best quality, paid — escalation when Qwen is unavailable
+    EngineType.MARKER,  # Local, layout-aware
     EngineType.GLM,  # Local, small model, fast
     EngineType.NOUGAT,  # Local, academic papers only
-    EngineType.MARKER,  # Local, layout-aware
 ]
 
 
@@ -110,7 +115,10 @@ class PipelineConfig:
     # ('=' -> '¼', '(' -> 'ð'), keep the native prose and image-OCR only the
     # equation regions to LaTeX. Opt-in: needs a local vision model (Ollama).
     recover_corrupt_math: bool = False
-    math_model: str = "qwen3-vl:8b"  # local Ollama VLM used for equation -> LaTeX
+    # qwen3.5:cloud (Ollama Cloud) is the practical winner: reliable on dense
+    # equation regions where local qwen3-vl:8b times out, no extra key. Override
+    # with --math-model qwen3-vl:8b for fully offline runs.
+    math_model: str = "qwen3.5:cloud"  # Ollama Cloud VLM used for equation -> LaTeX
 
     # --- Processing ---
     # ``Path("output")`` is the LEGACY SENTINEL meaning "unset". The canon

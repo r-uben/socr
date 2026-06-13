@@ -59,10 +59,11 @@ def resolve_auto_engine() -> EngineType:
 # Local-only engines for tiered routing (no API keys needed).
 # Qwen-VL leads: best open OCR quality (socOCRbench ~0.47-0.58), though slower per page
 # than GLM. Quality-first ordering — the tiered router only sends *easy* pages here anyway.
+# DeepSeek-OCR is dropped (~0.085 socOCRbench, near dead last); use --primary deepseek
+# to invoke it explicitly.
 _LOCAL_ENGINE_ORDER: list[EngineType] = [
     EngineType.QWEN,  # Qwen3-VL via Ollama; best open quality, ~slower
     EngineType.GLM,  # 0.9B, fast, ~10s/page
-    EngineType.DEEPSEEK,  # Larger, needs Ollama
     EngineType.NOUGAT,  # Academic papers only
     EngineType.MARKER,  # Layout-aware, CPU-friendly
 ]
