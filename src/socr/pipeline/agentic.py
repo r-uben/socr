@@ -38,13 +38,14 @@ logger = logging.getLogger(__name__)
 # Values are derived from measured worst-case latencies on the owner's 64GB
 # Mac, recorded in scratch/bench/out200/results.tsv (2026-06-13):
 #   qwen3-vl:30b-a3b-instruct (local): ~50-60s prose/math, ~91-125s dense tables
-#   qwen3.5:cloud:                      ~100-127s
 #   thinking build qwen3-vl:30b:        never terminates (the case this guard catches)
 # Values sit comfortably above the real worst-case but well below runaway.
 DEFAULT_PROVIDER_TIMEOUTS: dict[EngineType, float] = {
     # local qwen3-vl:30b-a3b-instruct: 91-125s observed; 300s catches runaway
     EngineType.QWEN: 300.0,
-    # qwen3.5:cloud: 100-127s observed; 240s buffer
+    # Gemini API latency not directly measured in bench data;
+    # 240s is a conservative upper-bound (cloud endpoint typically fast;
+    # guard exists primarily for thinking-runaway, not Gemini)
     EngineType.GEMINI: 240.0,
 }
 

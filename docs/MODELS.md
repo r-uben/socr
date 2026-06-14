@@ -59,7 +59,7 @@ hardware (Gemini web research: everything better is too big or API-only).
 **Stall-guard soft-timeout defaults** (`DEFAULT_PROVIDER_TIMEOUTS` in `pipeline/agentic.py`):
 measured latencies from `scratch/bench/out200/results.tsv` (2026-06-13):
 `qwen3-vl:30b-a3b-instruct` (local QWEN) peaks at ~125s on dense tables → soft timeout 300s;
-`qwen3.5:cloud` (GEMINI rung) peaks at ~127s → soft timeout 240s.
+Gemini API (GEMINI rung) latency not measured in bench data; 240s is a conservative upper-bound.
 The thinking build never terminates — the timeout guard is its only defence.
 
 ### 1. Text & formulas (LaTeX in markdown)
