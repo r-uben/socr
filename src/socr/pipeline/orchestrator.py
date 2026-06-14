@@ -1325,8 +1325,22 @@ class UnifiedPipeline:
         if not table_pages:
             return
 
+        # Derive crop-read timeout from the calibrated agentic provider timeouts so
+        # slow models (e.g. qwen3-vl:30b at 91-125s on dense tables) don't time out
+        # before they finish. DEFAULT_PROVIDER_TIMEOUTS[QWEN] = 300s covers the
+        # worst-case dense-table latency observed in bench data.
+        from socr.core.config import EngineType
+        from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
+
+        _qwen_family = ("qwen",)
+        crop_timeout = (
+            DEFAULT_PROVIDER_TIMEOUTS.get(EngineType.QWEN, 120.0)
+            if any(model.startswith(p) for p in _qwen_family)
+            else 120.0
+        )
+
         try:
-            extractor = TableCropExtractor(OllamaTableReader(model=model))
+            extractor = TableCropExtractor(OllamaTableReader(model=model, timeout=crop_timeout))
         except Exception as exc:
             logger.warning("dual-pass extractor unavailable (%s)", exc)
             return
