@@ -4,11 +4,17 @@ Status keys: `TODO` · `WIP` · `DONE` · `BLOCKED`. `depends-on` gates dispatch
 Parallelizable = no shared files / no dep. Each ticket = one `socr-implementer` agent,
 then one `socr-reviewer` pass before commit.
 
+**Status reconciled 2026-06-15** against `main`: A1/B1/B2/B3/C1/C1b/C2/D1 all have
+`feat(46)` commits merged to `main` (several with reviewer-blocker revisions) — flipped
+from stale `TODO` to `DONE`. M1 (merge feat/46) landed: the feat/46 commits are on `main`.
+Still open: **D2** (sparse-row lane drift, new), **Z1** (downstream CE batch, WIP),
+**E1** (optional skill).
+
 ---
 
 ## Foundation (do first — others build on it)
 
-### TICKET-A1 — Provider identity = engine + backend + model  · TODO · depends-on: none
+### TICKET-A1 — Provider identity = engine + backend + model  · DONE · depends-on: none
 **Problem:** `ProviderProfile` keys only on `EngineType`, so `QWEN` ambiguously means local
 `qwen3-vl:30b-a3b-instruct` OR cloud `qwen3.5:cloud` — different cost/latency/availability.
 **Do:** add `id`, `backend`, `model` to `ProviderProfile`. Define distinct profiles:
@@ -24,16 +30,16 @@ qwen3.5:cloud, ~free), `gemini`, `marker`, `glm`, `nougat`; `mistral`/`deepseek`
 
 ## Stream B — agentic default (depends on A1)
 
-### TICKET-B1 — Drop DeepSeek / demote Mistral from the agentic ladder · TODO · depends-on: A1
+### TICKET-B1 — Drop DeepSeek / demote Mistral from the agentic ladder · DONE · depends-on: A1
 Use `auto_eligible=False` so `provider_ladder()` excludes them by default (still reachable via
 explicit `--primary`, still in `cost_of`/replay). Update `tests/test_providers.py`.
 
-### TICKET-B2 — Agentic as default mode · TODO · depends-on: A1
+### TICKET-B2 — Agentic as default mode · DONE · depends-on: A1
 `config.agentic` default → True. Add CLI `--legacy-routing` (old deterministic path) and
 `--strict-local` (no cloud rungs). Files: `pipeline/orchestrator.py`, `cli.py`. Tests for flag
 wiring. Keep native-first intact.
 
-### TICKET-B3 — Enrich agentic manifest for bit-exact replay · TODO · depends-on: A1
+### TICKET-B3 — Enrich agentic manifest for bit-exact replay · DONE · depends-on: A1
 Manifest entries record: ladder snapshot, provider id/model/backend, every attempt, costs,
 judge model + prompt_hash + raw verdict/confidence, accepted flag, skip reasons. `socr replay`
 must reconstruct with 0 model calls. Files: manifest builder, `pipeline/agentic.py`. Tests.
@@ -42,13 +48,13 @@ must reconstruct with 0 model calls. Files: manifest builder, `pipeline/agentic.
 
 ## Stream C — robustness (parallel with A/B; minimal shared files)
 
-### TICKET-C1 — Thinking-aware / stall guard · TODO · depends-on: none
+### TICKET-C1 — Thinking-aware / stall guard · DONE · depends-on: none
 A provider that stalls (forced-thinking runaway, e.g. thinking-build qwen on a dense 11-col
 table — empty `response` while `thinking` grows; or wall-clock > budget) must **escalate up the
 ladder**, never hang the batch. Add a per-provider soft timeout + (where streaming) a
 no-`response`-progress detector. Files: `pipeline/agentic.py`. Tests with a stub slow provider.
 
-### TICKET-C2 — Local-first figure description · TODO · depends-on: none
+### TICKET-C2 — Local-first figure description · DONE · depends-on: none
 `engines/gemini_api.py` `describe_figure` currently Gemini-only. Make it local-first
 (`qwen3-vl:30b-a3b-instruct` via Ollama) with Gemini fallback on empty/error. Files:
 `engines/gemini_api.py` + caller in `orchestrator.py`. Tests.
@@ -98,7 +104,7 @@ MoE instead of raising the Gemini cap. Separate job; track elsewhere. Reference 
 
 ## Follow-ups (post-refactor — close out feat/46, then optional skill)
 
-### TICKET-C1b — Calibrate stall-guard soft-timeouts from measured data · TODO · depends-on: C1
+### TICKET-C1b — Calibrate stall-guard soft-timeouts from measured data · DONE · depends-on: C1
 C1 wired a per-provider soft-timeout dict but left the **values** unset. Do NOT run a new
 benchmark — derive defaults from the 2026-06-13 measured latencies already on disk
 (`scratch/bench/out200/results.tsv` + the CE runs). Observed worst-cases: local
@@ -110,7 +116,7 @@ Add a one-line note in MODELS.md / a code comment citing the data source. Files:
 timeout dict lives (`pipeline/agentic.py` or config). Test: a stub provider exceeding its
 soft-timeout escalates. **Not merge-blocking** — reasonable defaults are enough to merge.
 
-### TICKET-M1 — Final verify + merge feat/46 · TODO · depends-on: C1b (and all DONE tickets)
+### TICKET-M1 — Final verify + merge feat/46 · DONE · depends-on: C1b (and all DONE tickets)
 Full suite (`uv run pytest -q`) green + `ruff format --check .` clean on the whole branch.
 Then merge `feat/46-model-lineup-refresh` (already pushed). Confirm `socr replay` still
 reconstructs a prior agentic run bit-for-bit (reproducibility gate) before merging.
