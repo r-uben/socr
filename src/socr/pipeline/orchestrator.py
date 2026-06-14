@@ -1095,6 +1095,22 @@ class UnifiedPipeline:
             getattr(self.config, "agentic_provider_timeout", None) or DEFAULT_PROVIDER_TIMEOUTS
         )
 
+        # Write-through blob cache: persist each page's winning output to disk
+        # immediately after it is accepted, so progress is visible and a crash
+        # mid-run does not lose completed work.
+        _page_blob_store: object = None
+        try:
+            from ocr_output_contract import doc_dir_for, relative_key
+
+            from socr.core.cache import BlobStore
+
+            pdf_path = state.handle.path
+            scan_root = self._scan_root or pdf_path.parent
+            doc_dir = doc_dir_for(output_dir, relative_key(pdf_path, scan_root))
+            _page_blob_store = BlobStore(doc_dir / "cache")
+        except Exception as exc:
+            logger.debug("write-through blob store unavailable: %s", exc)
+
         for page_num in ocr_pages:
             # Escalation is bounded by the ladder + cost controls, never a
             # retry count (the old max_retries+1 cap made paid rungs
@@ -1126,6 +1142,13 @@ class UnifiedPipeline:
                 )  # B3
                 ps.attempts.append(att.output)
             ps.best_output = decision.final_output
+
+            # Persist winning page output immediately (write-through).
+            if _page_blob_store is not None and ps.best_output is not None:
+                try:
+                    _page_blob_store.put_page(ps.best_output)
+                except Exception as exc:
+                    logger.debug("write-through blob write failed for p%d: %s", page_num, exc)
 
             # Record cost so DocumentState.total_cost reflects spend.
             state.engine_runs.append(
