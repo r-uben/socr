@@ -63,11 +63,16 @@ On dense forecaster tables the VLM un-pairs the 2026/2027 columns for summary ro
 (and/or the page OCR prompt) so summary rows use the same paired-column structure. Validate on
 `scratch/bench/ce/202606_p4.png` (US forecaster table). No code logic change expected.
 
+**Field note (2026-06-14):** qwen3-vl:30b-a3b-instruct first-pass output on 202606 p4
+confirmed GOOD — each forecaster on its own row, all 10 columns with 2026/2027 pairs
+aligned, `na na` for missing cells. Main table structure is solved. D1 remains open only
+for the Consensus/High/Low/Std Dev summary rows at the bottom (not yet inspected).
+
 ---
 
 ## Downstream (out of socr-repo scope — note only)
 
-### TICKET-Z1 — Consensus Forecasts batch via qwen3-vl:30b-a3b-instruct · TODO
+### TICKET-Z1 — Consensus Forecasts batch via qwen3-vl:30b-a3b-instruct · WIP
 The ce_ocr job (`~/.claude/jobs/.../ce_ocr/`, 27 PDFs) can now run local-free with the instruct
 MoE instead of raising the Gemini cap. Separate job; track elsewhere. Reference only.
 
