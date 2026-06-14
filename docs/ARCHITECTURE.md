@@ -27,6 +27,33 @@ The engine is chosen **dynamically** by cost while judging the real output:
 This mode records the winning provider + cost per page and writes a replayable
 manifest. See `docs/log/2026-05-30_cost-aware-agentic-ocr.md`.
 
+## Extraction method: extract / verify / escalate
+Both modes are instances of one general method for getting structured content
+(tables, figures) out of a page. The three layers are **separable** — conflating
+them is what makes high-fidelity extraction look like it needs an expensive agentic
+loop on every page. It does not.
+
+| Layer | Question | Cost |
+|-------|----------|------|
+| **Extract** | how do I get the element out? | a **single VLM pass** (local `qwen3-vl:30b-a3b-instruct` / cloud Gemini), or native text where the text layer is trustworthy |
+| **Verify** | how do I know it's right? | a **free** native cross-check — text-layer geometry + header column count — *before* any paid model |
+| **Escalate** | what to do when verify fails | agentic crop-reconcile / second VLM — **only on a fired signal** |
+
+- **Single-pass is the default extract step.** Validated 2026-06-14 on a dense
+  forecaster table (`qwen3-vl:30b-a3b-instruct`, one call): 120/120 summary cells
+  exact. Agentic crop-reconcile is the tail (escalation), not the trunk.
+- **Verify is free, not a second model.** On born-digital pages PyMuPDF knows the
+  column x-positions and the header fixes the column count, so a value outside its
+  lane is a zero-cost red flag. This deterministic check sits *ahead* of the VLM
+  judge (`judge/ollama_judge.py`), which is itself a paid call — so the judge and any
+  escalation fire only when the cheap check disagrees.
+- **Scope:** holds for **born-digital** PDFs (≈the whole corpus). **Pure scans** have
+  no text layer to verify against, so there the only checks are a second VLM pass or
+  self-consistency voting — closer to agentic. Default: single-pass VLM + free native
+  verification; agentic reserved for scans-with-disagreement, never every page.
+
+See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
+
 ## Modules
 - `cli.py`: Click commands — `process` (default, PDF-path shorthand), `batch`,
   `engines`, `replay`, `judge-benchmark`. Agentic flags: `--agentic`,
