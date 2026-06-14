@@ -5,13 +5,13 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import patch
 
-import pytest
-
 from socr.core.ollama_utils import check_ollama_model as _check_ollama_model
 
 
 def _make_result(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(args=["ollama", "list"], returncode=returncode, stdout=stdout, stderr="")
+    return subprocess.CompletedProcess(
+        args=["ollama", "list"], returncode=returncode, stdout=stdout, stderr=""
+    )
 
 
 _OLLAMA_LIST_HEADER = "NAME                              ID              SIZE    MODIFIED\n"
