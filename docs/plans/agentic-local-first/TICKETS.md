@@ -70,3 +70,33 @@ On dense forecaster tables the VLM un-pairs the 2026/2027 columns for summary ro
 ### TICKET-Z1 — Consensus Forecasts batch via qwen3-vl:30b-a3b-instruct · TODO
 The ce_ocr job (`~/.claude/jobs/.../ce_ocr/`, 27 PDFs) can now run local-free with the instruct
 MoE instead of raising the Gemini cap. Separate job; track elsewhere. Reference only.
+
+---
+
+## Follow-ups (post-refactor — close out feat/46, then optional skill)
+
+### TICKET-C1b — Calibrate stall-guard soft-timeouts from measured data · TODO · depends-on: C1
+C1 wired a per-provider soft-timeout dict but left the **values** unset. Do NOT run a new
+benchmark — derive defaults from the 2026-06-13 measured latencies already on disk
+(`scratch/bench/out200/results.tsv` + the CE runs). Observed worst-cases: local
+`qwen3-vl:30b-a3b-instruct` ~50-60s prose/math, ~91-125s dense tables; `qwen3.5:cloud`
+~100-127s; the thinking build never terminates (the case the guard exists to catch). Set
+defaults comfortably above real worst-case, below runaway — e.g. local-instruct ~250-300s,
+cloud ~240s — as the dict's DEFAULTS (keep it tunable; no magic constants buried in logic).
+Add a one-line note in MODELS.md / a code comment citing the data source. Files: wherever C1's
+timeout dict lives (`pipeline/agentic.py` or config). Test: a stub provider exceeding its
+soft-timeout escalates. **Not merge-blocking** — reasonable defaults are enough to merge.
+
+### TICKET-M1 — Final verify + merge feat/46 · TODO · depends-on: C1b (and all DONE tickets)
+Full suite (`uv run pytest -q`) green + `ruff format --check .` clean on the whole branch.
+Then merge `feat/46-model-lineup-refresh` (already pushed). Confirm `socr replay` still
+reconstructs a prior agentic run bit-for-bit (reproducibility gate) before merging.
+
+### TICKET-E1 — Preflight profile skill (OPTIONAL, post-merge) · TODO · depends-on: M1
+Codex's frozen-preflight advisor: a skill that pre-classifies a doc and emits a frozen routing
+**profile** (`strict-local` / `balanced` / `high-accuracy` + cost budget + judge model +
+figures on/off), written into the manifest; the deterministic engine then runs from it. **The
+skill is a PLANNER, never the live router** (reproducibility). Decide whether to build only
+AFTER using agentic-default on a real job (Consensus batch / papers) — that reveals which
+profiles are actually worth having. Cheaper precursor: just extend the existing `/ocr` skill to
+expose the new `--strict-local` / agentic-default flags.

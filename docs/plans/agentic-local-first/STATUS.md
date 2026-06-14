@@ -3,7 +3,10 @@
 Last updated: 2026-06-14
 
 ## Stage
-All tickets DONE. D1, A1, B1, B2, B3, C1, C2 merged.
+Wave 1+2 DONE (A1, B1, B2, B3, C1, C2, D1) — 11 commits, pushed. Follow-ups open:
+**C1b** (calibrate stall-guard timeouts from measured data) → **M1** (final verify + merge
+feat/46; replay reproducibility gate) → **E1** (optional preflight skill, decide post-merge
+after real agentic-default usage). C1b + M1 are the path to merge; E1 is parked.
 
 ## Base state (clean before tickets)
 - **Repo now at `~/repos/socr`** (moved off iCloud 2026-06-14; git/uv/pytest native here).
