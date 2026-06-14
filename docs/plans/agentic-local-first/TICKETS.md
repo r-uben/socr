@@ -57,7 +57,7 @@ no-`response`-progress detector. Files: `pipeline/agentic.py`. Tests with a stub
 
 ## Stream D — quality (parallel; independent)
 
-### TICKET-D1 — Dense-table prompt: keep summary rows paired · TODO · depends-on: none
+### TICKET-D1 — Dense-table prompt: keep summary rows paired · DONE (validated) · depends-on: none
 On dense forecaster tables the VLM un-pairs the 2026/2027 columns for summary rows
 (Consensus/High/Low/Std Dev) while data rows stay paired. Tune `prompts/table_extract.md`
 (and/or the page OCR prompt) so summary rows use the same paired-column structure. Validate on
@@ -65,8 +65,26 @@ On dense forecaster tables the VLM un-pairs the 2026/2027 columns for summary ro
 
 **Field note (2026-06-14):** qwen3-vl:30b-a3b-instruct first-pass output on 202606 p4
 confirmed GOOD — each forecaster on its own row, all 10 columns with 2026/2027 pairs
-aligned, `na na` for missing cells. Main table structure is solved. D1 remains open only
-for the Consensus/High/Low/Std Dev summary rows at the bottom (not yet inspected).
+aligned, `na na` for missing cells. Main table structure is solved.
+
+**Validation (2026-06-14, `fix/46-ce-summary-rows`):** statistical summary rows
+(Consensus / Last Month / 3 Months Ago / High / Low / Std Dev) inspected cell-by-cell
+against high-DPI crops — **120/120 cells exact, all paired-column aligned.** The D1 core
+concern (un-pairing on summary rows) does **not** occur with the instruct MoE; objective
+met, no prompt change needed. See `docs/log/2026-06-14_ce-summary-row-validation.md`.
+Residual narrower issue surfaced (sparse-row drift) -> TICKET-D2.
+
+### TICKET-D2 — Sparse comparison-row lane drift · TODO · depends-on: none
+On rows with long runs of blank cells (institutional comparison rows: CBO/IMF/OECD), the
+VLM can slide a lone value into the wrong column lane. Observed on 202606 p4: `CBO (Feb. '26)`
+shifted its `Employment Costs` pair `3.4 3.4` one lane right into the blank `Auto & Light
+Truck Sales` column (digits correct, lane wrong); IMF/OECD on the same page were correct.
+Dense rows unaffected — this is a sparse-row (few anchors), not summary-row, problem.
+Cheapest fix first: prompt nudge in `prompts/table_extract.md` — count column positions
+from the header, keep each value under its own header lane, never left/right-pack across
+blanks. If that doesn't hold, consider the structural reconcile path (header fixes column
+count; flag values on ambiguous lanes). Validate on the CBO row; quantify firing rate via Z1
+(one CBO row is not a rate).
 
 ---
 
