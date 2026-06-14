@@ -17,8 +17,8 @@ import logging
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
+from socr.core.ollama_utils import check_ollama_model as _check_ollama_model
 from socr.engines.base import BaseEngine
-from socr.engines.deepseek import _check_ollama_model
 
 logger = logging.getLogger(__name__)
 

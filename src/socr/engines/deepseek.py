@@ -13,41 +13,15 @@ Task modes:
 """
 
 import logging
-import subprocess
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
+from socr.core.ollama_utils import check_ollama_model as _check_ollama_model
 from socr.engines.base import BaseEngine
 
 logger = logging.getLogger(__name__)
 
 OLLAMA_MODEL = "deepseek-ocr"
-
-
-def _check_ollama_model(model_name: str) -> str | None:
-    """Check if an Ollama model is available. Returns error message or None."""
-    try:
-        result = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return "Ollama is not running or not installed"
-        model_names = []
-        for line in result.stdout.strip().splitlines()[1:]:
-            parts = line.split()
-            if parts:
-                name = parts[0].split(":")[0]
-                model_names.append(name)
-        if model_name not in model_names:
-            return f"Ollama model '{model_name}' not found. Pull it with: ollama pull {model_name}"
-    except FileNotFoundError:
-        return "Ollama is not installed (ollama command not found)"
-    except subprocess.TimeoutExpired:
-        return "Ollama did not respond (timeout)"
-    return None
 
 
 class DeepSeekEngine(BaseEngine):
