@@ -34,6 +34,20 @@ from socr.core.result import PageOutput, PageStatus
 
 logger = logging.getLogger(__name__)
 
+# Soft-timeout defaults per provider engine type.
+# Values are derived from measured worst-case latencies on the owner's 64GB
+# Mac, recorded in scratch/bench/out200/results.tsv (2026-06-13):
+#   qwen3-vl:30b-a3b-instruct (local): ~50-60s prose/math, ~91-125s dense tables
+#   qwen3.5:cloud:                      ~100-127s
+#   thinking build qwen3-vl:30b:        never terminates (the case this guard catches)
+# Values sit comfortably above the real worst-case but well below runaway.
+DEFAULT_PROVIDER_TIMEOUTS: dict[EngineType, float] = {
+    # local qwen3-vl:30b-a3b-instruct: 91-125s observed; 300s catches runaway
+    EngineType.QWEN: 300.0,
+    # qwen3.5:cloud: 100-127s observed; 240s buffer
+    EngineType.GEMINI: 240.0,
+}
+
 RunProvider = Callable[[EngineType, int], PageOutput]
 
 

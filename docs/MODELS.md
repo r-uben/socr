@@ -56,6 +56,12 @@ hardware (Gemini web research: everything better is too big or API-only).
 > `minicpm-v4.5:8b` emits a degenerate loop on Ollama (broken). See
 > `[[reference-local-ocr-benchmark-jun2026]]`.
 
+**Stall-guard soft-timeout defaults** (`DEFAULT_PROVIDER_TIMEOUTS` in `pipeline/agentic.py`):
+measured latencies from `scratch/bench/out200/results.tsv` (2026-06-13):
+`qwen3-vl:30b-a3b-instruct` (local QWEN) peaks at ~125s on dense tables → soft timeout 300s;
+`qwen3.5:cloud` (GEMINI rung) peaks at ~127s → soft timeout 240s.
+The thinking build never terminates — the timeout guard is its only defence.
+
 ### 1. Text & formulas (LaTeX in markdown)
 - **Default:** native PyMuPDF text for born-digital prose (free).
 - **Hard / scanned / math pages:** local `qwen3-vl:30b-a3b-instruct` (free) or `qwen3.5:cloud`

@@ -15,6 +15,7 @@ from socr.core.config import EngineType
 from socr.core.providers import provider_ladder
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import (
+    DEFAULT_PROVIDER_TIMEOUTS,
     AcceptDecision,
     HeuristicPageJudge,
     VLMPageJudge,
@@ -231,3 +232,18 @@ def test_no_timeout_runs_normally():
     assert d.accepted
     assert d.winning_engine == "glm"
     assert len(d.attempts) == 1
+
+
+def test_default_provider_timeouts_keys():
+    """DEFAULT_PROVIDER_TIMEOUTS must cover the two primary agentic rungs.
+
+    Tests that QWEN and GEMINI keys are present.  Deliberately does NOT assert
+    specific float values because the calibration is tunable — the important
+    invariant is that the named constant exists and has the right shape.
+    """
+    assert EngineType.QWEN in DEFAULT_PROVIDER_TIMEOUTS
+    assert EngineType.GEMINI in DEFAULT_PROVIDER_TIMEOUTS
+    # Both values must be positive finite floats
+    for engine, seconds in DEFAULT_PROVIDER_TIMEOUTS.items():
+        assert isinstance(seconds, float), f"{engine}: expected float, got {type(seconds)}"
+        assert seconds > 0, f"{engine}: timeout must be positive"

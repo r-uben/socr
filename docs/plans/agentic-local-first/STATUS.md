@@ -3,10 +3,7 @@
 Last updated: 2026-06-14
 
 ## Stage
-Wave 1+2 DONE (A1, B1, B2, B3, C1, C2, D1) — 11 commits, pushed. Follow-ups open:
-**C1b** (calibrate stall-guard timeouts from measured data) → **M1** (final verify + merge
-feat/46; replay reproducibility gate) → **E1** (optional preflight skill, decide post-merge
-after real agentic-default usage). C1b + M1 are the path to merge; E1 is parked.
+Wave 1+2 DONE (A1, B1, B2, B3, C1, C2, D1). C1b DONE. Next: M1 (final verify + merge).
 
 ## Base state (clean before tickets)
 - **Repo now at `~/repos/socr`** (moved off iCloud 2026-06-14; git/uv/pytest native here).
@@ -25,6 +22,8 @@ after real agentic-default usage). C1b + M1 are the path to merge; E1 is parked.
 | C1 | thinking/stall guard | DONE | — | wave 1 (parallel) |
 | C2 | local-first figure desc | DONE | — | wave 1 (parallel) |
 | D1 | dense-table summary-row prompt | DONE | — | wave 1 (parallel) |
+| C1b | calibrate stall-guard timeouts | DONE | C1 | follow-up |
+| M1 | final verify + merge feat/46 | TODO | C1b | follow-up |
 
 ## Dispatch waves
 - **Wave 1 (parallel now):** A1, C1, C2, D1 — no cross-deps, mostly disjoint files
@@ -36,8 +35,8 @@ after real agentic-default usage). C1b + M1 are the path to merge; E1 is parked.
 > agent an isolated worktree and merge. Reviewer must check for collision.
 
 ## Next action
-Dispatch B2, B3 (depend on A1, now DONE). C1, C2 can run in parallel. B1 is DONE.
+Run M1: full suite + ruff clean on the whole branch, then merge feat/46-model-lineup-refresh.
 
 ## Open questions deferred to execution
 - Preflight skill (frozen-profile advisor) — Codex says optional; decide AFTER the refactor.
-- Exact soft-timeout values for C1 — derive from observed per-provider latencies, don't hardcode.
+- Exact soft-timeout values: calibrated in C1b (QWEN=300s, GEMINI=240s from bench data).

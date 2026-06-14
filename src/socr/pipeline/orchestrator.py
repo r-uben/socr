@@ -1008,7 +1008,7 @@ class UnifiedPipeline:
         unreachable whenever 3+ free local engines were installed).
         """
         from socr.core.providers import provider_ladder
-        from socr.pipeline.agentic import route_page
+        from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS, route_page
 
         if not self.config.quiet:
             console.print("\n[cyan]Agentic routing[/cyan] (cost-ordered, judge-gated)")
@@ -1088,7 +1088,12 @@ class UnifiedPipeline:
             )
             return outs[0]
 
-        provider_timeout = getattr(self.config, "agentic_provider_timeout", None)
+        # Use calibrated defaults when no explicit override is configured.
+        # DEFAULT_PROVIDER_TIMEOUTS is derived from scratch/bench/out200/results.tsv
+        # (2026-06-13); values are well above measured worst-case but below runaway.
+        provider_timeout = (
+            getattr(self.config, "agentic_provider_timeout", None) or DEFAULT_PROVIDER_TIMEOUTS
+        )
 
         for page_num in ocr_pages:
             # Escalation is bounded by the ladder + cost controls, never a
