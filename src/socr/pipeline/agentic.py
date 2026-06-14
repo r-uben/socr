@@ -22,6 +22,7 @@ winning provider and the total cost is known.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -32,6 +33,21 @@ from socr.core.providers import ProviderProfile
 from socr.core.result import PageOutput, PageStatus
 
 logger = logging.getLogger(__name__)
+
+# Soft-timeout defaults per provider engine type.
+# Values are derived from measured worst-case latencies on the owner's 64GB
+# Mac, recorded in scratch/bench/out200/results.tsv (2026-06-13):
+#   qwen3-vl:30b-a3b-instruct (local): ~50-60s prose/math, ~91-125s dense tables
+#   thinking build qwen3-vl:30b:        never terminates (the case this guard catches)
+# Values sit comfortably above the real worst-case but well below runaway.
+DEFAULT_PROVIDER_TIMEOUTS: dict[EngineType, float] = {
+    # local qwen3-vl:30b-a3b-instruct: 91-125s observed; 300s catches runaway
+    EngineType.QWEN: 300.0,
+    # Gemini API latency not directly measured in bench data;
+    # 240s is a conservative upper-bound (cloud endpoint typically fast;
+    # guard exists primarily for thinking-runaway, not Gemini)
+    EngineType.GEMINI: 240.0,
+}
 
 RunProvider = Callable[[EngineType, int], PageOutput]
 
@@ -60,6 +76,9 @@ class ProviderAttempt:
     accepted: bool
     reason: str = ""
     raw_verdict: object | None = None
+    provider_id: str = ""
+    model: str = ""
+    backend: str = ""
 
 
 @dataclass
@@ -126,6 +145,7 @@ def route_page(
     *,
     max_attempts: int = 0,
     remaining_budget: float | None = None,
+    provider_timeout: dict[EngineType, float] | None = None,
 ) -> PageDecision:
     """Route one page: cheapest provider first, escalate until the judge accepts.
 
@@ -145,6 +165,13 @@ def route_page(
             rung: a paid provider that does not fit is skipped (free rungs
             always fit), instead of discovering the overrun after spending.
             ``None`` = unbounded.
+        provider_timeout: optional per-provider wall-clock timeout in seconds.
+            When a provider's ``EngineType`` is present in this dict, the
+            ``run_provider`` call is wrapped with a
+            ``concurrent.futures.ThreadPoolExecutor`` timeout. On timeout the
+            provider is treated like a raised exception: an ERROR attempt is
+            recorded and the loop escalates to the next rung.
+            ``None`` (the default) disables all timeouts (backward-compatible).
     """
     if not ladder:
         return PageDecision(page_num, _error_output(page_num, "no providers available"))
@@ -164,10 +191,61 @@ def route_page(
                 prof.cost_per_page_usd,
                 remaining_budget,
             )
+            # Record a stub attempt so the manifest journal captures the skip
+            # reason for every rung (not just the ones that ran).
+            attempts.append(
+                ProviderAttempt(
+                    engine=prof.engine,
+                    output=_error_output(page_num, "budget exceeded"),
+                    cost_usd=0.0,
+                    accepted=False,
+                    reason="budget exceeded",
+                    provider_id=prof.id,
+                    model=prof.model,
+                    backend=prof.backend,
+                )
+            )
             continue
         tried += 1
+        timeout_sec: float | None = (
+            provider_timeout.get(prof.engine) if provider_timeout is not None else None
+        )
         try:
-            output = run_provider(prof.engine, page_num)
+            if timeout_sec is not None:
+                ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = ex.submit(run_provider, prof.engine, page_num)
+                try:
+                    output = future.result(timeout=timeout_sec)
+                except concurrent.futures.TimeoutError:
+                    future.cancel()
+                    # Abandon the executor without waiting for the stalled thread:
+                    # wait=False lets us escalate immediately; the daemon thread
+                    # will be cleaned up when the process exits or the thread
+                    # eventually unblocks.
+                    ex.shutdown(wait=False)
+                    logger.warning(
+                        "provider %s timed out on page %s (%.2fs) — escalating",
+                        prof.engine.value,
+                        page_num,
+                        timeout_sec,
+                    )
+                    attempts.append(
+                        ProviderAttempt(
+                            engine=prof.engine,
+                            output=_error_output(
+                                page_num,
+                                f"{prof.engine.value}: timed out after {timeout_sec}s",
+                            ),
+                            cost_usd=0.0,
+                            accepted=False,
+                            reason="provider timeout",
+                        )
+                    )
+                    continue
+                else:
+                    ex.shutdown(wait=False)
+            else:
+                output = run_provider(prof.engine, page_num)
         except Exception as exc:  # a provider blowing up must not kill the page
             logger.warning("provider %s failed on page %s: %s", prof.engine.value, page_num, exc)
             attempts.append(
@@ -177,6 +255,9 @@ def route_page(
                     cost_usd=0.0,
                     accepted=False,
                     reason="provider raised",
+                    provider_id=prof.id,
+                    model=prof.model,
+                    backend=prof.backend,
                 )
             )
             continue
@@ -193,6 +274,9 @@ def route_page(
                 accepted=decision.accept,
                 reason=decision.reason,
                 raw_verdict=decision.raw_verdict,
+                provider_id=prof.id,
+                model=prof.model,
+                backend=prof.backend,
             )
         )
         if decision.accept:

@@ -46,6 +46,10 @@ def _make_config(**overrides) -> PipelineConfig:
         save_figures=False,
         quiet=True,
         tiered=False,  # Disable tiered routing in tests (avoids fitz.open on fake PDFs)
+        # Opt out of agentic by default in tests: the existing deterministic
+        # backbone/score/repair tests pre-date the agentic-default change and
+        # mock the engine at the backbone level, not the agentic ladder level.
+        agentic=False,
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)

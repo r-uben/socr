@@ -64,3 +64,4 @@ uv.lock
 .envrc
 test_run/
 docs/log/*-findings.json
+scratch/

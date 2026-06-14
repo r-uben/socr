@@ -68,6 +68,9 @@ def _config(**overrides) -> PipelineConfig:
         judge_hard_pages=False,
         save_figures=False,
         write_manifest=False,
+        # These tests pre-date the agentic default change and test the deterministic
+        # backbone/audit/repair pipeline rather than agentic routing.
+        agentic=False,
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)
@@ -148,7 +151,9 @@ class TestLimitOutputPersists:
         ):
             result = CliRunner().invoke(
                 socr_cli.cli,
-                ["batch", str(in_dir), "--limit", "2", "--primary", "deepseek"],
+                # --legacy-routing opts out of agentic-default so _phase_backbone
+                # is still the entry point (this test patches it for predictable output).
+                ["batch", str(in_dir), "--limit", "2", "--primary", "deepseek", "--legacy-routing"],
                 catch_exceptions=False,
             )
 

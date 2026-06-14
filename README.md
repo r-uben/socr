@@ -85,13 +85,18 @@ the full design.
 
 ## Engines
 
-| Engine | Package | Type | Notes |
-|--------|---------|------|-------|
-| Gemini | `gemini-ocr-cli` | Cloud | Google Gemini, ~$0.0002/page |
-| Mistral | `mistral-ocr-cli` | Cloud | Mistral AI |
-| Marker | `marker-ocr-cli` | Local | Layout-aware (Surya + Texify) |
-| DeepSeek | `deepseek-ocr-cli` | Local | Via Ollama |
+Routing is **local-first → Ollama Cloud → paid cloud edge case**. See
+`docs/MODELS.md` for the full per-sub-task policy and the measured data behind it.
+
+| Engine | Package | Type | Routing role |
+|--------|---------|------|------|
+| Qwen | `qwen-ocr-cli` | Ollama Cloud / local | **Workhorse VLM** (`qwen3.5:cloud`, no extra key) |
+| Gemini | `gemini-ocr-cli` | Cloud | Edge-case escalation, ~$0.0002/page |
+| Marker | `marker-ocr-cli` | Local | Layout-aware fallback (Surya + Texify) |
+| GLM | `glm-ocr-cli` | Local | Fast local emergency fallback |
 | Nougat | `nougat-ocr-cli` | Local | Academic papers, Python <3.13 |
+| Mistral | `mistral-ocr-cli` | Cloud | Manual only (`--primary mistral`); dominated by Gemini |
+| DeepSeek | `deepseek-ocr-cli` | Local | Manual only (`--primary deepseek`); low quality |
 
 Check availability:
 ```

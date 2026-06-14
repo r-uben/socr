@@ -111,6 +111,11 @@ class PageOutput:
     audit_notes: list[str] = field(default_factory=list)
     escalated_from: str = ""  # engine that failed, triggering escalation
     cost_usd: float = 0.0  # estimated USD cost of producing this page output
+    # Agentic routing provenance (B3) — empty for non-agentic runs
+    provider_id: str = ""  # ProviderProfile.id that produced this output
+    provider_model: str = ""  # resolved model name (e.g. qwen3-vl:30b-a3b-instruct)
+    provider_backend: str = ""  # backend (e.g. ollama, gemini-api)
+    skip_reason: str = ""  # why the rung was not tried (e.g. budget exceeded)
 
     @property
     def word_count(self) -> int:
@@ -137,6 +142,10 @@ class PageOutput:
             "audit_notes": list(self.audit_notes),
             "escalated_from": self.escalated_from,
             "cost_usd": self.cost_usd,
+            "provider_id": self.provider_id,
+            "provider_model": self.provider_model,
+            "provider_backend": self.provider_backend,
+            "skip_reason": self.skip_reason,
         }
 
     @classmethod
@@ -155,6 +164,10 @@ class PageOutput:
             audit_notes=list(d.get("audit_notes", [])),
             escalated_from=d.get("escalated_from", ""),
             cost_usd=d.get("cost_usd", 0.0),
+            provider_id=d.get("provider_id", ""),
+            provider_model=d.get("provider_model", ""),
+            provider_backend=d.get("provider_backend", ""),
+            skip_reason=d.get("skip_reason", ""),
         )
 
 

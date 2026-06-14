@@ -259,6 +259,7 @@ class UnifiedPipeline:
             "chunk_size": cfg.chunk_size,
             # --- quality gates / repair / routing ---
             "agentic": cfg.agentic,
+            "strict_local": cfg.strict_local,
             "audit": cfg.audit_enabled,
             "audit_min_words": cfg.audit_min_words,
             "judge_hard_pages": cfg.judge_hard_pages,
@@ -1007,7 +1008,7 @@ class UnifiedPipeline:
         unreachable whenever 3+ free local engines were installed).
         """
         from socr.core.providers import provider_ladder
-        from socr.pipeline.agentic import route_page
+        from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS, route_page
 
         if not self.config.quiet:
             console.print("\n[cyan]Agentic routing[/cyan] (cost-ordered, judge-gated)")
@@ -1042,6 +1043,14 @@ class UnifiedPipeline:
             return
 
         available = self._available_engines_for_agentic()
+        # --strict-local: drop cloud-tier rungs (including free-cloud providers such
+        # as QWEN Cloud / Ollama Cloud) so only local/on-device providers are tried.
+        # Filter by tier, not by cost: PROFILE_QWEN_CLOUD is free (cost=0) but its
+        # tier is TIER_CLOUD and it requires internet — it must be excluded here.
+        if self.config.strict_local:
+            from socr.core.providers import TIER_LOCAL
+
+            available = [p for p in available if p.tier == TIER_LOCAL]
         ladder = provider_ladder(
             available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
         )
@@ -1051,6 +1060,21 @@ class UnifiedPipeline:
                 console.print("  [red]No OCR providers available[/red]")
             return
 
+        # Snapshot the ladder for manifest provenance (B3): ordered list of
+        # providers, with their identity/cost/tier fields, frozen at routing time.
+        state.agentic_ladder = [
+            {
+                "provider_id": p.id,
+                "model": p.model,
+                "backend": p.backend,
+                "cost_per_page_usd": p.cost_per_page_usd,
+                "tier": p.tier,
+            }
+            for p in ladder
+        ]
+
+        # Record judge model for manifest provenance (B3).
+        state.agentic_judge_model = self._resolve_judge_model() or ""
         judge = self._build_page_judge(state)
         enhancement_pages = [p for p in ocr_pages if state.pages[p].needs_ocr_enhancement]
 
@@ -1064,6 +1088,13 @@ class UnifiedPipeline:
             )
             return outs[0]
 
+        # Use calibrated defaults when no explicit override is configured.
+        # DEFAULT_PROVIDER_TIMEOUTS is derived from scratch/bench/out200/results.tsv
+        # (2026-06-13); values are well above measured worst-case but below runaway.
+        provider_timeout = (
+            getattr(self.config, "agentic_provider_timeout", None) or DEFAULT_PROVIDER_TIMEOUTS
+        )
+
         for page_num in ocr_pages:
             # Escalation is bounded by the ladder + cost controls, never a
             # retry count (the old max_retries+1 cap made paid rungs
@@ -1073,12 +1104,26 @@ class UnifiedPipeline:
             remaining = None
             if self.config.cost_budget > 0:
                 remaining = max(self.config.cost_budget - state.total_cost, 0.0)
-            decision = route_page(page_num, ladder, run_provider, judge, remaining_budget=remaining)
+            decision = route_page(
+                page_num,
+                ladder,
+                run_provider,
+                judge,
+                remaining_budget=remaining,
+                provider_timeout=provider_timeout,
+            )
 
             ps = state.pages[page_num]
             for att in decision.attempts:
                 att.output.cost_usd = att.cost_usd
                 att.output.audit_passed = att.accepted
+                att.output.provider_id = att.provider_id  # B3: agentic provenance
+                att.output.provider_model = att.model  # B3
+                att.output.provider_backend = att.backend  # B3
+                # skip_reason: populated for budget-exceeded stubs (no OCR ran).
+                att.output.skip_reason = (
+                    att.reason if not att.accepted and not att.output.text else ""
+                )  # B3
                 ps.attempts.append(att.output)
             ps.best_output = decision.final_output
 
@@ -1105,17 +1150,24 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(f"  total cost: ${state.total_cost:.4f}")
 
-    def _available_engines_for_agentic(self) -> set[EngineType]:
-        """Probe which known providers are actually usable right now."""
+    def _available_engines_for_agentic(self) -> list:
+        """Probe which known providers are actually usable right now.
+
+        Returns a list of ``ProviderProfile`` objects (not EngineType values) so
+        that two profiles sharing the same ``EngineType`` — e.g. QWEN local and
+        QWEN cloud — can appear as distinct rungs in the ladder. Pass the result
+        directly to ``provider_ladder()`` which accepts ``list[ProviderProfile]``.
+        """
         from socr.core.providers import DEFAULT_PROVIDERS
 
-        available: set[EngineType] = set()
+        available = []
         for engine_type in self.config.enabled_engines:
-            if engine_type not in DEFAULT_PROVIDERS:
+            prof = DEFAULT_PROVIDERS.get(engine_type)
+            if prof is None:
                 continue
             try:
                 if get_engine(engine_type).is_available():
-                    available.add(engine_type)
+                    available.append(prof)
             except Exception:  # availability probe must never crash routing
                 continue
         return available
@@ -2400,32 +2452,53 @@ class UnifiedPipeline:
     def _get_vision_engine(self):
         """Try to create a Gemini API engine for figure description.
 
-        Returns None if GEMINI_API_KEY is not available.
+        When Ollama is available, returns a LocalFirstFigureEngine that tries
+        qwen3-vl:30b-a3b-instruct first on every call and falls back to Gemini
+        per-call on empty or error result.  When Ollama is unavailable, returns
+        GeminiAPIEngine directly.  Returns None only when both are unreachable.
         """
         import os
 
-        api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
-        if not api_key:
-            if not self.config.quiet:
-                console.print(
-                    "  [dim]No GEMINI_API_KEY — saving figures without descriptions[/dim]"
-                )
-            return None
-
-        from socr.engines.gemini_api import GeminiAPIConfig, GeminiAPIEngine
-
-        engine = GeminiAPIEngine(
-            GeminiAPIConfig(
-                api_key=api_key,
-                model=self.config.gemini_model,
-            )
+        from socr.engines.gemini_api import (
+            GeminiAPIConfig,
+            GeminiAPIEngine,
+            LocalFirstFigureEngine,
+            OllamaFigureEngine,
         )
-        if engine.initialize():
-            return engine
+
+        # Build a Gemini engine if credentials are available (used as fallback)
+        def _try_gemini() -> GeminiAPIEngine | None:
+            api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+            if not api_key:
+                return None
+            engine = GeminiAPIEngine(
+                GeminiAPIConfig(api_key=api_key, model=self.config.gemini_model)
+            )
+            return engine if engine.initialize() else None
+
+        ollama = OllamaFigureEngine()
+        if ollama.is_available():
+            gemini_fallback = _try_gemini()
+            if not self.config.quiet:
+                fb = " + Gemini fallback" if gemini_fallback else ""
+                console.print(
+                    f"  [dim]Using local Ollama ({ollama.model}) for figure descriptions{fb}[/dim]"
+                )
+            return LocalFirstFigureEngine(ollama, gemini_fallback)
 
         if not self.config.quiet:
             console.print(
-                "  [dim]Gemini API not reachable — saving figures without descriptions[/dim]"
+                "  [dim]Ollama not available — trying Gemini API for figure descriptions[/dim]"
+            )
+
+        gemini = _try_gemini()
+        if gemini is not None:
+            return gemini
+
+        if not self.config.quiet:
+            console.print(
+                "  [dim]No figure description engine available"
+                " — saving figures without descriptions[/dim]"
             )
         return None
 

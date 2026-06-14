@@ -157,6 +157,138 @@ class GeminiAPIEngine:
         self.close()
 
 
+class OllamaFigureEngine:
+    """Local-first figure description engine using Ollama.
+
+    Uses qwen3-vl:30b-a3b-instruct (non-thinking MoE) via Ollama's /api/chat
+    endpoint. Intended as the primary figure-description tier, with GeminiAPIEngine
+    as fallback on empty result or error.
+    """
+
+    def __init__(
+        self,
+        model: str = "qwen3-vl:30b-a3b-instruct",
+        host: str = "http://localhost:11434",
+    ) -> None:
+        self.model = model
+        self.host = host.rstrip("/")
+
+    @property
+    def name(self) -> str:
+        return "ollama-figure"
+
+    def is_available(self) -> bool:
+        """Return True if Ollama is reachable and this model is in its tag list."""
+        try:
+            resp = httpx.get(f"{self.host}/api/tags", timeout=3.0)
+            if resp.status_code != 200:
+                return False
+            data = resp.json()
+            models = data.get("models", [])
+            return any(m.get("name", "") == self.model for m in models)
+        except Exception:
+            return False
+
+    def describe_figure(
+        self,
+        image: Image.Image,
+        figure_type: str = "unknown",
+        context: str = "",
+    ) -> FigureInfo:
+        """Describe a figure image using Ollama's /api/chat endpoint."""
+        try:
+            buf = io.BytesIO()
+            if image.mode in ("RGBA", "P"):
+                image = image.convert("RGB")
+            image.save(buf, format="JPEG", quality=90)
+            img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+            prompt = _build_figure_prompt(figure_type, context)
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [img_b64],
+                    }
+                ],
+                "stream": False,
+            }
+            resp = httpx.post(f"{self.host}/api/chat", json=payload, timeout=120.0)
+            resp.raise_for_status()
+            text = resp.json()["message"]["content"].strip()
+
+            detected_type = _detect_figure_type(text, figure_type)
+            return FigureInfo(
+                figure_num=0,
+                page_num=0,
+                figure_type=detected_type,
+                description=text,
+                engine=self.name,
+            )
+        except Exception as e:
+            return FigureInfo(
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
+                description=f"Ollama figure error: {type(e).__name__}: {e}",
+                engine=self.name,
+            )
+
+    def close(self) -> None:
+        pass  # stateless HTTP — nothing to close
+
+
+class LocalFirstFigureEngine:
+    """Composite engine: try Ollama first, fall back to Gemini per-call.
+
+    Used by the orchestrator's _get_vision_engine() when Ollama is available.
+    On each describe_figure call:
+    1. Call OllamaFigureEngine.
+    2. If the result has a non-empty description that is not an error prefix,
+       return it.
+    3. Otherwise fall back to GeminiAPIEngine (if provided).
+    """
+
+    _OLLAMA_ERROR_PREFIX = "Ollama figure error:"
+
+    def __init__(
+        self,
+        ollama: "OllamaFigureEngine",
+        gemini: "GeminiAPIEngine | None" = None,
+    ) -> None:
+        self._ollama = ollama
+        self._gemini = gemini
+
+    @property
+    def name(self) -> str:
+        return "local-first-figure"
+
+    def describe_figure(
+        self,
+        image: Image.Image,
+        figure_type: str = "unknown",
+        context: str = "",
+    ) -> FigureInfo:
+        """Describe via Ollama; fall back to Gemini on empty or error."""
+        info = self._ollama.describe_figure(image, figure_type=figure_type, context=context)
+        if info.description and not info.description.startswith(self._OLLAMA_ERROR_PREFIX):
+            return info
+
+        # Ollama returned empty or an error — try Gemini
+        if self._gemini is not None:
+            return self._gemini.describe_figure(image, figure_type=figure_type, context=context)
+
+        # No Gemini fallback available — return what Ollama gave us
+        return info
+
+    def close(self) -> None:
+        self._ollama.close()
+        if self._gemini is not None:
+            self._gemini.close()
+
+
 def _build_figure_prompt(figure_type: str, context: str) -> str:
     base = (
         "Describe this figure in detail. What does the chart, graph, table, "

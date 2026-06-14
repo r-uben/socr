@@ -97,6 +97,11 @@ class DocumentState:
         default_factory=list
     )  # all EngineResult objects for telemetry
     events: list = field(default_factory=list)  # AuditEvent stream for the run audit log
+    # Agentic routing ladder snapshot (B3) — populated by _phase_agentic, None otherwise.
+    # Each entry: {provider_id, model, backend, cost_per_page_usd, tier}.
+    agentic_ladder: list[dict] = field(default_factory=list)
+    # Judge model used for agentic routing (B3) — "" when heuristic judge was used.
+    agentic_judge_model: str = ""
 
     def __post_init__(self) -> None:
         for i in range(1, self.handle.page_count + 1):

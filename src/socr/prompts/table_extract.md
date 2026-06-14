@@ -14,6 +14,11 @@ corpus, so accuracy of the numbers is the whole point:
   coefficient cell.
 - Preserve the row and column structure you see. One Markdown column per visual
   column. Empty cells stay empty.
+- When a table has paired columns (e.g. two consecutive year columns such as 2026
+  and 2027 for each variable), ALL rows — including summary rows (Consensus, High,
+  Low, Std Dev, Mean) — must use the same number of columns as the data rows. Do
+  not flatten or merge columns for summary rows. If a summary row spans fewer
+  visual columns than the header, insert blank cells to maintain alignment.
 - Significance stars (*, **, ***) belong with the value they annotate.
 - Do not invent rows, columns, or values. If a cell is genuinely blank, leave it
   blank. If a value is unreadable, transcribe what you can see rather than guessing

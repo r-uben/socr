@@ -64,6 +64,9 @@ def _config(**overrides) -> PipelineConfig:
         judge_hard_pages=False,
         save_figures=False,
         write_manifest=False,
+        # These tests pre-date the agentic default change and test the deterministic
+        # backbone/audit/repair pipeline rather than agentic routing.
+        agentic=False,
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)
