@@ -1430,7 +1430,13 @@ class UnifiedPipeline:
         recorded in the page's audit notes. Tables whose count can't be safely
         mapped, or whose crop reading is malformed, are flagged but never edited.
         Fail-open throughout: any error keeps the page's existing text.
+
+        Each VLM crop call is wrapped in a ThreadPoolExecutor wall-clock guard
+        (``TableCropExtractor._read_with_deadline``). On timeout an audit event
+        of kind ``dualpass_crop_timeout`` is appended to ``state.events`` and the
+        cascade guard is consulted before issuing the next crop call.
         """
+        from socr.core.audit_log import AuditEvent
         from socr.tables import locate_tables, reconcile_page_tables
         from socr.tables.extract import OllamaTableReader, TableCropExtractor
 
@@ -1447,10 +1453,11 @@ class UnifiedPipeline:
         if not table_pages:
             return
 
-        # Derive crop-read timeout from the calibrated agentic provider timeouts so
-        # slow models (e.g. qwen3-vl:30b at 91-125s on dense tables) don't time out
-        # before they finish. DEFAULT_PROVIDER_TIMEOUTS[QWEN] = 300s covers the
-        # worst-case dense-table latency observed in bench data.
+        # Derive crop-read httpx timeout from the calibrated agentic provider timeouts
+        # so slow models (e.g. qwen3-vl:30b-a3b-instruct at 91-125 s on dense tables)
+        # don't trip the I/O timeout before they finish. This is the httpx scalar timeout
+        # on the network call; a SEPARATE ThreadPoolExecutor wall-clock deadline
+        # (crop_wall_clock_deadline) is computed from this value inside TableCropExtractor.
         from socr.core.config import EngineType
         from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
 
@@ -1489,22 +1496,66 @@ class UnifiedPipeline:
                     boxes = locate_tables(doc[page_num - 1])
                 if not boxes:
                     continue
-                crops = extractor.extract(pdf_path, page_num, boxes)
-                if not crops:
-                    continue
+                # extract() applies the per-crop wall-clock deadline internally and
+                # marks timed-out crops with _timed_out=True so we can record an
+                # audit event and apply the cascade guard here.
+                raw_crops = extractor.extract(pdf_path, page_num, boxes)
+            except Exception as exc:  # a dual-pass failure must never drop a page
+                logger.warning("dual-pass errored on p%d (%s); keeping text", page_num, exc)
+                continue
+
+            # Separate timed-out sentinels from successful crops; emit audit events
+            # for each timeout so they appear in audit_log.json.
+            had_timeout = False
+            crops = []
+            for c in raw_crops:
+                if getattr(c, "_timed_out", False):
+                    had_timeout = True
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="dualpass_crop_timeout",
+                            engine=bo.engine,
+                            detail=(
+                                "crop VLM reread timed out; "
+                                f"degraded={getattr(extractor, '_backend_degraded', False)}"
+                            ),
+                            data={
+                                "source": c.source,
+                                "backend_degraded": getattr(extractor, "_backend_degraded", False),
+                            },
+                        )
+                    )
+                    bo.audit_notes.append(
+                        f"dual-pass crop timeout p{page_num} ({c.source}); kept existing text"
+                    )
+                else:
+                    crops.append(c)
+
+            if not crops:
+                continue
+
+            # If ANY crop on this page timed out, do NOT auto-patch even when the
+            # config enables it. Partial crop coverage means we cannot safely assert
+            # that the remaining crops represent the full table set; patching on
+            # incomplete evidence risks data loss. Force flag-only for this page.
+            effective_auto_patch = self.config.auto_patch_tables and not had_timeout
+
+            try:
                 result = reconcile_page_tables(
                     bo.text,
                     [(c.markdown, c.source) for c in crops],
-                    auto_patch=self.config.auto_patch_tables,
+                    auto_patch=effective_auto_patch,
                 )
-            except Exception as exc:  # a dual-pass failure must never drop a page
-                logger.warning("dual-pass errored on p%d (%s); keeping text", page_num, exc)
+            except Exception as exc:  # reconcile failure must not drop the page
+                logger.warning(
+                    "dual-pass reconcile errored on p%d (%s); keeping text", page_num, exc
+                )
                 continue
 
             if result.patched:
                 bo.text = result.text
                 patched += 1
-            from socr.core.audit_log import AuditEvent
 
             for d in result.disagreements:
                 flagged += 1
@@ -1583,10 +1634,27 @@ class UnifiedPipeline:
         # memory (fitz.Page holds a reference to the open document).
         pdf_path = state.handle.path
 
+        # Single-slot cache: open the PDF once per get_fitz_page call, keep the
+        # doc handle alive in the list so the Page stays valid during
+        # verify_native_table, then close + evict the previous doc on the next
+        # call. The list (not a plain variable) lets the nested closure mutate it.
+        # This prevents N open file handles when the judge visits N table pages in
+        # sequence, while keeping the Page reference valid for the caller.
+        _fitz_doc_cache: list = []
+
         def get_fitz_page(page_num: int):
             import fitz
 
+            # Close and evict any previously cached doc before opening a new one
+            # so we hold at most one open handle at a time.
+            if _fitz_doc_cache:
+                try:
+                    _fitz_doc_cache[0].close()
+                except Exception:
+                    pass
+                _fitz_doc_cache.clear()
             doc = fitz.open(pdf_path)
+            _fitz_doc_cache.append(doc)
             # PyMuPDF pages are 0-indexed; socr page numbers are 1-indexed.
             return doc[page_num - 1]
 
