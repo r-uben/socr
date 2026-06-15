@@ -55,7 +55,7 @@ The durable planning format is:
 | Ticket | Status | Notes |
 |--------|--------|-------|
 | GH-49-routing | DONE | Born-digital table pages routed through OCR ladder; provenance-masking guard added; 844 tests pass |
-| GH-49A | NEEDS-DESIGN | Deterministic native table verifier — separate scope, no code written yet |
+| GH-49A | DONE | Two-tier deterministic verifier (NativeTableVerifierJudge) wrapping every judge; geometry_impossible_collapse hard-fail + warn-and-defer tiers; 864 tests pass |
 
 ## Ready Queue
 
@@ -81,6 +81,7 @@ Design/research queue:
 | Ticket | Agent id/name | Started | Status | Owned files | Notes |
 |--------|---------------|---------|--------|-------------|-------|
 | GH-49-routing | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | orchestrator.py, test_orchestrator.py, STATUS.md, log/2026-06-15_structured-content-routing.md | Provenance-masking fix: native_table_structure_failed set on agentic rejection; 844 tests pass |
+| GH-49A | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | native_verifier.py, agentic.py, orchestrator.py, test_native_table_verifier.py, test_p1_cascade_economics.py | Two-tier verifier; hard-fail=geometry_impossible_collapse; warn-and-defer for ambiguous mismatches; 864 tests pass |
 | GH-51 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | config.py, qwen.py, cli.py, test_qwen_engine.py | Resolver added; 791 tests pass |
 | GH-50 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | config.py, cli.py, orchestrator.py, test_orchestrator.py | save/describe split; 801 tests pass |
 | GH-34 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | state.py, audit_log.py, test_silent_content_destruction.py, test_audit_log.py | Empty-repair guard + empty-recovery event guard; 808 tests pass |

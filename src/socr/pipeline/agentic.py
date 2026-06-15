@@ -345,3 +345,119 @@ class VLMPageJudge:
             confidence=verdict.confidence,
             raw_verdict=verdict,
         )
+
+
+class NativeTableVerifierJudge:
+    """Two-tier deterministic pre-check for born-digital table pages.
+
+    Runs BEFORE the inner judge (VLM or heuristic) on pages where the
+    born-digital detector found table-like structure (``is_table_page``
+    returns True for the given page number).
+
+    Tier 1 — Hard-fail (geometry_impossible_collapse): a native data row has
+    K >= 2 well-separated numeric lanes but the output row has fewer cells.
+    → Return AcceptDecision(accept=False) immediately; inner judge NOT called.
+
+    Tier 2 — Warn-and-defer: ambiguous lane-count mismatch (paired-year
+    columns, spanning headers, stub columns).
+    → Record an AuditEvent, then delegate to the inner judge.
+
+    Scanned pages bypass cleanly (empty get_text("words")).
+
+    Args:
+        inner:         The wrapped judge (VLMPageJudge or HeuristicPageJudge).
+        get_fitz_page: Callable[[page_num: int]] -> fitz.Page — opens the PDF
+                       page for native geometry access.  None disables the
+                       verifier (safe fallback for test environments without a
+                       real PDF).
+        is_table_page: Callable[[page_num: int]] -> bool — True when the
+                       born-digital detector found table structure on the page.
+        record_event:  Callable[[AuditEvent]] — appends to state.events.
+                       None silently skips audit recording (non-breaking).
+    """
+
+    def __init__(
+        self,
+        inner: PageJudge,
+        get_fitz_page: Callable[[int], object] | None,
+        is_table_page: Callable[[int], bool],
+        record_event: Callable[[object], None] | None = None,
+    ) -> None:
+        self._inner = inner
+        self._get_fitz_page = get_fitz_page
+        self._is_table_page = is_table_page
+        self._record_event = record_event
+
+    def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
+        from socr.tables.native_verifier import verify_native_table
+
+        page_num = output.page_num
+
+        # Only run the verifier on born-digital table pages
+        if not self._is_table_page(page_num) or self._get_fitz_page is None:
+            return self._inner.assess(output, provider)
+
+        if output.status != PageStatus.SUCCESS or not output.text.strip():
+            return self._inner.assess(output, provider)
+
+        try:
+            fitz_page = self._get_fitz_page(page_num)
+            vr = verify_native_table(fitz_page, output.text)
+        except Exception as exc:
+            logger.warning(
+                "NativeTableVerifierJudge: verifier raised on p%d (%s); delegating to inner judge",
+                page_num,
+                exc,
+            )
+            return self._inner.assess(output, provider)
+
+        if vr.hard_fail:
+            # Record audit event for the hard-fail
+            self._emit_event(
+                page_num=page_num,
+                kind="native_table_verifier_hard_fail",
+                engine=output.engine or "",
+                detail=vr.reason,
+                data={
+                    "native_lane_count": vr.native_lane_count,
+                    "output_col_count": vr.output_col_count,
+                    "drifted_rows": vr.drifted_rows,
+                    "predicate": "geometry_impossible_collapse",
+                },
+            )
+            return AcceptDecision(
+                accept=False,
+                reason=f"native_table_verifier: {vr.reason}",
+                confidence=0.0,
+            )
+
+        if vr.warn:
+            # Record audit event for the warn-and-defer
+            self._emit_event(
+                page_num=page_num,
+                kind="native_table_verifier_warn",
+                engine=output.engine or "",
+                detail=vr.reason,
+                data={
+                    "native_lane_count": vr.native_lane_count,
+                    "output_col_count": vr.output_col_count,
+                    "drifted_rows": vr.drifted_rows,
+                },
+            )
+            # Defer to the inner judge — do NOT escalate here
+            return self._inner.assess(output, provider)
+
+        # No issue detected → delegate to inner judge
+        return self._inner.assess(output, provider)
+
+    def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:
+        if self._record_event is None:
+            return
+        try:
+            from socr.core.audit_log import AuditEvent
+
+            self._record_event(
+                AuditEvent(page_num=page_num, kind=kind, engine=engine, detail=detail, data=data)
+            )
+        except Exception as exc:
+            logger.debug("NativeTableVerifierJudge: failed to record audit event: %s", exc)

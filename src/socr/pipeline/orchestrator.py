@@ -1510,10 +1510,21 @@ class UnifiedPipeline:
                 console.print(f"  {scanned} pages scanned, {patched} patched, {flagged} flagged")
 
     def _build_page_judge(self, state: DocumentState):
-        """Select the page judge: VLM if requested+available, else heuristics."""
-        from socr.pipeline.agentic import HeuristicPageJudge, VLMPageJudge
+        """Select the page judge: VLM if requested+available, else heuristics.
+
+        The returned judge is always wrapped in NativeTableVerifierJudge, which
+        runs a deterministic two-tier PyMuPDF geometry check on born-digital
+        table pages BEFORE the inner judge is called (Consilium decision
+        20260615T170212Z-0362, Option C).  Scanned pages bypass cleanly.
+        """
+        from socr.pipeline.agentic import (
+            HeuristicPageJudge,
+            NativeTableVerifierJudge,
+            VLMPageJudge,
+        )
 
         backend = self.config.judge_backend
+        inner_judge = None
         if backend in ("vlm", "auto"):
             try:
                 from socr.judge.ollama_judge import OllamaVisionJudge
@@ -1524,15 +1535,42 @@ class UnifiedPipeline:
                     else OllamaVisionJudge()
                 )
                 if vj.is_available():
-                    return VLMPageJudge(vj, self._make_page_renderer(state))
+                    inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
             except Exception as exc:
                 logger.warning("VLM judge unavailable (%s); using heuristics", exc)
-            if backend == "vlm" and not self.config.quiet:
+            if inner_judge is None and backend == "vlm" and not self.config.quiet:
                 console.print("  [yellow]VLM judge unavailable -> heuristic judge[/yellow]")
-        # Sparse-aware at the DECISION point: without this, the heuristic
-        # fallback judge rejects correct sparse pages at every rung and the
-        # uncapped ladder pays the cloud engines for nothing.
-        return HeuristicPageJudge(self.heuristics, sparse_ok=self._sparse_page_ok)
+        if inner_judge is None:
+            # Sparse-aware at the DECISION point: without this, the heuristic
+            # fallback judge rejects correct sparse pages at every rung and the
+            # uncapped ladder pays the cloud engines for nothing.
+            inner_judge = HeuristicPageJudge(self.heuristics, sparse_ok=self._sparse_page_ok)
+
+        # Wrap with the deterministic native table verifier.
+        # get_fitz_page opens the PDF handle on demand; never caches pages in
+        # memory (fitz.Page holds a reference to the open document).
+        pdf_path = state.handle.path
+
+        def get_fitz_page(page_num: int):
+            import fitz
+
+            doc = fitz.open(pdf_path)
+            # PyMuPDF pages are 0-indexed; socr page numbers are 1-indexed.
+            return doc[page_num - 1]
+
+        def is_table_page(page_num: int) -> bool:
+            ps = state.pages.get(page_num)
+            return self._page_has_tables(page_num, ps)
+
+        def record_event(event) -> None:
+            state.events.append(event)
+
+        return NativeTableVerifierJudge(
+            inner=inner_judge,
+            get_fitz_page=get_fitz_page,
+            is_table_page=is_table_page,
+            record_event=record_event,
+        )
 
     def _make_page_renderer(self, state: DocumentState):
         """Return render_image(page_num) -> temp PNG path for the VLM judge."""
