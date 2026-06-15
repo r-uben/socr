@@ -3142,3 +3142,213 @@ class TestNativeOnlyRouting:
         assert result.cost == pytest.approx(0.0002), (
             "scans must still be OCR'd even under native_only"
         )
+
+
+# ---------------------------------------------------------------------------
+# GH-47C: figure_recoverable_labels audit event
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverableLabelAudit:
+    """GH-47C (Option C — log-only): _record_figure_recoverable_labels records
+    native word tokens from the figure bbox in the audit log without comparing
+    them against the caption and without emitting any warning.
+    """
+
+    def _make_pipeline(self, **overrides) -> UnifiedPipeline:
+        return UnifiedPipeline(_make_config(save_figures=True, describe_figures=True, **overrides))
+
+    def _make_pdf_with_text_inside_rect(self, tmp_path: Path) -> Path:
+        """Synthetic born-digital PDF with native text tokens inside a figure rect."""
+        fitz = pytest.importorskip("fitz")
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        # Place native text tokens inside a known rect.
+        page.insert_text(fitz.Point(110, 200), "AxisLabel", fontsize=9)
+        page.insert_text(fitz.Point(200, 300), "SeriesA", fontsize=9)
+        pdf_path = tmp_path / "native_labels.pdf"
+        doc.save(pdf_path)
+        doc.close()
+        return pdf_path
+
+    def _make_pdf_raster_only(self, tmp_path: Path) -> Path:
+        """Synthetic PDF with a rasterized image and no native text in the figure rect."""
+        import io
+
+        fitz = pytest.importorskip("fitz")
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (300, 300), color="blue").save(buf, format="PNG")
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_image(fitz.Rect(100, 100, 400, 400), stream=buf.getvalue())
+        pdf_path = tmp_path / "raster_only.pdf"
+        doc.save(pdf_path)
+        doc.close()
+        return pdf_path
+
+    def test_recoverable_labels_recorded_for_described_vector_figure(self, tmp_path: Path) -> None:
+        """GH-47C AC2: described figures with native tokens inside bbox get a
+        figure_recoverable_labels AuditEvent whose data.recoverable_labels is non-empty
+        and whose inapplicable flag is False.
+        Caption is not modified.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        pdf_path = self._make_pdf_with_text_inside_rect(tmp_path)
+        pipeline = self._make_pipeline()
+        state = DocumentState(handle=_make_handle(1))
+        with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+            state.handle = DocumentHandle(path=pdf_path, page_count=1)
+
+        # bbox covers the text tokens inserted at (110,200) and (200,300).
+        bbox = (90.0, 180.0, 400.0, 350.0)
+        fig_info = FigureInfo(
+            figure_num=1,
+            page_num=1,
+            figure_type="chart",
+            description=(
+                "[model-generated, non-authoritative gist] A chart showing AxisLabel trends."
+            ),
+            bbox=bbox,
+        )
+        original_description = fig_info.description
+
+        pipeline._record_figure_recoverable_labels(state, fig_info)
+
+        label_events = [
+            e
+            for e in state.events
+            if isinstance(e, AuditEvent) and e.kind == "figure_recoverable_labels"
+        ]
+        assert label_events, (
+            "Expected a figure_recoverable_labels AuditEvent for a described vector figure."
+        )
+        ev = label_events[0]
+        assert ev.data["figure_num"] == 1
+        assert ev.data["inapplicable"] is False, (
+            "inapplicable must be False when native words are found in the region"
+        )
+        assert len(ev.data["recoverable_labels"]) > 0, (
+            "recoverable_labels must contain the native text tokens inside the figure bbox"
+        )
+        # Caption must be unchanged (AC: never rewrite captions).
+        assert fig_info.description == original_description, (
+            "Caption must not be modified by the label recovery path"
+        )
+
+    def test_recoverable_labels_inapplicable_for_raster_figure(self, tmp_path: Path) -> None:
+        """GH-47C: rasterized figures yield zero recoverable tokens; inapplicable=True.
+        No warning is emitted, no failure is recorded — an empty set is correct.
+        Caption is unchanged.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        pdf_path = self._make_pdf_raster_only(tmp_path)
+        pipeline = self._make_pipeline()
+        state = DocumentState(handle=_make_handle(1))
+        with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+            state.handle = DocumentHandle(path=pdf_path, page_count=1)
+
+        bbox = (100.0, 100.0, 400.0, 400.0)
+        fig_info = FigureInfo(
+            figure_num=1,
+            page_num=1,
+            figure_type="image",
+            description="[model-generated, non-authoritative gist] A blue chart.",
+            bbox=bbox,
+        )
+        original_description = fig_info.description
+
+        pipeline._record_figure_recoverable_labels(state, fig_info)
+
+        label_events = [
+            e
+            for e in state.events
+            if isinstance(e, AuditEvent) and e.kind == "figure_recoverable_labels"
+        ]
+        assert label_events, (
+            "Expected a figure_recoverable_labels AuditEvent even for raster figures."
+        )
+        ev = label_events[0]
+        assert ev.data["recoverable_labels"] == [], (
+            "recoverable_labels must be empty for a rasterized figure"
+        )
+        assert ev.data["inapplicable"] is True, (
+            "inapplicable must be True when zero native words are found in the region"
+        )
+        # No failure / warning kind must be emitted.
+        assert all(e.kind == "figure_recoverable_labels" for e in label_events), (
+            "No warning or failure event must be emitted for inapplicable raster figures"
+        )
+        # Caption must be unchanged.
+        assert fig_info.description == original_description
+
+    def test_no_label_event_when_figure_not_described(self, tmp_path: Path) -> None:
+        """GH-47C: figures that were not described (no caption) must not trigger
+        the recoverable-label path.  This tests the was_described gate in the
+        _describe_and_embed_figures loop.
+        """
+        fig_path = tmp_path / "test_doc" / "figures" / "figure_1_page1.png"
+        fig_path.parent.mkdir(parents=True, exist_ok=True)
+        fig_path.write_bytes(b"\x89PNG")
+
+        mock_fig = ExtractedFigure(
+            figure_num=1,
+            page_num=1,
+            image=MagicMock(),
+            saved_path=str(fig_path),
+            bbox=(50.0, 50.0, 300.0, 400.0),
+        )
+
+        # describe_figures=False → vision engine is None → was_described=False
+        pipeline = UnifiedPipeline(_make_config(save_figures=True, describe_figures=False))
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch.object(pipeline, "_get_vision_engine", return_value=None),
+            patch.object(pipeline, "_record_figure_recoverable_labels") as mock_record,
+        ):
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
+            pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
+
+        (
+            mock_record.assert_not_called(),
+            (
+                "_record_figure_recoverable_labels must not be called when figures were not described"
+            ),
+        )
+
+    def test_no_label_event_when_bbox_is_none(self, tmp_path: Path) -> None:
+        """GH-47C: _record_figure_recoverable_labels is a no-op when bbox is None
+        (e.g. xref images without a placement rect).
+        """
+        from socr.core.audit_log import AuditEvent
+
+        pipeline = self._make_pipeline()
+        state = DocumentState(handle=_make_handle(1))
+        with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+            state.handle = DocumentHandle(path=Path("/tmp/fake.pdf"), page_count=1)
+
+        fig_info = FigureInfo(
+            figure_num=1,
+            page_num=1,
+            figure_type="image",
+            description="some caption",
+            bbox=None,  # no bbox → inapplicable by precondition
+        )
+        pipeline._record_figure_recoverable_labels(state, fig_info)
+
+        label_events = [
+            e
+            for e in state.events
+            if isinstance(e, AuditEvent) and e.kind == "figure_recoverable_labels"
+        ]
+        assert label_events == [], (
+            "_record_figure_recoverable_labels must emit no event when bbox is None"
+        )

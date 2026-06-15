@@ -2539,6 +2539,7 @@ class UnifiedPipeline:
         for fig in extracted:
             description = ""
             figure_type = "extracted"
+            was_described = False
 
             if vision_engine is not None and fig.image is not None:
                 # Get page context for better descriptions
@@ -2549,6 +2550,7 @@ class UnifiedPipeline:
                 )
                 description = info.description
                 figure_type = info.figure_type or "extracted"
+                was_described = True
 
             fig_info = FigureInfo(
                 figure_num=fig.figure_num,
@@ -2557,8 +2559,17 @@ class UnifiedPipeline:
                 description=description,
                 image_path=fig.saved_path,
                 engine=vision_engine.name if vision_engine else "",
+                bbox=fig.bbox,
             )
             figures.append(fig_info)
+
+            # GH-47C (Option C — log-only): for described figures, collect
+            # native word tokens inside the figure bbox and record them as a
+            # recoverable-label set in the audit log.  No caption comparison,
+            # no warning, no threshold.  A region with zero recoverable tokens
+            # is inapplicable — always recorded as an empty set, never a fail.
+            if was_described and fig.bbox is not None:
+                self._record_figure_recoverable_labels(state, fig_info)
 
         if vision_engine is not None:
             vision_engine.close()
@@ -2578,6 +2589,80 @@ class UnifiedPipeline:
             text = text.rstrip() + "\n\n" + figure_blocks
 
         return text
+
+    def _record_figure_recoverable_labels(self, state, fig_info) -> None:
+        """GH-47C (Option C — log-only): collect native word tokens inside a figure bbox.
+
+        For each described figure, open the PDF page and filter ``get_text("words")``
+        results by the figure's bounding rectangle.  The word token set is recorded in
+        the durable audit log as ``figure_recoverable_labels`` — evidence for human
+        inspection only.  No comparison is made against the caption, no warning is
+        emitted, and no threshold exists.
+
+        A figure region with zero recoverable native words is INAPPLICABLE: rasterized
+        or embedded-image figures have no text layer, so an empty set is always correct
+        for those figures.  We record the empty set and mark it inapplicable so the
+        audit record is self-explanatory.
+
+        This method is a no-op (logs a debug line and returns) on any error, to ensure
+        the describe-path cannot be disrupted by a label-recovery failure.
+        """
+        import fitz
+
+        from socr.core.audit_log import AuditEvent
+
+        if fig_info.bbox is None:
+            return
+
+        x0, y0, x1, y1 = fig_info.bbox
+        try:
+            with fitz.open(state.handle.path) as pdf:
+                page_index = fig_info.page_num - 1  # page_num is 1-indexed
+                if page_index < 0 or page_index >= len(pdf):
+                    return
+                page = pdf[page_index]
+                # Each word tuple: (x0, y0, x1, y1, word, block_no, line_no, word_no)
+                words = page.get_text("words")
+        except Exception as exc:
+            logger.debug(
+                "GH-47C: failed to open PDF for label recovery on figure %d page %d: %s",
+                fig_info.figure_num,
+                fig_info.page_num,
+                exc,
+            )
+            return
+
+        # Filter: include word tokens whose centre falls inside the figure rect.
+        # Strict containment (centre-point) is more reliable than intersection for
+        # labels that span a border; it avoids picking up text immediately adjacent
+        # to the figure (e.g. a caption line placed just below the bbox).
+        recovered: list[str] = []
+        for w in words:
+            wx0, wy0, wx1, wy1, word_text = w[0], w[1], w[2], w[3], w[4]
+            cx = (wx0 + wx1) / 2.0
+            cy = (wy0 + wy1) / 2.0
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                recovered.append(word_text)
+
+        inapplicable = len(recovered) == 0
+        if inapplicable:
+            detail_suffix = "0 native words in region (inapplicable — likely rasterized figure)"
+        else:
+            detail_suffix = f"{len(recovered)} native word token(s) recovered from figure region"
+        state.events.append(
+            AuditEvent(
+                page_num=fig_info.page_num,
+                kind="figure_recoverable_labels",
+                engine="",
+                detail=(f"figure {fig_info.figure_num} page {fig_info.page_num}: {detail_suffix}"),
+                data={
+                    "figure_num": fig_info.figure_num,
+                    "recoverable_labels": recovered,
+                    "inapplicable": inapplicable,
+                    "bbox": list(fig_info.bbox),
+                },
+            )
+        )
 
     def _get_vision_engine(self):
         """Try to create a Gemini API engine for figure description.

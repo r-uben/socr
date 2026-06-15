@@ -82,6 +82,7 @@ Design/research queue:
 | GH-35 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | born_digital.py, test_born_digital.py | Word-count gate made quality-aware; sparse/figure pages rescued; 7 new tests; 835 total pass |
 | GH-35-FU | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | born_digital.py, test_born_digital.py | Raster-coverage gate (RASTER_DOMINANCE_RATIO=0.90) added; scan+baked-OCR false-positive fixed; Tr-mode discriminator skipped as fragile; 160 tests pass |
 | GH-47B | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | _figure_prompt.py (new), gemini_api.py, vllm.py, test_gemini_api.py | Anti-fabrication prompt extracted to shared module; all 3 engine paths (Gemini/Ollama/vLLM-HPC) use hardened prompt + wrap_caption; 867 tests pass; empirical VLM validation PENDING (manual) |
+| GH-47C | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | extractor.py, result.py, orchestrator.py, test_figure_pass.py, test_orchestrator.py | Option C log-only: bbox persisted on ExtractedFigure+FigureInfo; recoverable-label AuditEvent(kind="figure_recoverable_labels") for described figures; 878 tests pass |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 
