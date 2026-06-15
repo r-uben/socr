@@ -11,6 +11,9 @@ Availability here reflects the **local ollama backend** (qwen3-vl), matching how
 glm/deepseek adapters gate on their Ollama models — that is the free, local role socr
 uses this engine for. The standalone CLI's vllm/api backends are reachable by setting
 ``config.qwen_backend`` explicitly; the CLI's ``--backend auto`` then picks what is live.
+
+Backend/model resolution is centralised in ``resolve_qwen_intent`` below so there is
+exactly ONE place that maps (backend, model-pin) → (resolved-backend, resolved-model).
 """
 
 import logging
@@ -30,6 +33,48 @@ logger = logging.getLogger(__name__)
 # never emits) and neither `think:false` nor `/no_think` suppress it on Ollama 0.30.8. The
 # dense `qwen3-vl:8b` collapses dense tables and is slow — do not use it as the local tier.
 OLLAMA_MODEL = "qwen3-vl:30b-a3b-instruct"
+
+# Backends that resolve to the local Ollama layer.  All other values ("vllm", "api")
+# route to non-local infrastructure and must not have their model strings rewritten.
+_LOCAL_BACKENDS: frozenset[str] = frozenset({"auto", "ollama"})
+
+
+def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
+    """Return (resolved_backend, resolved_model) for the qwen-ocr-cli invocation.
+
+    Rules (in priority order):
+    1. Explicit user pin (``config.qwen_model_pinned``): pass model through unchanged.
+    2. Non-local backend ("vllm", "api"): pass model through unchanged (may be empty,
+       letting the CLI use its own default).
+    3. Local/auto backend ("auto", "ollama") without a pin: use ``OLLAMA_MODEL``,
+       the validated instruct MoE.  A cloud model string must never reach a local backend
+       via this path.
+
+    Returns a ``(backend, model)`` tuple.  The backend is always the value from config
+    (callers pass it through to ``--backend``).  Only the model may be rewritten.
+    """
+    backend = config.qwen_backend
+    model = config.qwen_model
+
+    if config.qwen_model_pinned:
+        # Explicit user override — honour it verbatim, regardless of backend.
+        resolved_model = model
+    elif backend in _LOCAL_BACKENDS:
+        # Local/auto path: always use the validated instruct MoE unless the user pinned
+        # something else.  This prevents a cloud model string (e.g. qwen3.5:cloud) from
+        # silently landing on the local Ollama runtime.
+        resolved_model = OLLAMA_MODEL
+    else:
+        # vllm / api: pass the configured model (or empty → CLI picks its own default).
+        resolved_model = model
+
+    logger.info(
+        "[qwen] resolved backend=%r model=%r (pinned=%s)",
+        backend,
+        resolved_model,
+        config.qwen_model_pinned,
+    )
+    return backend, resolved_model
 
 
 class QwenEngine(BaseEngine):
@@ -77,6 +122,7 @@ class QwenEngine(BaseEngine):
         output_dir: Path,
         config: PipelineConfig,
     ) -> list[str]:
+        backend, model = resolve_qwen_intent(config)
         cmd = [
             self.cli_command,
             "process",
@@ -84,16 +130,10 @@ class QwenEngine(BaseEngine):
             "-o",
             str(output_dir),
             "--backend",
-            config.qwen_backend,
+            backend,
             "--dpi",
             str(config.render_dpi),
         ]
-        # Local (ollama) backend must not be handed a cloud model string. When the user
-        # left qwen_model at its cloud default, substitute the validated local instruct MoE;
-        # an explicit --qwen-model (e.g. qwen3-vl:8b offline) is still respected.
-        model = config.qwen_model
-        if config.qwen_backend == "ollama" and model == "qwen3.5:cloud":
-            model = OLLAMA_MODEL
         if model:
             cmd.extend(["--model", model])
         if config.workers > 1:

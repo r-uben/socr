@@ -121,6 +121,76 @@ def test_counts_and_summary_line():
     assert "2 dualpass_patch" in audit.summary_line()
 
 
+# --------------------------------------------------------------------------
+# GH-34 — empty recovering attempt must not emit recovered_by
+# --------------------------------------------------------------------------
+
+
+def test_empty_successor_does_not_emit_escalation():
+    """(b) A failure followed by an empty-text successor must NOT emit a
+    recovered_by event — empty text is not a recovery."""
+    state = DocumentState(handle=_handle(1))
+    state.pages[1].attempts = [
+        PageOutput(
+            page_num=1,
+            text="x",
+            status=PageStatus.SUCCESS,
+            engine="gemini",
+            failure_mode=FailureMode.RECITATION,
+            audit_passed=False,
+        ),
+        PageOutput(
+            page_num=1,
+            text="",  # empty — not a real recovery
+            status=PageStatus.ERROR,
+            engine="qwen",
+            failure_mode=FailureMode.EMPTY_OUTPUT,
+            audit_passed=False,
+        ),
+    ]
+    audit = build_run_audit(state)
+    assert audit.events == [], f"Unexpected events: {audit.events}"
+
+
+def test_whitespace_only_successor_does_not_emit_escalation():
+    """Whitespace-only text is treated the same as empty for recovery purposes."""
+    state = DocumentState(handle=_handle(1))
+    state.pages[1].attempts = [
+        PageOutput(
+            page_num=1,
+            text="x",
+            status=PageStatus.SUCCESS,
+            engine="gemini",
+            failure_mode=FailureMode.TRUNCATED,
+            audit_passed=False,
+        ),
+        PageOutput(
+            page_num=1,
+            text="   \n  ",  # whitespace only
+            status=PageStatus.ERROR,
+            engine="qwen",
+            failure_mode=FailureMode.EMPTY_OUTPUT,
+            audit_passed=False,
+        ),
+    ]
+    audit = build_run_audit(state)
+    assert audit.events == [], f"Unexpected events: {audit.events}"
+
+
+def test_nonempty_successor_still_emits_escalation():
+    """(c) A failure followed by a non-empty attempt DOES emit recovered_by
+    (no false negative introduced by the guard)."""
+    state = DocumentState(handle=_handle(1))
+    state.pages[1].attempts = [
+        _attempt("gemini", FailureMode.RECITATION, passed=False),
+        _attempt("qwen"),  # non-empty, took over
+    ]
+    audit = build_run_audit(state)
+    assert len(audit.events) == 1
+    assert audit.events[0].kind == "recitation_escalation"
+    assert audit.events[0].data["recovered_by"] == "qwen"
+
+
 def test_save_writes_structured_json(tmp_path):
     audit = RunAudit(
         pdf_filename="p.pdf",

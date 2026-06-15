@@ -109,6 +109,20 @@ class PipelineConfig:
     # --- Native-first + tiered routing ---
     native_first: bool = True  # Use native text for born-digital prose
     tiered: bool = True  # Route easy pages to local engine, hard pages to primary
+    # ``native_only`` is the positive counterpart of ``--no-native-first``.
+    # When True, clean born-digital pages (including those with
+    # ``needs_ocr_enhancement``) are NEVER sent to OCR — the native text layer is
+    # trusted as-is. Genuine scans (``is_born_digital=False``) still route to OCR
+    # as normal, and figure extraction can still run without forcing whole-page OCR.
+    #
+    # Policy interaction:
+    #   --native-only   native_first=True, native_only=True   → trust all BD pages
+    #   (default)       native_first=True, native_only=False  → trust clean BD; OCR enhance
+    #   --no-native-first native_first=False, native_only=*   → OCR all pages
+    #
+    # Setting both ``--native-only`` and ``--no-native-first`` is incoherent; the
+    # CLI warns and ``--no-native-first`` wins (everything goes to OCR).
+    native_only: bool = False
 
     # --- Math recovery (font-corrupted equations) ---
     # When a born-digital page's prose is clean but its math is font-map corrupted
@@ -136,6 +150,12 @@ class PipelineConfig:
     #   (200 misreads e.g. "(0.001)" as "(0.007)"); override per-run with --dpi.
     workers: int = 1  # Concurrent workers (passed to CLI --workers flag)
     save_figures: bool = False
+    # ``describe_figures`` is a separate opt-in from ``save_figures``.
+    # ``--save-figures`` extracts PNGs and appends image-ref markdown only;
+    # ``--describe-figures`` additionally calls the VLM caption engine.
+    # Keeping them apart lets the operator archive clean deterministic PNGs
+    # without coupling the run to non-authoritative model prose.
+    describe_figures: bool = False
     figures_max_total: int = 25
     figures_max_per_page: int = 3
 
@@ -196,11 +216,15 @@ class PipelineConfig:
     glm_backend: str = "ollama"  # "ollama", "transformers", or "vllm"
     glm_task: str = "text"  # "text", "formula", "table", "figure"
     qwen_backend: str = "auto"  # "auto", "ollama", "vllm", or "api"
-    # Default to qwen3.5:cloud (Ollama Cloud, vision): ~0.57 quality at ~49s/page on the
-    # owner's Mac — faster AND better than local qwen3-vl:8b, no extra key. Trade-off: it
-    # is ONLINE and uses the Ollama plan. For offline/private or true-free --agentic, pass
-    # --qwen-model qwen3-vl:8b. Empirics in [[reference-sococrbench]].
-    qwen_model: str = "qwen3.5:cloud"
+    # Default sentinel: empty string means "not user-pinned; let the engine resolver pick
+    # the right model for the resolved backend." When qwen_model_pinned is True the value
+    # is an explicit user override and must reach qwen-ocr unchanged.
+    # Local/auto-local resolution always uses the validated instruct MoE
+    # (qwen3-vl:30b-a3b-instruct); cloud or vllm/api paths keep their own defaults.
+    qwen_model: str = ""
+    # True when the user passed --qwen-model explicitly. The resolver honours this flag
+    # to avoid rewriting a deliberate model pin (e.g. qwen3.5:cloud for cloud-only runs).
+    qwen_model_pinned: bool = False
     nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
     gemini_model: str = "gemini-3-flash-preview"
@@ -245,6 +269,7 @@ class PipelineConfig:
         # Scalar fields
         scalar_fields = [
             "native_first",
+            "native_only",
             "tiered",
             "recover_corrupt_math",
             "math_model",
@@ -256,6 +281,7 @@ class PipelineConfig:
             "render_dpi",
             "workers",
             "save_figures",
+            "describe_figures",
             "figures_max_total",
             "figures_max_per_page",
             "audit_enabled",
@@ -274,6 +300,7 @@ class PipelineConfig:
             "glm_task",
             "qwen_backend",
             "qwen_model",
+            "qwen_model_pinned",
             "nougat_model",
             "marker_device",
             "gemini_model",

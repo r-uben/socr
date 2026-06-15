@@ -7,6 +7,23 @@ Three extraction strategies (applied per page, in order):
   0. Vector figure clustering (union-find on drawing bounding boxes)
   1. IMAGE blocks from page text dict
   2. Raw embedded images via xref
+
+Logo/letterhead filtering
+--------------------------
+Title-page logos and letterhead banners share a distinctive geometry: they sit
+at the very top of the page, span most of the page width, and are short relative
+to the page height.  The filter below gates on three conditions derived from page
+geometry (no magic literals -- all values are named config constants):
+
+  1. ``y0 < page_height * LOGO_TOP_MARGIN_RATIO``  -- image top is in the top band
+  2. ``(x1 - x0) / page_width > LOGO_WIDE_WIDTH_RATIO``  -- image is wide (banner-like)
+  3. ``(y1 - y0) / page_height < LOGO_HEIGHT_RATIO``  -- image is short relative to page
+
+All three must be true together; a genuine top-of-page figure (chart inset,
+pull-quote graphic) typically violates at least one -- either it is not wide
+enough to span the page or it occupies a substantial fraction of the page height.
+The filter is deliberately conservative: a single failing condition lets the
+candidate through.
 """
 
 from __future__ import annotations
@@ -14,7 +31,7 @@ from __future__ import annotations
 import logging
 import signal
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,6 +78,21 @@ class ExtractedFigure:
     saved_path: str | None = None
 
 
+@dataclass
+class ExtractionResult:
+    """Returned by ``FigureExtractor.extract()``.
+
+    ``figures`` holds every figure that passed all filters.
+    ``cap_reached`` is ``True`` when extraction halted because the
+    ``max_total`` figure cap was hit before the last page was processed;
+    callers should surface this fact to the operator (console + audit log)
+    so silently dropped later figures are not invisible.
+    """
+
+    figures: list[ExtractedFigure] = field(default_factory=list)
+    cap_reached: bool = False
+
+
 # --- Defaults ---
 RENDER_DPI = 150
 MAX_DIM = 1024
@@ -77,6 +109,15 @@ TABLE_GRID_MIN_AREA_RATIO = MIN_VECTOR_AREA_RATIO * 4
 MIN_DATA_MARKS = 3
 DATA_STROKE_MIN_WIDTH = 1.0
 
+# --- Logo / letterhead filter (IMAGE blocks and raw xref images) ---
+# Fraction of page height defining the "top band" where logos/letterheads live.
+LOGO_TOP_MARGIN_RATIO: float = 0.20
+# Minimum fraction of page width that a banner-style image must span.
+LOGO_WIDE_WIDTH_RATIO: float = 0.50
+# Maximum fraction of page height that a logo/letterhead may occupy.
+# Images taller than this are presumed to be substantive content, not a header.
+LOGO_HEIGHT_RATIO: float = 0.15
+
 
 class FigureExtractor:
     """Extracts figure images from a PDF file."""
@@ -91,13 +132,18 @@ class FigureExtractor:
         self.max_per_page = max_per_page
         self.save_dir = save_dir
 
-    def extract(self, pdf_path: Path, skip_pages: set[int] | None = None) -> list[ExtractedFigure]:
-        """Extract all figures from a PDF. Returns list of ExtractedFigure.
+    def extract(self, pdf_path: Path, skip_pages: set[int] | None = None) -> ExtractionResult:
+        """Extract all figures from a PDF. Returns an :class:`ExtractionResult`.
 
         ``skip_pages`` (1-indexed) drops those pages entirely. Meant for
         scanned pages, where the only extractable "figure" is the full-page
         raster itself — noise that crowds out real figures and burns vision
         calls; the OCR engine's inline description already covers them.
+
+        If the ``max_total`` cap is reached before all pages are processed,
+        ``ExtractionResult.cap_reached`` is set to ``True`` and a ``WARNING``
+        is logged so the operator knows later figures were silently dropped.
+        Callers should additionally record this in the durable audit log.
         """
         import fitz
 
@@ -106,13 +152,26 @@ class FigureExtractor:
 
         figures: list[ExtractedFigure] = []
         counter = 1
+        cap_reached = False
         if skip_pages:
             logger.info(f"Figure extraction skipping {len(skip_pages)} page(s) of {pdf_path.name}")
 
         try:
             with fitz.open(pdf_path) as pdf:
-                for page_index in range(len(pdf)):
+                total_pages = len(pdf)
+                for page_index in range(total_pages):
                     if counter > self.max_total:
+                        remaining = total_pages - page_index
+                        logger.warning(
+                            "Figure cap reached (%d figures, max_total=%d): "
+                            "stopping after page %d, %d page(s) not processed for %s",
+                            self.max_total,
+                            self.max_total,
+                            page_index,  # 0-indexed == 1-indexed last-processed page
+                            remaining,
+                            pdf_path.name,
+                        )
+                        cap_reached = True
                         break
 
                     page = pdf[page_index]
@@ -167,7 +226,7 @@ class FigureExtractor:
             logger.error(f"Figure extraction failed for {pdf_path.name}: {e}")
 
         logger.info(f"Extracted {len(figures)} figures from {pdf_path.name}")
-        return figures
+        return ExtractionResult(figures=figures, cap_reached=cap_reached)
 
     def _extract_page_figures(
         self,
@@ -295,6 +354,19 @@ class FigureExtractor:
                 if area < MIN_AREA or aspect > 8 or aspect < 0.125:
                     continue
 
+                # Logo/letterhead filter: suppress wide short images at the very
+                # top of the page (title-page banners, institutional logos).
+                if _is_logo_or_letterhead(x0, y0, x1, y1, page_width, page_height):
+                    logger.debug(
+                        "Suppressing likely logo/letterhead at (%.0f,%.0f,%.0f,%.0f) on page %d",
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        page_num,
+                    )
+                    continue
+
                 key = (int(x0), int(y0), int(x1), int(y1))
                 if key in processed:
                     continue
@@ -329,15 +401,28 @@ class FigureExtractor:
             # on the page reports its bbox via get_image_rects, which matches
             # the IMAGE-block bbox Strategy 1 recorded in `processed` (#42).
             try:
-                placement_keys = [
-                    (int(r.x0), int(r.y0), int(r.x1), int(r.y1))
-                    for r in page.get_image_rects(img_info)
-                ]
+                placement_rects = list(page.get_image_rects(img_info))
             except Exception:
-                placement_keys = []
+                placement_rects = []
+            placement_keys = [(int(r.x0), int(r.y0), int(r.x1), int(r.y1)) for r in placement_rects]
             if any(k in processed for k in placement_keys):
                 continue
             processed.update(placement_keys)
+
+            # Logo/letterhead filter: when any placement rect looks like a banner,
+            # suppress this image.  Strategy 1 already deduped placed images that
+            # matched an IMAGE block, so reaching here means the image was not in
+            # the text dict — still apply the position/geometry check.
+            if any(
+                _is_logo_or_letterhead(r.x0, r.y0, r.x1, r.y1, page_width, page_height)
+                for r in placement_rects
+            ):
+                logger.debug(
+                    "Suppressing likely logo/letterhead (xref %d) on page %d",
+                    xref,
+                    page_num,
+                )
+                continue
 
             try:
                 raw = pdf.extract_image(xref)
@@ -537,6 +622,34 @@ def _dedupe_regions(
 def _bbox_area_ratio(bbox: tuple[float, float, float, float], page_area: float) -> float:
     x0, y0, x1, y1 = bbox
     return ((x1 - x0) * (y1 - y0)) / max(page_area, 1)
+
+
+def _is_logo_or_letterhead(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    page_width: float,
+    page_height: float,
+) -> bool:
+    """Return True when an image block looks like a title-page logo or letterhead banner.
+
+    Three geometry conditions — all derived from page dimensions, no hard-coded
+    pixel values — must hold simultaneously:
+
+    1. The image top sits inside the top ``LOGO_TOP_MARGIN_RATIO`` band of the page.
+    2. The image spans at least ``LOGO_WIDE_WIDTH_RATIO`` of the page width.
+    3. The image height is at most ``LOGO_HEIGHT_RATIO`` of the page height.
+
+    A genuine substantive figure near the top of the page typically violates at
+    least one condition (it is too tall, or it does not span the full width).
+    The filter is therefore conservative: when any single condition is false the
+    candidate is passed through and treated as a real figure.
+    """
+    in_top_band = y0 < page_height * LOGO_TOP_MARGIN_RATIO
+    is_wide = (x1 - x0) >= page_width * LOGO_WIDE_WIDTH_RATIO
+    is_short = (y1 - y0) <= page_height * LOGO_HEIGHT_RATIO
+    return in_top_band and is_wide and is_short
 
 
 def _has_vector_data_marks(drawings: list[dict]) -> bool:

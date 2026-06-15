@@ -714,6 +714,115 @@ class TestFigurePhaseSuccessPath:
         assert ":pre-figures" not in fp
 
 
+# ---------------------------------------------------------------------------
+# GH-34 — Recovered-to-empty must not count as recovered
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyRepairNotPromoted:
+    """(a) An audit-passing but empty repair attempt must NOT displace a
+    non-empty prior best_output / best attempt.  The bug: apply_result only
+    checked audit_passed, not that the repair produced any text."""
+
+    def test_empty_audit_passed_does_not_displace_nonempty_best_output(self) -> None:
+        """Empty-but-passing repair should never overwrite a non-empty best_output."""
+        from socr.core.result import EngineResult
+
+        state = DocumentState(handle=_make_handle(1))
+        # Round-1: failed but has content
+        prior = _page_output(1, "Non-empty prior OCR text", audit_passed=False)
+        state.pages[1].attempts.append(prior)
+        state.pages[1].best_output = prior
+
+        # Round-2: audit-passed but empty
+        empty_repair = PageOutput(
+            page_num=1,
+            text="",
+            status=PageStatus.SUCCESS,
+            engine="gemini",
+            audit_passed=True,
+        )
+        state.apply_result(
+            EngineResult(
+                document_path=Path("/tmp/fake.pdf"),
+                engine="gemini",
+                status=DocumentStatus.SUCCESS,
+                pages=[empty_repair],
+            )
+        )
+        # best_output must NOT be replaced by the empty attempt
+        assert state.pages[1].best_output is prior
+        assert state.pages[1].best_output.text == "Non-empty prior OCR text"
+
+    def test_empty_audit_passed_does_not_become_best_output_when_no_prior(self) -> None:
+        """When there is no prior best_output, an empty-but-passing attempt must not
+        become best_output either — best_output should stay None."""
+        from socr.core.result import EngineResult
+
+        state = DocumentState(handle=_make_handle(1))
+        empty_repair = PageOutput(
+            page_num=1,
+            text="   ",  # whitespace-only
+            status=PageStatus.SUCCESS,
+            engine="gemini",
+            audit_passed=True,
+        )
+        state.apply_result(
+            EngineResult(
+                document_path=Path("/tmp/fake.pdf"),
+                engine="gemini",
+                status=DocumentStatus.SUCCESS,
+                pages=[empty_repair],
+            )
+        )
+        assert state.pages[1].best_output is None
+
+    def test_nonempty_audit_passed_still_promoted(self) -> None:
+        """Non-empty passing attempts must still be promoted (no false negative)."""
+        from socr.core.result import EngineResult
+
+        state = DocumentState(handle=_make_handle(1))
+        prior = _page_output(1, "Non-empty prior text", audit_passed=False)
+        state.pages[1].attempts.append(prior)
+        state.pages[1].best_output = prior
+
+        good_repair = _page_output(1, "Non-empty repair text", engine="gemini", audit_passed=True)
+        state.apply_result(
+            EngineResult(
+                document_path=Path("/tmp/fake.pdf"),
+                engine="gemini",
+                status=DocumentStatus.SUCCESS,
+                pages=[good_repair],
+            )
+        )
+        assert state.pages[1].best_output is good_repair
+
+    def test_all_empty_after_failure_resolves_to_explicit_failure(self) -> None:
+        """When every post-failure attempt is empty, the page must resolve to an
+        explicit failure marker, not empty text and not the rejected text
+        masquerading as accepted."""
+        from socr.core.manifest import _winning_page_output, is_page_failed_marker
+
+        state = DocumentState(handle=_make_handle(1))
+        # All attempts are empty
+        for engine in ("deepseek", "gemini", "qwen"):
+            empty = PageOutput(
+                page_num=1,
+                text="",
+                status=PageStatus.ERROR,
+                engine=engine,
+                audit_passed=False,
+                failure_mode=FailureMode.EMPTY_OUTPUT,
+            )
+            state.pages[1].attempts.append(empty)
+        # best_output stays None (no non-empty attempt was promoted)
+        assert state.pages[1].best_output is None
+
+        winner = _winning_page_output(state, 1, None)
+        assert is_page_failed_marker(winner.text)
+        assert winner.status == PageStatus.ERROR
+
+
 class TestJudgeRejectedRepairTerminates:
     def test_plan_repairs_picks_up_and_then_exhausts(self) -> None:
         """A judge-rejected born-digital page must enter the repair plan, and

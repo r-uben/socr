@@ -37,7 +37,7 @@ from socr.core.result import (
 )
 from socr.core.state import DocumentState
 from socr.engines.registry import get_engine, resolve_auto_engine
-from socr.figures.extractor import FigureExtractor
+from socr.figures.extractor import ExtractionResult, FigureExtractor
 from socr.pipeline.consensus import ConsensusEngine
 from socr.pipeline.repair import RepairRouter
 
@@ -254,6 +254,7 @@ class UnifiedPipeline:
             # --- rendering / chunking (change the bytes fed to the engine) ---
             "render_dpi": cfg.render_dpi,
             "native_first": cfg.native_first,
+            "native_only": cfg.native_only,
             "tiered": cfg.tiered,
             "chunk_threshold": cfg.chunk_threshold,
             "chunk_size": cfg.chunk_size,
@@ -272,8 +273,12 @@ class UnifiedPipeline:
             "consensus": cfg.consensus_enabled,
             "consensus_use_llm": cfg.consensus_use_llm,
             "consensus_ollama_model": cfg.consensus_ollama_model,
-            # --- figures (save_figures embeds figure blocks into the saved .md) ---
+            # --- figures ---
+            # ``save_figures`` controls PNG extraction + image-ref embedding.
+            # ``describe_figures`` is the separate opt-in for VLM captions.
+            # Both change the saved .md content, so both must invalidate the cache.
             "save_figures": cfg.save_figures,
+            "describe_figures": cfg.describe_figures,
             "figures_engine": cfg.figures_engine.value,
             "figures_max_total": cfg.figures_max_total,
             "figures_max_per_page": cfg.figures_max_per_page,
@@ -664,7 +669,15 @@ class UnifiedPipeline:
             elif ps.is_born_digital and not ps.needs_ocr_enhancement and ps.native_text:
                 prose_pages.append(page_num)
             elif ps.is_born_digital and ps.needs_ocr_enhancement:
-                enhancement_pages.append(page_num)
+                if self.config.native_only and ps.native_text:
+                    # native-only policy: suppress OCR enhancement for born-digital
+                    # pages even when the classifier flagged a deficiency (e.g.
+                    # corrupt-math regions). The native text layer is trusted as-is.
+                    # Scans (is_born_digital=False) are NOT affected and still route
+                    # to OCR below via the scanned_pages list.
+                    prose_pages.append(page_num)
+                else:
+                    enhancement_pages.append(page_num)
             else:
                 scanned_pages.append(page_num)
 
@@ -1016,14 +1029,18 @@ class UnifiedPipeline:
         # Tier 1: born-digital trusted native text (free, no OCR).
         # Skipped when --no-native-first: the user wants OCR even here, so
         # every page goes through the cost ladder.
+        # When --native-only: born-digital pages with needs_ocr_enhancement are
+        # also accepted as native (suppresses OCR enhancement for all BD pages).
+        # Scans (is_born_digital=False) are always sent to OCR regardless.
         ocr_pages: list[int] = []
         for page_num, ps in sorted(state.pages.items()):
-            if (
+            is_trusted_native = (
                 self.config.native_first
                 and ps.is_born_digital
-                and not ps.needs_ocr_enhancement
                 and ps.native_text
-            ):
+                and (not ps.needs_ocr_enhancement or self.config.native_only)
+            )
+            if is_trusted_native:
                 native = PageOutput(
                     page_num=page_num,
                     text=ps.native_text,
@@ -2280,7 +2297,13 @@ class UnifiedPipeline:
         # the metadata is PROVISIONAL: a ":pre-figures" fingerprint suffix
         # guarantees the resume gate never matches it, so a hard crash during
         # figures leaves a retryable record instead of a skipped-forever doc.
-        runs_figures = self.config.save_figures and has_text
+        #
+        # ``save_figures`` triggers PNG extraction + image-ref embedding.
+        # ``describe_figures`` additionally calls the VLM caption engine.
+        # Either flag activates the figure phase; the orchestrator gates the
+        # VLM call inside ``_describe_and_embed_figures`` on ``describe_figures``
+        # so ``--save-figures`` alone never produces caption prose.
+        runs_figures = (self.config.save_figures or self.config.describe_figures) and has_text
         if has_text:
             saved_path = self._save_markdown(state, final_text, output_dir)
             if not self.config.quiet:
@@ -2429,15 +2452,18 @@ class UnifiedPipeline:
         output_dir: Path,
         text: str,
     ) -> str:
-        """Extract figures, describe with a vision model, embed in markdown.
+        """Extract figures (save PNGs + image refs) and optionally describe them.
 
-        1. Extract figures from the PDF (saves PNGs).
-        2. For each figure with an image, send to Gemini API for description.
-        3. Append figure blocks at the end of the markdown.
-        4. Return modified text.
+        Phase steps:
+          1. Extract figures from the PDF (saves PNGs to the figures/ dir).
+          2. Append ``![Figure N](...)`` image-reference blocks to the markdown.
+          3. ONLY when ``config.describe_figures`` is True: call the VLM caption
+             engine per figure and include the prose description in the block.
 
-        Graceful degradation: if GEMINI_API_KEY is unavailable the figures
-        are saved without descriptions.
+        Deliberate separation: ``--save-figures`` alone never calls the vision
+        engine, so deterministic PNG archiving is decoupled from non-authoritative
+        model prose.  A failure in the caption sub-phase (step 3) is caught by the
+        caller and the already-saved OCR text is preserved unchanged.
         """
         if not self.config.quiet:
             console.print("  Extracting figures...")
@@ -2465,7 +2491,29 @@ class UnifiedPipeline:
                     f"  [dim]Skipping {len(skip_pages)} scanned page(s) "
                     f"(no localizable figures)[/dim]"
                 )
-        extracted = extractor.extract(state.handle.path, skip_pages=skip_pages)
+        extraction: ExtractionResult = extractor.extract(state.handle.path, skip_pages=skip_pages)
+        extracted = extraction.figures
+
+        # Cap-reached: signal in console and durable audit log so silently
+        # dropped later figures are not invisible to the operator.
+        if extraction.cap_reached:
+            cap_msg = (
+                f"Figure extraction cap reached ({self.config.figures_max_total} figures); "
+                f"later figures may have been dropped."
+            )
+            if not self.config.quiet:
+                console.print(f"  [yellow]{cap_msg}[/yellow]")
+            from socr.core.audit_log import AuditEvent
+
+            state.events.append(
+                AuditEvent(
+                    page_num=0,
+                    kind="figure_cap_reached",
+                    engine="",
+                    detail=cap_msg,
+                    data={"figures_max_total": self.config.figures_max_total},
+                )
+            )
 
         if not extracted:
             if not self.config.quiet:
@@ -2476,8 +2524,16 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(f"  Extracted {len(extracted)} figures to {figures_dir}")
 
-        # Try to get a vision engine for descriptions
-        vision_engine = self._get_vision_engine()
+        # VLM caption engine: only instantiated when ``describe_figures`` is True.
+        # When it is False, every figure gets an empty description and the image-
+        # reference block is still written — no caption prose is produced.
+        vision_engine = self._get_vision_engine() if self.config.describe_figures else None
+        if not self.config.describe_figures and not self.config.quiet:
+            console.print(
+                "  [dim]Skipping VLM captions (--describe-figures not set; "
+                "writing image refs only)[/dim]"
+            )
+
         figures: list[FigureInfo] = []
 
         for fig in extracted:
@@ -2510,8 +2566,11 @@ class UnifiedPipeline:
         result.figures = figures
 
         if not self.config.quiet:
-            described = sum(1 for f in figures if f.description)
-            console.print(f"  {len(figures)} figures processed ({described} described)")
+            if self.config.describe_figures:
+                described = sum(1 for f in figures if f.description)
+                console.print(f"  {len(figures)} figures processed ({described} described)")
+            else:
+                console.print(f"  {len(figures)} figures saved (no VLM captions)")
 
         # Build figure blocks and append to text
         figure_blocks = self._build_figure_blocks(figures, doc_dir)

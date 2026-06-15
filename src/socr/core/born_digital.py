@@ -129,9 +129,55 @@ class BornDigitalDetector:
     # are likely artifacts or watermarks rather than genuine content.
     MIN_CHARS_FOR_TEXT_LAYER = 50
 
-    # Minimum words per page for born-digital classification.
-    # Single words or short phrases are likely headers/footers on scanned pages.
+    # Minimum words per page for born-digital classification when text quality is
+    # *unknown* (i.e., before quality checks run).  Pages with fewer words than
+    # this AND poor quality signals are classified as scanned.
+    #
+    # For *clean* text (no CID artifacts, low garbage ratio, normal word lengths,
+    # at least one proper font), this threshold is NOT enforced — a sparse born-
+    # digital page (chapter divider, figure caption, section heading) should be
+    # classified as born-digital even with fewer words.  Only the absolute floor
+    # MIN_WORDS_SPARSE is enforced for clean text.
+    #
+    # Basis: 15 was historically calibrated for detecting baked-in OCR layers
+    # (garbage OCR tends to produce many single-char "words", so a low absolute
+    # count was a useful proxy).  That signal is now captured directly by the
+    # quality checks (garbage ratio, word-length distribution, CID artifacts).
     MIN_WORDS_PER_PAGE = 15
+
+    # Absolute minimum words to trust as a real native text layer, even when
+    # all quality checks pass.  Below this, the text is too thin to extract
+    # meaningful content (single page numbers, watermarks, stray characters).
+    #
+    # Basis: a figure caption or section heading is "Figure 1." or "Chapter 3"
+    # at minimum — at least 2 tokens.  We use 3 to require at minimum a brief
+    # phrase (number + noun + adjective) rather than a lone label or watermark.
+    # Three words is a loose floor; the quality checks do the real discrimination.
+    MIN_WORDS_SPARSE = 3
+
+    # Fraction of page area covered by embedded raster images above which a page
+    # is considered image-dominant.  Used to gate the clean-short-text exception
+    # (GH-35-FU, consilium decision id 20260615T104828Z-1577):
+    #
+    # A scanned page + baked-in OCR layer looks indistinguishable from a
+    # born-digital figure page with a caption when the text layer is short and
+    # clean.  But on a scanned page the raster image covers the ENTIRE page,
+    # while on a genuine born-digital figure page the chart/figure occupies a
+    # substantial but clearly sub-total fraction (surrounding white-space, caption
+    # area, header region all reduce image coverage well below 1.0).
+    #
+    # The panel converged on ~0.90–0.95.  We use 0.90 as the threshold:
+    #   - A full-page scan rendered as a single raster hits ≥ 0.98 (image fills
+    #     essentially the whole printable area after margins).
+    #   - A born-digital figure page with a chart in the body and a caption at
+    #     the top/bottom typically reaches 0.50–0.80 coverage, well below 0.90.
+    #   - The margin of 0.10 absorbs scanner over-crop and image-rect rounding
+    #     without encroaching on the legitimate figure-page population.
+    #
+    # Over-correcting (routing to OCR) is the safer direction here: an extra OCR
+    # call on a true born-digital page is suboptimal but recoverable; silently
+    # skipping OCR on a real scan causes permanent content loss.
+    RASTER_DOMINANCE_RATIO = 0.90
 
     # Maximum ratio of garbage/non-printable characters. Born-digital text is
     # clean; OCR layers on scanned PDFs often contain (cid:XX) references,
@@ -246,7 +292,9 @@ class BornDigitalDetector:
 
         # --- Decision logic ---
 
-        # No text layer at all: definitely scanned
+        # No text layer at all: definitely scanned.  This is a hard gate — fewer
+        # than MIN_CHARS_FOR_TEXT_LAYER characters means there is not enough
+        # content to be useful even if the few chars are perfectly clean.
         if char_count < self.MIN_CHARS_FOR_TEXT_LAYER:
             notes.append(
                 f"insufficient text layer ({char_count} chars < {self.MIN_CHARS_FOR_TEXT_LAYER})"
@@ -266,29 +314,97 @@ class BornDigitalDetector:
                 notes=notes,
             )
 
-        # Too few words: likely just headers, footers, or page numbers
-        if word_count < self.MIN_WORDS_PER_PAGE:
-            notes.append(f"too few words ({word_count} < {self.MIN_WORDS_PER_PAGE})")
-            return PageAssessment(
-                page_num=page_num,
-                is_born_digital=False,
-                native_text="",
-                confidence=0.85,
-                char_count=char_count,
-                word_count=word_count,
-                font_count=font_count,
-                has_images=has_images,
-                has_tables=has_tables,
-                has_figures=has_figures,
-                has_equations=has_equations,
-                notes=notes,
-            )
-
-        # Check text quality signals
+        # Compute text quality signals before the word-count check so that
+        # "short but clean" (sparse born-digital pages: figure captions, chapter
+        # headings, section dividers) can be rescued from the word-count gate.
+        # All quality signals below are still checked regardless of word count.
         garbage_ratio = self._garbage_ratio(raw_text)
         space_ratio = raw_text.count(" ") / max(len(raw_text), 1)
         avg_word_len = sum(len(w) for w in words) / max(len(words), 1)
         has_cid = bool(re.search(r"\(cid:\d+\)", raw_text))
+
+        # A text layer is "clean" when ALL of the following hold:
+        #   - no CID font-mapping artifacts (definitive sign of broken font map)
+        #   - low garbage-character ratio (baked-in OCR on scans tends to be noisy)
+        #   - normal average word length (garbled text fuses or fragments tokens)
+        #   - at least one embedded font (pages with no fonts have no real text layer)
+        #
+        # Clean short text on a page with proper fonts is a genuine native layer
+        # (figure caption, section heading, sparse table).  Such pages must NOT be
+        # classified as scanned solely because they have fewer than MIN_WORDS_PER_PAGE
+        # words — that would route them to OCR and potentially degrade the output.
+        text_layer_is_clean = (
+            not has_cid
+            and garbage_ratio <= self.MAX_GARBAGE_RATIO
+            and self.MIN_AVG_WORD_LENGTH <= avg_word_len <= self.MAX_AVG_WORD_LENGTH
+            and font_count > 0
+        )
+
+        # Word-count gate.  Enforced unconditionally only when the text layer is
+        # dirty (quality signals indicate baked-in OCR or no real layer).  When the
+        # text is clean, only the absolute floor MIN_WORDS_SPARSE is applied — this
+        # catches lone watermarks or page-number stubs that would extract as a single
+        # token, not sparse-but-real content.
+        if word_count < self.MIN_WORDS_PER_PAGE:
+            if not text_layer_is_clean or word_count < self.MIN_WORDS_SPARSE:
+                notes.append(
+                    f"too few words ({word_count} < {self.MIN_WORDS_PER_PAGE})"
+                    + ("" if text_layer_is_clean else "; dirty text layer")
+                )
+                return PageAssessment(
+                    page_num=page_num,
+                    is_born_digital=False,
+                    native_text="",
+                    confidence=0.85,
+                    char_count=char_count,
+                    word_count=word_count,
+                    font_count=font_count,
+                    has_images=has_images,
+                    has_tables=has_tables,
+                    has_figures=has_figures,
+                    has_equations=has_equations,
+                    notes=notes,
+                )
+
+            # Clean short text — but gate the pass-through by raster coverage.
+            # A scanned page with a baked-in OCR caption is INDISTINGUISHABLE from
+            # a born-digital figure page via text quality alone.  However, a scan
+            # always fills nearly the full page with a raster image, while a genuine
+            # born-digital figure page has the chart occupying a sub-total fraction
+            # of the page area (caption, header, and white-space reduce coverage).
+            # If the page is image-dominant (raster coverage >= RASTER_DOMINANCE_RATIO),
+            # route to OCR to prevent permanent content loss on real scans.
+            # Non-image-dominant sparse-but-clean pages still classify born-digital.
+            # GH-35-FU | consilium decision id 20260615T104828Z-1577
+            raster_cov = self._raster_coverage(page)
+            if raster_cov >= self.RASTER_DOMINANCE_RATIO:
+                notes.append(
+                    f"sparse native layer ({word_count} words); image-dominant page "
+                    f"({raster_cov:.1%} raster coverage >= {self.RASTER_DOMINANCE_RATIO:.0%} "
+                    "threshold) — routing to OCR to avoid baked-in-OCR false-positive (GH-35-FU)"
+                )
+                return PageAssessment(
+                    page_num=page_num,
+                    is_born_digital=False,
+                    native_text="",
+                    confidence=0.85,
+                    char_count=char_count,
+                    word_count=word_count,
+                    font_count=font_count,
+                    has_images=has_images,
+                    has_tables=has_tables,
+                    has_figures=has_figures,
+                    has_equations=has_equations,
+                    notes=notes,
+                )
+
+            # Clean short text on a non-image-dominant page: pass through to
+            # born-digital path with a note so the audit log can surface it.
+            notes.append(
+                f"sparse native layer ({word_count} words); clean text, "
+                f"raster coverage {raster_cov:.1%} < {self.RASTER_DOMINANCE_RATIO:.0%}, "
+                "classifying as born-digital"
+            )
 
         # CID artifacts: definitive sign of broken font mapping on scanned PDF
         if has_cid:
@@ -506,10 +622,10 @@ class BornDigitalDetector:
         or bullet lists.
         """
         lines = page.get_text("text").splitlines()
-        nonempty = [l.strip() for l in lines if l.strip()]
+        nonempty = [ln.strip() for ln in lines if ln.strip()]
         if not nonempty:
             return False
-        single_token = sum(1 for l in nonempty if len(l.split()) == 1)
+        single_token = sum(1 for ln in nonempty if len(ln.split()) == 1)
         return single_token >= 15 and single_token / len(nonempty) > 0.50
 
     @staticmethod
@@ -756,6 +872,37 @@ class BornDigitalDetector:
         """
         images = page.get_images()
         return len(images) > 0
+
+    @staticmethod
+    def _raster_coverage(page: fitz.Page) -> float:
+        """Fraction of page area covered by embedded raster images (0.0 – 1.0).
+
+        Uses ``page.get_image_info()`` which returns per-image bounding boxes in
+        PDF user-space coordinates (same coordinate system as ``page.rect``).
+
+        Area is computed as the SUM of individual image bbox areas, clamped to
+        the page area, rather than a union bounding box.  Union would overcount
+        for non-overlapping images (e.g. two small charts placed side-by-side
+        would give a bounding box that covers the gap between them).  Summing
+        individual areas slightly overcounts for overlapping images (rare in
+        practice), but never exceeds 1.0 after clamping — still safe for a
+        dominance threshold comparison.
+
+        Returns 0.0 on any exception so that a buggy or unavailable API never
+        wrongly gates an otherwise clean classification.
+        """
+        try:
+            page_area = page.rect.get_area()
+            if page_area <= 0:
+                return 0.0
+            image_area_sum = sum(
+                fitz.Rect(info["bbox"]).get_area()
+                for info in page.get_image_info()
+                if info.get("bbox")
+            )
+            return min(image_area_sum / page_area, 1.0)
+        except Exception:
+            return 0.0
 
     def _encoding_corruption_ratio(self, text: str) -> float:
         """Fraction of word tokens that show font/ToUnicode encoding corruption.

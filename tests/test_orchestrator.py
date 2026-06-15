@@ -19,7 +19,7 @@ from socr.core.result import (
     PageStatus,
 )
 from socr.core.state import DocumentState, PageState
-from socr.figures.extractor import ExtractedFigure
+from socr.figures.extractor import ExtractionResult, ExtractedFigure
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.pipeline.repair import RepairPlan, RepairRouter
 
@@ -906,7 +906,7 @@ class TestFigures:
 
         with patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor:
             mock_extractor = MockExtractor.return_value
-            mock_extractor.extract.return_value = []
+            mock_extractor.extract.return_value = ExtractionResult(figures=[], cap_reached=False)
 
             result = pipeline._phase_assemble(state, tmp_path)
 
@@ -936,7 +936,7 @@ class TestFigures:
 
         with patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor:
             mock_extractor = MockExtractor.return_value
-            mock_extractor.extract.return_value = []
+            mock_extractor.extract.return_value = ExtractionResult(figures=[], cap_reached=False)
 
             pipeline._phase_assemble(state, tmp_path)
 
@@ -1486,7 +1486,9 @@ class TestDescribeAndEmbedFigures:
         result = _make_engine_result(text=_good_text())
 
         with patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor:
-            MockExtractor.return_value.extract.return_value = []
+            MockExtractor.return_value.extract.return_value = ExtractionResult(
+                figures=[], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(state, result, tmp_path, "Some text")
 
         assert out == "Some text"
@@ -1514,7 +1516,9 @@ class TestDescribeAndEmbedFigures:
             patch.dict("os.environ", {}, clear=False),
             patch.object(pipeline, "_get_vision_engine", return_value=None),
         ):
-            MockExtractor.return_value.extract.return_value = [mock_fig]
+            MockExtractor.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(
                 state,
                 result,
@@ -1529,8 +1533,8 @@ class TestDescribeAndEmbedFigures:
         assert "![Figure 1]" in out
 
     def test_figures_with_vision_engine(self, tmp_path: Path) -> None:
-        """With a vision engine, figures are described and embedded."""
-        pipeline = self._make_pipeline()
+        """With a vision engine and --describe-figures, figures are described."""
+        pipeline = self._make_pipeline(describe_figures=True)
         state = DocumentState(handle=_make_handle(1))
         result = _make_engine_result(text=_good_text())
 
@@ -1561,7 +1565,9 @@ class TestDescribeAndEmbedFigures:
             patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor,
             patch.object(pipeline, "_get_vision_engine", return_value=mock_engine),
         ):
-            MockExtractor.return_value.extract.return_value = [mock_fig]
+            MockExtractor.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(
                 state,
                 result,
@@ -1575,6 +1581,285 @@ class TestDescribeAndEmbedFigures:
         assert "**Figure 1** (page 1): A bar chart showing quarterly revenue." in out
         assert "![Figure 1]" in out
         mock_engine.close.assert_called_once()
+
+    # GH-47A: cap-reached produces a durable audit event
+    def test_cap_reached_emits_audit_event_and_console_warning(self, tmp_path: Path) -> None:
+        """GH-47A AC1: cap_reached=True must append a figure_cap_reached AuditEvent
+        to state.events (durable audit) AND emit a yellow console warning.
+
+        Uses the normal (non-quiet) path so both side-effects are observable.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        pipeline = self._make_pipeline(quiet=False)  # non-quiet: console warning must fire
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+
+        mock_console = MagicMock()
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch("socr.pipeline.orchestrator.console", mock_console),
+        ):
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[], cap_reached=True
+            )
+            pipeline._describe_and_embed_figures(state, result, tmp_path, "Some text")
+
+        # Durable audit: at least one AuditEvent with kind="figure_cap_reached"
+        cap_events = [
+            e for e in state.events if isinstance(e, AuditEvent) and e.kind == "figure_cap_reached"
+        ]
+        assert cap_events, (
+            "Expected a figure_cap_reached AuditEvent in state.events when "
+            "cap_reached=True, but none was found."
+        )
+        assert cap_events[0].data.get("figures_max_total") is not None
+
+        # Console warning: a yellow warning must have been printed
+        printed_calls = [str(c) for c in mock_console.print.call_args_list]
+        assert any("yellow" in c or "cap" in c.lower() for c in printed_calls), (
+            "Expected a yellow console warning about the figure cap, but none was emitted."
+        )
+
+    def test_cap_reached_quiet_suppresses_console_but_keeps_audit_event(
+        self, tmp_path: Path
+    ) -> None:
+        """GH-47A AC1 (quiet path): AuditEvent is still appended even when quiet=True,
+        but the console.print call is suppressed.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        pipeline = self._make_pipeline(quiet=True)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+
+        mock_console = MagicMock()
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch("socr.pipeline.orchestrator.console", mock_console),
+        ):
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[], cap_reached=True
+            )
+            pipeline._describe_and_embed_figures(state, result, tmp_path, "Some text")
+
+        # Durable audit event must still be present even in quiet mode
+        cap_events = [
+            e for e in state.events if isinstance(e, AuditEvent) and e.kind == "figure_cap_reached"
+        ]
+        assert cap_events, "figure_cap_reached AuditEvent must be appended even when quiet=True."
+
+        # Console warning must be suppressed
+        printed_calls = [str(c) for c in mock_console.print.call_args_list]
+        assert not any("yellow" in c for c in printed_calls), (
+            "Console yellow warning must be suppressed when quiet=True."
+        )
+
+
+# ---------------------------------------------------------------------------
+# GH-50: Save-figures / describe-figures split (acceptance criteria)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_figure(tmp_path: Path, fig_num: int = 1, page_num: int = 1) -> "ExtractedFigure":
+    """Helper: a synthetic ExtractedFigure with a saved PNG."""
+    fig_dir = tmp_path / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    fig_path = fig_dir / f"figure_{fig_num}_page{page_num}.png"
+    fig_path.write_bytes(b"\x89PNG")
+    return ExtractedFigure(
+        figure_num=fig_num,
+        page_num=page_num,
+        image=MagicMock(),
+        saved_path=str(fig_path),
+    )
+
+
+class TestSaveFiguresNoVLM:
+    """GH-50 AC1: ``--save-figures`` writes PNGs + image refs but NO caption prose."""
+
+    def test_save_figures_alone_produces_no_description(self, tmp_path: Path) -> None:
+        """``save_figures=True, describe_figures=False`` must not call the VLM."""
+        config = _make_config(save_figures=True, describe_figures=False)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+        mock_fig = _make_mock_figure(tmp_path)
+
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch.object(pipeline, "_get_vision_engine") as mock_get_vision,
+        ):
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
+            out = pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
+
+        # VLM engine must never have been asked for
+        mock_get_vision.assert_not_called()
+        # Image reference block is present
+        assert "![Figure 1]" in out
+        # No description prose attached to the block
+        assert result.figures[0].description == ""
+
+    def test_save_figures_alone_produces_image_ref_block(self, tmp_path: Path) -> None:
+        """Image-ref markdown is still appended even without captions."""
+        config = _make_config(save_figures=True, describe_figures=False)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+        mock_fig = _make_mock_figure(tmp_path)
+
+        with patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls:
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
+            out = pipeline._describe_and_embed_figures(state, result, tmp_path, "Body text")
+
+        assert "**Figure 1** (page 1)" in out
+        assert "![Figure 1]" in out
+        # Ensure the OCR body text is preserved
+        assert "Body text" in out
+
+
+class TestDescribeFiguresVLM:
+    """GH-50 AC2: ``--describe-figures`` calls the VLM caption engine."""
+
+    def test_describe_figures_calls_vision_engine(self, tmp_path: Path) -> None:
+        """``describe_figures=True`` must call ``_get_vision_engine()``."""
+        config = _make_config(save_figures=True, describe_figures=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+        mock_fig = _make_mock_figure(tmp_path)
+
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini-api"
+        mock_engine.describe_figure.return_value = FigureInfo(
+            figure_num=1,
+            page_num=1,
+            figure_type="chart",
+            description="GDP growth over five years.",
+            engine="gemini-api",
+        )
+
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch.object(pipeline, "_get_vision_engine", return_value=mock_engine),
+        ):
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
+            out = pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
+
+        mock_engine.describe_figure.assert_called_once()
+        assert result.figures[0].description == "GDP growth over five years."
+        assert "GDP growth over five years." in out
+
+    def test_describe_figures_false_skips_vision_engine(self, tmp_path: Path) -> None:
+        """``describe_figures=False`` must not instantiate the VLM at all."""
+        config = _make_config(save_figures=True, describe_figures=False)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+        mock_fig = _make_mock_figure(tmp_path)
+
+        called = []
+        with patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls:
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
+            with patch.object(
+                pipeline,
+                "_get_vision_engine",
+                side_effect=lambda: called.append(1) or None,
+            ):
+                pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
+
+        assert not called, "_get_vision_engine must not be called when describe_figures=False"
+
+
+class TestFigurePhasePreservesOCRText:
+    """GH-50 AC3: caption-phase failure must not destroy already-written OCR text."""
+
+    def test_caption_failure_preserves_ocr_markdown(self, tmp_path: Path) -> None:
+        """A crash in the caption sub-loop must not clobber the saved .md."""
+        config = _make_config(save_figures=True, describe_figures=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        good = PageOutput(
+            page_num=1,
+            text="Precious OCR content.",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
+            audit_passed=True,
+        )
+        state.pages[1].attempts.append(good)
+        state.pages[1].best_output = good
+
+        # _describe_and_embed_figures raises mid-caption
+        with patch.object(
+            pipeline,
+            "_describe_and_embed_figures",
+            side_effect=RuntimeError("VLM API timed out"),
+        ):
+            result = pipeline._phase_assemble(state, tmp_path)
+
+        # The OCR text must be on disk
+        md_files = list(tmp_path.rglob("*.md"))
+        assert md_files, "markdown file must exist after caption-phase crash"
+        assert "Precious OCR content." in md_files[0].read_text()
+        # And returned in the result
+        assert "Precious OCR content." in result.markdown
+
+
+class TestDescribeFiguresResumeFingerprint:
+    """GH-50 AC4: resume fingerprint invalidates when describe_figures changes."""
+
+    def _config_fingerprint(self, **kwargs) -> str:
+        cfg = _make_config(**kwargs)
+        pipeline = UnifiedPipeline(cfg)
+        return pipeline._run_fingerprint()
+
+    def test_describe_figures_changes_fingerprint(self) -> None:
+        """Toggling describe_figures must produce a different fingerprint."""
+        fp_off = self._config_fingerprint(save_figures=True, describe_figures=False)
+        fp_on = self._config_fingerprint(save_figures=True, describe_figures=True)
+        assert fp_off != fp_on, (
+            "fingerprint must differ when describe_figures changes "
+            "so the resume gate reprocesses the doc"
+        )
+
+    def test_save_figures_still_changes_fingerprint(self) -> None:
+        """``save_figures`` alone still invalidates the fingerprint (regression guard)."""
+        fp_off = self._config_fingerprint(save_figures=False, describe_figures=False)
+        fp_on = self._config_fingerprint(save_figures=True, describe_figures=False)
+        assert fp_off != fp_on
+
+
+class TestCLIDescribeFiguresFlag:
+    """GH-50: CLI wiring — --describe-figures implies --save-figures."""
+
+    def test_describe_figures_implies_save_figures(self) -> None:
+        from socr.cli import build_config
+
+        cfg = build_config(describe_figures=True, save_figures=False)
+        assert cfg.describe_figures is True
+        assert cfg.save_figures is True, "--describe-figures must imply --save-figures"
+
+    def test_save_figures_alone_does_not_enable_describe(self) -> None:
+        from socr.cli import build_config
+
+        cfg = build_config(save_figures=True, describe_figures=False)
+        assert cfg.save_figures is True
+        assert cfg.describe_figures is False
+
+    def test_neither_flag_leaves_both_false(self) -> None:
+        from socr.cli import build_config
+
+        cfg = build_config(save_figures=False, describe_figures=False)
+        assert cfg.save_figures is False
+        assert cfg.describe_figures is False
 
 
 class TestBuildFigureBlocks:
@@ -2602,3 +2887,258 @@ class TestAgenticIntegration:
         # (Gemini, $0.0002) rather than served free from native text.
         assert result.cost == pytest.approx(0.0002)
         assert _good_text()[:25] in result.markdown
+
+
+# ---------------------------------------------------------------------------
+# GH-37: --native-only CLI control tests
+# ---------------------------------------------------------------------------
+
+
+class TestNativeOnlyConfig:
+    """GH-37: PipelineConfig default and CLI wiring for native_only."""
+
+    def test_default_is_false(self) -> None:
+        """native_only defaults to False (no behaviour change by default)."""
+        cfg = PipelineConfig()
+        assert cfg.native_only is False
+
+    def test_build_config_native_only_flag(self) -> None:
+        """--native-only sets native_only=True on PipelineConfig."""
+        from socr.cli import build_config
+
+        cfg = build_config(native_only=True)
+        assert cfg.native_only is True
+
+    def test_build_config_default_native_only_false(self) -> None:
+        """Omitting --native-only leaves native_only=False."""
+        from socr.cli import build_config
+
+        cfg = build_config()
+        assert cfg.native_only is False
+
+    def test_incompatible_flags_no_native_first_wins(self, capsys) -> None:
+        """--native-only + --no-native-first: --no-native-first wins, warning emitted."""
+        from socr.cli import build_config
+
+        cfg = build_config(native_only=True, no_native_first=True)
+        # --no-native-first wins: native_first is off, so native_only is irrelevant.
+        assert cfg.native_first is False
+        # native_only is NOT set because --no-native-first makes it incoherent.
+        assert cfg.native_only is False
+
+    def test_native_only_does_not_disable_native_first(self) -> None:
+        """--native-only does not affect native_first; it remains True."""
+        from socr.cli import build_config
+
+        cfg = build_config(native_only=True)
+        assert cfg.native_first is True
+        assert cfg.native_only is True
+
+
+class TestNativeOnlyFingerprint:
+    """GH-37: native_only must invalidate the resume fingerprint."""
+
+    def _fp(self, **kwargs) -> str:
+        cfg = _make_config(**kwargs)
+        return UnifiedPipeline(cfg)._run_fingerprint()
+
+    def test_native_only_changes_fingerprint(self) -> None:
+        """Toggling native_only must produce a different fingerprint."""
+        fp_off = self._fp(native_only=False)
+        fp_on = self._fp(native_only=True)
+        assert fp_off != fp_on, (
+            "fingerprint must differ when native_only changes "
+            "so the resume gate reprocesses the doc under the new policy"
+        )
+
+
+class TestNativeOnlyRouting:
+    """GH-37: native_only routing behaviour in backbone and agentic paths."""
+
+    @staticmethod
+    def _real_pdf(tmp_path, n_pages=2):
+        fitz = pytest.importorskip("fitz")
+        path = tmp_path / "paper.pdf"
+        doc = fitz.open()
+        for i in range(n_pages):
+            page = doc.new_page()
+            # Add enough text so born-digital check passes on the real detector
+            for j in range(12):
+                page.insert_text(
+                    (72, 72 + j * 14),
+                    f"Page {i + 1} sentence {j}: economic analysis of monetary policy.",
+                    fontsize=11,
+                    fontname="helv",
+                )
+        doc.save(str(path))
+        doc.close()
+        return path
+
+    def test_native_only_suppresses_ocr_for_enhancement_pages(self) -> None:
+        """native_only=True routes born-digital enhancement pages as native, not OCR."""
+        config = _make_config(quiet=True, native_first=True, native_only=True, agentic=False)
+        pipeline = UnifiedPipeline(config)
+
+        # Set up state: page 1 born-digital-clean, page 2 born-digital-with-enhancement
+        handle = _make_handle(2)
+        state = DocumentState(handle=handle)
+        state.pages[1].is_born_digital = True
+        state.pages[1].native_text = "Native clean text page 1."
+        state.pages[1].needs_ocr_enhancement = False
+        state.pages[2].is_born_digital = True
+        state.pages[2].native_text = "Native enhancement text page 2."
+        state.pages[2].needs_ocr_enhancement = True  # would normally go to OCR
+
+        # Supply a mock assessment so _backbone_native_first can read corrupt_math_pages.
+        assessment = _make_bd_assessment(2, born_digital_pages={1, 2}, complex_pages={2})
+        pipeline._last_assessment = assessment
+
+        # Capture which pages the engine is called with.
+        ocr_pages_called: list[int] = []
+
+        def fake_run_engine_on_pages(state, page_nums, enhancement_pages, engine_type, phase):
+            ocr_pages_called.extend(page_nums)
+            return [
+                PageOutput(page_num=pn, text=_good_text(), status=PageStatus.SUCCESS, engine="mock")
+                for pn in page_nums
+            ]
+
+        with patch.object(pipeline, "_run_engine_on_pages", side_effect=fake_run_engine_on_pages):
+            with patch.object(
+                pipeline, "_resolve_primary_engine", return_value=EngineType.DEEPSEEK
+            ):
+                pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Under native_only, page 2 (enhancement) stays native — NOT sent to OCR.
+        assert 2 not in ocr_pages_called, (
+            "native_only should suppress OCR enhancement for born-digital pages"
+        )
+        # Page 1 (clean BD) also stays native.
+        assert 1 not in ocr_pages_called
+
+    def test_native_only_false_routes_enhancement_to_ocr(self) -> None:
+        """Default behaviour (native_only=False): BD enhancement pages go to OCR."""
+        config = _make_config(quiet=True, native_first=True, native_only=False, agentic=False)
+        pipeline = UnifiedPipeline(config)
+
+        handle = _make_handle(2)
+        state = DocumentState(handle=handle)
+        state.pages[1].is_born_digital = True
+        state.pages[1].native_text = "Native clean text page 1."
+        state.pages[1].needs_ocr_enhancement = False
+        state.pages[2].is_born_digital = True
+        state.pages[2].native_text = "Native enhancement text page 2."
+        state.pages[2].needs_ocr_enhancement = True
+
+        assessment = _make_bd_assessment(2, born_digital_pages={1, 2}, complex_pages={2})
+        pipeline._last_assessment = assessment
+
+        ocr_pages_called: list[int] = []
+
+        def fake_run_engine_on_pages(state, page_nums, enhancement_pages, engine_type, phase):
+            ocr_pages_called.extend(page_nums)
+            return [
+                PageOutput(page_num=pn, text=_good_text(), status=PageStatus.SUCCESS, engine="mock")
+                for pn in page_nums
+            ]
+
+        with patch.object(pipeline, "_run_engine_on_pages", side_effect=fake_run_engine_on_pages):
+            with patch.object(
+                pipeline, "_resolve_primary_engine", return_value=EngineType.DEEPSEEK
+            ):
+                pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Without native_only, page 2 (enhancement) IS sent to OCR.
+        assert 2 in ocr_pages_called, "without native_only, BD enhancement pages must route to OCR"
+        # Page 1 (clean BD) stays native.
+        assert 1 not in ocr_pages_called
+
+    def test_native_only_does_not_suppress_scans(self) -> None:
+        """native_only=True does NOT suppress OCR for scanned pages."""
+        config = _make_config(quiet=True, native_first=True, native_only=True, agentic=False)
+        pipeline = UnifiedPipeline(config)
+
+        handle = _make_handle(2)
+        state = DocumentState(handle=handle)
+        state.pages[1].is_born_digital = True
+        state.pages[1].native_text = "Native text page 1."
+        state.pages[1].needs_ocr_enhancement = False
+        # Page 2 is a genuine SCAN — no native text layer.
+        state.pages[2].is_born_digital = False
+        state.pages[2].native_text = ""
+        state.pages[2].needs_ocr_enhancement = False
+
+        assessment = _make_bd_assessment(2, born_digital_pages={1}, complex_pages=set())
+        pipeline._last_assessment = assessment
+
+        ocr_pages_called: list[int] = []
+
+        def fake_run_engine_on_pages(state, page_nums, enhancement_pages, engine_type, phase):
+            ocr_pages_called.extend(page_nums)
+            return [
+                PageOutput(page_num=pn, text=_good_text(), status=PageStatus.SUCCESS, engine="mock")
+                for pn in page_nums
+            ]
+
+        with patch.object(pipeline, "_run_engine_on_pages", side_effect=fake_run_engine_on_pages):
+            with patch.object(
+                pipeline, "_resolve_primary_engine", return_value=EngineType.DEEPSEEK
+            ):
+                pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Scan page (2) must still go to OCR even with native_only.
+        assert 2 in ocr_pages_called, "native_only must not suppress OCR for genuine scans"
+        # Born-digital clean page (1) stays native.
+        assert 1 not in ocr_pages_called
+
+    def test_native_only_agentic_suppresses_enhancement(self, tmp_path) -> None:
+        """Agentic path: native_only=True keeps BD enhancement pages native (cost=0)."""
+        pdf = self._real_pdf(tmp_path, 2)
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            native_only=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        # Both pages born-digital; page 2 has needs_ocr_enhancement=True.
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            2, born_digital_pages={1, 2}, complex_pages={2}
+        )
+        eng = _mock_engine_named("gemini", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        # All pages served from native text (cost=0, no OCR calls).
+        assert result.cost == pytest.approx(0.0), (
+            "native_only should keep enhancement pages native — no OCR cost"
+        )
+
+    def test_native_only_agentic_still_ocrs_scans(self, tmp_path) -> None:
+        """Agentic path: native_only=True still routes scans through the OCR ladder."""
+        pdf = self._real_pdf(tmp_path, 2)
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            native_only=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        # Page 1 born-digital, page 2 is a scan.
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            2, born_digital_pages={1}, complex_pages=set()
+        )
+        eng = _mock_engine_named("gemini", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        # Page 2 (scan) must be OCR'd via Gemini ($0.0002).
+        assert result.cost == pytest.approx(0.0002), (
+            "scans must still be OCR'd even under native_only"
+        )

@@ -1,3 +1,9 @@
+> **FROZEN (2026-06-15).** This #46-phase-2 subplan is historical. All its waves shipped to
+> `main` through `7541175`. The two still-open items are now owned by the top-level board:
+> D2 → `docs/plans/TICKETS.md` **GH-46-D2**, E1 → **GH-46-E1**. Do not re-open tickets here;
+> the `logs/` and research findings below remain valid reference. Stale paths in this file
+> (`~/repos/socr`, branch `feat/46-…`) are superseded by `docs/plans/STATUS.md`.
+
 # Plan: Agentic local-first OCR routing (issue #46, phase 2)
 
 **Goal.** Make socr's OCR routing **agentic-by-default** with a deterministic, replayable

@@ -12,7 +12,6 @@ from socr.core.born_digital import (
     PageAssessment,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers: create synthetic PDFs for testing
 # ---------------------------------------------------------------------------
@@ -975,3 +974,425 @@ class TestMixedContent:
         assert pa.has_figures is False
         assert pa.has_equations is False
         assert pa.needs_ocr_enhancement is False
+
+
+# ---------------------------------------------------------------------------
+# Helpers: sparse/figure page PDFs for GH-35 characterization tests
+# ---------------------------------------------------------------------------
+
+
+def _create_figure_page_with_short_caption(path: Path) -> None:
+    """Born-digital figure page: large embedded image + short caption text.
+
+    The caption has fewer than MIN_WORDS_PER_PAGE (15) words but is genuinely
+    clean native text.  Prior to GH-35, this page was wrongly classified as
+    SCANNED because the word-count gate fired before quality checks.
+    """
+    import io
+
+    from PIL import Image
+
+    doc = fitz.open()
+    page = doc.new_page()
+
+    # Caption text — 10 words, below the old MIN_WORDS_PER_PAGE=15 threshold
+    page.insert_text(
+        (72, 72),
+        "Figure 1. Impulse response function.",
+        fontsize=11,
+        fontname="helv",
+    )
+    page.insert_text(
+        (72, 90),
+        "Notes: 90% confidence intervals shown.",
+        fontsize=9,
+        fontname="helv",
+    )
+
+    # Large embedded image covering most of the page body
+    img = Image.new("RGB", (400, 500), color=(200, 200, 255))
+    img_bytes = io.BytesIO()
+    img.save(img_bytes, format="PNG")
+    img_bytes.seek(0)
+    page.insert_image(fitz.Rect(72, 110, 472, 610), stream=img_bytes.read())
+
+    doc.save(str(path))
+    doc.close()
+
+
+def _create_sparse_section_heading_pdf(path: Path) -> None:
+    """Born-digital sparse page: section/part heading with 6-8 clean words.
+
+    Characterises a page that has enough chars (>=50) but fewer than 15 words.
+    Prior to GH-35, the word-count gate classified this as SCANNED even though
+    the text is perfectly clean and produced by proper fonts.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+
+    # Single heading line — 7 words, chars > 50 due to long words
+    page.insert_text(
+        (72, 350),
+        "Part II. Empirical Applications and Robustness Checks",
+        fontsize=24,
+        fontname="helv",
+    )
+
+    doc.save(str(path))
+    doc.close()
+
+
+def _create_image_only_scan_pdf(path: Path) -> None:
+    """True image-only scan: one large raster image, zero text layer.
+
+    This must remain classified as SCANNED; the char-count gate catches it
+    because PyMuPDF returns no text for a page that is purely a raster bitmap.
+    """
+    import io
+
+    from PIL import Image
+
+    doc = fitz.open()
+    page = doc.new_page()
+
+    # Full-page grayscale bitmap simulating a scanned document
+    img = Image.new("L", (1800, 2400), color=245)
+    img_bytes = io.BytesIO()
+    img.save(img_bytes, format="PNG")
+    img_bytes.seek(0)
+    page.insert_image(page.rect, stream=img_bytes.read())
+
+    doc.save(str(path))
+    doc.close()
+
+
+def _create_decorative_front_matter_pdf(path: Path) -> None:
+    """Decorative front matter: image + very short publisher/watermark text.
+
+    Two tokens — "Confidential Draft" — which falls below MIN_WORDS_SPARSE=3.
+    Must remain SCANNED (or at least non-born-digital) even though the two
+    words are clean, because the content is too thin to be useful native text.
+    """
+    import io
+
+    from PIL import Image
+
+    doc = fitz.open()
+    page = doc.new_page()
+
+    # Full-page background image
+    img = Image.new("RGB", (600, 800), color=(240, 240, 240))
+    img_bytes = io.BytesIO()
+    img.save(img_bytes, format="PNG")
+    img_bytes.seek(0)
+    page.insert_image(page.rect, stream=img_bytes.read())
+
+    # Watermark: exactly 2 clean words (below MIN_WORDS_SPARSE=3)
+    page.insert_text((200, 400), "Confidential Draft", fontsize=36, fontname="helv")
+
+    doc.save(str(path))
+    doc.close()
+
+
+# ---------------------------------------------------------------------------
+# GH-35: Scanned over-count on sparse and full-page-figure pages
+# ---------------------------------------------------------------------------
+
+
+class TestSparseAndFigurePageClassification:
+    """Regression tests for GH-35: sparse/figure born-digital pages must not
+    be classified as scanned solely because their text layer is short.
+
+    The dangerous direction — a real scan misclassified as born-digital and
+    thus skipping OCR — is tested explicitly; it must never happen.
+    """
+
+    def test_full_page_figure_with_short_caption_is_born_digital(self, tmp_path: Path) -> None:
+        """A born-digital figure page with a short-but-clean caption is NOT scanned.
+
+        Characterisation (pre-GH-35): word-count gate fired → SCANNED.
+        Expected post-GH-35: clean short text layer → born-digital with sparse note.
+        """
+        pdf_path = tmp_path / "figure_caption.pdf"
+        _create_figure_page_with_short_caption(pdf_path)
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        page = result.pages[0]
+
+        assert page.is_born_digital, (
+            "Full-page-figure born-digital page with short caption must NOT be "
+            "classified as scanned (GH-35 regression)"
+        )
+        assert page.has_figures, "Page with embedded image must have has_figures=True"
+        assert not page.needs_ocr_enhancement, "Clean native text does not require OCR enhancement"
+        # Audit log must surface the sparse detection
+        notes_text = " ".join(page.notes)
+        assert "sparse" in notes_text.lower(), (
+            "Notes must record that this is a sparse native layer for audit visibility"
+        )
+
+    def test_sparse_section_heading_is_born_digital(self, tmp_path: Path) -> None:
+        """A born-digital sparse section heading with 7 clean words is NOT scanned.
+
+        Characterisation (pre-GH-35): word-count gate fired → SCANNED.
+        Expected post-GH-35: clean text layer → born-digital with sparse note.
+        """
+        pdf_path = tmp_path / "section_heading.pdf"
+        _create_sparse_section_heading_pdf(pdf_path)
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        page = result.pages[0]
+
+        assert page.is_born_digital, (
+            "Sparse born-digital section heading must NOT be classified as scanned (GH-35)"
+        )
+        assert page.word_count < 15, "Fixture must have fewer than MIN_WORDS_PER_PAGE words"
+        notes_text = " ".join(page.notes)
+        assert "sparse" in notes_text.lower()
+
+    def test_true_image_only_scan_remains_scanned(self, tmp_path: Path) -> None:
+        """A true image-only scan with no text layer must remain classified as SCANNED.
+
+        This is the safety-critical case: a real scan must never be misrouted to
+        native extraction (which would silently skip OCR and lose content).
+        """
+        pdf_path = tmp_path / "real_scan.pdf"
+        _create_image_only_scan_pdf(pdf_path)
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        page = result.pages[0]
+
+        assert not page.is_born_digital, (
+            "True image-only scan must remain SCANNED — "
+            "misclassifying it as born-digital would skip OCR and lose content (GH-35)"
+        )
+        assert page.native_text == ""
+
+    def test_decorative_front_matter_below_sparse_floor_is_scanned(self, tmp_path: Path) -> None:
+        """Front-matter with only 2 clean words is rejected by the MIN_WORDS_SPARSE floor.
+
+        The fixture ("Confidential Draft", 19 chars) has clean text and a proper font,
+        so it would otherwise pass `text_layer_is_clean`.  The MIN_CHARS_FOR_TEXT_LAYER
+        gate (default 50) would catch it first, so we lower min_chars to 10 to isolate
+        the MIN_WORDS_SPARSE=3 branch.  This confirms the sparse-word floor is what
+        actually rejects the page, not an earlier unrelated gate.
+        """
+        pdf_path = tmp_path / "decorative_front.pdf"
+        _create_decorative_front_matter_pdf(pdf_path)
+
+        # Lower the char threshold so the fixture (19 chars) passes it and the
+        # MIN_WORDS_SPARSE gate is what rejects it.
+        detector = BornDigitalDetector(min_chars=10)
+        result = detector.detect(pdf_path)
+        page = result.pages[0]
+
+        assert not page.is_born_digital, (
+            "Two-word watermark page must remain non-born-digital even if text is clean"
+        )
+        # Confirm the rejection came from the word-count gate, not the char gate.
+        notes_text = " ".join(page.notes)
+        assert "too few words" in notes_text, (
+            "Rejection must come from the sparse-word floor (MIN_WORDS_SPARSE), "
+            f"not from an earlier gate; got notes: {page.notes}"
+        )
+
+    def test_garbage_ocr_with_few_words_is_still_scanned(self, tmp_path: Path) -> None:
+        """Dirty short text (single-char 'words') must not be rescued as born-digital.
+
+        The clean-text bypass only applies when ALL quality signals pass.
+        A page where avg_word_len fails (single-char OCR tokens) must remain SCANNED.
+        """
+        doc = fitz.open()
+        page = doc.new_page()
+
+        # Insert single-char tokens — exactly 8 words, below MIN_WORDS_PER_PAGE but
+        # avg_word_len=1.0, which fails MIN_AVG_WORD_LENGTH check.
+        garbage = "a b c d e f g h"
+        tw = fitz.TextWriter(page.rect)
+        tw.append((72, 72), garbage, fontsize=11, font=fitz.Font("helv"))
+        tw.write_text(page)
+        pdf_path = tmp_path / "dirty_short.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        page_a = result.pages[0]
+
+        assert not page_a.is_born_digital, (
+            "Short dirty text (single-char tokens, avg_word_len=1) must remain SCANNED"
+        )
+
+    def test_sparse_page_native_text_is_populated(self, tmp_path: Path) -> None:
+        """A rescued sparse born-digital page must have its native text populated.
+
+        If we classify the page as born-digital, native_text must not be empty —
+        otherwise the pipeline would have nothing to work with.
+        """
+        pdf_path = tmp_path / "section_heading.pdf"
+        _create_sparse_section_heading_pdf(pdf_path)
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        page = result.pages[0]
+
+        if page.is_born_digital:
+            assert page.native_text.strip() != "", (
+                "Rescued sparse born-digital page must have non-empty native_text"
+            )
+
+    def test_figure_page_native_text_contains_caption(self, tmp_path: Path) -> None:
+        """A rescued figure page must include the caption in native_text."""
+        pdf_path = tmp_path / "figure_caption.pdf"
+        _create_figure_page_with_short_caption(pdf_path)
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        page = result.pages[0]
+
+        assert page.is_born_digital
+        assert "Figure" in page.native_text or "Impulse" in page.native_text, (
+            "Caption text must appear in native_text of rescued figure page"
+        )
+
+    def test_scan_with_clean_short_ocr_caption_routes_to_ocr(self, tmp_path: Path) -> None:
+        """GH-35-FU: full-page-raster scan + short clean baked-in OCR → SCANNED (routed to OCR).
+
+        GH-35 introduced a clean-short-text exception that correctly rescued genuine
+        born-digital figure pages with short captions.  However, a scanned page with a
+        full-page raster image AND a baked-in OCR caption is indistinguishable from a
+        born-digital figure page via text quality alone.  Skipping OCR on a real scan
+        causes permanent content loss in a citation corpus.
+
+        GH-35-FU gates the clean-short-text exception by RASTER IMAGE COVERAGE
+        (consilium decision id 20260615T104828Z-1577):
+          - If raster coverage >= RASTER_DOMINANCE_RATIO (0.90), the page is image-
+            dominant and is routed to OCR even if the text layer is short and clean.
+          - Non-image-dominant sparse pages (genuine born-digital figure pages) are
+            still classified born-digital — the GH-35 win is preserved.
+
+        This test replaces the former pinned tradeoff assertion
+        ("test_scan_with_clean_short_ocr_caption_is_currently_born_digital") which
+        accepted the false-positive as an inescapable tradeoff.  The image-coverage
+        gate makes the distinction tractable.
+        """
+        import io
+
+        from PIL import Image
+
+        doc = fitz.open()
+        page = doc.new_page()
+
+        # Full-page scan image — covers essentially the entire page area.
+        # This is the hallmark of a scanned page: one raster bitmap = the page.
+        img = Image.new("L", (1800, 2400), color=245)
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+        page.insert_image(page.rect, stream=img_bytes.read())
+
+        # Baked-in OCR text layer: 8 clean words, 52 chars, proper Helvetica font.
+        # This passes the char gate (52 >= 50), all quality checks (no CID, low
+        # garbage, normal word lengths, font_count=1), and word_count=8 >= MIN_WORDS_SPARSE=3,
+        # so text_layer_is_clean=True — the old GH-35 path would fire.
+        # GH-35-FU must intercept it via the image-coverage gate.
+        page.insert_text(
+            (72, 100),
+            "Figure one. Monetary policy shock on output growth.",
+            fontsize=10,
+            fontname="helv",
+        )
+
+        pdf_path = tmp_path / "scan_with_clean_ocr.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        pg = result.pages[0]
+
+        # GH-35-FU: full-page raster image-dominant → must route to OCR (SCANNED).
+        assert not pg.is_born_digital, (
+            "GH-35-FU: a scan with a full-page raster image and a short baked-in OCR "
+            "caption must be classified SCANNED (routed to OCR) by the image-coverage gate. "
+            "Raster coverage should be >= RASTER_DOMINANCE_RATIO (0.90). "
+            "See consilium decision id 20260615T104828Z-1577 and "
+            "docs/log/2026-06-15_GH-35-FU.md"
+        )
+        assert pg.native_text == "", "Scanned page must have empty native_text"
+        # Audit note must surface the image-dominance gate
+        notes_text = " ".join(pg.notes)
+        assert "image-dominant" in notes_text.lower(), (
+            f"Notes must record that the image-coverage gate fired; got: {pg.notes}"
+        )
+
+    def test_genuine_born_digital_figure_page_not_image_dominant_remains_born_digital(
+        self, tmp_path: Path
+    ) -> None:
+        """Guard against GH-35-FU over-correction: non-image-dominant sparse page stays BD.
+
+        A GENUINE born-digital figure page has a chart occupying part of the page
+        body surrounded by real prose/caption/header text.  The raster coverage is
+        well below RASTER_DOMINANCE_RATIO (0.90), so the image-coverage gate must
+        NOT fire, and GH-35's original win (sparse + clean → born-digital) must be
+        preserved.
+
+        This test uses a page with a modest chart image (occupying ~6% of the page)
+        with surrounding text, confirming the GH-35-FU gate does not regress GH-35
+        for the canonical born-digital figure scenario.
+        """
+        import io
+
+        from PIL import Image
+
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+
+        # Small chart image — clearly non-dominant (occupies ~6% of 612×792 page)
+        img = Image.new("RGB", (200, 150), color=(200, 200, 255))
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+        page.insert_image(fitz.Rect(72, 200, 272, 350), stream=img_bytes.read())
+
+        # Short caption text — below MIN_WORDS_PER_PAGE but above MIN_WORDS_SPARSE.
+        # This is the GH-35 sparse-rescue scenario.
+        page.insert_text(
+            (72, 370),
+            "Figure 1. Output response to monetary shock.",
+            fontsize=10,
+            fontname="helv",
+        )
+        page.insert_text(
+            (72, 385),
+            "Notes: 90% confidence bands shown.",
+            fontsize=9,
+            fontname="helv",
+        )
+
+        pdf_path = tmp_path / "genuine_figure_page.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        pg = result.pages[0]
+
+        # Verify coverage is indeed below the threshold
+        with fitz.open(pdf_path) as fdoc:
+            cov = detector._raster_coverage(fdoc[0])
+        assert cov < detector.RASTER_DOMINANCE_RATIO, (
+            f"Fixture must have raster coverage < {detector.RASTER_DOMINANCE_RATIO:.0%}; "
+            f"got {cov:.1%}"
+        )
+
+        # The page must be classified born-digital (GH-35 win preserved)
+        assert pg.is_born_digital, (
+            "GH-35-FU must NOT over-correct: a genuine born-digital figure page with a "
+            f"small chart ({cov:.1%} raster coverage) and short caption must remain "
+            "classified born-digital.  The image-coverage gate must only fire for "
+            "image-dominant pages (>= RASTER_DOMINANCE_RATIO)."
+        )

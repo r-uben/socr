@@ -44,10 +44,22 @@ def common_options(f):
     f = click.option(
         "--auto-patch-tables",
         is_flag=True,
-        help="Let dual-pass auto-patch crop readings into the page (default: flag-only, never edits)",
+        help="Let dual-pass auto-patch crop readings into the page (default: flag-only,"
+        " never edits)",
     )(f)
     f = click.option(
         "--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages"
+    )(f)
+    f = click.option(
+        "--native-only",
+        is_flag=True,
+        help=(
+            "Trust the native text layer for ALL born-digital pages — never OCR-enhance them, "
+            "even when the layer has known deficiencies (e.g. corrupt-math regions). "
+            "Genuine scans still route to OCR normally. "
+            "Figure extraction can still run without triggering whole-page OCR. "
+            "Incompatible with --no-native-first (that flag wins if both are set)."
+        ),
     )(f)
     f = click.option(
         "--recover-corrupt-math",
@@ -56,8 +68,12 @@ def common_options(f):
     )(f)
     f = click.option(
         "--math-model",
-        default="qwen3-vl:8b",
-        help="Local Ollama vision model for equation -> LaTeX recovery",
+        default=None,
+        help=(
+            "Local Ollama vision model for equation -> LaTeX recovery "
+            "(default: qwen3.5:cloud; use qwen3-vl:30b-a3b-instruct for offline). "
+            "Note: this is a math-only path, NOT the OCR qwen tier."
+        ),
     )(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
     f = click.option(
@@ -78,7 +94,22 @@ def common_options(f):
         default=None,
         help="Qwen model override (e.g. qwen3.5:27b local, qwen3.5:cloud)",
     )(f)
-    f = click.option("--save-figures", is_flag=True, help="Save extracted figure images")(f)
+    f = click.option(
+        "--save-figures",
+        is_flag=True,
+        help=(
+            "Extract figures and write PNG files with image references. "
+            "Does NOT generate VLM caption prose — use --describe-figures for that."
+        ),
+    )(f)
+    f = click.option(
+        "--describe-figures",
+        is_flag=True,
+        help=(
+            "Run VLM captions on extracted figures (opt-in; implies --save-figures). "
+            "Caption failures never overwrite already-written OCR text."
+        ),
+    )(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
     f = click.option("--dry-run", is_flag=True, help="List files without processing")(f)
     f = click.option("-q", "--quiet", is_flag=True, help="Suppress non-error output")(f)
@@ -146,13 +177,15 @@ def build_config(
     no_dual_pass_tables: bool = False,
     auto_patch_tables: bool = False,
     no_native_first: bool = False,
+    native_only: bool = False,
     recover_corrupt_math: bool = False,
-    math_model: str = "qwen3-vl:8b",
+    math_model: str | None = None,
     timeout: int = 1800,
     dpi: int | None = None,
     qwen_backend: str | None = None,
     qwen_model: str | None = None,
     save_figures: bool = False,
+    describe_figures: bool = False,
     reprocess: bool = False,
     dry_run: bool = False,
     quiet: bool = False,
@@ -192,9 +225,19 @@ def build_config(
         config.auto_patch_tables = True
     if no_native_first:
         config.native_first = False
+    if native_only and no_native_first:
+        # Incoherent combination: --no-native-first forces OCR on all pages,
+        # so --native-only has no effect. Warn and let --no-native-first win.
+        console.print(
+            "[yellow]Warning:[/yellow] --native-only and --no-native-first are incompatible. "
+            "--no-native-first takes precedence (all pages sent to OCR)."
+        )
+    elif native_only:
+        config.native_only = True
     if recover_corrupt_math:
         config.recover_corrupt_math = True
-    config.math_model = math_model
+    if math_model is not None:
+        config.math_model = math_model
 
     config.timeout = timeout
     if dpi is not None:
@@ -203,7 +246,14 @@ def build_config(
         config.qwen_backend = qwen_backend
     if qwen_model is not None:
         config.qwen_model = qwen_model
-    config.save_figures = save_figures
+        config.qwen_model_pinned = True
+    # --describe-figures implies --save-figures: captions require PNGs on disk.
+    if describe_figures:
+        config.save_figures = True
+        config.describe_figures = True
+    else:
+        config.save_figures = save_figures
+        config.describe_figures = False
     config.reprocess = reprocess
     config.dry_run = dry_run
     config.quiet = quiet
