@@ -308,7 +308,7 @@ class HeuristicPageJudge:
         self._sparse_ok = sparse_ok if sparse_ok is not None else (lambda page_num: False)
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
-        if output.status == PageStatus.ERROR or not output.text.strip():
+        if output.status != PageStatus.SUCCESS or not output.text.strip():
             return AcceptDecision(accept=False, reason="empty/error output")
         check = self._checker.check(output.text, sparse_ok=self._sparse_ok(output.page_num))
         if check.passed:
@@ -335,7 +335,7 @@ class VLMPageJudge:
         self._render_image = render_image
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
-        if output.status == PageStatus.ERROR or not output.text.strip():
+        if output.status != PageStatus.SUCCESS or not output.text.strip():
             return AcceptDecision(accept=False, reason="empty/error output")
         image_path = self._render_image(output.page_num)
         verdict = self._judge.judge(image_path, output.text)

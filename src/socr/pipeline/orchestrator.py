@@ -35,7 +35,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.core.state import DocumentState
+from socr.core.state import DocumentState, PageState
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor
 from socr.pipeline.consensus import ConsensusEngine
@@ -661,23 +661,16 @@ class UnifiedPipeline:
                 and page_num in corrupt_math_pages
                 and ps.is_born_digital
                 and ps.native_text
+                and not self._page_has_tables(page_num, ps)
             ):
                 # Trust the native prose layer; math is spliced in Tier 1. This
                 # also avoids whole-page VLM OCR that would degrade the prose.
                 prose_pages.append(page_num)
                 math_recovery_pages.add(page_num)
-            elif ps.is_born_digital and not ps.needs_ocr_enhancement and ps.native_text:
+            elif self._is_trusted_native_without_ocr(page_num, ps):
                 prose_pages.append(page_num)
-            elif ps.is_born_digital and ps.needs_ocr_enhancement:
-                if self.config.native_only and ps.native_text:
-                    # native-only policy: suppress OCR enhancement for born-digital
-                    # pages even when the classifier flagged a deficiency (e.g.
-                    # corrupt-math regions). The native text layer is trusted as-is.
-                    # Scans (is_born_digital=False) are NOT affected and still route
-                    # to OCR below via the scanned_pages list.
-                    prose_pages.append(page_num)
-                else:
-                    enhancement_pages.append(page_num)
+            elif ps.is_born_digital and ps.native_text:
+                enhancement_pages.append(page_num)
             else:
                 scanned_pages.append(page_num)
 
@@ -833,7 +826,11 @@ class UnifiedPipeline:
             for po in local_outputs:
                 # Native passthrough — born-digital prose, keep as-is
                 if po.engine == "native":
-                    passed_outputs.append(po)
+                    if po.status == PageStatus.SUCCESS and po.audit_passed:
+                        passed_outputs.append(po)
+                    else:
+                        escalated_pages.append(po.page_num)
+                        escalated_reasons[po.page_num] = po.failure_mode.value
                     continue
                 # Engine error — escalate rather than ship a blank page
                 if po.status != PageStatus.SUCCESS:
@@ -937,6 +934,22 @@ class UnifiedPipeline:
         """
         engine = get_engine(engine_type)
 
+        def native_fallback(
+            page_num: int, failure_mode: FailureMode, error: str = ""
+        ) -> PageOutput:
+            ps = state.pages[page_num]
+            if self._page_has_tables(page_num, ps):
+                ps.native_table_structure_failed = True
+            return PageOutput(
+                page_num=page_num,
+                text=ps.native_text or "",
+                status=PageStatus.WARNING,
+                engine="native",
+                failure_mode=failure_mode,
+                error=error,
+                audit_passed=False,
+            )
+
         if not engine.is_available():
             logger.warning(f"{engine.name} not available for {label} OCR")
             if not self.config.quiet:
@@ -949,12 +962,10 @@ class UnifiedPipeline:
                 ps = state.pages[page_num]
                 if page_num in enhancement_pages and ps.native_text:
                     outputs.append(
-                        PageOutput(
-                            page_num=page_num,
-                            text=ps.native_text,
-                            status=PageStatus.SUCCESS,
-                            engine="native",
-                            audit_passed=True,
+                        native_fallback(
+                            page_num,
+                            FailureMode.MODEL_UNAVAILABLE,
+                            f"{engine.name} unavailable; native text used as fallback",
                         )
                     )
                 else:
@@ -989,12 +1000,12 @@ class UnifiedPipeline:
                 ps = state.pages[po.page_num]
                 if ps.native_text:
                     final.append(
-                        PageOutput(
-                            page_num=po.page_num,
-                            text=ps.native_text,
-                            status=PageStatus.SUCCESS,
-                            engine="native",
-                            audit_passed=True,
+                        native_fallback(
+                            po.page_num,
+                            po.failure_mode
+                            if po.failure_mode != FailureMode.NONE
+                            else FailureMode.AUDIT_FAILED,
+                            po.error or f"{engine.name} OCR failed; native text used as fallback",
                         )
                     )
                     continue
@@ -1005,6 +1016,44 @@ class UnifiedPipeline:
             console.print(f"  {ok}/{len(page_nums)} pages succeeded")
 
         return final
+
+    def _assessment_for_page(self, page_num: int):
+        if not self._last_assessment:
+            return None
+        return next((p for p in self._last_assessment.pages if p.page_num == page_num), None)
+
+    def _page_has_tables(self, page_num: int, ps: PageState | None = None) -> bool:
+        """Whether the born-digital detector found table-like structure."""
+        if ps is not None and ps.has_tables:
+            return True
+        pa = self._assessment_for_page(page_num)
+        return bool(pa and pa.has_tables)
+
+    def _is_trusted_native_without_ocr(self, page_num: int, ps: PageState) -> bool:
+        """Whether a page may bypass OCR and ship native text directly.
+
+        Born-digital prose takes free native text. Pages with tables need the
+        model/VLM path because PyMuPDF text often flattens grids even when the
+        character layer is otherwise clean. ``--native-only`` remains the
+        explicit override for born-digital pages.
+        """
+        if not self.config.native_first or not ps.is_born_digital or not ps.native_text:
+            return False
+
+        if self.config.native_only:
+            return True
+
+        if ps.needs_ocr_enhancement:
+            return False
+
+        if self._page_has_tables(page_num, ps):
+            return False
+
+        return True
+
+    def _is_agentic_trusted_native(self, page_num: int, ps: PageState) -> bool:
+        """Backward-compatible alias for the agentic native-bypass predicate."""
+        return self._is_trusted_native_without_ocr(page_num, ps)
 
     # ------------------------------------------------------------------
     # Agentic: cost-aware per-page routing (replaces backbone+score+repair)
@@ -1034,12 +1083,7 @@ class UnifiedPipeline:
         # Scans (is_born_digital=False) are always sent to OCR regardless.
         ocr_pages: list[int] = []
         for page_num, ps in sorted(state.pages.items()):
-            is_trusted_native = (
-                self.config.native_first
-                and ps.is_born_digital
-                and ps.native_text
-                and (not ps.needs_ocr_enhancement or self.config.native_only)
-            )
+            is_trusted_native = self._is_agentic_trusted_native(page_num, ps)
             if is_trusted_native:
                 native = PageOutput(
                     page_num=page_num,
@@ -1059,6 +1103,14 @@ class UnifiedPipeline:
                 console.print("  All pages born-digital (no OCR needed)")
             return
 
+        native_fallback_pages = [
+            p
+            for p in ocr_pages
+            if self.config.native_first
+            and state.pages[p].is_born_digital
+            and state.pages[p].native_text
+        ]
+
         available = self._available_engines_for_agentic()
         # --strict-local: drop cloud-tier rungs (including free-cloud providers such
         # as QWEN Cloud / Ollama Cloud) so only local/on-device providers are tried.
@@ -1072,9 +1124,24 @@ class UnifiedPipeline:
             available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
         )
         if not ladder:
-            logger.warning("agentic: no OCR providers available; pages left unprocessed")
+            logger.warning("agentic: no OCR providers available; OCR pages left unprocessed")
             if not self.config.quiet:
                 console.print("  [red]No OCR providers available[/red]")
+            for page_num in native_fallback_pages:
+                ps = state.pages[page_num]
+                if self._page_has_tables(page_num, ps):
+                    ps.native_table_structure_failed = True
+                fallback = PageOutput(
+                    page_num=page_num,
+                    text=ps.native_text or "",
+                    status=PageStatus.WARNING,
+                    engine="native",
+                    failure_mode=FailureMode.MODEL_UNAVAILABLE,
+                    error="no OCR providers available; native text used as fallback",
+                    audit_passed=False,
+                    cost_usd=0.0,
+                )
+                ps.attempts.append(fallback)
             return
 
         # Snapshot the ladder for manifest provenance (B3): ordered list of
@@ -1093,15 +1160,13 @@ class UnifiedPipeline:
         # Record judge model for manifest provenance (B3).
         state.agentic_judge_model = self._resolve_judge_model() or ""
         judge = self._build_page_judge(state)
-        enhancement_pages = [p for p in ocr_pages if state.pages[p].needs_ocr_enhancement]
-
         if not self.config.quiet:
             ladder_str = " -> ".join(f"{p.engine.value}(${p.cost_per_page_usd:g})" for p in ladder)
             console.print(f"  ladder: {ladder_str}")
 
         def run_provider(engine: EngineType, page_num: int) -> PageOutput:
             outs = self._run_engine_on_pages(
-                state, [page_num], enhancement_pages, engine, "agentic"
+                state, [page_num], native_fallback_pages, engine, "agentic"
             )
             return outs[0]
 
@@ -1159,6 +1224,14 @@ class UnifiedPipeline:
                 )  # B3
                 ps.attempts.append(att.output)
             ps.best_output = decision.final_output
+
+            # Provenance guard: when the judge rejected ALL ladder rungs for a
+            # born-digital table page, mark the page so _assemble_result treats
+            # any native-text fallback as audit-failed rather than a clean
+            # success.  Without this flag the document-level status would be
+            # SUCCESS even though the table structure may have been lost.
+            if not decision.accepted and self._page_has_tables(page_num, ps):
+                ps.native_table_structure_failed = True
 
             # Persist winning page output immediately (write-through).
             if _page_blob_store is not None and ps.best_output is not None:
@@ -1691,15 +1764,13 @@ class UnifiedPipeline:
             return False
         return (pa.word_count or 0) < self.config.audit_min_words
 
-    def _native_table_structure_gate_applies(self, page_num: int, output: PageOutput) -> bool:
+    def _native_table_structure_gate_applies(
+        self, page_num: int, output: PageOutput, ps: PageState | None = None
+    ) -> bool:
         """Whether a native output should be audited for table grid loss."""
         if not (output.engine or "").startswith("native"):
             return False
-        assessment = self._last_assessment
-        if not assessment:
-            return False
-        pa = next((p for p in assessment.pages if p.page_num == page_num), None)
-        return bool(pa and pa.has_tables)
+        return self._page_has_tables(page_num, ps)
 
     def _score_per_page(self, state: DocumentState) -> None:
         """Score each page's best output individually."""
@@ -1714,7 +1785,7 @@ class UnifiedPipeline:
             if page_state.is_born_digital and page_state.native_text:
                 latest_is_native = (latest.engine or "").startswith("native")
                 if latest_is_native:
-                    if self._native_table_structure_gate_applies(page_num, latest):
+                    if self._native_table_structure_gate_applies(page_num, latest, page_state):
                         scoring = self.scorer.score_native_table_structure(latest.text)
                         latest.audit_passed = scoring.passed
                         if not scoring.passed:
@@ -1734,7 +1805,9 @@ class UnifiedPipeline:
                     # Preserve the native-text exemption unless the narrow
                     # table-structure gate above rejected this exact attempt.
                     continue
-                if not page_state.needs_ocr_enhancement:
+                if not page_state.needs_ocr_enhancement and not self._page_has_tables(
+                    page_num, page_state
+                ):
                     continue
 
             scoring = self.scorer.score(
@@ -1744,12 +1817,16 @@ class UnifiedPipeline:
             latest.audit_passed = scoring.passed
             if not scoring.passed:
                 latest.failure_mode = scoring.primary_failure
+                if self._page_has_tables(page_num, page_state):
+                    page_state.native_table_structure_failed = True
                 failures += 1
                 # If this was the best_output but now fails, clear it
                 if page_state.best_output is latest:
                     page_state.best_output = None
             else:
                 latest.failure_mode = FailureMode.NONE
+                if self._page_has_tables(page_num, page_state):
+                    page_state.native_table_structure_failed = False
                 # Promote to best if none set
                 if not page_state.best_output:
                     page_state.best_output = latest
@@ -2196,7 +2273,7 @@ class UnifiedPipeline:
             for n, p in sorted(state.pages.items())
             if p.is_born_digital
             and p.native_text
-            and p.needs_ocr_enhancement
+            and (p.needs_ocr_enhancement or p.native_table_structure_failed)
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
         ]
@@ -2236,7 +2313,7 @@ class UnifiedPipeline:
                         page_num=n,
                         kind="native_fallback",
                         engine="native",
-                        detail="OCR tried and never passed on an enhancement page; "
+                        detail="OCR tried and never passed on a structured/enhancement page; "
                         "native text shipped flagged",
                     )
                 )
@@ -2248,7 +2325,7 @@ class UnifiedPipeline:
                     )
                 if native_fallback_pages:
                     console.print(
-                        f"  [yellow]{len(native_fallback_pages)} enhancement page(s) "
+                        f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
                         f"fell back to native text: {native_fallback_pages}[/yellow]"
                     )
 
