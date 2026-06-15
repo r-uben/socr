@@ -594,9 +594,16 @@ class BornDigitalDetector:
 
         Two passes:
         1. PyMuPDF's built-in table detector (catches ruled/bordered tables).
-        2. Columnar-numeric heuristic (catches borderless regression tables
-           common in academic PDFs — whitespace-aligned columns of numbers
-           that find_tables() cannot see).
+        2. Lane-cooccupancy gate (``has_numeric_columns``) — catches borderless
+           regression tables common in academic PDFs.  Replaces the old
+           single-token-line-ratio heuristic (``_detect_columnar_numbers``)
+           that false-fired on chart-axis labels and CE front-matter where many
+           lines each carry a single x/y tick value.
+
+        The lane-cooccupancy gate requires numeric tokens to form a genuine
+        row × column grid (multiple distinct x-lanes co-occupied per data row),
+        which chart axes never satisfy: tick labels run down a single x position,
+        not across several independent lanes simultaneously.
         """
         try:
             tables = page.find_tables()
@@ -605,28 +612,9 @@ class BornDigitalDetector:
         except Exception:
             pass
 
-        return self._detect_columnar_numbers(page)
+        from socr.tables.reconstruct import has_numeric_columns
 
-    @staticmethod
-    def _detect_columnar_numbers(page: fitz.Page) -> bool:
-        """Detect borderless tables via single-token line ratio.
-
-        When PyMuPDF extracts text from a PDF table whose columns are
-        whitespace-aligned (no drawn borders), each table cell lands on
-        its own line as a single token.  Prose pages never exhibit this:
-        a justified paragraph produces multi-word lines.
-
-        Heuristic: if >50% of non-empty lines are single-token AND there
-        are at least 15 such lines, the page is almost certainly tabular.
-        The count floor avoids false-positives on short pages with headers
-        or bullet lists.
-        """
-        lines = page.get_text("text").splitlines()
-        nonempty = [ln.strip() for ln in lines if ln.strip()]
-        if not nonempty:
-            return False
-        single_token = sum(1 for ln in nonempty if len(ln.split()) == 1)
-        return single_token >= 15 and single_token / len(nonempty) > 0.50
+        return has_numeric_columns(page)
 
     @staticmethod
     def _detect_math_fonts(page: fitz.Page) -> bool:

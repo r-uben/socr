@@ -31,6 +31,8 @@ class PageState:
     native_text: str | None = None
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     has_tables: bool = False  # page contains table-like structures
+    has_figures: bool = False  # page contains embedded raster images
+    has_equations: bool = False  # page contains math/equations
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
@@ -147,14 +149,22 @@ class DocumentState:
                         page_state.best_output = page_out
 
     def apply_born_digital(self, assessment: DocumentAssessment) -> None:
-        """Apply born-digital detection results."""
+        """Apply born-digital detection results.
+
+        Propagates the full content-type vector (has_tables, has_figures,
+        has_equations) onto PageState so downstream routing gates can read
+        directly from PageState without re-consulting _last_assessment.
+        """
         for pa in assessment.pages:
             if pa.page_num in self.pages:
-                self.pages[pa.page_num].is_born_digital = pa.is_born_digital
-                self.pages[pa.page_num].has_tables = pa.has_tables
+                ps = self.pages[pa.page_num]
+                ps.is_born_digital = pa.is_born_digital
+                ps.has_tables = pa.has_tables
+                ps.has_figures = pa.has_figures
+                ps.has_equations = pa.has_equations
                 if pa.is_born_digital:
-                    self.pages[pa.page_num].native_text = pa.native_text
-                    self.pages[pa.page_num].needs_ocr_enhancement = pa.needs_ocr_enhancement
+                    ps.native_text = pa.native_text
+                    ps.needs_ocr_enhancement = pa.needs_ocr_enhancement
 
     # ------------------------------------------------------------------
     # Read-only derived properties

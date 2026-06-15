@@ -1396,3 +1396,124 @@ class TestSparseAndFigurePageClassification:
             "classified born-digital.  The image-coverage gate must only fire for "
             "image-dominant pages (>= RASTER_DOMINANCE_RATIO)."
         )
+
+
+# ---------------------------------------------------------------------------
+# PP-6 (GH-54): lane-cooccupancy routing gate
+# ---------------------------------------------------------------------------
+
+
+def _create_chart_axis_pdf(path: Path) -> None:
+    """Synthetic born-digital page that mimics CE chart-axis labels.
+
+    Layout: a column of single-token y-axis tick values (e.g. "0.0", "0.5",
+    "1.0", …) stacked vertically at a single x position.  This is exactly
+    what the OLD ``_detect_columnar_numbers`` heuristic (>=15 single-token
+    lines, >50% single-token) would trip on — but it is NOT a data table
+    because all numeric tokens share one x-lane, so no row co-occupies
+    multiple distinct lanes.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+
+    # Short prose header to make the page born-digital
+    prose = "Figure 2. Impulse response of output to a monetary policy shock."
+    page.insert_text((72, 60), prose, fontsize=10, fontname="helv")
+
+    # Chart axis tick values — all at the SAME x position (single lane).
+    # 20 values → 20 single-token lines, well above the old heuristic floor.
+    tick_x = 50.0
+    for i, val in enumerate([f"{v:.1f}" for v in [v / 10 for v in range(20)]]):
+        page.insert_text((tick_x, 100 + i * 28), val, fontsize=8, fontname="helv")
+
+    doc.save(str(path))
+    doc.close()
+
+
+def _create_dense_forecast_table_pdf(path: Path) -> None:
+    """Synthetic born-digital page with a real multi-column numeric grid.
+
+    Layout: 5 data columns × 6 data rows of numbers, co-occupying distinct
+    x-lanes per row.  This is what the lane-cooccupancy gate must flag as
+    has_tables=True so the page routes to the structured OCR path.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+
+    # Prose header
+    prose = "Table 1. GDP growth forecasts across baseline and shock scenarios."
+    page.insert_text((72, 50), prose, fontsize=10, fontname="helv")
+
+    # Multi-column numeric grid: 5 distinct x-lanes, 6 data rows
+    col_xs = [90.0, 180.0, 270.0, 360.0, 450.0]
+    headers = ["Variable", "b", "s", "h", "q"]
+    for ci, hdr in enumerate(headers):
+        page.insert_text((col_xs[ci], 80), hdr, fontsize=9, fontname="helv")
+    rows = [
+        ["GDP", "0.253", "0.179", "0.211", "0.301"],
+        ["CPI", "0.144", "0.135", "0.290", "0.188"],
+        ["IP", "0.041", "0.050", "0.154", "0.099"],
+        ["UR", "0.082", "0.321", "0.144", "0.211"],
+        ["CB", "0.180", "0.171", "0.365", "0.244"],
+        ["TR", "0.310", "0.220", "0.410", "0.188"],
+    ]
+    for ri, row in enumerate(rows):
+        for ci, cell in enumerate(row):
+            page.insert_text((col_xs[ci], 100 + ri * 22), cell, fontsize=9, fontname="helv")
+
+    doc.save(str(path))
+    doc.close()
+
+
+class TestLaneCooccupancyRoutingGate:
+    """PP-6 (GH-54): verify that the new lane-cooccupancy gate replaces the old
+    single-token-line-ratio heuristic for has_tables routing.
+
+    Limitation: no real CE page is checked in as a fixture; we use a synthetic
+    born-digital page that the old _detect_columnar_numbers would trip on but
+    has_numeric_columns does not, because all tick values share a single x-lane.
+    """
+
+    def test_chart_axis_labels_not_flagged_as_table(self, tmp_path: Path) -> None:
+        """A column of chart-axis tick values (single x-lane) must NOT trigger has_tables.
+
+        The old _detect_columnar_numbers heuristic fired on this pattern (>=15
+        single-token lines, >50% single-token).  The lane-cooccupancy gate
+        (has_numeric_columns) requires co-occupation of >= _MIN_LANES_PER_ROW
+        distinct numeric lanes per data row — chart ticks share one lane so they
+        never satisfy this.
+
+        Limitation: synthetic fixture; annotated in docs/log/2026-06-16_PP-6.md.
+        """
+        pdf_path = tmp_path / "chart_axis.pdf"
+        _create_chart_axis_pdf(pdf_path)
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        page = result.pages[0]
+
+        assert page.is_born_digital, "Fixture must be born-digital"
+        assert not page.has_tables, (
+            "PP-6: chart-axis tick values (single x-lane) must NOT trigger has_tables. "
+            "The old _detect_columnar_numbers heuristic false-fired here; "
+            "the lane-cooccupancy gate must reject it."
+        )
+
+    def test_dense_forecast_table_still_flagged(self, tmp_path: Path) -> None:
+        """A genuine multi-column numeric grid must still set has_tables=True.
+
+        Regression guard: the lane-cooccupancy gate must not produce false
+        negatives on real data tables.  A 5-column × 6-row forecast table
+        co-occupies multiple x-lanes per row and must be detected.
+        """
+        pdf_path = tmp_path / "forecast_table.pdf"
+        _create_dense_forecast_table_pdf(pdf_path)
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        page = result.pages[0]
+
+        assert page.has_tables, (
+            "PP-6 regression guard: a genuine multi-column numeric table must "
+            "still set has_tables=True with the lane-cooccupancy gate."
+        )

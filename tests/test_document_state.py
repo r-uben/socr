@@ -623,3 +623,106 @@ class TestExports:
 
         assert ExportedDocumentState is DocumentState
         assert ExportedPageState is PageState
+
+
+# ---------------------------------------------------------------------------
+# PP-6 (GH-54): content-type vector propagation onto PageState
+# ---------------------------------------------------------------------------
+
+
+class TestApplyBornDigitalContentTypeVector:
+    """apply_born_digital must propagate has_figures and has_equations (PP-6)."""
+
+    def test_has_figures_propagated(self) -> None:
+        """has_figures=True on PageAssessment propagates to PageState."""
+        state = DocumentState(handle=_make_handle(1))
+        assessment = DocumentAssessment(
+            path=Path("/tmp/fake.pdf"),
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text="text",
+                    confidence=0.9,
+                    has_figures=True,
+                    has_equations=False,
+                    has_tables=False,
+                )
+            ],
+        )
+        state.apply_born_digital(assessment)
+
+        assert state.pages[1].has_figures is True, (
+            "PP-6: has_figures must be propagated from PageAssessment to PageState"
+        )
+        assert state.pages[1].has_equations is False
+        assert state.pages[1].has_tables is False
+
+    def test_has_equations_propagated(self) -> None:
+        """has_equations=True on PageAssessment propagates to PageState."""
+        state = DocumentState(handle=_make_handle(1))
+        assessment = DocumentAssessment(
+            path=Path("/tmp/fake.pdf"),
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text="text",
+                    confidence=0.9,
+                    has_figures=False,
+                    has_equations=True,
+                    has_tables=False,
+                )
+            ],
+        )
+        state.apply_born_digital(assessment)
+
+        assert state.pages[1].has_equations is True, (
+            "PP-6: has_equations must be propagated from PageAssessment to PageState"
+        )
+        assert state.pages[1].has_figures is False
+
+    def test_content_type_vector_defaults_false_on_pagestate(self) -> None:
+        """PageState has_figures and has_equations default to False."""
+        ps = PageState(page_num=1)
+        assert ps.has_figures is False
+        assert ps.has_equations is False
+        assert ps.has_tables is False
+
+    def test_all_flags_propagated_together(self) -> None:
+        """apply_born_digital propagates the full content-type vector in one call."""
+        state = DocumentState(handle=_make_handle(2))
+        assessment = DocumentAssessment(
+            path=Path("/tmp/fake.pdf"),
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text="page one",
+                    confidence=0.9,
+                    has_figures=True,
+                    has_equations=True,
+                    has_tables=True,
+                ),
+                PageAssessment(
+                    page_num=2,
+                    is_born_digital=False,
+                    native_text="",
+                    confidence=0.95,
+                    has_figures=False,
+                    has_equations=False,
+                    has_tables=False,
+                ),
+            ],
+        )
+        state.apply_born_digital(assessment)
+
+        ps1 = state.pages[1]
+        assert ps1.has_figures is True
+        assert ps1.has_equations is True
+        assert ps1.has_tables is True
+
+        ps2 = state.pages[2]
+        assert ps2.has_figures is False
+        assert ps2.has_equations is False
+        assert ps2.has_tables is False
