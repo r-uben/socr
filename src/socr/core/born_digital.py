@@ -155,6 +155,30 @@ class BornDigitalDetector:
     # Three words is a loose floor; the quality checks do the real discrimination.
     MIN_WORDS_SPARSE = 3
 
+    # Fraction of page area covered by embedded raster images above which a page
+    # is considered image-dominant.  Used to gate the clean-short-text exception
+    # (GH-35-FU, consilium decision id 20260615T104828Z-1577):
+    #
+    # A scanned page + baked-in OCR layer looks indistinguishable from a
+    # born-digital figure page with a caption when the text layer is short and
+    # clean.  But on a scanned page the raster image covers the ENTIRE page,
+    # while on a genuine born-digital figure page the chart/figure occupies a
+    # substantial but clearly sub-total fraction (surrounding white-space, caption
+    # area, header region all reduce image coverage well below 1.0).
+    #
+    # The panel converged on ~0.90–0.95.  We use 0.90 as the threshold:
+    #   - A full-page scan rendered as a single raster hits ≥ 0.98 (image fills
+    #     essentially the whole printable area after margins).
+    #   - A born-digital figure page with a chart in the body and a caption at
+    #     the top/bottom typically reaches 0.50–0.80 coverage, well below 0.90.
+    #   - The margin of 0.10 absorbs scanner over-crop and image-rect rounding
+    #     without encroaching on the legitimate figure-page population.
+    #
+    # Over-correcting (routing to OCR) is the safer direction here: an extra OCR
+    # call on a true born-digital page is suboptimal but recoverable; silently
+    # skipping OCR on a real scan causes permanent content loss.
+    RASTER_DOMINANCE_RATIO = 0.90
+
     # Maximum ratio of garbage/non-printable characters. Born-digital text is
     # clean; OCR layers on scanned PDFs often contain (cid:XX) references,
     # replacement chars, and control characters.
@@ -341,10 +365,45 @@ class BornDigitalDetector:
                     has_equations=has_equations,
                     notes=notes,
                 )
-            # Clean short text: pass through to born-digital path with a note so
-            # the audit log can surface it.
+
+            # Clean short text — but gate the pass-through by raster coverage.
+            # A scanned page with a baked-in OCR caption is INDISTINGUISHABLE from
+            # a born-digital figure page via text quality alone.  However, a scan
+            # always fills nearly the full page with a raster image, while a genuine
+            # born-digital figure page has the chart occupying a sub-total fraction
+            # of the page area (caption, header, and white-space reduce coverage).
+            # If the page is image-dominant (raster coverage >= RASTER_DOMINANCE_RATIO),
+            # route to OCR to prevent permanent content loss on real scans.
+            # Non-image-dominant sparse-but-clean pages still classify born-digital.
+            # GH-35-FU | consilium decision id 20260615T104828Z-1577
+            raster_cov = self._raster_coverage(page)
+            if raster_cov >= self.RASTER_DOMINANCE_RATIO:
+                notes.append(
+                    f"sparse native layer ({word_count} words); image-dominant page "
+                    f"({raster_cov:.1%} raster coverage >= {self.RASTER_DOMINANCE_RATIO:.0%} "
+                    "threshold) — routing to OCR to avoid baked-in-OCR false-positive (GH-35-FU)"
+                )
+                return PageAssessment(
+                    page_num=page_num,
+                    is_born_digital=False,
+                    native_text="",
+                    confidence=0.85,
+                    char_count=char_count,
+                    word_count=word_count,
+                    font_count=font_count,
+                    has_images=has_images,
+                    has_tables=has_tables,
+                    has_figures=has_figures,
+                    has_equations=has_equations,
+                    notes=notes,
+                )
+
+            # Clean short text on a non-image-dominant page: pass through to
+            # born-digital path with a note so the audit log can surface it.
             notes.append(
-                f"sparse native layer ({word_count} words); clean text, classifying as born-digital"
+                f"sparse native layer ({word_count} words); clean text, "
+                f"raster coverage {raster_cov:.1%} < {self.RASTER_DOMINANCE_RATIO:.0%}, "
+                "classifying as born-digital"
             )
 
         # CID artifacts: definitive sign of broken font mapping on scanned PDF
@@ -813,6 +872,37 @@ class BornDigitalDetector:
         """
         images = page.get_images()
         return len(images) > 0
+
+    @staticmethod
+    def _raster_coverage(page: fitz.Page) -> float:
+        """Fraction of page area covered by embedded raster images (0.0 – 1.0).
+
+        Uses ``page.get_image_info()`` which returns per-image bounding boxes in
+        PDF user-space coordinates (same coordinate system as ``page.rect``).
+
+        Area is computed as the SUM of individual image bbox areas, clamped to
+        the page area, rather than a union bounding box.  Union would overcount
+        for non-overlapping images (e.g. two small charts placed side-by-side
+        would give a bounding box that covers the gap between them).  Summing
+        individual areas slightly overcounts for overlapping images (rare in
+        practice), but never exceeds 1.0 after clamping — still safe for a
+        dominance threshold comparison.
+
+        Returns 0.0 on any exception so that a buggy or unavailable API never
+        wrongly gates an otherwise clean classification.
+        """
+        try:
+            page_area = page.rect.get_area()
+            if page_area <= 0:
+                return 0.0
+            image_area_sum = sum(
+                fitz.Rect(info["bbox"]).get_area()
+                for info in page.get_image_info()
+                if info.get("bbox")
+            )
+            return min(image_area_sum / page_area, 1.0)
+        except Exception:
+            return 0.0
 
     def _encoding_corruption_ratio(self, text: str) -> float:
         """Fraction of word tokens that show font/ToUnicode encoding corruption.

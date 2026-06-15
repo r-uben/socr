@@ -416,6 +416,52 @@ There is no supported flag for "trust this clean born-digital text layer; only O
 - `uv run pytest tests/test_born_digital.py tests/test_orchestrator.py tests/test_canon_round3.py -q`
 - `uv run ruff check src/socr/cli.py src/socr/core/config.py src/socr/core/born_digital.py`
 
+## GH-35-FU - Gate clean-short-text born-digital exception by raster image coverage
+
+Status: DONE
+Priority: P1
+Suggested agent: `socr-implementer`
+Depends on: GH-35 (DONE)
+Write ownership: `src/socr/core/born_digital.py`, `tests/test_born_digital.py`.
+
+### Problem
+
+GH-35 introduced a clean-short-text exception: a sparse but clean native text layer
+(e.g. figure caption, section heading) would skip the word-count gate and classify the
+page as born-digital.  A /consilium panel (Codex + Gemini, decision id
+20260615T104828Z-1577) found this is UNSAFE on image-dominant pages: a full-page-raster
+scan with a baked-in OCR caption passes all text-quality checks and is
+INDISTINGUISHABLE from a genuine born-digital figure page by text quality alone.
+Skipping OCR on such a page causes permanent content loss in a citation corpus.
+
+### Plan
+
+1. Add `_raster_coverage(page)` helper using `page.get_image_info()` bbox data.
+2. Add named constant `RASTER_DOMINANCE_RATIO = 0.90` with documented basis.
+3. In the clean-short-text pass-through, check raster coverage first: if
+   `coverage >= RASTER_DOMINANCE_RATIO` route to OCR; otherwise pass through to
+   born-digital (preserving the GH-35 win).
+4. Update the pinned "accepted tradeoff" test to assert the corrected behaviour.
+5. Add a guard test ensuring a non-image-dominant sparse page still classifies born-digital.
+
+The text render-mode (Tr 3 invisible text) discriminator was evaluated and SKIPPED:
+PyMuPDF's `get_texttrace()` does expose render mode but the signal is fragile for
+synthetic test fixtures (PyMuPDF's `insert_text` does not set Tr explicitly) and the
+coverage gate is sufficient to catch the problematic case robustly.
+
+### Acceptance Criteria
+
+- Full-page raster + short clean baked-in OCR → SCANNED (is_born_digital=False).
+- Genuine born-digital figure page with small/partial chart → born-digital (GH-35 preserved).
+- Audit notes surface the image-dominance gate reason.
+- RASTER_DOMINANCE_RATIO is a named constant with documented basis.
+
+### Verification
+
+- `~/venvs/socr/bin/pytest tests/test_born_digital.py tests/test_orchestrator.py -q`
+- `~/venvs/socr/bin/ruff check src/socr/core/born_digital.py tests/test_born_digital.py`
+- `~/venvs/socr/bin/ruff format --check src/socr/core/born_digital.py tests/test_born_digital.py`
+
 ## GH-35 - Recheck scanned over-count on sparse and full-page-figure pages
 
 GitHub: https://github.com/r-uben/socr/issues/35

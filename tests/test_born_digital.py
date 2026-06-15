@@ -1258,22 +1258,26 @@ class TestSparseAndFigurePageClassification:
             "Caption text must appear in native_text of rescued figure page"
         )
 
-    def test_scan_with_clean_short_ocr_caption_is_currently_born_digital(
-        self, tmp_path: Path
-    ) -> None:
-        """PINS the accepted GH-35 tradeoff: scan + short clean baked-in OCR → born-digital.
+    def test_scan_with_clean_short_ocr_caption_routes_to_ocr(self, tmp_path: Path) -> None:
+        """GH-35-FU: full-page-raster scan + short clean baked-in OCR → SCANNED (routed to OCR).
 
-        A scanned page with a full-page raster image AND a short, high-quality
-        baked-in OCR caption (8 words, >= 50 chars, proper font, no CID artifacts)
-        is currently classified as born-digital after the GH-35 fix.
+        GH-35 introduced a clean-short-text exception that correctly rescued genuine
+        born-digital figure pages with short captions.  However, a scanned page with a
+        full-page raster image AND a baked-in OCR caption is indistinguishable from a
+        born-digital figure page via text quality alone.  Skipping OCR on a real scan
+        causes permanent content loss in a citation corpus.
 
-        This is documented, accepted behaviour: the baked-in OCR text IS the best
-        available text for such a sparse scan, and re-OCR-ing it would not produce
-        better output.  The practical impact is therefore bounded — we use the
-        baked-in OCR text as native text rather than re-running OCR.
+        GH-35-FU gates the clean-short-text exception by RASTER IMAGE COVERAGE
+        (consilium decision id 20260615T104828Z-1577):
+          - If raster coverage >= RASTER_DOMINANCE_RATIO (0.90), the page is image-
+            dominant and is routed to OCR even if the text layer is short and clean.
+          - Non-image-dominant sparse pages (genuine born-digital figure pages) are
+            still classified born-digital — the GH-35 win is preserved.
 
-        DO NOT change this assertion without updating docs/log/2026-06-15_GH-35.md
-        and re-evaluating the tradeoff.  See the residual-risk section in that log.
+        This test replaces the former pinned tradeoff assertion
+        ("test_scan_with_clean_short_ocr_caption_is_currently_born_digital") which
+        accepted the false-positive as an inescapable tradeoff.  The image-coverage
+        gate makes the distinction tractable.
         """
         import io
 
@@ -1282,7 +1286,8 @@ class TestSparseAndFigurePageClassification:
         doc = fitz.open()
         page = doc.new_page()
 
-        # Full-page scan image (simulates a rasterized document page)
+        # Full-page scan image — covers essentially the entire page area.
+        # This is the hallmark of a scanned page: one raster bitmap = the page.
         img = Image.new("L", (1800, 2400), color=245)
         img_bytes = io.BytesIO()
         img.save(img_bytes, format="PNG")
@@ -1292,7 +1297,8 @@ class TestSparseAndFigurePageClassification:
         # Baked-in OCR text layer: 8 clean words, 52 chars, proper Helvetica font.
         # This passes the char gate (52 >= 50), all quality checks (no CID, low
         # garbage, normal word lengths, font_count=1), and word_count=8 >= MIN_WORDS_SPARSE=3,
-        # so text_layer_is_clean=True and the sparse-rescue path fires.
+        # so text_layer_is_clean=True — the old GH-35 path would fire.
+        # GH-35-FU must intercept it via the image-coverage gate.
         page.insert_text(
             (72, 100),
             "Figure one. Monetary policy shock on output growth.",
@@ -1308,8 +1314,85 @@ class TestSparseAndFigurePageClassification:
         result = detector.detect(pdf_path)
         pg = result.pages[0]
 
-        # PIN: this is currently True — documented GH-35 accepted tradeoff.
+        # GH-35-FU: full-page raster image-dominant → must route to OCR (SCANNED).
+        assert not pg.is_born_digital, (
+            "GH-35-FU: a scan with a full-page raster image and a short baked-in OCR "
+            "caption must be classified SCANNED (routed to OCR) by the image-coverage gate. "
+            "Raster coverage should be >= RASTER_DOMINANCE_RATIO (0.90). "
+            "See consilium decision id 20260615T104828Z-1577 and "
+            "docs/log/2026-06-15_GH-35-FU.md"
+        )
+        assert pg.native_text == "", "Scanned page must have empty native_text"
+        # Audit note must surface the image-dominance gate
+        notes_text = " ".join(pg.notes)
+        assert "image-dominant" in notes_text.lower(), (
+            f"Notes must record that the image-coverage gate fired; got: {pg.notes}"
+        )
+
+    def test_genuine_born_digital_figure_page_not_image_dominant_remains_born_digital(
+        self, tmp_path: Path
+    ) -> None:
+        """Guard against GH-35-FU over-correction: non-image-dominant sparse page stays BD.
+
+        A GENUINE born-digital figure page has a chart occupying part of the page
+        body surrounded by real prose/caption/header text.  The raster coverage is
+        well below RASTER_DOMINANCE_RATIO (0.90), so the image-coverage gate must
+        NOT fire, and GH-35's original win (sparse + clean → born-digital) must be
+        preserved.
+
+        This test uses a page with a modest chart image (occupying ~6% of the page)
+        with surrounding text, confirming the GH-35-FU gate does not regress GH-35
+        for the canonical born-digital figure scenario.
+        """
+        import io
+
+        from PIL import Image
+
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+
+        # Small chart image — clearly non-dominant (occupies ~6% of 612×792 page)
+        img = Image.new("RGB", (200, 150), color=(200, 200, 255))
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+        page.insert_image(fitz.Rect(72, 200, 272, 350), stream=img_bytes.read())
+
+        # Short caption text — below MIN_WORDS_PER_PAGE but above MIN_WORDS_SPARSE.
+        # This is the GH-35 sparse-rescue scenario.
+        page.insert_text(
+            (72, 370),
+            "Figure 1. Output response to monetary shock.",
+            fontsize=10,
+            fontname="helv",
+        )
+        page.insert_text(
+            (72, 385),
+            "Notes: 90% confidence bands shown.",
+            fontsize=9,
+            fontname="helv",
+        )
+
+        pdf_path = tmp_path / "genuine_figure_page.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        detector = BornDigitalDetector()
+        result = detector.detect(pdf_path)
+        pg = result.pages[0]
+
+        # Verify coverage is indeed below the threshold
+        with fitz.open(pdf_path) as fdoc:
+            cov = detector._raster_coverage(fdoc[0])
+        assert cov < detector.RASTER_DOMINANCE_RATIO, (
+            f"Fixture must have raster coverage < {detector.RASTER_DOMINANCE_RATIO:.0%}; "
+            f"got {cov:.1%}"
+        )
+
+        # The page must be classified born-digital (GH-35 win preserved)
         assert pg.is_born_digital, (
-            "GH-35 accepted tradeoff: scan + short clean baked-in OCR is classified "
-            "born-digital (uses baked-in OCR text as native; see docs/log/2026-06-15_GH-35.md)"
+            "GH-35-FU must NOT over-correct: a genuine born-digital figure page with a "
+            f"small chart ({cov:.1%} raster coverage) and short caption must remain "
+            "classified born-digital.  The image-coverage gate must only fire for "
+            "image-dominant pages (>= RASTER_DOMINANCE_RATIO)."
         )
