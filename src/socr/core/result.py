@@ -59,7 +59,15 @@ class FailureMode(str, Enum):
 
 @dataclass
 class FigureInfo:
-    """Metadata for a detected figure."""
+    """Metadata for a detected figure.
+
+    ``bbox`` carries the figure's bounding rectangle in page-space coordinates
+    ``(x0, y0, x1, y1)``, persisted from ``ExtractedFigure.bbox`` (GH-47C).
+    Used by the orchestrator to filter native word tokens inside the figure region
+    via ``page.get_text("words")`` and record a recoverable-label set in the audit
+    log.  ``None`` when the bbox was not determinable (xref images without a
+    placement rect).
+    """
 
     figure_num: int
     page_num: int
@@ -67,6 +75,7 @@ class FigureInfo:
     description: str = ""
     image_path: str | None = None
     engine: str = ""
+    bbox: tuple[float, float, float, float] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -76,10 +85,20 @@ class FigureInfo:
             "description": self.description,
             "image_path": self.image_path,
             "engine": self.engine,
+            "bbox": list(self.bbox) if self.bbox is not None else None,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "FigureInfo":
+        raw_bbox = d.get("bbox")
+        bbox: tuple[float, float, float, float] | None = None
+        if raw_bbox is not None:
+            bbox = (
+                float(raw_bbox[0]),
+                float(raw_bbox[1]),
+                float(raw_bbox[2]),
+                float(raw_bbox[3]),
+            )
         return cls(
             figure_num=d["figure_num"],
             page_num=d["page_num"],
@@ -87,6 +106,7 @@ class FigureInfo:
             description=d.get("description", ""),
             image_path=d.get("image_path"),
             engine=d.get("engine", ""),
+            bbox=bbox,
         )
 
 

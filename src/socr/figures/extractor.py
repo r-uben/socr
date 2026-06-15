@@ -70,12 +70,20 @@ def _timeout_guard(seconds: int, label: str = ""):
 
 @dataclass
 class ExtractedFigure:
-    """A figure image extracted from a PDF page."""
+    """A figure image extracted from a PDF page.
+
+    ``bbox`` is the figure's bounding rectangle in page-space coordinates as a
+    4-float tuple ``(x0, y0, x1, y1)``, matching PyMuPDF convention.  It is used
+    downstream (GH-47C) to filter native word tokens inside the figure region via
+    ``page.get_text("words")``.  ``None`` for Strategy 2 xref images whose
+    placement rect could not be determined (rare; treated as inapplicable).
+    """
 
     figure_num: int
     page_num: int
     image: Image.Image  # PIL Image (lazy import)
     saved_path: str | None = None
+    bbox: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -306,7 +314,12 @@ class FigureExtractor:
                     if img is None:
                         continue
 
-                    fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
+                    fig = ExtractedFigure(
+                        figure_num=counter,
+                        page_num=page_num,
+                        image=img,
+                        bbox=(x0, y0, x1, y1),
+                    )
                     if self.save_dir:
                         fig.saved_path = str(self._save(img, counter, page_num))
                     figures.append(fig)
@@ -315,17 +328,24 @@ class FigureExtractor:
 
                 # Presentation fallback
                 if is_landscape and per_page == 0 and len(drawings) >= 10:
+                    fb_x0, fb_y0 = page_width * 0.05, page_height * 0.15
+                    fb_x1, fb_y1 = page_width * 0.95, page_height * 0.90
                     img = _render_region(
                         page,
-                        page_width * 0.05,
-                        page_height * 0.15,
-                        page_width * 0.95,
-                        page_height * 0.90,
+                        fb_x0,
+                        fb_y0,
+                        fb_x1,
+                        fb_y1,
                         page_width,
                         page_height,
                     )
                     if img:
-                        fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
+                        fig = ExtractedFigure(
+                            figure_num=counter,
+                            page_num=page_num,
+                            image=img,
+                            bbox=(fb_x0, fb_y0, fb_x1, fb_y1),
+                        )
                         if self.save_dir:
                             fig.saved_path = str(self._save(img, counter, page_num))
                         figures.append(fig)
@@ -376,7 +396,12 @@ class FigureExtractor:
                 if img is None:
                     continue
 
-                fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
+                fig = ExtractedFigure(
+                    figure_num=counter,
+                    page_num=page_num,
+                    image=img,
+                    bbox=(x0, y0, x1, y1),
+                )
                 if self.save_dir:
                     fig.saved_path = str(self._save(img, counter, page_num))
                 figures.append(fig)
@@ -436,7 +461,19 @@ class FigureExtractor:
             if img is None:
                 continue
 
-            fig = ExtractedFigure(figure_num=counter, page_num=page_num, image=img)
+            # Derive page-space bbox from the first placement rect when available
+            # so downstream label recovery can filter native words by region.
+            xref_bbox: tuple[float, float, float, float] | None = None
+            if placement_rects:
+                r = placement_rects[0]
+                xref_bbox = (r.x0, r.y0, r.x1, r.y1)
+
+            fig = ExtractedFigure(
+                figure_num=counter,
+                page_num=page_num,
+                image=img,
+                bbox=xref_bbox,
+            )
             if self.save_dir:
                 fig.saved_path = str(self._save(img, counter, page_num))
             figures.append(fig)

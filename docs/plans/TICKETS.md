@@ -249,7 +249,7 @@ verbatim source.
 ## GH-47C - Free label cross-check for figure captions
 
 GitHub: https://github.com/r-uben/socr/issues/47
-Status: NEEDS-DESIGN
+Status: DONE (Option C, consilium run 20260615T203853Z-9682)
 Priority: P2
 Suggested agent: `socr-designer` first
 Depends on: GH-50, GH-47B

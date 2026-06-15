@@ -10,6 +10,7 @@ from socr.figures.extractor import (  # noqa: E402
     LOGO_HEIGHT_RATIO,
     LOGO_TOP_MARGIN_RATIO,
     LOGO_WIDE_WIDTH_RATIO,
+    ExtractedFigure,
     ExtractionResult,
     FigureExtractor,
 )
@@ -459,3 +460,178 @@ def test_logo_filter_thresholds_are_named_constants() -> None:
     assert 0.0 < LOGO_HEIGHT_RATIO < 0.5, (
         f"LOGO_HEIGHT_RATIO={LOGO_HEIGHT_RATIO} out of expected range"
     )
+
+
+# ---------------------------------------------------------------------------
+# GH-47C: bbox persistence on ExtractedFigure and recoverable-label audit
+# ---------------------------------------------------------------------------
+
+
+def _make_pdf_with_vector_labels(tmp_path: Path) -> Path:
+    """Born-digital-style page: a vector chart region with native text labels inside it.
+
+    The chart region is at (100, 100, 400, 500); axis labels and a legend entry
+    are placed as native text inside that region so ``page.get_text("words")``
+    can recover them.  A body paragraph sits above the figure region (outside
+    the bbox) and must NOT appear in the recoverable-label set.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+
+    # Draw a prominent vector chart (enough drawings to trigger Strategy 0).
+    red = (0.8, 0.1, 0.1)
+    chart = fitz.Rect(100, 100, 400, 500)
+    page.draw_rect(chart, color=red, width=1.0)
+    # Gridlines + bar data marks.
+    for i in range(1, 6):
+        y = chart.y0 + i * chart.height / 6
+        page.draw_line((chart.x0 + 5, y), (chart.x1 - 5, y), color=(0.6, 0.6, 0.6), width=0.4)
+    for i in range(8):
+        x = chart.x0 + 12 + i * (chart.width - 24) / 8
+        h = (i % 4 + 2) * (chart.height - 30) / 8
+        page.draw_rect(
+            fitz.Rect(x, chart.y1 - 15 - h, x + 10, chart.y1 - 15),
+            color=red,
+            fill=red,
+            width=0.3,
+        )
+
+    # Native axis/legend text INSIDE the figure region.
+    page.insert_text(fitz.Point(110, 490), "Quarters", fontsize=8)
+    page.insert_text(fitz.Point(110, 120), "EuroArea", fontsize=8)
+    page.insert_text(fitz.Point(200, 300), "GDP", fontsize=9)
+
+    # Body paragraph OUTSIDE the figure region (above it).
+    page.insert_text(fitz.Point(72, 60), "This paragraph is above the chart.", fontsize=10)
+
+    pdf_path = tmp_path / "vector_labels.pdf"
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
+def _make_pdf_with_raster_only_figure(tmp_path: Path) -> Path:
+    """Page with a single rasterized embedded image: no native text inside the figure rect."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    # Placed raster image; no text operators inside the rect.
+    page.insert_image(fitz.Rect(100, 200, 400, 500), stream=_noisy_jpeg_bytes())
+    pdf_path = tmp_path / "raster_only.pdf"
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
+def test_extracted_figure_has_bbox_field() -> None:
+    """GH-47C step-0: ExtractedFigure.bbox exists and defaults to None."""
+    from PIL import Image
+
+    img = Image.new("RGB", (10, 10))
+    fig = ExtractedFigure(figure_num=1, page_num=1, image=img)
+    assert hasattr(fig, "bbox"), "ExtractedFigure must have a bbox field"
+    assert fig.bbox is None, "bbox must default to None"
+
+    fig2 = ExtractedFigure(figure_num=2, page_num=1, image=img, bbox=(10.0, 20.0, 100.0, 200.0))
+    assert fig2.bbox == (10.0, 20.0, 100.0, 200.0)
+
+
+def test_figure_info_has_bbox_field() -> None:
+    """GH-47C step-0: FigureInfo.bbox exists, round-trips through to_dict/from_dict."""
+    from socr.core.result import FigureInfo
+
+    fi = FigureInfo(figure_num=1, page_num=2, figure_type="chart", bbox=(5.0, 10.0, 300.0, 400.0))
+    assert fi.bbox == (5.0, 10.0, 300.0, 400.0)
+
+    d = fi.to_dict()
+    assert d["bbox"] == [5.0, 10.0, 300.0, 400.0], "bbox must be serialised as a list"
+
+    fi2 = FigureInfo.from_dict(d)
+    assert fi2.bbox == (5.0, 10.0, 300.0, 400.0), "bbox must round-trip through from_dict"
+
+
+def test_figure_info_bbox_none_round_trips() -> None:
+    """GH-47C step-0: FigureInfo.bbox=None serialises and deserialises cleanly."""
+    from socr.core.result import FigureInfo
+
+    fi = FigureInfo(figure_num=3, page_num=1, figure_type="image")
+    assert fi.bbox is None
+    d = fi.to_dict()
+    assert d["bbox"] is None
+    fi2 = FigureInfo.from_dict(d)
+    assert fi2.bbox is None
+
+
+def test_extractor_persists_bbox_on_image_block_strategy(tmp_path: Path) -> None:
+    """GH-47C step-0: bbox is set on ExtractedFigure for Strategy 1 (IMAGE block) figures."""
+    pdf_path = _make_pdf_with_placed_image(tmp_path)
+    result = FigureExtractor(max_total=5, max_per_page=3).extract(pdf_path)
+
+    assert len(result.figures) >= 1
+    for fig in result.figures:
+        assert fig.bbox is not None, "bbox must be set for Strategy 1 (IMAGE block) figures"
+        x0, y0, x1, y1 = fig.bbox
+        assert x1 > x0 and y1 > y0, "bbox must be a valid non-degenerate rect"
+
+
+def test_extractor_persists_bbox_on_vector_strategy(tmp_path: Path) -> None:
+    """GH-47C step-0: bbox is set on ExtractedFigure for Strategy 0 (vector cluster) figures."""
+    pdf_path = _make_vector_dashboard_pdf(tmp_path)
+    result = FigureExtractor(max_total=10, max_per_page=5).extract(pdf_path)
+
+    assert len(result.figures) >= 1
+    for fig in result.figures:
+        assert fig.bbox is not None, "bbox must be set for Strategy 0 (vector) figures"
+        x0, y0, x1, y1 = fig.bbox
+        assert x1 > x0 and y1 > y0, "bbox must be a valid non-degenerate rect"
+
+
+def test_recoverable_label_set_contains_inside_tokens(tmp_path: Path) -> None:
+    """GH-47C: native word tokens inside the figure bbox are recoverable via get_text("words").
+
+    This is a unit test of the filtering logic (centre-point containment) independent of
+    the orchestrator, confirming that the three label strings inside the chart region are
+    found and the body text above the region is excluded.
+    """
+    pdf_path = _make_pdf_with_vector_labels(tmp_path)
+
+    # Open the PDF and apply the same centre-point containment filter the orchestrator uses.
+    doc = fitz.open(pdf_path)
+    page = doc[0]
+    words = page.get_text("words")
+
+    # Chart region bbox as inserted in _make_pdf_with_vector_labels.
+    x0, y0, x1, y1 = 100.0, 100.0, 400.0, 500.0
+    inside = [
+        w[4] for w in words if x0 <= (w[0] + w[2]) / 2.0 <= x1 and y0 <= (w[1] + w[3]) / 2.0 <= y1
+    ]
+    doc.close()
+
+    assert "Quarters" in inside, f"'Quarters' label should be inside figure bbox; got: {inside}"
+    assert "EuroArea" in inside, f"'EuroArea' label should be inside figure bbox; got: {inside}"
+    assert "GDP" in inside, f"'GDP' label should be inside figure bbox; got: {inside}"
+    # Body paragraph text must be outside the region.
+    assert not any("paragraph" in t.lower() for t in inside), (
+        f"Body text from above the chart should NOT appear in figure region words; got: {inside}"
+    )
+
+
+def test_recoverable_label_set_empty_for_raster_figure(tmp_path: Path) -> None:
+    """GH-47C: a rasterized embedded image has no native word tokens in its region.
+
+    Zero recoverable words is INAPPLICABLE — correct and expected, never a failure.
+    """
+    pdf_path = _make_pdf_with_raster_only_figure(tmp_path)
+
+    doc = fitz.open(pdf_path)
+    page = doc[0]
+    words = page.get_text("words")
+    doc.close()
+
+    # Rect matches the insert_image call in _make_pdf_with_raster_only_figure.
+    x0, y0, x1, y1 = 100.0, 200.0, 400.0, 500.0
+    inside = [
+        w[4] for w in words if x0 <= (w[0] + w[2]) / 2.0 <= x1 and y0 <= (w[1] + w[3]) / 2.0 <= y1
+    ]
+
+    # For a pure raster image there are no text operators in the region.
+    assert inside == [], f"Raster figure should yield empty recoverable-label set; got: {inside}"
