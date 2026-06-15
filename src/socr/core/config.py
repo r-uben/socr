@@ -130,9 +130,18 @@ class PipelineConfig:
     # equation regions to LaTeX. Opt-in: needs a local vision model (Ollama).
     recover_corrupt_math: bool = False
     # qwen3.5:cloud (Ollama Cloud) is the practical winner: reliable on dense
-    # equation regions where local qwen3-vl:8b times out, no extra key. Override
-    # with --math-model qwen3-vl:8b for fully offline runs.
+    # equation regions where local qwen3-vl:30b-a3b-instruct times out, no extra
+    # key.  Override with --math-model qwen3-vl:30b-a3b-instruct for offline runs.
     math_model: str = "qwen3.5:cloud"  # Ollama Cloud VLM used for equation -> LaTeX
+
+    # --- GH-36a: Display-equation region detection (model-free) ---
+    # Detect display-equation regions on born-digital pages using PyMuPDF
+    # geometry (math-font spans + centring).  Saves crop PNGs and records
+    # provenance; does NOT call a model or splice LaTeX (that is GH-36b).
+    # Default-off: the throughput cost must be measured (see GH-36a AC5)
+    # before making this default-on, and the GH-36b engine/validation gate
+    # must land before any replacement/splicing occurs.
+    detect_equations: bool = False
 
     # --- Processing ---
     # ``Path("output")`` is the LEGACY SENTINEL meaning "unset". The canon
@@ -273,6 +282,7 @@ class PipelineConfig:
             "tiered",
             "recover_corrupt_math",
             "math_model",
+            "detect_equations",
             "timeout",
             "max_retries",
             "truncation_retries",

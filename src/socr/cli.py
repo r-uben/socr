@@ -67,6 +67,15 @@ def common_options(f):
         help="Keep native prose but image-OCR font-corrupted equations to LaTeX (local VLM)",
     )(f)
     f = click.option(
+        "--detect-equations",
+        is_flag=True,
+        help=(
+            "GH-36a: detect display-equation regions on born-digital pages (model-free). "
+            "Saves crop PNGs and records provenance; does NOT splice LaTeX (that is GH-36b). "
+            "Default off; throughput and quality must be validated before enabling by default."
+        ),
+    )(f)
+    f = click.option(
         "--math-model",
         default=None,
         help=(
@@ -179,6 +188,7 @@ def build_config(
     no_native_first: bool = False,
     native_only: bool = False,
     recover_corrupt_math: bool = False,
+    detect_equations: bool = False,
     math_model: str | None = None,
     timeout: int = 1800,
     dpi: int | None = None,
@@ -236,6 +246,8 @@ def build_config(
         config.native_only = True
     if recover_corrupt_math:
         config.recover_corrupt_math = True
+    if detect_equations:
+        config.detect_equations = True
     if math_model is not None:
         config.math_model = math_model
 
