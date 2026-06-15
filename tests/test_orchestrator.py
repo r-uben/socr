@@ -120,6 +120,7 @@ def _make_bd_assessment(
     page_count: int,
     born_digital_pages: set[int] | None = None,
     complex_pages: set[int] | None = None,
+    table_pages: set[int] | None = None,
 ) -> DocumentAssessment:
     """Build a DocumentAssessment with specified born-digital pages.
 
@@ -128,13 +129,17 @@ def _make_bd_assessment(
         born_digital_pages: Set of 1-indexed page numbers that are born-digital.
         complex_pages: Subset of born_digital_pages that have complex content
             (tables/figures/equations) and need OCR enhancement.
+        table_pages: Subset of born_digital_pages with table-like structure but
+            otherwise clean native text.
     """
     bd = born_digital_pages or set()
     cx = complex_pages or set()
+    tables = table_pages or set()
     pages = []
     for i in range(1, page_count + 1):
         is_bd = i in bd
         needs_enhancement = is_bd and i in cx
+        has_tables = needs_enhancement or (is_bd and i in tables)
         pages.append(
             PageAssessment(
                 page_num=i,
@@ -142,7 +147,7 @@ def _make_bd_assessment(
                 native_text=f"Native text for page {i}" if is_bd else "",
                 confidence=0.9,
                 needs_ocr_enhancement=needs_enhancement,
-                has_tables=needs_enhancement,
+                has_tables=has_tables,
             )
         )
     return DocumentAssessment(path=Path("/tmp/fake.pdf"), pages=pages)
@@ -1962,6 +1967,7 @@ class TestNativeFirstPipeline:
         page_count: int,
         bd_pages: set[int],
         complex_pages: set[int] | None = None,
+        table_pages: set[int] | None = None,
         native_first: bool = True,
     ) -> tuple[UnifiedPipeline, DocumentState]:
         """Create a pipeline + state with born-digital detection already applied."""
@@ -1973,7 +1979,9 @@ class TestNativeFirstPipeline:
             page_count,
             born_digital_pages=bd_pages,
             complex_pages=complex_pages,
+            table_pages=table_pages,
         )
+        pipeline._last_assessment = assessment
         state.apply_born_digital(assessment)
         return pipeline, state
 
@@ -2040,6 +2048,86 @@ class TestNativeFirstPipeline:
 
         # process_pages called (not process_document)
         mock_engine.process_pages.assert_called_once()
+
+    def test_clean_table_pages_sent_to_cli(self) -> None:
+        """Born-digital table pages route to OCR even without native corruption."""
+        pipeline, state = self._setup_bd_state(
+            page_count=3,
+            bd_pages={1, 2, 3},
+            table_pages={2},
+        )
+
+        def mock_process_pages(pdf_path, page_nums, config, dpi=200):
+            return [
+                PageOutput(
+                    page_num=pn,
+                    text=f"OCR table text for page {pn}",
+                    status=PageStatus.SUCCESS,
+                    engine="gemini",
+                    audit_passed=True,
+                )
+                for pn in page_nums
+            ]
+
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_pages.side_effect = mock_process_pages
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        assert result.status == DocumentStatus.SUCCESS
+        assert state.pages[1].best_output.engine == "native"
+        assert state.pages[3].best_output.engine == "native"
+        assert state.pages[2].best_output.engine == "gemini"
+        assert state.pages[2].best_output.text == "OCR table text for page 2"
+        assert mock_engine.process_pages.call_args.kwargs["page_nums"] == [2]
+
+    def test_clean_table_native_fallback_is_warning(self) -> None:
+        """If table OCR fails, native text is fallback but not a clean pass."""
+        pipeline, state = self._setup_bd_state(
+            page_count=2,
+            bd_pages={1, 2},
+            table_pages={2},
+        )
+
+        def mock_process_pages(pdf_path, page_nums, config, dpi=200):
+            return [
+                PageOutput(
+                    page_num=pn,
+                    text="",
+                    status=PageStatus.ERROR,
+                    engine="gemini",
+                    failure_mode=FailureMode.EMPTY_OUTPUT,
+                    audit_passed=False,
+                )
+                for pn in page_nums
+            ]
+
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini"
+        mock_engine.is_available.return_value = True
+        mock_engine.process_pages.side_effect = mock_process_pages
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
+            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        assert result.status == DocumentStatus.SUCCESS
+        fallback = state.pages[2].attempts[-1]
+        assert fallback.engine == "native"
+        assert fallback.text == "Native text for page 2"
+        assert fallback.status == PageStatus.WARNING
+        assert fallback.audit_passed is False
+        assert fallback.failure_mode == FailureMode.EMPTY_OUTPUT
+        assert state.pages[2].best_output is None
+        assert state.pages[2].native_table_structure_failed is True
+
+        from socr.core.manifest import _winning_page_output
+
+        winner = _winning_page_output(state, 2)
+        assert winner.status == PageStatus.WARNING
+        assert winner.audit_passed is False
 
     def test_scanned_pages_sent_to_cli(self) -> None:
         """Scanned pages (not born-digital) should be sent to CLI engine."""
@@ -2172,12 +2260,16 @@ class TestNativeFirstPipeline:
         mock_engine.process_pages.side_effect = mock_process_pages
 
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
-            result = pipeline._backbone_native_first(state, Path("/tmp/out"))
+            pipeline._backbone_native_first(state, Path("/tmp/out"))
 
-        # Page 2 (complex, OCR failed) should fall back to native text
-        assert state.pages[2].best_output is not None
-        assert state.pages[2].best_output.engine == "native"
-        assert state.pages[2].best_output.text == "Native text for page 2"
+        # Page 2 (complex, OCR failed) falls back to native text, but is
+        # flagged rather than promoted as a clean passing best_output.
+        fallback = state.pages[2].attempts[-1]
+        assert fallback.engine == "native"
+        assert fallback.text == "Native text for page 2"
+        assert fallback.status == PageStatus.WARNING
+        assert fallback.audit_passed is False
+        assert state.pages[2].best_output is None
 
     def test_engine_unavailable_falls_back_to_native(self) -> None:
         """When CLI engine is unavailable, enhancement pages use native text."""
@@ -2198,10 +2290,13 @@ class TestNativeFirstPipeline:
         for i in [1, 2, 4]:
             assert state.pages[i].best_output.engine == "native"
 
-        # Complex page 3 should fall back to native text
-        assert state.pages[3].best_output is not None
-        assert state.pages[3].best_output.engine == "native"
-        assert state.pages[3].best_output.text == "Native text for page 3"
+        # Complex page 3 should fall back to native text, flagged as warning.
+        fallback = state.pages[3].attempts[-1]
+        assert fallback.engine == "native"
+        assert fallback.text == "Native text for page 3"
+        assert fallback.status == PageStatus.WARNING
+        assert fallback.audit_passed is False
+        assert state.pages[3].best_output is None
 
     def test_engine_unavailable_scanned_pages_get_error(self) -> None:
         """When engine is unavailable, scanned pages (no native text) get error."""
@@ -3016,6 +3111,35 @@ class TestNativeOnlyRouting:
         # Page 1 (clean BD) also stays native.
         assert 1 not in ocr_pages_called
 
+    def test_native_only_suppresses_ocr_for_clean_table_pages(self) -> None:
+        """native_only=True keeps clean born-digital table pages on native text."""
+        config = _make_config(quiet=True, native_first=True, native_only=True, agentic=False)
+        pipeline = UnifiedPipeline(config)
+
+        handle = _make_handle(2)
+        state = DocumentState(handle=handle)
+        assessment = _make_bd_assessment(2, born_digital_pages={1, 2}, table_pages={2})
+        pipeline._last_assessment = assessment
+        state.apply_born_digital(assessment)
+
+        ocr_pages_called: list[int] = []
+
+        def fake_run_engine_on_pages(state, page_nums, enhancement_pages, engine_type, phase):
+            ocr_pages_called.extend(page_nums)
+            return [
+                PageOutput(page_num=pn, text=_good_text(), status=PageStatus.SUCCESS, engine="mock")
+                for pn in page_nums
+            ]
+
+        with patch.object(pipeline, "_run_engine_on_pages", side_effect=fake_run_engine_on_pages):
+            with patch.object(
+                pipeline, "_resolve_primary_engine", return_value=EngineType.DEEPSEEK
+            ):
+                pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        assert ocr_pages_called == []
+        assert state.pages[2].best_output.engine == "native"
+
     def test_native_only_false_routes_enhancement_to_ocr(self) -> None:
         """Default behaviour (native_only=False): BD enhancement pages go to OCR."""
         config = _make_config(quiet=True, native_first=True, native_only=False, agentic=False)
@@ -3116,6 +3240,131 @@ class TestNativeOnlyRouting:
         assert result.cost == pytest.approx(0.0), (
             "native_only should keep enhancement pages native — no OCR cost"
         )
+
+    def test_agentic_routes_clean_table_pages_to_ocr(self, tmp_path) -> None:
+        """Agentic path: clean born-digital table pages use the OCR ladder."""
+        pdf = self._real_pdf(tmp_path, 2)
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            2, born_digital_pages={1, 2}, table_pages={2}
+        )
+        eng = _mock_engine_named("gemini", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        assert result.cost == pytest.approx(0.0002)
+        assert "Native text for page 1" in result.markdown
+        assert _good_text() in result.markdown
+        assert eng.process_pages.call_args.kwargs["page_nums"] == [2]
+
+    def test_agentic_no_provider_table_fallback_is_audit_failed(self, tmp_path) -> None:
+        """No-provider table fallback is visible, not a clean native success."""
+        pdf = self._real_pdf(tmp_path, 1)
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            judge_backend="heuristic",
+            enabled_engines=[],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            1, born_digital_pages={1}, table_pages={1}
+        )
+
+        result = pipeline.process(pdf, tmp_path)
+
+        assert result.status == DocumentStatus.AUDIT_FAILED
+        assert "Native text for page 1" in result.markdown
+
+    def test_agentic_table_judge_reject_all_rungs_is_audit_failed(self, tmp_path) -> None:
+        """Provenance-masking guard: provider available, OCR returns SUCCESS+non-empty
+        content, but judge rejects all rungs — result must not be a clean success.
+
+        Regression for the bug where native_table_structure_failed was never set
+        in the agentic path when the decision was not accepted, so _assemble_result
+        silently treated the native-text fallback as a passing entry.
+        """
+        pdf = self._real_pdf(tmp_path, 1)
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        # Build an assessment where page 1 has word_count above the audit minimum
+        # (50 words) so that _sparse_page_ok returns False and the heuristic
+        # judge applies the full word-count gate.  _make_bd_assessment leaves
+        # word_count=0, which makes every page sparse-OK and silently accepts
+        # any non-empty output — defeating the rejection scenario we want to test.
+        page1_assessment = PageAssessment(
+            page_num=1,
+            is_born_digital=True,
+            native_text="Native text for page 1",
+            confidence=0.9,
+            needs_ocr_enhancement=False,
+            has_tables=True,
+            word_count=100,  # above audit_min_words=50 → not sparse → judge applies full gate
+        )
+        pipeline.bd_detector.detect.return_value = DocumentAssessment(
+            path=pdf, pages=[page1_assessment]
+        )
+        # Engine returns PageStatus.SUCCESS with non-empty content, but text is
+        # too short (1 word) to pass the full heuristic gate → judge rejects all rungs.
+        eng = _mock_engine_named("gemini", _bad_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        # (a) document status must be AUDIT_FAILED, not SUCCESS.
+        assert result.status == DocumentStatus.AUDIT_FAILED, (
+            f"expected AUDIT_FAILED but got {result.status}; "
+            "native table page with all-rejected OCR must not be a clean success"
+        )
+        # (b) page must carry native fallback, not be stamped audit_passed=True.
+        # Verify via manifest: the page must be flagged as native fallback, not clean.
+        manifest_path = tmp_path / "paper" / "manifest.json"
+        if manifest_path.exists():
+            import json
+
+            manifest = json.loads(manifest_path.read_text())
+            page_entry = manifest.get("pages", {}).get("1", {})
+            assert page_entry.get("audit_passed") is not True, (
+                "page manifest entry must NOT be audit_passed=True when OCR was rejected"
+            )
+
+    def test_native_only_agentic_suppresses_clean_table_pages(self, tmp_path) -> None:
+        """Agentic native_only=True keeps clean table pages native."""
+        pdf = self._real_pdf(tmp_path, 2)
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            native_only=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            2, born_digital_pages={1, 2}, table_pages={2}
+        )
+        eng = _mock_engine_named("gemini", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        assert result.cost == pytest.approx(0.0)
+        eng.process_pages.assert_not_called()
 
     def test_native_only_agentic_still_ocrs_scans(self, tmp_path) -> None:
         """Agentic path: native_only=True still routes scans through the OCR ladder."""

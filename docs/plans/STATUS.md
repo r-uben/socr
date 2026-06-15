@@ -50,6 +50,13 @@ The durable planning format is:
 | GH-35 | `842ab26` | Rescue sparse/full-page-figure born-digital pages from the word-count gate. |
 | GH-35-FU | `2409192` | Raster-coverage gate for image-dominant clean-short-text pages. |
 
+## Structured Content Routing (GH-49-routing)
+
+| Ticket | Status | Notes |
+|--------|--------|-------|
+| GH-49-routing | DONE | Born-digital table pages routed through OCR ladder; provenance-masking guard added; 844 tests pass |
+| GH-49A | NEEDS-DESIGN | Deterministic native table verifier — separate scope, no code written yet |
+
 ## Ready Queue
 
 Last non-design implementable ticket:
@@ -73,6 +80,7 @@ Design/research queue:
 
 | Ticket | Agent id/name | Started | Status | Owned files | Notes |
 |--------|---------------|---------|--------|-------------|-------|
+| GH-49-routing | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | orchestrator.py, test_orchestrator.py, STATUS.md, log/2026-06-15_structured-content-routing.md | Provenance-masking fix: native_table_structure_failed set on agentic rejection; 844 tests pass |
 | GH-51 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | config.py, qwen.py, cli.py, test_qwen_engine.py | Resolver added; 791 tests pass |
 | GH-50 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | config.py, cli.py, orchestrator.py, test_orchestrator.py | save/describe split; 801 tests pass |
 | GH-34 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | state.py, audit_log.py, test_silent_content_destruction.py, test_audit_log.py | Empty-repair guard + empty-recovery event guard; 808 tests pass |

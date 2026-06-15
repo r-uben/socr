@@ -30,6 +30,7 @@ class PageState:
     is_born_digital: bool = False
     native_text: str | None = None
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
+    has_tables: bool = False  # page contains table-like structures
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
@@ -40,8 +41,9 @@ class PageState:
         """Whether this page still needs (re)processing.
 
         Born-digital pages with trusted native text never need repair.
-        Born-digital pages with a known native-layer deficiency request
-        enhancement, so they need repair until a passing attempt exists.
+        Born-digital pages with a known native-layer deficiency, or table pages
+        that require structured OCR, need repair until a passing non-native
+        attempt exists.
         If OCR has been attempted and failed, native_text serves as fallback
         (needs_repair returns False to avoid infinite repair loops) — UNLESS
         an audit explicitly rejected the output: a judge rejection or failed
@@ -52,7 +54,7 @@ class PageState:
         so an audit-rejected page runs out of candidates and is skipped.
         """
         if self.is_born_digital and self.native_text:
-            if self.needs_ocr_enhancement:
+            if self.needs_ocr_enhancement or self.native_table_structure_failed:
                 # Prefer enhancement for pages with deficient native text, but
                 # if it has been attempted and none passed, fall back to native.
                 if self.best_output and self.best_output.audit_passed:
@@ -149,6 +151,7 @@ class DocumentState:
         for pa in assessment.pages:
             if pa.page_num in self.pages:
                 self.pages[pa.page_num].is_born_digital = pa.is_born_digital
+                self.pages[pa.page_num].has_tables = pa.has_tables
                 if pa.is_born_digital:
                     self.pages[pa.page_num].native_text = pa.native_text
                     self.pages[pa.page_num].needs_ocr_enhancement = pa.needs_ocr_enhancement

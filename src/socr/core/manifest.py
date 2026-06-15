@@ -262,7 +262,9 @@ def _winning_page_output(
         # as a FALLBACK, not a success: flagged WARNING / audit_passed=False
         # so the manifest and run summary stop stamping silent reversions as
         # passing pages.
-        native_is_fallback = p.needs_ocr_enhancement and bool(p.attempts)
+        native_is_fallback = (p.needs_ocr_enhancement or p.native_table_structure_failed) and bool(
+            p.attempts
+        )
         return PageOutput(
             page_num=page_num,
             text=p.native_text,
