@@ -51,6 +51,17 @@ def common_options(f):
         "--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages"
     )(f)
     f = click.option(
+        "--native-only",
+        is_flag=True,
+        help=(
+            "Trust the native text layer for ALL born-digital pages — never OCR-enhance them, "
+            "even when the layer has known deficiencies (e.g. corrupt-math regions). "
+            "Genuine scans still route to OCR normally. "
+            "Figure extraction can still run without triggering whole-page OCR. "
+            "Incompatible with --no-native-first (that flag wins if both are set)."
+        ),
+    )(f)
+    f = click.option(
         "--recover-corrupt-math",
         is_flag=True,
         help="Keep native prose but image-OCR font-corrupted equations to LaTeX (local VLM)",
@@ -166,6 +177,7 @@ def build_config(
     no_dual_pass_tables: bool = False,
     auto_patch_tables: bool = False,
     no_native_first: bool = False,
+    native_only: bool = False,
     recover_corrupt_math: bool = False,
     math_model: str | None = None,
     timeout: int = 1800,
@@ -213,6 +225,15 @@ def build_config(
         config.auto_patch_tables = True
     if no_native_first:
         config.native_first = False
+    if native_only and no_native_first:
+        # Incoherent combination: --no-native-first forces OCR on all pages,
+        # so --native-only has no effect. Warn and let --no-native-first win.
+        console.print(
+            "[yellow]Warning:[/yellow] --native-only and --no-native-first are incompatible. "
+            "--no-native-first takes precedence (all pages sent to OCR)."
+        )
+    elif native_only:
+        config.native_only = True
     if recover_corrupt_math:
         config.recover_corrupt_math = True
     if math_model is not None:

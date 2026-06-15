@@ -2887,3 +2887,258 @@ class TestAgenticIntegration:
         # (Gemini, $0.0002) rather than served free from native text.
         assert result.cost == pytest.approx(0.0002)
         assert _good_text()[:25] in result.markdown
+
+
+# ---------------------------------------------------------------------------
+# GH-37: --native-only CLI control tests
+# ---------------------------------------------------------------------------
+
+
+class TestNativeOnlyConfig:
+    """GH-37: PipelineConfig default and CLI wiring for native_only."""
+
+    def test_default_is_false(self) -> None:
+        """native_only defaults to False (no behaviour change by default)."""
+        cfg = PipelineConfig()
+        assert cfg.native_only is False
+
+    def test_build_config_native_only_flag(self) -> None:
+        """--native-only sets native_only=True on PipelineConfig."""
+        from socr.cli import build_config
+
+        cfg = build_config(native_only=True)
+        assert cfg.native_only is True
+
+    def test_build_config_default_native_only_false(self) -> None:
+        """Omitting --native-only leaves native_only=False."""
+        from socr.cli import build_config
+
+        cfg = build_config()
+        assert cfg.native_only is False
+
+    def test_incompatible_flags_no_native_first_wins(self, capsys) -> None:
+        """--native-only + --no-native-first: --no-native-first wins, warning emitted."""
+        from socr.cli import build_config
+
+        cfg = build_config(native_only=True, no_native_first=True)
+        # --no-native-first wins: native_first is off, so native_only is irrelevant.
+        assert cfg.native_first is False
+        # native_only is NOT set because --no-native-first makes it incoherent.
+        assert cfg.native_only is False
+
+    def test_native_only_does_not_disable_native_first(self) -> None:
+        """--native-only does not affect native_first; it remains True."""
+        from socr.cli import build_config
+
+        cfg = build_config(native_only=True)
+        assert cfg.native_first is True
+        assert cfg.native_only is True
+
+
+class TestNativeOnlyFingerprint:
+    """GH-37: native_only must invalidate the resume fingerprint."""
+
+    def _fp(self, **kwargs) -> str:
+        cfg = _make_config(**kwargs)
+        return UnifiedPipeline(cfg)._run_fingerprint()
+
+    def test_native_only_changes_fingerprint(self) -> None:
+        """Toggling native_only must produce a different fingerprint."""
+        fp_off = self._fp(native_only=False)
+        fp_on = self._fp(native_only=True)
+        assert fp_off != fp_on, (
+            "fingerprint must differ when native_only changes "
+            "so the resume gate reprocesses the doc under the new policy"
+        )
+
+
+class TestNativeOnlyRouting:
+    """GH-37: native_only routing behaviour in backbone and agentic paths."""
+
+    @staticmethod
+    def _real_pdf(tmp_path, n_pages=2):
+        fitz = pytest.importorskip("fitz")
+        path = tmp_path / "paper.pdf"
+        doc = fitz.open()
+        for i in range(n_pages):
+            page = doc.new_page()
+            # Add enough text so born-digital check passes on the real detector
+            for j in range(12):
+                page.insert_text(
+                    (72, 72 + j * 14),
+                    f"Page {i + 1} sentence {j}: economic analysis of monetary policy.",
+                    fontsize=11,
+                    fontname="helv",
+                )
+        doc.save(str(path))
+        doc.close()
+        return path
+
+    def test_native_only_suppresses_ocr_for_enhancement_pages(self) -> None:
+        """native_only=True routes born-digital enhancement pages as native, not OCR."""
+        config = _make_config(quiet=True, native_first=True, native_only=True, agentic=False)
+        pipeline = UnifiedPipeline(config)
+
+        # Set up state: page 1 born-digital-clean, page 2 born-digital-with-enhancement
+        handle = _make_handle(2)
+        state = DocumentState(handle=handle)
+        state.pages[1].is_born_digital = True
+        state.pages[1].native_text = "Native clean text page 1."
+        state.pages[1].needs_ocr_enhancement = False
+        state.pages[2].is_born_digital = True
+        state.pages[2].native_text = "Native enhancement text page 2."
+        state.pages[2].needs_ocr_enhancement = True  # would normally go to OCR
+
+        # Supply a mock assessment so _backbone_native_first can read corrupt_math_pages.
+        assessment = _make_bd_assessment(2, born_digital_pages={1, 2}, complex_pages={2})
+        pipeline._last_assessment = assessment
+
+        # Capture which pages the engine is called with.
+        ocr_pages_called: list[int] = []
+
+        def fake_run_engine_on_pages(state, page_nums, enhancement_pages, engine_type, phase):
+            ocr_pages_called.extend(page_nums)
+            return [
+                PageOutput(page_num=pn, text=_good_text(), status=PageStatus.SUCCESS, engine="mock")
+                for pn in page_nums
+            ]
+
+        with patch.object(pipeline, "_run_engine_on_pages", side_effect=fake_run_engine_on_pages):
+            with patch.object(
+                pipeline, "_resolve_primary_engine", return_value=EngineType.DEEPSEEK
+            ):
+                pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Under native_only, page 2 (enhancement) stays native — NOT sent to OCR.
+        assert 2 not in ocr_pages_called, (
+            "native_only should suppress OCR enhancement for born-digital pages"
+        )
+        # Page 1 (clean BD) also stays native.
+        assert 1 not in ocr_pages_called
+
+    def test_native_only_false_routes_enhancement_to_ocr(self) -> None:
+        """Default behaviour (native_only=False): BD enhancement pages go to OCR."""
+        config = _make_config(quiet=True, native_first=True, native_only=False, agentic=False)
+        pipeline = UnifiedPipeline(config)
+
+        handle = _make_handle(2)
+        state = DocumentState(handle=handle)
+        state.pages[1].is_born_digital = True
+        state.pages[1].native_text = "Native clean text page 1."
+        state.pages[1].needs_ocr_enhancement = False
+        state.pages[2].is_born_digital = True
+        state.pages[2].native_text = "Native enhancement text page 2."
+        state.pages[2].needs_ocr_enhancement = True
+
+        assessment = _make_bd_assessment(2, born_digital_pages={1, 2}, complex_pages={2})
+        pipeline._last_assessment = assessment
+
+        ocr_pages_called: list[int] = []
+
+        def fake_run_engine_on_pages(state, page_nums, enhancement_pages, engine_type, phase):
+            ocr_pages_called.extend(page_nums)
+            return [
+                PageOutput(page_num=pn, text=_good_text(), status=PageStatus.SUCCESS, engine="mock")
+                for pn in page_nums
+            ]
+
+        with patch.object(pipeline, "_run_engine_on_pages", side_effect=fake_run_engine_on_pages):
+            with patch.object(
+                pipeline, "_resolve_primary_engine", return_value=EngineType.DEEPSEEK
+            ):
+                pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Without native_only, page 2 (enhancement) IS sent to OCR.
+        assert 2 in ocr_pages_called, "without native_only, BD enhancement pages must route to OCR"
+        # Page 1 (clean BD) stays native.
+        assert 1 not in ocr_pages_called
+
+    def test_native_only_does_not_suppress_scans(self) -> None:
+        """native_only=True does NOT suppress OCR for scanned pages."""
+        config = _make_config(quiet=True, native_first=True, native_only=True, agentic=False)
+        pipeline = UnifiedPipeline(config)
+
+        handle = _make_handle(2)
+        state = DocumentState(handle=handle)
+        state.pages[1].is_born_digital = True
+        state.pages[1].native_text = "Native text page 1."
+        state.pages[1].needs_ocr_enhancement = False
+        # Page 2 is a genuine SCAN — no native text layer.
+        state.pages[2].is_born_digital = False
+        state.pages[2].native_text = ""
+        state.pages[2].needs_ocr_enhancement = False
+
+        assessment = _make_bd_assessment(2, born_digital_pages={1}, complex_pages=set())
+        pipeline._last_assessment = assessment
+
+        ocr_pages_called: list[int] = []
+
+        def fake_run_engine_on_pages(state, page_nums, enhancement_pages, engine_type, phase):
+            ocr_pages_called.extend(page_nums)
+            return [
+                PageOutput(page_num=pn, text=_good_text(), status=PageStatus.SUCCESS, engine="mock")
+                for pn in page_nums
+            ]
+
+        with patch.object(pipeline, "_run_engine_on_pages", side_effect=fake_run_engine_on_pages):
+            with patch.object(
+                pipeline, "_resolve_primary_engine", return_value=EngineType.DEEPSEEK
+            ):
+                pipeline._backbone_native_first(state, Path("/tmp/out"))
+
+        # Scan page (2) must still go to OCR even with native_only.
+        assert 2 in ocr_pages_called, "native_only must not suppress OCR for genuine scans"
+        # Born-digital clean page (1) stays native.
+        assert 1 not in ocr_pages_called
+
+    def test_native_only_agentic_suppresses_enhancement(self, tmp_path) -> None:
+        """Agentic path: native_only=True keeps BD enhancement pages native (cost=0)."""
+        pdf = self._real_pdf(tmp_path, 2)
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            native_only=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        # Both pages born-digital; page 2 has needs_ocr_enhancement=True.
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            2, born_digital_pages={1, 2}, complex_pages={2}
+        )
+        eng = _mock_engine_named("gemini", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        # All pages served from native text (cost=0, no OCR calls).
+        assert result.cost == pytest.approx(0.0), (
+            "native_only should keep enhancement pages native — no OCR cost"
+        )
+
+    def test_native_only_agentic_still_ocrs_scans(self, tmp_path) -> None:
+        """Agentic path: native_only=True still routes scans through the OCR ladder."""
+        pdf = self._real_pdf(tmp_path, 2)
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            native_only=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        # Page 1 born-digital, page 2 is a scan.
+        pipeline.bd_detector.detect.return_value = _make_bd_assessment(
+            2, born_digital_pages={1}, complex_pages=set()
+        )
+        eng = _mock_engine_named("gemini", _good_text())
+
+        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+            result = pipeline.process(pdf, tmp_path)
+
+        # Page 2 (scan) must be OCR'd via Gemini ($0.0002).
+        assert result.cost == pytest.approx(0.0002), (
+            "scans must still be OCR'd even under native_only"
+        )

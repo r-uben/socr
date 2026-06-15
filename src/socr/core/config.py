@@ -109,6 +109,20 @@ class PipelineConfig:
     # --- Native-first + tiered routing ---
     native_first: bool = True  # Use native text for born-digital prose
     tiered: bool = True  # Route easy pages to local engine, hard pages to primary
+    # ``native_only`` is the positive counterpart of ``--no-native-first``.
+    # When True, clean born-digital pages (including those with
+    # ``needs_ocr_enhancement``) are NEVER sent to OCR — the native text layer is
+    # trusted as-is. Genuine scans (``is_born_digital=False``) still route to OCR
+    # as normal, and figure extraction can still run without forcing whole-page OCR.
+    #
+    # Policy interaction:
+    #   --native-only   native_first=True, native_only=True   → trust all BD pages
+    #   (default)       native_first=True, native_only=False  → trust clean BD; OCR enhance
+    #   --no-native-first native_first=False, native_only=*   → OCR all pages
+    #
+    # Setting both ``--native-only`` and ``--no-native-first`` is incoherent; the
+    # CLI warns and ``--no-native-first`` wins (everything goes to OCR).
+    native_only: bool = False
 
     # --- Math recovery (font-corrupted equations) ---
     # When a born-digital page's prose is clean but its math is font-map corrupted
@@ -255,6 +269,7 @@ class PipelineConfig:
         # Scalar fields
         scalar_fields = [
             "native_first",
+            "native_only",
             "tiered",
             "recover_corrupt_math",
             "math_model",

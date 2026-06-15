@@ -70,6 +70,7 @@ Design/research queue:
 | GH-34 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | state.py, audit_log.py, test_silent_content_destruction.py, test_audit_log.py | Empty-repair guard + empty-recovery event guard; 808 tests pass |
 | GH-46-D2 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | prompts/table_extract.md | Prompt-only fix: column-lane anchoring bullet added; 39 tests pass; empirical CBO-row VLM validation PENDING (manual) |
 | GH-47A | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | extractor.py, orchestrator.py, test_figure_pass.py, test_orchestrator.py | Cap signal (cap_reached flag + audit event + console warn) + logo filter (3-condition geometry); 815 tests pass |
+| GH-37 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | cli.py, config.py, born_digital.py, orchestrator.py, test_orchestrator.py | --native-only flag + PipelineConfig.native_only + fingerprint + routing in backbone+agentic; 828 tests pass |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 

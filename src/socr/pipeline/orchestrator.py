@@ -254,6 +254,7 @@ class UnifiedPipeline:
             # --- rendering / chunking (change the bytes fed to the engine) ---
             "render_dpi": cfg.render_dpi,
             "native_first": cfg.native_first,
+            "native_only": cfg.native_only,
             "tiered": cfg.tiered,
             "chunk_threshold": cfg.chunk_threshold,
             "chunk_size": cfg.chunk_size,
@@ -668,7 +669,15 @@ class UnifiedPipeline:
             elif ps.is_born_digital and not ps.needs_ocr_enhancement and ps.native_text:
                 prose_pages.append(page_num)
             elif ps.is_born_digital and ps.needs_ocr_enhancement:
-                enhancement_pages.append(page_num)
+                if self.config.native_only and ps.native_text:
+                    # native-only policy: suppress OCR enhancement for born-digital
+                    # pages even when the classifier flagged a deficiency (e.g.
+                    # corrupt-math regions). The native text layer is trusted as-is.
+                    # Scans (is_born_digital=False) are NOT affected and still route
+                    # to OCR below via the scanned_pages list.
+                    prose_pages.append(page_num)
+                else:
+                    enhancement_pages.append(page_num)
             else:
                 scanned_pages.append(page_num)
 
@@ -1020,14 +1029,18 @@ class UnifiedPipeline:
         # Tier 1: born-digital trusted native text (free, no OCR).
         # Skipped when --no-native-first: the user wants OCR even here, so
         # every page goes through the cost ladder.
+        # When --native-only: born-digital pages with needs_ocr_enhancement are
+        # also accepted as native (suppresses OCR enhancement for all BD pages).
+        # Scans (is_born_digital=False) are always sent to OCR regardless.
         ocr_pages: list[int] = []
         for page_num, ps in sorted(state.pages.items()):
-            if (
+            is_trusted_native = (
                 self.config.native_first
                 and ps.is_born_digital
-                and not ps.needs_ocr_enhancement
                 and ps.native_text
-            ):
+                and (not ps.needs_ocr_enhancement or self.config.native_only)
+            )
+            if is_trusted_native:
                 native = PageOutput(
                     page_num=page_num,
                     text=ps.native_text,

@@ -384,7 +384,7 @@ identity, metric summaries, and price assumptions.
 ## GH-37 - Add native-only or enhancement-threshold CLI control
 
 GitHub: https://github.com/r-uben/socr/issues/37
-Status: READY
+Status: DONE
 Priority: P1
 Suggested agent: `socr-implementer`
 Depends on: none, but coordinate with GH-35

@@ -506,10 +506,10 @@ class BornDigitalDetector:
         or bullet lists.
         """
         lines = page.get_text("text").splitlines()
-        nonempty = [l.strip() for l in lines if l.strip()]
+        nonempty = [ln.strip() for ln in lines if ln.strip()]
         if not nonempty:
             return False
-        single_token = sum(1 for l in nonempty if len(l.split()) == 1)
+        single_token = sum(1 for ln in nonempty if len(ln.split()) == 1)
         return single_token >= 15 and single_token / len(nonempty) > 0.50
 
     @staticmethod
