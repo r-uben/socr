@@ -13,6 +13,7 @@ mirroring ``OllamaVisionJudge``.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import logging
 import tempfile
 from dataclasses import dataclass
@@ -34,6 +35,54 @@ DEFAULT_CROP_DPI = 400
 # Padding (PDF points) around a located bbox so a rule or edge digit is never
 # clipped by an off-by-a-pixel boundary.
 _CROP_PADDING_PT = 6.0
+
+# Wall-clock deadline (seconds) applied per-crop in addition to the httpx I/O
+# timeout. Crops are small (fraction of a page), so a crop reread at
+# qwen3-vl:30b-a3b-instruct should complete well under 120 s. The ThreadPoolExecutor
+# guard (mirroring agentic.py route_page) guarantees the call cannot hold the
+# pipeline hostage even when the httpx read-timeout does not fire (e.g. a wedged
+# Ollama socket that never closes the response stream).
+#
+# Residual: closing the httpx client does NOT abort Ollama server-side generation
+# (stream:false). The GPU continues until the model finishes, so strict-local mode
+# stays serial even after a crop is abandoned. Ollama-side cancellation is out of
+# scope; callers that need hard GPU preemption must restart the Ollama process.
+#
+# Basis: the httpx OllamaTableReader.timeout default is 120 s; we give the
+# ThreadPoolExecutor a headroom multiplier of 1.5 so the I/O timeout can fire
+# first in normal wedge scenarios. Callers may pass a different deadline.
+_CROP_WALL_CLOCK_MULTIPLIER = 1.5
+# Minimum deadline, regardless of multiplier outcome, to avoid rounding to 0.
+_CROP_DEADLINE_FLOOR_S = 30.0
+
+
+def crop_wall_clock_deadline(reader_timeout_s: float) -> float:
+    """Return the per-crop ThreadPoolExecutor wall-clock deadline in seconds.
+
+    Derived from the reader's httpx timeout: give the OS I/O timeout a chance to
+    fire first (multiplier > 1), but never less than the floor. The result is not
+    a magic constant — it tracks the configured reader timeout so both guards
+    scale together when models or hardware change.
+    """
+    return max(_CROP_DEADLINE_FLOOR_S, reader_timeout_s * _CROP_WALL_CLOCK_MULTIPLIER)
+
+
+def probe_ollama_idle(host: str = "http://localhost:11434", timeout: float = 5.0) -> bool:
+    """Return True if the Ollama HTTP server is responding (idle/ready).
+
+    Used as a cascade guard after a crop timeout: if the backend is unreachable,
+    the pipeline should not fire additional VLM calls into the wedged GPU.
+
+    This is a lightweight /api/tags ping — it does NOT check whether a generation
+    is still running server-side (Ollama does not expose that). It only tells us
+    whether the HTTP layer is healthy.
+    """
+    try:
+        resp = httpx.get(f"{host.rstrip('/')}/api/tags", timeout=timeout)
+        resp.raise_for_status()
+        return True
+    except (httpx.HTTPError, OSError):
+        return False
 
 
 def load_table_prompt() -> str:
@@ -93,14 +142,41 @@ class TableCropExtractor:
         self._reader = reader
         self._crop_dpi = crop_dpi
 
-    def extract(self, pdf_path: Path, page_num: int, boxes: list[TableBox]) -> list[CropTable]:
+    def extract(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        boxes: list[TableBox],
+        *,
+        deadline: float | None = None,
+        cascade_probe: bool = True,
+    ) -> list[CropTable]:
         """Crop each box on ``page_num`` (1-indexed) and read it. Never raises.
 
-        A failed crop/read drops that table (returns no entry for it) rather than
-        aborting the page — the reconciler then sees a count mismatch and flags
-        rather than patches, which is the safe outcome.
+        Each VLM call is wrapped in a ThreadPoolExecutor wall-clock guard (mirroring
+        agentic.py ``route_page``). On ``TimeoutError`` the future is abandoned and a
+        ``CropTimeout`` sentinel is injected into the output list so callers can
+        record an audit event and apply the cascade guard without re-running
+        detection. ``deadline`` defaults to ``crop_wall_clock_deadline(reader.timeout)``
+        when the reader exposes a ``timeout`` attribute; otherwise 180 s.
+
+        cascade_probe — when True (default), after any crop timeout this method
+        pings the Ollama backend; if it is unreachable, all remaining crops are
+        skipped and ``_backend_degraded`` is set on self. A future PP-2 document-
+        level halt can test this attribute to abort the whole document.
+
+        A failed crop/read (non-timeout) drops that table (returns no entry for it)
+        rather than aborting the page — the reconciler then sees a count mismatch
+        and flags rather than patches, which is the safe outcome.
         """
         import fitz
+
+        # Resolve the per-crop wall-clock deadline.
+        if deadline is None:
+            reader_timeout = getattr(self._reader, "timeout", None)
+            deadline = (
+                crop_wall_clock_deadline(reader_timeout) if reader_timeout is not None else 180.0
+            )
 
         out: list[CropTable] = []
         try:
@@ -112,21 +188,88 @@ class TableCropExtractor:
             page = doc[page_num - 1]
             page_rect = page.rect
             for box in boxes:
+                if getattr(self, "_backend_degraded", False):
+                    # Cascade guard: a prior timeout left the GPU in an unknown
+                    # state — don't fire more VLM calls into the wedged backend.
+                    logger.warning(
+                        "dual-pass: backend degraded; skipping remaining crops on p%d",
+                        page_num,
+                    )
+                    break
                 img_path = self._render_crop(page, box, page_rect)
                 if img_path is None:
                     continue
                 try:
-                    md = self._reader.read(img_path)
+                    md = self._read_with_deadline(img_path, deadline, page_num)
+                except _CropTimeoutError:
+                    # Timeout: emit a sentinel so the orchestrator can log an audit
+                    # event and apply the cascade guard.
+                    out.append(
+                        CropTable(
+                            markdown="",
+                            source=box.source,
+                            bbox=box.bbox,
+                        )
+                    )
+                    out[-1]._timed_out = True  # type: ignore[attr-defined]
+                    # Mark backend degraded UNCONDITIONALLY after any crop timeout.
+                    # /api/tags may answer while /api/generate is still running on
+                    # the GPU, so using the probe as the degradation condition is
+                    # unsound. We degrade first, then probe only to enrich the log.
+                    self._backend_degraded = True
+                    if cascade_probe:
+                        host = getattr(self._reader, "host", "http://localhost:11434")
+                        idle = probe_ollama_idle(host)
+                        logger.warning(
+                            "dual-pass: crop timeout on p%d — backend marked degraded "
+                            "(probe idle=%s)",
+                            page_num,
+                            idle,
+                        )
+                    img_path.unlink(missing_ok=True)
+                    continue
                 except Exception as exc:
                     logger.warning("dual-pass: crop read failed p%d (%s)", page_num, exc)
-                    continue
-                finally:
                     img_path.unlink(missing_ok=True)
+                    continue
+                img_path.unlink(missing_ok=True)
                 if md.strip():
                     out.append(CropTable(markdown=md, source=box.source, bbox=box.bbox))
         finally:
             doc.close()
         return out
+
+    def _read_with_deadline(self, img_path: Path, deadline: float, page_num: int) -> str:
+        """Submit ``reader.read`` to a single-worker executor; raise ``_CropTimeoutError``
+        if the wall-clock deadline expires.
+
+        Mirrors the ``ThreadPoolExecutor`` pattern in ``agentic.py route_page``
+        (~lines 213-247): abandon the future with ``wait=False`` so the pipeline
+        is not blocked by a stalled thread. The daemon thread is cleaned up when
+        it eventually unblocks or the process exits.
+        """
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = ex.submit(self._reader.read, img_path)
+        try:
+            return future.result(timeout=deadline)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            logger.warning(
+                "dual-pass: crop VLM call timed out after %.1f s on p%d — releasing",
+                deadline,
+                page_num,
+            )
+            raise _CropTimeoutError(deadline, page_num)
+        finally:
+            # wait=False: release the executor without blocking. On the success
+            # path this reclaims the idle worker immediately; on timeout the
+            # stalled thread (blocked on httpx response) is NOT reaped — it keeps
+            # running until it unblocks. ThreadPoolExecutor workers are NOT daemon
+            # threads; they keep the process alive if it tries to exit while a
+            # worker is blocked. In practice the orchestrator is long-lived and the
+            # thread unblocks once Ollama finishes generating (or the process exits
+            # naturally). This is the accepted trade-off in the agentic.py pattern.
+            ex.shutdown(wait=False)
 
     def _render_crop(self, page, box: TableBox, page_rect) -> Path | None:
         import fitz
@@ -157,6 +300,15 @@ class TableCropExtractor:
             path.unlink(missing_ok=True)
             return None
         return path
+
+
+class _CropTimeoutError(Exception):
+    """Internal sentinel: a single crop VLM call exceeded its wall-clock deadline."""
+
+    def __init__(self, deadline: float, page_num: int) -> None:
+        super().__init__(f"crop reread timed out after {deadline:.1f}s on p{page_num}")
+        self.deadline = deadline
+        self.page_num = page_num
 
 
 def _clean_markdown(text: str) -> str:
