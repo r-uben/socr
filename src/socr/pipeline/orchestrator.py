@@ -285,6 +285,11 @@ class UnifiedPipeline:
             # Changing it changes the audit log and crop artefacts, so it must
             # invalidate the cache.
             "detect_equations": cfg.detect_equations,
+            # --- GH-36b: clean-equation → LaTeX via local VLM + 1A gate ---
+            # ``recover_clean_equations`` enables the engine call + pylatexenc
+            # 1A gate + 1C sidecar attachment.  Changing it changes the .md
+            # content (sidecar blocks appear/disappear) so it invalidates cache.
+            "recover_clean_equations": cfg.recover_clean_equations,
             "figures_engine": cfg.figures_engine.value,
             "figures_max_total": cfg.figures_max_total,
             "figures_max_per_page": cfg.figures_max_per_page,
@@ -827,6 +832,14 @@ class UnifiedPipeline:
             eq_prose_pages = [p for p in prose_pages if p in clean_eq_pages]
             if eq_prose_pages:
                 self._detect_and_crop_equations(state, eq_prose_pages, output_dir)
+
+        # GH-36b: Clean-equation → LaTeX via local VLM + 1A structural gate + 1C sidecar.
+        # Runs AFTER GH-36a detection (so crop paths are in state.events) and BEFORE
+        # state.apply_result (so we can append sidecar blocks to prose page_outputs).
+        # Gated by config.recover_clean_equations (default False).
+        # Requires detect_equations to have run (no detected regions → no-op).
+        if self.config.recover_clean_equations and self.config.detect_equations:
+            self._attach_equation_latex_sidecars(state, page_outputs)
 
         # Tier 2: Local engine for easy pages
         escalated_pages: list[int] = []
@@ -2880,6 +2893,134 @@ class UnifiedPipeline:
             console.print(
                 f"  [dim]GH-36a: {total_regions} equation region(s) detected "
                 f"and cropped to {equations_dir}[/dim]"
+            )
+
+    def _attach_equation_latex_sidecars(
+        self,
+        state: DocumentState,
+        page_outputs: list,
+    ) -> None:
+        """GH-36b: read equation crop PNGs → 1A-validated LaTeX → 1C sidecar.
+
+        For each page that had display-equation regions detected by GH-36a, this
+        method:
+          1. Reads the crop PNG with the local VLM (``qwen3-vl:30b-a3b-instruct``
+             via ``equation_latex.latex_for_crop``; mock-testable via the ``ocr``
+             injectable inside ``process_equation_region``).
+          2. Validates the VLM output with ``validate_latex.validate_latex_structure``
+             (pylatexenc, offline, deterministic — the 1A gate).
+          3. Appends a 1C non-destructive sidecar block to the page's
+             ``PageOutput.text``:  the crop PNG is ALWAYS inlined; validated LaTeX
+             is attached adjacently when 1A passes; native text is kept on failure.
+             Neither the crop nor the native text is ever silently replaced.
+          4. Records ``equation_latex_accepted`` / ``equation_latex_rejected_kept_crop``
+             audit events with raw LaTeX + 1A result + attachment decision + model id.
+
+        Hard invariants (per consilium 20260615T210537Z-6621):
+          - Bad/hallucinated/unvalidated LaTeX NEVER silently replaces a faithful
+            crop or native text.
+          - The crop PNG is always the visual ground truth — always inlined.
+          - 1B (full render / image-compare) is NOT performed here.
+          - This path stays default-off (config.recover_clean_equations = False).
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.math.equation_latex import process_equation_region
+        from socr.math.recover import DEFAULT_MODEL
+
+        # Collect equation_region_detected events grouped by page.
+        regions_by_page: dict[int, list[dict]] = {}
+        for event in state.events:
+            if event.kind == "equation_region_detected":
+                regions_by_page.setdefault(event.page_num, []).append(event.data)
+
+        if not regions_by_page:
+            return  # GH-36a found nothing (or didn't run)
+
+        # Build a fast lookup from page_num to the PageOutput entry.
+        output_by_page: dict[int, object] = {po.page_num: po for po in page_outputs}
+
+        # GH-36b: use the dedicated clean-equation model field (defaults to
+        # qwen3-vl:30b-a3b-instruct — the validated local instruct VLM).
+        # Do NOT fall back to math_model here: that field defaults to
+        # qwen3.5:cloud for the corrupt-font path and would route every
+        # default-config clean-equation run to a cloud endpoint, violating
+        # the consilium local-first mandate (20260615T210537Z-6621).
+        model = self.config.clean_equation_model or DEFAULT_MODEL
+        accepted_total = 0
+        rejected_total = 0
+
+        for page_num, region_data_list in sorted(regions_by_page.items()):
+            po = output_by_page.get(page_num)
+            if po is None:
+                # Page not in prose_pages (shouldn't happen, but be defensive).
+                logger.warning(
+                    "GH-36b: page %d has detected equations but no PageOutput; skipping",
+                    page_num,
+                )
+                continue
+
+            native_text = state.pages[page_num].native_text or ""
+
+            for region_index, rdata in enumerate(region_data_list):
+                crop_path = rdata.get("crop_path")
+
+                result = process_equation_region(
+                    region_index=region_index,
+                    page_num=page_num,
+                    crop_path=crop_path,
+                    native_text=native_text,
+                    model=model,
+                    host=self.config.math_model_host
+                    if hasattr(self.config, "math_model_host")
+                    else "http://localhost:11434",
+                )
+
+                # 1C: append sidecar block to page text (never replace).
+                if result.sidecar_block:
+                    if po.text:
+                        po.text = po.text + "\n\n" + result.sidecar_block
+                    else:
+                        po.text = result.sidecar_block
+
+                # Provenance: emit audit event.
+                if result.latex_attached:
+                    accepted_total += 1
+                    kind = "equation_latex_accepted"
+                    detail = (
+                        f"1A-validated LaTeX attached adjacently to crop "
+                        f"(crop={crop_path!r}, model={model!r})"
+                    )
+                else:
+                    rejected_total += 1
+                    kind = "equation_latex_rejected_kept_crop"
+                    detail = (
+                        f"1A validation failed ({result.validation_reason}); "
+                        f"native text kept, crop retained "
+                        f"(crop={crop_path!r}, model={model!r})"
+                    )
+
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=kind,
+                        engine="equation_latex",
+                        detail=detail,
+                        data={
+                            "region_index": result.region_index,
+                            "crop_path": result.crop_path,
+                            "raw_latex": result.raw_latex,
+                            "validation_ok": result.validation_ok,
+                            "validation_reason": result.validation_reason,
+                            "latex_attached": result.latex_attached,
+                            "model_id": result.model_id,
+                        },
+                    )
+                )
+
+        if (accepted_total or rejected_total) and not self.config.quiet:
+            console.print(
+                f"  [dim]GH-36b: {accepted_total} equation(s) → LaTeX attached; "
+                f"{rejected_total} failed 1A gate (native text kept)[/dim]"
             )
 
     def _get_vision_engine(self):

@@ -500,7 +500,7 @@ the issue is specifically about scanned-page classification and corpus-level ove
 ## GH-36 - General clean-equation to LaTeX path
 
 GitHub: https://github.com/r-uben/socr/issues/36
-Status: SPLIT (GH-36a DONE; GH-36b NEEDS-DESIGN → design settled by consilium 20260615T210537Z-6621)
+Status: SPLIT (GH-36a DONE; GH-36b DONE — consilium 20260615T210537Z-6621; branch feat/36b-equation-latex)
 Priority: P1
 Suggested agent: `socr-designer` first
 Depends on: corrupt-math recovery already merged

@@ -93,6 +93,7 @@ Design/research queue:
 | GH-47B | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | _figure_prompt.py (new), gemini_api.py, vllm.py, test_gemini_api.py | Anti-fabrication prompt extracted to shared module; all 3 engine paths (Gemini/Ollama/vLLM-HPC) use hardened prompt + wrap_caption; 867 tests pass; empirical VLM validation PENDING (manual) |
 | GH-47C | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | extractor.py, result.py, orchestrator.py, test_figure_pass.py, test_orchestrator.py | Option C log-only: bbox persisted on ExtractedFigure+FigureInfo; recoverable-label AuditEvent(kind="figure_recoverable_labels") for described figures; 878 tests pass |
 | GH-36a | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | math/detect_equations.py (new), math/recover.py, core/config.py, cli.py, pipeline/orchestrator.py, tests/test_equation_detection.py | Model-free equation region detector + crop-PNG + provenance + detect_equations flag + fingerprint + throughput harness + :8b defect fix; 855 tests pass |
+| GH-36b | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | math/equation_latex.py (new), math/validate_latex.py (new), pipeline/orchestrator.py, core/config.py, cli.py, pyproject.toml, tests/test_equation_latex.py (new) | VLM engine + pylatexenc 1A gate + 1C non-destructive sidecar + provenance events + recover_clean_equations flag (default off); 886 tests pass |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 

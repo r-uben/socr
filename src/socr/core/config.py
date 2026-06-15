@@ -143,6 +143,29 @@ class PipelineConfig:
     # must land before any replacement/splicing occurs.
     detect_equations: bool = False
 
+    # --- GH-36b: Clean-equation → LaTeX via local VLM + 1A structural gate ---
+    # Reads each detected equation crop (from detect_equations above) with the
+    # local qwen3-vl:30b-a3b-instruct VLM, validates the output structurally
+    # with pylatexenc (1A gate, offline, deterministic), and attaches
+    # 1A-validated LaTeX ADJACENTLY to the inlined crop PNG (1C non-destructive
+    # sidecar policy).  Bad/hallucinated LaTeX never replaces native text or the
+    # crop — the crop is always retained as the visual ground truth.
+    #
+    # Default-OFF: the default-on decision awaits real-corpus throughput
+    # measurement (per consilium 20260615T210537Z-6621 and GH-36b AC).
+    # Requires detect_equations=True to have any effect (no detected regions,
+    # no engine calls).
+    recover_clean_equations: bool = False
+    # Model for the clean-equation crop→LaTeX engine call (GH-36b only).
+    # MUST default to the validated local instruct VLM — NEVER to a cloud
+    # model — per consilium 20260615T210537Z-6621 (local-first mandate).
+    # Kept separate from ``math_model`` (corrupt-font path) which defaults to
+    # qwen3.5:cloud for historical reasons and operator convenience there.
+    # Override with --clean-equation-model for a different local model or an
+    # explicit cloud opt-in.  Never use ":8b" (wrong model tier) or ":30b"
+    # (thinking/non-instruct, runs away on dense regions).
+    clean_equation_model: str = "qwen3-vl:30b-a3b-instruct"
+
     # --- Processing ---
     # ``Path("output")`` is the LEGACY SENTINEL meaning "unset". The canon
     # default output root is ``<input-parent>/ocr/`` (resolved per-input via the
@@ -283,6 +306,8 @@ class PipelineConfig:
             "recover_corrupt_math",
             "math_model",
             "detect_equations",
+            "recover_clean_equations",
+            "clean_equation_model",
             "timeout",
             "max_retries",
             "truncation_retries",

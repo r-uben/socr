@@ -76,10 +76,32 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
+        "--recover-clean-equations",
+        is_flag=True,
+        help=(
+            "GH-36b: read detected equation crops with the local VLM, validate with pylatexenc "
+            "(1A structural gate), and attach 1A-validated LaTeX adjacently to the inlined crop "
+            "(1C non-destructive sidecar). Requires --detect-equations. "
+            "Bad/hallucinated LaTeX never replaces native text or the crop. "
+            "Default off — enable only after throughput is measured on a real corpus "
+            "(per consilium 20260615T210537Z-6621)."
+        ),
+    )(f)
+    f = click.option(
+        "--clean-equation-model",
+        default=None,
+        help=(
+            "GH-36b: local Ollama vision model for clean-equation crop → LaTeX "
+            "(default: qwen3-vl:30b-a3b-instruct — the validated local instruct VLM). "
+            "Never use :8b or the non-instruct :30b. "
+            "Cloud opt-in: pass e.g. qwen3.5:cloud explicitly."
+        ),
+    )(f)
+    f = click.option(
         "--math-model",
         default=None,
         help=(
-            "Local Ollama vision model for equation -> LaTeX recovery "
+            "Local Ollama vision model for corrupt-font equation -> LaTeX recovery "
             "(default: qwen3.5:cloud; use qwen3-vl:30b-a3b-instruct for offline). "
             "Note: this is a math-only path, NOT the OCR qwen tier."
         ),
@@ -189,6 +211,8 @@ def build_config(
     native_only: bool = False,
     recover_corrupt_math: bool = False,
     detect_equations: bool = False,
+    recover_clean_equations: bool = False,
+    clean_equation_model: str | None = None,
     math_model: str | None = None,
     timeout: int = 1800,
     dpi: int | None = None,
@@ -248,6 +272,10 @@ def build_config(
         config.recover_corrupt_math = True
     if detect_equations:
         config.detect_equations = True
+    if recover_clean_equations:
+        config.recover_clean_equations = True
+    if clean_equation_model is not None:
+        config.clean_equation_model = clean_equation_model
     if math_model is not None:
         config.math_model = math_model
 
