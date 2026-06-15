@@ -7,7 +7,13 @@ GitHub source: open issues #34, #35, #36, #37, #39, #46, #47, #49, #50, #51
 
 ## Stage
 
-Planning complete in this branch. No implementation subagents have been spawned yet.
+Implementation wave complete on PR #52. Eight tickets have shipped on
+`feat/001-issue-plans` and were accepted after implementer/reviewer passes:
+GH-51, GH-50, GH-34, GH-46-D2, GH-47A, GH-37, GH-35, and GH-35-FU.
+
+Latest pushed head: `2409192` (`fix(35): GH-35-FU gate clean-short-text by raster coverage`).
+CI is green on GitHub: `test (3.11)` and `typecheck` passed. Local full-suite result reported by
+the ticket workflow: 837 tests passing, ruff clean.
 
 The durable planning format is:
 
@@ -24,31 +30,33 @@ The durable planning format is:
 | #50 | Open, actionable P0. Split deterministic PNG extraction from VLM captions. | GH-50 |
 | #49 | ADR/docs mostly done on main; implementation still needed for native table verifier. | GH-49A |
 | #47 | Investigation done; follow-ups are concrete figure extraction/caption/verification tickets. | GH-47A, GH-47B, GH-47C |
-| #46 | Main #46 implementation mostly merged; remaining repo-level item is sparse-row lane drift. | GH-46-D2, GH-46-E1 |
+| #46 | Main #46 implementation mostly merged; sparse-row lane drift has a prompt-only fix, with manual CBO-row VLM validation still pending. | GH-46-D2, GH-46-E1 |
 | #39 | Stage 1 landed; Stage 2 human GT and Stage 3 calibration remain. | GH-39A, GH-39B |
-| #37 | Still actionable. Needs user-facing native-only/enhancement policy control. | GH-37 |
+| #37 | Done in PR #52. User-facing `--native-only` / enhancement policy control landed. | GH-37 |
 | #36 | Partially addressed by corrupt-math recovery; clean equation-to-LaTeX route remains. | GH-36 |
-| #35 | Still needs scanned-classifier validation for sparse/full-page-figure pages. | GH-35 |
-| #34 | Partially fixed by #38; remaining scope is recovered-to-empty guard. | GH-34 |
+| #35 | Done in PR #52 plus GH-35-FU. Sparse/figure pages rescued, then image-dominant short-text pages gated by raster coverage. | GH-35, GH-35-FU |
+| #34 | Done in PR #52. Empty repair output is no longer promoted or logged as recovered. | GH-34 |
+
+## Completed in PR #52
+
+| Ticket | Commit | Notes |
+|--------|--------|-------|
+| GH-51 | `88b6cc8` | Unambiguous qwen backend/model resolution. |
+| GH-50 | `67edaca` | Split `--save-figures` from opt-in `--describe-figures`. |
+| GH-34 | `2c486cf` | Empty repair output cannot become `best_output` or `recovered_by`. |
+| GH-46-D2 | `2d3dadb` | Prompt-only sparse-row header-lane anchoring; manual VLM validation pending. |
+| GH-47A | `b20521c` | Figure cap signal and title-page logo/letterhead filter. |
+| GH-37 | `779f512` | `--native-only` policy control and fingerprints. |
+| GH-35 | `842ab26` | Rescue sparse/full-page-figure born-digital pages from the word-count gate. |
+| GH-35-FU | `2409192` | Raster-coverage gate for image-dominant clean-short-text pages. |
 
 ## Ready Queue
 
-Recommended first wave, safe to run in parallel because write sets are mostly disjoint:
+Last non-design implementable ticket:
 
 | Ticket | Agent | Ownership | Notes |
 |--------|-------|-----------|-------|
-| GH-51 | `socr-implementer` | qwen config/CLI/engine/tests | P0, fixes silent routing confusion. |
-| GH-50 | `socr-implementer` | figure flags/config/orchestrator/tests | P0, separates safe artifacts from captions. |
-| GH-34 | `socr-implementer` | repair promotion/audit/tests | P0, prevents misleading recovery records. |
-
-Second wave:
-
-| Ticket | Agent | Ownership | Notes |
-|--------|-------|-----------|-------|
-| GH-46-D2 | `socr-implementer` | table prompt/tests | DONE (prompt-only fix). Empirical CBO-row VLM validation pending (manual). |
-| GH-47A | `socr-implementer` | figure extractor/tests | Cap visibility and logo false-positive handling. |
-| GH-37 | `socr-implementer` | CLI/config/born-digital/tests | Coordinate with GH-35 to avoid competing policy changes. |
-| GH-35 | `socr-implementer` | born-digital classifier/tests | Characterize before changing broad classification logic. |
+| GH-47B | `socr-implementer` | figure caption prompt/tests | Anti-fabrication prompt and warning; unblocked by GH-50. |
 
 Design/research queue:
 
@@ -122,7 +130,8 @@ Prompt each agent with exactly one ticket section from `docs/plans/TICKETS.md`, 
 
 ## Next Action
 
-Start with the first wave (GH-51, GH-50, GH-34) — disjoint write sets, safe in parallel. GH-51 and
-GH-50 are mechanical (skip the design gate); GH-34 is a correctness/promotion fix where a root-cause
-`/consilium` pass before implementing is worthwhile. Record each dispatched agent in **Active
-Agents** above.
+Merge PR #52 after this bookkeeping update lands. Next PR candidates:
+
+- GH-47B as the last ready implementation ticket.
+- GH-49A, GH-36, and GH-47C as a design-gated batch.
+- GH-39A/B only after human-verified benchmark ground truth exists.
