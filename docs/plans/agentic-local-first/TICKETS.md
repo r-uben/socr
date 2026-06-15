@@ -1,4 +1,9 @@
-# TICKETS — agentic local-first routing (#46 phase 2)
+# TICKETS — agentic local-first routing (#46 phase 2)  · FROZEN — historical
+
+> **FROZEN (2026-06-15).** Live ownership moved to `docs/plans/TICKETS.md`. The only open items,
+> **D2** (sparse-row lane drift) and **E1** (preflight skill), are tracked there as **GH-46-D2**
+> and **GH-46-E1** — edit those, not this file. Everything below is kept as the historical #46
+> record (what shipped, field notes, validation evidence).
 
 Status keys: `TODO` · `WIP` · `DONE` · `BLOCKED`. `depends-on` gates dispatch.
 Parallelizable = no shared files / no dep. Each ticket = one `socr-implementer` agent,
