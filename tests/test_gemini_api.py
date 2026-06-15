@@ -9,16 +9,18 @@ import io
 from unittest.mock import MagicMock, patch
 
 import httpx
-import pytest
 from PIL import Image
 
 from socr.engines.gemini_api import (
+    _CAPTION_MARKER,
     GeminiAPIConfig,
     GeminiAPIEngine,
     LocalFirstFigureEngine,
     OllamaFigureEngine,
+    _build_figure_prompt,
     _extract_text,
     _image_to_base64,
+    _wrap_caption,
 )
 
 
@@ -199,7 +201,10 @@ class TestOllamaFigureEngineDescribeFigure:
         with patch("httpx.post", return_value=mock_resp):
             result = engine.describe_figure(_make_image(), figure_type="chart")
 
-        assert result.description == "This bar chart shows quarterly revenue growth."
+        assert (
+            result.description
+            == f"{_CAPTION_MARKER} This bar chart shows quarterly revenue growth."
+        )
         assert result.engine == "ollama-figure"
         # _detect_figure_type should detect "chart" from the description
         assert result.figure_type == "chart"
@@ -214,7 +219,7 @@ class TestOllamaFigureEngineDescribeFigure:
         with patch("httpx.post", return_value=mock_resp) as mock_post:
             result = engine.describe_figure(img)
         assert result.engine == "ollama-figure"
-        assert result.description == "A red square."
+        assert result.description == f"{_CAPTION_MARKER} A red square."
         # Verify image was sent as base64-encoded JPEG
         call_payload = mock_post.call_args[1]["json"]
         assert len(call_payload["messages"][0]["images"]) == 1
@@ -387,3 +392,321 @@ class TestGetVisionEngineFallback:
                 result = orch._get_vision_engine()
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# GH-47B: anti-fabrication prompt and non-authoritative marker
+# ---------------------------------------------------------------------------
+
+
+class TestBuildFigurePromptAntiFabrication:
+    """GH-47B: _build_figure_prompt must instruct the model to omit unreadable
+    numeric values and relationships rather than guessing them."""
+
+    def test_prompt_contains_omit_instruction(self):
+        """Prompt must explicitly tell the model to omit unreadable values."""
+        prompt = _build_figure_prompt("unknown", "")
+        prompt_lower = prompt.lower()
+        # Must contain the no-guessing instruction
+        assert "omit" in prompt_lower or "do not guess" in prompt_lower or "skip" in prompt_lower, (
+            "Prompt must instruct the model to omit/skip unreadable values"
+        )
+
+    def test_prompt_mentions_numeric_values(self):
+        """Prompt must specifically mention numeric values as off-limits when unreadable."""
+        prompt = _build_figure_prompt("unknown", "")
+        prompt_lower = prompt.lower()
+        assert "numeric" in prompt_lower or "number" in prompt_lower or "value" in prompt_lower, (
+            "Prompt must reference numeric values in the no-guessing instruction"
+        )
+
+    def test_prompt_mentions_axis_ranges(self):
+        """Prompt must specifically warn against guessing axis ranges."""
+        prompt = _build_figure_prompt("unknown", "")
+        prompt_lower = prompt.lower()
+        assert "axis" in prompt_lower or "axes" in prompt_lower or "range" in prompt_lower, (
+            "Prompt must reference axis ranges in the no-guessing instruction"
+        )
+
+    def test_prompt_does_not_instruct_refusal(self):
+        """Prompt must NOT ask the model to refuse describing legible content."""
+        prompt = _build_figure_prompt("unknown", "")
+        prompt_lower = prompt.lower()
+        # The instruction is 'omit unreadable', not 'describe nothing'
+        assert "describe" in prompt_lower or "show" in prompt_lower or "visible" in prompt_lower, (
+            "Prompt must still ask for a description of visibly legible content"
+        )
+
+    def test_figure_type_prefix_included(self):
+        """Known figure type should appear in the prompt."""
+        prompt = _build_figure_prompt("chart", "")
+        assert "chart" in prompt
+
+    def test_context_appended(self):
+        """Context from surrounding text should be appended to the prompt."""
+        prompt = _build_figure_prompt("unknown", "some context here")
+        assert "some context here" in prompt
+
+    def test_context_truncated_to_500_chars(self):
+        """Context should be truncated to 500 characters to avoid token blowup."""
+        long_ctx = "x" * 1000
+        prompt = _build_figure_prompt("unknown", long_ctx)
+        # The long context must be clipped — "x" * 501 must NOT appear
+        assert "x" * 501 not in prompt
+        assert "x" * 500 in prompt
+
+
+class TestWrapCaption:
+    """GH-47B: _wrap_caption adds the non-authoritative marker."""
+
+    def test_non_empty_description_gets_marker(self):
+        result = _wrap_caption("A trend is visible.")
+        assert result.startswith(_CAPTION_MARKER)
+
+    def test_marker_in_wrapped_output(self):
+        result = _wrap_caption("Some description.")
+        assert _CAPTION_MARKER in result
+
+    def test_empty_description_unchanged(self):
+        assert _wrap_caption("") == ""
+
+    def test_idempotent(self):
+        """Calling _wrap_caption twice must not double-wrap."""
+        once = _wrap_caption("Some text.")
+        twice = _wrap_caption(once)
+        assert once == twice
+
+    def test_marker_value_is_non_empty_string(self):
+        assert isinstance(_CAPTION_MARKER, str) and len(_CAPTION_MARKER) > 0
+
+
+class TestGeminiEngineWrapsCaption:
+    """GH-47B: GeminiAPIEngine.describe_figure must emit the non-authoritative marker."""
+
+    def test_successful_description_has_marker(self):
+        engine = _make_engine()
+        engine._initialized = True
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = _gemini_response("A line graph showing upward trend.")
+
+        with patch.object(engine, "_get_client") as mock_client:
+            mock_client.return_value.post.return_value = mock_response
+            result = engine.describe_figure(_make_image())
+
+        assert result.description.startswith(_CAPTION_MARKER), (
+            f"Expected description to start with {_CAPTION_MARKER!r}; got: {result.description!r}"
+        )
+
+    def test_error_response_does_not_get_marker(self):
+        """API error messages should NOT be wrapped with the caption marker."""
+        engine = _make_engine()
+        engine._initialized = True
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+
+        with patch.object(engine, "_get_client") as mock_client:
+            mock_client.return_value.post.return_value = mock_response
+            result = engine.describe_figure(_make_image())
+
+        assert not result.description.startswith(_CAPTION_MARKER), (
+            "Error messages from the API must not be wrapped with the caption marker"
+        )
+
+
+class TestOllamaEngineWrapsCaption:
+    """GH-47B: OllamaFigureEngine.describe_figure must emit the non-authoritative marker."""
+
+    def test_successful_description_has_marker(self):
+        engine = OllamaFigureEngine()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = _ollama_chat_response("Bar chart of monthly sales figures.")
+        with patch("httpx.post", return_value=mock_resp):
+            result = engine.describe_figure(_make_image())
+
+        assert result.description.startswith(_CAPTION_MARKER), (
+            f"Expected description to start with {_CAPTION_MARKER!r}; got: {result.description!r}"
+        )
+
+    def test_error_description_does_not_get_marker(self):
+        """On httpx failure the error string must not carry the caption marker."""
+        engine = OllamaFigureEngine()
+        with patch("httpx.post", side_effect=httpx.ConnectError("refused")):
+            result = engine.describe_figure(_make_image())
+
+        assert not result.description.startswith(_CAPTION_MARKER)
+
+
+# ---------------------------------------------------------------------------
+# GH-47B (reviewer fix): shared _figure_prompt module — single source of truth
+# ---------------------------------------------------------------------------
+
+
+class TestSharedFigurePromptModule:
+    """The prompt and marker must be importable from the canonical shared module."""
+
+    def test_shared_module_build_figure_prompt_importable(self):
+        from socr.engines._figure_prompt import build_figure_prompt
+
+        prompt = build_figure_prompt("unknown", "")
+        assert isinstance(prompt, str) and len(prompt) > 0
+
+    def test_shared_module_wrap_caption_importable(self):
+        from socr.engines._figure_prompt import wrap_caption
+
+        result = wrap_caption("hello")
+        assert "hello" in result
+
+    def test_shared_module_caption_marker_importable(self):
+        from socr.engines._figure_prompt import CAPTION_MARKER
+
+        assert isinstance(CAPTION_MARKER, str) and len(CAPTION_MARKER) > 0
+
+    def test_gemini_api_aliases_point_to_shared_module(self):
+        """_CAPTION_MARKER in gemini_api must equal CAPTION_MARKER in _figure_prompt."""
+        from socr.engines._figure_prompt import CAPTION_MARKER
+        from socr.engines.gemini_api import _CAPTION_MARKER as GEMINI_MARKER  # noqa: N811
+
+        assert GEMINI_MARKER == CAPTION_MARKER
+
+    def test_vllm_uses_same_prompt_text_as_shared_module(self):
+        """VLLMEngine must produce the same prompt as build_figure_prompt."""
+        from socr.engines._figure_prompt import build_figure_prompt
+
+        expected = build_figure_prompt("chart", "some context")
+        # vllm calls _build_figure_prompt which is the shared function
+        from socr.engines import _figure_prompt
+
+        actual = _figure_prompt.build_figure_prompt("chart", "some context")
+        assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# GH-47B (reviewer fix): VLLMEngine prompt + marker
+# ---------------------------------------------------------------------------
+
+
+def _vllm_response(text: str) -> dict:
+    """Build a minimal OpenAI-compatible chat completion response."""
+    return {"choices": [{"message": {"content": text}}]}
+
+
+class TestVLLMEngineFigurePrompt:
+    """GH-47B: VLLMEngine must use the hardened anti-fabrication prompt."""
+
+    def test_vllm_prompt_contains_omit_instruction(self):
+        """The prompt fed to vLLM must tell the model to omit unreadable values."""
+        from socr.engines._figure_prompt import build_figure_prompt
+
+        prompt = build_figure_prompt("unknown", "")
+        assert (
+            "omit" in prompt.lower() or "do not guess" in prompt.lower() or "skip" in prompt.lower()
+        ), "Shared prompt must include an omit/skip instruction"
+
+    def test_vllm_prompt_mentions_axis_ranges(self):
+        from socr.engines._figure_prompt import build_figure_prompt
+
+        prompt = build_figure_prompt("unknown", "")
+        assert "axis" in prompt.lower() or "axes" in prompt.lower() or "range" in prompt.lower()
+
+    def test_vllm_prompt_does_not_say_be_specific_about_numbers(self):
+        """The old fabrication-inducing instruction must be gone from the shared prompt."""
+        from socr.engines._figure_prompt import build_figure_prompt
+
+        prompt = build_figure_prompt("unknown", "")
+        assert "be specific about numbers" not in prompt.lower(), (
+            "Old fabrication-encouraging text must not appear in the hardened prompt"
+        )
+
+
+class TestVLLMEngineWrapsCaption:
+    """GH-47B (reviewer fix): VLLMEngine.describe_figure must emit the marker."""
+
+    def _make_vllm_engine(self):
+        from socr.engines.vllm import VLLMConfig, VLLMEngine
+
+        engine = VLLMEngine(VLLMConfig(base_url="http://localhost:8000/v1"))
+        engine._initialized = True
+        return engine
+
+    def test_successful_description_has_marker(self):
+        """A normal VLM response must be wrapped with the non-authoritative marker."""
+        engine = self._make_vllm_engine()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = _vllm_response(
+            "This is a bar chart displaying quarterly revenue across four regions."
+        )
+
+        with patch.object(engine, "_get_client") as mock_client:
+            mock_client.return_value.post.return_value = mock_response
+            result = engine.describe_figure(_make_image())
+
+        assert result.description.startswith(_CAPTION_MARKER), (
+            f"Expected description to start with {_CAPTION_MARKER!r}; got: {result.description!r}"
+        )
+
+    def test_api_error_does_not_get_marker(self):
+        """HTTP error responses must NOT be wrapped with the caption marker."""
+        engine = self._make_vllm_engine()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+
+        with patch.object(engine, "_get_client") as mock_client:
+            mock_client.return_value.post.return_value = mock_response
+            result = engine.describe_figure(_make_image())
+
+        assert not result.description.startswith(_CAPTION_MARKER), (
+            "API error strings must not carry the caption marker"
+        )
+
+    def test_timeout_error_does_not_get_marker(self):
+        """Timeout error strings must NOT be wrapped with the caption marker."""
+        engine = self._make_vllm_engine()
+
+        with patch.object(engine, "_get_client") as mock_client:
+            mock_client.return_value.post.side_effect = httpx.TimeoutException("timed out")
+            result = engine.describe_figure(_make_image())
+
+        assert not result.description.startswith(_CAPTION_MARKER)
+
+    def test_connection_error_does_not_get_marker(self):
+        """Connection error strings must NOT be wrapped."""
+        engine = self._make_vllm_engine()
+
+        with patch.object(engine, "_get_client") as mock_client:
+            mock_client.return_value.post.side_effect = httpx.ConnectError("refused")
+            result = engine.describe_figure(_make_image())
+
+        assert not result.description.startswith(_CAPTION_MARKER)
+
+    def test_too_short_response_does_not_get_marker(self):
+        """A response shorter than 10 chars must return the fallback string unwrapped."""
+        engine = self._make_vllm_engine()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = _vllm_response("ok")  # < 10 chars
+
+        with patch.object(engine, "_get_client") as mock_client:
+            mock_client.return_value.post.return_value = mock_response
+            result = engine.describe_figure(_make_image())
+
+        assert not result.description.startswith(_CAPTION_MARKER)
+        assert "Unable to generate" in result.description
+
+    def test_unavailable_server_does_not_get_marker(self):
+        """When vLLM is not available, the unavailable string must not be wrapped."""
+        from socr.engines.vllm import VLLMConfig, VLLMEngine
+
+        engine = VLLMEngine(VLLMConfig(base_url="http://localhost:8000/v1"))
+        # _initialized stays False; initialize() will try to connect and fail
+        with patch.object(engine, "initialize", return_value=False):
+            result = engine.describe_figure(_make_image())
+
+        assert not result.description.startswith(_CAPTION_MARKER)

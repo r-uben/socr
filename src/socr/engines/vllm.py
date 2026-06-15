@@ -7,13 +7,18 @@ for figure/chart description. This is a figures-only engine (no OCR).
 import base64
 import io
 import os
-import time
 from dataclasses import dataclass
 
 import httpx
 from PIL import Image
 
 from socr.core.result import FailureMode, FigureInfo, PageOutput
+from socr.engines._figure_prompt import (
+    build_figure_prompt as _build_figure_prompt,
+)
+from socr.engines._figure_prompt import (
+    wrap_caption as _wrap_caption,
+)
 from socr.engines.base import BaseHTTPEngine
 
 
@@ -103,7 +108,6 @@ class VLLMEngine(BaseHTTPEngine):
                 description=f"vLLM server not available at {self.config.base_url}",
             )
 
-        start_time = time.time()
         try:
             buffered = io.BytesIO()
             if image.mode in ("RGBA", "P"):
@@ -111,7 +115,7 @@ class VLLMEngine(BaseHTTPEngine):
             image.save(buffered, format="JPEG", quality=85)
             img_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-            prompt = self._build_figure_prompt(figure_type, context)
+            prompt = _build_figure_prompt(figure_type, context)
             messages = [
                 {
                     "role": "user",
@@ -147,19 +151,24 @@ class VLLMEngine(BaseHTTPEngine):
 
             data = response.json()
             choices = data.get("choices", [])
-            description = (
-                choices[0].get("message", {}).get("content", "").strip() if choices else ""
-            )
-            if not description or len(description) < 10:
-                description = "Unable to generate meaningful description"
+            raw = choices[0].get("message", {}).get("content", "").strip() if choices else ""
+            if not raw or len(raw) < 10:
+                # Too short to be meaningful — return unwrapped fallback string.
+                return FigureInfo(
+                    figure_num=0,
+                    page_num=0,
+                    figure_type=figure_type,
+                    description="Unable to generate meaningful description",
+                    engine=self.name,
+                )
 
-            detected_type = self._detect_figure_type(description, figure_type)
+            detected_type = self._detect_figure_type(raw, figure_type)
 
             return FigureInfo(
                 figure_num=0,
                 page_num=0,
                 figure_type=detected_type,
-                description=description,
+                description=_wrap_caption(raw),
                 engine=self.name,
             )
 
@@ -179,19 +188,6 @@ class VLLMEngine(BaseHTTPEngine):
                 description=f"vLLM error: {type(e).__name__}: {e}",
                 engine=self.name,
             )
-
-    @staticmethod
-    def _build_figure_prompt(figure_type: str, context: str) -> str:
-        base = (
-            "Describe this figure in detail. What does the chart, graph, table, or diagram show? "
-            "Explain the axes, data, key findings, and any notable patterns or trends. "
-            "Be specific about numbers, labels, and relationships shown."
-        )
-        if figure_type and figure_type != "unknown":
-            base = f"This appears to be a {figure_type}. {base}"
-        if context:
-            base += f"\n\nContext from surrounding text: {context[:500]}"
-        return base
 
     @staticmethod
     def _detect_figure_type(description: str, default: str) -> str:
