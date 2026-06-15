@@ -56,7 +56,7 @@ Last non-design implementable ticket:
 
 | Ticket | Agent | Ownership | Notes |
 |--------|-------|-----------|-------|
-| GH-47B | `socr-implementer` | figure caption prompt/tests | Anti-fabrication prompt and warning; unblocked by GH-50. |
+| GH-47B | DONE | figure caption prompt/tests | Anti-fabrication prompt and warning; unblocked by GH-50. |
 
 Design/research queue:
 
@@ -81,6 +81,7 @@ Design/research queue:
 | GH-37 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | cli.py, config.py, born_digital.py, orchestrator.py, test_orchestrator.py | --native-only flag + PipelineConfig.native_only + fingerprint + routing in backbone+agentic; 828 tests pass |
 | GH-35 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | born_digital.py, test_born_digital.py | Word-count gate made quality-aware; sparse/figure pages rescued; 7 new tests; 835 total pass |
 | GH-35-FU | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | born_digital.py, test_born_digital.py | Raster-coverage gate (RASTER_DOMINANCE_RATIO=0.90) added; scan+baked-OCR false-positive fixed; Tr-mode discriminator skipped as fragile; 160 tests pass |
+| GH-47B | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | _figure_prompt.py (new), gemini_api.py, vllm.py, test_gemini_api.py | Anti-fabrication prompt extracted to shared module; all 3 engine paths (Gemini/Ollama/vLLM-HPC) use hardened prompt + wrap_caption; 867 tests pass; empirical VLM validation PENDING (manual) |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 

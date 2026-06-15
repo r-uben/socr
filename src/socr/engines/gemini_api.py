@@ -14,6 +14,15 @@ import httpx
 from PIL import Image
 
 from socr.core.result import FigureInfo
+from socr.engines._figure_prompt import (
+    CAPTION_MARKER as _CAPTION_MARKER,  # noqa: F401  re-exported for tests
+)
+from socr.engines._figure_prompt import (
+    build_figure_prompt as _build_figure_prompt,
+)
+from socr.engines._figure_prompt import (
+    wrap_caption as _wrap_caption,
+)
 
 
 @dataclass
@@ -128,8 +137,10 @@ class GeminiAPIEngine:
                     engine=self.name,
                 )
 
-            description = _extract_text(response.json()) or "Unable to generate description"
-            detected_type = _detect_figure_type(description, figure_type)
+            raw = _extract_text(response.json()) or "Unable to generate description"
+            detected_type = _detect_figure_type(raw, figure_type)
+            # Only wrap genuine model output — not the fallback error string.
+            description = _wrap_caption(raw) if raw != "Unable to generate description" else raw
 
             return FigureInfo(
                 figure_num=0,
@@ -217,14 +228,14 @@ class OllamaFigureEngine:
             }
             resp = httpx.post(f"{self.host}/api/chat", json=payload, timeout=120.0)
             resp.raise_for_status()
-            text = resp.json()["message"]["content"].strip()
+            raw = resp.json()["message"]["content"].strip()
 
-            detected_type = _detect_figure_type(text, figure_type)
+            detected_type = _detect_figure_type(raw, figure_type)
             return FigureInfo(
                 figure_num=0,
                 page_num=0,
                 figure_type=detected_type,
-                description=text,
+                description=_wrap_caption(raw),
                 engine=self.name,
             )
         except Exception as e:
@@ -287,20 +298,6 @@ class LocalFirstFigureEngine:
         self._ollama.close()
         if self._gemini is not None:
             self._gemini.close()
-
-
-def _build_figure_prompt(figure_type: str, context: str) -> str:
-    base = (
-        "Describe this figure in detail. What does the chart, graph, table, "
-        "or diagram show? Explain the axes, data, key findings, and any "
-        "notable patterns or trends. Be specific about numbers, labels, "
-        "and relationships shown."
-    )
-    if figure_type and figure_type != "unknown":
-        base = f"This appears to be a {figure_type}. {base}"
-    if context:
-        base += f"\n\nContext from surrounding text: {context[:500]}"
-    return base
 
 
 def _detect_figure_type(description: str, default: str) -> str:

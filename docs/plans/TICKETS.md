@@ -215,7 +215,7 @@ operator.
 ## GH-47B - Figure caption anti-fabrication prompt and warning
 
 GitHub: https://github.com/r-uben/socr/issues/47
-Status: READY
+Status: DONE
 Priority: P1
 Suggested agent: `socr-implementer`
 Depends on: GH-50 preferred, but can be developed independently
