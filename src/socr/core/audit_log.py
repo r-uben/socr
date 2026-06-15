@@ -125,9 +125,13 @@ def _derive_escalations(state) -> list[AuditEvent]:
         for i, a in enumerate(attempts):
             if a.failure_mode not in _ESCALATION_MODES:
                 continue
-            took_over = attempts[i + 1].engine if i + 1 < len(attempts) else ""
-            if not took_over:
-                continue  # nothing recovered it; not an escalation (just a failure)
+            # GH-34: only count a successor as a real recovery if it produced
+            # usable text.  An empty successor is not a recovery — it should
+            # never generate a misleading recovered_by event.
+            next_attempt = attempts[i + 1] if i + 1 < len(attempts) else None
+            if not next_attempt or not (next_attempt.text and next_attempt.text.strip()):
+                continue  # nothing usable recovered it; not an escalation
+            took_over = next_attempt.engine
             kind = (
                 "recitation_escalation"
                 if a.failure_mode == FailureMode.RECITATION

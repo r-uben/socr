@@ -106,7 +106,7 @@ The current flag couples a safe archival action to a risky interpretive action.
 ## GH-34 - Recovered-to-empty must not count as recovered
 
 GitHub: https://github.com/r-uben/socr/issues/34
-Status: READY
+Status: DONE
 Priority: P0
 Suggested agent: `socr-implementer`
 Depends on: #38 partial fix already merged

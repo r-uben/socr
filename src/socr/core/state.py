@@ -132,8 +132,15 @@ class DocumentState:
                     # demotes in place). Without the second clause, a failed
                     # round-1 repair pinned best_output forever and every
                     # later PASSING repair attempt was silently discarded.
-                    if page_out.audit_passed and (
-                        not page_state.best_output or not page_state.best_output.audit_passed
+                    #
+                    # GH-34: also require non-empty text (same predicate used
+                    # by PageState.best_attempt). An empty-but-audit_passed
+                    # repair must never overwrite or become best_output.
+                    if (
+                        page_out.audit_passed
+                        and page_out.text
+                        and page_out.text.strip()
+                        and (not page_state.best_output or not page_state.best_output.audit_passed)
                     ):
                         page_state.best_output = page_out
 
