@@ -179,7 +179,7 @@ Forecasts validation page. This is a column-lane anchoring problem, not a digit-
 ## GH-47A - Figure extraction safety: logo false positives and silent cap
 
 GitHub: https://github.com/r-uben/socr/issues/47
-Status: READY
+Status: DONE
 Priority: P1
 Suggested agent: `socr-implementer`
 Depends on: none

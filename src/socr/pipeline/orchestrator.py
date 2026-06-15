@@ -37,7 +37,7 @@ from socr.core.result import (
 )
 from socr.core.state import DocumentState
 from socr.engines.registry import get_engine, resolve_auto_engine
-from socr.figures.extractor import FigureExtractor
+from socr.figures.extractor import ExtractionResult, FigureExtractor
 from socr.pipeline.consensus import ConsensusEngine
 from socr.pipeline.repair import RepairRouter
 
@@ -2478,7 +2478,29 @@ class UnifiedPipeline:
                     f"  [dim]Skipping {len(skip_pages)} scanned page(s) "
                     f"(no localizable figures)[/dim]"
                 )
-        extracted = extractor.extract(state.handle.path, skip_pages=skip_pages)
+        extraction: ExtractionResult = extractor.extract(state.handle.path, skip_pages=skip_pages)
+        extracted = extraction.figures
+
+        # Cap-reached: signal in console and durable audit log so silently
+        # dropped later figures are not invisible to the operator.
+        if extraction.cap_reached:
+            cap_msg = (
+                f"Figure extraction cap reached ({self.config.figures_max_total} figures); "
+                f"later figures may have been dropped."
+            )
+            if not self.config.quiet:
+                console.print(f"  [yellow]{cap_msg}[/yellow]")
+            from socr.core.audit_log import AuditEvent
+
+            state.events.append(
+                AuditEvent(
+                    page_num=0,
+                    kind="figure_cap_reached",
+                    engine="",
+                    detail=cap_msg,
+                    data={"figures_max_total": self.config.figures_max_total},
+                )
+            )
 
         if not extracted:
             if not self.config.quiet:

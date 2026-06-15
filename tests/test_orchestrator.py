@@ -19,7 +19,7 @@ from socr.core.result import (
     PageStatus,
 )
 from socr.core.state import DocumentState, PageState
-from socr.figures.extractor import ExtractedFigure
+from socr.figures.extractor import ExtractionResult, ExtractedFigure
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.pipeline.repair import RepairPlan, RepairRouter
 
@@ -906,7 +906,7 @@ class TestFigures:
 
         with patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor:
             mock_extractor = MockExtractor.return_value
-            mock_extractor.extract.return_value = []
+            mock_extractor.extract.return_value = ExtractionResult(figures=[], cap_reached=False)
 
             result = pipeline._phase_assemble(state, tmp_path)
 
@@ -936,7 +936,7 @@ class TestFigures:
 
         with patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor:
             mock_extractor = MockExtractor.return_value
-            mock_extractor.extract.return_value = []
+            mock_extractor.extract.return_value = ExtractionResult(figures=[], cap_reached=False)
 
             pipeline._phase_assemble(state, tmp_path)
 
@@ -1486,7 +1486,9 @@ class TestDescribeAndEmbedFigures:
         result = _make_engine_result(text=_good_text())
 
         with patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor:
-            MockExtractor.return_value.extract.return_value = []
+            MockExtractor.return_value.extract.return_value = ExtractionResult(
+                figures=[], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(state, result, tmp_path, "Some text")
 
         assert out == "Some text"
@@ -1514,7 +1516,9 @@ class TestDescribeAndEmbedFigures:
             patch.dict("os.environ", {}, clear=False),
             patch.object(pipeline, "_get_vision_engine", return_value=None),
         ):
-            MockExtractor.return_value.extract.return_value = [mock_fig]
+            MockExtractor.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(
                 state,
                 result,
@@ -1561,7 +1565,9 @@ class TestDescribeAndEmbedFigures:
             patch("socr.pipeline.orchestrator.FigureExtractor") as MockExtractor,
             patch.object(pipeline, "_get_vision_engine", return_value=mock_engine),
         ):
-            MockExtractor.return_value.extract.return_value = [mock_fig]
+            MockExtractor.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(
                 state,
                 result,
@@ -1575,6 +1581,79 @@ class TestDescribeAndEmbedFigures:
         assert "**Figure 1** (page 1): A bar chart showing quarterly revenue." in out
         assert "![Figure 1]" in out
         mock_engine.close.assert_called_once()
+
+    # GH-47A: cap-reached produces a durable audit event
+    def test_cap_reached_emits_audit_event_and_console_warning(self, tmp_path: Path) -> None:
+        """GH-47A AC1: cap_reached=True must append a figure_cap_reached AuditEvent
+        to state.events (durable audit) AND emit a yellow console warning.
+
+        Uses the normal (non-quiet) path so both side-effects are observable.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        pipeline = self._make_pipeline(quiet=False)  # non-quiet: console warning must fire
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+
+        mock_console = MagicMock()
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch("socr.pipeline.orchestrator.console", mock_console),
+        ):
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[], cap_reached=True
+            )
+            pipeline._describe_and_embed_figures(state, result, tmp_path, "Some text")
+
+        # Durable audit: at least one AuditEvent with kind="figure_cap_reached"
+        cap_events = [
+            e for e in state.events if isinstance(e, AuditEvent) and e.kind == "figure_cap_reached"
+        ]
+        assert cap_events, (
+            "Expected a figure_cap_reached AuditEvent in state.events when "
+            "cap_reached=True, but none was found."
+        )
+        assert cap_events[0].data.get("figures_max_total") is not None
+
+        # Console warning: a yellow warning must have been printed
+        printed_calls = [str(c) for c in mock_console.print.call_args_list]
+        assert any("yellow" in c or "cap" in c.lower() for c in printed_calls), (
+            "Expected a yellow console warning about the figure cap, but none was emitted."
+        )
+
+    def test_cap_reached_quiet_suppresses_console_but_keeps_audit_event(
+        self, tmp_path: Path
+    ) -> None:
+        """GH-47A AC1 (quiet path): AuditEvent is still appended even when quiet=True,
+        but the console.print call is suppressed.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        pipeline = self._make_pipeline(quiet=True)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+
+        mock_console = MagicMock()
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch("socr.pipeline.orchestrator.console", mock_console),
+        ):
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[], cap_reached=True
+            )
+            pipeline._describe_and_embed_figures(state, result, tmp_path, "Some text")
+
+        # Durable audit event must still be present even in quiet mode
+        cap_events = [
+            e for e in state.events if isinstance(e, AuditEvent) and e.kind == "figure_cap_reached"
+        ]
+        assert cap_events, "figure_cap_reached AuditEvent must be appended even when quiet=True."
+
+        # Console warning must be suppressed
+        printed_calls = [str(c) for c in mock_console.print.call_args_list]
+        assert not any("yellow" in c for c in printed_calls), (
+            "Console yellow warning must be suppressed when quiet=True."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1611,7 +1690,9 @@ class TestSaveFiguresNoVLM:
             patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
             patch.object(pipeline, "_get_vision_engine") as mock_get_vision,
         ):
-            mock_extractor_cls.return_value.extract.return_value = [mock_fig]
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
 
         # VLM engine must never have been asked for
@@ -1630,7 +1711,9 @@ class TestSaveFiguresNoVLM:
         mock_fig = _make_mock_figure(tmp_path)
 
         with patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls:
-            mock_extractor_cls.return_value.extract.return_value = [mock_fig]
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(state, result, tmp_path, "Body text")
 
         assert "**Figure 1** (page 1)" in out
@@ -1664,7 +1747,9 @@ class TestDescribeFiguresVLM:
             patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
             patch.object(pipeline, "_get_vision_engine", return_value=mock_engine),
         ):
-            mock_extractor_cls.return_value.extract.return_value = [mock_fig]
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
             out = pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
 
         mock_engine.describe_figure.assert_called_once()
@@ -1681,7 +1766,9 @@ class TestDescribeFiguresVLM:
 
         called = []
         with patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls:
-            mock_extractor_cls.return_value.extract.return_value = [mock_fig]
+            mock_extractor_cls.return_value.extract.return_value = ExtractionResult(
+                figures=[mock_fig], cap_reached=False
+            )
             with patch.object(
                 pipeline,
                 "_get_vision_engine",
