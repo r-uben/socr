@@ -231,7 +231,7 @@ class TestSparseRoutingEndToEnd:
     def test_build_page_judge_wires_sparse_predicate(self) -> None:
         from socr.core.document import DocumentHandle
         from socr.core.state import DocumentState
-        from socr.pipeline.agentic import HeuristicPageJudge
+        from socr.pipeline.agentic import HeuristicPageJudge, NativeTableVerifierJudge
         from socr.pipeline.orchestrator import UnifiedPipeline
 
         pipeline = UnifiedPipeline(
@@ -240,8 +240,13 @@ class TestSparseRoutingEndToEnd:
         with patch.object(DocumentHandle, "__post_init__", lambda self: None):
             handle = DocumentHandle(path=Path("/tmp/fake.pdf"), page_count=1)
         judge = pipeline._build_page_judge(DocumentState(handle=handle))
-        assert isinstance(judge, HeuristicPageJudge)
-        assert judge._sparse_ok == pipeline._sparse_page_ok
+        # _build_page_judge now always wraps the inner judge in NativeTableVerifierJudge
+        # (Consilium decision 20260615T170212Z-0362, Option C two-tier verifier).
+        # The inner judge is a HeuristicPageJudge when no VLM is available.
+        assert isinstance(judge, NativeTableVerifierJudge)
+        inner = judge._inner
+        assert isinstance(inner, HeuristicPageJudge)
+        assert inner._sparse_ok == pipeline._sparse_page_ok
 
     def test_agentic_call_site_passes_no_cap(self) -> None:
         """Pin the production call site: reintroducing a max_attempts cap in

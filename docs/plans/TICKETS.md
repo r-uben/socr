@@ -281,7 +281,7 @@ table verifier proposed in #49.
 ## GH-49A - Native table verifier before VLM judge on born-digital pages
 
 GitHub: https://github.com/r-uben/socr/issues/49
-Status: NEEDS-DESIGN
+Status: DONE
 Priority: P1
 Suggested agent: `socr-designer` first, then `socr-implementer`
 Depends on: GH-46-D2 findings; coordinates with #39 calibration
