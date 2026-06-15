@@ -80,6 +80,7 @@ Design/research queue:
 
 | Ticket | Agent id/name | Started | Status | Owned files | Notes |
 |--------|---------------|---------|--------|-------------|-------|
+| PP-6 (GH-54) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | born_digital.py, state.py, orchestrator.py, test_born_digital.py, test_document_state.py | Lane-cooccupancy gate + content-type vector; 968 tests pass |
 | GH-49-routing | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | orchestrator.py, test_orchestrator.py, STATUS.md, log/2026-06-15_structured-content-routing.md | Provenance-masking fix: native_table_structure_failed set on agentic rejection; 844 tests pass |
 | GH-49A | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | native_verifier.py, agentic.py, orchestrator.py, test_native_table_verifier.py, test_p1_cascade_economics.py | Two-tier verifier; hard-fail=geometry_impossible_collapse; warn-and-defer for ambiguous mismatches; 864 tests pass |
 | GH-51 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | config.py, qwen.py, cli.py, test_qwen_engine.py | Resolver added; 791 tests pass |

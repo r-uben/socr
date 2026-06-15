@@ -701,25 +701,15 @@ class UnifiedPipeline:
                 local_engine_type = self.config.local_engine
 
         if local_engine_type and ocr_pages:
-            # Build hints from born-digital assessment
+            # Build hints from PageState content-type vector (propagated by
+            # apply_born_digital; no need to re-read _last_assessment here).
             page_hints: dict[int, dict] = {}
             for page_num in ocr_pages:
                 ps = state.pages[page_num]
-                bd_assessment = next(
-                    (
-                        pa
-                        for pa in (
-                            self._last_assessment
-                            or DocumentAssessment(path=state.handle.path, pages=[])
-                        ).pages
-                        if pa.page_num == page_num
-                    ),
-                    None,
-                )
-                if bd_assessment:
+                if ps.has_tables or ps.has_equations:
                     page_hints[page_num] = {
-                        "has_tables": bd_assessment.has_tables,
-                        "has_equations": bd_assessment.has_equations,
+                        "has_tables": ps.has_tables,
+                        "has_equations": ps.has_equations,
                     }
                 elif ps.needs_ocr_enhancement:
                     # Fallback: if needs enhancement, assume hard
@@ -1351,12 +1341,18 @@ class UnifiedPipeline:
 
         # Which pages are worth the extra call: those with tables or equations,
         # where wrong digits/signs/columns are both likely and costly.
-        assessment = self._last_assessment
+        # Primary source: PageState content-type vector (propagated by apply_born_digital).
+        # Fallback: _last_assessment for callers that set it directly without going
+        # through apply_born_digital (e.g. unit tests, partial pipeline runs).
         hard_pages = {
-            pa.page_num
-            for pa in (assessment.pages if assessment else [])
-            if pa.has_tables or pa.has_equations
+            page_num for page_num, ps in state.pages.items() if ps.has_tables or ps.has_equations
         }
+        if not hard_pages and self._last_assessment:
+            hard_pages = {
+                pa.page_num
+                for pa in self._last_assessment.pages
+                if pa.has_tables or pa.has_equations
+            }
         if not hard_pages:
             return
 
@@ -1442,10 +1438,12 @@ class UnifiedPipeline:
         if not model:
             return  # no vision model available; nothing to do
 
-        assessment = self._last_assessment
-        table_pages = {
-            pa.page_num for pa in (assessment.pages if assessment else []) if pa.has_tables
-        }
+        # Table pages: primary source is PageState content-type vector (propagated by
+        # apply_born_digital).  Fall back to _last_assessment for partial pipeline runs
+        # and unit tests that set the assessment directly without apply_born_digital.
+        table_pages = {page_num for page_num, ps in state.pages.items() if ps.has_tables}
+        if not table_pages and self._last_assessment:
+            table_pages = {pa.page_num for pa in self._last_assessment.pages if pa.has_tables}
         if not table_pages:
             return
 

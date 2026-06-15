@@ -589,3 +589,45 @@ codifying.
 
 - No profile planner exists until backed by observed workflow needs.
 - Any future planner writes reproducible, manifest-visible choices.
+
+---
+
+## PP-6 — Fix #54 over-routing: lane-cooccupancy table gate + content-type vector on PageState
+
+GitHub: https://github.com/r-uben/socr/issues/54
+Status: DONE
+Priority: P1
+Branch: fix/54-routing-overroute
+Depends on: none
+
+### Problem
+
+The native-vs-ladder routing decision forces a born-digital page onto the Qwen VLM whenever
+`has_tables` is set, and `has_tables` was set by the loose `_detect_columnar_numbers` heuristic
+(single-token columnar-number ratio) that false-fires on CE chart-axis labels and front-matter.
+The stronger `has_numeric_columns` lane-cooccupancy gate existed but was only used for native
+reconstruction, not routing. Separately, `apply_born_digital` dropped `has_figures`/`has_equations`
+so the per-page gate couldn't route on content type.
+
+### Plan (completed)
+
+1. Route on `has_numeric_columns` instead of `_detect_columnar_numbers` in `born_digital._detect_tables`.
+2. Propagate `has_figures`/`has_equations` onto `PageState` via `apply_born_digital`.
+3. Remove ad hoc `_last_assessment` re-reads in the tiered routing page_hints block (now uses PageState).
+4. Update `_phase_judge_hard_pages` and `_phase_dual_pass_tables` to prefer PageState, with
+   `_last_assessment` fallback for partial pipeline runs.
+
+### Acceptance Criteria (met)
+
+- Chart-axis tick values (single x-lane) no longer trigger `has_tables`. (synthetic test)
+- Genuine multi-column forecast table still routes to the ladder. (synthetic test)
+- `has_figures`/`has_equations` readable from `PageState`; `apply_born_digital` propagates them.
+- Existing routing/born-digital tests pass; native reconstruction path unchanged.
+
+### Write ownership
+
+- `src/socr/core/born_digital.py`
+- `src/socr/core/state.py`
+- `src/socr/pipeline/orchestrator.py`
+- `tests/test_born_digital.py`
+- `tests/test_document_state.py`
