@@ -67,7 +67,7 @@ cloud model string on the non-agentic `--primary qwen` path.
 ## GH-50 - Split figure extraction from VLM figure descriptions
 
 GitHub: https://github.com/r-uben/socr/issues/50
-Status: READY
+Status: DONE
 Priority: P0
 Suggested agent: `socr-implementer`
 Depends on: none

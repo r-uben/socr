@@ -136,6 +136,12 @@ class PipelineConfig:
     #   (200 misreads e.g. "(0.001)" as "(0.007)"); override per-run with --dpi.
     workers: int = 1  # Concurrent workers (passed to CLI --workers flag)
     save_figures: bool = False
+    # ``describe_figures`` is a separate opt-in from ``save_figures``.
+    # ``--save-figures`` extracts PNGs and appends image-ref markdown only;
+    # ``--describe-figures`` additionally calls the VLM caption engine.
+    # Keeping them apart lets the operator archive clean deterministic PNGs
+    # without coupling the run to non-authoritative model prose.
+    describe_figures: bool = False
     figures_max_total: int = 25
     figures_max_per_page: int = 3
 
@@ -260,6 +266,7 @@ class PipelineConfig:
             "render_dpi",
             "workers",
             "save_figures",
+            "describe_figures",
             "figures_max_total",
             "figures_max_per_page",
             "audit_enabled",

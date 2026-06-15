@@ -83,7 +83,22 @@ def common_options(f):
         default=None,
         help="Qwen model override (e.g. qwen3.5:27b local, qwen3.5:cloud)",
     )(f)
-    f = click.option("--save-figures", is_flag=True, help="Save extracted figure images")(f)
+    f = click.option(
+        "--save-figures",
+        is_flag=True,
+        help=(
+            "Extract figures and write PNG files with image references. "
+            "Does NOT generate VLM caption prose — use --describe-figures for that."
+        ),
+    )(f)
+    f = click.option(
+        "--describe-figures",
+        is_flag=True,
+        help=(
+            "Run VLM captions on extracted figures (opt-in; implies --save-figures). "
+            "Caption failures never overwrite already-written OCR text."
+        ),
+    )(f)
     f = click.option("--reprocess", is_flag=True, help="Reprocess already-processed files")(f)
     f = click.option("--dry-run", is_flag=True, help="List files without processing")(f)
     f = click.option("-q", "--quiet", is_flag=True, help="Suppress non-error output")(f)
@@ -158,6 +173,7 @@ def build_config(
     qwen_backend: str | None = None,
     qwen_model: str | None = None,
     save_figures: bool = False,
+    describe_figures: bool = False,
     reprocess: bool = False,
     dry_run: bool = False,
     quiet: bool = False,
@@ -210,7 +226,13 @@ def build_config(
     if qwen_model is not None:
         config.qwen_model = qwen_model
         config.qwen_model_pinned = True
-    config.save_figures = save_figures
+    # --describe-figures implies --save-figures: captions require PNGs on disk.
+    if describe_figures:
+        config.save_figures = True
+        config.describe_figures = True
+    else:
+        config.save_figures = save_figures
+        config.describe_figures = False
     config.reprocess = reprocess
     config.dry_run = dry_run
     config.quiet = quiet

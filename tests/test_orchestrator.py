@@ -1529,8 +1529,8 @@ class TestDescribeAndEmbedFigures:
         assert "![Figure 1]" in out
 
     def test_figures_with_vision_engine(self, tmp_path: Path) -> None:
-        """With a vision engine, figures are described and embedded."""
-        pipeline = self._make_pipeline()
+        """With a vision engine and --describe-figures, figures are described."""
+        pipeline = self._make_pipeline(describe_figures=True)
         state = DocumentState(handle=_make_handle(1))
         result = _make_engine_result(text=_good_text())
 
@@ -1575,6 +1575,204 @@ class TestDescribeAndEmbedFigures:
         assert "**Figure 1** (page 1): A bar chart showing quarterly revenue." in out
         assert "![Figure 1]" in out
         mock_engine.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# GH-50: Save-figures / describe-figures split (acceptance criteria)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_figure(tmp_path: Path, fig_num: int = 1, page_num: int = 1) -> "ExtractedFigure":
+    """Helper: a synthetic ExtractedFigure with a saved PNG."""
+    fig_dir = tmp_path / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    fig_path = fig_dir / f"figure_{fig_num}_page{page_num}.png"
+    fig_path.write_bytes(b"\x89PNG")
+    return ExtractedFigure(
+        figure_num=fig_num,
+        page_num=page_num,
+        image=MagicMock(),
+        saved_path=str(fig_path),
+    )
+
+
+class TestSaveFiguresNoVLM:
+    """GH-50 AC1: ``--save-figures`` writes PNGs + image refs but NO caption prose."""
+
+    def test_save_figures_alone_produces_no_description(self, tmp_path: Path) -> None:
+        """``save_figures=True, describe_figures=False`` must not call the VLM."""
+        config = _make_config(save_figures=True, describe_figures=False)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+        mock_fig = _make_mock_figure(tmp_path)
+
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch.object(pipeline, "_get_vision_engine") as mock_get_vision,
+        ):
+            mock_extractor_cls.return_value.extract.return_value = [mock_fig]
+            out = pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
+
+        # VLM engine must never have been asked for
+        mock_get_vision.assert_not_called()
+        # Image reference block is present
+        assert "![Figure 1]" in out
+        # No description prose attached to the block
+        assert result.figures[0].description == ""
+
+    def test_save_figures_alone_produces_image_ref_block(self, tmp_path: Path) -> None:
+        """Image-ref markdown is still appended even without captions."""
+        config = _make_config(save_figures=True, describe_figures=False)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+        mock_fig = _make_mock_figure(tmp_path)
+
+        with patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls:
+            mock_extractor_cls.return_value.extract.return_value = [mock_fig]
+            out = pipeline._describe_and_embed_figures(state, result, tmp_path, "Body text")
+
+        assert "**Figure 1** (page 1)" in out
+        assert "![Figure 1]" in out
+        # Ensure the OCR body text is preserved
+        assert "Body text" in out
+
+
+class TestDescribeFiguresVLM:
+    """GH-50 AC2: ``--describe-figures`` calls the VLM caption engine."""
+
+    def test_describe_figures_calls_vision_engine(self, tmp_path: Path) -> None:
+        """``describe_figures=True`` must call ``_get_vision_engine()``."""
+        config = _make_config(save_figures=True, describe_figures=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+        mock_fig = _make_mock_figure(tmp_path)
+
+        mock_engine = MagicMock()
+        mock_engine.name = "gemini-api"
+        mock_engine.describe_figure.return_value = FigureInfo(
+            figure_num=1,
+            page_num=1,
+            figure_type="chart",
+            description="GDP growth over five years.",
+            engine="gemini-api",
+        )
+
+        with (
+            patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls,
+            patch.object(pipeline, "_get_vision_engine", return_value=mock_engine),
+        ):
+            mock_extractor_cls.return_value.extract.return_value = [mock_fig]
+            out = pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
+
+        mock_engine.describe_figure.assert_called_once()
+        assert result.figures[0].description == "GDP growth over five years."
+        assert "GDP growth over five years." in out
+
+    def test_describe_figures_false_skips_vision_engine(self, tmp_path: Path) -> None:
+        """``describe_figures=False`` must not instantiate the VLM at all."""
+        config = _make_config(save_figures=True, describe_figures=False)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        result = _make_engine_result(text=_good_text())
+        mock_fig = _make_mock_figure(tmp_path)
+
+        called = []
+        with patch("socr.pipeline.orchestrator.FigureExtractor") as mock_extractor_cls:
+            mock_extractor_cls.return_value.extract.return_value = [mock_fig]
+            with patch.object(
+                pipeline,
+                "_get_vision_engine",
+                side_effect=lambda: called.append(1) or None,
+            ):
+                pipeline._describe_and_embed_figures(state, result, tmp_path, "OCR text")
+
+        assert not called, "_get_vision_engine must not be called when describe_figures=False"
+
+
+class TestFigurePhasePreservesOCRText:
+    """GH-50 AC3: caption-phase failure must not destroy already-written OCR text."""
+
+    def test_caption_failure_preserves_ocr_markdown(self, tmp_path: Path) -> None:
+        """A crash in the caption sub-loop must not clobber the saved .md."""
+        config = _make_config(save_figures=True, describe_figures=True)
+        pipeline = UnifiedPipeline(config)
+        state = DocumentState(handle=_make_handle(1))
+        good = PageOutput(
+            page_num=1,
+            text="Precious OCR content.",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
+            audit_passed=True,
+        )
+        state.pages[1].attempts.append(good)
+        state.pages[1].best_output = good
+
+        # _describe_and_embed_figures raises mid-caption
+        with patch.object(
+            pipeline,
+            "_describe_and_embed_figures",
+            side_effect=RuntimeError("VLM API timed out"),
+        ):
+            result = pipeline._phase_assemble(state, tmp_path)
+
+        # The OCR text must be on disk
+        md_files = list(tmp_path.rglob("*.md"))
+        assert md_files, "markdown file must exist after caption-phase crash"
+        assert "Precious OCR content." in md_files[0].read_text()
+        # And returned in the result
+        assert "Precious OCR content." in result.markdown
+
+
+class TestDescribeFiguresResumeFingerprint:
+    """GH-50 AC4: resume fingerprint invalidates when describe_figures changes."""
+
+    def _config_fingerprint(self, **kwargs) -> str:
+        cfg = _make_config(**kwargs)
+        pipeline = UnifiedPipeline(cfg)
+        return pipeline._run_fingerprint()
+
+    def test_describe_figures_changes_fingerprint(self) -> None:
+        """Toggling describe_figures must produce a different fingerprint."""
+        fp_off = self._config_fingerprint(save_figures=True, describe_figures=False)
+        fp_on = self._config_fingerprint(save_figures=True, describe_figures=True)
+        assert fp_off != fp_on, (
+            "fingerprint must differ when describe_figures changes "
+            "so the resume gate reprocesses the doc"
+        )
+
+    def test_save_figures_still_changes_fingerprint(self) -> None:
+        """``save_figures`` alone still invalidates the fingerprint (regression guard)."""
+        fp_off = self._config_fingerprint(save_figures=False, describe_figures=False)
+        fp_on = self._config_fingerprint(save_figures=True, describe_figures=False)
+        assert fp_off != fp_on
+
+
+class TestCLIDescribeFiguresFlag:
+    """GH-50: CLI wiring — --describe-figures implies --save-figures."""
+
+    def test_describe_figures_implies_save_figures(self) -> None:
+        from socr.cli import build_config
+
+        cfg = build_config(describe_figures=True, save_figures=False)
+        assert cfg.describe_figures is True
+        assert cfg.save_figures is True, "--describe-figures must imply --save-figures"
+
+    def test_save_figures_alone_does_not_enable_describe(self) -> None:
+        from socr.cli import build_config
+
+        cfg = build_config(save_figures=True, describe_figures=False)
+        assert cfg.save_figures is True
+        assert cfg.describe_figures is False
+
+    def test_neither_flag_leaves_both_false(self) -> None:
+        from socr.cli import build_config
+
+        cfg = build_config(save_figures=False, describe_figures=False)
+        assert cfg.save_figures is False
+        assert cfg.describe_figures is False
 
 
 class TestBuildFigureBlocks:
