@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 from socr.tables.reconstruct import (
@@ -270,6 +271,94 @@ def _parse_output_data_rows(text: str) -> list[tuple[int, int, str]]:
     return result
 
 
+def _numeric_tokens_from_text(text: str) -> list[str]:
+    """Return table-value-like numeric tokens from a Markdown row."""
+    candidates = re.split(r"[\s|]+", text.strip())
+    return [
+        token
+        for token in (c.strip() for c in candidates)
+        if token and _NUM_TOKEN_RE.match(token) and _NUMERIC_RE.search(token)
+    ]
+
+
+def _numeric_tokens_from_native_row(row_tokens: list[tuple[float, str]]) -> list[str]:
+    """Return numeric token text from one native row."""
+    return [word for _x, word in row_tokens]
+
+
+def _token_overlap_count(output_tokens: list[str], native_tokens: list[str]) -> int:
+    """Count multiset overlap so repeated values still carry information."""
+    return sum((Counter(output_tokens) & Counter(native_tokens)).values())
+
+
+def _pair_output_to_native_rows(
+    native_row_list: list[tuple[float, list[tuple[float, str]]]],
+    output_data_rows: list[tuple[int, int, str]],
+) -> list[tuple[tuple[int, int, str], list[tuple[float, str]]]]:
+    """Pair output data rows to native numeric rows conservatively.
+
+    If native/output row counts match exactly, order alignment is the fallback
+    because there is no evidence of extra native numeric rows. If the counts
+    differ, extra native rows may be leading headers or trailing footnotes. In
+    that case, only a unique positive numeric-token overlap is strong enough
+    for the hard-fail predicate. Ambiguous or unpaired rows are skipped here and
+    left to the VLM judge.
+    """
+    if not native_row_list or not output_data_rows:
+        return []
+
+    same_row_count = len(native_row_list) == len(output_data_rows)
+    used_native: set[int] = set()
+    pairs: list[tuple[tuple[int, int, str], list[tuple[float, str]]]] = []
+
+    for out_idx, output_row in enumerate(output_data_rows):
+        _row_idx, _output_cell_count, row_text = output_row
+        output_tokens = _numeric_tokens_from_text(row_text)
+        matched_native_idx: int | None = None
+
+        if output_tokens:
+            scored: list[tuple[int, int]] = []
+            for native_idx, (_y, row_tokens) in enumerate(native_row_list):
+                if native_idx in used_native:
+                    continue
+                score = _token_overlap_count(
+                    output_tokens, _numeric_tokens_from_native_row(row_tokens)
+                )
+                if score > 0:
+                    scored.append((score, native_idx))
+
+            if scored:
+                best_score = max(score for score, _idx in scored)
+                best_native_idxs = [
+                    native_idx for score, native_idx in scored if score == best_score
+                ]
+                if len(best_native_idxs) == 1:
+                    matched_native_idx = best_native_idxs[0]
+
+        # Ordinal fallback applies ONLY to output rows that carry numeric tokens.
+        # A label-only row (panel/section header like "Panel A.", zero numeric
+        # tokens) cannot demonstrate a geometry-impossible collapse — pairing it
+        # by ordinal position with a native spec-number header row ((1)(2)(3))
+        # would compare its single label cell against the header's lanes and
+        # false-fail. Such rows are skipped (deferred), never hard-failed.
+        if (
+            matched_native_idx is None
+            and same_row_count
+            and output_tokens
+            and out_idx not in used_native
+        ):
+            matched_native_idx = out_idx
+
+        if matched_native_idx is None:
+            continue
+
+        used_native.add(matched_native_idx)
+        _y, row_tokens = native_row_list[matched_native_idx]
+        pairs.append((output_row, row_tokens))
+
+    return pairs
+
+
 # --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
@@ -327,34 +416,11 @@ def verify_native_table(page, output_text: str) -> VerifierResult:
     native_rows = _rows_by_y(page)
     output_data_rows = _parse_output_data_rows(output_text)
 
-    # Pair native rows to output data rows by TRAILING alignment.
-    #
-    # _rows_by_y collects ALL numeric tokens on the page, including header
-    # rows whose column-spec labels — (1)(2)(3), year headers 2020 2021 2022
-    # — match _NUM_TOKEN_RE.  These appear at smaller y-values (higher on
-    # page) than the data rows.  If we align from the front (out_idx →
-    # native_row_list[out_idx]), the header row(s) consume the leading slots
-    # and every output data row is compared against the WRONG native row,
-    # producing a spurious geometry_impossible_collapse on legitimately sparse
-    # data rows.
-    #
-    # Conservative fix: skip a leading prefix of native rows of length
-    #   _offset = max(0, len(native_row_list) - len(output_data_rows))
-    # so that output data row i aligns to native_row_list[_offset + i].
-    # Assumption: extra native rows are leading header/label rows (true for
-    # academic regression tables where spec-number headers, year labels, and
-    # panel headers all contain numeric tokens).  If extra rows were trailing
-    # footnote rows instead, the loop exits early (bounds guard below) —
-    # a false-NEGATIVE / defer-to-VLM, never a false-positive.
     native_row_list = sorted(native_rows.items())  # [(y, [(x, word), ...]), ...]
-    _offset = max(0, len(native_row_list) - len(output_data_rows))
+    paired_rows = _pair_output_to_native_rows(native_row_list, output_data_rows)
 
     hard_fail_rows: list[dict] = []
-    for out_idx, (row_idx, output_cell_count, row_text) in enumerate(output_data_rows):
-        native_idx = _offset + out_idx
-        if native_idx >= len(native_row_list):
-            break
-        _y, row_tokens = native_row_list[native_idx]
+    for (row_idx, output_cell_count, row_text), row_tokens in paired_rows:
         sep_lanes = _well_separated_lanes_in_row(row_tokens, lane_of)
         if len(sep_lanes) < _MIN_HARD_FAIL_LANES:
             continue

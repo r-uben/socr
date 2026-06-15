@@ -551,9 +551,9 @@ class TestFalseFailGuard:
         row (3 lanes) was paired with output row 1 (sparse, 1 cell) → FALSE
         hard-fail fired.
 
-        After the fix (_offset = max(0, 3-2) = 1): output row 0 → native[1]
-        (data, 3 lanes vs 4 cells → ok); output row 1 → native[2] (sparse, 1
-        lane vs 1 cell → ok).  No hard-fail.
+        After the fix: rows are paired by unique numeric-token overlap when
+        native/output row counts differ. Output row 0 pairs to the full data
+        row; output row 1 pairs to the sparse SE row. No hard-fail.
 
         This test FAILED on commit 7026dc8 and PASSES after the pairing fix.
         """
@@ -580,6 +580,46 @@ class TestFalseFailGuard:
         assert result.hard_fail is False, (
             "Spec-number header + full data row + sparse SE row must NOT hard-fail; "
             f"got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+
+    def test_no_false_fail_with_trailing_numeric_footnote(self):
+        """A trailing numeric footnote must not be paired to a sparse data row.
+
+        Native rows: one sparse SE row at y=100, then a dense numeric footnote
+        row at y=160. Output has only the sparse SE row. A blind trailing
+        offset would pair the output row with the footnote and falsely hard-fail.
+        """
+        tokens: list[tuple[float, float, str]] = []
+        tokens.append((100.0, 220.0, "(0.014)"))
+        for i, tok in enumerate(["1", "2", "3"]):
+            tokens.append((160.0, 220.0 + i * _PHYS_COL_GAP, tok))
+
+        page = _make_fitz_page_explicit(tokens)
+        output_text = _md_table(
+            ["", "(1)", "(2)", "(3)"],
+            [["", "(0.014)", "", ""]],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Trailing numeric footnotes must not create false hard-fails on sparse rows"
+        )
+
+    def test_hard_fail_data_collapse_with_trailing_numeric_footnote(self):
+        """A real collapsed data row is still caught with a numeric footnote below."""
+        tokens: list[tuple[float, float, str]] = []
+        for i, tok in enumerate(["0.043", "0.051", "0.039"]):
+            tokens.append((100.0, 220.0 + i * _PHYS_COL_GAP, tok))
+        for i, tok in enumerate(["1", "2", "3"]):
+            tokens.append((160.0, 220.0 + i * _PHYS_COL_GAP, tok))
+
+        page = _make_fitz_page_explicit(tokens)
+        output_text = _md_table(
+            ["label", "values"],
+            [["log wage", "0.043 0.051 0.039"]],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is True, (
+            "Collapsed data row should hard-fail even when an extra numeric footnote exists"
         )
 
     def test_no_false_fail_standard_4col_table_with_header(self):
@@ -677,4 +717,37 @@ class TestFalseFailGuard:
         result = verify_native_table(page, output_text)
         assert result.hard_fail is False, (
             "Dense row with label + spec-number header must not hard-fail"
+        )
+
+    def test_no_false_fail_panel_header_row_with_spec_number_header_and_data(self):
+        """A label-only panel/section-header output row (zero numeric tokens),
+        paired by the same-row-count ordinal fallback against a native
+        spec-number header row, must NOT hard-fail. A row with no numeric output
+        tokens cannot demonstrate a geometry-impossible collapse, so it is
+        skipped/deferred, never compared against native header lanes.
+
+        Reproduces a real AER/QJE multi-panel regression layout (``Panel A.``
+        section rows) that false-failed before the ``output_tokens`` guard on
+        the ordinal fallback.
+        """
+        tokens: list[tuple[float, float, str]] = []
+        # Native spec-number header row at y=70
+        for i, tok in enumerate(["(1)", "(2)", "(3)"]):
+            tokens.append((70.0, 220.0 + i * _PHYS_COL_GAP, tok))
+        # Native data row at y=100
+        for i, tok in enumerate(["0.043", "0.051", "0.039"]):
+            tokens.append((100.0, 220.0 + i * _PHYS_COL_GAP, tok))
+
+        page = _make_fitz_page_explicit(tokens)
+        output_text = _md_table(
+            ["", "(1)", "(2)", "(3)"],
+            [
+                ["Outcome: log wages", "", "", ""],  # label-only row, 0 numeric tokens
+                ["Coefficient", "0.043", "0.051", "0.039"],
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Panel header row with no numeric tokens must not false-fail via ordinal "
+            f"fallback; got: hard_fail={result.hard_fail}, reason={result.reason!r}"
         )
