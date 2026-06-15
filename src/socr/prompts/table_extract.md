@@ -19,6 +19,14 @@ corpus, so accuracy of the numbers is the whole point:
   Low, Std Dev, Mean) — must use the same number of columns as the data rows. Do
   not flatten or merge columns for summary rows. If a summary row spans fewer
   visual columns than the header, insert blank cells to maintain alignment.
+- **Column-lane anchoring (critical for sparse rows):** Every value in every row
+  must be placed under the header column it visually aligns with. Count column
+  positions from the header row — do not left-pack or right-pack values when a row
+  contains only a few populated cells. A row with one or two values surrounded by
+  blank cells (e.g. an institutional comparison row such as CBO, IMF, or OECD that
+  reports only one forecast pair) must have those values in their correct header
+  lanes, with blank cells filling all other positions. NEVER slide a value
+  sideways to close a gap left by blank cells.
 - Significance stars (*, **, ***) belong with the value they annotate.
 - Do not invent rows, columns, or values. If a cell is genuinely blank, leave it
   blank. If a value is unreadable, transcribe what you can see rather than guessing

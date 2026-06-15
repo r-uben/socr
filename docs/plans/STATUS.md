@@ -45,7 +45,7 @@ Second wave:
 
 | Ticket | Agent | Ownership | Notes |
 |--------|-------|-----------|-------|
-| GH-46-D2 | `socr-implementer` | table prompt/tests | May stay prompt-only; escalate to verifier only if needed. |
+| GH-46-D2 | `socr-implementer` | table prompt/tests | DONE (prompt-only fix). Empirical CBO-row VLM validation pending (manual). |
 | GH-47A | `socr-implementer` | figure extractor/tests | Cap visibility and logo false-positive handling. |
 | GH-37 | `socr-implementer` | CLI/config/born-digital/tests | Coordinate with GH-35 to avoid competing policy changes. |
 | GH-35 | `socr-implementer` | born-digital classifier/tests | Characterize before changing broad classification logic. |
@@ -68,6 +68,7 @@ Design/research queue:
 | GH-51 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | config.py, qwen.py, cli.py, test_qwen_engine.py | Resolver added; 791 tests pass |
 | GH-50 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | config.py, cli.py, orchestrator.py, test_orchestrator.py | save/describe split; 801 tests pass |
 | GH-34 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | state.py, audit_log.py, test_silent_content_destruction.py, test_audit_log.py | Empty-repair guard + empty-recovery event guard; 808 tests pass |
+| GH-46-D2 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | prompts/table_extract.md | Prompt-only fix: column-lane anchoring bullet added; 39 tests pass; empirical CBO-row VLM validation PENDING (manual) |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 

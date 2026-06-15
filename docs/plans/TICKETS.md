@@ -144,7 +144,7 @@ contentless.
 
 GitHub: https://github.com/r-uben/socr/issues/46
 Local plan: `docs/plans/agentic-local-first/TICKETS.md` ticket D2
-Status: READY
+Status: DONE
 Priority: P1
 Suggested agent: `socr-implementer`
 Depends on: #46 D1 validation
