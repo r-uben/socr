@@ -24,7 +24,7 @@ history, but this file is the current GitHub issue board.
 ## GH-51 - Qwen model resolution is ambiguous
 
 GitHub: https://github.com/r-uben/socr/issues/51
-Status: READY
+Status: DONE
 Priority: P0
 Suggested agent: `socr-implementer`
 Depends on: #46 provider identity work already merged

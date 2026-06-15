@@ -63,12 +63,9 @@ Design/research queue:
 
 ## Active Agents
 
-None.
-
-When agents are spawned, record them here as:
-
 | Ticket | Agent id/name | Started | Status | Owned files | Notes |
 |--------|---------------|---------|--------|-------------|-------|
+| GH-51 | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | config.py, qwen.py, cli.py, test_qwen_engine.py | Resolver added; 791 tests pass |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 

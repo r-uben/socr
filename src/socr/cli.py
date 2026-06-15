@@ -44,7 +44,8 @@ def common_options(f):
     f = click.option(
         "--auto-patch-tables",
         is_flag=True,
-        help="Let dual-pass auto-patch crop readings into the page (default: flag-only, never edits)",
+        help="Let dual-pass auto-patch crop readings into the page (default: flag-only,"
+        " never edits)",
     )(f)
     f = click.option(
         "--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages"
@@ -56,8 +57,12 @@ def common_options(f):
     )(f)
     f = click.option(
         "--math-model",
-        default="qwen3-vl:8b",
-        help="Local Ollama vision model for equation -> LaTeX recovery",
+        default=None,
+        help=(
+            "Local Ollama vision model for equation -> LaTeX recovery "
+            "(default: qwen3.5:cloud; use qwen3-vl:30b-a3b-instruct for offline). "
+            "Note: this is a math-only path, NOT the OCR qwen tier."
+        ),
     )(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)
     f = click.option(
@@ -147,7 +152,7 @@ def build_config(
     auto_patch_tables: bool = False,
     no_native_first: bool = False,
     recover_corrupt_math: bool = False,
-    math_model: str = "qwen3-vl:8b",
+    math_model: str | None = None,
     timeout: int = 1800,
     dpi: int | None = None,
     qwen_backend: str | None = None,
@@ -194,7 +199,8 @@ def build_config(
         config.native_first = False
     if recover_corrupt_math:
         config.recover_corrupt_math = True
-    config.math_model = math_model
+    if math_model is not None:
+        config.math_model = math_model
 
     config.timeout = timeout
     if dpi is not None:
@@ -203,6 +209,7 @@ def build_config(
         config.qwen_backend = qwen_backend
     if qwen_model is not None:
         config.qwen_model = qwen_model
+        config.qwen_model_pinned = True
     config.save_figures = save_figures
     config.reprocess = reprocess
     config.dry_run = dry_run

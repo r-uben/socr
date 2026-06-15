@@ -196,11 +196,15 @@ class PipelineConfig:
     glm_backend: str = "ollama"  # "ollama", "transformers", or "vllm"
     glm_task: str = "text"  # "text", "formula", "table", "figure"
     qwen_backend: str = "auto"  # "auto", "ollama", "vllm", or "api"
-    # Default to qwen3.5:cloud (Ollama Cloud, vision): ~0.57 quality at ~49s/page on the
-    # owner's Mac — faster AND better than local qwen3-vl:8b, no extra key. Trade-off: it
-    # is ONLINE and uses the Ollama plan. For offline/private or true-free --agentic, pass
-    # --qwen-model qwen3-vl:8b. Empirics in [[reference-sococrbench]].
-    qwen_model: str = "qwen3.5:cloud"
+    # Default sentinel: empty string means "not user-pinned; let the engine resolver pick
+    # the right model for the resolved backend." When qwen_model_pinned is True the value
+    # is an explicit user override and must reach qwen-ocr unchanged.
+    # Local/auto-local resolution always uses the validated instruct MoE
+    # (qwen3-vl:30b-a3b-instruct); cloud or vllm/api paths keep their own defaults.
+    qwen_model: str = ""
+    # True when the user passed --qwen-model explicitly. The resolver honours this flag
+    # to avoid rewriting a deliberate model pin (e.g. qwen3.5:cloud for cloud-only runs).
+    qwen_model_pinned: bool = False
     nougat_model: str = "0.1.0-base"
     marker_device: str = "auto"
     gemini_model: str = "gemini-3-flash-preview"
@@ -274,6 +278,7 @@ class PipelineConfig:
             "glm_task",
             "qwen_backend",
             "qwen_model",
+            "qwen_model_pinned",
             "nougat_model",
             "marker_device",
             "gemini_model",
