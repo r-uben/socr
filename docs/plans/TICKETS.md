@@ -419,7 +419,7 @@ There is no supported flag for "trust this clean born-digital text layer; only O
 ## GH-35 - Recheck scanned over-count on sparse and full-page-figure pages
 
 GitHub: https://github.com/r-uben/socr/issues/35
-Status: READY
+Status: DONE
 Priority: P2
 Suggested agent: `socr-implementer`
 Depends on: none

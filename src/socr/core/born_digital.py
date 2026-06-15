@@ -129,9 +129,31 @@ class BornDigitalDetector:
     # are likely artifacts or watermarks rather than genuine content.
     MIN_CHARS_FOR_TEXT_LAYER = 50
 
-    # Minimum words per page for born-digital classification.
-    # Single words or short phrases are likely headers/footers on scanned pages.
+    # Minimum words per page for born-digital classification when text quality is
+    # *unknown* (i.e., before quality checks run).  Pages with fewer words than
+    # this AND poor quality signals are classified as scanned.
+    #
+    # For *clean* text (no CID artifacts, low garbage ratio, normal word lengths,
+    # at least one proper font), this threshold is NOT enforced — a sparse born-
+    # digital page (chapter divider, figure caption, section heading) should be
+    # classified as born-digital even with fewer words.  Only the absolute floor
+    # MIN_WORDS_SPARSE is enforced for clean text.
+    #
+    # Basis: 15 was historically calibrated for detecting baked-in OCR layers
+    # (garbage OCR tends to produce many single-char "words", so a low absolute
+    # count was a useful proxy).  That signal is now captured directly by the
+    # quality checks (garbage ratio, word-length distribution, CID artifacts).
     MIN_WORDS_PER_PAGE = 15
+
+    # Absolute minimum words to trust as a real native text layer, even when
+    # all quality checks pass.  Below this, the text is too thin to extract
+    # meaningful content (single page numbers, watermarks, stray characters).
+    #
+    # Basis: a figure caption or section heading is "Figure 1." or "Chapter 3"
+    # at minimum — at least 2 tokens.  We use 3 to require at minimum a brief
+    # phrase (number + noun + adjective) rather than a lone label or watermark.
+    # Three words is a loose floor; the quality checks do the real discrimination.
+    MIN_WORDS_SPARSE = 3
 
     # Maximum ratio of garbage/non-printable characters. Born-digital text is
     # clean; OCR layers on scanned PDFs often contain (cid:XX) references,
@@ -246,7 +268,9 @@ class BornDigitalDetector:
 
         # --- Decision logic ---
 
-        # No text layer at all: definitely scanned
+        # No text layer at all: definitely scanned.  This is a hard gate — fewer
+        # than MIN_CHARS_FOR_TEXT_LAYER characters means there is not enough
+        # content to be useful even if the few chars are perfectly clean.
         if char_count < self.MIN_CHARS_FOR_TEXT_LAYER:
             notes.append(
                 f"insufficient text layer ({char_count} chars < {self.MIN_CHARS_FOR_TEXT_LAYER})"
@@ -266,29 +290,62 @@ class BornDigitalDetector:
                 notes=notes,
             )
 
-        # Too few words: likely just headers, footers, or page numbers
-        if word_count < self.MIN_WORDS_PER_PAGE:
-            notes.append(f"too few words ({word_count} < {self.MIN_WORDS_PER_PAGE})")
-            return PageAssessment(
-                page_num=page_num,
-                is_born_digital=False,
-                native_text="",
-                confidence=0.85,
-                char_count=char_count,
-                word_count=word_count,
-                font_count=font_count,
-                has_images=has_images,
-                has_tables=has_tables,
-                has_figures=has_figures,
-                has_equations=has_equations,
-                notes=notes,
-            )
-
-        # Check text quality signals
+        # Compute text quality signals before the word-count check so that
+        # "short but clean" (sparse born-digital pages: figure captions, chapter
+        # headings, section dividers) can be rescued from the word-count gate.
+        # All quality signals below are still checked regardless of word count.
         garbage_ratio = self._garbage_ratio(raw_text)
         space_ratio = raw_text.count(" ") / max(len(raw_text), 1)
         avg_word_len = sum(len(w) for w in words) / max(len(words), 1)
         has_cid = bool(re.search(r"\(cid:\d+\)", raw_text))
+
+        # A text layer is "clean" when ALL of the following hold:
+        #   - no CID font-mapping artifacts (definitive sign of broken font map)
+        #   - low garbage-character ratio (baked-in OCR on scans tends to be noisy)
+        #   - normal average word length (garbled text fuses or fragments tokens)
+        #   - at least one embedded font (pages with no fonts have no real text layer)
+        #
+        # Clean short text on a page with proper fonts is a genuine native layer
+        # (figure caption, section heading, sparse table).  Such pages must NOT be
+        # classified as scanned solely because they have fewer than MIN_WORDS_PER_PAGE
+        # words — that would route them to OCR and potentially degrade the output.
+        text_layer_is_clean = (
+            not has_cid
+            and garbage_ratio <= self.MAX_GARBAGE_RATIO
+            and self.MIN_AVG_WORD_LENGTH <= avg_word_len <= self.MAX_AVG_WORD_LENGTH
+            and font_count > 0
+        )
+
+        # Word-count gate.  Enforced unconditionally only when the text layer is
+        # dirty (quality signals indicate baked-in OCR or no real layer).  When the
+        # text is clean, only the absolute floor MIN_WORDS_SPARSE is applied — this
+        # catches lone watermarks or page-number stubs that would extract as a single
+        # token, not sparse-but-real content.
+        if word_count < self.MIN_WORDS_PER_PAGE:
+            if not text_layer_is_clean or word_count < self.MIN_WORDS_SPARSE:
+                notes.append(
+                    f"too few words ({word_count} < {self.MIN_WORDS_PER_PAGE})"
+                    + ("" if text_layer_is_clean else "; dirty text layer")
+                )
+                return PageAssessment(
+                    page_num=page_num,
+                    is_born_digital=False,
+                    native_text="",
+                    confidence=0.85,
+                    char_count=char_count,
+                    word_count=word_count,
+                    font_count=font_count,
+                    has_images=has_images,
+                    has_tables=has_tables,
+                    has_figures=has_figures,
+                    has_equations=has_equations,
+                    notes=notes,
+                )
+            # Clean short text: pass through to born-digital path with a note so
+            # the audit log can surface it.
+            notes.append(
+                f"sparse native layer ({word_count} words); clean text, classifying as born-digital"
+            )
 
         # CID artifacts: definitive sign of broken font mapping on scanned PDF
         if has_cid:
