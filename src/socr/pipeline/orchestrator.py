@@ -279,6 +279,12 @@ class UnifiedPipeline:
             # Both change the saved .md content, so both must invalidate the cache.
             "save_figures": cfg.save_figures,
             "describe_figures": cfg.describe_figures,
+            # --- GH-36a: equation region detection ---
+            # ``detect_equations`` controls whether display-equation regions are
+            # detected, cropped, and recorded in provenance (model-free, GH-36a).
+            # Changing it changes the audit log and crop artefacts, so it must
+            # invalidate the cache.
+            "detect_equations": cfg.detect_equations,
             "figures_engine": cfg.figures_engine.value,
             "figures_max_total": cfg.figures_max_total,
             "figures_max_per_page": cfg.figures_max_per_page,
@@ -806,6 +812,21 @@ class UnifiedPipeline:
             )
         if math_doc is not None:
             math_doc.close()
+
+        # GH-36a: Deterministic display-equation region detection (model-free).
+        # Runs on born-digital prose pages that carry the ``has_equations`` signal
+        # and are NOT already handled by the corrupt-math recovery path.  Default-
+        # off; gated by ``config.detect_equations``.  Saves crop PNGs beside
+        # figures and records provenance in ``state.events`` — no text is modified.
+        if self.config.detect_equations and self._last_assessment:
+            clean_eq_pages = {
+                pa.page_num
+                for pa in self._last_assessment.pages
+                if pa.has_equations and not pa.has_corrupt_math and pa.is_born_digital
+            }
+            eq_prose_pages = [p for p in prose_pages if p in clean_eq_pages]
+            if eq_prose_pages:
+                self._detect_and_crop_equations(state, eq_prose_pages, output_dir)
 
         # Tier 2: Local engine for easy pages
         escalated_pages: list[int] = []
@@ -2778,6 +2799,88 @@ class UnifiedPipeline:
                 },
             )
         )
+
+    def _detect_and_crop_equations(
+        self,
+        state: DocumentState,
+        page_nums: list[int],
+        output_dir: Path,
+    ) -> None:
+        """GH-36a: detect display-equation regions and save crop PNGs.
+
+        Runs the deterministic, model-free detector on each page in
+        ``page_nums``.  Saves a crop PNG for every detected region to
+        ``equations/`` beside the figures directory, and records provenance in
+        ``state.events`` (AuditEvent kind ``equation_region_detected``).
+
+        No text is modified, no model is called.  This is DETECTION + EVIDENCE
+        only; the engine/validation/splice layer is GH-36b.
+        """
+        import fitz
+        from ocr_output_contract import doc_dir_for, relative_key
+
+        from socr.core.audit_log import AuditEvent
+        from socr.math.detect_equations import (
+            EquationDetectionResult,
+            detect_display_equations,
+            save_equation_crops,
+        )
+
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        equations_dir = doc_dir / "equations"
+
+        total_regions = 0
+        try:
+            pdf = fitz.open(state.handle.path)
+        except Exception as exc:
+            logger.warning("equation detection: cannot open PDF: %s", exc)
+            return
+
+        try:
+            for page_num in page_nums:
+                try:
+                    page = pdf[page_num - 1]
+                except IndexError:
+                    logger.warning("equation detection: page %d out of range (skipping)", page_num)
+                    continue
+
+                det: EquationDetectionResult = detect_display_equations(page, page_num)
+                if not det.regions:
+                    continue
+
+                save_equation_crops(det.regions, page, equations_dir, dpi=self.config.render_dpi)
+
+                for region in det.regions:
+                    total_regions += 1
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="equation_region_detected",
+                            engine="detect_equations",
+                            detail=(
+                                f"display-equation region detected "
+                                f"(bbox={region.source_bbox!r}, "
+                                f"eq_num={region.has_eq_number}, "
+                                f"crop={region.crop_path!r})"
+                            ),
+                            data={
+                                "source_bbox": list(region.source_bbox),
+                                "padded_bbox": list(region.bbox),
+                                "has_eq_number": region.has_eq_number,
+                                "crop_path": region.crop_path,
+                                "detection_time_s": det.detection_time_s,
+                            },
+                        )
+                    )
+        finally:
+            pdf.close()
+
+        if total_regions and not self.config.quiet:
+            console.print(
+                f"  [dim]GH-36a: {total_regions} equation region(s) detected "
+                f"and cropped to {equations_dir}[/dim]"
+            )
 
     def _get_vision_engine(self):
         """Try to create a Gemini API engine for figure description.

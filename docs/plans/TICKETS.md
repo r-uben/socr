@@ -500,7 +500,7 @@ the issue is specifically about scanned-page classification and corpus-level ove
 ## GH-36 - General clean-equation to LaTeX path
 
 GitHub: https://github.com/r-uben/socr/issues/36
-Status: NEEDS-DESIGN
+Status: SPLIT (GH-36a DONE; GH-36b NEEDS-DESIGN → design settled by consilium 20260615T210537Z-6621)
 Priority: P1
 Suggested agent: `socr-designer` first
 Depends on: corrupt-math recovery already merged
@@ -512,7 +512,37 @@ tests for math recovery.
 The corrupt-font math subcase is implemented, but there is still no general clean-equation route to
 LaTeX. Native extraction can linearize math, flatten superscripts/subscripts, and lose symbols.
 
-### Plan
+### Design decision (consilium 20260615T210537Z-6621)
+
+Validation-before-splice policy (Fork 1): **Hybrid 1A + 1C, unanimous**.
+- 1A structural gate: pylatexenc pure-Python structural validation (offline, deterministic).
+- 1C non-destructive presentation: NEVER silently replace crop or native text; inline crop +
+  attach 1A-validated LaTeX adjacently (sidecar / comment / alt-text).
+- 1B (full render / image-compare) REJECTED — dependency/replay/throughput hazard.
+Engine: reuse local qwen3-vl:30b-a3b-instruct (NOT marker-pdf/Texify — too heavy).
+
+### Phase split
+
+**GH-36a — model-free foundation (DONE, branch feat/36a-equation-detection)**
+
+1. Deterministic display-equation REGION DETECTION (math-font spans + centering), no OCR.
+2. Crop-PNG storage: `equation_{n}_page{N}.png` under `equations/` beside figures.
+3. Manifest/audit provenance: AuditEvent kind `equation_region_detected` in `state.events`.
+4. `--detect-equations` CLI flag / `PipelineConfig.detect_equations = False` default, in fingerprint.
+5. Throughput harness in `tests/test_equation_detection.py` (geometry-only, deterministic).
+6. Fixed: `recover.py` DEFAULT_MODEL changed from forbidden `qwen3-vl:8b` to `qwen3-vl:30b-a3b-instruct`.
+7. Documented: `splice_math` has no LaTeX validation (OK for corrupt-font case; GH-36b must gate clean case).
+
+**GH-36b — engine + validation + splice (READY, blocked on GH-36a throughput review)**
+
+1. Wire engine: reuse `latex_for_image` (local qwen3-vl:30b-a3b-instruct) on detected regions.
+2. 1A validation gate: pylatexenc structural check before any splice.
+3. 1C splice policy: inline crop PNG always; attach 1A-validated LaTeX adjacently; keep native text on failure.
+4. New audit event kinds: `equation_latex_accepted` / `equation_latex_rejected_kept_crop`.
+5. Add `recover_clean_equations: bool = False` config flag (parallel to `recover_corrupt_math`).
+6. Measure per-region model latency; update throughput numbers from GH-36a harness.
+
+### Plan (original)
 
 1. Design the regional equation detection boundary: when to crop, how to avoid whole-page OCR, and
    where to store crop PNGs.
@@ -529,7 +559,8 @@ LaTeX. Native extraction can linearize math, flatten superscripts/subscripts, an
 ### Verification
 
 - Design phase: write `docs/log/YYYY-MM-DD_math-latex-route.md`.
-- Implementation phase: `uv run pytest tests/test_math_recover.py tests/test_orchestrator.py -q`
+- GH-36a: `uv run pytest tests/test_equation_detection.py tests/test_math_recover.py tests/test_orchestrator.py -q`
+- GH-36b: `uv run pytest tests/test_math_recover.py tests/test_orchestrator.py tests/test_equation_detection.py -q`
 
 ## GH-46-E1 - Optional OCR skill/profile update
 

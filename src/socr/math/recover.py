@@ -26,7 +26,13 @@ from socr.core.born_digital import line_has_corrupt_math
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "qwen3-vl:8b"
+# GH-36a (defect fix): the only sanctioned local vision model is
+# qwen3-vl:30b-a3b-instruct.  The former default "qwen3-vl:8b" is FORBIDDEN
+# per repo rules (collapses tables, wrong model tier).  The orchestrator path
+# overrides this via ``config.math_model`` (default "qwen3.5:cloud"), so the
+# bare default is only hit by direct callers and tests — but it must still be
+# correct.
+DEFAULT_MODEL = "qwen3-vl:30b-a3b-instruct"
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_DPI = 300
 
@@ -197,6 +203,20 @@ def splice_math(page, native_text: str, regions: list[tuple[object, str]]) -> st
     every other line is emitted as its native text, byte-for-byte. Lines whose
     region produced empty LaTeX are dropped in favour of a crop reference note so
     corrupted glyphs never reach the corpus.
+
+    GH-36a NOTE — no LaTeX validation is performed here.  For the corrupt-font
+    case (``recover_corrupt_math`` pipeline) this is acceptable: the native text
+    for those lines is already garbage (font-map mojibake), so any non-empty
+    model output is an improvement and the crop reference fallback prevents
+    corrupted glyphs from reaching the corpus.
+
+    For the *clean-equation* case (GH-36b), the native linearised text is
+    faithful (correct symbols, lost super/subscripts), so an unvalidated,
+    malformed, or hallucinated LaTeX block would silently replace faithful
+    content — the exact data-loss the hard AC forbids.  GH-36b must add the
+    1A structural-validation gate (pylatexenc, pure-Python, offline) BEFORE
+    any splice into clean-equation pages.  DO NOT call this function from the
+    clean-equation path without that gate in place.
     """
     import fitz
 
