@@ -43,6 +43,7 @@ htmlcov/
 output/
 *.md
 !README.md
+!CLAUDE.md
 !docs/*.md
 !docs/**/*.md
 !examples/**/*.md
