@@ -268,6 +268,29 @@ class UnifiedPipeline:
             "local_engine_determinants": self._engine_determinants(cfg.local_engine),
             "fallback_determinants": [self._engine_determinants(e) for e in cfg.fallback_chain],
             "multi_engine_determinants": [self._engine_determinants(e) for e in cfg.multi_engine],
+            # PP-5: the agentic provider ladder is built from ``enabled_engines``
+            # and pruned by ``max_cost_per_page`` / ``cost_budget`` — all three
+            # change which provider produces (or is even tried on) a page, so a
+            # change to any must invalidate the per-page resume ledger.  SORTED by
+            # engine value (NOT user order): ``provider_ladder`` is cost-ordered
+            # and ignores the input list order, so two configs with the same
+            # enabled SET in a different order select identical output — recording
+            # the raw order would spuriously invalidate the ledger (needless
+            # re-OCR).  Adding/removing an engine (a real set change) still does.
+            "enabled_engines": sorted(e.value for e in cfg.enabled_engines),
+            # And the RESOLVED model/backend/task of EVERY enabled engine, NOT
+            # just its name: an enabled engine drives the agentic ladder, so a
+            # provider present ONLY through ``enabled_engines`` (not also via
+            # primary/local/fallback/multi) would otherwise let a model/backend/
+            # task swap reuse a stale terminal sidecar on resume.  Keyed by engine
+            # value and SORTED for determinism (the ladder is cost-ordered, not
+            # list-ordered, so member identity — not position — drives output).
+            "enabled_engine_determinants": {
+                e.value: self._engine_determinants(e)
+                for e in sorted(cfg.enabled_engines, key=lambda x: x.value)
+            },
+            "max_cost_per_page": cfg.max_cost_per_page,
+            "cost_budget": cfg.cost_budget,
             # --- rendering / chunking (change the bytes fed to the engine) ---
             "render_dpi": cfg.render_dpi,
             "native_first": cfg.native_first,
@@ -1286,6 +1309,31 @@ class UnifiedPipeline:
             and state.pages[p].native_text
         ]
 
+        # -- PP-5: provider-INDEPENDENT terminal-resume PRE-PASS -----------------
+        # Resuming a TERMINAL page loads its fragment from disk and needs NO live
+        # provider.  Do this BEFORE the empty-ladder early-return below so that a
+        # re-run with no provider available (e.g. ollama down) still restores the
+        # pages that were already terminal — instead of treating them as lost.
+        # Each resumed page is removed from ``ocr_pages`` (and the native-fallback
+        # list) so the empty-ladder check only fires for the genuinely
+        # UNresumable OCR pages, and is recorded in ``resumed_pages`` so the main
+        # loop below skips it (no double-restore / double-cost-count).  The skip
+        # is the SAME conservative gate used in the loop (terminal + fingerprint +
+        # checksum + SUCCESS + readable fragment), so semantics are unchanged.
+        resumed_pages: set[int] = set()
+        for page_num in list(ocr_pages):
+            resumed = self._load_terminal_page(state, page_num, output_dir)
+            if resumed is not None:
+                self._restore_terminal_page_state(state, page_num, resumed, output_dir)
+                resumed_pages.add(page_num)
+                if not self.config.quiet:
+                    console.print(
+                        f"  p{page_num}: [dim]resumed (terminal ledger hit, pre-pass)[/dim]"
+                    )
+        if resumed_pages:
+            ocr_pages = [p for p in ocr_pages if p not in resumed_pages]
+            native_fallback_pages = [p for p in native_fallback_pages if p not in resumed_pages]
+
         # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
         if self.config.strict_local:
@@ -1444,6 +1492,37 @@ class UnifiedPipeline:
                         "(PARTIAL_SAVE_VLM_TIMEOUT)[/red]"
                     )
                 break
+
+            # ----------------------------------------------------------------
+            # PP-5: per-page resume gate (INNER ledger; doc-level RootIndex gate
+            # stays the outer all-or-nothing fast path).  Before doing ANY work
+            # on page N, consult the ledger: if a TERMINAL sidecar
+            # (``pages/NNN.json`` terminal=true) AND its fragment
+            # (``pages/NNN.md``) exist, parse, and the per-page run fingerprint
+            # MATCHES this run's fingerprint, load that fragment as the page's
+            # result and SKIP OCR for page N.  This is what makes a re-run after
+            # a crash reprocess ONLY the pages that were not yet terminal.
+            #
+            # CONSERVATIVE (load-bearing): _load_terminal_page returns None on
+            # ANY doubt — missing / partial / corrupt sidecar, terminal=false,
+            # fingerprint mismatch, unreadable fragment — and the page falls
+            # through to normal processing.  Reprocessing a done page is wasteful
+            # but safe; skipping an unfinished page is silent data loss and must
+            # never happen.  A resumed page is NOT re-flushed here: its terminal
+            # sidecar + fragment already on disk are authoritative, and the
+            # assemble-time _rewrite_all_fragments rewrites every fragment from
+            # the final text regardless.
+            #
+            # OCR pages already resumed by the provider-independent PRE-PASS above
+            # are skipped here so they are not restored (and cost-counted) twice.
+            if page_num in resumed_pages:
+                continue
+            resumed = self._load_terminal_page(state, page_num, output_dir)
+            if resumed is not None:
+                self._restore_terminal_page_state(state, page_num, resumed, output_dir)
+                if not self.config.quiet:
+                    console.print(f"  p{page_num}: [dim]resumed (terminal ledger hit)[/dim]")
+                continue
 
             # PP-7: Chart-asset lane — intercept before the native-bypass branch.
             # A born-digital native page that carries vector chart marks (or an
@@ -2934,6 +3013,17 @@ class UnifiedPipeline:
         sidecar_path = doc_dir / "pages" / f"{page_num:05d}.json"
         sidecar_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # PP-5: bind the sidecar to the EXACT input bytes.  The doc-level
+        # RootIndex gate already rejects a changed input on checksum mismatch, but
+        # a partial-doc resume (no COMPLETED doc record) or ``--reprocess`` re-
+        # enters _phase_agentic where the INNER ledger runs; without this binding
+        # the inner gate would reuse a stale fragment for a CHANGED PDF at the
+        # same relative path (silent stale-output reuse).  ``None`` when the input
+        # is unreadable — which never equals a real digest, so it can never match.
+        from ocr_output_contract import safe_checksum
+
+        input_checksum = safe_checksum(state.handle.path)
+
         ps = state.pages.get(page_num)
         bo = ps.best_output if ps else None
         winning_dict = bo.to_dict() if bo is not None else {}
@@ -2971,8 +3061,18 @@ class UnifiedPipeline:
             "engine": winning_dict.get("engine", ""),
             "provider": winning_dict.get("provider_id", ""),
             "cost_usd": winning_dict.get("cost_usd", 0.0),
+            # Full serialised winning PageOutput.  PP-5 reconstructs a skipped
+            # page's in-memory PageState.best_output from this dict (paired with
+            # the fragment text) so the resumed run carries the SAME status /
+            # engine / provider / audit verdict the original produced — not just
+            # the stitched body.  Empty dict when no winning output exists.
+            "winning_output": winning_dict,
             # Run-level fingerprint (shared across all pages of this run).
             "run_fingerprint": self._run_fingerprint(),
+            # Input-PDF checksum: the PP-5 inner resume gate requires an EXACT
+            # match so a changed input at the same relative path can never reuse
+            # this fragment.  Empty string when the input is unreadable.
+            "input_checksum": input_checksum or "",
             # Page-level fingerprint: the blob key of the winning output, if
             # available.  Empty string when no winning output exists (e.g. a
             # failed page).
@@ -2997,6 +3097,179 @@ class UnifiedPipeline:
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.rename(sidecar_path)
         return sidecar_path
+
+    def _load_terminal_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        output_dir: Path,
+    ) -> PageOutput | None:
+        """PP-5 ledger reader: a reconstructed ``PageOutput`` for a TERMINAL page.
+
+        Returns the page's winning output, reconstructed from its terminal
+        sidecar (``pages/NNN.json``) paired with its body fragment
+        (``pages/NNN.md``), ONLY when the page is DEFINITELY complete under the
+        CURRENT run fingerprint.  Returns ``None`` on ANY doubt — the caller then
+        reprocesses the page.  This is the load-bearing conservative gate: a
+        false ``None`` only re-OCRs a page that was already done (wasteful but
+        safe); a false non-``None`` would SKIP an unfinished page (silent data
+        loss) and must never happen.
+
+        Skip is granted iff ALL hold:
+          * ``pages/NNN.json`` exists and parses as JSON.
+          * ``terminal`` is exactly ``True`` (a provisional ``terminal=False``
+            mid-run flush is NEVER skippable — the page may not be finished).
+          * ``run_fingerprint`` equals the current run's fingerprint EXACTLY (a
+            model / prompt / render-dpi / flag change yields a different
+            fingerprint, forcing re-OCR of affected pages).
+          * ``input_checksum`` equals the CURRENT input PDF's checksum EXACTLY (a
+            changed input at the same relative path can never reuse a stale
+            fragment — the doc-level RootIndex gate catches this on the fast
+            path, but a partial-doc resume / ``--reprocess`` re-enters the loop
+            where only this inner check stands between us and stale-output reuse).
+          * The winning output's status is exactly ``SUCCESS`` and the body is
+            NOT a page-failure marker (a timed-out / ERROR / lossy-fallback page
+            written terminal at assemble must be RE-OCR'd, never skipped).
+          * ``pages/NNN.md`` exists and is readable.
+          * The serialised ``winning_output`` is present and rebuilds into a
+            ``PageOutput`` without error.
+
+        The fragment is body-only (no ``## Page N`` header), so its text is used
+        verbatim as ``PageOutput.text``; the sidecar restores status / engine /
+        provider / audit verdict and the PageState decision flags.
+        """
+        import json
+
+        try:
+            from ocr_output_contract import doc_dir_for, relative_key, safe_checksum
+
+            from socr.core.manifest import is_page_failed_marker
+
+            scan_root = self._scan_root or state.handle.path.parent
+            doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+            pages_dir = doc_dir / "pages"
+            sidecar_path = pages_dir / f"{page_num:05d}.json"
+            frag_path = pages_dir / f"{page_num:05d}.md"
+
+            # Both artefacts MUST be present.  A missing sidecar OR fragment means
+            # the page never reached the authoritative assemble-time flush.
+            if not sidecar_path.is_file() or not frag_path.is_file():
+                return None
+
+            # Parse the sidecar; a corrupt / truncated file is treated as doubt.
+            try:
+                meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                return None
+            if not isinstance(meta, dict):
+                return None
+
+            # terminal MUST be exactly True (not truthy): a provisional sidecar,
+            # a missing key, or a non-bool value all force reprocessing.
+            if meta.get("terminal") is not True:
+                return None
+
+            # Fingerprint MUST match the current run EXACTLY.  A config / model /
+            # flag change yields a different fingerprint and re-OCRs the page.
+            if meta.get("run_fingerprint") != self._run_fingerprint():
+                return None
+
+            # Input-PDF checksum MUST match the CURRENT input EXACTLY.  Guards the
+            # partial-resume / --reprocess path where the outer RootIndex gate
+            # does not fire: a different PDF at the same relative path must never
+            # reuse this fragment.  An unreadable input (safe_checksum None) or a
+            # missing recorded checksum can never match a real digest.
+            recorded_checksum = meta.get("input_checksum")
+            current_checksum = safe_checksum(state.handle.path)
+            if not recorded_checksum or recorded_checksum != current_checksum:
+                return None
+
+            # The full winning PageOutput dict must be present and rebuildable.
+            winning = meta.get("winning_output")
+            if not isinstance(winning, dict) or not winning:
+                return None
+
+            # Status MUST be SUCCESS.  A page written terminal at assemble time
+            # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
+            # whose best_output is the ERROR attempt, or a flagged native fallback)
+            # is NOT a clean result — re-OCR it, never skip it.
+            if winning.get("status") != PageStatus.SUCCESS.value:
+                return None
+
+            # Read the authoritative body fragment.
+            try:
+                body = frag_path.read_text(encoding="utf-8")
+            except OSError:
+                return None
+
+            # A page-failure marker body is honesty, not content: never skip it.
+            if not body.strip() or is_page_failed_marker(body):
+                return None
+
+            try:
+                page_out = PageOutput.from_dict(winning)
+            except Exception:
+                return None
+
+            # The fragment is the authoritative body bytes; prefer it over the
+            # serialised text so a post-OCR fragment rewrite (figures / phantom
+            # strip from a prior completed assemble) is honoured on resume.
+            page_out.text = body
+            page_out.page_num = page_num
+            return page_out
+        except Exception as exc:  # never let the ledger read break a run
+            logger.debug("PP-5 ledger read failed for p%d (%s); reprocessing", page_num, exc)
+            return None
+
+    def _restore_terminal_page_state(
+        self, state: DocumentState, page_num: int, page_out: PageOutput, output_dir: Path
+    ) -> None:
+        """Populate ``PageState`` from a resumed terminal page (PP-5).
+
+        Mirrors what the live loop sets for a freshly-processed page: appends the
+        reconstructed output to ``attempts``, sets it as ``best_output``, restores
+        the PageState decision flags from the sidecar so downstream status
+        demotion (native fallback, judge rejection, table-structure loss) behaves
+        identically to a non-resumed run, AND folds the page's recorded cost into
+        ``state.engine_runs`` so ``state.total_cost`` matches a live run.  The
+        latter matters for budget correctness: later pages compute their
+        remaining budget from ``state.total_cost``; without the resumed page's
+        spend the loop could over-route / overspend on resume.  Best-effort: a
+        flag-restore failure is non-fatal (the body text is already correct).
+        """
+        import json
+
+        ps = state.pages.get(page_num)
+        if ps is None:
+            return
+        ps.attempts.append(page_out)
+        ps.best_output = page_out
+        # Fold the resumed page's cost into total_cost (budget continuity).  An
+        # EngineResult mirrors what the live route_page path appends per page.
+        state.engine_runs.append(
+            EngineResult(
+                document_path=state.handle.path,
+                engine=page_out.engine or "resumed",
+                status=DocumentStatus.SUCCESS,
+                cost=page_out.cost_usd,
+                processing_time=0.0,
+            )
+        )
+        try:
+            from ocr_output_contract import doc_dir_for, relative_key
+
+            scan_root = self._scan_root or state.handle.path.parent
+            doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+            sidecar_path = doc_dir / "pages" / f"{page_num:05d}.json"
+            meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            ps.needs_ocr_enhancement = bool(meta.get("needs_ocr_enhancement", False))
+            ps.native_table_structure_failed = bool(
+                meta.get("native_table_structure_failed", False)
+            )
+            ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
+            ps.judge_rejected = bool(meta.get("judge_rejected", False))
+        except Exception as exc:
+            logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
 
     def _rewrite_all_fragments(
         self,
