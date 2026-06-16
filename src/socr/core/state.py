@@ -37,6 +37,7 @@ class PageState:
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
     native_table_structure_failed: bool = False  # native table text lost its grid
+    chart_asset_render_failed: bool = False  # PP-7: chart-lane PNG render failed
 
     @property
     def needs_repair(self) -> bool:
@@ -56,12 +57,20 @@ class PageState:
         so an audit-rejected page runs out of candidates and is skipped.
         """
         if self.is_born_digital and self.native_text:
-            if self.needs_ocr_enhancement or self.native_table_structure_failed:
+            if (
+                self.needs_ocr_enhancement
+                or self.native_table_structure_failed
+                or self.chart_asset_render_failed  # PP-7: render failure treated as deficient
+            ):
                 # Prefer enhancement for pages with deficient native text, but
                 # if it has been attempted and none passed, fall back to native.
                 if self.best_output and self.best_output.audit_passed:
                     return False  # OCR succeeded
-                if self.judge_rejected or self.native_table_structure_failed:
+                if (
+                    self.judge_rejected
+                    or self.native_table_structure_failed
+                    or self.chart_asset_render_failed
+                ):
                     return True  # audit rejection demands a real repair pass
                 non_native_attempts = [
                     a for a in self.attempts if not (a.engine or "").startswith("native")

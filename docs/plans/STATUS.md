@@ -1,6 +1,6 @@
 # STATUS - GitHub issue action plan
 
-Last updated: 2026-06-15
+Last updated: 2026-06-16
 Branch: `feat/001-issue-plans`
 Base reviewed: `7541175`
 GitHub source: open issues #34, #35, #36, #37, #39, #46, #47, #49, #50, #51
@@ -100,6 +100,7 @@ Design/research queue:
 | PP-3 (GH-67) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | pipeline/orchestrator.py (_reread_page_tables extracted, _phase_dual_pass_tables refactored), tests/test_dual_pass_tables.py | Behavior-preserving refactor; reader built once at doc scope; 4 parity tests added; 999 tests pass |
 | PP-4 (GH-69) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | figures/extractor.py (cap_page field), pipeline/orchestrator.py (_describe_and_embed_figures pure text transformer + _rewrite_all_fragments unconditional in _phase_assemble), tests/test_pp4_inline_figures.py (new, 18 tests) | Inline embedding; _rewrite_all_fragments unconditional in _phase_assemble (covers figure-free phantom docs — all 3 REVISE rounds resolved); vision engine once/close once; cap AuditEvent at crossing page; 255 targeted tests pass |
 | PP-2 (GH-71) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | pipeline/orchestrator.py (_phase_agentic full rewrite, _TimeoutJudge, _flush_page_sidecar terminal kwarg, phase-4c gate), tests/test_pp2_agentic_fuse.py (new, 13 tests) | Fused all-pages loop; provisional flush (terminal=False); cascade-halt on wedged backend; byte-identity via fork A; 1031 tests pass |
+| PP-7 (GH-73) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | figures/extractor.py (CHART_MIN_CLUSTER_AREA + has_chart_marks), pipeline/orchestrator.py (_is_chart_asset_page, _render_chart_page_png, chart-lane hook in _phase_agentic), tests/test_chart_lane.py (new, 20 tests) | Cluster-first vector detector + B1 representation (native prose + PNG ref + audit flag); force-PNG; fail-closed; monochrome false-negative documented; 327 targeted tests pass |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 

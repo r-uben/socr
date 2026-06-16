@@ -121,6 +121,16 @@ TABLE_GRID_MIN_AREA_RATIO = MIN_VECTOR_AREA_RATIO * 4
 MIN_DATA_MARKS = 3
 DATA_STROKE_MIN_WIDTH = 1.0
 
+# --- Chart-lane detection (PP-7) ---
+# Minimum bounding-box area (pts²) a vector cluster must span before it is
+# eligible for the chart-asset lane.  Derived from the existing MIN_AREA gate
+# (80×80 = 6400 pts²) scaled up to require a meaningfully-sized chart region
+# rather than a small decorative mark (e.g. a bullet or horizontal rule).
+# 120×120 = 14 400 pts² ≈ ~4.2 cm × 4.2 cm at 72 dpi — roughly the smallest
+# chart that can convey information.  Kept as a named constant (not a magic
+# literal) so it is tunable from data.
+CHART_MIN_CLUSTER_AREA: float = 120.0 * 120.0
+
 # --- Logo / letterhead filter (IMAGE blocks and raw xref images) ---
 # Fraction of page height defining the "top band" where logos/letterheads live.
 LOGO_TOP_MARGIN_RATIO: float = 0.20
@@ -762,3 +772,124 @@ def _looks_like_table_grid(
                 if rect.height >= height * 0.4:
                     vertical += 2
     return horizontal >= 3 and vertical >= 2
+
+
+def has_chart_marks(page) -> bool:
+    """Cluster-first chart detector for the PP-7 chart-asset routing lane.
+
+    Returns True when the page contains at least one spatially-coherent vector
+    cluster that (a) meets the minimum bounding-box area gate
+    (``CHART_MIN_CLUSTER_AREA``) and (b) passes ``_has_vector_data_marks``
+    (coloured fills or thick strokes — the positive chart signal).
+    Also returns True when the page carries at least one embedded raster image
+    (``page.get_images()``), because an embedded PNG/JPEG chart is visually lost
+    as native word-salad just like a vector one.
+
+    Note on ``_looks_like_table_grid``: this function is intentionally NOT called
+    here.  Its first-line short-circuit ``if has_data_marks: return False`` means
+    it always returns False once the data-marks gate passes — calling it would be
+    dead code.  Table pages are excluded upstream by ``_page_has_tables`` in
+    ``_is_chart_asset_page``, which is the correct structural boundary.
+
+    Detection is fully deterministic and model-free; it reuses the same named-
+    constant thresholds already trusted by ``FigureExtractor``.
+
+    NOTE: Calling ``get_drawings()`` on every born-digital non-table page is a
+    moderate cost, but it is the SAME call the figure-extraction phase already
+    makes for the same page — no new I/O.
+
+    Cluster-first (load-bearing): we do NOT count isolated marks on the flat
+    ``get_drawings()`` list, because scattered decorative rules (e.g. three thin
+    horizontal lines on a title page) can reach ``MIN_DATA_MARKS`` and false-
+    trigger the chart lane.  Requiring a spatially-coherent cluster first
+    suppresses those false positives.
+
+    Logging: logs mark counts, cluster counts, and rejection reasons at DEBUG
+    level so operators can trace routing decisions without re-running the pipeline.
+    """
+    page_width = page.rect.width
+    page_height = page.rect.height
+    page_area = page_width * page_height
+
+    # Fast path: embedded raster image present → raster chart.
+    try:
+        raster_images = page.get_images()
+        if raster_images:
+            logger.debug(
+                "has_chart_marks p%s: raster path — %d embedded image(s)",
+                getattr(page, "number", "?") + 1,
+                len(raster_images),
+            )
+            return True
+    except Exception as exc:
+        logger.debug("has_chart_marks: get_images() failed: %s", exc)
+
+    # Vector path: cluster drawings, then gate each cluster.
+    try:
+        drawings = page.get_drawings()
+    except Exception as exc:
+        logger.debug("has_chart_marks: get_drawings() failed: %s", exc)
+        return False
+
+    page_num_label = getattr(page, "number", "?")
+    try:
+        page_num_label = page.number + 1
+    except Exception:
+        pass
+
+    if not drawings:
+        logger.debug("has_chart_marks p%s: no drawings", page_num_label)
+        return False
+
+    clusters = _cluster_drawings(drawings, page_width, page_height, CLUSTER_GAP)
+    logger.debug(
+        "has_chart_marks p%s: %d drawings → %d cluster(s)",
+        page_num_label,
+        len(drawings),
+        len(clusters),
+    )
+
+    for cluster_drawings, bbox in clusters:
+        x0, y0, x1, y1 = bbox
+        area = (x1 - x0) * (y1 - y0)
+
+        # (a) Minimum bounding-box area gate.
+        if area < CHART_MIN_CLUSTER_AREA:
+            logger.debug(
+                "has_chart_marks p%s: cluster bbox=%.0f×%.0f area=%.0f < "
+                "CHART_MIN_CLUSTER_AREA=%.0f — skip (too small)",
+                page_num_label,
+                x1 - x0,
+                y1 - y0,
+                area,
+                CHART_MIN_CLUSTER_AREA,
+            )
+            continue
+
+        # (b) Must pass the data-marks positive gate.
+        has_data_marks = _has_vector_data_marks(cluster_drawings)
+        if not has_data_marks:
+            logger.debug(
+                "has_chart_marks p%s: cluster area=%.0f — no data marks "
+                "(thin/neutral strokes only); skip",
+                page_num_label,
+                area,
+            )
+            continue
+
+        ratio = area / max(page_area, 1.0)
+        logger.debug(
+            "has_chart_marks p%s: CHART cluster found — area=%.0f ratio=%.3f %d drawings",
+            page_num_label,
+            area,
+            ratio,
+            len(cluster_drawings),
+        )
+        return True
+
+    logger.debug(
+        "has_chart_marks p%s: no qualifying chart cluster in %d cluster(s)",
+        page_num_label,
+        len(clusters),
+    )
+    return False

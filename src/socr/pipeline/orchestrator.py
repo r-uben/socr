@@ -37,7 +37,7 @@ from socr.core.result import (
 )
 from socr.core.state import DocumentState, PageState
 from socr.engines.registry import get_engine, resolve_auto_engine
-from socr.figures.extractor import ExtractionResult, FigureExtractor
+from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.pipeline.agentic import route_page
 from socr.pipeline.consensus import ConsensusEngine
 from socr.pipeline.repair import RepairRouter
@@ -1099,6 +1099,90 @@ class UnifiedPipeline:
         return self._is_trusted_native_without_ocr(page_num, ps)
 
     # ------------------------------------------------------------------
+    # PP-7: Chart-asset routing lane
+    # ------------------------------------------------------------------
+
+    def _is_chart_asset_page(self, page_num: int, ps: PageState, pdf_path: Path) -> bool:
+        """PP-7: return True when a born-digital page should route to the chart-asset lane.
+
+        Fires when ALL of:
+          - The page is born-digital with native text (otherwise it goes to OCR anyway).
+          - It is NOT a table page (tables route to the VLM ladder; charts do not).
+          - It IS a trusted-native candidate (i.e. ``_is_trusted_native_without_ocr``
+            would have returned True — no needs_ocr_enhancement, native_first enabled).
+          - ``has_chart_marks`` detects at least one vector chart cluster OR embedded
+            raster image on the page.
+
+        This predicate is called BEFORE the native-bypass branch in the agentic loop so
+        chart pages are intercepted and routed to the chart lane instead of shipping as
+        pure native word-salad prose.
+
+        Do NOT call this predicate when ``_is_trusted_native_without_ocr`` returns False
+        (i.e. the page would go to the OCR ladder anyway); there is nothing to intercept.
+        """
+        # Must be a trusted native candidate first (chart lane is a sub-case of native).
+        if not self._is_trusted_native_without_ocr(page_num, ps):
+            return False
+        # Tables route to the ladder — never to the chart lane.
+        if self._page_has_tables(page_num, ps):
+            return False
+        # Open the PDF page and run the vector detector.
+        try:
+            import fitz
+
+            with fitz.open(pdf_path) as doc:
+                page = doc[page_num - 1]
+                return has_chart_marks(page)
+        except Exception as exc:
+            logger.debug(
+                "_is_chart_asset_page p%d: fitz open/detect failed (%s); defaulting to False",
+                page_num,
+                exc,
+            )
+            return False
+
+    def _render_chart_page_png(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        figures_dir: Path,
+    ) -> str:
+        """PP-7: render the full page as a PNG and save it to ``figures_dir``.
+
+        Renders at ``RENDER_DPI`` (same as FigureExtractor) and saves with a
+        deterministic name ``chart_page_{page_num}.png`` so the path is
+        predictable and the file is distinguishable from regular extracted figures.
+
+        Returns the saved path as a string.
+
+        Raises ``RuntimeError`` on any render failure — the caller is responsible
+        for fail-closed handling (hard audit error, never silent degradation).
+        """
+        from socr.figures.extractor import RENDER_DPI
+
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            import fitz
+            from PIL import Image
+
+            with fitz.open(pdf_path) as doc:
+                page = doc[page_num - 1]
+                mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
+                pix = page.get_pixmap(matrix=mat)
+                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        except Exception as exc:
+            raise RuntimeError(
+                f"chart-lane PNG render failed for p{page_num} of {pdf_path.name}: {exc}"
+            ) from exc
+
+        out_path = figures_dir / f"chart_page_{page_num}.png"
+        try:
+            img.save(out_path)
+        except Exception as exc:
+            raise RuntimeError(f"chart-lane PNG save failed for p{page_num}: {exc}") from exc
+        return str(out_path)
+
+    # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
     # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
     # wedged VLM judge cannot block the orchestrator thread indefinitely.
@@ -1318,6 +1402,26 @@ class UnifiedPipeline:
         # Track whether any page was processed for console summary.
         halt_reason: str = ""
 
+        # -- PP-7: doc-scoped chart-lane figures directory -----------------------
+        # Pre-compute figures_dir once so chart-lane PNG saves have a consistent
+        # location alongside the rest of the document outputs.  Falls back to a
+        # sibling ``figures/`` directory next to the PDF when the contract is not
+        # available (unit-test / partial-pipeline scenario).
+        _chart_figures_dir: Path | None = None
+        try:
+            from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
+
+            _chart_pdf_path = state.handle.path
+            _chart_scan_root = self._scan_root or _chart_pdf_path.parent
+            _chart_doc_dir = doc_dir_for(
+                output_dir, relative_key(_chart_pdf_path, _chart_scan_root)
+            )
+            _chart_figures_dir = figures_dir_for(_chart_doc_dir)
+        except Exception as exc:
+            logger.debug("PP-7: could not compute chart figures_dir via contract: %s", exc)
+            # Fallback: sibling figures/ next to the output dir.
+            _chart_figures_dir = output_dir / "figures"
+
         # ====================================================================
         # ONE fused loop over ALL pages in page order (native AND ocr).
         # Native-trusted pages are finalized in-place; OCR pages go through
@@ -1341,7 +1445,117 @@ class UnifiedPipeline:
                     )
                 break
 
-            if is_native:
+            # PP-7: Chart-asset lane — intercept before the native-bypass branch.
+            # A born-digital native page that carries vector chart marks (or an
+            # embedded raster image) routes here instead of shipping as raw word-
+            # salad prose.  B1 representation: native prose retained + chart PNG
+            # ref embedded + explicit audit flag.  Force PNG even when --save-
+            # figures is off (chart PNGs are mandatory preservation artifacts).
+            if is_native and self._is_chart_asset_page(page_num, ps, state.handle.path):
+                if not self.config.quiet:
+                    console.print(f"  p{page_num}: [cyan]chart-asset lane[/cyan]")
+                from socr.core.audit_log import AuditEvent
+
+                chart_png_ref = ""
+                chart_render_failed = False
+                if _chart_figures_dir is not None:
+                    try:
+                        saved_png = self._render_chart_page_png(
+                            state.handle.path, page_num, _chart_figures_dir
+                        )
+                        # Relative image ref (from the doc's root markdown file).
+                        png_rel = Path(saved_png).name
+                        # figures/ subdir is conventional; use the relative path
+                        # within the figures dir so it renders in the markdown.
+                        try:
+                            _figures_dir_name = _chart_figures_dir.name
+                            chart_png_ref = (
+                                f"![Chart page {page_num}]({_figures_dir_name}/{png_rel})"
+                            )
+                        except Exception:
+                            chart_png_ref = f"![Chart page {page_num}]({png_rel})"
+                    except RuntimeError as render_exc:
+                        chart_render_failed = True
+                        logger.error(
+                            "PP-7 chart-lane: PNG render FAILED for p%d — %s",
+                            page_num,
+                            render_exc,
+                        )
+                        state.events.append(
+                            AuditEvent(
+                                page_num=page_num,
+                                kind="chart_asset_render_failed",
+                                engine="",
+                                detail=str(render_exc),
+                            )
+                        )
+                else:
+                    chart_render_failed = True
+                    _msg = (
+                        f"PP-7 chart-lane: figures_dir unavailable for p{page_num}; PNG not saved"
+                    )
+                    logger.error(_msg)
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="chart_asset_render_failed",
+                            engine="",
+                            detail=_msg,
+                        )
+                    )
+
+                # B1 representation: retain native prose + embed chart PNG ref.
+                # If render failed, set status=WARNING so downstream stages know
+                # the visual payload is missing (fail-closed, never silent).
+                native_prose = ps.native_text or ""
+                if chart_png_ref:
+                    chart_body = (
+                        native_prose.rstrip() + "\n\n" + chart_png_ref
+                        if native_prose.strip()
+                        else chart_png_ref
+                    )
+                else:
+                    chart_body = native_prose
+
+                # Mirror native_table_structure_failed: set the PageState flag so
+                # _winning_page_output (manifest.py) does not re-stamp the page as
+                # engine=native / audit_passed=True / status=SUCCESS when it falls
+                # through from the non-passing best_output.  Without this the fail-
+                # closed intent is scrubbed at manifest-freeze time (bug PP-7-R1).
+                if chart_render_failed:
+                    ps.chart_asset_render_failed = True
+
+                chart_status = PageStatus.WARNING if chart_render_failed else PageStatus.SUCCESS
+                chart_out = PageOutput(
+                    page_num=page_num,
+                    text=chart_body,
+                    status=chart_status,
+                    engine="chart_asset",
+                    audit_passed=not chart_render_failed,
+                    cost_usd=0.0,
+                )
+                ps.attempts.append(chart_out)
+                ps.best_output = chart_out
+
+                # Durable audit event: visual chart semantics saved as image
+                # asset; data values are NOT transcribed (explicit, auditable).
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="chart_asset_page",
+                        engine="chart_asset",
+                        detail=(
+                            "visual chart semantics represented as image asset; "
+                            "data values not transcribed"
+                        ),
+                        data={
+                            "png_saved": not chart_render_failed,
+                            "png_path": chart_png_ref,
+                        },
+                    )
+                )
+
+            elif is_native:
                 # Tier 1: born-digital trusted native text — free, no OCR.
                 native_out = PageOutput(
                     page_num=page_num,
@@ -2769,6 +2983,9 @@ class UnifiedPipeline:
             "native_table_structure_failed": (
                 bool(ps.native_table_structure_failed) if ps else False
             ),
+            "chart_asset_render_failed": (
+                bool(ps.chart_asset_render_failed) if ps else False  # PP-7
+            ),
             "judge_rejected": bool(ps.judge_rejected) if ps else False,
             # Audit log subset for this page.
             "audit_events": page_events,
@@ -2968,7 +3185,11 @@ class UnifiedPipeline:
             for n, p in sorted(state.pages.items())
             if p.is_born_digital
             and p.native_text
-            and (p.needs_ocr_enhancement or p.native_table_structure_failed)
+            and (
+                p.needs_ocr_enhancement
+                or p.native_table_structure_failed
+                or p.chart_asset_render_failed  # PP-7: render failure surfaces at doc level
+            )
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
         ]
