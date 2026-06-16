@@ -45,6 +45,21 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def _page_blob_key(page_output_dict: dict) -> str:
+    """Content-addressed key for a serialised PageOutput dict.
+
+    Used in per-page sidecars as a lightweight ``page_fingerprint`` that
+    changes whenever the winning page text changes.  Mirrors the BlobStore
+    key derivation so PP-5 can cross-reference with the manifest without
+    opening the manifest file.
+    """
+    import hashlib
+    import json
+
+    payload = json.dumps(page_output_dict, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _manifest_versions() -> tuple[str, str]:
     """(NORMALIZER_VERSION, ASSEMBLY_VERSION), read at call time.
 
@@ -2350,6 +2365,173 @@ class UnifiedPipeline:
                 )
 
     # ------------------------------------------------------------------
+    # Phase 5: Assemble — fragment/sidecar/stitch helpers (PP-1)
+    # ------------------------------------------------------------------
+
+    def _page_fragment_path(self, output_dir: Path, state: DocumentState, page_num: int) -> Path:
+        """Canonical path for a per-page markdown fragment: ``pages/NNN.md``.
+
+        Zero-padded to five digits so lexicographic order == page order for any
+        document up to 99 999 pages.
+        """
+        from ocr_output_contract import doc_dir_for, relative_key
+
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        return doc_dir / "pages" / f"{page_num:05d}.md"
+
+    def _flush_page_fragment(
+        self,
+        state: DocumentState,
+        page_num: int,
+        text: str,
+        output_dir: Path,
+    ) -> Path:
+        """Write body-only canonical page text to ``pages/NNN.md`` atomically.
+
+        The fragment contains ONLY the body text — no ``## Page N`` header.
+        ``_stitch_fragments`` re-adds headers via ``assemble_pages`` so the
+        stitched output is byte-identical to the in-memory ``_canonical_body``.
+
+        Atomic: writes to ``.md.tmp`` then renames so a mid-write crash never
+        leaves a truncated fragment that a future stitch would silently include.
+        """
+        frag_path = self._page_fragment_path(output_dir, state, page_num)
+        frag_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = frag_path.with_suffix(".md.tmp")
+        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.rename(frag_path)
+        return frag_path
+
+    def _flush_page_sidecar(
+        self,
+        state: DocumentState,
+        page_num: int,
+        output_dir: Path,
+    ) -> Path:
+        """Write per-page provenance sidecar to ``pages/NNN.json`` atomically.
+
+        Carries the fields that are NOT already in ``PageOutput.to_dict`` but
+        are needed by later pipeline stages (PP-5 enrichment) or diagnostics:
+        the PageState decision flags (``needs_ocr_enhancement``,
+        ``native_table_structure_failed``, ``judge_rejected``), page- and
+        run-level fingerprints, the winning output's full serialised dict, and
+        a summary of audit events for this page.
+
+        Atomic: writes to ``.json.tmp`` then renames so a reader never sees a
+        half-written file.
+        """
+        import json
+
+        from ocr_output_contract import doc_dir_for, relative_key
+
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        sidecar_path = doc_dir / "pages" / f"{page_num:05d}.json"
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+
+        ps = state.pages.get(page_num)
+        bo = ps.best_output if ps else None
+        winning_dict = bo.to_dict() if bo is not None else {}
+
+        # Audit events for this page only, serialised as plain dicts.
+        page_events = [
+            {
+                "kind": ev.kind,
+                "engine": ev.engine,
+                "detail": ev.detail,
+                "data": ev.data if hasattr(ev, "data") and ev.data else {},
+            }
+            for ev in state.events
+            if hasattr(ev, "page_num") and ev.page_num == page_num
+        ]
+
+        # Figure refs emitted by the description phase and stored on EngineResult.
+        # We record only the page-local subset here.
+        figure_refs: list[dict] = []
+        for run in state.engine_runs:
+            for fig in getattr(run, "figures", []):
+                if getattr(fig, "page_num", None) == page_num:
+                    figure_refs.append(fig.to_dict() if hasattr(fig, "to_dict") else {})
+
+        payload: dict = {
+            "page_num": page_num,
+            # Status mirrors the winning output's status, or "missing" when
+            # no output exists.
+            "status": winning_dict.get("status", "missing"),
+            # terminal: True when this is the definitive sidecar written at
+            # phase-5 assemble time (as opposed to a future incremental write
+            # from PP-2 that may be superseded by repair).
+            "terminal": True,
+            # Engine / provider provenance.
+            "engine": winning_dict.get("engine", ""),
+            "provider": winning_dict.get("provider_id", ""),
+            "cost_usd": winning_dict.get("cost_usd", 0.0),
+            # Run-level fingerprint (shared across all pages of this run).
+            "run_fingerprint": self._run_fingerprint(),
+            # Page-level fingerprint: the blob key of the winning output, if
+            # available.  Empty string when no winning output exists (e.g. a
+            # failed page).
+            "page_fingerprint": _page_blob_key(winning_dict) if winning_dict else "",
+            # PageState decision flags NOT in PageOutput.to_dict (PP-5 consumers
+            # need these to understand why a particular output was selected).
+            "needs_ocr_enhancement": bool(ps.needs_ocr_enhancement) if ps else False,
+            "native_table_structure_failed": (
+                bool(ps.native_table_structure_failed) if ps else False
+            ),
+            "judge_rejected": bool(ps.judge_rejected) if ps else False,
+            # Audit log subset for this page.
+            "audit_events": page_events,
+            # Table-pass and figure refs.
+            "figure_refs": figure_refs,
+        }
+
+        tmp_path = sidecar_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.rename(sidecar_path)
+        return sidecar_path
+
+    def _stitch_fragments(self, state: DocumentState, output_dir: Path) -> str:
+        """Reconstruct the document body from ``pages/NNN.md`` fragments.
+
+        Reads every fragment in page order and joins them via the contract's
+        ``assemble_pages`` with EXPLICIT page numbers, producing the canonical
+        ``## Page N`` body.  The result is byte-identical to ``_canonical_body``
+        when all fragments were written from the same ``canonical_page_texts``
+        call.
+
+        Falls back to an empty string when no fragments exist (should never
+        happen after a successful flush pass, but defensively handled).
+        """
+        from ocr_output_contract import assemble_pages, doc_dir_for, relative_key
+
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        pages_dir = doc_dir / "pages"
+        if not pages_dir.is_dir():
+            return ""
+
+        # Collect fragment files in lexicographic (== page) order.
+        frag_files = sorted(pages_dir.glob("*.md"))
+        if not frag_files:
+            return ""
+
+        texts: list[str] = []
+        page_numbers: list[int] = []
+        for frag_file in frag_files:
+            try:
+                page_num = int(frag_file.stem)
+            except ValueError:
+                logger.warning("stitch: ignoring non-numeric fragment %s", frag_file.name)
+                continue
+            texts.append(frag_file.read_text(encoding="utf-8"))
+            page_numbers.append(page_num)
+
+        if not texts:
+            return ""
+        return assemble_pages(texts, page_numbers=page_numbers)
+
+    # ------------------------------------------------------------------
     # Phase 5: Assemble
     # ------------------------------------------------------------------
 
@@ -2391,7 +2573,18 @@ class UnifiedPipeline:
         return body, True
 
     def _phase_assemble(self, state: DocumentState, output_dir: Path) -> EngineResult:
-        """Build the final EngineResult from DocumentState and save to disk."""
+        """Build the final EngineResult from DocumentState and save to disk.
+
+        PP-1: fragment/sidecar/stitch scaffold.  After computing the in-memory
+        canonical body, this method also:
+          1. Flushes one ``pages/NNN.md`` fragment per page (body-only, no header).
+          2. Flushes one ``pages/NNN.json`` sidecar per page (provenance / flags).
+          3. Stitches the fragments back via ``_stitch_fragments`` and verifies
+             the result is byte-identical to the in-memory body.
+        The stitched body replaces the in-memory one when they match; on any
+        mismatch or error a warning is logged and the in-memory body is kept
+        (fail-open, byte-identity invariant preserved via fallback).
+        """
         if not self.config.quiet:
             console.print("\n[cyan]Phase 5:[/cyan] Assemble")
 
@@ -2405,6 +2598,37 @@ class UnifiedPipeline:
         from socr.core.manifest import canonical_page_texts, is_page_failed_marker
 
         page_texts = canonical_page_texts(state)
+
+        # PP-1: flush per-page fragments and sidecars from the in-memory page
+        # texts, then verify stitch round-trips byte-identically.
+        # Non-fatal: any error keeps the in-memory body.
+        if has_text and page_texts:
+            try:
+                page_nums = list(range(1, state.handle.page_count + 1))
+                for pnum, ptext in zip(page_nums, page_texts):
+                    self._flush_page_fragment(state, pnum, ptext, output_dir)
+                    self._flush_page_sidecar(state, pnum, output_dir)
+                stitched = self._stitch_fragments(state, output_dir)
+                if stitched == final_text:
+                    # Byte-identical: the fragment/stitch path is verified.
+                    # Use stitched to confirm we go through the new code path.
+                    final_text = stitched
+                else:
+                    # Mismatch — log and fall back to in-memory body.
+                    logger.warning(
+                        "PP-1 [%s]: stitched body differs from in-memory body "
+                        "(%d vs %d bytes); falling back to in-memory assembly",
+                        state.handle.path.name,
+                        len(stitched),
+                        len(final_text),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "PP-1 [%s]: fragment flush/stitch failed (%s); "
+                    "falling back to in-memory assembly",
+                    state.handle.path.name,
+                    exc,
+                )
         failed_pages = [i for i, t in enumerate(page_texts, start=1) if is_page_failed_marker(t)]
         native_fallback_pages = [
             n
