@@ -27,10 +27,13 @@ Engines are installed separately because they have different dependencies (torch
 # Process a PDF (deterministic mode)
 socr paper.pdf
 
-# Cost-aware agentic mode: cheapest provider first, escalate only if rejected
+# Cost-aware agentic mode: processes + saves one page at a time (pages/NNN.md),
+# resumable on re-run, byte-identical final output.
 socr paper.pdf --agentic
-socr paper.pdf --agentic --cost-budget 0.05      # cap spend per document
-socr paper.pdf --agentic --max-cost-per-page 0.0  # local-only (free)
+socr paper.pdf --agentic --strict-local           # local-only (free), page-by-page
+socr paper.pdf --agentic --cost-budget 0.05       # cap spend per document
+# Interrupted a run? Just run it again — finished pages are skipped:
+socr paper.pdf --agentic                          # resumes from the last saved page
 
 # Choose engine (deterministic mode)
 socr paper.pdf --primary gemini
@@ -67,8 +70,10 @@ checked by heuristics; failed pages fall back to another engine.
 ### Agentic, cost-aware mode (`--agentic`)
 
 ```
-PDF → per page: try cheapest provider → judge the output
-    → accept, or escalate up the cost ladder → Markdown (+ replayable manifest)
+PDF → for each page, in order:
+        route → extract text → reconcile tables → place figures/charts → (equations)
+        → verify → FLUSH pages/NNN.md to disk → next page
+    → stitch fragments → Markdown (byte-identical to whole-doc assembly) + manifest
 ```
 
 The engine is chosen **dynamically by cost**: try the cheapest available provider
@@ -78,6 +83,29 @@ fallback) decide accept-or-escalate, and climb the cost ladder
 Stops at the first accepted output, bounded by `--cost-budget` / `--max-cost-per-page`.
 Each run records the winning provider + cost per page and writes a **manifest**
 that `socr replay` can reconstruct with zero model calls.
+
+**Progressive, page-by-page processing.** In agentic mode socr is *page-major*: it
+finishes one page completely and **writes it to disk immediately** (`pages/NNN.md`
++ a `pages/NNN.json` status sidecar) before starting the next, rather than holding
+the whole document in memory and saving once at the end. Concretely:
+
+- **Crash-safe.** A hang or crash on page 30 leaves pages 1–29 already on disk. The
+  final `<stem>.md` is the ordered stitch of the fragments and is **byte-identical**
+  to the non-progressive whole-doc assembly.
+- **Resume.** Re-running a partially-processed document **skips pages already finished**
+  (matched by a per-page run-fingerprint + input checksum) and reprocesses only the
+  rest. A model/prompt/flag change invalidates the fingerprint and forces re-OCR; the
+  skip is conservative — on any doubt the page is reprocessed, never silently reused.
+- **Clean halt on a wedged model.** If the local VLM stops responding, socr flushes
+  the finished pages, marks the document `PARTIAL_SAVE_VLM_TIMEOUT`, and stops cleanly
+  instead of feeding more work into a stuck GPU.
+- **Tables / figures / charts, per page.** Born-digital table geometry is verified
+  before paying for a VLM judge; figures are embedded **inline** within their page;
+  chart/front-matter pages (vector charts that would otherwise become text word-salad)
+  are saved as **image assets** with a note rather than transcribed.
+- **Equations (opt-in).** `--detect-equations` saves model-free crop PNGs of display
+  equations; `--recover-clean-equations` additionally reads each crop to LaTeX into a
+  non-destructive sidecar (validated; bad LaTeX never replaces the native text/crop).
 
 Each engine is a separate CLI binary. `socr` calls it as a subprocess, reads the
 output markdown, and applies the quality pipeline. See `docs/ARCHITECTURE.md` for
@@ -118,20 +146,27 @@ socr process <PDF> [OPTIONS]
   --fallback ENGINE            Fallback engine
   --no-audit                   Skip quality audit
   --no-native-first            OCR every page (don't use native text for prose)
-  --save-figures               Save extracted figure images
+  --save-figures               Extract figure PNGs + inline image refs (no captions)
+  --describe-figures           Also add VLM captions (opt-in, non-authoritative)
   --timeout SECONDS            Subprocess timeout
   --profile NAME               Load ~/.config/socr/{name}.yaml
   --config PATH                Custom YAML config file
   -q, --quiet / -v, --verbose  Output verbosity
   --dry-run / --reprocess      List-only / force reprocess
 
-  # Agentic cost-aware routing
-  --agentic                    Per page: cheapest provider first, judge escalates
+  # Agentic cost-aware routing (page-major; progressive save + resume)
+  --agentic                    Per page: cheapest provider first, judge escalates,
+                               then flush pages/NNN.md to disk before the next page.
+                               Re-running resumes from the last finished page.
+  --strict-local               Only local/free rungs (no paid cloud)
   --judge-backend MODE         auto | vlm | heuristic (default: auto)
   --judge-model NAME           VLM model for the judge (e.g. qwen2-vl:7b)
   --max-cost-per-page USD      Skip providers above this price (0 = no cap)
   --cost-budget USD            Stop escalating once doc spend hits this (0 = ∞)
   --write-manifest             Write a replayable manifest + blob cache
+  --detect-equations           Detect display-equation regions, save crop PNGs (model-free)
+  --recover-clean-equations    Also read equation crops to LaTeX into a sidecar (opt-in)
+  --legacy-routing             Use the old deterministic backbone instead of agentic
 
 socr batch <DIR> [OPTIONS]
   Same options as process, plus:
@@ -146,11 +181,20 @@ socr engines                     Show available engines
 
 ```
 output/<doc_stem>/
-├── <doc_stem>.md        # OCR text
-├── metadata.json        # Processing stats
-└── figures/             # With --save-figures
-    └── figure_1_page3.png
+├── <doc_stem>.md        # final OCR text (stitched from pages/)
+├── metadata.json        # processing stats + status
+├── pages/               # agentic mode: per-page progressive save + resume ledger
+│   ├── 00001.md         #   one fragment per page (stitches to <doc_stem>.md, byte-identical)
+│   ├── 00001.json       #   sidecar: status, terminal flag, engine, run-fingerprint
+│   └── ...
+├── figures/             # with --save-figures
+│   └── figure_1_page3.png
+└── audit_log.json       # per-page audit events (timeouts, chart-asset pages, failures)
 ```
+
+The `pages/` directory is what makes a run **crash-safe and resumable**: each
+`NNN.md` is written the instant its page finishes, and re-running reuses the ones
+whose `NNN.json` is `terminal` with a matching fingerprint.
 
 ## Configuration
 
