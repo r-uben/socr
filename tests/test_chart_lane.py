@@ -623,7 +623,18 @@ class TestAgenticChartLaneRouting:
         mock_decision.winning_engine = "deepseek"
         mock_decision.total_cost_usd = 0.002
 
-        with patch("socr.pipeline.orchestrator.route_page", return_value=mock_decision):
+        # Hermetic: patch _available_engines_for_agentic so the provider ladder is
+        # non-empty regardless of whether ollama/qwen is installed — otherwise the
+        # loop bails before the patched route_page (no providers) and the table page
+        # is never routed (best_output stays None) in a no-provider env like CI.
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        with (
+            patch("socr.pipeline.orchestrator.route_page", return_value=mock_decision),
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+        ):
             pipeline._phase_agentic(state, tmp_path)
 
         ps = state.pages[1]
