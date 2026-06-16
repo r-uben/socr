@@ -706,3 +706,193 @@ def test_fitz_page_judge_handle_closes_between_calls(tmp_path):
     # close-and-evict path ran without error.  Verified above.
     # Additionally verify that p1 and p2 are distinct objects (a fresh doc was opened).
     assert p1 is not p2
+
+
+# --------------------------------------------------------------------------
+# PP-3 Acceptance tests: _reread_page_tables parity + reader-singleton
+# --------------------------------------------------------------------------
+
+
+class _CountingReader:
+    """A stub reader that counts how many times it is instantiated (via a shared
+    counter passed at construction) and how many times read() is called."""
+
+    def __init__(self, value: str, instance_counter: list[int]) -> None:
+        self.value = value
+        self.calls = 0
+        instance_counter.append(1)  # one entry per construction
+
+    def read(self, _image_path: Path) -> str:
+        self.calls += 1
+        return self.value
+
+
+def test_pp3_parity_flagged(tmp_path, monkeypatch):
+    """_reread_page_tables must produce the SAME dualpass_flagged AuditEvent
+    and leave bo.text untouched (flag-only default) as the pre-refactor inline
+    loop body did.  This is the primary parity assertion for PP-3.
+    """
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))  # auto_patch_tables=False
+    pipe._last_assessment = _assessment(has_tables=True)
+    state, bo = _state_with_table_page(pdf, _PAGE_MD)
+    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
+    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
+
+    pipe._phase_dual_pass_tables(state)
+
+    # PARITY: same outcome as before the refactor.
+    assert bo.text == _PAGE_MD, "bo.text must be unchanged in flag-only mode"
+    assert any("dual-pass flagged" in n for n in bo.audit_notes), (
+        "audit_notes must record the disagreement"
+    )
+    events = [e for e in state.events if e.kind == "dualpass_flagged"]
+    assert events, "dualpass_flagged AuditEvent must be emitted"
+    assert events[0].page_num == 1, "AuditEvent page_num must match the table page"
+
+
+def test_pp3_parity_patched(tmp_path, monkeypatch):
+    """_reread_page_tables must produce the SAME patch and dualpass_patched
+    AuditEvent as the pre-refactor inline loop body when auto_patch_tables=True.
+    """
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
+    pipe._last_assessment = _assessment(has_tables=True)
+    state, bo = _state_with_table_page(pdf, _PAGE_MD)
+    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
+    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
+
+    pipe._phase_dual_pass_tables(state)
+
+    # PARITY: misread corrected, same as pre-refactor.
+    assert "(0.010)" in bo.text and "(0.0l0)" not in bo.text, (
+        "bo.text must be patched to the crop reading"
+    )
+    events = [e for e in state.events if e.kind == "dualpass_patched"]
+    assert events, "dualpass_patched AuditEvent must be emitted"
+    assert events[0].page_num == 1, "AuditEvent page_num must match the table page"
+
+
+def test_pp3_reader_built_once_not_per_crop(tmp_path, monkeypatch):
+    """OllamaTableReader must be instantiated ONCE at doc scope, not once per
+    crop or per page.  Verified by counting constructor calls via a shared list.
+    """
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    instance_counter: list[int] = []
+    reader = _CountingReader(_CROP_MD, instance_counter)
+
+    import socr.tables.extract as extract_mod
+
+    # Patch OllamaTableReader so its construction is tracked.
+    monkeypatch.setattr(extract_mod, "OllamaTableReader", lambda *a, **k: reader)
+
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    pipe._last_assessment = _assessment(has_tables=True)
+    state, _bo = _state_with_table_page(pdf, _PAGE_MD)
+    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
+
+    pipe._phase_dual_pass_tables(state)
+
+    # Reader must be built exactly once — doc scope, not per crop.
+    assert len(instance_counter) == 1, (
+        f"OllamaTableReader was constructed {len(instance_counter)} time(s); "
+        "expected exactly 1 (doc-scoped singleton)"
+    )
+
+
+def test_pp3_reread_page_tables_direct(tmp_path):
+    """_reread_page_tables can be called directly with pre-computed raw_crops;
+    it must return (patched_delta, flagged_delta) matching the expected outcome.
+    This verifies the helper's interface is stable for PP-2's per-page call site.
+    """
+    import fitz as _fitz
+
+    from socr.tables.extract import TableCropExtractor
+    from socr.tables.locate import locate_tables as _locate_tables
+
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    reader = _StubReader(_CROP_MD)
+    extractor = TableCropExtractor(reader)
+
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))  # auto_patch_tables=False
+    state, bo = _state_with_table_page(pdf, _PAGE_MD)
+
+    # Caller obtains raw_crops (locate + extract) in a narrow try/except, then
+    # calls the helper outside it — matching the production call pattern.
+    with _fitz.open(pdf) as fitz_doc:
+        boxes = _locate_tables(fitz_doc[0])
+    raw_crops = extractor.extract(pdf, 1, boxes)
+
+    patched_delta, flagged_delta = pipe._reread_page_tables(state, 1, raw_crops, extractor)
+
+    # flag-only: patched=0, flagged=1 (one table with a misread)
+    assert patched_delta == 0
+    assert flagged_delta == 1
+    assert bo.text == _PAGE_MD  # corpus untouched in flag-only mode
+    events = [e for e in state.events if e.kind.startswith("dualpass_")]
+    assert events and events[0].page_num == 1
+
+
+def test_pp3_boundary_audit_exception_propagates(tmp_path, monkeypatch):
+    """REGRESSION guard (codex merge gate): if an exception occurs in the
+    patch/audit-event path AFTER bo.text has been patched, the exception must
+    propagate to the caller -- it must NOT be silently swallowed into a
+    'keeping text' continue that leaves the page half-patched (bo.text updated,
+    dualpass_patched event missing).
+
+    We inject the failure via a ``d.summary()`` method that raises on the
+    disagreement object returned by a monkeypatched ``reconcile_page_tables``.
+    Because ``bo.text = result.text`` runs BEFORE the loop over disagreements,
+    the exception fires after the patch is applied.  The exception must escape
+    ``_phase_dual_pass_tables``, not be swallowed.
+    """
+    from types import SimpleNamespace
+
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
+    pipe._last_assessment = _assessment(has_tables=True)
+    state, bo = _state_with_table_page(pdf, _PAGE_MD)
+    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
+    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
+
+    # A disagreement whose summary() raises — simulates a contract violation in
+    # the audit-event construction path that fires AFTER bo.text is patched.
+    def _raise_summary():
+        raise RuntimeError("injected audit-event construction failure")
+
+    broken_disagreement = SimpleNamespace(
+        action="patched",
+        source="booktabs",
+        note="",
+        changed_cells=[],
+        summary=_raise_summary,
+    )
+
+    class _FakeResult:
+        patched = True
+        text = _PAGE_MD.replace("(0.0l0)", "(0.010)")  # the patched text
+        disagreements = [broken_disagreement]
+
+    import socr.tables as tables_mod
+
+    monkeypatch.setattr(tables_mod, "reconcile_page_tables", lambda *a, **k: _FakeResult())
+
+    # The exception must propagate out of _phase_dual_pass_tables, not be logged
+    # and swallowed (which would leave bo.text patched without the event).
+    with pytest.raises(RuntimeError, match="injected audit-event construction failure"):
+        pipe._phase_dual_pass_tables(state)
