@@ -1436,6 +1436,125 @@ class UnifiedPipeline:
             else:
                 console.print(f"  {judged} judged, {rejected} rejected")
 
+    def _reread_page_tables(
+        self,
+        state: DocumentState,
+        page_num: int,
+        raw_crops: list,
+        extractor,
+    ) -> tuple[int, int]:
+        """Reconcile crop readings against whole-page OCR for one page.
+
+        Called by ``_phase_dual_pass_tables`` AFTER ``locate_tables`` and
+        ``extractor.extract`` have already run (those are inside the caller's
+        narrow fail-open ``try/except``). This method starts from the raw crop
+        list, handles the timeout-sentinel split, reconciles, patches, and emits
+        ``dualpass_*`` AuditEvents. The progressive-pages loop (PP-2) will call
+        this directly after it obtains crops for the page.
+
+        Returns ``(patched_delta, flagged_delta)``.
+
+        Exception boundary (must match pre-refactor 065e5dd exactly):
+        - ``reconcile_page_tables`` is guarded by its own narrow ``try/except``
+          (a reconcile failure must not drop the page -- same as original).
+        - The patch (``bo.text = result.text``), counter increment, and
+          AuditEvent emission run OUTSIDE any ``try/except`` so a bug there
+          propagates to the caller rather than being swallowed.  This ensures
+          a page is never left with patched ``bo.text`` and a missing event.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.tables import reconcile_page_tables
+
+        ps = state.pages[page_num]
+        bo = ps.best_output
+
+        # Separate timed-out sentinels from successful crops; emit audit events
+        # for each timeout so they appear in audit_log.json.
+        had_timeout = False
+        crops = []
+        for c in raw_crops:
+            if getattr(c, "_timed_out", False):
+                had_timeout = True
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="dualpass_crop_timeout",
+                        engine=bo.engine,
+                        detail=(
+                            "crop VLM reread timed out; "
+                            f"degraded={getattr(extractor, '_backend_degraded', False)}"
+                        ),
+                        data={
+                            "source": c.source,
+                            "backend_degraded": getattr(extractor, "_backend_degraded", False),
+                        },
+                    )
+                )
+                bo.audit_notes.append(
+                    f"dual-pass crop timeout p{page_num} ({c.source}); kept existing text"
+                )
+            else:
+                crops.append(c)
+
+        if not crops:
+            return 0, 0
+
+        # If ANY crop on this page timed out, do NOT auto-patch even when the
+        # config enables it. Partial crop coverage means we cannot safely assert
+        # that the remaining crops represent the full table set; patching on
+        # incomplete evidence risks data loss. Force flag-only for this page.
+        effective_auto_patch = self.config.auto_patch_tables and not had_timeout
+
+        try:
+            result = reconcile_page_tables(
+                bo.text,
+                [(c.markdown, c.source) for c in crops],
+                auto_patch=effective_auto_patch,
+            )
+        except Exception as exc:  # reconcile failure must not drop the page
+            logger.warning("dual-pass reconcile errored on p%d (%s); keeping text", page_num, exc)
+            return 0, 0
+
+        # Patch and emit AuditEvents OUTSIDE any try/except -- a bug here must
+        # propagate so the caller sees it and the page is never left in a
+        # half-patched state (bo.text changed but event/counter missing).
+        patched_delta = 0
+        if result.patched:
+            bo.text = result.text
+            patched_delta = 1
+
+        flagged_delta = 0
+        for d in result.disagreements:
+            flagged_delta += 1
+            bo.audit_notes.append(f"dual-pass {d.action}: {d.summary()}")
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=f"dualpass_{d.action}",
+                    engine=bo.engine,
+                    detail=d.summary(),
+                    data={
+                        "source": d.source,
+                        "note": d.note,
+                        "changed_cells": [
+                            {
+                                "row": c.row,
+                                "col": c.col,
+                                "page": c.page_value,
+                                "crop": c.crop_value,
+                            }
+                            for c in d.changed_cells
+                        ],
+                    },
+                )
+            )
+        if result.disagreements and not self.config.quiet:
+            for d in result.disagreements:
+                color = "green" if d.action == "patched" else "yellow"
+                console.print(f"  [{color}]p{page_num}: {d.action} — {d.summary()}[/{color}]")
+
+        return patched_delta, flagged_delta
+
     def _phase_dual_pass_tables(self, state: DocumentState) -> None:
         """Crop precisely-located tables, re-read each with the judge VLM, and
         reconcile against the whole-page OCR.
@@ -1450,9 +1569,14 @@ class UnifiedPipeline:
         (``TableCropExtractor._read_with_deadline``). On timeout an audit event
         of kind ``dualpass_crop_timeout`` is appended to ``state.events`` and the
         cascade guard is consulted before issuing the next crop call.
+
+        The per-page reconcile/patch/audit body is delegated to
+        ``_reread_page_tables`` so that the progressive-pages loop (PP-2) can
+        call it independently per page. The narrow fail-open guard covering
+        ``fitz.open + locate_tables + extractor.extract`` stays in this loop,
+        matching the pre-refactor exception boundary exactly.
         """
-        from socr.core.audit_log import AuditEvent
-        from socr.tables import locate_tables, reconcile_page_tables
+        from socr.tables import locate_tables
         from socr.tables.extract import OllamaTableReader, TableCropExtractor
 
         model = self._resolve_judge_model()
@@ -1484,6 +1608,7 @@ class UnifiedPipeline:
         )
 
         try:
+            # Reader and extractor are built ONCE at doc scope; reused per page.
             extractor = TableCropExtractor(OllamaTableReader(model=model, timeout=crop_timeout))
         except Exception as exc:
             logger.warning("dual-pass extractor unavailable (%s)", exc)
@@ -1506,100 +1631,29 @@ class UnifiedPipeline:
             if not bo or not bo.text or bo.engine == "native":
                 continue
             scanned += 1
+            # Narrow fail-open guard: covers only fitz.open + locate_tables +
+            # extractor.extract (the bad-PDF/bad-page cases). Reconcile, patch,
+            # and audit-event emission run OUTSIDE this catch via
+            # _reread_page_tables, matching the pre-refactor boundary exactly.
             try:
                 with fitz.open(pdf_path) as doc:
                     boxes = locate_tables(doc[page_num - 1])
                 if not boxes:
                     continue
-                # extract() applies the per-crop wall-clock deadline internally and
-                # marks timed-out crops with _timed_out=True so we can record an
-                # audit event and apply the cascade guard here.
+                # extract() applies the per-crop wall-clock deadline internally
+                # and marks timed-out crops with _timed_out=True so the helper
+                # can record an audit event and apply the cascade guard.
                 raw_crops = extractor.extract(pdf_path, page_num, boxes)
             except Exception as exc:  # a dual-pass failure must never drop a page
                 logger.warning("dual-pass errored on p%d (%s); keeping text", page_num, exc)
                 continue
-
-            # Separate timed-out sentinels from successful crops; emit audit events
-            # for each timeout so they appear in audit_log.json.
-            had_timeout = False
-            crops = []
-            for c in raw_crops:
-                if getattr(c, "_timed_out", False):
-                    had_timeout = True
-                    state.events.append(
-                        AuditEvent(
-                            page_num=page_num,
-                            kind="dualpass_crop_timeout",
-                            engine=bo.engine,
-                            detail=(
-                                "crop VLM reread timed out; "
-                                f"degraded={getattr(extractor, '_backend_degraded', False)}"
-                            ),
-                            data={
-                                "source": c.source,
-                                "backend_degraded": getattr(extractor, "_backend_degraded", False),
-                            },
-                        )
-                    )
-                    bo.audit_notes.append(
-                        f"dual-pass crop timeout p{page_num} ({c.source}); kept existing text"
-                    )
-                else:
-                    crops.append(c)
-
-            if not crops:
-                continue
-
-            # If ANY crop on this page timed out, do NOT auto-patch even when the
-            # config enables it. Partial crop coverage means we cannot safely assert
-            # that the remaining crops represent the full table set; patching on
-            # incomplete evidence risks data loss. Force flag-only for this page.
-            effective_auto_patch = self.config.auto_patch_tables and not had_timeout
-
-            try:
-                result = reconcile_page_tables(
-                    bo.text,
-                    [(c.markdown, c.source) for c in crops],
-                    auto_patch=effective_auto_patch,
-                )
-            except Exception as exc:  # reconcile failure must not drop the page
-                logger.warning(
-                    "dual-pass reconcile errored on p%d (%s); keeping text", page_num, exc
-                )
-                continue
-
-            if result.patched:
-                bo.text = result.text
-                patched += 1
-
-            for d in result.disagreements:
-                flagged += 1
-                bo.audit_notes.append(f"dual-pass {d.action}: {d.summary()}")
-                state.events.append(
-                    AuditEvent(
-                        page_num=page_num,
-                        kind=f"dualpass_{d.action}",
-                        engine=bo.engine,
-                        detail=d.summary(),
-                        data={
-                            "source": d.source,
-                            "note": d.note,
-                            "changed_cells": [
-                                {
-                                    "row": c.row,
-                                    "col": c.col,
-                                    "page": c.page_value,
-                                    "crop": c.crop_value,
-                                }
-                                for c in d.changed_cells
-                            ],
-                        },
-                    )
-                )
-            if result.disagreements and not self.config.quiet:
-                for d in result.disagreements:
-                    color = "green" if d.action == "patched" else "yellow"
-                    console.print(f"  [{color}]p{page_num}: {d.action} — {d.summary()}[/{color}]")
+            # _reread_page_tables runs outside the try/except above so that any
+            # exception in reconcile->patch->audit propagates (not swallowed).
+            page_patched, page_flagged = self._reread_page_tables(
+                state, page_num, raw_crops, extractor
+            )
+            patched += page_patched
+            flagged += page_flagged
 
         if not self.config.quiet:
             if scanned == 0:

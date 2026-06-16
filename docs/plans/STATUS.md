@@ -97,6 +97,7 @@ Design/research queue:
 | GH-36b | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | math/equation_latex.py (new), math/validate_latex.py (new), pipeline/orchestrator.py, core/config.py, cli.py, pyproject.toml, tests/test_equation_latex.py (new) | VLM engine + pylatexenc 1A gate + 1C non-destructive sidecar + provenance events + recover_clean_equations flag (default off); 886 tests pass |
 | PP-0 (GH-55) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | tables/extract.py, pipeline/orchestrator.py (_phase_dual_pass_tables + get_fitz_page), tests/test_dual_pass_tables.py | ThreadPoolExecutor wall-clock deadline guard + cascade guard + dualpass_crop_timeout AuditEvent + fitz single-slot cache; 969 tests pass |
 | PP-1 (GH-65) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | pipeline/orchestrator.py (_flush_page_fragment, _flush_page_sidecar, _stitch_fragments, _phase_assemble refactor), tests/test_pp1_fragment_flush.py | Fragment flush + atomic sidecar + end-of-run stitch; byte-identity verified by test; 994 tests pass |
+| PP-3 (GH-67) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | pipeline/orchestrator.py (_reread_page_tables extracted, _phase_dual_pass_tables refactored), tests/test_dual_pass_tables.py | Behavior-preserving refactor; reader built once at doc scope; 4 parity tests added; 999 tests pass |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 
