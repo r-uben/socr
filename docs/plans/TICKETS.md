@@ -676,3 +676,57 @@ within the `## Page N` section it belongs to.
 - `src/socr/figures/extractor.py`
 - `src/socr/pipeline/orchestrator.py`
 - `tests/test_pp4_inline_figures.py`
+
+---
+
+## PP-7 (GH-73) — Chart/figure-page routing lane
+
+GitHub: https://github.com/r-uben/socr/issues/73
+Status: DONE
+Priority: P1
+Branch: feat/73-pp7-chart-lane
+Depends on: PP-6 (GH-54)
+Settled design: A2 (cluster-first vector detector) + B1 (native prose + PNG ref + audit flag).
+Consilium note: `docs/log/2026-06-16_chart-route.md`
+
+### Problem
+
+PP-6 narrowed `has_tables`, so CE chart/front-matter pages that no longer qualify as tables fall
+through to native prose — producing word-salad for vector dashboards whose visual payload is in
+`get_drawings()`, not `get_images()`. A third routing lane is needed: detect vector charts
+deterministically and route them to a saved chart image asset.
+
+### Plan (completed)
+
+1. Added `CHART_MIN_CLUSTER_AREA` named constant and `has_chart_marks(page)` to
+   `src/socr/figures/extractor.py`.  Cluster-first: requires ≥1 spatially-coherent drawing
+   cluster that (a) meets `CHART_MIN_CLUSTER_AREA`, (b) passes `_has_vector_data_marks`, (c)
+   survives `_looks_like_table_grid` rejection.  OR-s with raster `page.get_images()`.
+   Logs mark counts + rejection reasons at DEBUG.
+2. Added `_is_chart_asset_page(page_num, ps, pdf_path)` predicate to `orchestrator.py`.  Fires
+   only when `_is_trusted_native_without_ocr` would have returned True AND not table AND
+   `has_chart_marks`.  Does NOT modify PP-6's predicates.
+3. Added `_render_chart_page_png(pdf_path, page_num, figures_dir)` helper — renders a full-page
+   PNG at `RENDER_DPI`, saves to `chart_page_{N}.png`.  Raises `RuntimeError` on failure.
+4. Hooked chart-lane routing into the PP-2 fused agentic loop as an `elif is_native and
+   _is_chart_asset_page(...)` branch before the normal native-bypass branch.  B1 representation:
+   native prose retained + chart PNG embedded (`![Chart page N](figures/...png)`) + explicit
+   AuditEvent(kind="chart_asset_page").  Force PNG regardless of `--save-figures`.
+5. Fail-closed on render failure: AuditEvent(kind="chart_asset_render_failed") + status=WARNING +
+   audit_passed=False; never silent.
+
+### Acceptance Criteria (met)
+
+- A genuine zero-raster vector chart page routes to chart-asset lane (not OCR ladder).
+- Chart-lane page = native prose + chart PNG ref + `chart_asset_page` audit event.
+- PNG saved even with `--save-figures=off`; render failure → hard audit error (fail-closed).
+- Decorated-vector prose pages (thin neutral rules) do NOT trigger chart lane.
+- Dense data tables still route to ladder; clean prose still ships native.
+- Monochrome B&W line-plots: documented false-negative (thin neutral strokes only; no VLM needed).
+- `has_chart_marks` logs mark counts + rejection reasons.
+
+### Write ownership
+
+- `src/socr/figures/extractor.py`
+- `src/socr/pipeline/orchestrator.py`
+- `tests/test_chart_lane.py` (new)
