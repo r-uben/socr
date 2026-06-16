@@ -96,6 +96,7 @@ Design/research queue:
 | GH-36a | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | math/detect_equations.py (new), math/recover.py, core/config.py, cli.py, pipeline/orchestrator.py, tests/test_equation_detection.py | Model-free equation region detector + crop-PNG + provenance + detect_equations flag + fingerprint + throughput harness + :8b defect fix; 855 tests pass |
 | GH-36b | socr-implementer (claude-sonnet-4-6) | 2026-06-15 | DONE | math/equation_latex.py (new), math/validate_latex.py (new), pipeline/orchestrator.py, core/config.py, cli.py, pyproject.toml, tests/test_equation_latex.py (new) | VLM engine + pylatexenc 1A gate + 1C non-destructive sidecar + provenance events + recover_clean_equations flag (default off); 886 tests pass |
 | PP-0 (GH-55) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | tables/extract.py, pipeline/orchestrator.py (_phase_dual_pass_tables + get_fitz_page), tests/test_dual_pass_tables.py | ThreadPoolExecutor wall-clock deadline guard + cascade guard + dualpass_crop_timeout AuditEvent + fitz single-slot cache; 969 tests pass |
+| PP-1 (GH-65) | socr-implementer (claude-sonnet-4-6) | 2026-06-16 | DONE | pipeline/orchestrator.py (_flush_page_fragment, _flush_page_sidecar, _stitch_fragments, _phase_assemble refactor), tests/test_pp1_fragment_flush.py | Fragment flush + atomic sidecar + end-of-run stitch; byte-identity verified by test; 994 tests pass |
 
 ## Per-issue workflow (orchestrator-driven, consilium-gated)
 
