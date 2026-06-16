@@ -38,8 +38,10 @@ from socr.core.result import (
 from socr.core.state import DocumentState, PageState
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor
+from socr.pipeline.agentic import route_page
 from socr.pipeline.consensus import ConsensusEngine
 from socr.pipeline.repair import RepairRouter
+from socr.tables.extract import probe_ollama_idle
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -418,7 +420,9 @@ class UnifiedPipeline:
         # re-read each crop with the judge VLM, and patch the authoritative crop
         # reading back into the page on disagreement. Runs for every mode, on the
         # final per-page text, just before assembly.
-        if self.config.dual_pass_tables:
+        # PP-2: skip in agentic mode — tables are handled per-page inside
+        # _phase_agentic's fused loop (avoids re-reading tables twice).
+        if self.config.dual_pass_tables and not (self.config.agentic and not is_multi):
             self._phase_dual_pass_tables(state)
 
         # Phase 5: Assemble
@@ -1095,52 +1099,100 @@ class UnifiedPipeline:
         return self._is_trusted_native_without_ocr(page_num, ps)
 
     # ------------------------------------------------------------------
+    # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
+    # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
+    # wedged VLM judge cannot block the orchestrator thread indefinitely.
+    # ------------------------------------------------------------------
+
+    class _TimeoutJudge:
+        """Wraps a PageJudge with a ThreadPoolExecutor wall-clock deadline.
+
+        On timeout the wrapper returns a rejection (accept=False,
+        reason="judge timeout"), which causes ``route_page`` to record the
+        attempt and escalate normally.  If the backend is also not idle after
+        the timeout, the caller should set ``backend_degraded`` and halt.
+
+        ``timeout_sec`` is a soft wall-clock bound in seconds.  ``None``
+        disables the wrapper (forward to the inner judge directly).
+        """
+
+        def __init__(self, inner, timeout_sec: float | None) -> None:
+            self._inner = inner
+            self._timeout_sec = timeout_sec
+
+        def assess(self, output, provider):
+            import concurrent.futures
+
+            from socr.pipeline.agentic import AcceptDecision
+
+            if self._timeout_sec is None:
+                return self._inner.assess(output, provider)
+
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = ex.submit(self._inner.assess, output, provider)
+            try:
+                result = future.result(timeout=self._timeout_sec)
+                ex.shutdown(wait=False)
+                return result
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                ex.shutdown(wait=False)
+                logger.warning(
+                    "judge timed out on page %s (%.2fs) — rejecting",
+                    output.page_num,
+                    self._timeout_sec,
+                )
+                return AcceptDecision(accept=False, reason="judge timeout")
+
+    # ------------------------------------------------------------------
     # Agentic: cost-aware per-page routing (replaces backbone+score+repair)
     # ------------------------------------------------------------------
 
     def _phase_agentic(self, state: DocumentState, output_dir: Path) -> None:
-        """Per OCR page: try the cheapest provider, let the judge escalate.
+        """PP-2 fused page-major loop: one pass over ALL pages (native + OCR).
 
-        Born-digital prose still takes free native text (Tier 1). Every other
-        page is routed through the cost-ordered ladder; the winning provider and
-        its cost are recorded on PageState. Bounded by ladder exhaustion,
-        ``max_cost_per_page``, and ``cost_budget`` — never by a retry count
-        (issue #39: the old ``max_retries + 1`` cap made the paid rungs
-        unreachable whenever 3+ free local engines were installed).
+        Born-digital prose takes free native text; every OCR page is routed
+        through the cost ladder.  After each page is final, a PROVISIONAL
+        fragment + sidecar (``terminal=False``) is flushed for crash recovery.
+        The authoritative fragment bytes come from ``_rewrite_all_fragments``
+        at the end of ``_phase_assemble`` (fork A / assemble-authoritative).
+
+        Per-page lifecycle (post-route):
+          1. ``_reread_page_tables`` (PP-3) — OCR pages with tables only.
+          2. Per-page equation detect+crop (GH-36a) — behind ``detect_equations``.
+          3. Per-page equation LaTeX sidecar (GH-36b) — behind ``recover_clean_equations``.
+          4. Write-through blob cache (``put_page``).
+          5. Provisional fragment + sidecar flush (``terminal=False``).
+
+        Cascade HALT (fork B / judge-guard):
+          - The judge is wrapped in ``_TimeoutJudge`` so a wedged VLM judge
+            cannot block the orchestrator thread.
+          - When ``route_page`` records a provider timeout AND ``probe_ollama_idle``
+            reports the backend is NOT responding, the document-level
+            ``backend_degraded`` latch is set: pages processed so far are already
+            flushed; the loop breaks without firing any VLM call for page N+1.
+          - An AuditEvent of kind ``partial_save_vlm_timeout`` is appended and the
+            final ``EngineResult`` carries ``error="PARTIAL_SAVE_VLM_TIMEOUT"`` so
+            callers and tests can detect the HALT condition unambiguously.
+
+        Phase 4c (dual-pass tables) is gated OFF for agentic mode in
+        ``process()`` so tables are never re-read twice.
+
+        ``_classify`` remains doc-wide (``_phase_analyze``); the fused loop
+        handles only the post-classification per-page lifecycle (fork C2).
         """
         from socr.core.providers import provider_ladder
-        from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS, route_page
+        from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
 
         if not self.config.quiet:
             console.print("\n[cyan]Agentic routing[/cyan] (cost-ordered, judge-gated)")
 
-        # Tier 1: born-digital trusted native text (free, no OCR).
-        # Skipped when --no-native-first: the user wants OCR even here, so
-        # every page goes through the cost ladder.
-        # When --native-only: born-digital pages with needs_ocr_enhancement are
-        # also accepted as native (suppresses OCR enhancement for all BD pages).
-        # Scans (is_born_digital=False) are always sent to OCR regardless.
+        # -- Doc-scoped native-fallback list (needed by run_provider stub) --------
+        # Collect OCR pages first, to build native_fallback_pages before the loop.
         ocr_pages: list[int] = []
         for page_num, ps in sorted(state.pages.items()):
-            is_trusted_native = self._is_agentic_trusted_native(page_num, ps)
-            if is_trusted_native:
-                native = PageOutput(
-                    page_num=page_num,
-                    text=ps.native_text,
-                    status=PageStatus.SUCCESS,
-                    engine="native",
-                    audit_passed=True,
-                    cost_usd=0.0,
-                )
-                ps.attempts.append(native)
-                ps.best_output = native
-            else:
+            if not self._is_agentic_trusted_native(page_num, ps):
                 ocr_pages.append(page_num)
-
-        if not ocr_pages:
-            if not self.config.quiet:
-                console.print("  All pages born-digital (no OCR needed)")
-            return
 
         native_fallback_pages = [
             p
@@ -1150,11 +1202,8 @@ class UnifiedPipeline:
             and state.pages[p].native_text
         ]
 
+        # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
-        # --strict-local: drop cloud-tier rungs (including free-cloud providers such
-        # as QWEN Cloud / Ollama Cloud) so only local/on-device providers are tried.
-        # Filter by tier, not by cost: PROFILE_QWEN_CLOUD is free (cost=0) but its
-        # tier is TIER_CLOUD and it requires internet — it must be excluded here.
         if self.config.strict_local:
             from socr.core.providers import TIER_LOCAL
 
@@ -1162,7 +1211,8 @@ class UnifiedPipeline:
         ladder = provider_ladder(
             available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
         )
-        if not ladder:
+
+        if not ladder and ocr_pages:
             logger.warning("agentic: no OCR providers available; OCR pages left unprocessed")
             if not self.config.quiet:
                 console.print("  [red]No OCR providers available[/red]")
@@ -1183,8 +1233,7 @@ class UnifiedPipeline:
                 ps.attempts.append(fallback)
             return
 
-        # Snapshot the ladder for manifest provenance (B3): ordered list of
-        # providers, with their identity/cost/tier fields, frozen at routing time.
+        # Snapshot the ladder for manifest provenance (B3).
         state.agentic_ladder = [
             {
                 "provider_id": p.id,
@@ -1198,7 +1247,21 @@ class UnifiedPipeline:
 
         # Record judge model for manifest provenance (B3).
         state.agentic_judge_model = self._resolve_judge_model() or ""
-        judge = self._build_page_judge(state)
+        _inner_judge = self._build_page_judge(state)
+
+        # Use calibrated defaults when no explicit override is configured.
+        provider_timeout = (
+            getattr(self.config, "agentic_provider_timeout", None) or DEFAULT_PROVIDER_TIMEOUTS
+        )
+
+        # Wrap the judge in a deadline adapter so a wedged VLM judge cannot
+        # block the orchestrator thread (fork B: orchestrator-side adapter).
+        # Use the maximum configured provider timeout as the judge bound.
+        _judge_timeout: float | None = None
+        if provider_timeout:
+            _judge_timeout = max(provider_timeout.values()) if provider_timeout else None
+        judge = self._TimeoutJudge(_inner_judge, _judge_timeout)
+
         if not self.config.quiet:
             ladder_str = " -> ".join(f"{p.engine.value}(${p.cost_per_page_usd:g})" for p in ladder)
             console.print(f"  ladder: {ladder_str}")
@@ -1209,16 +1272,34 @@ class UnifiedPipeline:
             )
             return outs[0]
 
-        # Use calibrated defaults when no explicit override is configured.
-        # DEFAULT_PROVIDER_TIMEOUTS is derived from scratch/bench/out200/results.tsv
-        # (2026-06-13); values are well above measured worst-case but below runaway.
-        provider_timeout = (
-            getattr(self.config, "agentic_provider_timeout", None) or DEFAULT_PROVIDER_TIMEOUTS
-        )
+        # -- Doc-scoped table extractor (PP-3 hoist) ----------------------------
+        _table_extractor = None
+        _crop_timeout: float | None = None
+        if self.config.dual_pass_tables:
+            try:
+                from socr.tables.extract import OllamaTableReader, TableCropExtractor
 
-        # Write-through blob cache: persist each page's winning output to disk
-        # immediately after it is accepted, so progress is visible and a crash
-        # mid-run does not lose completed work.
+                _table_model = self._resolve_judge_model()
+                if _table_model:
+                    _qwen_family = ("qwen",)
+                    _crop_timeout = (
+                        DEFAULT_PROVIDER_TIMEOUTS.get(EngineType.QWEN, 120.0)
+                        if any(_table_model.startswith(p) for p in _qwen_family)
+                        else 120.0
+                    )
+                    _table_extractor = TableCropExtractor(
+                        OllamaTableReader(model=_table_model, timeout=_crop_timeout)
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "agentic: table extractor unavailable (%s); skipping in-loop tables", exc
+                )
+
+        # -- Doc-scoped equation flags -------------------------------------------
+        _detect_eq = bool(self.config.detect_equations)
+        _recover_eq = bool(self.config.recover_clean_equations) and _detect_eq
+
+        # -- Doc-scoped write-through blob cache ---------------------------------
         _page_blob_store: object = None
         try:
             from ocr_output_contract import doc_dir_for, relative_key
@@ -1232,75 +1313,224 @@ class UnifiedPipeline:
         except Exception as exc:
             logger.debug("write-through blob store unavailable: %s", exc)
 
-        for page_num in ocr_pages:
-            # Escalation is bounded by the ladder + cost controls, never a
-            # retry count (the old max_retries+1 cap made paid rungs
-            # unreachable with 3+ free locals installed). The budget is
-            # enforced BEFORE each paid rung inside route_page; free rungs
-            # always remain available.
-            remaining = None
-            if self.config.cost_budget > 0:
-                remaining = max(self.config.cost_budget - state.total_cost, 0.0)
-            decision = route_page(
-                page_num,
-                ladder,
-                run_provider,
-                judge,
-                remaining_budget=remaining,
-                provider_timeout=provider_timeout,
-            )
+        # -- Document-level cascade-halt latch -----------------------------------
+        backend_degraded: bool = False
+        # Track whether any page was processed for console summary.
+        halt_reason: str = ""
 
+        # ====================================================================
+        # ONE fused loop over ALL pages in page order (native AND ocr).
+        # Native-trusted pages are finalized in-place; OCR pages go through
+        # route_page.  Every page gets a provisional fragment + sidecar flush
+        # at the end of its lifecycle (salvage-only; authoritative bytes come
+        # from _rewrite_all_fragments at assemble time — fork A).
+        # ====================================================================
+        for page_num in sorted(state.pages):
             ps = state.pages[page_num]
-            for att in decision.attempts:
-                att.output.cost_usd = att.cost_usd
-                att.output.audit_passed = att.accepted
-                att.output.provider_id = att.provider_id  # B3: agentic provenance
-                att.output.provider_model = att.model  # B3
-                att.output.provider_backend = att.backend  # B3
-                # skip_reason: populated for budget-exceeded stubs (no OCR ran).
-                att.output.skip_reason = (
-                    att.reason if not att.accepted and not att.output.text else ""
-                )  # B3
-                ps.attempts.append(att.output)
-            ps.best_output = decision.final_output
+            is_native = self._is_agentic_trusted_native(page_num, ps)
 
-            # Provenance guard: when the judge rejected ALL ladder rungs for a
-            # born-digital table page, mark the page so _assemble_result treats
-            # any native-text fallback as audit-failed rather than a clean
-            # success.  Without this flag the document-level status would be
-            # SUCCESS even though the table structure may have been lost.
-            if not decision.accepted and self._page_has_tables(page_num, ps):
-                ps.native_table_structure_failed = True
+            # Cascade halt guard (top-of-loop): once the backend has degraded
+            # (previously timed out AND failed the health probe), halt for ALL
+            # subsequent pages — native OR OCR.  No page after the wedge may be
+            # processed or flushed; saving pages 0..N-1 is the invariant.
+            if backend_degraded:
+                if not self.config.quiet:
+                    console.print(
+                        f"  [red]p{page_num}: backend degraded — halting "
+                        "(PARTIAL_SAVE_VLM_TIMEOUT)[/red]"
+                    )
+                break
 
-            # Persist winning page output immediately (write-through).
-            if _page_blob_store is not None and ps.best_output is not None:
+            if is_native:
+                # Tier 1: born-digital trusted native text — free, no OCR.
+                native_out = PageOutput(
+                    page_num=page_num,
+                    text=ps.native_text,
+                    status=PageStatus.SUCCESS,
+                    engine="native",
+                    audit_passed=True,
+                    cost_usd=0.0,
+                )
+                ps.attempts.append(native_out)
+                ps.best_output = native_out
+            else:
+                # Route OCR page through the cost ladder.
+                remaining = None
+                if self.config.cost_budget > 0:
+                    remaining = max(self.config.cost_budget - state.total_cost, 0.0)
+                decision = route_page(
+                    page_num,
+                    ladder,
+                    run_provider,
+                    judge,
+                    remaining_budget=remaining,
+                    provider_timeout=provider_timeout,
+                )
+
+                for att in decision.attempts:
+                    att.output.cost_usd = att.cost_usd
+                    att.output.audit_passed = att.accepted
+                    att.output.provider_id = att.provider_id  # B3: agentic provenance
+                    att.output.provider_model = att.model  # B3
+                    att.output.provider_backend = att.backend  # B3
+                    att.output.skip_reason = (
+                        att.reason if not att.accepted and not att.output.text else ""
+                    )  # B3
+                    ps.attempts.append(att.output)
+                ps.best_output = decision.final_output
+
+                # Provenance guard: when the judge rejected ALL ladder rungs for a
+                # born-digital table page, mark the page so _assemble_result treats
+                # any native-text fallback as audit-failed.
+                if not decision.accepted and self._page_has_tables(page_num, ps):
+                    ps.native_table_structure_failed = True
+
+                # Record cost so DocumentState.total_cost reflects spend.
+                state.engine_runs.append(
+                    EngineResult(
+                        document_path=state.handle.path,
+                        engine=decision.winning_engine,
+                        status=DocumentStatus.SUCCESS
+                        if decision.accepted
+                        else DocumentStatus.AUDIT_FAILED,
+                        cost=decision.total_cost_usd,
+                        processing_time=0.0,
+                    )
+                )
+
+                if not self.config.quiet:
+                    tag = "accepted" if decision.accepted else "best-effort"
+                    console.print(
+                        f"  p{page_num}: {decision.winning_engine} "
+                        f"[{tag}, {len(decision.attempts)} tr, ${decision.total_cost_usd:.4f}]"
+                    )
+
+                # Cascade-halt check: did any attempt time out, and is the
+                # backend now unresponsive?  Use PP-0's probe_ollama_idle.
+                # A judge timeout is encoded as reason="judge timeout" on the
+                # last attempt; a provider timeout is encoded similarly.
+                _had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)
+                if _had_timeout and not probe_ollama_idle():
+                    backend_degraded = True
+                    halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
+                    from socr.core.audit_log import AuditEvent
+
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="partial_save_vlm_timeout",
+                            engine="",
+                            detail=(
+                                f"backend unresponsive after timeout on p{page_num}; "
+                                "halting — pages processed so far are saved"
+                            ),
+                        )
+                    )
+                    if not self.config.quiet:
+                        console.print(
+                            f"  [red]p{page_num}: VLM backend unresponsive after timeout; "
+                            "halting document (PARTIAL_SAVE_VLM_TIMEOUT)[/red]"
+                        )
+                    # Fall through to flush this page's output, then break at
+                    # the top of the next iteration.
+
+            # ----------------------------------------------------------------
+            # Per-page lifecycle (runs for EVERY page that has best_output).
+            # ----------------------------------------------------------------
+            bo = ps.best_output
+            if bo is None:
+                continue
+
+            # PP-3: in-loop table re-read (OCR pages with tables only).
+            # Native text is character-exact — its tables need no re-read.
+            if (
+                not is_native
+                and _table_extractor is not None
+                and self._page_has_tables(page_num, ps)
+                and bo.text
+            ):
                 try:
-                    _page_blob_store.put_page(ps.best_output)
+                    import fitz
+
+                    from socr.tables import locate_tables
+
+                    with fitz.open(state.handle.path) as _doc:
+                        _boxes = locate_tables(_doc[page_num - 1])
+                    if _boxes:
+                        _raw_crops = _table_extractor.extract(
+                            state.handle.path,
+                            page_num,
+                            _boxes,
+                            cascade_probe=True,
+                        )
+                        self._reread_page_tables(state, page_num, _raw_crops, _table_extractor)
+                except Exception as exc:
+                    logger.warning(
+                        "agentic in-loop table re-read errored on p%d (%s); keeping text",
+                        page_num,
+                        exc,
+                    )
+
+            # GH-36a/36b: per-page equation detect + crop + optional LaTeX
+            # sidecar.  Runs ONLY when the flags are on (default-off).  With
+            # both flags OFF, the page body is unchanged — output is byte-
+            # identical to a non-equation-aware run (AC: "flags OFF → unchanged").
+            if _detect_eq and bo.text:
+                # Determine whether this page has clean equations.
+                _eq_pages_set: set[int] = set()
+                if self._last_assessment:
+                    _eq_pages_set = {
+                        pa.page_num
+                        for pa in self._last_assessment.pages
+                        if pa.has_equations and not pa.has_corrupt_math and pa.is_born_digital
+                    }
+                if page_num in _eq_pages_set:
+                    # GH-36a: detect + crop (model-free, no text change).
+                    self._detect_and_crop_equations(state, [page_num], output_dir)
+                    # GH-36b: LaTeX sidecar (behind recover_clean_equations flag).
+                    if _recover_eq:
+                        self._attach_equation_latex_sidecars(state, [bo])
+
+            # Write-through blob cache (replay-cache continuity).
+            if _page_blob_store is not None:
+                try:
+                    _page_blob_store.put_page(bo)
                 except Exception as exc:
                     logger.debug("write-through blob write failed for p%d: %s", page_num, exc)
 
-            # Record cost so DocumentState.total_cost reflects spend.
-            state.engine_runs.append(
-                EngineResult(
-                    document_path=state.handle.path,
-                    engine=decision.winning_engine,
-                    status=DocumentStatus.SUCCESS
-                    if decision.accepted
-                    else DocumentStatus.AUDIT_FAILED,
-                    cost=decision.total_cost_usd,
-                    processing_time=0.0,
-                )
-            )
+            # Provisional fragment + sidecar flush (PP-2 A1: salvage-only).
+            # ``terminal=False`` marks these as provisional; the authoritative
+            # bytes are written by _rewrite_all_fragments at assemble time.
+            try:
+                from ocr_output_contract import PAGE_MARKER_RE
 
-            if not self.config.quiet:
-                tag = "accepted" if decision.accepted else "best-effort"
-                console.print(
-                    f"  p{page_num}: {decision.winning_engine} "
-                    f"[{tag}, {len(decision.attempts)} tr, ${decision.total_cost_usd:.4f}]"
+                # Strip any leading ## Page N marker from bo.text so the
+                # provisional fragment body matches what assemble would produce
+                # (modulo post-strip/post-figure transforms, which run later).
+                _raw_body = bo.text or ""
+                _stripped = _raw_body.lstrip()
+                _m = PAGE_MARKER_RE.match(_stripped)
+                _body = _stripped[_m.end() :].lstrip("\n") if _m else _raw_body
+
+                self._flush_page_fragment(state, page_num, _body, output_dir)
+                self._flush_page_sidecar(state, page_num, output_dir, terminal=False)
+            except Exception as exc:
+                logger.debug(
+                    "PP-2 provisional flush failed for p%d (%s); continuing",
+                    page_num,
+                    exc,
                 )
 
+        # -- Post-loop summary ---------------------------------------------------
         if not self.config.quiet:
             console.print(f"  total cost: ${state.total_cost:.4f}")
+            if halt_reason:
+                console.print(f"  [red]Halted: {halt_reason}[/red]")
+
+        # If we halted due to backend degradation, record it on the state so
+        # _phase_assemble can propagate the reason into EngineResult.error.
+        if halt_reason:
+            state._pp2_halt_reason = halt_reason  # type: ignore[attr-defined]
 
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
@@ -2462,6 +2692,8 @@ class UnifiedPipeline:
         state: DocumentState,
         page_num: int,
         output_dir: Path,
+        *,
+        terminal: bool = True,
     ) -> Path:
         """Write per-page provenance sidecar to ``pages/NNN.json`` atomically.
 
@@ -2471,6 +2703,10 @@ class UnifiedPipeline:
         ``native_table_structure_failed``, ``judge_rejected``), page- and
         run-level fingerprints, the winning output's full serialised dict, and
         a summary of audit events for this page.
+
+        ``terminal=False`` marks a provisional sidecar written mid-run (PP-2
+        incremental flush); it may be superseded by the final assemble-time
+        flush (``terminal=True``).
 
         Atomic: writes to ``.json.tmp`` then renames so a reader never sees a
         half-written file.
@@ -2514,9 +2750,9 @@ class UnifiedPipeline:
             # no output exists.
             "status": winning_dict.get("status", "missing"),
             # terminal: True when this is the definitive sidecar written at
-            # phase-5 assemble time (as opposed to a future incremental write
-            # from PP-2 that may be superseded by repair).
-            "terminal": True,
+            # phase-5 assemble time; False for a provisional mid-run incremental
+            # flush from PP-2 that may be superseded by the authoritative write.
+            "terminal": terminal,
             # Engine / provider provenance.
             "engine": winning_dict.get("engine", ""),
             "provider": winning_dict.get("provider_id", ""),
@@ -2824,6 +3060,16 @@ class UnifiedPipeline:
             final_result.error = (
                 f"page(s) {', '.join(str(n) for n in failed_pages)} {LOST_CONTENT_NOTE}"
             )
+
+        # PP-2 cascade HALT: propagate the halt reason into the result error
+        # so callers and tests can detect a partial-save due to a wedged backend.
+        _pp2_halt = getattr(state, "_pp2_halt_reason", None)
+        if _pp2_halt:
+            # Append to any existing per-page error rather than overwriting it.
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_pp2_halt}"
+            else:
+                final_result.error = _pp2_halt
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
