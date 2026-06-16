@@ -2545,6 +2545,49 @@ class UnifiedPipeline:
         tmp_path.rename(sidecar_path)
         return sidecar_path
 
+    def _rewrite_all_fragments(
+        self,
+        state: DocumentState,
+        output_dir: Path,
+        final_text: str,
+    ) -> None:
+        """Rewrite every per-page fragment from the FINAL assembled text.
+
+        This is the single authoritative fragment-write pass, called AFTER
+        ``strip_phantom_images`` AND AFTER the figure phase, so every
+        ``pages/NNN.md`` file contains exactly the body that appears in the
+        saved ``.md`` (post-strip, post-inline-figures).
+
+        The earlier PP-1 flush writes raw (pre-strip) fragments for the
+        byte-identity verification check.  This pass supersedes those files so
+        that ``_stitch_fragments`` == ``final_text`` is guaranteed for every
+        page — whether or not the page has figures, and whether or not the page
+        carried phantom image references.
+
+        Non-fatal: any error is logged; the on-disk ``.md`` is already correct.
+        """
+        from ocr_output_contract import split_native_pages
+
+        page_bodies = split_native_pages(final_text)
+        if not page_bodies:
+            return
+
+        try:
+            for idx, body in enumerate(page_bodies):
+                page_num = idx + 1
+                frag_path = self._page_fragment_path(output_dir, state, page_num)
+                frag_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = frag_path.with_suffix(".md.tmp")
+                tmp_path.write_text(body, encoding="utf-8")
+                tmp_path.rename(frag_path)
+        except Exception as exc:
+            logger.warning(
+                "PP-4 [%s]: authoritative fragment rewrite failed (%s); "
+                "fragments may diverge from final .md",
+                state.handle.path.name,
+                exc,
+            )
+
     def _stitch_fragments(self, state: DocumentState, output_dir: Path) -> str:
         """Reconstruct the document body from ``pages/NNN.md`` fragments.
 
@@ -2830,6 +2873,15 @@ class UnifiedPipeline:
             # replacing the provisional pre-figures entry.
             self._write_metadata(state, final_result, output_dir, has_text)
 
+        # PP-4: single authoritative fragment rewrite from the FINAL text (post-
+        # strip_phantom_images, post-inline-figures for figure docs, plain post-
+        # strip for figure-free docs).  Runs unconditionally so every pages/NNN.md
+        # matches the saved .md byte-for-byte regardless of whether the page has
+        # figures or phantom image refs.  Supersedes the PP-1 pre-strip flush for
+        # ALL pages.
+        if has_text:
+            self._rewrite_all_fragments(state, output_dir, final_text)
+
         # Reproducibility manifest (opt-in; default-on in agentic mode). Pass the
         # FINAL saved body so the manifest blobs (and thus replay) reproduce the
         # on-disk .md bit-for-bit, not the pre-transform state.
@@ -2945,23 +2997,45 @@ class UnifiedPipeline:
         output_dir: Path,
         text: str,
     ) -> str:
-        """Extract figures (save PNGs + image refs) and optionally describe them.
+        """Extract figures, describe them (opt-in), and embed inline per page.
+
+        PP-4 layout: each figure is embedded INSIDE the ``## Page N`` section it
+        belongs to (after the page body text), not appended at the document tail.
+        This makes each page section self-contained.
 
         Phase steps:
-          1. Extract figures from the PDF (saves PNGs to the figures/ dir).
-          2. Append ``![Figure N](...)`` image-reference blocks to the markdown.
-          3. ONLY when ``config.describe_figures`` is True: call the VLM caption
-             engine per figure and include the prose description in the block.
+          1. Extract figures doc-wide (saves PNGs; counter is doc-global +
+             monotonic across pages so ``figure_N_pageP.png`` filenames never
+             renumber).
+          2. Build a vision engine ONCE per document; close it once at the end.
+             When ``config.describe_figures`` is False the engine is never
+             constructed and no VLM call is made.
+          3. Describe each figure (optional) and collect ``FigureInfo`` objects.
+          4. Group figures by page.  For each page: build the figure-block
+             markdown, splice it into that page's body in the in-memory page
+             list, and update the on-disk fragment (``pages/NNN.md``) atomically
+             so the fragment layer stays consistent with the final ``.md``.
+          5. Reassemble all pages into the updated document body.
 
-        Deliberate separation: ``--save-figures`` alone never calls the vision
-        engine, so deterministic PNG archiving is decoupled from non-authoritative
-        model prose.  A failure in the caption sub-phase (step 3) is caught by the
-        caller and the already-saved OCR text is preserved unchanged.
+        Byte-identity guarantee: a document with no extracted figures returns
+        ``text`` unchanged and leaves all fragment files untouched, so the PP-1
+        byte-identity invariant is preserved for figure-free documents.
+
+        Ordering: PNGs are saved by the extractor BEFORE the image ref is written
+        to the fragment, so ``strip_phantom_images`` (applied to ``text`` before
+        this method is called) cannot strip our just-added refs on a subsequent
+        pass.
         """
         if not self.config.quiet:
             console.print("  Extracting figures...")
 
-        from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
+        from ocr_output_contract import (
+            assemble_pages,
+            doc_dir_for,
+            figures_dir_for,
+            relative_key,
+            split_native_pages,
+        )
 
         scan_root = self._scan_root or state.handle.path.parent
         doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
@@ -2988,7 +3062,9 @@ class UnifiedPipeline:
         extracted = extraction.figures
 
         # Cap-reached: signal in console and durable audit log so silently
-        # dropped later figures are not invisible to the operator.
+        # dropped later figures are not invisible to the operator.  The event
+        # is attached to the page where extraction halted (the first unprocessed
+        # page) so per-page audit consumers can localise the cap.
         if extraction.cap_reached:
             cap_msg = (
                 f"Figure extraction cap reached ({self.config.figures_max_total} figures); "
@@ -3000,7 +3076,7 @@ class UnifiedPipeline:
 
             state.events.append(
                 AuditEvent(
-                    page_num=0,
+                    page_num=extraction.cap_page or 0,
                     kind="figure_cap_reached",
                     engine="",
                     detail=cap_msg,
@@ -3017,9 +3093,9 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(f"  Extracted {len(extracted)} figures to {figures_dir}")
 
-        # VLM caption engine: only instantiated when ``describe_figures`` is True.
-        # When it is False, every figure gets an empty description and the image-
-        # reference block is still written — no caption prose is produced.
+        # VLM caption engine: built ONCE per document, closed ONCE after the
+        # per-figure loop.  When ``describe_figures`` is False the engine is
+        # never constructed and no VLM call is made (GH-50 parity).
         vision_engine = self._get_vision_engine() if self.config.describe_figures else None
         if not self.config.describe_figures and not self.config.quiet:
             console.print(
@@ -3076,12 +3152,55 @@ class UnifiedPipeline:
             else:
                 console.print(f"  {len(figures)} figures saved (no VLM captions)")
 
-        # Build figure blocks and append to text
-        figure_blocks = self._build_figure_blocks(figures, doc_dir)
-        if figure_blocks:
-            text = text.rstrip() + "\n\n" + figure_blocks
+        # PP-4 inline embedding: splice figure blocks into the per-page body
+        # rather than appending them at the document tail.
+        #
+        # ``text`` is the phantom-stripped assembled document body (## Page N
+        # sections).  We split it into per-page body texts, augment each page
+        # that has figures, re-assemble with explicit page numbers, and also
+        # update the on-disk fragment files so the ``pages/NNN.md`` layer stays
+        # consistent.
+        #
+        # Group figures by 1-indexed page number.
+        by_page: dict[int, list[FigureInfo]] = {}
+        for fig_info in figures:
+            by_page.setdefault(fig_info.page_num, []).append(fig_info)
 
-        return text
+        if not by_page:
+            return text
+
+        # Parse the assembled body into per-page body texts (headers stripped).
+        page_bodies = split_native_pages(text)
+        n_pages = len(page_bodies)
+
+        updated = False
+        for page_num, page_figs in sorted(by_page.items()):
+            idx = page_num - 1  # 0-indexed
+            if idx < 0 or idx >= n_pages:
+                logger.warning(
+                    "PP-4: figure(s) claim page %d but document has %d page(s); "
+                    "skipping inline embed for these figures",
+                    page_num,
+                    n_pages,
+                )
+                continue
+
+            page_figure_blocks = self._build_figure_blocks(page_figs, doc_dir)
+            if not page_figure_blocks:
+                continue
+
+            # Append figure blocks to this page's body text.
+            page_bodies[idx] = page_bodies[idx].rstrip() + "\n\n" + page_figure_blocks
+
+            updated = True
+
+        if not updated:
+            return text
+
+        # Reassemble using explicit 1-indexed page numbers so assemble_pages
+        # emits canonical ## Page N headers matching the original page order.
+        page_numbers = list(range(1, n_pages + 1))
+        return assemble_pages(page_bodies, page_numbers=page_numbers)
 
     def _record_figure_recoverable_labels(self, state, fig_info) -> None:
         """GH-47C (Option C — log-only): collect native word tokens inside a figure bbox.
