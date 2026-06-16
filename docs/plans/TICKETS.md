@@ -631,3 +631,48 @@ so the per-page gate couldn't route on content type.
 - `src/socr/pipeline/orchestrator.py`
 - `tests/test_born_digital.py`
 - `tests/test_document_state.py`
+
+---
+
+## PP-4 — per-page figure extraction + inline embedding
+
+GitHub: https://github.com/r-uben/socr/issues/69
+Status: DONE
+Priority: P1
+Branch: feat/69-pp4-inline-figures
+Depends on: PP-1 (GH-65, fragment/stitch scaffold), GH-50 (save/describe split)
+
+### Problem
+
+`_describe_and_embed_figures` appended all figure blocks at the document tail as a
+flat list, making the .md non-self-contained per page. PP-4 embeds each figure inline
+within the `## Page N` section it belongs to.
+
+### Plan (completed)
+
+1. Added `cap_page: int | None` to `ExtractionResult` so the cap AuditEvent can be
+   page-scoped (not always page_num=0).
+2. Rewrote `_describe_and_embed_figures` to:
+   a. Keep doc-wide extraction (FigureExtractor handles global counter).
+   b. Build vision engine once; close once.
+   c. Group figures by page.
+   d. Parse phantom-stripped `text` with `split_native_pages`.
+   e. Append figure blocks to per-page body texts.
+   f. Update fragment files atomically (non-fatal on failure).
+   g. Reassemble with `assemble_pages(updated_bodies, page_numbers=...)`.
+3. Figure-free docs return `text` unchanged (PP-1 byte-identity preserved).
+
+### Acceptance Criteria (met)
+
+- Figures appear inline within `## Page N` sections.
+- Figure numbering is doc-global and monotonic across pages.
+- Cap AuditEvent uses `cap_page` from ExtractionResult (stopping page, not 0).
+- Vision engine constructed once per doc and closed once.
+- `--save-figures` only → no VLM call, empty descriptions (GH-50 parity).
+- Figure-free doc → byte-identical .md (PP-1 preserved).
+
+### Write ownership
+
+- `src/socr/figures/extractor.py`
+- `src/socr/pipeline/orchestrator.py`
+- `tests/test_pp4_inline_figures.py`

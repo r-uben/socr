@@ -95,10 +95,14 @@ class ExtractionResult:
     ``max_total`` figure cap was hit before the last page was processed;
     callers should surface this fact to the operator (console + audit log)
     so silently dropped later figures are not invisible.
+    ``cap_page`` is the 1-indexed page number where extraction was stopped
+    by the cap (the first page that was not processed); ``None`` when the
+    cap was not hit.
     """
 
     figures: list[ExtractedFigure] = field(default_factory=list)
     cap_reached: bool = False
+    cap_page: int | None = None
 
 
 # --- Defaults ---
@@ -161,6 +165,7 @@ class FigureExtractor:
         figures: list[ExtractedFigure] = []
         counter = 1
         cap_reached = False
+        cap_page: int | None = None
         if skip_pages:
             logger.info(f"Figure extraction skipping {len(skip_pages)} page(s) of {pdf_path.name}")
 
@@ -180,6 +185,8 @@ class FigureExtractor:
                             pdf_path.name,
                         )
                         cap_reached = True
+                        # 1-indexed page where extraction was stopped (first skipped page).
+                        cap_page = page_index + 1
                         break
 
                     page = pdf[page_index]
@@ -234,7 +241,7 @@ class FigureExtractor:
             logger.error(f"Figure extraction failed for {pdf_path.name}: {e}")
 
         logger.info(f"Extracted {len(figures)} figures from {pdf_path.name}")
-        return ExtractionResult(figures=figures, cap_reached=cap_reached)
+        return ExtractionResult(figures=figures, cap_reached=cap_reached, cap_page=cap_page)
 
     def _extract_page_figures(
         self,
