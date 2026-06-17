@@ -4,13 +4,14 @@ Last updated: 2026-06-17
 
 ## Stage
 
-**Wave 1 COMPLETE.** TR-0, TR-1, and TR-2 DONE. The TR-0 parity test
-(`TestEndToEndParity::test_agentic_parity_on_ce_like_fixture`) passes — xfail mark removed.
-Both tables, chart image-ref, and prose all verified with correct reading order.
+**Wave 1 COMPLETE. TR-0, TR-1, TR-2, TR-3 DONE.** v1 deterministic pipeline is fully
+implemented: per-region segmentation → rowizer (B) → D3 fail-closed floor (TR-3).
+TR-0 parity test passes (both tables, chart image-ref, prose, correct reading order).
+TR-3 adds 18 tests; full suite at 1140 passed.
 
 ## Branch
 
-`feat/56-tr2-segmentation` — TR-2 committed here.
+`feat/56-tr3-fail-closed` — TR-3 committed here (branched from `feat/56-tr2-segmentation`).
 
 ## Decisions (settled)
 
@@ -34,6 +35,7 @@ Both tables, chart image-ref, and prose all verified with correct reading order.
 | TR-0 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-1 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-2 | socr-implementer (claude-sonnet-4-6) | DONE |
+| TR-3 | socr-implementer (claude-sonnet-4-6) | DONE |
 
 ## Ticket state
 
@@ -42,16 +44,17 @@ Both tables, chart image-ref, and prose all verified with correct reading order.
 | TR-0 | License-clean CE-like fixture + cell-parity harness | DONE | — |
 | TR-1 | Deterministic rowizer on lane-stacked `find_tables()` regions (Option B) | DONE | TR-0 |
 | TR-2 | Per-region verifier scoping + reading-order reassembly | DONE | TR-1 |
-| TR-3 | D3 fail-closed floor + selection-policy fix | READY | TR-2 |
+| TR-3 | D3 fail-closed floor + selection-policy fix | DONE | TR-2 |
 | TR-4 | A2 value-guarded VLM re-ask | DEFERRED (v2) | TR-3 + evidence |
 | TR-5 | S3 VLM confirm/split segmentation | DEFERRED (v2) | TR-2 spike |
 
 ## Outstanding / open questions
 
-- TR-3 (D3 fail-closed floor): now unblocked. Dispatch when ready.
-- The e2e parity test is now PASSING — no remaining blockers in v1 wave 1.
+- v1 is complete. TR-4 and TR-5 are deferred to v2 (require measured evidence that
+  deterministic per-region + rowizer is insufficient on real CE grids).
+- The agentic-path whole-page ladder verifier (`agentic.py:~405`) remains whole-page;
+  converting it to per-region is explicitly a v2 item (TR-4/TR-5 scope).
 
 ## Next action
 
-Dispatch **TR-3** — D3 fail-closed floor + selection-policy fix. TR-2 is fully committed and
-the parity gate is green.
+v1 wave complete. Measure v1 on real CE `202401.pdf` before dispatching v2 (TR-4/TR-5).

@@ -75,6 +75,7 @@ class PageAssessment:
     has_equations: bool = False  # page contains math/equations
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
+    has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
     notes: list[str] = field(default_factory=list)
 
 
@@ -571,6 +572,11 @@ class BornDigitalDetector:
         if encoding_corruption > self.ENCODING_CORRUPTION_FLAG:
             notes.append(f"text-layer encoding suspect ({encoding_corruption:.1%})")
 
+        # TR-3: reset the per-extraction unverifiable flag so _assess_page can
+        # read it after calling extract_structured.  Initialise to False so pages
+        # without tables (which never call _verify_regions) are not flagged.
+        self._last_extraction_had_unverifiable: bool = False
+
         if has_tables:
             # Use structured extraction that renders tables as markdown
             native_text = self.extract_structured(page)
@@ -578,6 +584,10 @@ class BornDigitalDetector:
         else:
             native_text = raw_text.strip()
             notes.append("born-digital: clean text layer detected")
+
+        # TR-3: read the per-region geometry hard-fail flag written by
+        # extract_structured → _verify_regions during table extraction above.
+        has_unverifiable_table_region = self._last_extraction_had_unverifiable
 
         if has_complex_content:
             content_types = []
@@ -609,6 +619,7 @@ class BornDigitalDetector:
             has_equations=has_equations,
             needs_ocr_enhancement=needs_ocr_enhancement,
             has_corrupt_math=has_corrupt_math,
+            has_unverifiable_table_region=has_unverifiable_table_region,
             notes=notes,
         )
 
@@ -813,7 +824,7 @@ class BornDigitalDetector:
         # This is documented as a known limitation in the design note §1b.
         table_regions.sort(key=lambda tr: tr[0].y0)
 
-        # TR-2 per-region verifier scoping: verify each table region
+        # TR-2/TR-3 per-region verifier scoping: verify each table region
         # independently against its own native numeric lanes.  The whole-page
         # verifier (verify_native_table) combines lanes from ALL tables on the
         # page, which causes false geometry_impossible_collapse hard-fails when
@@ -821,9 +832,12 @@ class BornDigitalDetector:
         # forecaster grid + a 3-col historical table → 7 combined lanes but each
         # table only has 3-4).  Calling verify_native_table_region per region
         # fixes this by clipping get_text("words") to the region bbox first.
-        # This is a diagnostic + warn step (not a gate) at the extraction point
-        # where both region bboxes and per-region text are available.
-        self._verify_regions(page, table_regions)
+        # TR-3: _verify_regions now returns True when any region hard-fails so
+        # _assess_page can flag the page for D3 fail-closed routing.
+        had_unverifiable = self._verify_regions(page, table_regions)
+        # Store on the instance so _assess_page can read it after the call to
+        # extract_structured — the PageAssessment is built there, not here.
+        self._last_extraction_had_unverifiable = had_unverifiable
 
         # TR-2 token-coverage post-check: every native numeric token must land in
         # exactly one region (no orphaned / double-counted token).  This is a
@@ -885,8 +899,8 @@ class BornDigitalDetector:
         self,
         page: fitz.Page,
         regions: list[tuple[fitz.Rect, str]],
-    ) -> None:
-        """TR-2 per-region native verifier (diagnostic + warn, not a gate).
+    ) -> bool:
+        """TR-2/TR-3 per-region native verifier.
 
         For each table region, clips get_text("words") to the region bbox and
         runs the two-tier geometry check against the region's own markdown text.
@@ -895,9 +909,19 @@ class BornDigitalDetector:
 
         Only regions whose text contains a markdown table separator are checked
         (image-asset placeholders like chart refs have no numeric lanes).
+
+        Returns
+        -------
+        bool
+            True if ANY table region produced a geometry hard-fail
+            (``geometry_impossible_collapse``).  The caller stores this flag on
+            the PageAssessment so the D3 fail-closed floor in
+            ``_winning_page_output`` can route an unverifiable page to the
+            image-asset lane instead of silently shipping the collapsed native.
         """
         from socr.tables.native_verifier import verify_native_table_region
 
+        any_hard_fail = False
         for region_rect, region_text in regions:
             # Skip non-table regions (chart image refs, prose blocks)
             if "| --- |" not in region_text and "| --- " not in region_text:
@@ -909,6 +933,7 @@ class BornDigitalDetector:
                 continue
 
             if vr.hard_fail:
+                any_hard_fail = True
                 logger.warning(
                     "per-region verifier: geometry_impossible_collapse in region y=%.0f..%.0f — %s",
                     region_rect.y0,
@@ -922,6 +947,7 @@ class BornDigitalDetector:
                     region_rect.y1,
                     vr.reason,
                 )
+        return any_hard_fail
 
     def _check_token_coverage(
         self,
