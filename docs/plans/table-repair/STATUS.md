@@ -19,11 +19,17 @@ initiative branch (or a fresh `feat/56-…` per wave — decide at dispatch).
 - Q1=D3, Q2=A2 (deferred v2, lane-aware token EQUALITY not superset), Q3=S3 (geometry-led in v1).
 - Fixture must be **synthesized** (CE PDF is licensed — never commit it).
 
+## Active Agents
+
+| Ticket | Agent | Status |
+|--------|-------|--------|
+| TR-0 | socr-implementer (claude-sonnet-4-6) | DONE |
+
 ## Ticket state
 
 | Ticket | What | Status | Depends on |
 |--------|------|--------|------------|
-| TR-0 | License-clean CE-like fixture + cell-parity harness | READY | — |
+| TR-0 | License-clean CE-like fixture + cell-parity harness | DONE | — |
 | TR-1 | Deterministic rowizer on lane-stacked `find_tables()` regions (Option B) | READY | TR-0 |
 | TR-2 | Per-region verifier scoping + reading-order reassembly | NEEDS-DESIGN (split spike) | TR-1 |
 | TR-3 | D3 fail-closed floor + selection-policy fix | READY | TR-2 |
@@ -39,5 +45,5 @@ initiative branch (or a fresh `feat/56-…` per wave — decide at dispatch).
 
 ## Next action
 
-Dispatch **TR-0** (`socr-implementer`) — the fixture + parity harness is the acceptance gate every
-other ticket tests against. Then TR-1.
+Dispatch **TR-1** (`socr-implementer`) — deterministic rowizer on lane-stacked `find_tables()`
+regions. The TR-0 parity test is the acceptance gate.
