@@ -1,6 +1,6 @@
 # STATUS — table-repair
 
-Last updated: 2026-06-17 (TR-4 rev3 — Option B: row-count demoted to soft warning)
+Last updated: 2026-06-17 (TR-6 — per-region tri-state harness + pairing-derived y-band scoping)
 
 ## Stage
 
@@ -44,6 +44,7 @@ unblocked by measured evidence). TR-4a (real-geometry fixture = the failing gate
 | TR-3 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-4a | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-4 | socr-implementer (claude-sonnet-4-6) | DONE |
+| TR-6 | socr-implementer (claude-sonnet-4-6) | DONE |
 
 ## Ticket state
 
@@ -56,6 +57,7 @@ unblocked by measured evidence). TR-4a (real-geometry fixture = the failing gate
 | TR-4a | Real-CE-geometry dense fixture (failing gate for TR-4) | DONE | — |
 | TR-4 | Token-equality value-guard (accept year-paired, reject genuinely broken) | DONE | TR-4a |
 | TR-5 | S3 VLM confirm/split segmentation | DEFERRED (v2) | TR-2 spike |
+| TR-6 | Per-region tri-state harness (pairing-derived y-band scoping) | DONE | TR-4 |
 
 ## TR-4a findings (2026-06-17)
 
@@ -73,18 +75,17 @@ Real root-cause established from `202401.pdf` p.4 geometry:
 
 ## Outstanding / open questions
 
-- TR-4 DONE (rev3 after Option B panel decision): value-guard final state:
-  1. ROW-COUNT: SOFT WARNING (`row_count_warn=True`). When output numeric row count
-     ≠ effective native numeric row count, emit `value_guard_row_count_warning` audit
-     event; table SHIPS with WARNING status, NOT rejected. Rationale: row-count gaps are
-     confounded by chart/prose numerals on complex pages (CE p.4 chart tick labels,
-     bar values). Silently discarding correct tables is worse than flagging them.
-  2. LABEL-BINDING (adjacency-dominance): HARD-FAIL. Fires only when adjacent interleaved
-     pairs dominate clean labeled rows.
-  3. MULTISET: HARD-FAIL. Per-paired-row N2-normalized token equality.
-  CE p.4 (63 native rows, ~50-row correct table): row_count_warn fires, hard_fail=False.
-  Table ships with WARNING status. Label-binding and multiset determine corruption.
-  TR-4a dense fixture xfail STAYS (recovery step — VLM re-ask — not yet done).
+- TR-4 DONE (rev3 after Option B panel decision): row-count → SOFT WARNING; label-binding
+  and multiset → HARD-FAIL.
+- TR-6 DONE: pairing-derived y-band scoping + tri-state verdict. For correct VLM output
+  on CE p.4:
+  - Preliminary pairing finds unique matches → y-band scoped to forecaster table
+  - Chart/prose rows (y>553) excluded by band
+  - After scoping: row counts match → no row_count_warn
+  - Multiset: values match for correct output → no hard-fail
+  - Result: EXACT_PASS (inner judge short-circuited) or AMBIGUOUS (ships via inner)
+  - Table SHIPS in both cases — the CE false-positive is fixed
+  TR-4a dense fixture xfail STAYS (recovery step — VLM re-ask — TR-7).
 - TR-5 DEFERRED (v2).
 
 ## Next action

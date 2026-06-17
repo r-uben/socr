@@ -463,8 +463,13 @@ class TestNativeTableVerifierAuditEvents:
         assert "native_lane_count" in evt.data
         assert "output_col_count" in evt.data
 
-    def test_no_event_on_clean_pass(self):
-        """No audit event when the verifier finds no issue."""
+    def test_exact_pass_ships_immediately_with_event(self):
+        """TR-6 EXACT_PASS: verifier ships immediately without calling inner judge.
+
+        When row counts match and multiset is clean (EXACT_PASS), the judge
+        short-circuits: it emits a native_table_verifier_exact_pass event and
+        returns accept=True immediately, without calling the inner judge.
+        """
         native_rows = [
             [
                 (200.0, "0.1"),
@@ -490,10 +495,14 @@ class TestNativeTableVerifierAuditEvents:
             record_event=events.append,
         )
         provider = MagicMock()
-        judge.assess(output, provider)
+        decision = judge.assess(output, provider)
 
-        inner.assess.assert_called_once()
-        assert len(events) == 0, "No events on a clean pass"
+        # TR-6: EXACT_PASS short-circuits — inner judge is NOT called
+        inner.assess.assert_not_called()
+        assert decision.accept is True, "EXACT_PASS must accept"
+        # Exactly one audit event of kind native_table_verifier_exact_pass
+        assert len(events) == 1, f"Expected 1 exact_pass event, got {len(events)}"
+        assert events[0].kind == "native_table_verifier_exact_pass"
 
     def test_scan_page_bypasses_verifier_in_judge(self):
         """Scanned page: no native words → verifier bypassed, inner judge called."""
@@ -670,18 +679,18 @@ class TestFalseFailGuard:
             f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
         )
 
-    def test_footnote_row_with_distinct_tokens_warns_not_hard_fails(self):
-        """A trailing numeric footnote whose tokens are DISTINCT from the output
-        column headers triggers a soft row-count WARNING (Option B).
+    def test_footnote_row_with_distinct_tokens_exact_pass_via_yband(self):
+        """TR-6: a trailing numeric footnote is excluded by pairing-derived y-band.
 
-        Pattern: native has data row (0.043 0.051 0.039) + footnote (7 8 9).
-        Output header uses (1) (2) (3) as column labels.  The footnote's tokens
-        {7, 8, 9} are NOT in the output header token set → the footnote is counted
-        as an effective native row.  2 effective native rows vs 1 output numeric
-        row → row_count_warn=True (soft warning), hard_fail=False.
+        Pattern: native has data row (0.043 0.051 0.039) at y=100 and a
+        footnote (7 8 9) at y=160.  Output has one data row matching (0.043,
+        0.051, 0.039).  The preliminary pairing matches the output row to the
+        native data row at y=100; the derived y-band excludes y=160 (footnote).
+        After scoping: 1 native row, 1 output numeric row → counts match →
+        multiset matches → EXACT_PASS, hard_fail=False, row_count_warn=False.
 
-        The table ships with WARNING status.  The per-row multiset check on the
-        paired data row (0.043, 0.051, 0.039 → matches) does NOT fire.
+        This is the TR-6 win: chart/prose/footnote rows are excluded by pairing
+        before the row-count check, not by a magic constant.
         """
         tokens: list[tuple[float, float, str]] = []
         for i, tok in enumerate(["0.043", "0.051", "0.039"]):
@@ -697,13 +706,17 @@ class TestFalseFailGuard:
         )
         result = verify_native_table(page, output_text)
         assert result.hard_fail is False, (
-            "Footnote with distinct tokens must produce a SOFT WARNING (Option B), "
-            "not hard-fail. "
+            "Footnote excluded by y-band scoping must not hard-fail. "
             f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
         )
-        assert result.row_count_warn is True, (
-            "Footnote row-count gap must set row_count_warn=True. "
+        assert result.row_count_warn is False, (
+            "Footnote excluded by y-band → row counts match → no row_count_warn. "
             f"Got: row_count_warn={result.row_count_warn}"
+        )
+        from socr.tables.native_verifier import VerifierState
+
+        assert result.state == VerifierState.EXACT_PASS, (
+            f"Footnote excluded by y-band → EXACT_PASS. Got: state={result.state!r}"
         )
 
     def test_no_false_fail_standard_4col_table_with_header(self):
@@ -945,8 +958,10 @@ class TestTR4ValueGuard:
             ],
         )
         result = verify_native_table(page, output_text)
-        # With Option B, row-count mismatch is a SOFT warning; the hard-fail here
-        # is from label-binding (1 adjacent pair vs 1 clean labeled row → 1 >= 1).
+        # TR-6: pairing-derived y-band scoping excludes the unmatched 3rd native
+        # row (no output row pairs with it), so row_count_warn does NOT fire.
+        # The hard-fail is from label-binding (1 adjacent pair vs 1 clean labeled
+        # row → 1 >= 1) — CERTAIN_FAIL.
         assert result.hard_fail is True, (
             "Merged rows with interleaved pattern must hard-fail via label-binding. "
             f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
@@ -954,8 +969,9 @@ class TestTR4ValueGuard:
         assert "label_binding" in result.reason, (
             f"Expected label_binding in reason, got: {result.reason!r}"
         )
-        # Soft row-count warning should also be set (3 native vs 2 output numeric)
-        assert result.row_count_warn is True
+        from socr.tables.native_verifier import VerifierState
+
+        assert result.state == VerifierState.CERTAIN_FAIL
 
     def test_interleaved_name_value_offset_fails_via_label_binding(self):
         """TR-4 AC 4: name/value offset (TR-4a dense fixture pattern) → FAILS.
@@ -1169,6 +1185,49 @@ class TestTR4RowCount:
             f"Got: row_count_warn={result.row_count_warn}"
         )
 
+    def test_dropped_row_plus_corrupted_values_ships_ambiguous_not_silent(self):
+        """ACCEPTED TRADEOFF — pinned so it cannot silently regress.
+
+        When an extraction BOTH drops a row AND corrupts a remaining row's values,
+        the count discrepancy (3 native vs 2 output) makes the per-row pairing
+        UNRELIABLE — the verifier cannot distinguish this from the benign case
+        (chart/prose numerals inflating the native count: the real-CE false-positive
+        TR-6 fixes). Per the harness design, a multiset mismatch UNDER a row-count
+        discrepancy is AMBIGUOUS: the table ships FLAGGED (``row_count_warn``
+        surfaces it), NOT hard-failed and NOT silently.
+
+        This is the residual "bad localization" failure mode both /consilium panelists
+        named; TR-7 (the cropped VLM table-judge) is the planned backstop for
+        AMBIGUOUS pages. A maintainer who tightens this back to a hard-fail will
+        REOPEN the CE false-positive — hence this test pins the accepted behavior.
+        """
+        from socr.tables.native_verifier import VerifierState
+
+        tokens: list[tuple[float, float, str]] = []
+        for row_i, (v1, v2) in enumerate([("2.1", "1.9"), ("3.2", "2.8"), ("1.8", "2.4")]):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output DROPS the middle row AND CORRUPTS the third row (1.8/2.4 → 9.1/8.7).
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [
+                ["Goldman", "2.1", "1.9"],  # correct
+                ["Barclays", "9.1", "8.7"],  # corrupted; native was 1.8/2.4
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "dropped-row + corrupted-value under a count discrepancy is AMBIGUOUS "
+            f"(ships flagged), not a hard-fail. Got hard_fail={result.hard_fail}"
+        )
+        assert result.row_count_warn is True, "the discrepancy must surface as a warning"
+        assert result.state == VerifierState.AMBIGUOUS, (
+            f"must be AMBIGUOUS (ships flagged; TR-7 VLM judge is the backstop). Got {result.state}"
+        )
+
     def test_invented_row_warns_not_hard_fails(self):
         """2 native rows; output invents a 3rd row → WARN, not hard-fail.
 
@@ -1228,24 +1287,31 @@ class TestTR4RowCount:
             f"Got: row_count_warn={result.row_count_warn}"
         )
 
-    def test_row_count_gap_emits_audit_event_and_ships(self):
-        """Row-count gap emits value_guard_row_count_warning audit event, table ships.
+    def test_page_numerals_excluded_by_yband_exact_pass(self):
+        """TR-6: non-table page numerals outside the y-band → EXACT_PASS.
 
-        Simulates a page where the native PDF has 3 numeric rows but the correct
-        output only extracts 2 (the 3rd native row belongs to a chart or prose
-        context).  The verifier should: (a) emit a row_count_warn, and (b) the
-        NativeTableVerifierJudge emits value_guard_row_count_warning audit event
-        and ACCEPTS the output (table ships, not rejected).
+        Simulates a page where:
+        - 2 table rows at y=100 and y=130 (matched by the output)
+        - 1 chart/prose row at y=160 (NOT in the output, outside the pairing y-band)
+
+        With TR-6 pairing-derived y-band scoping: the preliminary pairing matches
+        output rows A and B to native rows at y=100 and y=130.  The y-band is
+        [85..145] (30pt gap → 15pt margin).  y=160 falls outside → excluded.
+        After scoping: 2 effective native rows = 2 output numeric rows → EXACT_PASS.
+
+        The table ships immediately via EXACT_PASS (no row_count_warn, no inner judge).
         """
         tokens: list[tuple[float, float, str]] = []
-        # 3 native numeric rows (one may be a chart axis label, not in output)
-        for row_i, (v1, v2) in enumerate([("2.1", "1.9"), ("3.2", "2.8"), ("4.0", "3.5")]):
+        # Table rows at y=100 and y=130 (paired to output)
+        for row_i, (v1, v2) in enumerate([("2.1", "1.9"), ("3.2", "2.8")]):
             y = 100.0 + row_i * 30
             tokens.append((y, 150.0, v1))
             tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        # Chart/prose row at y=160 (outside y-band, not in output)
+        tokens.append((160.0, 150.0, "4.0"))
+        tokens.append((160.0, 150.0 + _PHYS_COL_GAP, "3.5"))
         page = _make_fitz_page_explicit(tokens)
 
-        # Output only includes 2 rows (correctly omits chart row)
         output_text = _md_table(
             ["Forecaster", "2024", "2025"],
             [
@@ -1255,11 +1321,18 @@ class TestTR4RowCount:
         )
         result = verify_native_table(page, output_text)
 
-        # Verifier: soft warning, NOT hard-fail
-        assert result.hard_fail is False, "Row-count gap must not hard-fail"
-        assert result.row_count_warn is True, "Row-count gap must set row_count_warn=True"
+        # Verifier: EXACT_PASS — chart row excluded by y-band scoping
+        from socr.tables.native_verifier import VerifierState
 
-        # NativeTableVerifierJudge: emits audit event and accepts (ships)
+        assert result.hard_fail is False, "Chart row excluded by y-band → no hard-fail"
+        assert result.row_count_warn is False, (
+            "Chart row excluded by y-band → row counts match → no row_count_warn"
+        )
+        assert result.state == VerifierState.EXACT_PASS, (
+            f"Chart row excluded by y-band → EXACT_PASS. Got: state={result.state!r}"
+        )
+
+        # Judge: ships immediately (EXACT_PASS), emits exact_pass event
         events: list = []
         inner_judge = MagicMock()
         inner_judge.assess.return_value = AcceptDecision(
@@ -1278,13 +1351,47 @@ class TestTR4RowCount:
         )
         decision = judge.assess(page_output, MagicMock())
         assert decision.accept is True, (
-            "Table with row-count gap must SHIP (accept=True). "
-            f"Got: accept={decision.accept}, reason={decision.reason!r}"
+            f"EXACT_PASS must SHIP. Got: accept={decision.accept}, reason={decision.reason!r}"
         )
+        # Inner judge NOT called on EXACT_PASS
+        inner_judge.assess.assert_not_called()
         event_kinds = [e.kind for e in events]
-        assert "value_guard_row_count_warning" in event_kinds, (
-            f"Expected value_guard_row_count_warning audit event. Got: {event_kinds}"
+        assert "native_table_verifier_exact_pass" in event_kinds, (
+            f"Expected native_table_verifier_exact_pass event. Got: {event_kinds}"
         )
+
+    def test_row_count_warn_still_fires_when_pairing_cant_scope(self):
+        """Row-count warn fires when pairing can't exclude extra native rows.
+
+        When 2 native rows are merged into 1 output row (both native rows have
+        equal token overlap with the single output row → tie → no unique match),
+        the pairing can't determine a y-band.  The effective native rows stay at 2
+        while output has 1 numeric row → row_count_warn=True (AMBIGUOUS).
+        """
+        tokens: list[tuple[float, float, str]] = []
+        # 2 native rows with distinct values
+        for row_i, (v1, v2) in enumerate([("5.0", "3.0"), ("2.0", "4.0")]):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output merges both native rows into 1 row (no unique match for pairing)
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [["Merged", "5.0 2.0", "3.0 4.0"]],  # both native rows' values
+        )
+        result = verify_native_table(page, output_text)
+
+        # No unique pairing → no y-band scoping → 2 native vs 1 output → warn
+        assert result.hard_fail is False, f"No hard-fail expected. Got: {result.reason!r}"
+        assert result.row_count_warn is True, (
+            f"2 native rows, 1 output row, no unique pairing → row_count_warn. "
+            f"Got: row_count_warn={result.row_count_warn}"
+        )
+        from socr.tables.native_verifier import VerifierState
+
+        assert result.state == VerifierState.AMBIGUOUS
 
     def test_legitimate_structural_rows_do_not_trip_row_count(self):
         """A table with structural rows (section header, sub-table year header,
