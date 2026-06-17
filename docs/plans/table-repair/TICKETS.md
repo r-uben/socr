@@ -201,7 +201,7 @@ for VALUES.
 ## TR-4a — Real-CE-geometry fixture (the failing gate) — DO FIRST
 
 GitHub: https://github.com/r-uben/socr/issues/56
-Status: **READY** · Priority: P0 · Agent: `socr-implementer` · Depends on: none
+Status: **DONE** · Priority: P0 · Agent: `socr-implementer` · Depends on: none
 
 ### Problem
 The TR-0 fixture used clean, evenly-spaced single-line rows → it went green while real CE stays

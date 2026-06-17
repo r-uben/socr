@@ -1,6 +1,6 @@
 # STATUS — table-repair
 
-Last updated: 2026-06-17
+Last updated: 2026-06-17 (TR-4a DONE)
 
 ## Stage
 
@@ -42,6 +42,7 @@ unblocked by measured evidence). TR-4a (real-geometry fixture = the failing gate
 | TR-1 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-2 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-3 | socr-implementer (claude-sonnet-4-6) | DONE |
+| TR-4a | socr-implementer (claude-sonnet-4-6) | DONE |
 
 ## Ticket state
 
@@ -51,17 +52,31 @@ unblocked by measured evidence). TR-4a (real-geometry fixture = the failing gate
 | TR-1 | Deterministic rowizer on lane-stacked `find_tables()` regions (Option B) | DONE | TR-0 |
 | TR-2 | Per-region verifier scoping + reading-order reassembly | DONE | TR-1 |
 | TR-3 | D3 fail-closed floor + selection-policy fix | DONE | TR-2 |
-| TR-4 | A2 value-guarded VLM re-ask | DEFERRED (v2) | TR-3 + evidence |
+| TR-4a | Real-CE-geometry dense fixture (failing gate for TR-4) | DONE | — |
+| TR-4 | A2 value-guarded VLM re-ask | NEEDS-DESIGN | TR-4a |
 | TR-5 | S3 VLM confirm/split segmentation | DEFERRED (v2) | TR-2 spike |
+
+## TR-4a findings (2026-06-17)
+
+Real root-cause established from `202401.pdf` p.4 geometry:
+- `find_tables(strategy="lines")` detects one table (triggered by the outer border rect
+  + vertical column-separator strokes in the real CE PDF).
+- The detected table is lane-stacked (`_is_lane_stacked=True`) because the name/value
+  y-offset (~1 pt) causes embedded `\n`-stacked tokens in cells.
+- Routes to `rowize_from_word_list` which groups words by `round(y0)`: value row at
+  y=143 and name row at y=144 are DISTINCT y-groups, producing interleaved output
+  (value row: empty label + full data; name row: label + no data).
+- The synthetic dense fixture (`ce_like_p4_dense.pdf`) reproduces this exactly:
+  outer border + 4 column separators → find_tables returns lane-stacked table → same
+  interleaved failure on `extract_structured`.
 
 ## Outstanding / open questions
 
-- v1 is complete. TR-4 and TR-5 are deferred to v2 (require measured evidence that
-  deterministic per-region + rowizer is insufficient on real CE grids).
-- The agentic-path whole-page ladder verifier (`agentic.py:~405`) remains whole-page;
-  converting it to per-region is explicitly a v2 item (TR-4/TR-5 scope).
+- TR-4a DONE: dense fixture committed, xfail parity test in place.
+- TR-4 NEEDS-DESIGN: value-guarded VLM-for-structure (see TICKETS.md design questions).
+- TR-5 DEFERRED (v2).
 
 ## Next action
 
-Real-CE measurement done → v1 insufficient on row structure. Dispatch **TR-4a** (real-geometry
-failing fixture) and the **TR-4 design pass** (value-guarded VLM-for-structure) concurrently.
+TR-4 design pass (value-guard algorithm, escalation trigger, scanned vs born-digital,
+wiring into the agentic ladder) → then TR-4 implementation against the xfail gate.
