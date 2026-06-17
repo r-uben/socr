@@ -115,6 +115,30 @@ class DocumentAssessment:
         return [p.page_num for p in self.pages if not p.is_born_digital]
 
 
+def _is_lane_stacked(table: object) -> bool:
+    """True when a ``find_tables()`` result looks lane-stacked (whitespace-gutter collapse).
+
+    A whitespace-gutter table (no ruling lines, CE forecaster-grid style) may be
+    returned by ``find_tables()`` with multiple values newline-stacked inside a
+    single cell — the "lines" strategy collapses the whitespace-separated columns.
+    Detecting this lets ``extract_structured`` route the region to the
+    word-geometry rowizer instead of the passthrough ``_table_to_markdown`` path.
+
+    The check is purely structural: any cell containing an embedded newline
+    signals that the extractor concatenated what should be separate column values.
+    Never raises.
+    """
+    try:
+        rows = table.extract()
+    except Exception:
+        return False
+    for row in rows or []:
+        for cell in row or []:
+            if cell and isinstance(cell, str) and "\n" in cell:
+                return True
+    return False
+
+
 class BornDigitalDetector:
     """Detect born-digital pages and extract native text from PDFs.
 
@@ -713,12 +737,39 @@ class BornDigitalDetector:
         except Exception:
             return page.get_text("text").strip()
 
-        # Collect table bounding boxes and their markdown representations
+        # Collect table bounding boxes and their markdown representations.
+        # For each table returned by find_tables(), detect lane-stacking: a
+        # whitespace-gutter table (no ruling lines, CE-style) may come back with
+        # embedded newlines inside cells because the "lines" strategy collapses
+        # whitespace-separated columns into one cell.  Such a region is
+        # lane-stacked — route it to the word-geometry rowizer rather than the
+        # passthrough _table_to_markdown path that preserves the embedded newlines.
         table_regions: list[tuple[fitz.Rect, str]] = []
+        lane_stacked_regions: list[tuple[fitz.Rect, str]] = []
         for table in tables_result.tables:
-            md = self._table_to_markdown(table)
-            if md:
-                table_regions.append((fitz.Rect(table.bbox), md))
+            if _is_lane_stacked(table):
+                # Route to word-geometry rowizer scoped to this region's words.
+                # A multi-schema merge is TR-2's job: if rowize_from_word_list
+                # cannot produce a valid single-schema grid from these words it
+                # returns [] and we fall through to the whole-page fallbacks.
+                from socr.tables.reconstruct import rowize_from_word_list
+
+                bbox = fitz.Rect(table.bbox)
+                region_words = [
+                    w for w in page.get_text("words") if bbox.contains(fitz.Point(w[0], w[1]))
+                ]
+                rowized = rowize_from_word_list(region_words)
+                for rect, md in rowized:
+                    lane_stacked_regions.append((rect, md))
+            else:
+                md = self._table_to_markdown(table)
+                if md:
+                    table_regions.append((fitz.Rect(table.bbox), md))
+
+        # Merge: lane-stacked replacements take priority; non-stacked tables keep
+        # their passthrough markdown.  The rowizer may produce more or fewer
+        # regions than the original find_tables() result — that is expected.
+        table_regions.extend(lane_stacked_regions)
 
         # Born-digital booktabs tables (top/mid/bottom rules only) make the
         # default lines strategy return nothing, so the table would otherwise be
@@ -729,6 +780,18 @@ class BornDigitalDetector:
             from socr.tables.reconstruct import reconstruct_table_regions
 
             table_regions = reconstruct_table_regions(page)
+
+        # Word-geometry rowizer fallback (TR-1): when find_tables() returns nothing
+        # AND the text-strategy reconstruct also fails (e.g. a multi-region page
+        # where the text strategy over-merges chart + table + prose into one
+        # spanning grid that fails _looks_tabular), try segmenting the page by
+        # vertical gaps derived from the page's own row-height distribution and
+        # rowizing each segment independently.  This is the correct path for
+        # CE-style whitespace-gutter tables on pages with multiple content regions.
+        if not table_regions:
+            from socr.tables.reconstruct import rowize_from_words
+
+            table_regions = rowize_from_words(page)
 
         if not table_regions:
             return page.get_text("text").strip()

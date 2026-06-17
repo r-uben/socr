@@ -76,7 +76,7 @@ structure with KNOWN values.
 ## TR-1 — Deterministic rowizer for lane-stacked `find_tables()` regions (Option B)
 
 GitHub: https://github.com/r-uben/socr/issues/56
-Status: **READY** · Priority: P0 · Agent: `socr-implementer` · Depends on: TR-0 · Wave 1
+Status: **DONE** · Priority: P0 · Agent: `socr-implementer` · Depends on: TR-0 · Wave 1
 
 ### Problem
 `extract_structured()` trusts `page.find_tables()` whenever it returns ANY non-empty region

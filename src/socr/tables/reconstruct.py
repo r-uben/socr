@@ -14,6 +14,14 @@ surrounding prose), but its *cell extraction* is exactly what we want here. So w
 run it only on table-dominant pages, clean the grid (drop empty rows/columns,
 strip page running-heads), and keep it only if it still looks like a table.
 
+Word-geometry rowizer (TR-1): when the text-strategy find_tables also over-merges
+(whitespace-gutter pages with multiple regions — charts, prose — on the same page),
+``rowize_from_words`` segments the page by vertical gaps derived from the page's own
+row-height distribution (1.5 × median inter-row gap) and builds a column grid
+directly from PyMuPDF word coordinates. This is the correct fallback for CE-style
+whitespace-gutter tables that have no ruling lines AND live on a multi-region page.
+Crucially, a missing token in a lane produces a blank cell — never a skipped column.
+
 No model, no Ollama — pure PyMuPDF on the page's own text layer, so every value is
 the char-exact native glyph.
 """
@@ -22,6 +30,8 @@ from __future__ import annotations
 
 import logging
 import re
+import statistics
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -213,3 +223,243 @@ def _grid_to_markdown(grid: list[list[str]]) -> str:
 
 def _esc(cell: str) -> str:
     return cell.replace("|", r"\|")
+
+
+# ---------------------------------------------------------------------------
+# Word-geometry rowizer (TR-1)
+# ---------------------------------------------------------------------------
+# Gap threshold multiplier: an inter-row gap > (SPLIT_GAP_MULT × median row gap)
+# is treated as a region boundary. 1.5 is calibrated to separate table sections
+# (13-16 pt row height → threshold ~20 pt) from surrounding regions without
+# splitting multi-line headers (5-6 pt y-jitter within a header). This is a
+# structural constant derived from the observed row-height distribution, not a
+# magic pixel value — any table with consistent row heights will produce a clean
+# split at natural region boundaries.
+_SPLIT_GAP_MULT = 1.5
+
+# Minimum absolute gap (pt) for a region split. Prevents splitting on sub-pixel
+# y-jitter in densely-set headers where word baselines may vary by 1-2 pt.
+_SPLIT_GAP_MIN_PT = 10.0
+
+# Words within this factor × _LANE_X_TOL_PT of the nearest data-column x are
+# assigned to that column; words further left go into the label cell.
+# Using 3× the lane tolerance gives a comfortable snap radius for slight PDF
+# text-positioning variation while keeping labels out of the first data column.
+_LANE_SNAP_MULT = 3
+
+
+def rowize_from_words(page) -> list[tuple[object, str]]:
+    """Return ``(rect, markdown)`` pairs built from word geometry on ``page``.
+
+    This is the TR-1 fallback for pages where ``find_tables(strategy="text")``
+    over-merges multiple regions (chart + table + prose) into one spanning grid
+    that fails the ``_looks_tabular`` gate. It segments the page by detecting
+    vertical gaps larger than 1.5 × the page's median inter-row gap (derived
+    from the page's own word positions — no fixed pixel threshold), then tries
+    to rowize each segment independently.
+
+    A missing token in a column lane produces a blank cell — the caller's
+    normalisation layer maps ``""`` → ``"na"`` for parity checks.
+
+    Guard: the same ``has_numeric_columns`` structural gate as
+    ``reconstruct_table_regions`` is applied first. This prevents the fallback
+    from firing on reference/bibliography pages where 2-column aligned rows
+    (author + year, or year + page) happen to pass ``_looks_tabular`` but do
+    not form a real numeric grid — which would produce spurious markdown tables
+    (silent content corruption on the citation corpus). A genuine table page
+    has ≥ ``_MIN_LANES_PER_ROW`` numeric lanes co-occupied per row; bibliography
+    pages do not.
+
+    Never raises. Returns ``[]`` if no valid table segment is found.
+    """
+    # Structural gate: only rowize where numeric tokens form a real grid.
+    # Mirrors the identical guard in reconstruct_table_regions (reconstruct.py
+    # line ~85) and ensures the same class of pages (references, equation dumps)
+    # that are already safely skipped by the text-strategy path are also skipped
+    # here. The word cap (_MAX_PAGE_WORDS) is NOT applied: unlike find_tables
+    # (strategy="text") which scales quadratically, the word-geometry rowizer is
+    # O(n) so the only skip needed is the structural gate, not a cost backstop.
+    if not has_numeric_columns(page):
+        return []
+
+    try:
+        words = page.get_text("words")  # (x0,y0,x1,y1,text,block,line,word)
+    except Exception:
+        return []
+
+    return rowize_from_word_list(words)
+
+
+def rowize_from_word_list(
+    words: list,
+) -> list[tuple[object, str]]:
+    """Build ``(rect, markdown)`` pairs from a flat list of PyMuPDF word tuples.
+
+    The word list has the PyMuPDF ``get_text("words")`` shape:
+    ``(x0, y0, x1, y1, text, block_no, line_no, word_no)``.
+
+    Segmentation: rows are grouped by rounded ``y0``; consecutive y-groups
+    separated by a gap > max(_SPLIT_GAP_MULT × median_gap, _SPLIT_GAP_MIN_PT)
+    are treated as distinct regions. Each segment passes through the same
+    ``_looks_tabular`` gate as ``reconstruct_table_regions``.
+
+    Column detection: numeric token x-positions are clustered into lanes (same
+    ``_LANE_X_TOL_PT`` as ``has_numeric_columns``); words to the left of the
+    leftmost lane minus a snap margin are concatenated into the label cell for
+    that row. A lane with no token in a given row becomes a blank (``""``)
+    cell — never dropped.
+
+    Never raises. Returns ``[]`` if no valid table segment is found.
+    """
+    try:
+        import fitz
+    except ImportError:  # pragma: no cover
+        return []
+
+    if not words:
+        return []
+
+    # ------------------------------------------------------------------
+    # 1. Group words into y-rows (round y0 to nearest point to merge
+    #    words on the same baseline that differ by sub-point jitter).
+    # ------------------------------------------------------------------
+    rows_by_y: dict[int, list] = defaultdict(list)
+    for w in words:
+        rows_by_y[round(w[1])].append(w)
+
+    ys = sorted(rows_by_y.keys())
+    if len(ys) < _MIN_TABLE_ROWS:
+        return []
+
+    # ------------------------------------------------------------------
+    # 2. Derive split threshold from the page's own row-height distribution.
+    #    The median gap between consecutive y-groups reflects the typical
+    #    row spacing for this document — no fixed pt constant.
+    # ------------------------------------------------------------------
+    gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+    median_gap = statistics.median(gaps)
+    split_threshold = max(_SPLIT_GAP_MULT * median_gap, _SPLIT_GAP_MIN_PT)
+
+    # ------------------------------------------------------------------
+    # 3. Split into y-segments at gaps above the threshold.
+    # ------------------------------------------------------------------
+    segments: list[list[int]] = [[ys[0]]]
+    for i in range(1, len(ys)):
+        if ys[i] - ys[i - 1] > split_threshold:
+            segments.append([ys[i]])
+        else:
+            segments[-1].append(ys[i])
+
+    # ------------------------------------------------------------------
+    # 4. For each segment, attempt to build a column-consistent grid.
+    # ------------------------------------------------------------------
+    out: list[tuple[object, str]] = []
+    for seg_ys in segments:
+        seg_words: list = []
+        for y in seg_ys:
+            seg_words.extend(rows_by_y[y])
+
+        grid_and_rect = _rowize_segment(seg_words, seg_ys, rows_by_y)
+        if grid_and_rect is None:
+            continue
+        grid, x0, y0, x1, y1 = grid_and_rect
+
+        cleaned = _clean_grid(grid)
+        if not _looks_tabular(cleaned):
+            logger.debug(
+                "rowizer: segment y=%d..%d rejected by _looks_tabular", seg_ys[0], seg_ys[-1]
+            )
+            continue
+        md = _grid_to_markdown(cleaned)
+        if md:
+            out.append((fitz.Rect(x0, y0, x1, y1), md))
+
+    return out
+
+
+def _rowize_segment(
+    seg_words: list,
+    seg_ys: list[int],
+    rows_by_y: dict[int, list],
+) -> tuple[list[list[str]], float, float, float, float] | None:
+    """Build a raw grid from the words in one y-segment.
+
+    Returns ``(grid, x0, y0, x1, y1)`` on success, ``None`` if the segment
+    has too few numeric tokens to form a plausible table.
+
+    Column lanes are identified from numeric-token x-positions.  Words to the
+    left of the first lane (minus a snap margin) are collected into a single
+    label cell per row.  A lane absent from a row produces ``""`` — the blank
+    cell that maps to ``"na"`` in parity checks.
+    """
+    # Find numeric tokens to detect column lanes
+    num_words = [w for w in seg_words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
+    if len(num_words) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
+        return None
+
+    # Cluster numeric x-positions into lanes (same algorithm as has_numeric_columns)
+    num_xs = sorted(set(w[0] for w in num_words))
+    lanes_x: list[list[float]] = []
+    for x in num_xs:
+        if lanes_x and x - lanes_x[-1][-1] <= _LANE_X_TOL_PT:
+            lanes_x[-1].append(x)
+        else:
+            lanes_x.append([x])
+
+    if len(lanes_x) < _MIN_COLS:
+        return None
+
+    # Lane centres (mean x of all xs in the cluster)
+    lane_centers = [sum(xs) / len(xs) for xs in lanes_x]
+    data_start_x = lane_centers[0]
+
+    # Words further left than (data_start_x − snap_margin) form the label cell
+    snap_margin = _LANE_X_TOL_PT * _LANE_SNAP_MULT
+
+    # ------------------------------------------------------------------
+    # Build one grid row per y-group in the segment.
+    # ------------------------------------------------------------------
+    grid: list[list[str]] = []
+    # Use the actual word bounding-box coordinates for the region rect so that
+    # extract_structured's overlap check correctly suppresses the corresponding
+    # prose text blocks (which start at the same y as the words, not at the
+    # rounded y-group centre).
+    bbox_x0 = min(w[0] for w in seg_words)
+    bbox_x1 = max(w[2] for w in seg_words)
+    bbox_y0 = min(w[1] for w in seg_words)
+    bbox_y1 = max(w[3] for w in seg_words)
+
+    for y in seg_ys:
+        row_ws = sorted(rows_by_y[y], key=lambda w: w[0])
+
+        # Label: concatenate all words to the left of the data boundary
+        label_words = [w[4] for w in row_ws if w[0] < data_start_x - snap_margin]
+        label = " ".join(label_words) if label_words else ""
+
+        # Data cells: assign each word to the nearest lane by x-distance.
+        # A lane with no word assigned stays "" (blank / na).
+        row_cells = [""] * len(lane_centers)
+        for w in row_ws:
+            if w[0] < data_start_x - snap_margin:
+                continue  # already in the label
+            best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
+            if abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
+                existing = row_cells[best]
+                row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
+
+        # Always emit the label as a first cell so all rows share the same
+        # column layout.  An empty label yields "" (empty first cell).
+        grid_row = [label] + row_cells
+        if any(c.strip() for c in grid_row):
+            grid.append(grid_row)
+
+    if not grid:
+        return None
+
+    # Pad to uniform width and drop all-empty columns (standard cleanup)
+    ncols = max(len(r) for r in grid)
+    grid = [r + [""] * (ncols - len(r)) for r in grid]
+    keep = [c for c in range(ncols) if any(r[c] for r in grid)]
+    grid = [[r[c] for c in keep] for r in grid]
+
+    return grid, bbox_x0, bbox_y0, bbox_x1, bbox_y1
