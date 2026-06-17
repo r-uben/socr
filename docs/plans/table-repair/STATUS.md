@@ -4,14 +4,13 @@ Last updated: 2026-06-17
 
 ## Stage
 
-**Wave 1 in progress.** TR-0 and TR-1 DONE. TR-2 (per-region verifier scoping + hist-table
-split from chart) is next. The e2e xfail remains: TR-1 extracts the main forecaster grid but
-the historical table still appears as flat text (chart+hist segment fails `_looks_tabular`).
+**Wave 1 COMPLETE.** TR-0, TR-1, and TR-2 DONE. The TR-0 parity test
+(`TestEndToEndParity::test_agentic_parity_on_ce_like_fixture`) passes — xfail mark removed.
+Both tables, chart image-ref, and prose all verified with correct reading order.
 
 ## Branch
 
-`feat/56-tr1-rowizer` (TR-1 commit). TR-2 onwards to commit on same initiative branch (or
-`feat/56-tr2-…` — decide at dispatch).
+`feat/56-tr2-segmentation` — TR-2 committed here.
 
 ## Decisions (settled)
 
@@ -20,8 +19,13 @@ the historical table still appears as flat text (chart+hist segment fails `_look
 - Fixture must be **synthesized** (CE PDF is licensed — never commit it).
 - TR-1 finding: `find_tables()` returns ZERO tables for the fixture (no ruling lines). The
   text-strategy over-merges the whole page into one region that fails `_looks_tabular`. The
-  word-geometry rowizer correctly extracts the main table but the historical table is blocked
-  by the chart+hist segment merge — that's TR-2's job.
+  word-geometry rowizer correctly extracts the main table but the historical table was blocked
+  by the chart+hist segment merge — fixed by TR-2 chart-clip.
+- TR-2 finding: chart tick labels at x=54 (left of vertical axis at x=73) were diluting the
+  historical table's `data_row_frac`. Fix: extend chart bbox x0 to 0 (page left edge) to
+  capture all axis tick labels. Multi-line headers (indicator row + year row) collapsed into
+  a single header row by `_collapse_header_prefix`. Chart PNG rendered to `figures/` so
+  `strip_phantom_images` preserves the ref.
 
 ## Active Agents
 
@@ -29,6 +33,7 @@ the historical table still appears as flat text (chart+hist segment fails `_look
 |--------|-------|--------|
 | TR-0 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-1 | socr-implementer (claude-sonnet-4-6) | DONE |
+| TR-2 | socr-implementer (claude-sonnet-4-6) | DONE |
 
 ## Ticket state
 
@@ -36,23 +41,17 @@ the historical table still appears as flat text (chart+hist segment fails `_look
 |--------|------|--------|------------|
 | TR-0 | License-clean CE-like fixture + cell-parity harness | DONE | — |
 | TR-1 | Deterministic rowizer on lane-stacked `find_tables()` regions (Option B) | DONE | TR-0 |
-| TR-2 | Per-region verifier scoping + reading-order reassembly | NEEDS-DESIGN (split spike) | TR-1 |
+| TR-2 | Per-region verifier scoping + reading-order reassembly | DONE | TR-1 |
 | TR-3 | D3 fail-closed floor + selection-policy fix | READY | TR-2 |
 | TR-4 | A2 value-guarded VLM re-ask | DEFERRED (v2) | TR-3 + evidence |
 | TR-5 | S3 VLM confirm/split segmentation | DEFERRED (v2) | TR-2 spike |
 
 ## Outstanding / open questions
 
-- TR-2 spike: the chart+hist merged segment (y=205-335) in the fixture needs splitting.
-  `has_chart_marks` bboxes can clip the chart sub-region; then the historical table can be
-  rowized independently. TR-2 implementer should use chart bboxes from `has_chart_marks` /
-  `extractor.py:777` as the split signal.
-- Whether deterministic v1 (per-region + rowizer) alone yields clean CE grids — measured by
-  the TR-0 parity test once TR-1…TR-3 land. After TR-1: main table correct; hist table and
-  chart/image-asset handling are TR-2/TR-3.
+- TR-3 (D3 fail-closed floor): now unblocked. Dispatch when ready.
+- The e2e parity test is now PASSING — no remaining blockers in v1 wave 1.
 
 ## Next action
 
-Dispatch **TR-2** (`socr-designer` for spike, then `socr-implementer`) — per-region verifier
-scoping + reading-order reassembly. TR-1 finding: use `has_chart_marks` bboxes to split the
-chart from the hist table in the word-geometry rowizer path.
+Dispatch **TR-3** — D3 fail-closed floor + selection-policy fix. TR-2 is fully committed and
+the parity gate is green.
