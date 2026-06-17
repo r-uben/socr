@@ -354,8 +354,9 @@ class NativeTableVerifierJudge:
     born-digital detector found table-like structure (``is_table_page``
     returns True for the given page number).
 
-    Tier 1 — Hard-fail (geometry_impossible_collapse): a native data row has
-    K >= 2 well-separated numeric lanes but the output row has fewer cells.
+    Tier 1 — Hard-fail (value_guard): the output table's numeric-token content
+    does not match the native page's numeric tokens on a per-row basis (TR-4
+    value-guard: row-aware multiset equality + label-binding interleaved detection).
     → Return AcceptDecision(accept=False) immediately; inner judge NOT called.
 
     Tier 2 — Warn-and-defer: ambiguous lane-count mismatch (paired-year
@@ -411,7 +412,27 @@ class NativeTableVerifierJudge:
             )
             return self._inner.assess(output, provider)
 
+        # Soft row-count warning: table ships, but emit audit event before
+        # delegating so the audit log + status machinery can demote to WARNING.
+        if vr.row_count_warn:
+            self._emit_event(
+                page_num=page_num,
+                kind="value_guard_row_count_warning",
+                engine=output.engine or "",
+                detail=vr.row_count_warn_reason,
+                data={
+                    "native_lane_count": vr.native_lane_count,
+                    "output_col_count": vr.output_col_count,
+                },
+            )
+
         if vr.hard_fail:
+            # Derive the predicate label from drifted_rows (TR-4 value-guard
+            # replaced geometry_impossible_collapse with multiset/label checks).
+            if vr.drifted_rows:
+                predicate = vr.drifted_rows[0].get("predicate", "value_guard")
+            else:
+                predicate = "value_guard"
             # Record audit event for the hard-fail
             self._emit_event(
                 page_num=page_num,
@@ -422,7 +443,7 @@ class NativeTableVerifierJudge:
                     "native_lane_count": vr.native_lane_count,
                     "output_col_count": vr.output_col_count,
                     "drifted_rows": vr.drifted_rows,
-                    "predicate": "geometry_impossible_collapse",
+                    "predicate": predicate,
                 },
             )
             return AcceptDecision(
@@ -432,7 +453,7 @@ class NativeTableVerifierJudge:
             )
 
         if vr.warn:
-            # Record audit event for the warn-and-defer
+            # Record audit event for the warn-and-defer (Tier-2 lane-count gap)
             self._emit_event(
                 page_num=page_num,
                 kind="native_table_verifier_warn",

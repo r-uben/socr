@@ -1,6 +1,6 @@
 # STATUS — table-repair
 
-Last updated: 2026-06-17 (TR-4a DONE)
+Last updated: 2026-06-17 (TR-4 rev3 — Option B: row-count demoted to soft warning)
 
 ## Stage
 
@@ -43,6 +43,7 @@ unblocked by measured evidence). TR-4a (real-geometry fixture = the failing gate
 | TR-2 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-3 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-4a | socr-implementer (claude-sonnet-4-6) | DONE |
+| TR-4 | socr-implementer (claude-sonnet-4-6) | DONE |
 
 ## Ticket state
 
@@ -53,7 +54,7 @@ unblocked by measured evidence). TR-4a (real-geometry fixture = the failing gate
 | TR-2 | Per-region verifier scoping + reading-order reassembly | DONE | TR-1 |
 | TR-3 | D3 fail-closed floor + selection-policy fix | DONE | TR-2 |
 | TR-4a | Real-CE-geometry dense fixture (failing gate for TR-4) | DONE | — |
-| TR-4 | A2 value-guarded VLM re-ask | NEEDS-DESIGN | TR-4a |
+| TR-4 | Token-equality value-guard (accept year-paired, reject genuinely broken) | DONE | TR-4a |
 | TR-5 | S3 VLM confirm/split segmentation | DEFERRED (v2) | TR-2 spike |
 
 ## TR-4a findings (2026-06-17)
@@ -72,11 +73,22 @@ Real root-cause established from `202401.pdf` p.4 geometry:
 
 ## Outstanding / open questions
 
-- TR-4a DONE: dense fixture committed, xfail parity test in place.
-- TR-4 NEEDS-DESIGN: value-guarded VLM-for-structure (see TICKETS.md design questions).
+- TR-4 DONE (rev3 after Option B panel decision): value-guard final state:
+  1. ROW-COUNT: SOFT WARNING (`row_count_warn=True`). When output numeric row count
+     ≠ effective native numeric row count, emit `value_guard_row_count_warning` audit
+     event; table SHIPS with WARNING status, NOT rejected. Rationale: row-count gaps are
+     confounded by chart/prose numerals on complex pages (CE p.4 chart tick labels,
+     bar values). Silently discarding correct tables is worse than flagging them.
+  2. LABEL-BINDING (adjacency-dominance): HARD-FAIL. Fires only when adjacent interleaved
+     pairs dominate clean labeled rows.
+  3. MULTISET: HARD-FAIL. Per-paired-row N2-normalized token equality.
+  CE p.4 (63 native rows, ~50-row correct table): row_count_warn fires, hard_fail=False.
+  Table ships with WARNING status. Label-binding and multiset determine corruption.
+  TR-4a dense fixture xfail STAYS (recovery step — VLM re-ask — not yet done).
 - TR-5 DEFERRED (v2).
 
 ## Next action
 
-TR-4 design pass (value-guard algorithm, escalation trigger, scanned vs born-digital,
-wiring into the agentic ladder) → then TR-4 implementation against the xfail gate.
+VLM re-ask step (post-TR-4): when value-guard hard-fails, fire constrained
+VLM re-ask for structure, accept only if value-guard passes, else D3 floor.
+Also: wire `native_table_unverifiable=True` on agentic path so D3 AND-gate fires.

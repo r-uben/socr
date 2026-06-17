@@ -919,11 +919,14 @@ class TestDenseFixtureParityXfail:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "TR-4 not yet implemented: the name/value y-offset (≈1 pt) causes "
-            "the TR-1 rowizer to produce interleaved rows — label rows with no "
-            "data, data rows with no label.  Fix: TR-4 value-guarded VLM-for-"
-            "structure must propose correct row structure and pass the geometry "
-            "value-guard.  Remove this xfail once TR-4 passes parity."
+            "TR-4 value-guard implemented (label-binding correctly detects the "
+            "interleaved row pattern) but the RECOVERY step is not yet done: "
+            "the TR-1 rowizer still produces interleaved rows on the dense fixture "
+            "(label rows with no data, data rows with no label), and the VLM "
+            "re-ask that would propose the correct structure is a later step.  "
+            "The value-guard rejects the broken output as intended (hard-fail via "
+            "label-binding).  Remove this xfail once the VLM re-ask + structure "
+            "recovery produces a parity-passing output."
         ),
     )
     def test_dense_parity_fails_today(self) -> None:

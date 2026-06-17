@@ -223,11 +223,10 @@ means green.
 
 ---
 
-## TR-4 — Value-guarded VLM-for-structure (NEEDS-DESIGN → then implement)
+## TR-4 — Token-equality value-guard
 
 GitHub: https://github.com/r-uben/socr/issues/56
-Status: **NEEDS-DESIGN** · Priority: P0 · Agent: `socr-designer` then `socr-implementer` ·
-Depends on: TR-4a
+Status: **DONE** · Priority: P0 · Agent: `socr-implementer` · Depends on: TR-4a
 
 ### Goal
 When the deterministic rowizer's output fails its verifier (real CE) — or there is no geometry
