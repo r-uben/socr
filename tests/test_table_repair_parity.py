@@ -623,6 +623,341 @@ class TestAssertTableParity:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# TR-4a: Dense-fixture (real-CE-geometry) — the failing gate for TR-4
+# ---------------------------------------------------------------------------
+
+DENSE_FIXTURE_PDF = FIXTURE_DIR / "ce_like_p4_dense.pdf"
+DENSE_GROUND_TRUTH = FIXTURE_DIR / "ground_truth_dense.json"
+
+
+def _load_dense_gt() -> dict:
+    return json.loads(DENSE_GROUND_TRUTH.read_text())
+
+
+def _dense_region(gt: dict) -> dict:
+    """Return the single table region from the dense ground truth."""
+    for r in gt["regions"]:
+        if r["kind"] == "table":
+            return r
+    raise KeyError("no table region in dense ground truth")
+
+
+def assert_dense_table_parity(extracted_md: str, ground_truth: dict) -> None:
+    """Assert the dense fixture's table is correctly extracted.
+
+    The dense fixture has exactly ONE table region (the forecaster grid).
+    This helper checks that EVERY row label is paired with its correct values
+    — which FAILS today because the name/value y-offset causes interleaved
+    rows in the rowizer output (name row has no data; data row has no label).
+
+    Raises ``ParityError`` with a per-cell diff on any mismatch.
+    """
+    region = _dense_region(ground_truth)
+    row_labels = region["row_labels"]
+    columns = region["columns"]
+    expected_cells = region["cells"]
+
+    errors: list[str] = []
+
+    # Parse markdown tables from extracted output
+    md_tables = _parse_markdown_tables(extracted_md)
+    if not md_tables:
+        errors.append(
+            "NO-TABLE: no markdown table found in the dense fixture output. "
+            "Expected at least one table with forecaster rows."
+        )
+        for key, val in list(expected_cells.items())[:5]:
+            errors.append(f"  MISSING {key}: expected {val!r}")
+        if errors:
+            bullet = "\n  - "
+            raise ParityError(
+                f"Dense parity check failed ({len(errors)} issue(s)):{bullet}" + bullet.join(errors)
+            )
+
+    # Collect all rows from all parsed tables (the interleaved output splits
+    # the forecasters into multiple regions separated by the summary gap).
+    all_rows: list[list[str]] = []
+    for grid in md_tables:
+        all_rows.extend(grid)
+
+    # Build a mapping from label to its data cells (by scanning all rows for
+    # label matches in column 0).
+    label_to_data: dict[str, list[str]] = {}
+    for row in all_rows:
+        if not row:
+            continue
+        label_text = row[0].strip()
+        for lbl in row_labels:
+            if lbl in label_text and label_text not in ("", "---"):
+                # Found a row with this label; record its data cells
+                data = [c.strip() for c in row[1:]]
+                label_to_data[lbl] = data
+                break
+
+    # Per-cell check: for each expected cell, verify the label row has the
+    # correct value at the right column position.
+    # The header row detection: find a row containing any column name token.
+    col_tokens = [c.replace("_", " ").split()[-1] for c in columns]  # e.g. "2024"
+    header_row: list[str] = []
+    for grid in md_tables:
+        for row in grid[:3]:  # header is in the first few rows
+            row_text = " ".join(row)
+            if any(tok in row_text for tok in col_tokens):
+                header_row = row
+                break
+        if header_row:
+            break
+
+    # Map column names to header indices
+    col_idx: dict[str, int] = {}
+    for col in columns:
+        col_norm = col.replace("_", " ")
+        for ci, hdr_cell in enumerate(header_row):
+            hdr_norm = hdr_cell.replace("_", " ")
+            if col_norm in hdr_norm or hdr_norm in col_norm:
+                col_idx[col] = ci
+                break
+
+    for key, expected_val in expected_cells.items():
+        label, col = key.split("|", 1)
+        data = label_to_data.get(label)
+        if data is None:
+            errors.append(
+                f"ROW-MISSING {key}: label {label!r} not found as a row header "
+                f"in the extracted output.  This indicates the name↔value binding "
+                f"is broken (the label row has no data, or is absent entirely)."
+            )
+            continue
+
+        # The data cells are relative to the label column (index 0 of the row).
+        # col_idx gives position in the full row; data starts at index 1.
+        ci = col_idx.get(col)
+        if ci is None:
+            errors.append(
+                f"COL-MISSING {key}: column {col!r} not found in header row {header_row!r}."
+            )
+            continue
+
+        # data[ci - 1] because data is row[1:] (skips label cell)
+        data_idx = ci - 1
+        if data_idx < 0 or data_idx >= len(data):
+            errors.append(
+                f"CELL-OOB {key}: data index {data_idx} out of range "
+                f"(data has {len(data)} cells: {data!r})."
+            )
+            continue
+
+        actual_val = data[data_idx] if data[data_idx] else "na"
+        if actual_val != expected_val:
+            errors.append(f"CELL-MISMATCH {key}: expected {expected_val!r}, got {actual_val!r}.")
+
+    if errors:
+        bullet = "\n  - "
+        raise ParityError(
+            f"Dense parity check failed ({len(errors)} issue(s)):{bullet}" + bullet.join(errors)
+        )
+
+
+class TestDenseFixtureSanity:
+    """Verify the TR-4a dense fixture meets its physical requirements.
+
+    These tests PASS now (sanity checks on the fixture itself).
+    """
+
+    def test_dense_pdf_exists(self) -> None:
+        assert DENSE_FIXTURE_PDF.exists(), f"Dense fixture PDF missing: {DENSE_FIXTURE_PDF}"
+
+    def test_dense_ground_truth_exists(self) -> None:
+        assert DENSE_GROUND_TRUTH.exists(), f"Dense GT missing: {DENSE_GROUND_TRUTH}"
+
+    def test_dense_born_digital(self) -> None:
+        """Dense fixture must have a real text layer (born-digital)."""
+        doc = fitz.open(str(DENSE_FIXTURE_PDF))
+        page = doc[0]
+        words = page.get_text("words")
+        doc.close()
+        assert len(words) >= 40, (
+            f"Expected >= 40 words in dense fixture text layer, got {len(words)}."
+        )
+
+    def test_dense_gt_version_and_regions(self) -> None:
+        gt = _load_dense_gt()
+        assert gt["version"] == 1
+        regions = gt["regions"]
+        assert len(regions) == 1, f"Expected 1 region in dense GT, got {len(regions)}"
+        assert regions[0]["kind"] == "table"
+
+    def test_dense_gt_cell_count(self) -> None:
+        gt = _load_dense_gt()
+        region = _dense_region(gt)
+        expected = len(region["row_labels"]) * len(region["columns"])
+        assert len(region["cells"]) == expected, (
+            f"dense_table: expected {expected} cells, got {len(region['cells'])}"
+        )
+
+    def test_dense_geometry_fields_present(self) -> None:
+        """Ground truth must record the geometry metadata for traceability."""
+        gt = _load_dense_gt()
+        geo = gt.get("geometry", {})
+        assert "name_y_offset_pt" in geo, "geometry.name_y_offset_pt missing"
+        assert "row_spacing_pt" in geo, "geometry.row_spacing_pt missing"
+        assert geo["name_y_offset_pt"] >= 0.5, (
+            f"name_y_offset_pt={geo['name_y_offset_pt']} is too small; "
+            "must be >= 0.5 pt to produce distinct y-groups in the rowizer."
+        )
+
+    def test_dense_fixture_produces_lane_stacked_table(self) -> None:
+        """The dense fixture MUST trigger find_tables() returning a lane-stacked result.
+
+        This is the critical prerequisite: the fixture must route through
+        ``_is_lane_stacked`` -> ``rowize_from_word_list``, which is where the
+        name/value y-offset failure occurs.  If find_tables() returns 0 tables,
+        the pipeline falls through to reconstruct_table_regions (text-strategy)
+        which handles the offset correctly -> false green.
+        """
+        from socr.core.born_digital import _is_lane_stacked
+
+        doc = fitz.open(str(DENSE_FIXTURE_PDF))
+        page = doc[0]
+        tables_result = page.find_tables()
+        doc.close()
+
+        assert len(tables_result.tables) >= 1, (
+            "Dense fixture must produce >= 1 table from find_tables() — "
+            "the table border structure must trigger the lines-strategy detector.  "
+            "If find_tables() returns 0 tables the failure mode is not reproduced "
+            "(the pipeline uses reconstruct_table_regions instead which handles "
+            "the name/value offset correctly)."
+        )
+        lane_stacked = [t for t in tables_result.tables if _is_lane_stacked(t)]
+        assert len(lane_stacked) >= 1, (
+            "Dense fixture must produce at least one lane-stacked table from "
+            "find_tables() — the name/value y-offset must cause cells with "
+            "embedded newlines (\\n-stacked tokens), which is the trigger for "
+            "the rowize_from_word_list path where the interleaving failure occurs."
+        )
+
+    def test_dense_extraction_reproduces_interleaved_failure(self) -> None:
+        """extract_structured MUST produce the interleaved name/value failure.
+
+        This test CONFIRMS the fixture faithfully reproduces real CE's failure:
+        the output must contain label-only rows (names) interleaved with
+        data-only rows (values), broken name↔value binding.
+
+        This test itself PASSES (it asserts the failure IS present in the
+        output).  The xfail is on the PARITY test that requires the failure
+        to be FIXED.
+        """
+        from socr.core.born_digital import BornDigitalDetector
+
+        doc = fitz.open(str(DENSE_FIXTURE_PDF))
+        page = doc[0]
+        detector = BornDigitalDetector()
+        extracted = detector.extract_structured(page)
+        doc.close()
+
+        # The interleaved output has rows like:
+        #   |  | 2.3 | 1.9 | 2.1 | 2.4 |   ← data with EMPTY label
+        #   | Alpha Economics |  |  |  |  |  ← label with NO data
+        # Parse the markdown tables to find these patterns.
+        md_tables = _parse_markdown_tables(extracted)
+        assert md_tables, (
+            "extract_structured must produce at least one markdown table on the "
+            "dense fixture (after _is_lane_stacked routes to the rowizer).  "
+            f"Got empty output. Full extraction:\n{extracted[:500]}"
+        )
+
+        # Look for label-only rows: label non-empty, ALL data cells empty
+        label_only_rows = []
+        data_only_rows = []
+        for grid in md_tables:
+            for row in grid[1:]:  # skip header
+                if not row:
+                    continue
+                label = row[0].strip()
+                data = [c.strip() for c in row[1:]]
+                has_label = bool(label) and not re.fullmatch(r"-+", label)
+                has_data = any(c for c in data)
+                if has_label and not has_data:
+                    label_only_rows.append(row)
+                elif not has_label and has_data:
+                    data_only_rows.append(row)
+
+        assert label_only_rows, (
+            "Expected label-only rows (name present, no data values) in the dense "
+            "fixture extraction — this is the interleaved failure mode.  "
+            "If no label-only rows exist the fixture does NOT reproduce real CE's "
+            "failure and must be revised.  "
+            f"Full extraction:\n{extracted}"
+        )
+        assert data_only_rows, (
+            "Expected data-only rows (data values present, no label) in the dense "
+            "fixture extraction — this is the interleaved failure mode.  "
+            f"Full extraction:\n{extracted}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TR-4a xfail parity test — the FAILING GATE for TR-4
+# ---------------------------------------------------------------------------
+
+
+class TestDenseFixtureParityXfail:
+    """Dense fixture parity — XFAIL until TR-4 fixes the row-structure problem.
+
+    This test reproduces the real-CE failure (top block merged, names offset
+    from values by one row) on the synthesized dense fixture.  It is marked
+    ``xfail(strict=True)`` so CI stays green and the test turns red the moment
+    the underlying bug is fixed (reminding the implementer to remove the xfail).
+
+    The test will PASS (and the xfail will be satisfied) once TR-4
+    (value-guarded VLM-for-structure) correctly assigns each name to its
+    corresponding value row.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "TR-4 value-guard implemented (label-binding correctly detects the "
+            "interleaved row pattern) but the RECOVERY step is not yet done: "
+            "the TR-1 rowizer still produces interleaved rows on the dense fixture "
+            "(label rows with no data, data rows with no label), and the VLM "
+            "re-ask that would propose the correct structure is a later step.  "
+            "The value-guard rejects the broken output as intended (hard-fail via "
+            "label-binding).  Remove this xfail once the VLM re-ask + structure "
+            "recovery produces a parity-passing output."
+        ),
+    )
+    def test_dense_parity_fails_today(self) -> None:
+        """Dense fixture parity must FAIL today (reproducing real-CE row-offset bug).
+
+        This test drives ``BornDigitalDetector().extract_structured()`` directly
+        (no agentic pipeline needed — the failure is in the born-digital path)
+        and asserts cell-by-cell parity against the dense ground truth.
+
+        It is expected to FAIL (xfail) because the interleaved output breaks the
+        name↔value binding: each forecaster row produces two grid rows —
+        one with the label and no data, one with the data and no label.
+
+        CI hermeticity: no ollama/provider is needed — this exercises only the
+        native text extraction path (BornDigitalDetector), which runs entirely
+        in PyMuPDF without any model call.
+        """
+        from socr.core.born_digital import BornDigitalDetector
+
+        doc = fitz.open(str(DENSE_FIXTURE_PDF))
+        page = doc[0]
+        detector = BornDigitalDetector()
+        extracted = detector.extract_structured(page)
+        doc.close()
+
+        gt = _load_dense_gt()
+        # This assertion IS expected to raise ParityError today — names are
+        # in rows by themselves (no values), so every cell will be MISSING.
+        assert_dense_table_parity(extracted, gt)
+
+
 class TestEndToEndParity:
     """Drive ``UnifiedPipeline.process()`` on the fixture and assert full parity.
 

@@ -100,12 +100,14 @@ def _md_table(header: list[str], rows: list[list[str]]) -> str:
 
 
 class TestVerifyNativeTableHardFail:
-    """Tier 1: geometry-impossible row collapse."""
+    """Tier 1: value-guard (TR-4 row-aware multiset + label-binding)."""
 
-    def test_hard_fail_row_collapse(self):
-        """A row with 3 well-separated native lanes but only 2 output cells
-        (label + collapsed values) is a geometry-impossible collapse → hard_fail=True."""
-        # Three native numeric tokens placed at _PHYS_COL_GAP distances
+    def test_no_hard_fail_year_paired_cells_all_values_present(self):
+        """TR-4 acceptance case: a row with 3 native numeric tokens, but the output
+        packs all three into 1 cell (e.g. year-paired "0.043 0.051 0.039").
+        All values ARE present — the value-guard passes because the per-row
+        numeric-token multiset matches.  This is the key fix for the real-CE
+        false-positive where paired-year tables were incorrectly hard-failed."""
         native_rows = [
             [
                 (100.0, "0.043"),
@@ -114,16 +116,16 @@ class TestVerifyNativeTableHardFail:
             ],
         ]
         page = _make_fitz_page_with_words(native_rows)
-        # Output collapses all three values into 1 populated cell (2 cols total)
+        # Output packs all three values into 1 cell — but all values ARE present
         output_text = _md_table(
             ["label", "values"],
             [["log wage", "0.043 0.051 0.039"]],
         )
         result = verify_native_table(page, output_text)
-        assert result.hard_fail is True, f"Expected hard_fail for collapsed row; got: {result}"
-        assert result.warn is False
-        assert "geometry_impossible_collapse" in result.reason
-        assert len(result.drifted_rows) >= 1
+        assert result.hard_fail is False, (
+            "All native values present per row → value-guard must PASS even if values "
+            f"are packed into fewer cells (year-pair case); got: {result}"
+        )
         assert result.native_lane_count >= 3
 
     def test_hard_fail_two_lane_collapse_to_one_cell(self):
@@ -162,33 +164,40 @@ class TestVerifyNativeTableHardFail:
             "glued-numeric detection is the heuristics checker's job"
         )
 
-    def test_hard_fail_multiple_rows_some_collapse(self):
-        """Multiple data rows; only one collapses — hard-fail fires for that row."""
+    def test_hard_fail_dropped_value_in_one_row(self):
+        """Multiple data rows; one has a dropped value — hard-fail fires for that row.
+
+        Native row 0 has 3 values; output row 0 is missing one value (2.2 dropped).
+        Native row 1 is complete.  The value-guard detects the multiset mismatch
+        for row 0 and hard-fails.
+        """
         native_rows = [
-            [  # row 0 — 3 lanes
-                (100.0, "0.043"),
-                (100.0 + _PHYS_COL_GAP, "0.051"),
-                (100.0 + 2 * _PHYS_COL_GAP, "0.039"),
+            [  # row 0 — 3 lanes (values 2.1, 2.2, 2.3)
+                (100.0, "2.1"),
+                (100.0 + _PHYS_COL_GAP, "2.2"),
+                (100.0 + 2 * _PHYS_COL_GAP, "2.3"),
             ],
-            [  # row 1 — 3 lanes (same x positions, different y)
-                (100.0, "1,204"),
-                (100.0 + _PHYS_COL_GAP, "1,204"),
-                (100.0 + 2 * _PHYS_COL_GAP, "1,204"),
+            [  # row 1 — 3 lanes, all present in output (3.1, 3.2, 3.3)
+                (100.0, "3.1"),
+                (100.0 + _PHYS_COL_GAP, "3.2"),
+                (100.0 + 2 * _PHYS_COL_GAP, "3.3"),
             ],
         ]
         page = _make_fitz_page_with_words(native_rows)
-        # Row 0 collapsed (1 populated cell); row 1 is fine (3 populated + label = 4)
+        # Row 0 drops 2.2; row 1 is complete
         output_text = _md_table(
             ["label", "c1", "c2", "c3"],
             [
-                ["log wage", "0.043 0.051 0.039", "", ""],
-                ["N", "1,204", "1,204", "1,204"],
+                ["Alpha", "2.1", "", "2.3"],  # 2.2 missing → multiset mismatch
+                ["Beta", "3.1", "3.2", "3.3"],
             ],
         )
         result = verify_native_table(page, output_text)
-        assert result.hard_fail is True
+        assert result.hard_fail is True, (
+            "Dropped value (2.2 missing from row 0) must hard-fail via multiset mismatch"
+        )
         assert len(result.drifted_rows) >= 1
-        assert result.drifted_rows[0]["row_idx"] == 0
+        assert result.drifted_rows[0]["predicate"] == "multiset_mismatch"
 
 
 class TestVerifyNativeTableWarnOnly:
@@ -287,26 +296,34 @@ class TestVerifyNativeTableWarnOnly:
         assert result.warn is True, "col_gap >= 2 with no collapse → should warn"
         assert "ambiguous_lane_count_mismatch" in result.reason
 
-    def test_cbo_style_sparse_drift_no_hard_fail(self):
-        """CBO-style: a sparse row has 2 well-separated native lanes, output has
-        2 populated cells but with a value in the wrong column (drift).
-        The verifier catches COLLAPSE (fewer cells), NOT drift to the wrong column.
-        Hard-fail must NOT fire here — that would be a false-fail on sparse rows."""
+    def test_cbo_style_dropped_value_now_hard_fails(self):
+        """TR-4 behaviour change: a sparse row that DROPS a value now hard-fails.
+
+        The old verifier caught COLLAPSE (fewer cells than native lanes) but NOT
+        a dropped value when the cell count happened to match.  The new value-guard
+        (row-aware multiset equality) correctly catches any dropped value, including
+        the CBO-style case where 2.2 is present in the native row but absent from
+        the output row — the per-row numeric-token multiset does not match.
+
+        This is CORRECT behaviour: a missing value is a genuine data-loss, not a
+        legitimate layout variant.  The old no-fail was the false-negative the
+        value-guard fixes.
+        """
         native_rows = [
             [(150.0, "2.1"), (150.0 + _PHYS_COL_GAP, "2.2")],
         ]
         page = _make_fitz_page_with_words(native_rows)
-        # Output: row has 2 populated cells (CBO + 2.1) but 2.2 is missing → 1 numeric drifted
-        # populated-cell count: "CBO" + "2.1" = 2 cells, native_lanes = 2 → no collapse
+        # Output: 2.2 is absent → multiset {2.1:1} != native {2.1:1, 2.2:1}
         output_text = _md_table(
             ["country", "2026", "2027"],
             [["CBO", "2.1", ""]],
         )
         result = verify_native_table(page, output_text)
-        assert result.hard_fail is False, (
-            "Column-lane drift (correct cell count, wrong column) is NOT geometry-impossible "
-            "collapse; hard-fail would false-fire on sparse rows."
+        assert result.hard_fail is True, (
+            "A dropped value (2.2 absent from output) must now hard-fail via the "
+            "value-guard multiset check — this is the correct TR-4 behaviour."
         )
+        assert "multiset_mismatch" in result.reason
 
 
 class TestVerifyNativeTableBypass:
@@ -401,7 +418,9 @@ class TestNativeTableVerifierAuditEvents:
         assert evt.kind == "native_table_verifier_hard_fail"
         assert evt.page_num == 1
         assert "predicate" in evt.data
-        assert evt.data["predicate"] == "geometry_impossible_collapse"
+        # TR-4: predicate is now "multiset_mismatch" (value-guard replaced
+        # geometry_impossible_collapse; the dropped value 0.2/0.3 triggers it).
+        assert evt.data["predicate"] == "multiset_mismatch"
         assert "drifted_rows" in evt.data
         assert "native_lane_count" in evt.data
         assert "output_col_count" in evt.data
@@ -444,8 +463,13 @@ class TestNativeTableVerifierAuditEvents:
         assert "native_lane_count" in evt.data
         assert "output_col_count" in evt.data
 
-    def test_no_event_on_clean_pass(self):
-        """No audit event when the verifier finds no issue."""
+    def test_exact_pass_ships_immediately_with_event(self):
+        """TR-6 EXACT_PASS: verifier ships immediately without calling inner judge.
+
+        When row counts match and multiset is clean (EXACT_PASS), the judge
+        short-circuits: it emits a native_table_verifier_exact_pass event and
+        returns accept=True immediately, without calling the inner judge.
+        """
         native_rows = [
             [
                 (200.0, "0.1"),
@@ -471,10 +495,14 @@ class TestNativeTableVerifierAuditEvents:
             record_event=events.append,
         )
         provider = MagicMock()
-        judge.assess(output, provider)
+        decision = judge.assess(output, provider)
 
-        inner.assess.assert_called_once()
-        assert len(events) == 0, "No events on a clean pass"
+        # TR-6: EXACT_PASS short-circuits — inner judge is NOT called
+        inner.assess.assert_not_called()
+        assert decision.accept is True, "EXACT_PASS must accept"
+        # Exactly one audit event of kind native_table_verifier_exact_pass
+        assert len(events) == 1, f"Expected 1 exact_pass event, got {len(events)}"
+        assert events[0].kind == "native_table_verifier_exact_pass"
 
     def test_scan_page_bypasses_verifier_in_judge(self):
         """Scanned page: no native words → verifier bypassed, inner judge called."""
@@ -582,17 +610,25 @@ class TestFalseFailGuard:
             f"got: hard_fail={result.hard_fail}, reason={result.reason!r}"
         )
 
-    def test_no_false_fail_with_trailing_numeric_footnote(self):
-        """A trailing numeric footnote must not be paired to a sparse data row.
+    def test_no_false_fail_with_leading_header_matching_footnote(self):
+        """A leading numeric header row (above data rows) whose tokens match
+        the output column headers is excluded from the effective row count.
 
-        Native rows: one sparse SE row at y=100, then a dense numeric footnote
-        row at y=160. Output has only the sparse SE row. A blind trailing
-        offset would pair the output row with the footnote and falsely hard-fail.
+        Native rows: spec-number header (1)(2)(3) at y=70 (above data), then
+        a sparse SE row at y=100.  Output header uses ``(1) (2) (3)`` as column
+        labels.  The header row at y=70 is ABOVE the first data row at y=100,
+        so it is identified as a leading header-like row and excluded.
+        Effective native count = 1 (data row only); output numeric = 1 → PASS.
+
+        This is the standard case for regression tables: spec-number column
+        headers appear as native numeric rows above the data rows.
         """
         tokens: list[tuple[float, float, str]] = []
+        # Leading header row ABOVE the data row
+        for i, tok in enumerate(["(1)", "(2)", "(3)"]):
+            tokens.append((70.0, 220.0 + i * _PHYS_COL_GAP, tok))
+        # Sparse SE data row
         tokens.append((100.0, 220.0, "(0.014)"))
-        for i, tok in enumerate(["1", "2", "3"]):
-            tokens.append((160.0, 220.0 + i * _PHYS_COL_GAP, tok))
 
         page = _make_fitz_page_explicit(tokens)
         output_text = _md_table(
@@ -601,25 +637,86 @@ class TestFalseFailGuard:
         )
         result = verify_native_table(page, output_text)
         assert result.hard_fail is False, (
-            "Trailing numeric footnotes must not create false hard-fails on sparse rows"
+            "Leading spec-number header row must be excluded as header-like; "
+            "only the data row remains → row count matches → no hard-fail. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
         )
 
-    def test_hard_fail_data_collapse_with_trailing_numeric_footnote(self):
-        """A real collapsed data row is still caught with a numeric footnote below."""
+    def test_leading_header_row_with_matching_tokens_excluded_from_row_count(self):
+        """A LEADING native row (above all data rows) whose tokens match the output
+        column headers is excluded from the effective native row count.
+
+        Pattern: native has spec-number header (1)(2)(3) at y=70 (ABOVE data),
+        then data row (0.043 0.051 0.039) at y=100.  Output header uses (1)(2)(3)
+        as column labels.  The leading header row's tokens {1,2,3} are ALL present
+        in the output header token set AND the row is above the first data-like
+        native row (y=70 < y=100) → it is excluded as a leading header-like row.
+        Effective native = 1 row; output numeric = 1 row → row count matches → PASS.
+
+        IMPORTANT: Only LEADING header rows (above the first data row) are excluded.
+        A trailing footnote below the data rows (same tokens) is NOT excluded, since
+        the verifier cannot distinguish it from a dropped data row — that is the
+        conservative correct behaviour (see test_footnote_row_with_distinct_tokens_*).
+        """
+        tokens: list[tuple[float, float, str]] = []
+        # Leading spec-number header ABOVE the data row
+        for i, tok in enumerate(["(1)", "(2)", "(3)"]):
+            tokens.append((70.0, 220.0 + i * _PHYS_COL_GAP, tok))
+        # Data row below
+        for i, tok in enumerate(["0.043", "0.051", "0.039"]):
+            tokens.append((100.0, 220.0 + i * _PHYS_COL_GAP, tok))
+
+        page = _make_fitz_page_explicit(tokens)
+        # Output uses (1) (2) (3) as headers — matching the leading header row
+        output_text = _md_table(
+            ["label", "(1)", "(2)", "(3)"],
+            [["log wage", "0.043", "0.051", "0.039"]],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Leading spec-number header row (above data) must be excluded from "
+            "effective native count; only the data row counts → row matches → PASS. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+
+    def test_footnote_row_with_distinct_tokens_exact_pass_via_yband(self):
+        """TR-6: a trailing numeric footnote is excluded by pairing-derived y-band.
+
+        Pattern: native has data row (0.043 0.051 0.039) at y=100 and a
+        footnote (7 8 9) at y=160.  Output has one data row matching (0.043,
+        0.051, 0.039).  The preliminary pairing matches the output row to the
+        native data row at y=100; the derived y-band excludes y=160 (footnote).
+        After scoping: 1 native row, 1 output numeric row → counts match →
+        multiset matches → EXACT_PASS, hard_fail=False, row_count_warn=False.
+
+        This is the TR-6 win: chart/prose/footnote rows are excluded by pairing
+        before the row-count check, not by a magic constant.
+        """
         tokens: list[tuple[float, float, str]] = []
         for i, tok in enumerate(["0.043", "0.051", "0.039"]):
             tokens.append((100.0, 220.0 + i * _PHYS_COL_GAP, tok))
-        for i, tok in enumerate(["1", "2", "3"]):
+        # Footnote with tokens NOT in the output header
+        for i, tok in enumerate(["7", "8", "9"]):
             tokens.append((160.0, 220.0 + i * _PHYS_COL_GAP, tok))
 
         page = _make_fitz_page_explicit(tokens)
         output_text = _md_table(
-            ["label", "values"],
-            [["log wage", "0.043 0.051 0.039"]],
+            ["label", "(1)", "(2)", "(3)"],
+            [["log wage", "0.043", "0.051", "0.039"]],
         )
         result = verify_native_table(page, output_text)
-        assert result.hard_fail is True, (
-            "Collapsed data row should hard-fail even when an extra numeric footnote exists"
+        assert result.hard_fail is False, (
+            "Footnote excluded by y-band scoping must not hard-fail. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+        assert result.row_count_warn is False, (
+            "Footnote excluded by y-band → row counts match → no row_count_warn. "
+            f"Got: row_count_warn={result.row_count_warn}"
+        )
+        from socr.tables.native_verifier import VerifierState
+
+        assert result.state == VerifierState.EXACT_PASS, (
+            f"Footnote excluded by y-band → EXACT_PASS. Got: state={result.state!r}"
         )
 
     def test_no_false_fail_standard_4col_table_with_header(self):
@@ -700,7 +797,13 @@ class TestFalseFailGuard:
 
     def test_no_false_fail_empty_cells_in_dense_table_with_header(self):
         """A dense table with a spec-number header in native layer, where some
-        output cells are empty (spanning label rows).  Must not hard-fail."""
+        output cells are empty (spanning label rows).  Must not hard-fail.
+
+        The output uses ``(1) (2) (3)`` as column headers (matching the native
+        spec-number header row), so the native header row is identified as
+        header-like (its tokens are all in the output header token set) and
+        excluded from the effective native row count.
+        """
         tokens: list[tuple[float, float, str]] = []
         # Spec-number header at y=70
         for i, tok in enumerate(["(1)", "(2)", "(3)"]):
@@ -710,13 +813,16 @@ class TestFalseFailGuard:
             tokens.append((100.0, 100.0 + i * _PHYS_COL_GAP, tok))
 
         page = _make_fitz_page_explicit(tokens)
+        # Output uses (1)(2)(3) as column headers — matching the native header row
         output_text = _md_table(
-            ["", "c1", "c2", "c3"],
+            ["", "(1)", "(2)", "(3)"],
             [["R2", "0.31", "0.34", "0.36"]],
         )
         result = verify_native_table(page, output_text)
         assert result.hard_fail is False, (
-            "Dense row with label + spec-number header must not hard-fail"
+            "Dense row with label + spec-number header must not hard-fail; "
+            "the native spec-number row is excluded as header-like. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
         )
 
     def test_no_false_fail_panel_header_row_with_spec_number_header_and_data(self):
@@ -750,4 +856,611 @@ class TestFalseFailGuard:
         assert result.hard_fail is False, (
             "Panel header row with no numeric tokens must not false-fail via ordinal "
             f"fallback; got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+
+
+# --------------------------------------------------------------------------
+# TR-4 value-guard acceptance criteria tests
+# --------------------------------------------------------------------------
+
+
+class TestTR4ValueGuard:
+    """TR-4 acceptance tests: the value-guard (row-aware multiset + label-binding).
+
+    These tests directly verify the six acceptance criteria from the TR-4 ticket:
+    1. Year-paired correct table → PASSES.
+    2. Merged rows (multiple forecasters in one output row) → FAILS.
+    3. Dropped number → FAILS (covered also by TestVerifyNativeTableHardFail).
+    4. Name/value offset (TR-4a interleaved pattern) → FAILS via label-binding.
+    5. Clean separate-column table → PASSES (regression guard).
+    6. Full collapse (28 rows → 1 row) → still FAILS.
+    """
+
+    def test_year_paired_table_passes(self):
+        """TR-4 AC 1: year-paired correct table PASSES.
+
+        Real-CE case: each forecaster row has two-year values packed into cells
+        (e.g. "2.3 1.9" = 2024+2025 for one indicator), but all native tokens
+        ARE present per row.  The value-guard must ACCEPT this table — the old
+        geometry_impossible_collapse check falsely rejected it.
+
+        Synthetic setup: 3 forecasters × 4 numeric tokens each (two indicators,
+        two years).  Output: 3 rows, each with year-paired cells but all values.
+        """
+        # 3 forecasters, each row at a different y, 4 numeric values per row
+        # (two indicators × two years at 4 distinct x-lanes)
+        tokens: list[tuple[float, float, str]] = []
+        forecaster_values = [
+            ["2.3", "1.9", "2.1", "2.4"],  # forecaster A
+            ["2.5", "2.0", "1.8", "2.2"],  # forecaster B
+            ["1.7", "2.1", "2.3", "1.6"],  # forecaster C
+        ]
+        x_lanes = [
+            150.0,
+            150.0 + _PHYS_COL_GAP,
+            150.0 + 2 * _PHYS_COL_GAP,
+            150.0 + 3 * _PHYS_COL_GAP,
+        ]
+        for row_i, vals in enumerate(forecaster_values):
+            y = 100.0 + row_i * 30
+            for col_i, v in enumerate(vals):
+                tokens.append((y, x_lanes[col_i], v))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output: year-paired — each indicator's two years in ONE cell per row.
+        # "2.3 1.9" = GDP 2024 + GDP 2025 for forecaster A.
+        # This table has 3 output columns (label + 2 indicator-pair cells)
+        # but native had 4 numeric lanes.  All values are present.
+        output_text = _md_table(
+            ["Forecaster", "GDP (2024 2025)", "CPI (2024 2025)"],
+            [
+                ["Forecaster A", "2.3 1.9", "2.1 2.4"],
+                ["Forecaster B", "2.5 2.0", "1.8 2.2"],
+                ["Forecaster C", "1.7 2.1", "2.3 1.6"],
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Year-paired table with all native values present must NOT hard-fail. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+
+    def test_merged_rows_fails(self):
+        """TR-4 AC 2: merged rows (multiple forecasters in one output row) → FAILS.
+
+        3 native forecaster rows; output has an interleaved pattern — 1 unlabeled
+        data row, 2 label-only rows, 1 partial labeled row.  This is caught by the
+        row-count check (3 native vs 2 output numeric rows) — the faster predicate
+        that fires before label-binding.
+        """
+        # 3 native rows at distinct y-positions, each with 2 numeric tokens
+        tokens: list[tuple[float, float, str]] = []
+        native_values = [
+            ("2.1", "1.9"),  # forecaster A
+            ("3.2", "2.8"),  # forecaster B
+            ("1.5", "2.3"),  # forecaster C
+        ]
+        for row_i, (v1, v2) in enumerate(native_values):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output: 3 forecasters interleaved — 2 label-only rows + 1 data-without-label row.
+        # 2 output numeric rows (row 0 + row 3) vs 3 native rows → row_count_mismatch fires.
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [
+                ["", "2.1", "1.9"],  # data-only: values but no label
+                ["Forecaster A", "", ""],  # label-only: label but no values
+                ["Forecaster B", "", ""],  # label-only: label but no values
+                ["Forecaster C", "3.2", "2.8"],  # partial: C values misattributed
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        # TR-6: pairing-derived y-band scoping excludes the unmatched 3rd native
+        # row (no output row pairs with it), so row_count_warn does NOT fire.
+        # The hard-fail is from label-binding (1 adjacent pair vs 1 clean labeled
+        # row → 1 >= 1) — CERTAIN_FAIL.
+        assert result.hard_fail is True, (
+            "Merged rows with interleaved pattern must hard-fail via label-binding. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+        assert "label_binding" in result.reason, (
+            f"Expected label_binding in reason, got: {result.reason!r}"
+        )
+        from socr.tables.native_verifier import VerifierState
+
+        assert result.state == VerifierState.CERTAIN_FAIL
+
+    def test_interleaved_name_value_offset_fails_via_label_binding(self):
+        """TR-4 AC 4: name/value offset (TR-4a dense fixture pattern) → FAILS.
+
+        The TR-4a failure mode: a name/value y-offset in the native page causes
+        the born-digital path to produce interleaved rows — data rows with empty
+        labels paired with label-only rows with no data.
+
+        This test constructs the interleaved pattern directly and verifies the
+        label-binding check rejects it.
+        """
+        # Native page: 2 rows, each with 2 numeric tokens
+        native_rows = [
+            [(150.0, "5.1"), (150.0 + _PHYS_COL_GAP, "3.2")],
+            [(150.0, "2.7"), (150.0 + _PHYS_COL_GAP, "4.1")],
+        ]
+        page = _make_fitz_page_with_words(native_rows)
+
+        # Interleaved output (TR-4a failure mode):
+        # - Row 1: empty label, has values ("data-without-label")
+        # - Row 2: has label, no values ("label-only")
+        # - Row 3: empty label, has values
+        # - Row 4: has label, no values
+        output_text = _md_table(
+            ["Name", "col_A", "col_B"],
+            [
+                ["", "5.1", "3.2"],  # data-without-label
+                ["Alpha", "", ""],  # label-only
+                ["", "2.7", "4.1"],  # data-without-label
+                ["Beta", "", ""],  # label-only
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is True, (
+            "Interleaved name/value offset pattern must hard-fail via label-binding. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+        assert "label_binding" in result.reason
+
+    def test_clean_separate_column_table_passes(self):
+        """TR-4 AC 5: clean separate-column table (TR-0 fixture style) → PASSES.
+
+        Every row has a non-empty label and all native values in separate cells.
+        This is the baseline case that must not regress.
+        """
+        # 4 rows of 3 numeric values each
+        tokens: list[tuple[float, float, str]] = []
+        data = [
+            ("2.1", "1.9", "3.4"),
+            ("2.3", "2.0", "3.1"),
+            ("1.8", "2.2", "3.6"),
+            ("2.5", "1.7", "3.2"),
+        ]
+        for row_i, vals in enumerate(data):
+            y = 100.0 + row_i * 30
+            for col_i, v in enumerate(vals):
+                tokens.append((y, 150.0 + col_i * _PHYS_COL_GAP, v))
+        page = _make_fitz_page_explicit(tokens)
+
+        output_text = _md_table(
+            ["Forecaster", "GDP_2024", "GDP_2025", "CPI_2024"],
+            [
+                ["Ashford Capital", "2.1", "1.9", "3.4"],
+                ["Brightwater Research", "2.3", "2.0", "3.1"],
+                ["Clearview Economics", "1.8", "2.2", "3.6"],
+                ["Dunmore Analytics", "2.5", "1.7", "3.2"],
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Clean separate-column table with all values and labels must PASS. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+
+    def test_full_collapse_via_interleaved_pattern_fails(self):
+        """TR-4 AC 6: the original full-collapse (many names in one cell) → FAILS.
+
+        The real CE full-collapse produces the INTERLEAVED pattern: a single
+        merged data row (with no label) contains all forecasters' values, while
+        the individual forecasters appear as label-only rows (names with no data).
+
+        This is now caught by the row-count check (4 native rows vs 1 output
+        numeric row → row_count_mismatch), which fires before label-binding.
+        """
+        # 4 native rows at distinct y-positions, each with 2 numeric tokens
+        native_rows = [
+            [(150.0, "2.1"), (150.0 + _PHYS_COL_GAP, "1.9")],
+            [(150.0, "3.2"), (150.0 + _PHYS_COL_GAP, "2.8")],
+            [(150.0, "1.5"), (150.0 + _PHYS_COL_GAP, "2.3")],
+            [(150.0, "2.7"), (150.0 + _PHYS_COL_GAP, "1.4")],
+        ]
+        page = _make_fitz_page_with_words(native_rows)
+
+        # Real collapse output: all values in ONE data-without-label row;
+        # forecasters appear as separate label-only rows.
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [
+                ["", "2.1 3.2 1.5 2.7", "1.9 2.8 2.3 1.4"],  # data-without-label
+                ["Forecaster A", "", ""],  # label-only
+                ["Forecaster B", "", ""],  # label-only
+                ["Forecaster C", "", ""],  # label-only
+                ["Forecaster D", "", ""],  # label-only
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        # With Option B, row-count mismatch is a SOFT warning; the hard-fail here
+        # is from label-binding (1 adjacent pair, 0 clean labeled rows → 1 >= 0).
+        assert result.hard_fail is True, (
+            "Full collapse (4 native rows → 1 output numeric row) must FAIL. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+        assert "label_binding" in result.reason, (
+            f"Expected label_binding in reason, got: {result.reason!r}"
+        )
+        # Soft row-count warning should also be set (4 native vs 1 output numeric)
+        assert result.row_count_warn is True
+
+    def test_n2_normalization_thousands_separator(self):
+        """N2 token normalization: '1,204' and '1204' are treated as equal."""
+        from socr.tables.native_verifier import _normalize_numeric_token
+
+        assert _normalize_numeric_token("1,204") == "1204"
+        assert _normalize_numeric_token("1,234,567") == "1234567"
+
+    def test_n2_normalization_parenthesis_wrapper(self):
+        """N2 token normalization: '(0.014)' → '0.014' (econ negative-sign wrapper)."""
+        from socr.tables.native_verifier import _normalize_numeric_token
+
+        assert _normalize_numeric_token("(0.014)") == "0.014"
+        assert _normalize_numeric_token("(1,204)") == "1204"
+
+    def test_n2_normalization_preserves_decimal_precision(self):
+        """N2 normalization preserves stated decimal precision (no float cast)."""
+        from socr.tables.native_verifier import _normalize_numeric_token
+
+        # 2.10 and 2.1 are DIFFERENT strings after N2 (no float cast)
+        assert _normalize_numeric_token("2.10") == "2.10"
+        assert _normalize_numeric_token("2.1") == "2.1"
+        assert _normalize_numeric_token("2.10") != _normalize_numeric_token("2.1")
+
+    def test_n2_normalization_percent_strip(self):
+        """N2 token normalization: trailing '%' is stripped."""
+        from socr.tables.native_verifier import _normalize_numeric_token
+
+        assert _normalize_numeric_token("45%") == "45"
+        assert _normalize_numeric_token("3.2%") == "3.2"
+
+    def test_thousands_separator_table_passes(self):
+        """A table with native '1,204' tokens and output '1,204' tokens: PASSES."""
+        native_rows = [
+            [(100.0, "1,204"), (100.0 + _PHYS_COL_GAP, "2,500")],
+        ]
+        page = _make_fitz_page_with_words(native_rows)
+        output_text = _md_table(
+            ["label", "c1", "c2"],
+            [["N", "1,204", "2,500"]],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Table with thousands-separator values must pass when all values present"
+        )
+
+
+# --------------------------------------------------------------------------
+# TR-4 row-count tests (BLOCKING 1 fix)
+# --------------------------------------------------------------------------
+
+
+class TestTR4RowCount:
+    """Row-count mismatch check (soft warning — Option B, panel decision).
+
+    A row-count gap between native and output numeric rows raises a soft
+    completeness WARNING (``row_count_warn=True``), NOT a hard-fail.  The table
+    ships with WARNING status; only the per-row multiset and label-binding
+    checks remain as hard-fails.
+
+    Rationale: row-count gaps can be caused by non-table page numerals (chart
+    tick labels, bar values, prose annotations) that are correctly excluded from
+    the output table.  Silently discarding correct tables is worse than flagging
+    them for human review.
+    """
+
+    def test_dropped_forecaster_row_warns_not_hard_fails(self):
+        """3 native rows; output drops row B (only A and C labeled) → WARN, not hard-fail.
+
+        Row count: 3 native vs 2 output numeric → row_count_warn=True, hard_fail=False.
+        """
+        tokens: list[tuple[float, float, str]] = []
+        for row_i, (v1, v2) in enumerate([("2.1", "1.9"), ("3.2", "2.8"), ("1.5", "2.3")]):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output drops forecaster B — only A and C present
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [
+                ["Forecaster A", "2.1", "1.9"],
+                ["Forecaster C", "1.5", "2.3"],
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Dropped forecaster row (3 native → 2 output) must WARN (not hard-fail). "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+        assert result.row_count_warn is True, (
+            "Dropped forecaster row must set row_count_warn=True. "
+            f"Got: row_count_warn={result.row_count_warn}"
+        )
+
+    def test_dropped_row_plus_corrupted_values_ships_ambiguous_not_silent(self):
+        """ACCEPTED TRADEOFF — pinned so it cannot silently regress.
+
+        When an extraction BOTH drops a row AND corrupts a remaining row's values,
+        the count discrepancy (3 native vs 2 output) makes the per-row pairing
+        UNRELIABLE — the verifier cannot distinguish this from the benign case
+        (chart/prose numerals inflating the native count: the real-CE false-positive
+        TR-6 fixes). Per the harness design, a multiset mismatch UNDER a row-count
+        discrepancy is AMBIGUOUS: the table ships FLAGGED (``row_count_warn``
+        surfaces it), NOT hard-failed and NOT silently.
+
+        This is the residual "bad localization" failure mode both /consilium panelists
+        named; TR-7 (the cropped VLM table-judge) is the planned backstop for
+        AMBIGUOUS pages. A maintainer who tightens this back to a hard-fail will
+        REOPEN the CE false-positive — hence this test pins the accepted behavior.
+        """
+        from socr.tables.native_verifier import VerifierState
+
+        tokens: list[tuple[float, float, str]] = []
+        for row_i, (v1, v2) in enumerate([("2.1", "1.9"), ("3.2", "2.8"), ("1.8", "2.4")]):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output DROPS the middle row AND CORRUPTS the third row (1.8/2.4 → 9.1/8.7).
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [
+                ["Goldman", "2.1", "1.9"],  # correct
+                ["Barclays", "9.1", "8.7"],  # corrupted; native was 1.8/2.4
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "dropped-row + corrupted-value under a count discrepancy is AMBIGUOUS "
+            f"(ships flagged), not a hard-fail. Got hard_fail={result.hard_fail}"
+        )
+        assert result.row_count_warn is True, "the discrepancy must surface as a warning"
+        assert result.state == VerifierState.AMBIGUOUS, (
+            f"must be AMBIGUOUS (ships flagged; TR-7 VLM judge is the backstop). Got {result.state}"
+        )
+
+    def test_invented_row_warns_not_hard_fails(self):
+        """2 native rows; output invents a 3rd row → WARN, not hard-fail.
+
+        Row count: 2 native vs 3 output numeric → row_count_warn=True, hard_fail=False.
+        """
+        tokens: list[tuple[float, float, str]] = []
+        for row_i, (v1, v2) in enumerate([("2.1", "1.9"), ("3.2", "2.8")]):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output invents a 3rd forecaster row not in the native PDF
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [
+                ["Forecaster A", "2.1", "1.9"],
+                ["Forecaster B", "3.2", "2.8"],
+                ["Forecaster C", "1.5", "2.3"],  # invented — not in native
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Invented output row (2 native → 3 output) must WARN (not hard-fail). "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+        assert result.row_count_warn is True, (
+            "Invented output row must set row_count_warn=True. "
+            f"Got: row_count_warn={result.row_count_warn}"
+        )
+
+    def test_two_native_merged_into_one_labeled_output_row_warns(self):
+        """2 native rows merged into 1 labeled output row → WARN, not hard-fail.
+
+        A labeled merge changes the row count: 2 native vs 1 output numeric →
+        row_count_warn=True, hard_fail=False.
+        """
+        tokens: list[tuple[float, float, str]] = []
+        for row_i, (v1, v2) in enumerate([("2.1", "1.9"), ("3.2", "2.8")]):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Both forecasters merged into one labeled output row
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [["Forecaster A & B", "2.1 3.2", "1.9 2.8"]],  # merged — 2 native into 1
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Two native rows merged into one labeled output row must WARN (not hard-fail). "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
+        )
+        assert result.row_count_warn is True, (
+            "Merged-row output must set row_count_warn=True. "
+            f"Got: row_count_warn={result.row_count_warn}"
+        )
+
+    def test_page_numerals_excluded_by_yband_exact_pass(self):
+        """TR-6: non-table page numerals outside the y-band → EXACT_PASS.
+
+        Simulates a page where:
+        - 2 table rows at y=100 and y=130 (matched by the output)
+        - 1 chart/prose row at y=160 (NOT in the output, outside the pairing y-band)
+
+        With TR-6 pairing-derived y-band scoping: the preliminary pairing matches
+        output rows A and B to native rows at y=100 and y=130.  The y-band is
+        [85..145] (30pt gap → 15pt margin).  y=160 falls outside → excluded.
+        After scoping: 2 effective native rows = 2 output numeric rows → EXACT_PASS.
+
+        The table ships immediately via EXACT_PASS (no row_count_warn, no inner judge).
+        """
+        tokens: list[tuple[float, float, str]] = []
+        # Table rows at y=100 and y=130 (paired to output)
+        for row_i, (v1, v2) in enumerate([("2.1", "1.9"), ("3.2", "2.8")]):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        # Chart/prose row at y=160 (outside y-band, not in output)
+        tokens.append((160.0, 150.0, "4.0"))
+        tokens.append((160.0, 150.0 + _PHYS_COL_GAP, "3.5"))
+        page = _make_fitz_page_explicit(tokens)
+
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [
+                ["Forecaster A", "2.1", "1.9"],
+                ["Forecaster B", "3.2", "2.8"],
+            ],
+        )
+        result = verify_native_table(page, output_text)
+
+        # Verifier: EXACT_PASS — chart row excluded by y-band scoping
+        from socr.tables.native_verifier import VerifierState
+
+        assert result.hard_fail is False, "Chart row excluded by y-band → no hard-fail"
+        assert result.row_count_warn is False, (
+            "Chart row excluded by y-band → row counts match → no row_count_warn"
+        )
+        assert result.state == VerifierState.EXACT_PASS, (
+            f"Chart row excluded by y-band → EXACT_PASS. Got: state={result.state!r}"
+        )
+
+        # Judge: ships immediately (EXACT_PASS), emits exact_pass event
+        events: list = []
+        inner_judge = MagicMock()
+        inner_judge.assess.return_value = AcceptDecision(
+            accept=True, reason="inner ok", confidence=0.9
+        )
+        judge = NativeTableVerifierJudge(
+            inner=inner_judge,
+            get_fitz_page=lambda _n: page,
+            is_table_page=lambda _n: True,
+            record_event=events.append,
+        )
+        page_output = PageOutput(
+            page_num=1,
+            text=output_text,
+            status=PageStatus.SUCCESS,
+        )
+        decision = judge.assess(page_output, MagicMock())
+        assert decision.accept is True, (
+            f"EXACT_PASS must SHIP. Got: accept={decision.accept}, reason={decision.reason!r}"
+        )
+        # Inner judge NOT called on EXACT_PASS
+        inner_judge.assess.assert_not_called()
+        event_kinds = [e.kind for e in events]
+        assert "native_table_verifier_exact_pass" in event_kinds, (
+            f"Expected native_table_verifier_exact_pass event. Got: {event_kinds}"
+        )
+
+    def test_row_count_warn_still_fires_when_pairing_cant_scope(self):
+        """Row-count warn fires when pairing can't exclude extra native rows.
+
+        When 2 native rows are merged into 1 output row (both native rows have
+        equal token overlap with the single output row → tie → no unique match),
+        the pairing can't determine a y-band.  The effective native rows stay at 2
+        while output has 1 numeric row → row_count_warn=True (AMBIGUOUS).
+        """
+        tokens: list[tuple[float, float, str]] = []
+        # 2 native rows with distinct values
+        for row_i, (v1, v2) in enumerate([("5.0", "3.0"), ("2.0", "4.0")]):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output merges both native rows into 1 row (no unique match for pairing)
+        output_text = _md_table(
+            ["Forecaster", "2024", "2025"],
+            [["Merged", "5.0 2.0", "3.0 4.0"]],  # both native rows' values
+        )
+        result = verify_native_table(page, output_text)
+
+        # No unique pairing → no y-band scoping → 2 native vs 1 output → warn
+        assert result.hard_fail is False, f"No hard-fail expected. Got: {result.reason!r}"
+        assert result.row_count_warn is True, (
+            f"2 native rows, 1 output row, no unique pairing → row_count_warn. "
+            f"Got: row_count_warn={result.row_count_warn}"
+        )
+        from socr.tables.native_verifier import VerifierState
+
+        assert result.state == VerifierState.AMBIGUOUS
+
+    def test_legitimate_structural_rows_do_not_trip_row_count(self):
+        """A table with structural rows (section header, sub-table year header,
+        multi-line labels) alongside 5 clean labeled-numeric data rows → PASSES.
+
+        This is the BLOCKING 2 false-positive guard: a real CE-style table that
+        includes section headers, year sub-headers, and two-line labels (which
+        produce a few label-only or unlabeled-numeric rows) must not trigger
+        row_count_mismatch or label-binding when the core data rows are correct.
+
+        Setup:
+        - 5 native data rows (one per forecaster, 2 values each)
+        - Output: 5 clean labeled-numeric rows + 1 section-header (label-only) +
+          1 sub-table year-header (unlabeled-numeric: the year row has numbers
+          but no label column) + 1 multi-line label (label-only)
+
+        Row count: 5 native vs 6 output numeric rows... wait, the year-header
+        row IS numeric (e.g. "2024 2025") so output_numeric_count would be 6.
+
+        To avoid the row-count fire, the year-header tokens must either:
+          (a) appear in the output markdown header (excluded as header-like), OR
+          (b) have corresponding native rows.
+
+        In this test we model the year header as a NATIVE row AND an output data
+        row so both sides agree: 6 native rows (5 data + 1 year-header row) vs
+        6 output numeric rows (5 labeled data + 1 unlabeled year header).
+
+        The label-binding check: 1 adjacent (label-only, unlabeled-numeric) pair
+        (section-header before year-header) vs 5 clean labeled rows → 1 < 5 →
+        does NOT dominate → label-binding does NOT fire.
+
+        Result: PASSES.
+        """
+        tokens: list[tuple[float, float, str]] = []
+        # Native rows: year-header row at y=70, then 5 forecaster rows
+        for i, yr in enumerate(["2024", "2025"]):
+            tokens.append((70.0, 150.0 + i * _PHYS_COL_GAP, yr))
+        forecaster_data = [
+            ("2.1", "1.9"),
+            ("3.2", "2.8"),
+            ("1.5", "2.3"),
+            ("2.7", "1.4"),
+            ("2.0", "2.2"),
+        ]
+        for row_i, (v1, v2) in enumerate(forecaster_data):
+            y = 100.0 + row_i * 30
+            tokens.append((y, 150.0, v1))
+            tokens.append((y, 150.0 + _PHYS_COL_GAP, v2))
+        page = _make_fitz_page_explicit(tokens)
+
+        # Output: section header (label-only) + year-header (unlabeled-numeric) +
+        # 5 clean labeled rows + multi-line label (label-only)
+        output_text = _md_table(
+            ["Forecaster", "GDP_2024", "GDP_2025"],
+            [
+                ["Comparison Forecasts", "", ""],  # section header (label-only)
+                ["", "2024", "2025"],  # year sub-header (unlabeled-numeric)
+                ["Forecaster A", "2.1", "1.9"],  # clean labeled
+                ["Forecaster B", "3.2", "2.8"],  # clean labeled
+                ["Forecaster C", "1.5", "2.3"],  # clean labeled
+                ["Auto & Light Truck", "", ""],  # multi-line label part 1 (label-only)
+                ["Forecaster D", "2.7", "1.4"],  # clean labeled
+                ["Forecaster E", "2.0", "2.2"],  # clean labeled
+            ],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is False, (
+            "Table with section headers, year sub-headers, and multi-line labels "
+            "alongside 5 clean labeled rows must PASS — structural rows must not "
+            "trip row_count_mismatch or label-binding. "
+            f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
         )

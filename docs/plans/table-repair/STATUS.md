@@ -1,13 +1,19 @@
 # STATUS — table-repair
 
-Last updated: 2026-06-17
+Last updated: 2026-06-17 (TR-6 — per-region tri-state harness + pairing-derived y-band scoping)
 
 ## Stage
 
-**Wave 1 COMPLETE. TR-0, TR-1, TR-2, TR-3 DONE.** v1 deterministic pipeline is fully
-implemented: per-region segmentation → rowizer (B) → D3 fail-closed floor (TR-3).
-TR-0 parity test passes (both tables, chart image-ref, prose, correct reading order).
-TR-3 adds 18 tests; full suite at 1140 passed.
+**Wave 1 (v1 deterministic) MERGED — but real CE proved it INSUFFICIENT.** TR-0…TR-3 are in
+`main`; the SYNTHETIC fixture passes. Validating on the REAL CE `202401.pdf` p.4 (2026-06-17):
+v1 gets VALUES + COLUMNS right and flags itself honestly, but **breaks the ROW structure** (top
+block merged, names offset from values by one row — gap-segmentation can't handle CE's dense/
+variable spacing). The clean fixture gave false confidence. See
+`docs/log/2026-06-17_real-CE-v1-finding.md`.
+
+**→ Moving to v2: VLM for STRUCTURE, geometry value-guard for VALUES** (the panel's A2/S3, now
+unblocked by measured evidence). TR-4a (real-geometry fixture = the failing gate) first, then TR-4
+(value-guarded VLM-for-structure) after a design pass.
 
 ## Branch
 
@@ -36,6 +42,9 @@ TR-3 adds 18 tests; full suite at 1140 passed.
 | TR-1 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-2 | socr-implementer (claude-sonnet-4-6) | DONE |
 | TR-3 | socr-implementer (claude-sonnet-4-6) | DONE |
+| TR-4a | socr-implementer (claude-sonnet-4-6) | DONE |
+| TR-4 | socr-implementer (claude-sonnet-4-6) | DONE |
+| TR-6 | socr-implementer (claude-sonnet-4-6) | DONE |
 
 ## Ticket state
 
@@ -45,16 +54,42 @@ TR-3 adds 18 tests; full suite at 1140 passed.
 | TR-1 | Deterministic rowizer on lane-stacked `find_tables()` regions (Option B) | DONE | TR-0 |
 | TR-2 | Per-region verifier scoping + reading-order reassembly | DONE | TR-1 |
 | TR-3 | D3 fail-closed floor + selection-policy fix | DONE | TR-2 |
-| TR-4 | A2 value-guarded VLM re-ask | DEFERRED (v2) | TR-3 + evidence |
+| TR-4a | Real-CE-geometry dense fixture (failing gate for TR-4) | DONE | — |
+| TR-4 | Token-equality value-guard (accept year-paired, reject genuinely broken) | DONE | TR-4a |
 | TR-5 | S3 VLM confirm/split segmentation | DEFERRED (v2) | TR-2 spike |
+| TR-6 | Per-region tri-state harness (pairing-derived y-band scoping) | DONE | TR-4 |
+
+## TR-4a findings (2026-06-17)
+
+Real root-cause established from `202401.pdf` p.4 geometry:
+- `find_tables(strategy="lines")` detects one table (triggered by the outer border rect
+  + vertical column-separator strokes in the real CE PDF).
+- The detected table is lane-stacked (`_is_lane_stacked=True`) because the name/value
+  y-offset (~1 pt) causes embedded `\n`-stacked tokens in cells.
+- Routes to `rowize_from_word_list` which groups words by `round(y0)`: value row at
+  y=143 and name row at y=144 are DISTINCT y-groups, producing interleaved output
+  (value row: empty label + full data; name row: label + no data).
+- The synthetic dense fixture (`ce_like_p4_dense.pdf`) reproduces this exactly:
+  outer border + 4 column separators → find_tables returns lane-stacked table → same
+  interleaved failure on `extract_structured`.
 
 ## Outstanding / open questions
 
-- v1 is complete. TR-4 and TR-5 are deferred to v2 (require measured evidence that
-  deterministic per-region + rowizer is insufficient on real CE grids).
-- The agentic-path whole-page ladder verifier (`agentic.py:~405`) remains whole-page;
-  converting it to per-region is explicitly a v2 item (TR-4/TR-5 scope).
+- TR-4 DONE (rev3 after Option B panel decision): row-count → SOFT WARNING; label-binding
+  and multiset → HARD-FAIL.
+- TR-6 DONE: pairing-derived y-band scoping + tri-state verdict. For correct VLM output
+  on CE p.4:
+  - Preliminary pairing finds unique matches → y-band scoped to forecaster table
+  - Chart/prose rows (y>553) excluded by band
+  - After scoping: row counts match → no row_count_warn
+  - Multiset: values match for correct output → no hard-fail
+  - Result: EXACT_PASS (inner judge short-circuited) or AMBIGUOUS (ships via inner)
+  - Table SHIPS in both cases — the CE false-positive is fixed
+  TR-4a dense fixture xfail STAYS (recovery step — VLM re-ask — TR-7).
+- TR-5 DEFERRED (v2).
 
 ## Next action
 
-v1 wave complete. Measure v1 on real CE `202401.pdf` before dispatching v2 (TR-4/TR-5).
+VLM re-ask step (post-TR-4): when value-guard hard-fails, fire constrained
+VLM re-ask for structure, accept only if value-guard passes, else D3 floor.
+Also: wire `native_table_unverifiable=True` on agentic path so D3 AND-gate fires.

@@ -354,8 +354,9 @@ class NativeTableVerifierJudge:
     born-digital detector found table-like structure (``is_table_page``
     returns True for the given page number).
 
-    Tier 1 — Hard-fail (geometry_impossible_collapse): a native data row has
-    K >= 2 well-separated numeric lanes but the output row has fewer cells.
+    Tier 1 — Hard-fail (value_guard): the output table's numeric-token content
+    does not match the native page's numeric tokens on a per-row basis (TR-4
+    value-guard: row-aware multiset equality + label-binding interleaved detection).
     → Return AcceptDecision(accept=False) immediately; inner judge NOT called.
 
     Tier 2 — Warn-and-defer: ambiguous lane-count mismatch (paired-year
@@ -389,7 +390,7 @@ class NativeTableVerifierJudge:
         self._record_event = record_event
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
-        from socr.tables.native_verifier import verify_native_table
+        from socr.tables.native_verifier import VerifierState, verify_native_table
 
         page_num = output.page_num
 
@@ -411,8 +412,33 @@ class NativeTableVerifierJudge:
             )
             return self._inner.assess(output, provider)
 
+        # TR-6 tri-state dispatch based on vr.state:
+        #   EXACT_PASS   → ship immediately (no inner judge needed)
+        #   CERTAIN_FAIL → hard-reject
+        #   AMBIGUOUS    → row-count warning and/or Tier-2 lane gap → emit event,
+        #                  delegate to inner judge (ships flagged)
+
+        # Soft row-count warning: table ships, but emit audit event before
+        # delegating so the audit log + status machinery can demote to WARNING.
+        if vr.row_count_warn:
+            self._emit_event(
+                page_num=page_num,
+                kind="value_guard_row_count_warning",
+                engine=output.engine or "",
+                detail=vr.row_count_warn_reason,
+                data={
+                    "native_lane_count": vr.native_lane_count,
+                    "output_col_count": vr.output_col_count,
+                    "verifier_state": vr.state,
+                },
+            )
+
         if vr.hard_fail:
-            # Record audit event for the hard-fail
+            # CERTAIN_FAIL: systematic label-binding or multiset mismatch → hard-reject
+            if vr.drifted_rows:
+                predicate = vr.drifted_rows[0].get("predicate", "value_guard")
+            else:
+                predicate = "value_guard"
             self._emit_event(
                 page_num=page_num,
                 kind="native_table_verifier_hard_fail",
@@ -422,7 +448,8 @@ class NativeTableVerifierJudge:
                     "native_lane_count": vr.native_lane_count,
                     "output_col_count": vr.output_col_count,
                     "drifted_rows": vr.drifted_rows,
-                    "predicate": "geometry_impossible_collapse",
+                    "predicate": predicate,
+                    "verifier_state": vr.state,
                 },
             )
             return AcceptDecision(
@@ -432,7 +459,7 @@ class NativeTableVerifierJudge:
             )
 
         if vr.warn:
-            # Record audit event for the warn-and-defer
+            # AMBIGUOUS (Tier-2 lane-count gap): emit event, defer to inner judge
             self._emit_event(
                 page_num=page_num,
                 kind="native_table_verifier_warn",
@@ -442,10 +469,30 @@ class NativeTableVerifierJudge:
                     "native_lane_count": vr.native_lane_count,
                     "output_col_count": vr.output_col_count,
                     "drifted_rows": vr.drifted_rows,
+                    "verifier_state": vr.state,
                 },
             )
             # Defer to the inner judge — do NOT escalate here
             return self._inner.assess(output, provider)
+
+        if vr.state == VerifierState.EXACT_PASS:
+            # EXACT_PASS: ship immediately — no model needed
+            self._emit_event(
+                page_num=page_num,
+                kind="native_table_verifier_exact_pass",
+                engine=output.engine or "",
+                detail="deterministic EXACT_PASS: row counts match + multiset clean",
+                data={
+                    "native_lane_count": vr.native_lane_count,
+                    "output_col_count": vr.output_col_count,
+                    "verifier_state": vr.state,
+                },
+            )
+            return AcceptDecision(
+                accept=True,
+                reason="native_table_verifier: EXACT_PASS",
+                confidence=1.0,
+            )
 
         # No issue detected → delegate to inner judge
         return self._inner.assess(output, provider)

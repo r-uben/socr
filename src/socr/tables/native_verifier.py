@@ -3,19 +3,41 @@
 Runs BEFORE the VLM judge on born-digital table pages (has_tables=True).
 No model call; uses only PyMuPDF page.get_text("words") geometry.
 
-Two tiers (Consilium decision 20260615T170212Z-0362, Option C):
+Two tiers (Consilium decision 20260615T170212Z-0362, Option C; updated TR-4):
 
-1. Hard-fail (geometry_impossible_collapse): a data row has K >= 2
-   WELL-SEPARATED native numeric token lanes, but the corresponding OCR
-   output row has fewer populated cells.  This is structurally impossible:
-   the native page proves K distinct values existed, yet fewer cells were
-   emitted — a concrete collapse, not an ambiguous column-count mismatch.
+1. Hard-fail (value_guard): the output table's numeric-token content does not
+   match the native page's numeric tokens on a per-row basis.  Specifically,
+   BOTH of the following must hold for a PASS; failure of either is a hard-fail:
+
+   a. NUMBER-COMPLETENESS (row-aware multiset): the count of output rows that
+      contain >= 1 numeric token must equal the count of native numeric rows;
+      AND for each paired row (overlap-based match) the N2-normalized
+      numeric-token multiset must be identical.  This ACCEPTS year-paired
+      tables ("2.3 1.9" in one cell ↔ two native tokens in one row) and
+      REJECTS dropped values, invented values, dropped forecaster rows
+      (row_count_mismatch), and merged rows that alter the row count.
+
+   b. LABEL-BINDING (adjacency-dominance interleaved detection): fires ONLY
+      when the SYSTEMATIC name/value-offset pattern dominates the table —
+      i.e., the count of ADJACENT (unlabeled-numeric, label-only) or
+      (label-only, unlabeled-numeric) consecutive-row pairs is >= the count
+      of clean labeled-numeric rows.  A few isolated section headers, sub-
+      table year headers, or two-line labels (vastly outnumbered by clean
+      labeled rows) do NOT trigger this predicate.
+
+   Token normalization N2 (deterministic string equality, no float parsing):
+   strip thousands-separator commas (1,204 → 1204), strip parenthesis wrappers
+   (econ-table negative-sign convention: (0.014) → 0.014), strip trailing %
+   sign.  Stated decimal precision is preserved (2.10 ≠ 2.1 after
+   normalization).  Both native and output tokens are normalized identically
+   before comparison.
+
    → VerifierResult.hard_fail = True, skip the VLM call, escalate.
 
-2. Warn-and-defer: overall native lane count != output column count, but no
-   row-level geometry-impossible collapse was found.  Encompasses paired-year
-   columns ("2023 2024"), spanning headers, stub label columns with no
-   numbers, and sparse rows where visual and native lanes legitimately differ.
+2. Warn-and-defer: overall native lane count != output column count, but the
+   value guard passed.  Encompasses paired-year columns ("2023 2024"), spanning
+   headers, stub label columns with no numbers, and sparse rows where visual
+   and native lanes legitimately differ.
    → VerifierResult.warn = True, record AuditMetric + AuditEvent, defer to
    the VLM judge.
 
@@ -27,13 +49,8 @@ Named tolerances (no magic literals):
   this x-distance share a lane.  Basis: sub-column glyph spread on
   proportional-width fonts; validated on Fama-French 1997 corpus.
 - ``_WELL_SEPARATED_GAP_PT``: minimum gap between two DISTINCT lane centres
-  for the hard-fail predicate.  Must be large enough that two lanes cannot
-  be confused with formatting jitter on a single column value (e.g. a
-  right-aligned "1,204" whose digits spread across 12pt).
-  Basis: a two-digit number "12" is at most ~12pt wide at 9pt font; a safe
-  inter-column gap in a well-formatted econ table is >= 30pt.  Set to
-  2 * _LANE_X_TOL_PT + 6 = 18pt so that even aggressive tolerance still
-  leaves a clear gap.  (Stored as a named constant; derive from tolerance.)
+  (retained for Tier 2 warn context; no longer used in Tier 1 hard-fail).
+  Set to 2 * _LANE_X_TOL_PT + 6 = 18pt.
 - ``_MIN_HARD_FAIL_LANES``: minimum number of distinct well-separated native
   lanes in a row required before we can call a collapse geometry-impossible.
   Set to 2: a single-column row cannot collapse by definition.
@@ -64,6 +81,17 @@ logger = logging.getLogger(__name__)
 # Basis: see module docstring.
 _WELL_SEPARATED_GAP_PT: float = 2 * _LANE_X_TOL_PT + 6.0  # = 18.0 pt
 
+# Fallback row-height estimate (pt) for the y-band margin when fewer than two
+# native rows are matched (no inter-row gap to measure). ~1.5x a 10pt type line:
+# provides a small margin that excludes inter-row non-table content without
+# reaching an adjacent table row (which sits >= a full row pitch away).
+_YBAND_SINGLE_ROW_HEIGHT_PT: float = 15.0
+
+# Cap (pt) on the y-band row-height estimate. Even on a double-spaced layout the
+# margin stays bounded so the y-band can never engulf an adjacent table's rows
+# on the same page (the residual "bad localization" failure mode).
+_YBAND_ROW_HEIGHT_CAP_PT: float = 30.0
+
 # Minimum distinct well-separated lanes in one row to allow the hard-fail
 # predicate.  A row with < 2 numeric values cannot demonstrate collapse.
 _MIN_HARD_FAIL_LANES: int = 2
@@ -78,6 +106,23 @@ _MD_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
 # --------------------------------------------------------------------------
 
 
+class VerifierState:
+    """Tri-state verdict constants (TR-6).
+
+    EXACT_PASS   — scoped: row counts match, no label-binding, no multiset mismatch.
+                   The table is verified deterministically; no model needed.
+    CERTAIN_FAIL — systematic label-binding OR multiset mismatch under clean row
+                   alignment. Indicates SILENT CORRUPTION of content → hard-reject.
+    AMBIGUOUS    — row-count / lane discrepancy after pairing-derived y-band scoping,
+                   OR no trusted native layer, OR scanned page. Table ships FLAGGED;
+                   VLM judge (TR-7) may refine.
+    """
+
+    EXACT_PASS: str = "EXACT_PASS"
+    CERTAIN_FAIL: str = "CERTAIN_FAIL"
+    AMBIGUOUS: str = "AMBIGUOUS"
+
+
 @dataclass
 class VerifierResult:
     """Outcome of the native table verifier for one page."""
@@ -90,6 +135,10 @@ class VerifierResult:
     drifted_rows: list[dict] = field(
         default_factory=list
     )  # [{row_idx, native_lanes, output_cells, row_text}]
+    row_count_warn: bool = False  # row-count mismatch soft-flag (table ships, status→WARNING)
+    row_count_warn_reason: str = ""  # detail for the row_count_warn event
+    # TR-6 tri-state verdict (derived from the fields above; set by _verify_from_words)
+    state: str = VerifierState.AMBIGUOUS  # default before verification: AMBIGUOUS
 
 
 # --------------------------------------------------------------------------
@@ -270,6 +319,44 @@ def _parse_output_col_count(text: str) -> int:
     return 0
 
 
+def _output_header_numeric_tokens(text: str) -> frozenset[str]:
+    """Return N2-normalized numeric tokens from the markdown table HEADER row.
+
+    Only the header row (the line immediately before the separator) is
+    included.  This set is used by the row-count check to identify LEADING
+    native numeric rows that are "header-like" — their tokens were absorbed
+    into the output header rather than a data row, so they should not be
+    counted as expected output data rows.
+
+    For example, a spec-number header ``| | (1) | (2) | (3) |`` in the output
+    corresponds to native tokens ``(1) (2) (3)`` at a distinct y-position above
+    the data rows.  A native row whose N2-normalized tokens are ALL present in
+    the output header token set AND which appears above the first data-like row
+    is treated as a leading header row and excluded from the native data-row
+    count.  (The positional constraint is applied by ``_value_guard``; this
+    function only returns the token set.)
+
+    Returns an empty frozenset if no markdown table header is found.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for i, line in enumerate(lines):
+        if not _MD_SEP_RE.match(line):
+            continue
+        if i == 0:
+            continue
+        header_line = lines[i - 1]
+        if "|" not in header_line:
+            continue
+        # Collect numeric tokens from the header line
+        header_tokens: set[str] = set()
+        for cell in header_line.strip().strip("|").split("|"):
+            for tok in re.split(r"\s+", cell.strip()):
+                if tok and _NUM_TOKEN_RE.match(tok) and _NUMERIC_RE.search(tok):
+                    header_tokens.add(_normalize_numeric_token(tok))
+        return frozenset(header_tokens)
+    return frozenset()
+
+
 def _parse_output_data_rows(text: str) -> list[tuple[int, int, str]]:
     """Return (row_idx, cell_count, raw_line) for each markdown data row.
 
@@ -312,6 +399,413 @@ def _numeric_tokens_from_native_row(row_tokens: list[tuple[float, str]]) -> list
 def _token_overlap_count(output_tokens: list[str], native_tokens: list[str]) -> int:
     """Count multiset overlap so repeated values still carry information."""
     return sum((Counter(output_tokens) & Counter(native_tokens)).values())
+
+
+def _parse_output_row_cells(line: str) -> list[str]:
+    """Split a markdown table row into cell strings (stripped, no outer pipes).
+
+    Returns a list of cell content strings in column order.  The first cell
+    (index 0) is the row label column.
+    """
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _normalize_numeric_token(tok: str) -> str:
+    """N2 canonical form for numeric-string comparison (no float parsing).
+
+    Rules (applied in order):
+    1. Strip outer whitespace.
+    2. Strip parenthesis wrappers (econ negative-sign convention):
+       ``(0.014)`` → ``0.014``.
+    3. Strip trailing ``%`` sign: ``45%`` → ``45``.
+    4. Remove thousands-separator commas between digit groups:
+       ``1,204`` → ``1204``, ``1,234,567`` → ``1234567``.
+    5. Return the resulting decimal string verbatim — stated precision is
+       preserved (``2.10`` ≠ ``2.1``); no float/Decimal cast is performed.
+
+    Both native tokens and output tokens are normalized with this function
+    before multiset comparison, so the comparison is always N2↔N2.
+    """
+    tok = tok.strip()
+    # Strip parenthesis wrappers (econ-table negative-sign: (X) means -X)
+    if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
+        tok = tok[1:-1]
+    # Strip trailing percent
+    if tok.endswith("%"):
+        tok = tok[:-1]
+    # Remove thousands-separator commas (between digit groups only)
+    # Repeat three times to handle up to 1,234,567,890
+    for _ in range(3):
+        tok = re.sub(r"(\d),(\d)", r"\1\2", tok)
+    return tok
+
+
+def _numeric_multiset_from_tokens(
+    raw_tokens: list[str],
+) -> Counter:
+    """Return a Counter of normalized numeric tokens from a list of raw strings.
+
+    Only tokens that match ``_NUM_TOKEN_RE`` AND ``_NUMERIC_RE`` are included;
+    non-numeric strings (labels, punctuation) are discarded.  Each included
+    token is normalized with ``_normalize_numeric_token`` (N2) before counting.
+    """
+    result: Counter = Counter()
+    for tok in raw_tokens:
+        if _NUM_TOKEN_RE.match(tok) and _NUMERIC_RE.search(tok):
+            result[_normalize_numeric_token(tok)] += 1
+    return result
+
+
+def _parse_all_data_rows(
+    text: str,
+) -> tuple[list[tuple[int, str, Counter]], list[tuple[int, str]]]:
+    """Parse output markdown table into data rows classified by content.
+
+    Returns a pair:
+      - ``numeric_rows``: list of ``(row_idx, label, numeric_multiset)`` for
+        every row after the separator that contains >= 1 numeric token.
+        ``label`` is the content of column 0 (stripped).
+        ``numeric_multiset`` is the N2-normalized Counter of all numeric tokens
+        found anywhere in the row (across all cells).
+      - ``label_only_rows``: list of ``(row_idx, label)`` for every row after
+        the separator that has a NON-EMPTY label (col 0) and ZERO numeric
+        tokens.  These are "label-only rows" — section headers, forecaster-
+        name rows in the interleaved failure mode, panel headings, etc.
+
+    This classification is used by the label-binding predicate: the interleaved
+    failure pattern produces BOTH numeric rows with empty labels AND label-only
+    rows.  A regression table with SE rows (empty label + a value) produces
+    numeric rows with empty labels but NO label-only rows — the two are
+    distinguished without over-firing on valid SE rows.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    numeric_rows: list[tuple[int, str, Counter]] = []
+    label_only_rows: list[tuple[int, str]] = []
+    sep_found = False
+    data_idx = 0
+    for line in lines:
+        if _MD_SEP_RE.match(line):
+            sep_found = True
+            continue
+        if not sep_found:
+            continue
+        if "|" not in line:
+            continue
+        cells = _parse_output_row_cells(line)
+        # Collect all tokens across all cells
+        all_tokens: list[str] = []
+        for cell in cells:
+            all_tokens.extend(re.split(r"\s+", cell))
+        multiset = _numeric_multiset_from_tokens(all_tokens)
+        label = cells[0] if cells else ""
+        if multiset:
+            numeric_rows.append((data_idx, label, multiset))
+        elif label:
+            # Non-empty label, zero numeric tokens → label-only row
+            label_only_rows.append((data_idx, label))
+        data_idx += 1
+    return numeric_rows, label_only_rows
+
+
+def _count_adjacent_interleaved_pairs(
+    numeric_rows: list[tuple[int, str, Counter]],
+    label_only_rows: list[tuple[int, str]],
+) -> tuple[int, int]:
+    """Count adjacent (unlabeled-numeric, label-only) pairs and clean labeled rows.
+
+    Scans all data rows in row-index order.  An ADJACENT INTERLEAVED PAIR is
+    defined as a consecutive pair of rows where one is an unlabeled-numeric row
+    (has >= 1 numeric token, empty col-0 label) and the other is a label-only
+    row (non-empty label, zero numeric tokens) — in either order.
+
+    A CLEAN LABELED ROW is a numeric row with a non-empty label.
+
+    Returns ``(adjacent_pairs, clean_labeled_count)``.  The label-binding
+    predicate fires only when
+    ``adjacent_pairs > 0 and adjacent_pairs >= clean_labeled_count``.
+    This ensures that a few isolated section headers, sub-table year headers,
+    or multi-line labels (vastly outnumbered by 40+ clean labeled rows) do NOT
+    trigger the predicate — they produce at most 1-2 adjacent pairs against
+    a backdrop of many clean rows.
+    """
+    # Build a unified timeline of all data rows, tagging each by kind:
+    #   "unlabeled_numeric", "labeled_numeric", "label_only"
+    row_kinds: dict[int, str] = {}
+    for row_idx, label, _ms in numeric_rows:
+        if label:
+            row_kinds[row_idx] = "labeled_numeric"
+        else:
+            row_kinds[row_idx] = "unlabeled_numeric"
+    for row_idx, _label in label_only_rows:
+        # numeric_rows takes precedence (shouldn't overlap, but be safe)
+        if row_idx not in row_kinds:
+            row_kinds[row_idx] = "label_only"
+
+    sorted_rows = sorted(row_kinds.items())  # [(row_idx, kind), ...]
+
+    adjacent_pairs = 0
+    clean_labeled = 0
+
+    for i, (_idx, kind) in enumerate(sorted_rows):
+        if kind == "labeled_numeric":
+            clean_labeled += 1
+        if i + 1 < len(sorted_rows):
+            _next_idx, next_kind = sorted_rows[i + 1]
+            # Adjacent pair: one unlabeled-numeric + one label-only, consecutive
+            if (kind == "unlabeled_numeric" and next_kind == "label_only") or (
+                kind == "label_only" and next_kind == "unlabeled_numeric"
+            ):
+                adjacent_pairs += 1
+
+    return adjacent_pairs, clean_labeled
+
+
+def _value_guard(
+    words: list,
+    output_text: str,
+    scope_label: str = "page",
+) -> tuple[bool, str, list[dict], dict | None]:
+    """TR-4 value-guard: row-count soft-flag + row-aware multiset + label-binding.
+
+    Returns ``(hard_fail, reason, drifted_rows, row_count_warn_info)``.
+
+    ``hard_fail`` is True only for the two predicates that indicate SILENT
+    CORRUPTION of table content (wrong/shifted numbers or systematic label
+    mis-binding).  Row-count gaps are a soft completeness warning — the table
+    ships with a WARNING flag rather than being routed to the D3 image floor.
+
+    ROW-COUNT CHECK → SOFT WARNING (not hard-fail):
+        The count of output rows containing >= 1 numeric token is compared to
+        the count of native numeric rows (after excluding LEADING header-like
+        rows whose tokens all appear in the output's markdown header).  A
+        mismatch means the output either has more or fewer numeric rows than
+        the native PDF.  This is a COMPLETENESS concern (a potentially dropped
+        or invented row, or chart/prose numbers counted in the native that are
+        absent from the output because they were correctly rendered as images).
+        The table SHIPS but the page/document status is demoted to WARNING and
+        a ``value_guard_row_count_warning`` audit event is recorded.  When
+        ``row_count_warn_info`` is not None, the caller sets
+        ``VerifierResult.row_count_warn = True``.
+
+        Rationale (codex + gemini panel): a missing/flagged row is better than
+        a wrong number.  Row-count gaps are confounded by chart/prose numerals
+        on complex pages (e.g. CE p.4 where the bar chart's tick labels and the
+        main forecaster grid share the same native word list), so silently
+        discarding the table would be more harmful than shipping it flagged.
+
+    LABEL-BINDING → HARD-FAIL (unchanged):
+        Fires when the SYSTEMATIC name/value-offset pattern dominates the table
+        (adjacent interleaved pairs >= clean labeled rows).  This catches the
+        TR-4a failure mode (values in rows with empty labels, names in rows
+        with no data) which produces SILENTLY WRONG output — every number would
+        be mis-attributed.
+
+    NUMBER-COMPLETENESS (row-aware multiset) → HARD-FAIL (unchanged):
+        For each output data row paired to a native numeric row, the
+        N2-normalized numeric-token multisets must be identical.  Mismatches
+        mean a number was dropped, invented, or shifted within a row — silent
+        corruption at the cell level.
+
+    Returns:
+        hard_fail:           True if label-binding or multiset fires.
+        reason:              Human-readable summary of the hard-fail predicate.
+        drifted_rows:        List of per-row detail dicts for the hard-fail.
+        row_count_warn_info: Dict with row-count details if a mismatch was
+                             detected (table ships, status → WARNING); else None.
+    """
+    native_rows_map = _rows_by_y_from_words(words)
+    native_row_list = sorted(native_rows_map.items())
+    output_data_rows = _parse_output_data_rows(output_text)
+    numeric_output_rows, label_only_rows = _parse_all_data_rows(output_text)
+
+    drifted: list[dict] = []
+    row_count_warn_info: dict | None = None
+
+    # --- Header-like row exclusion ---
+    # Exclude LEADING header-like native rows (spec-number headers, year-label
+    # rows) whose tokens were absorbed into the output's markdown column header.
+    # POSITIONAL CONSTRAINT: only exclude rows above the first data-like native
+    # row so footer year-annotations are not incorrectly excluded.
+    output_header_tokens = _output_header_numeric_tokens(output_text)
+
+    def _is_header_like(row_tokens: list[tuple[float, str]]) -> bool:
+        return bool(
+            output_header_tokens
+            and all(_normalize_numeric_token(w) in output_header_tokens for _x, w in row_tokens)
+        )
+
+    first_data_y: float | None = None
+    for y, row_tokens in native_row_list:
+        if not _is_header_like(row_tokens):
+            first_data_y = y
+            break
+
+    effective_native_rows = [
+        (y, row_tokens)
+        for y, row_tokens in native_row_list
+        if not (_is_header_like(row_tokens) and (first_data_y is None or y < first_data_y))
+    ]
+
+    # --- TR-6 Pairing-derived y-band scoping ---
+    # Run a preliminary overlap-based pairing to discover which y-range of native
+    # rows actually aligns with the output table.  Restrict effective_native_rows
+    # to this matched y-band + a half-row margin before counting.  This excludes
+    # chart tick labels, prose figures, and historical-table rows that share the
+    # native word list (whole-page scope) but are absent from the output table
+    # being verified.  "Table region" is derived from the pairing itself, not a
+    # magic constant or an unreliable bbox cluster.
+    if effective_native_rows and output_data_rows:
+        prelim_pairs = _pair_output_to_native_rows(effective_native_rows, output_data_rows)
+        if prelim_pairs:
+            # Collect y-values of matched native rows directly from the pairing.
+            native_tok_to_y: dict[int, float] = {id(rt): y for y, rt in effective_native_rows}
+            matched_ys_direct: list[float] = []
+            for _out_row, matched_toks in prelim_pairs:
+                tok_id = id(matched_toks)
+                if tok_id in native_tok_to_y:
+                    matched_ys_direct.append(native_tok_to_y[tok_id])
+            if matched_ys_direct:
+                # Estimate row-height as median gap between consecutive matched ys,
+                # capped at 30pt.  Use half this as the margin around the y-band.
+                sorted_matched = sorted(matched_ys_direct)
+                if len(sorted_matched) >= 2:
+                    gaps = [b - a for a, b in zip(sorted_matched, sorted_matched[1:]) if b > a]
+                    row_height_est = (
+                        sorted(gaps)[len(gaps) // 2] if gaps else _YBAND_SINGLE_ROW_HEIGHT_PT
+                    )
+                else:
+                    row_height_est = _YBAND_SINGLE_ROW_HEIGHT_PT
+                row_height_est = min(row_height_est, _YBAND_ROW_HEIGHT_CAP_PT)
+                margin = row_height_est * 0.5
+                band_y0 = sorted_matched[0] - margin
+                band_y1 = sorted_matched[-1] + margin
+                scoped_native_rows = [
+                    (y, rt) for y, rt in effective_native_rows if band_y0 <= y <= band_y1
+                ]
+                logger.debug(
+                    "native_verifier [%s] TR-6 pairing y-band: y=%.0f..%.0f "
+                    "(%d → %d effective native rows; margin=%.1fpt)",
+                    scope_label,
+                    band_y0,
+                    band_y1,
+                    len(effective_native_rows),
+                    len(scoped_native_rows),
+                    margin,
+                )
+                effective_native_rows = scoped_native_rows
+
+    # --- Row-count check: SOFT WARNING → AMBIGUOUS state (table ships; status → WARNING) ---
+    native_numeric_count = len(effective_native_rows)
+    output_numeric_count = len(numeric_output_rows)
+
+    if native_numeric_count > 0 and output_numeric_count != native_numeric_count:
+        row_count_warn_reason = (
+            f"value_guard_row_count_warning: output has {output_numeric_count} "
+            f"numeric row(s) vs {native_numeric_count} effective native numeric row(s) "
+            f"(after pairing-derived y-band scoping) — "
+            f"possible dropped/invented row or alignment gap; "
+            f"table ships with WARNING status"
+        )
+        row_count_warn_info = {
+            "predicate": "row_count_mismatch",
+            "native_numeric_rows": native_numeric_count,
+            "output_numeric_rows": output_numeric_count,
+            "detail": (
+                f"output has {output_numeric_count} numeric row(s) but "
+                f"native has {native_numeric_count} effective numeric row(s) "
+                f"(scoped)"
+            ),
+        }
+        logger.debug(
+            "native_verifier [%s] row-count warning (scoped): %s",
+            scope_label,
+            row_count_warn_reason,
+        )
+        # Continue to check label-binding and multiset — a count gap does not
+        # suppress hard-fail for genuinely corrupted tables.
+
+    # --- Label-binding check (adjacency-dominance interleaved-pattern detection) ---
+    # HARD-FAIL → CERTAIN_FAIL: fires only when the SYSTEMATIC offset pattern dominates.
+    adjacent_pairs, clean_labeled = _count_adjacent_interleaved_pairs(
+        numeric_output_rows, label_only_rows
+    )
+    if adjacent_pairs > 0 and adjacent_pairs >= clean_labeled:
+        unlabeled_numeric = [
+            (row_idx, label, ms) for (row_idx, label, ms) in numeric_output_rows if not label
+        ]
+        for row_idx, _label, _ms in unlabeled_numeric:
+            drifted.append(
+                {
+                    "row_idx": row_idx,
+                    "predicate": "label_binding_failure",
+                    "detail": (
+                        "output data row has numeric tokens but empty label (col 0); "
+                        f"adjacent interleaved pairs ({adjacent_pairs}) dominate "
+                        f"clean labeled rows ({clean_labeled}) — "
+                        "systematic name/value offset pattern detected"
+                    ),
+                }
+            )
+        reason = (
+            f"value_guard_label_binding: {adjacent_pairs} adjacent interleaved pair(s) "
+            f">= {clean_labeled} clean labeled row(s) — "
+            f"name/value binding is broken (systematic interleaved row pattern)"
+        )
+        logger.debug("native_verifier [%s] value-guard label-binding: %s", scope_label, reason)
+        return True, reason, drifted, row_count_warn_info
+
+    # --- Number-completeness: per-paired-row multiset equality → HARD-FAIL ---
+    # Use the existing overlap-based pairing to match output rows to native rows.
+    # (Uses the y-band-scoped effective_native_rows from above.)
+    if not effective_native_rows:
+        return False, "", [], row_count_warn_info
+
+    paired_rows = _pair_output_to_native_rows(effective_native_rows, output_data_rows)
+
+    for (row_idx, _cell_count, row_text), native_row_tokens in paired_rows:
+        raw_output_tokens: list[str] = re.split(r"[\s|]+", row_text.strip())
+        out_ms = _numeric_multiset_from_tokens(raw_output_tokens)
+        nat_ms = _numeric_multiset_from_tokens([word for _x, word in native_row_tokens])
+
+        if out_ms != nat_ms:
+            drifted.append(
+                {
+                    "row_idx": row_idx,
+                    "predicate": "multiset_mismatch",
+                    "output_multiset": dict(out_ms),
+                    "native_multiset": dict(nat_ms),
+                    "detail": (f"output numeric tokens {dict(out_ms)} != native {dict(nat_ms)}"),
+                }
+            )
+
+    if drifted:
+        # CERTAIN_FAIL only under CLEAN alignment (row counts matched → no
+        # row_count_warn). When a row-count discrepancy is present, the per-row
+        # pairing is UNRELIABLE: on a multi-element page (e.g. CE — two tables
+        # with a chart/prose block between them) the mismatch is almost always
+        # MIS-PAIRING caused by non-table native rows (chart axis ticks, prose
+        # figures) contaminating the row set, NOT a genuinely wrong number. Per
+        # the harness design (docs/log/2026-06-17_verification-harness-design.md),
+        # a multiset mismatch UNDER a count discrepancy is AMBIGUOUS: the table
+        # SHIPS flagged (the row-count warning already surfaces the uncertainty)
+        # rather than being discarded. Hard-fail is reserved for clean-alignment
+        # pages, where a multiset mismatch is a certain dropped/shifted value.
+        if row_count_warn_info is not None:
+            logger.debug(
+                "native_verifier [%s] multiset mismatch UNDER row-count discrepancy "
+                "→ AMBIGUOUS (ship flagged, not hard-fail): %d row(s)",
+                scope_label,
+                len(drifted),
+            )
+            return False, "", drifted, row_count_warn_info
+        reason = (
+            f"value_guard_multiset_mismatch: {len(drifted)} paired row(s) have "
+            f"numeric-token multiset mismatch (dropped/invented/shifted values)"
+        )
+        logger.debug("native_verifier [%s] value-guard multiset: %s", scope_label, reason)
+        return True, reason, drifted, row_count_warn_info
+
+    return False, "", [], row_count_warn_info
 
 
 def _pair_output_to_native_rows(
@@ -428,38 +922,34 @@ def _verify_from_words(
         return result
 
     # ------------------------------------------------------------------
-    # Tier 1: Hard-fail — geometry-impossible row collapse
+    # Tier 1: Hard-fail — value-guard (TR-4 row-count + multiset + label-binding)
+    #
+    # Replaces the old geometry_impossible_collapse predicate, which compared
+    # native lane count against output cell count and produced false positives
+    # for year-paired tables (all values present per row, just in fewer cells).
+    #
+    # Three predicates in order:
+    #   (a) ROW-COUNT: soft warning (table ships, status→WARNING) when output
+    #       numeric-row count ≠ effective native numeric-row count.
+    #   (b) LABEL-BINDING: hard-fail when adjacent interleaved pairs dominate
+    #       clean labeled rows — the systematic TR-4a name/value offset pattern.
+    #   (c) MULTISET: hard-fail when per-paired-row numeric-token multisets
+    #       differ (dropped/invented/shifted values within a matched row).
     # ------------------------------------------------------------------
-    native_rows = _rows_by_y_from_words(words)
-    output_data_rows = _parse_output_data_rows(output_text)
+    vg_hard_fail, vg_reason, vg_drifted, vg_row_count_warn = _value_guard(
+        words, output_text, scope_label
+    )
 
-    native_row_list = sorted(native_rows.items())
-    paired_rows = _pair_output_to_native_rows(native_row_list, output_data_rows)
+    # Propagate soft row-count warning regardless of hard-fail outcome.
+    if vg_row_count_warn is not None:
+        result.row_count_warn = True
+        result.row_count_warn_reason = vg_row_count_warn.get("detail", "")
 
-    hard_fail_rows: list[dict] = []
-    for (row_idx, output_cell_count, row_text), row_tokens in paired_rows:
-        sep_lanes = _well_separated_lanes_in_row(row_tokens, lane_of)
-        if len(sep_lanes) < _MIN_HARD_FAIL_LANES:
-            continue
-        if output_cell_count < len(sep_lanes):
-            hard_fail_rows.append(
-                {
-                    "row_idx": row_idx,
-                    "native_well_separated_lanes": len(sep_lanes),
-                    "output_populated_cells": output_cell_count,
-                    "row_text": row_text,
-                }
-            )
-
-    if hard_fail_rows:
+    if vg_hard_fail:
         result.hard_fail = True
-        result.drifted_rows = hard_fail_rows
-        result.reason = (
-            f"geometry_impossible_collapse: {len(hard_fail_rows)} row(s) have "
-            f">= {_MIN_HARD_FAIL_LANES} well-separated native numeric lanes "
-            f"but fewer output cells "
-            f"(native_lane_count={lane_count}, output_col_count={output_col_count})"
-        )
+        result.drifted_rows = vg_drifted
+        result.reason = vg_reason
+        result.state = VerifierState.CERTAIN_FAIL
         logger.debug("native_verifier [%s] hard-fail: %s", scope_label, result.reason)
         return result
 
@@ -474,7 +964,17 @@ def _verify_from_words(
             f"output_cols={output_col_count}, gap={col_gap} "
             f"(paired/spanning headers possible — deferring to VLM)"
         )
+        result.state = VerifierState.AMBIGUOUS
         logger.debug("native_verifier [%s] warn: %s", scope_label, result.reason)
+
+    # TR-6 tri-state: if no hard-fail, no Tier-2 warn, and no row-count warn
+    # → EXACT_PASS (clean 1:1 alignment, matching multisets, no label-binding).
+    # Row-count warn alone → AMBIGUOUS (count gap after scoping, but multiset clean).
+    if not result.hard_fail and not result.warn:
+        if result.row_count_warn:
+            result.state = VerifierState.AMBIGUOUS
+        else:
+            result.state = VerifierState.EXACT_PASS
 
     return result
 
