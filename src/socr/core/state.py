@@ -37,6 +37,8 @@ class PageState:
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
     native_table_structure_failed: bool = False  # native table text lost its grid
+    native_table_unverifiable: bool = False  # TR-3: per-region verifier flagged hard-fail
+    d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
     chart_asset_render_failed: bool = False  # PP-7: chart-lane PNG render failed
 
     @property
@@ -174,6 +176,10 @@ class DocumentState:
                 if pa.is_born_digital:
                     ps.native_text = pa.native_text
                     ps.needs_ocr_enhancement = pa.needs_ocr_enhancement
+                    # TR-3: propagate per-region verifier hard-fail flag so the
+                    # D3 selection in _winning_page_output can route to the floor.
+                    if getattr(pa, "has_unverifiable_table_region", False):
+                        ps.native_table_unverifiable = True
 
     # ------------------------------------------------------------------
     # Read-only derived properties

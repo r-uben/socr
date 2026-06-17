@@ -40,7 +40,7 @@ from ocr_output_contract import (
 
 from socr.core.cache import BlobStore
 from socr.core.document import DocumentHandle
-from socr.core.result import PageOutput, PageStatus
+from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,13 @@ ASSEMBLY_VERSION = "2"
 # only for backward-compatible imports and is no longer used to join pages.
 PAGE_SEPARATOR = "\n\n---\n\n"
 
+# Matches the canonical failure marker `[page N failed: no usable OCR output]`.
 _PAGE_FAILED_RE = re.compile(r"^\[page \d+ failed: no usable OCR output\]$")
+# TR-3: also matches the D3 fail-closed marker `[page N failed: unverifiable table …]`
+# which may be followed by a PNG image ref on a second block (the full text starts
+# with the marker, possibly with trailing whitespace and an image ref).  We match
+# on the FIRST LINE only so both formats are recognised by is_page_failed_marker.
+_PAGE_FAILED_ANY_RE = re.compile(r"^\[page \d+ failed:.*", re.MULTILINE)
 
 
 def page_failed_marker(page_num: int) -> str:
@@ -70,13 +76,27 @@ def page_failed_marker(page_num: int) -> str:
     Shipped instead of silent emptiness: a reader diffing the output against
     the source must not need to count page headers to notice a missing page
     (the Kuttner-Table-2 failure mode).
+
+    The D3 fail-closed floor (TR-3) ships a VARIANT marker:
+    ``[page N failed: unverifiable table — see image]\\n\\n![...](...)``.
+    That marker is also recognised by ``is_page_failed_marker``.
     """
     return f"[page {page_num} failed: no usable OCR output]"
 
 
 def is_page_failed_marker(text: str) -> bool:
-    """True if a page's canonical text is the failure marker (not content)."""
-    return bool(_PAGE_FAILED_RE.match(text.strip()))
+    """True if a page's canonical text is a failure marker (not real content).
+
+    Matches both the original ``[page N failed: no usable OCR output]`` marker
+    AND the TR-3 D3 fail-closed variant ``[page N failed: unverifiable table …]``
+    (which may be followed by a PNG image ref block).
+    """
+    stripped = text.strip()
+    # Fast path: exact original marker.
+    if _PAGE_FAILED_RE.match(stripped):
+        return True
+    # TR-3 D3 variant: text starts with `[page N failed: ...]` on its first line.
+    return bool(_PAGE_FAILED_ANY_RE.match(stripped))
 
 
 def compute_image_hash(handle: DocumentHandle, page_num: int, dpi: int) -> str:
@@ -257,6 +277,38 @@ def _winning_page_output(
     if p.best_output and p.best_output.audit_passed:
         return p.best_output
     if p.is_born_digital and p.native_text:
+        # TR-3: D3 fail-closed floor.  When the OCR ladder failed for a table
+        # page AND the per-region geometry verifier flagged a hard-fail
+        # (geometry_impossible_collapse), shipping the collapsed native text
+        # risks a plausible-but-wrong artifact (silent column-shift or merged
+        # rows).  The panel verdict Q1=D3: "ship neither flawed table — emit an
+        # explicit failed-table marker; route the region to the image-asset lane."
+        # A wrong/shifted number is worse than an obviously-missing one.
+        if (
+            p.native_table_structure_failed
+            and getattr(p, "native_table_unverifiable", False)
+            and bool(p.attempts)
+        ):
+            # TR-3: D3 fail-closed floor text = failed-table marker + image ref.
+            # The marker is always present (makes the failure loud and greppable);
+            # the PNG image ref lets a human SEE the table without transcription.
+            # ``ps.d3_floor_png_ref`` is set by ``_render_d3_floor_png`` in
+            # ``_phase_agentic`` right after ``native_table_structure_failed``
+            # is set.  If the render failed (or no figures_dir was available),
+            # d3_floor_png_ref is "" and only the marker is shipped — still
+            # fail-closed, still no plausible-but-wrong table text.
+            d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+            png_ref = getattr(p, "d3_floor_png_ref", "")
+            d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+            return PageOutput(
+                page_num=page_num,
+                text=d3_text,
+                status=PageStatus.ERROR,
+                engine="native",
+                audit_passed=False,
+                failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+            )
+
         # An enhancement page (native layer known deficient) whose recovery was
         # tried and never passed ships native text
         # as a FALLBACK, not a success: flagged WARNING / audit_passed=False

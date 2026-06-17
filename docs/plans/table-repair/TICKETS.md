@@ -154,7 +154,7 @@ even though each individual table is internally consistent. Reassembly is `y0`-o
 ## TR-3 — D3 fail-closed floor + selection-policy fix
 
 GitHub: https://github.com/r-uben/socr/issues/56
-Status: **READY** · Priority: P0 · Agent: `socr-implementer` · Depends on: TR-2 · Wave 3
+Status: **DONE** · Priority: P0 · Agent: `socr-implementer` · Depends on: TR-2 · Wave 3
 
 ### Problem
 When a table region still fails verification, `_winning_page_output` ships the collapsed native

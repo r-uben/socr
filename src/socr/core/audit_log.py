@@ -100,13 +100,20 @@ def build_run_audit(state) -> RunAudit:
     events.extend(_derive_escalations(state))
 
     # Stable order: by page, then a coarse phase rank so a page's story reads
-    # top-to-bottom (engine escalation -> judge -> dual-pass).
+    # top-to-bottom (engine escalation -> judge -> dual-pass -> D3 floor).
+    # ``table_region_unverifiable`` is TR-3's distinct event: a born-digital
+    # table region that hard-failed per-region geometry verification and was
+    # routed to the image-asset lane (failed-table marker + PNG ref) rather
+    # than shipping as a plausible-but-wrong collapsed or ragged table.
     rank = {
         "recitation_escalation": 0,
         "escalation": 1,
         "judge_reject": 2,
         "dualpass_patch": 3,
         "dualpass_flag": 3,
+        "table_region_unverifiable": 4,
+        "native_fallback": 5,
+        "page_failed": 6,
     }
     events.sort(key=lambda e: (e.page_num, rank.get(e.kind, 9)))
     return RunAudit(pdf_filename=state.handle.filename, events=events)

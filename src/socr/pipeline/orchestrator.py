@@ -1304,6 +1304,50 @@ class UnifiedPipeline:
             )
             return native_text
 
+    def _render_d3_floor_png(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        figures_dir: Path,
+    ) -> str:
+        """TR-3: render a PNG for a D3 fail-closed floor page and return an image ref.
+
+        For a born-digital table page that failed both OCR and per-region geometry
+        verification (D3 floor), the human must still be able to SEE the table.
+        This method renders a full-page PNG of the failed page into ``figures_dir``
+        and returns a markdown image reference string
+        (``![Failed table page N](figures/failed_table_p{N}.png)``).
+
+        A full-page render is used rather than a region crop because the page
+        has no verified region bboxes at this point — the per-region verifier
+        flagged a hard-fail, which means the detected bboxes cannot be trusted
+        to bound the actual table content correctly.  The full page is always
+        safe: it preserves everything visible.
+
+        Returns "" on any render failure so the caller can safely append it to
+        the failure marker (an empty string produces marker-only output, still
+        fail-closed and never a plausible-but-wrong table).
+        """
+        try:
+            fname = f"failed_table_p{page_num}.png"
+            saved = self._render_chart_page_png(pdf_path, page_num, figures_dir)
+            # _render_chart_page_png saves chart_page_{page_num}.png; rename to
+            # our D3-specific name so the file is clearly identifiable in figures/.
+            saved_path = Path(saved)
+            d3_path = saved_path.parent / fname
+            saved_path.rename(d3_path)
+            figures_dir_name = figures_dir.name
+            ref = f"![Failed table page {page_num}]({figures_dir_name}/{fname})"
+            logger.debug("TR-3 D3 floor: saved full-page PNG %s", d3_path)
+            return ref
+        except Exception as exc:
+            logger.warning(
+                "TR-3 D3 floor PNG render failed for p%d (%s); marker only",
+                page_num,
+                exc,
+            )
+            return ""
+
     # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
     # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
@@ -1787,6 +1831,21 @@ class UnifiedPipeline:
                             state.handle.path,
                             page_num,
                             ps.native_text,
+                            _chart_figures_dir,
+                        )
+                    # TR-3: D3 fail-closed floor PNG.  When the per-region
+                    # verifier also hard-failed (native_table_unverifiable=True),
+                    # render a full-page PNG so the human can still SEE the table.
+                    # The image ref is stored on ps.d3_floor_png_ref and picked up
+                    # by _winning_page_output (manifest.py) when assembling the
+                    # final failed-table marker text.
+                    if (
+                        getattr(ps, "native_table_unverifiable", False)
+                        and _chart_figures_dir is not None
+                    ):
+                        ps.d3_floor_png_ref = self._render_d3_floor_png(
+                            state.handle.path,
+                            page_num,
                             _chart_figures_dir,
                         )
 
@@ -3226,6 +3285,12 @@ class UnifiedPipeline:
             "native_table_structure_failed": (
                 bool(ps.native_table_structure_failed) if ps else False
             ),
+            # TR-3: per-region geometry hard-fail flag (D3 floor trigger).
+            "native_table_unverifiable": (
+                bool(getattr(ps, "native_table_unverifiable", False)) if ps else False
+            ),
+            # TR-3: image ref for the D3 floor PNG (empty string when not rendered).
+            "d3_floor_png_ref": (str(getattr(ps, "d3_floor_png_ref", "")) if ps else ""),
             "chart_asset_render_failed": (
                 bool(ps.chart_asset_render_failed) if ps else False  # PP-7
             ),
@@ -3409,6 +3474,9 @@ class UnifiedPipeline:
             ps.native_table_structure_failed = bool(
                 meta.get("native_table_structure_failed", False)
             )
+            # TR-3: restore per-region verifier flag and D3 PNG ref.
+            ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
+            ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
             ps.judge_rejected = bool(meta.get("judge_rejected", False))
         except Exception as exc:
@@ -3596,6 +3664,20 @@ class UnifiedPipeline:
                     exc,
                 )
         failed_pages = [i for i, t in enumerate(page_texts, start=1) if is_page_failed_marker(t)]
+        # TR-3: D3 fail-closed floor pages — born-digital table pages where the
+        # per-region geometry verifier hard-failed AND the OCR ladder also failed.
+        # These ship the explicit failed-table marker (not the collapsed native) so
+        # no plausible-but-wrong table is ever emitted.  They are a STRICT SUBSET
+        # of failed_pages (every D3 page is also a failed page), counted separately
+        # for the distinct audit event and CLI summary.
+        d3_floor_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.is_born_digital
+            and p.native_table_structure_failed
+            and getattr(p, "native_table_unverifiable", False)
+            and bool(p.attempts)
+        ]
         native_fallback_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -3603,7 +3685,13 @@ class UnifiedPipeline:
             and p.native_text
             and (
                 p.needs_ocr_enhancement
-                or p.native_table_structure_failed
+                or (
+                    p.native_table_structure_failed
+                    # TR-3: D3 floor pages already have their own distinct event;
+                    # exclude them from the generic native_fallback list so they
+                    # are not double-counted in the CLI summary.
+                    and not getattr(p, "native_table_unverifiable", False)
+                )
                 or p.chart_asset_render_failed  # PP-7: render failure surfaces at doc level
             )
             and p.attempts
@@ -3627,7 +3715,7 @@ class UnifiedPipeline:
 
         state.status = status
 
-        if failed_pages or native_fallback_pages:
+        if failed_pages or native_fallback_pages or d3_floor_pages:
             from socr.core.audit_log import AuditEvent
 
             for n in failed_pages:
@@ -3649,6 +3737,24 @@ class UnifiedPipeline:
                         "native text shipped flagged",
                     )
                 )
+            # TR-3: distinct audit event for D3 floor pages — do NOT record
+            # native_fallback for these; they were routed to the image-asset lane
+            # (failed-table marker + explicit failure), never the collapsed native.
+            for n in d3_floor_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="table_region_unverifiable",
+                        engine="native",
+                        detail=(
+                            "per-region geometry verifier hard-failed"
+                            " (geometry_impossible_collapse) and OCR ladder also failed;"
+                            " D3 fail-closed: explicit failed-table marker shipped"
+                            " — no collapsed/ragged table emitted"
+                        ),
+                        data={"d3_floor": True},
+                    )
+                )
             if not self.config.quiet:
                 if failed_pages:
                     console.print(
@@ -3659,6 +3765,12 @@ class UnifiedPipeline:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
                         f"fell back to native text: {native_fallback_pages}[/yellow]"
+                    )
+                if d3_floor_pages:
+                    console.print(
+                        f"  [red]{len(d3_floor_pages)} table page(s) hit the D3 fail-closed"
+                        f" floor (unverifiable region → explicit failure marker): "
+                        f"{d3_floor_pages}[/red]"
                     )
 
         # Compute total processing time
