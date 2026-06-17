@@ -15,11 +15,14 @@ Heuristics for distinguishing born-digital from baked-in OCR:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import fitz
+
+logger = logging.getLogger(__name__)
 
 # Font families used exclusively for typeset mathematics in LaTeX/LuaTeX/XeTeX.
 # These appear in basefont names regardless of whether PyMuPDF's text extraction
@@ -781,25 +784,57 @@ class BornDigitalDetector:
 
             table_regions = reconstruct_table_regions(page)
 
-        # Word-geometry rowizer fallback (TR-1): when find_tables() returns nothing
-        # AND the text-strategy reconstruct also fails (e.g. a multi-region page
-        # where the text strategy over-merges chart + table + prose into one
+        # Word-geometry rowizer fallback (TR-1/TR-2): when find_tables() returns
+        # nothing AND the text-strategy reconstruct also fails (e.g. a multi-region
+        # page where the text strategy over-merges chart + table + prose into one
         # spanning grid that fails _looks_tabular), try segmenting the page by
         # vertical gaps derived from the page's own row-height distribution and
         # rowizing each segment independently.  This is the correct path for
         # CE-style whitespace-gutter tables on pages with multiple content regions.
+        #
+        # TR-2 chart-clip: use the chart-aware variant so chart-drawing clusters
+        # are excluded from the rowizer and returned as image-ref placeholders.
+        # The chart's tick-label rows (all single-column) previously diluted the
+        # historical table's data_row_frac below _looks_tabular's 0.5 threshold,
+        # causing it to fall back to flat text.  Clipping the chart words first
+        # fixes this without any magic threshold.
         if not table_regions:
-            from socr.tables.reconstruct import rowize_from_words
+            from socr.tables.reconstruct import rowize_from_words_chart_aware
 
-            table_regions = rowize_from_words(page)
+            page_num = getattr(page, "number", 0) + 1
+            table_regions = rowize_from_words_chart_aware(page, page_num=page_num)
 
         if not table_regions:
             return page.get_text("text").strip()
 
-        # Sort table regions top-to-bottom by their y0 coordinate
+        # Sort regions top-to-bottom by their y0 coordinate (reading order).
+        # Column-aware ordering (x-band then y) would be needed for multi-column
+        # layouts; for single-column pages (CE p.4 style) y0 alone is correct.
+        # This is documented as a known limitation in the design note §1b.
         table_regions.sort(key=lambda tr: tr[0].y0)
 
-        # Build output by interleaving prose text and markdown tables.
+        # TR-2 per-region verifier scoping: verify each table region
+        # independently against its own native numeric lanes.  The whole-page
+        # verifier (verify_native_table) combines lanes from ALL tables on the
+        # page, which causes false geometry_impossible_collapse hard-fails when
+        # two tables with different schemas sit on the same page (e.g. a 4-col
+        # forecaster grid + a 3-col historical table → 7 combined lanes but each
+        # table only has 3-4).  Calling verify_native_table_region per region
+        # fixes this by clipping get_text("words") to the region bbox first.
+        # This is a diagnostic + warn step (not a gate) at the extraction point
+        # where both region bboxes and per-region text are available.
+        self._verify_regions(page, table_regions)
+
+        # TR-2 token-coverage post-check: every native numeric token must land in
+        # exactly one region (no orphaned / double-counted token).  This is a
+        # deterministic safety net — not a gate that suppresses output, just a
+        # debug log so operators can trace lost tokens without re-running.
+        self._check_token_coverage(page, table_regions)
+
+        # Collect all region bboxes for the overlap-suppress check below.
+        all_region_rects = [r for r, _ in table_regions]
+
+        # Build output by interleaving prose text and region content.
         # Use text blocks from get_text("dict") to get position-aware text.
         try:
             page_dict = page.get_text("dict")
@@ -808,7 +843,7 @@ class BornDigitalDetector:
 
         blocks = page_dict.get("blocks", [])
         output_parts: list[str] = []
-        table_idx = 0
+        region_idx = 0
 
         for block in blocks:
             # Skip image blocks (type 1)
@@ -817,25 +852,19 @@ class BornDigitalDetector:
 
             block_rect = fitz.Rect(block["bbox"])
 
-            # Check if we need to insert a table before this block
-            while table_idx < len(table_regions):
-                table_rect, table_md = table_regions[table_idx]
-                if table_rect.y0 <= block_rect.y0:
-                    # Check if this text block overlaps the table region;
-                    # if so, skip the text block (table markdown replaces it)
-                    output_parts.append(f"\n{table_md}\n")
-                    table_idx += 1
+            # Check if we need to insert a region before this block
+            while region_idx < len(table_regions):
+                region_rect, region_content = table_regions[region_idx]
+                if region_rect.y0 <= block_rect.y0:
+                    output_parts.append(f"\n{region_content}\n")
+                    region_idx += 1
                 else:
                     break
 
-            # Check if this block overlaps any remaining table region
-            overlaps_table = False
-            for t_rect, _ in table_regions:
-                if block_rect.intersects(t_rect):
-                    overlaps_table = True
-                    break
+            # Check if this block overlaps any region (table or chart)
+            overlaps_region = any(block_rect.intersects(r) for r in all_region_rects)
 
-            if not overlaps_table:
+            if not overlaps_region:
                 # Extract text from this block
                 lines = block.get("lines", [])
                 for line in lines:
@@ -844,13 +873,109 @@ class BornDigitalDetector:
                     if line_text.strip():
                         output_parts.append(line_text.strip())
 
-        # Append any remaining tables that come after all text blocks
-        while table_idx < len(table_regions):
-            _, table_md = table_regions[table_idx]
-            output_parts.append(f"\n{table_md}\n")
-            table_idx += 1
+        # Append any remaining regions that come after all text blocks
+        while region_idx < len(table_regions):
+            _, region_content = table_regions[region_idx]
+            output_parts.append(f"\n{region_content}\n")
+            region_idx += 1
 
         return "\n".join(output_parts).strip()
+
+    def _verify_regions(
+        self,
+        page: fitz.Page,
+        regions: list[tuple[fitz.Rect, str]],
+    ) -> None:
+        """TR-2 per-region native verifier (diagnostic + warn, not a gate).
+
+        For each table region, clips get_text("words") to the region bbox and
+        runs the two-tier geometry check against the region's own markdown text.
+        This avoids false hard-fails that arise when whole-page lane counting
+        merges columns from multiple tables with different schemas.
+
+        Only regions whose text contains a markdown table separator are checked
+        (image-asset placeholders like chart refs have no numeric lanes).
+        """
+        from socr.tables.native_verifier import verify_native_table_region
+
+        for region_rect, region_text in regions:
+            # Skip non-table regions (chart image refs, prose blocks)
+            if "| --- |" not in region_text and "| --- " not in region_text:
+                continue
+            try:
+                vr = verify_native_table_region(page, region_text, region_rect)
+            except Exception as exc:
+                logger.debug("per-region verifier failed for region %s: %s", region_rect, exc)
+                continue
+
+            if vr.hard_fail:
+                logger.warning(
+                    "per-region verifier: geometry_impossible_collapse in region y=%.0f..%.0f — %s",
+                    region_rect.y0,
+                    region_rect.y1,
+                    vr.reason,
+                )
+            elif vr.warn:
+                logger.debug(
+                    "per-region verifier: warn for region y=%.0f..%.0f — %s",
+                    region_rect.y0,
+                    region_rect.y1,
+                    vr.reason,
+                )
+
+    def _check_token_coverage(
+        self,
+        page: fitz.Page,
+        regions: list[tuple[fitz.Rect, str]],
+    ) -> None:
+        """TR-2 token-coverage post-check (diagnostic, not a gate).
+
+        Verifies that every native numeric token on the page falls inside at
+        most one table/chart region.  Orphaned tokens (in no region) and
+        double-counted tokens (in two or more overlapping regions) are both
+        logged at DEBUG level so operators can trace lost or duplicated values
+        without re-running the pipeline.
+
+        This is a deterministic safety net — it never suppresses output.  A
+        future escalation path (TR-5 VLM confirm/split) can use these counts
+        to decide when geometry-led segmentation has failed.
+        """
+        from socr.tables.reconstruct import _NUM_TOKEN_RE, _NUMERIC_RE
+
+        try:
+            words = page.get_text("words")
+        except Exception:
+            return
+
+        # Collect all region bboxes.
+        region_rects = [r for r, _ in regions]
+
+        orphaned: list[str] = []
+        double_counted: list[str] = []
+
+        for w in words:
+            x0, y0, _, _, text = w[0], w[1], w[2], w[3], w[4]
+            if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):
+                continue
+
+            hits = sum(1 for r in region_rects if r.x0 <= x0 <= r.x1 and r.y0 <= y0 <= r.y1)
+            if hits == 0:
+                orphaned.append(f"{text}@({x0:.0f},{y0:.0f})")
+            elif hits > 1:
+                double_counted.append(f"{text}@({x0:.0f},{y0:.0f})")
+
+        if orphaned:
+            logger.debug(
+                "token-coverage: %d orphaned numeric token(s) not in any region: %s",
+                len(orphaned),
+                orphaned[:10],
+            )
+        if double_counted:
+            logger.debug(
+                "token-coverage: %d double-counted numeric token(s) in >1 region: %s",
+                len(double_counted),
+                double_counted[:10],
+            )
 
     def _table_to_markdown(self, table: object) -> str:
         """Convert a PyMuPDF Table object to a markdown table string.

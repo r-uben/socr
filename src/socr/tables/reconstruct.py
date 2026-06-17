@@ -22,6 +22,17 @@ directly from PyMuPDF word coordinates. This is the correct fallback for CE-styl
 whitespace-gutter tables that have no ruling lines AND live on a multi-region page.
 Crucially, a missing token in a lane produces a blank cell — never a skipped column.
 
+Chart-clip (TR-2): ``chart_region_bboxes`` detects vector-chart clusters on the page
+using the same drawing-cluster logic as ``has_chart_marks`` (figures/extractor.py),
+then expands each cluster's bbox by the page's own median inter-row word gap so that
+nearby text labels (axis tick values, year labels below bars) are included in the
+chart region and excluded from the table rowizer.  This fixes the CE p.4 failure mode
+where chart tick-label rows at x=54 diluted the historical table's data_row_frac
+below the ``_looks_tabular`` threshold.  The chart region is returned as a
+placeholder image-ref entry (``![chart region ...](...)``) by
+``rowize_from_words_chart_aware`` so reading-order reassembly in
+``extract_structured`` can emit it in the correct position.
+
 No model, no Ollama — pure PyMuPDF on the page's own text layer, so every value is
 the char-exact native glyph.
 """
@@ -248,6 +259,294 @@ _SPLIT_GAP_MIN_PT = 10.0
 _LANE_SNAP_MULT = 3
 
 
+def _is_header_row(row: list[str]) -> bool:
+    """True when the row is safe to merge into the multi-line header prefix.
+
+    Two kinds of rows safely belong to a multi-line header:
+
+    1. **Empty-col-0 rows** — pure column-metadata rows like
+       ``['', 'GDP', 'GDP']`` or ``['', '2024', '2025']``.
+       No entity label; only header cell content.
+
+    2. **All-empty-data rows with non-empty col 0** — the label-column name
+       row like ``['Forecaster', '', '', '']``.  Provides the name for the
+       label column but carries no values in any data cell.
+
+    Everything else — col 0 non-empty AND at least one non-empty data cell —
+    is a data row that must NEVER be swallowed into the header.  This covers:
+
+    * All-na forecaster rows (``['EarlyFirm', '', '', '']``) — they look
+      identical to the label-column-name row structurally, but the scan stops
+      *before* reaching them because a real data row (or the end of the
+      empty/label-only prefix) intervenes first.
+    * Integer-only rows (``['Car Sales', '16', '17']``) and decimal-value
+      rows (``['Ashford Capital', '2.1', '1.9']``).
+    """
+    col0 = row[0].strip() if row else ""
+    if not col0:
+        return True  # empty col 0 — pure column-metadata row
+    # Non-empty col 0: safe only when ALL data cells are empty
+    # (label-column-name row like ['Forecaster', '', '', '']).
+    return not any(c.strip() for c in row[1:])
+
+
+def _collapse_header_prefix(grid: list[list[str]]) -> list[list[str]]:
+    """Merge a multi-row header prefix into a single combined header row.
+
+    Some tables (e.g. CE-style indicator-year grids) use two or three header
+    lines:
+
+        Row 0:  |             | GDP  | GDP  | CPI  | CPI  |  (indicator names — col 0 empty)
+        Row 1:  | Forecaster  |      |      |      |      |  (label name; data cells empty)
+        Row 2:  |             | 2024 | 2025 | 2024 | 2025 |  (year names — col 0 empty)
+        Row 3+: data rows (col 0 non-empty AND at least one non-empty data cell)
+
+    Header-prefix detection uses ``_is_header_row``: a row belongs to the header
+    prefix iff its col 0 is empty OR (col 0 is non-empty AND all data cells are
+    empty — the label-column-name row).  The scan stops at the FIRST row where
+    col 0 is non-empty AND any data cell is non-empty — that is a data row.
+
+    Column cells are merged with a space separator, giving a single header::
+
+        | Forecaster | GDP 2024 | GDP 2025 | CPI 2024 | CPI 2025 |
+
+    This lets the parity checker (after normalising underscores → spaces) find
+    ``GDP_2024`` → ``GDP 2024`` as a unique header cell.
+
+    Returns the original grid unchanged when:
+      - Fewer than two header-like rows exist at the top (no collapsing needed).
+      - All rows are header-like (degenerate — no data body to keep).
+
+    Safety guarantee: only rows satisfying ``_is_header_row`` are merged; a data
+    row (including all-na rows like ``['EarlyFirm', '', '']`` that appear *after*
+    a non-header row would have stopped the scan) is NEVER swallowed.
+    """
+    if len(grid) < 2:
+        return grid
+
+    # Find the boundary: first non-header row (a row with at least one
+    # decimal value in data columns).
+    hdr_end = 0
+    while hdr_end < len(grid) and _is_header_row(grid[hdr_end]):
+        hdr_end += 1
+
+    # No multi-line header (0 or 1 header rows), or every row is header-like
+    # (degenerate — no data body to keep).
+    if hdr_end < 2 or hdr_end >= len(grid):
+        return grid
+
+    # Normalise widths so column-wise zipping works across all header rows.
+    ncol = max(len(r) for r in grid)
+    header_rows = [r + [""] * (ncol - len(r)) for r in grid[:hdr_end]]
+
+    # Merge column-by-column: concatenate non-empty cells with a single space.
+    merged: list[str] = []
+    for ci in range(ncol):
+        parts = [r[ci] for r in header_rows if r[ci].strip()]
+        merged.append(" ".join(parts))
+
+    return [merged] + list(grid[hdr_end:])
+
+
+# ---------------------------------------------------------------------------
+# Chart-clip helpers (TR-2)
+# ---------------------------------------------------------------------------
+# Minimum area (pt²) for a vector drawing cluster to be considered a chart.
+# Reuses the same constant as figures/extractor.py CHART_MIN_CLUSTER_AREA.
+# Defined here independently to avoid a cross-module import cycle.
+_CHART_MIN_CLUSTER_AREA_PT2: float = 120.0 * 120.0  # 14 400 pt²
+
+# Gap (pt) used when clustering drawing bboxes into chart regions.
+# Reuses the same value as figures/extractor.py CLUSTER_GAP = 30.
+_CHART_CLUSTER_GAP_PT: float = 30.0
+
+
+def _drawing_bboxes(page) -> list[tuple[float, float, float, float]]:
+    """Return (x0, y0, x1, y1) for every non-degenerate drawing on *page*.
+
+    Returns [] on error or when there are no drawings.
+    """
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return []
+    boxes: list[tuple[float, float, float, float]] = []
+    for d in drawings:
+        rect = d.get("rect")
+        if rect is None:
+            continue
+        x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
+        if x1 > x0 or y1 > y0:  # skip zero-area point/line markers
+            boxes.append((x0, y0, x1, y1))
+    return boxes
+
+
+def _union_find_clusters(
+    boxes: list[tuple[float, float, float, float]],
+    gap: float,
+) -> list[tuple[float, float, float, float]]:
+    """Cluster *boxes* by proximity (boxes within *gap* pt of each other merge).
+
+    Returns the merged bbox for each cluster as (x0, y0, x1, y1).
+    """
+    if not boxes:
+        return []
+    n = len(boxes)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        ax0, ay0, ax1, ay1 = boxes[i]
+        for j in range(i + 1, n):
+            bx0, by0, bx1, by1 = boxes[j]
+            h_gap = max(0.0, bx0 - ax1) if ax1 < bx0 else max(0.0, ax0 - bx1)
+            v_gap = max(0.0, by0 - ay1) if ay1 < by0 else max(0.0, ay0 - by1)
+            if h_gap <= gap and v_gap <= gap:
+                union(i, j)
+
+    clusters: dict[int, list[int]] = {}
+    for i in range(n):
+        clusters.setdefault(find(i), []).append(i)
+
+    merged: list[tuple[float, float, float, float]] = []
+    for indices in clusters.values():
+        x0 = min(boxes[i][0] for i in indices)
+        y0 = min(boxes[i][1] for i in indices)
+        x1 = max(boxes[i][2] for i in indices)
+        y1 = max(boxes[i][3] for i in indices)
+        merged.append((x0, y0, x1, y1))
+    return merged
+
+
+def _has_filled_rects_or_thick_strokes(page, bbox: tuple[float, float, float, float]) -> bool:
+    """Return True if the drawing cluster in *bbox* contains chart-like marks.
+
+    Chart-like = filled rectangles (bars, area fills) or strokes wider than
+    hairline.  Mirrors the positive-signal check in figures/extractor.py
+    ``_has_vector_data_marks`` without requiring an import from that module.
+    """
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return False
+    x0, y0, x1, y1 = bbox
+    for d in drawings:
+        rect = d.get("rect")
+        if rect is None:
+            continue
+        # Check the drawing overlaps the cluster bbox
+        if rect.x0 > x1 or rect.x1 < x0 or rect.y0 > y1 or rect.y1 < y0:
+            continue
+        d_type = d.get("type", "")
+        # Filled rect (bars, area fills)
+        if d_type in ("f", "fs"):
+            return True
+        # Coloured stroke (non-black = chart line)
+        color = d.get("color") or d.get("stroke_color")
+        if color and color != (0, 0, 0) and color != (0.0, 0.0, 0.0):
+            return True
+        # Thick stroke (> 1pt width)
+        width = d.get("width", 0.0) or 0.0
+        if width > 1.0:
+            return True
+    return False
+
+
+def chart_region_bboxes(page) -> list[object]:
+    """Return ``fitz.Rect`` bboxes covering chart-drawing clusters on *page*.
+
+    Uses the same union-find clustering as ``figures/extractor.py`` but is
+    self-contained to avoid import cycles.  Each qualifying cluster
+    (area >= ``_CHART_MIN_CLUSTER_AREA_PT2`` AND has chart-like marks) is
+    expanded by the page's own median inter-word-row gap so that nearby text
+    labels (axis tick values, year labels below bars) fall inside the returned
+    bbox and are excluded from the table rowizer.
+
+    The margin is derived from the page's word geometry — no fixed pt constant.
+    Returns ``[]`` when there are no qualifying chart clusters or on error.
+
+    Never raises.
+    """
+    try:
+        import fitz
+    except ImportError:  # pragma: no cover
+        return []
+
+    boxes = _drawing_bboxes(page)
+    if not boxes:
+        return []
+
+    clusters = _union_find_clusters(boxes, _CHART_CLUSTER_GAP_PT)
+
+    # Compute the page's median inter-word-row gap for the expansion margin.
+    # Falls back to _SPLIT_GAP_MIN_PT when the page has too few word rows.
+    try:
+        words = page.get_text("words")
+    except Exception:
+        words = []
+    ys_all = sorted({round(w[1]) for w in words}) if words else []
+    if len(ys_all) >= 2:
+        gaps = [ys_all[i + 1] - ys_all[i] for i in range(len(ys_all) - 1)]
+        row_margin = statistics.median(gaps)
+    else:
+        row_margin = _SPLIT_GAP_MIN_PT
+
+    result: list[object] = []
+    for cx0, cy0, cx1, cy1 in clusters:
+        area = (cx1 - cx0) * (cy1 - cy0)
+        if area < _CHART_MIN_CLUSTER_AREA_PT2:
+            continue
+        if not _has_filled_rects_or_thick_strokes(page, (cx0, cy0, cx1, cy1)):
+            continue
+        # Expand the bbox to capture nearby text labels.
+        #
+        # Vertical expansion: one row-height margin above and below to capture
+        # year labels (below the bars) and chart title (above).
+        #
+        # Horizontal expansion: axis tick labels appear to the LEFT of the
+        # chart's vertical axis line (the leftmost drawing element).  Tick
+        # labels are typically 1-3 characters wide (~10-25pt at small fonts)
+        # and positioned a few pt to the left of the axis.  A single
+        # row_margin may not reach them (e.g. tick labels at x=54 with
+        # chart x0=73 and row_margin=13 → expanded x0=60 still misses x=54).
+        # To reliably capture them, extend x0 to 0 (page left edge): tick
+        # labels are the only content to the left of the axis in the chart's
+        # y-band, so this is safe.  On the right side, row_margin is enough.
+        pw = page.rect.width
+        ph = page.rect.height
+        expanded = fitz.Rect(
+            0.0,  # left: extend to page left edge to capture axis tick labels
+            max(0.0, cy0 - row_margin),
+            min(pw, cx1 + row_margin),
+            min(ph, cy1 + row_margin),
+        )
+        result.append(expanded)
+    return result
+
+
+def _word_in_any_bbox(w: tuple, bboxes: list) -> bool:
+    """Return True if word *w* falls inside any of the given ``fitz.Rect`` bboxes.
+
+    Only the word's top-left corner (x0, y0) is checked — the standard
+    convention for PyMuPDF word-in-region tests.
+    """
+    wx, wy = w[0], w[1]
+    for b in bboxes:
+        if b.x0 <= wx <= b.x1 and b.y0 <= wy <= b.y1:
+            return True
+    return False
+
+
 def rowize_from_words(page) -> list[tuple[object, str]]:
     """Return ``(rect, markdown)`` pairs built from word geometry on ``page``.
 
@@ -288,6 +587,73 @@ def rowize_from_words(page) -> list[tuple[object, str]]:
         return []
 
     return rowize_from_word_list(words)
+
+
+def rowize_from_words_chart_aware(
+    page,
+    page_num: int = 1,
+) -> list[tuple[object, str]]:
+    """Return ``(rect, content)`` pairs for table AND chart regions on *page*.
+
+    This is the TR-2 chart-aware variant of ``rowize_from_words``.  It:
+
+    1. Calls ``chart_region_bboxes(page)`` to get expanded chart-drawing bboxes.
+    2. Excludes words inside those bboxes from the table rowizer, so chart tick
+       labels and year labels do not dilute the historical table's
+       ``data_row_frac`` and cause ``_looks_tabular`` to reject it.
+    3. Returns a placeholder ``(rect, image_ref)`` entry for each chart cluster
+       so ``extract_structured`` can emit it in reading order.
+
+    The returned list contains BOTH table entries (``(rect, markdown_table)``)
+    and chart entries (``(rect, "![chart region N](chart_region_pN.png)")``)
+    sorted by ``rect.y0``.  The caller is responsible for building the final
+    reading-order output.
+
+    If no chart clusters exist on the page (or the page has no drawings), this
+    falls back to plain ``rowize_from_words(page)`` and returns no chart entries
+    — so the caller behaves identically to the TR-1 path for non-chart pages.
+
+    Never raises.  Returns ``[]`` if no valid table segment is found and no chart
+    regions exist.
+    """
+    chart_bboxes = chart_region_bboxes(page)
+    if not chart_bboxes:
+        # No chart regions — fall back to the plain rowizer (TR-1 path).
+        return rowize_from_words(page)
+
+    # Structural gate on the full word set (chart words included): if the page
+    # doesn't form a numeric grid at all, skip expensive clustering below.
+    if not has_numeric_columns(page):
+        # But still return chart placeholders so the chart region is represented.
+        result: list[tuple[object, str]] = []
+        for idx, cbbox in enumerate(chart_bboxes):
+            label = f"chart region {idx + 1}"
+            ref = f"![{label}](chart_region_p{page_num}_{idx + 1}.png)"
+            result.append((cbbox, ref))
+        return result
+
+    try:
+        all_words = page.get_text("words")
+    except Exception:
+        return rowize_from_words(page)
+
+    # Split words into chart words and non-chart (table/prose) words.
+    non_chart_words = [w for w in all_words if not _word_in_any_bbox(w, chart_bboxes)]
+
+    # Rowize the non-chart words.
+    table_regions = rowize_from_word_list(non_chart_words)
+
+    # Build placeholder entries for each chart cluster.
+    chart_regions: list[tuple[object, str]] = []
+    for idx, cbbox in enumerate(chart_bboxes):
+        label = f"chart region {idx + 1}"
+        ref = f"![{label}](chart_region_p{page_num}_{idx + 1}.png)"
+        chart_regions.append((cbbox, ref))
+
+    # Merge and sort by y0 (reading order, top-to-bottom).
+    all_regions = table_regions + chart_regions
+    all_regions.sort(key=lambda r: r[0].y0)
+    return all_regions
 
 
 def rowize_from_word_list(
@@ -365,6 +731,10 @@ def rowize_from_word_list(
         grid, x0, y0, x1, y1 = grid_and_rect
 
         cleaned = _clean_grid(grid)
+        # TR-2: collapse multi-line headers (e.g. indicator row + year row)
+        # into a single combined header row so the parity checker can match
+        # "GDP 2024" against the ground-truth column name "GDP_2024".
+        cleaned = _collapse_header_prefix(cleaned)
         if not _looks_tabular(cleaned):
             logger.debug(
                 "rowizer: segment y=%d..%d rejected by _looks_tabular", seg_ys[0], seg_ys[-1]

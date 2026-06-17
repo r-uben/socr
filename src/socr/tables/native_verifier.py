@@ -123,7 +123,19 @@ def _get_native_lane_count(page) -> tuple[int, dict[float, int]]:
         return 0, {}
     if not words:
         return 0, {}
+    return _lane_count_from_words(words)
 
+
+def _lane_count_from_words(words: list) -> tuple[int, dict[float, int]]:
+    """Cluster numeric x-positions from *words* into lanes.
+
+    Factored out of ``_get_native_lane_count`` so the same logic can be used
+    on a bbox-clipped word list (per-region scoping for TR-2).
+
+    Returns ``(lane_count, lane_of_x)`` where ``lane_of_x`` maps each
+    observed numeric token x0 → lane index.  Returns ``(0, {})`` on empty or
+    all-non-numeric input.
+    """
     # Collect x0 of numeric tokens
     num_xs: list[float] = [
         w[0] for w in words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])
@@ -157,6 +169,17 @@ def _rows_by_y(page) -> dict[float, list[tuple[float, str]]]:
         words = page.get_text("words")
     except Exception:
         return {}
+    return _rows_by_y_from_words(words)
+
+
+def _rows_by_y_from_words(words: list) -> dict[float, list[tuple[float, str]]]:
+    """Group numeric tokens from *words* by their rounded y-coordinate.
+
+    Factored out of ``_rows_by_y`` so the same logic can be used on a
+    bbox-clipped word list (per-region scoping for TR-2).
+
+    Returns ``{y: [(x, word), ...]}``, sorted by x within each row.
+    """
     row_map: dict[float, list[tuple[float, str]]] = {}
     for w in words:
         x0, y0, _x1, _y1, word, *_ = w
@@ -360,63 +383,57 @@ def _pair_output_to_native_rows(
 
 
 # --------------------------------------------------------------------------
-# Public entry point
+# Public entry points
 # --------------------------------------------------------------------------
 
 
-def verify_native_table(page, output_text: str) -> VerifierResult:
-    """Two-tier deterministic verifier for one born-digital table page.
+def _verify_from_words(
+    words: list,
+    output_text: str,
+    scope_label: str = "page",
+) -> VerifierResult:
+    """Core verifier logic on a pre-fetched / pre-clipped word list.
+
+    Factored out of ``verify_native_table`` so the same two-tier check can be
+    run on a bbox-scoped word list (per-region verification, TR-2) without
+    repeating the logic.
 
     Args:
-        page:        A live fitz.Page object (PyMuPDF).  Must have native
-                     text layer (get_text("words") non-empty for born-digital).
+        words:       PyMuPDF ``get_text("words")`` tuples for the scope being
+                     verified (whole page or a bbox-clipped sub-set).
         output_text: The OCR output text to verify.
+        scope_label: Human-readable label for debug messages (e.g. "page" or
+                     "region y=60..140").
 
     Returns a VerifierResult with hard_fail / warn flags and context.
     """
     result = VerifierResult()
 
-    # Scan bypass: no native word geometry → page is scanned or no numbers
-    try:
-        words = page.get_text("words")
-    except Exception:
-        logger.debug("native_verifier: get_text failed, bypassing")
-        return result
-    if not words:
-        logger.debug("native_verifier: no native words (scan page), bypassing")
-        return result
-
     # Parse output structure
     output_col_count = _parse_output_col_count(output_text)
     if output_col_count < 2:
-        # Cannot verify without a recognizable markdown grid
         logger.debug(
-            "native_verifier: output has no parseable markdown table (col_count=%d), bypassing",
+            "native_verifier [%s]: no parseable markdown table (col_count=%d), bypassing",
+            scope_label,
             output_col_count,
         )
         return result
 
-    # Cluster native numeric tokens into lanes (page-level)
-    lane_count, lane_of = _get_native_lane_count(page)
+    # Cluster numeric tokens into lanes (scoped to the supplied word list).
+    lane_count, lane_of = _lane_count_from_words(words)
     result.native_lane_count = lane_count
     result.output_col_count = output_col_count
 
     if lane_count == 0:
-        # No numeric tokens in native layer → no geometry to compare
         return result
 
     # ------------------------------------------------------------------
     # Tier 1: Hard-fail — geometry-impossible row collapse
-    #
-    # For each native data row: count how many WELL-SEPARATED numeric lanes
-    # it occupies.  Then check the corresponding output markdown row's
-    # populated cell count.  If native_well_separated_lanes > output_cells,
-    # this is geometry-impossible (values must have been merged/dropped).
     # ------------------------------------------------------------------
-    native_rows = _rows_by_y(page)
+    native_rows = _rows_by_y_from_words(words)
     output_data_rows = _parse_output_data_rows(output_text)
 
-    native_row_list = sorted(native_rows.items())  # [(y, [(x, word), ...]), ...]
+    native_row_list = sorted(native_rows.items())
     paired_rows = _pair_output_to_native_rows(native_row_list, output_data_rows)
 
     hard_fail_rows: list[dict] = []
@@ -443,20 +460,12 @@ def verify_native_table(page, output_text: str) -> VerifierResult:
             f"but fewer output cells "
             f"(native_lane_count={lane_count}, output_col_count={output_col_count})"
         )
-        logger.debug("native_verifier hard-fail: %s", result.reason)
+        logger.debug("native_verifier [%s] hard-fail: %s", scope_label, result.reason)
         return result
 
     # ------------------------------------------------------------------
     # Tier 2: Warn-and-defer — ambiguous lane-count mismatch
-    #
-    # Overall native lane count != output column count, but no row-level
-    # geometry-impossible collapse was found.  Record a warning; let the
-    # VLM judge decide.
     # ------------------------------------------------------------------
-    # Allow a stub/label column with no numbers: native lanes count only
-    # numeric tokens, output cols include the label column.  So a mismatch
-    # of exactly 1 (output_col_count == native_lane_count + 1) is expected
-    # and should NOT warn.  Larger mismatches (>=2) are worth noting.
     col_gap = abs(output_col_count - lane_count)
     if col_gap >= 2:
         result.warn = True
@@ -465,6 +474,76 @@ def verify_native_table(page, output_text: str) -> VerifierResult:
             f"output_cols={output_col_count}, gap={col_gap} "
             f"(paired/spanning headers possible — deferring to VLM)"
         )
-        logger.debug("native_verifier warn: %s", result.reason)
+        logger.debug("native_verifier [%s] warn: %s", scope_label, result.reason)
 
     return result
+
+
+def verify_native_table(page, output_text: str) -> VerifierResult:
+    """Two-tier deterministic verifier for one born-digital table page.
+
+    Args:
+        page:        A live fitz.Page object (PyMuPDF).  Must have native
+                     text layer (get_text("words") non-empty for born-digital).
+        output_text: The OCR output text to verify.
+
+    Returns a VerifierResult with hard_fail / warn flags and context.
+    """
+    result = VerifierResult()
+
+    # Scan bypass: no native word geometry → page is scanned or no numbers
+    try:
+        words = page.get_text("words")
+    except Exception:
+        logger.debug("native_verifier: get_text failed, bypassing")
+        return result
+    if not words:
+        logger.debug("native_verifier: no native words (scan page), bypassing")
+        return result
+
+    return _verify_from_words(words, output_text, scope_label="page")
+
+
+def verify_native_table_region(
+    page,
+    output_text: str,
+    region_bbox,
+) -> VerifierResult:
+    """Per-region variant of ``verify_native_table``.
+
+    Scopes the native geometry check to words WITHIN *region_bbox* rather than
+    the whole page.  This is the TR-2 fix for the false
+    ``geometry_impossible_collapse`` that fires when a page contains multiple
+    tables: whole-page lane counting combines all schemas into a single
+    (too-high) lane count and compares it to a single table's column count.
+
+    Per-region scoping means each table region is verified against its own
+    numeric lanes, so a 4-column historical table with 3 data-lanes passes
+    cleanly even when the main forecaster grid contributes 4 more lanes on
+    the same page.
+
+    Args:
+        page:         A live fitz.Page object (PyMuPDF).
+        output_text:  The OCR output text to verify (should be the markdown for
+                      this region only, not the whole-page output).
+        region_bbox:  A ``fitz.Rect`` (or anything with ``.x0 .y0 .x1 .y1``)
+                      bounding the table region to scope verification to.
+
+    Returns a VerifierResult scoped to the region.
+    """
+    try:
+        all_words = page.get_text("words")
+    except Exception:
+        logger.debug("native_verifier_region: get_text failed, bypassing")
+        return VerifierResult()
+    if not all_words:
+        return VerifierResult()
+
+    # Clip words to the region bbox (top-left corner of each word must be inside).
+    rx0, ry0, rx1, ry1 = region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1
+    region_words = [w for w in all_words if rx0 <= w[0] <= rx1 and ry0 <= w[1] <= ry1]
+    if not region_words:
+        return VerifierResult()
+
+    scope_label = f"region y={ry0:.0f}..{ry1:.0f}"
+    return _verify_from_words(region_words, output_text, scope_label=scope_label)

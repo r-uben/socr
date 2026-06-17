@@ -141,6 +141,18 @@ def assert_table_parity(
             f"Tables found: {len(md_tables)}. "
             "This usually means the tables are collapsed or merged."
         )
+    # Upper-bound guard: over-segmentation (rowizer splits one table into many)
+    # produces more grids than expected and may cause cell-parity mismatches by
+    # scattering rows across fragmented tables.  We allow at most one extra table
+    # per expected table region (e.g. a multi-header that splits on collapse).
+    max_tables = len(table_regions) + 1
+    if len(md_tables) > max_tables:
+        errors.append(
+            f"OVER-SEGMENTED: expected at most {max_tables} markdown tables "
+            f"(len(table_regions)={len(table_regions)} + 1 tolerance), "
+            f"got {len(md_tables)}. "
+            "This usually means the rowizer over-split one table into multiple grids."
+        )
 
     # ------------------------------------------------------------------
     # 2. Per-table cell parity
@@ -189,10 +201,14 @@ def assert_table_parity(
         header_row = matched_grid[0]
         # Map column names to grid column indices.
         # The first cell in each data row is the row label (forecaster name etc.)
+        # Normalize underscores to spaces before comparing so "GDP_2024" matches
+        # a header cell produced as "GDP 2024" by the multi-line-header collapser.
         col_idx: dict[str, int] = {}
         for col in columns:
+            col_norm = col.replace("_", " ")
             for ci, hdr_cell in enumerate(header_row):
-                if col in hdr_cell or hdr_cell in col:
+                hdr_norm = hdr_cell.replace("_", " ")
+                if col_norm in hdr_norm or hdr_norm in col_norm:
                     col_idx[col] = ci
                     break
 
@@ -603,28 +619,24 @@ class TestAssertTableParity:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end agentic test  (xfail — TR-1…TR-3 not yet built)
+# End-to-end agentic test  (TR-2 implemented — xfail removed)
 # ---------------------------------------------------------------------------
 
 
 class TestEndToEndParity:
     """Drive ``UnifiedPipeline.process()`` on the fixture and assert full parity.
 
-    Today's pipeline collapses the whitespace-gutter tables; the assertion is
-    expected to fail until TR-1…TR-3 fix the rowizer + per-region path.
+    TR-2 (chart-clip + per-region verifier + token coverage + reading-order
+    reassembly) is now implemented, so this test must PASS.
     """
 
-    @pytest.mark.xfail(
-        reason="GH-56 TR-1..TR-3 not yet implemented: pipeline collapses whitespace-gutter tables",
-        strict=True,
-    )
     def test_agentic_parity_on_ce_like_fixture(self, tmp_path: Path) -> None:
         """Full agentic run on the fixture must pass cell-parity for both tables.
 
         Hermeticity:
           - ``_available_engines_for_agentic`` is patched → no ollama required.
           - ``route_page`` is patched → no VLM call; the page uses the
-            born-digital / native text path (the path TR-1 fixes).
+            born-digital / native text path (the path TR-2 fixes).
           - ``probe_ollama_idle`` is patched → no network call.
 
         The born-digital page is classified as a native page by ``_phase_agentic``

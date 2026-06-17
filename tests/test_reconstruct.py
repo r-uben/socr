@@ -7,6 +7,7 @@ import fitz
 from socr.core.born_digital import BornDigitalDetector
 from socr.tables.reconstruct import (
     _clean_grid,
+    _collapse_header_prefix,
     _grid_to_markdown,
     _is_runhead,
     _looks_tabular,
@@ -207,3 +208,44 @@ def test_prose_with_small_embedded_table_is_not_whole_page_gridded():
     import re
 
     assert not re.search(r"\| [a-z] \|", out)  # no mid-word character-split cells
+
+
+# ---------------------------------------------------------------------------
+# _collapse_header_prefix safety tests (TR-2 reviewer requirements)
+# ---------------------------------------------------------------------------
+
+
+def test_all_na_data_row_not_swallowed():
+    """An all-na forecaster row must NEVER be merged into the header prefix.
+
+    The grid here has one empty-col-0 header row (indicator names) followed by
+    a row where col 0 = 'Forecaster' AND data cols contain year values —
+    that row has non-empty data cells so the scan stops before 'EarlyFirm'.
+    'EarlyFirm' is an all-na data row and must remain a data row.
+    """
+    grid = [
+        ["", "GDP", "GDP"],
+        ["Forecaster", "2024", "2025"],
+        ["EarlyFirm", "", "", ""],
+        ["LateFirm", "2.1", "1.8"],
+    ]
+    data_rows = _collapse_header_prefix(grid)[1:]
+    assert any("EarlyFirm" in r[0] for r in data_rows), (
+        "all-na first data row was swallowed into the header prefix"
+    )
+
+
+def test_integer_only_data_row_not_swallowed():
+    """An integer-only data row must NOT be merged into the header prefix.
+
+    Car Sales has integer values (16, 17) in data cols, so the row is a data
+    row and must survive collapse_header_prefix as a body row.
+    """
+    grid = [
+        ["Indicator", "2021", "2022"],
+        ["Car Sales", "16", "17"],
+    ]
+    data_rows = _collapse_header_prefix(grid)[1:]
+    assert any("Car Sales" in r[0] for r in data_rows), (
+        "integer-only data row was swallowed into the header prefix"
+    )

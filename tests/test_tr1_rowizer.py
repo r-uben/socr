@@ -342,17 +342,18 @@ class TestExtractStructuredOnFixture:
         doc.close()
         return text
 
-    def test_produces_exactly_one_markdown_table(self, structured_text):
-        """After TR-1, extract_structured should produce exactly one markdown table.
+    def test_produces_at_least_one_markdown_table(self, structured_text):
+        """After TR-1, extract_structured should produce at least one markdown table.
 
-        The historical table is not yet extracted as a grid (that is TR-2/TR-3
-        territory — it requires splitting the chart region from the hist table).
-        One grid is the TR-1 success criterion; two grids is TR-2/TR-3.
+        TR-1 success criterion: the main forecaster grid is extracted as a grid.
+        TR-2 additionally extracts the historical table, so ≥ 2 tables is expected
+        after TR-2 is implemented.  This test relaxes the strict == 1 assertion so
+        the TR-2 improvement does not count as a regression for TR-1's check.
         """
         tables = _find_md_tables(structured_text)
-        assert len(tables) == 1, (
-            f"Expected exactly 1 markdown table after TR-1, got {len(tables)}. "
-            "If 0: rowizer gate is broken. If 2: TR-2 landed too early."
+        assert len(tables) >= 1, (
+            f"Expected at least 1 markdown table, got {len(tables)}. "
+            "The rowizer gate may be broken."
         )
 
     def test_main_table_values_correct(self, structured_text):
@@ -374,11 +375,11 @@ class TestExtractStructuredOnFixture:
         )
         assert "Blanks indicate" in structured_text, "Prose sentence 'Blanks indicate' dropped."
 
-    def test_historical_data_present_as_text(self, structured_text):
-        """The historical data must still appear (as flat text or grid) in the output."""
-        # After TR-1, the hist table appears as flat text (not yet a grid).
-        # Check that its key labels and values are present somewhere.
-        assert "Historical Data" in structured_text or "GDP Actual" in structured_text, (
+    def test_historical_data_present(self, structured_text):
+        """The historical data must appear in the output (as grid or flat text)."""
+        # After TR-1 the hist table appeared as flat text; after TR-2 it is a grid.
+        # Either way, the key label must be present somewhere in the output.
+        assert "GDP Actual" in structured_text, (
             "Historical table content dropped entirely — unexpected regression."
         )
 

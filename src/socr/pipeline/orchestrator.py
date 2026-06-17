@@ -1205,6 +1205,105 @@ class UnifiedPipeline:
             raise RuntimeError(f"chart-lane PNG save failed for p{page_num}: {exc}") from exc
         return str(out_path)
 
+    def _render_chart_region_pngs(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        native_text: str,
+        figures_dir: Path,
+    ) -> str:
+        """TR-2: render chart region bbox crops and update placeholder paths.
+
+        ``rowize_from_words_chart_aware`` embeds chart region placeholders of
+        the form ``![chart region N](chart_region_pP_N.png)`` in
+        ``ps.native_text``.  Those bare filenames have no path prefix, so
+        ``strip_phantom_images`` (called with ``output_dir=doc_dir``) strips
+        them because the files do not exist on disk.
+
+        This method:
+        1. Detects any ``chart_region_p{page_num}_{i}.png`` placeholders in
+           ``native_text``.
+        2. Opens the PDF page, calls ``chart_region_bboxes`` to get the
+           cluster bboxes (same as the rowizer used when generating the
+           placeholders).
+        3. Renders each bbox as a cropped PNG and saves to ``figures_dir``.
+        4. Returns updated ``native_text`` with
+           ``{figures_dir.name}/{filename}`` paths so the files are resolvable
+           against ``doc_dir`` and survive ``strip_phantom_images``.
+
+        On any error, returns ``native_text`` unchanged (fail-open: the
+        placeholder stays, strip_phantom_images will remove it, and the page
+        is treated as chart-asset-failed by the provenance audit).
+
+        Never raises.
+        """
+        import re
+
+        pattern = re.compile(rf"\(chart_region_p{page_num}_(\d+)\.png\)")
+        if not pattern.search(native_text):
+            return native_text
+
+        try:
+            import fitz
+
+            from socr.figures.extractor import RENDER_DPI
+            from socr.tables.reconstruct import chart_region_bboxes
+
+            figures_dir.mkdir(parents=True, exist_ok=True)
+
+            with fitz.open(str(pdf_path)) as _doc:
+                _page = _doc[page_num - 1]
+                bboxes = chart_region_bboxes(_page)
+
+            rendered_indices: set[int] = set()
+            for m in pattern.finditer(native_text):
+                region_idx = int(m.group(1))
+                if region_idx < 1 or region_idx > len(bboxes):
+                    continue
+                bbox = bboxes[region_idx - 1]
+                fname = f"chart_region_p{page_num}_{region_idx}.png"
+                out_path = figures_dir / fname
+                try:
+                    with fitz.open(str(pdf_path)) as _doc:
+                        _page = _doc[page_num - 1]
+                        mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
+                        pix = _page.get_pixmap(matrix=mat, clip=bbox)
+                        pix.save(str(out_path))
+                    rendered_indices.add(region_idx)
+                    logger.debug("TR-2: saved chart region PNG %s", out_path)
+                except Exception as render_exc:
+                    logger.warning(
+                        "TR-2 chart region PNG render failed for p%d region %d: %s",
+                        page_num,
+                        region_idx,
+                        render_exc,
+                    )
+
+            if not rendered_indices:
+                # No PNGs saved — return original text so strip_phantom_images
+                # removes the placeholder and the audit records the failure.
+                return native_text
+
+            # Update placeholder paths to ``figures/{filename}`` so the files
+            # resolve correctly against ``doc_dir`` in strip_phantom_images.
+            figures_dir_name = figures_dir.name
+
+            def _replace_path(m: re.Match[str]) -> str:
+                region_idx = int(m.group(1))
+                if region_idx in rendered_indices:
+                    return f"({figures_dir_name}/chart_region_p{page_num}_{region_idx}.png)"
+                return m.group(0)  # keep original if PNG was not saved
+
+            return pattern.sub(_replace_path, native_text)
+
+        except Exception as exc:
+            logger.warning(
+                "TR-2 _render_chart_region_pngs failed for p%d: %s",
+                page_num,
+                exc,
+            )
+            return native_text
+
     # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
     # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
@@ -1677,6 +1776,19 @@ class UnifiedPipeline:
                 # any native-text fallback as audit-failed.
                 if not decision.accepted and self._page_has_tables(page_num, ps):
                     ps.native_table_structure_failed = True
+                    # TR-2: render chart region PNG crops and update placeholder
+                    # paths in ps.native_text so strip_phantom_images (called in
+                    # _phase_assemble with output_dir=doc_dir) finds the files.
+                    # If ps.native_text contains no chart region placeholders this
+                    # is a no-op; on render failure it returns native_text unchanged
+                    # (fail-open: placeholder is stripped as before).
+                    if ps.native_text and _chart_figures_dir is not None:
+                        ps.native_text = self._render_chart_region_pngs(
+                            state.handle.path,
+                            page_num,
+                            ps.native_text,
+                            _chart_figures_dir,
+                        )
 
                 # Record cost so DocumentState.total_cost reflects spend.
                 state.engine_runs.append(

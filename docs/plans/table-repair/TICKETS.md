@@ -116,8 +116,7 @@ region-scoped entry point.
 ## TR-2 — Per-region verifier scoping + reading-order reassembly
 
 GitHub: https://github.com/r-uben/socr/issues/56
-Status: **NEEDS-DESIGN** (segmentation-split spike) → READY for the verifier-scoping half ·
-Priority: P0 · Agent: `socr-designer` (spike) then `socr-implementer` · Depends on: TR-1 · Wave 2
+Status: **DONE** · Priority: P0 · Agent: `socr-implementer` · Depends on: TR-1 · Wave 2
 
 ### Problem
 The native verifier counts lanes over the WHOLE page (`native_verifier.py:~114-148`): it compared
