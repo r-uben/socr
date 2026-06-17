@@ -188,15 +188,69 @@ plausible-but-wrong artifact. The panel's Q1 verdict is **D3: ship neither flawe
 
 ---
 
-## TR-4 — A2 value-guarded VLM re-ask (DEFERRED to v2)
+## v2 — UNBLOCKED by real-CE evidence (2026-06-17)
 
-Status: **DEFERRED** (v2) · Depends on: TR-3 + measured evidence that deterministic v1 is
-insufficient on real CE grids.
+The measured trigger the panel required has fired: deterministic v1 (TR-1…TR-3) gets the **values
+and columns right on real CE but breaks the ROW structure** (top block merged, names offset from
+values by one row — gap-segmentation can't handle CE's dense/variable spacing). See
+`docs/log/2026-06-17_real-CE-v1-finding.md`. v2 brings the VLM in for STRUCTURE, geometry-guarded
+for VALUES.
 
-One geometry-constrained re-ask ("N rows, C columns from the word lanes; every data row has exactly
-C cells; `na` for blanks"), accepted ONLY on **lane-aware token EQUALITY / no-extra-tokens** (the
-panel's refinement — loose "superset" lets the VLM invent numbers into blanks and pass). Puts a
-model in the repair loop → only build if v1 deterministic recovery measurably falls short.
+---
+
+## TR-4a — Real-CE-geometry fixture (the failing gate) — DO FIRST
+
+GitHub: https://github.com/r-uben/socr/issues/56
+Status: **READY** · Priority: P0 · Agent: `socr-implementer` · Depends on: none
+
+### Problem
+The TR-0 fixture used clean, evenly-spaced single-line rows → it went green while real CE stays
+broken (false confidence). v2 needs a fixture that REPRODUCES real CE's row geometry so "green"
+means green.
+
+### Plan
+1. From a real CE page (e.g. `202401.pdf` p.4), extract the **actual row y-positions and x-lane
+   positions** (geometry only). License-clean: copy the COORDINATES, synthesize fake forecaster
+   names + numbers placed at those real positions — never commit CE text/numbers.
+2. Regenerate the fixture (or add a second `ce_like_p4_dense.pdf`) reproducing: the tight top
+   block, the small name/value vertical offset, the summary rows (Consensus/High/Low). Update
+   ground-truth.
+3. The e2e parity test must now FAIL (`xfail(strict=True)`, or a new dense-fixture test) —
+   reproducing the real-CE row-merge/offset failure. This is TR-4's acceptance gate.
+
+### Write ownership
+`tests/fixtures/table_repair/` + `tests/test_table_repair_parity.py`. No `src/` changes.
+
+---
+
+## TR-4 — Value-guarded VLM-for-structure (NEEDS-DESIGN → then implement)
+
+GitHub: https://github.com/r-uben/socr/issues/56
+Status: **NEEDS-DESIGN** · Priority: P0 · Agent: `socr-designer` then `socr-implementer` ·
+Depends on: TR-4a
+
+### Goal
+When the deterministic rowizer's output fails its verifier (real CE) — or there is no geometry
+(scanned page) — escalate to the VLM for the table STRUCTURE, accept it ONLY if geometry confirms
+the VALUES, else fail closed to the image (D3). The rowizer stays the free first pass; the VLM is
+the escalation.
+
+### Design questions (socr-designer pass)
+1. **Escalation trigger + where it wires.** The VLM fires when `native_table_verifier` hard-fails
+   the rowized grid (the real-CE path) OR the page is not born-digital. Where in the agentic ladder
+   does this sit, and how does it relate to TR-3's D3 floor?
+2. **The value-guard (the crux).** The VLM proposes rows×columns; accept ONLY if its numeric-token
+   multiset, **lane-aware**, EQUALS the page's native numeric tokens (born-digital) — no invented,
+   no dropped, no shifted. Specify the exact check. For SCANNED pages there is no native-token net —
+   what is the accept criterion (lower-confidence ship + flag)?
+3. **Prompt constraint without magic numbers.** Feed native geometry (N rows, C columns, row
+   labels) as a hard constraint; derive N/C from the page, not a constant.
+4. **Fail-closed integration.** A VLM structure that fails the value-guard must route to the TR-3
+   D3 image floor. Confirm D3 covers the agentic verifier path (the gap real CE exposed: D3 didn't
+   fire because the failure was on the agentic `NativeTableVerifierJudge` path, not born-digital
+   `_verify_regions`).
+
+### Then implement against the TR-4a failing gate.
 
 ---
 

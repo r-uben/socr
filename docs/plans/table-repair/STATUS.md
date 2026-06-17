@@ -4,10 +4,16 @@ Last updated: 2026-06-17
 
 ## Stage
 
-**Wave 1 COMPLETE. TR-0, TR-1, TR-2, TR-3 DONE.** v1 deterministic pipeline is fully
-implemented: per-region segmentation → rowizer (B) → D3 fail-closed floor (TR-3).
-TR-0 parity test passes (both tables, chart image-ref, prose, correct reading order).
-TR-3 adds 18 tests; full suite at 1140 passed.
+**Wave 1 (v1 deterministic) MERGED — but real CE proved it INSUFFICIENT.** TR-0…TR-3 are in
+`main`; the SYNTHETIC fixture passes. Validating on the REAL CE `202401.pdf` p.4 (2026-06-17):
+v1 gets VALUES + COLUMNS right and flags itself honestly, but **breaks the ROW structure** (top
+block merged, names offset from values by one row — gap-segmentation can't handle CE's dense/
+variable spacing). The clean fixture gave false confidence. See
+`docs/log/2026-06-17_real-CE-v1-finding.md`.
+
+**→ Moving to v2: VLM for STRUCTURE, geometry value-guard for VALUES** (the panel's A2/S3, now
+unblocked by measured evidence). TR-4a (real-geometry fixture = the failing gate) first, then TR-4
+(value-guarded VLM-for-structure) after a design pass.
 
 ## Branch
 
@@ -57,4 +63,5 @@ TR-3 adds 18 tests; full suite at 1140 passed.
 
 ## Next action
 
-v1 wave complete. Measure v1 on real CE `202401.pdf` before dispatching v2 (TR-4/TR-5).
+Real-CE measurement done → v1 insufficient on row structure. Dispatch **TR-4a** (real-geometry
+failing fixture) and the **TR-4 design pass** (value-guarded VLM-for-structure) concurrently.
