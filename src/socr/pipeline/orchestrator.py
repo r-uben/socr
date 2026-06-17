@@ -3025,8 +3025,30 @@ class UnifiedPipeline:
         input_checksum = safe_checksum(state.handle.path)
 
         ps = state.pages.get(page_num)
-        bo = ps.best_output if ps else None
-        winning_dict = bo.to_dict() if bo is not None else {}
+        # Provenance honesty (GH-56): record the output that ACTUALLY ships for
+        # this page — the same selection ``_winning_page_output`` freezes into the
+        # manifest (``build_manifest``) and the ``pages/NNN.md`` fragment
+        # (``canonical_page_texts``) — NOT the raw per-page OCR attempt
+        # (``best_output``).  They diverge precisely in the fallback cases: a
+        # rejected OCR attempt (status=SUCCESS yet audit_passed=False) overridden
+        # by a flagged born-digital native-text fallback (engine="native",
+        # WARNING), or a CLI whole-doc attempt recovered into per-page text.
+        # Recording ``best_output`` there made the sidecar disagree with the
+        # fragment AND fooled the resume gate, whose skip test reads
+        # ``winning_output.status``: a flagged native-fallback page kept
+        # status="success" and was SKIPPED on re-run, silently erasing its
+        # audit-failed signal.  We compute ``whole_doc`` exactly as the manifest
+        # and fragment do (None in the agentic path — no whole-doc CLI attempts —
+        # but real for non-agentic CLI runs) so the sidecar matches both paths.
+        from socr.core.manifest import (
+            _whole_doc_page_texts,
+            _winning_page_output,
+            is_page_failed_marker,
+        )
+
+        whole_doc = _whole_doc_page_texts(state)
+        winning_out = _winning_page_output(state, page_num, whole_doc) if ps else None
+        winning_dict = winning_out.to_dict() if winning_out is not None else {}
 
         # Audit events for this page only, serialised as plain dicts.
         page_events = [
@@ -3076,7 +3098,16 @@ class UnifiedPipeline:
             # Page-level fingerprint: the blob key of the winning output, if
             # available.  Empty string when no winning output exists (e.g. a
             # failed page).
-            "page_fingerprint": _page_blob_key(winning_dict) if winning_dict else "",
+            # A failure-marker winner (a page with no usable output anywhere) has
+            # no cached BlobStore entry to cross-reference, so its fingerprint
+            # stays "" — otherwise it would be a sha256 of synthesized marker text
+            # pointing at a blob that was never stored.  A real or native-fallback
+            # winner carries genuine text worth fingerprinting for change-detection.
+            "page_fingerprint": (
+                _page_blob_key(winning_dict)
+                if winning_dict and not is_page_failed_marker(winning_dict.get("text", ""))
+                else ""
+            ),
             # PageState decision flags NOT in PageOutput.to_dict (PP-5 consumers
             # need these to understand why a particular output was selected).
             "needs_ocr_enhancement": bool(ps.needs_ocr_enhancement) if ps else False,

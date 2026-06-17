@@ -27,8 +27,10 @@ import pytest
 
 from socr.core.born_digital import DocumentAssessment, PageAssessment
 from socr.core.config import EngineType, PipelineConfig
+from socr.core.document import DocumentHandle
 from socr.core.providers import PROFILE_GEMINI
 from socr.core.result import DocumentStatus, PageOutput, PageStatus
+from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 # ---------------------------------------------------------------------------
@@ -569,6 +571,113 @@ class TestNonTerminalNotSkipped:
         assert run2_calls == [2], (
             f"A non-SUCCESS terminal page must be re-OCR'd; p1 (clean) skipped. got {run2_calls}"
         )
+
+    def test_flagged_native_fallback_sidecar_records_winner_not_attempt(
+        self, tmp_path: Path
+    ) -> None:
+        """GH-56: a page that ships a FLAGGED native-text fallback (its OCR table
+        attempt was rejected by the table verifier) must record the NATIVE
+        fallback as ``winning_output`` — not the rejected OCR attempt.
+
+        Observed on the real Consensus Economics forecaster grid: qwen produced a
+        row-major table that the native-table verifier hard-failed; the page then
+        shipped the collapsed native-text fallback (engine="native", WARNING). But
+        the sidecar recorded ``best_output`` (the qwen attempt, status="success",
+        audit_passed=False), so:
+          1. the sidecar disagreed with the fragment that actually shipped, and
+          2. the resume gate — which reads ``winning_output.status`` — saw
+             "success" and would SKIP this flagged page on re-run, silently
+             erasing its audit-failed signal (the gate's own contract forbids
+             skipping a flagged native fallback).
+        The sidecar must instead record the selection ``_winning_page_output``
+        freezes into the manifest/fragment.
+        """
+        pytest.importorskip("fitz")
+        pdf_path = _real_pdf(tmp_path, page_count=1)
+        out_dir = tmp_path / "out"
+
+        pipeline = _make_pipeline(_make_config())
+        pipeline._scan_root = pdf_path.parent
+
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = "JANUARY 2024\n\n| names-collapsed | numbers-newline-stacked |"
+        ps.native_table_structure_failed = True
+        # A rejected OCR table attempt: extraction SUCCEEDED as an operation, but
+        # the native-table verifier hard-failed its grid (audit_passed=False).
+        # status stays SUCCESS — the exact shape that fooled the resume gate.
+        rejected = PageOutput(
+            page_num=1,
+            text="# UNITED STATES\n\n| Goldman Sachs | 2.3 | 1.9 |",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=False,
+        )
+        ps.attempts.append(rejected)
+        ps.best_output = rejected
+
+        # Flush what actually ships (the native fallback body) + the terminal sidecar.
+        pipeline._flush_page_fragment(state, 1, ps.native_text, out_dir)
+        pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+
+        sidecar = next(out_dir.rglob("pages/00001.json"))
+        meta = json.loads(sidecar.read_text())
+
+        # Provenance honesty: the sidecar names the NATIVE fallback that shipped,
+        # not the rejected qwen attempt.
+        assert meta["winning_output"]["engine"] == "native", meta["winning_output"]
+        assert meta["winning_output"]["status"] == PageStatus.WARNING.value
+        assert meta["winning_output"]["audit_passed"] is False
+        assert meta["status"] == PageStatus.WARNING.value
+        assert meta["engine"] == "native"
+
+        # Resume correctness: same fingerprint + checksum + terminal=True, so the
+        # ONLY thing that can force a reprocess is the now-honest non-SUCCESS
+        # status. The flagged page must NOT be skipped.
+        assert pipeline._load_terminal_page(state, 1, out_dir) is None
+
+    def test_whole_doc_recovery_sidecar_matches_manifest(self, tmp_path: Path) -> None:
+        """GH-56 (non-agentic path): a page whose text was recovered from a CLI
+        whole-document attempt must record that recovered output in the sidecar —
+        the SAME selection ``build_manifest`` and the fragment use — not a failure
+        marker.
+
+        ``_flush_page_sidecar`` runs in ``_phase_assemble`` for every pipeline
+        path, including non-agentic CLI-engine runs where ``best_output`` is never
+        populated and the text lives in ``state.whole_doc_attempts``. The sidecar
+        must compute ``whole_doc`` exactly as the manifest does; passing
+        ``whole_doc=None`` here would freeze a failure marker that disagrees with
+        the shipped fragment.
+        """
+        pytest.importorskip("fitz")
+        pdf_path = _real_pdf(tmp_path, page_count=1)
+        out_dir = tmp_path / "out"
+
+        pipeline = _make_pipeline(_make_config())
+        pipeline._scan_root = pdf_path.parent
+
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        # A CLI whole-doc engine populates whole_doc_attempts (page_num=0), never
+        # the per-page best_output slots.
+        state.whole_doc_attempts.append(
+            PageOutput(
+                page_num=0,
+                text="## Page 1\n\nrecovered whole-doc body for page one",
+                status=PageStatus.SUCCESS,
+                engine="marker",
+                audit_passed=True,
+            )
+        )
+        assert state.pages[1].best_output is None
+
+        pipeline._flush_page_fragment(state, 1, "recovered whole-doc body for page one", out_dir)
+        pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+
+        meta = json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
+        assert meta["winning_output"]["engine"] == "marker", meta["winning_output"]
+        assert "recovered whole-doc body" in meta["winning_output"]["text"]
+        assert meta["status"] == PageStatus.SUCCESS.value
 
     def test_failure_marker_body_reprocessed(self, tmp_path: Path) -> None:
         """A terminal page whose fragment body is a page-failure marker must be
