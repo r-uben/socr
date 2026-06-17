@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "fixture": "ce_like_p4.pdf",
+  "description": "Synthesized CE-p4-like fixture: born-digital, no ruling lines. Two numeric tables (main forecaster grid + historical data), one vector chart region, one prose text box.",
+  "regions": [
+    {
+      "id": "main_table",
+      "kind": "table",
+      "order": 0,
+      "schema": "forecaster_grid",
+      "columns": [
+        "GDP_2024",
+        "GDP_2025",
+        "CPI_2024",
+        "CPI_2025"
+      ],
+      "row_labels": [
+        "Ashford Capital",
+        "Brightwater Research",
+        "Clearview Economics",
+        "Dunmore Analytics",
+        "Eastfield Partners",
+        "Fenwick Group"
+      ],
+      "cells": {
+        "Ashford Capital|GDP_2024": "2.1",
+        "Ashford Capital|GDP_2025": "1.9",
+        "Ashford Capital|CPI_2024": "3.4",
+        "Ashford Capital|CPI_2025": "2.8",
+        "Brightwater Research|GDP_2024": "2.3",
+        "Brightwater Research|GDP_2025": "na",
+        "Brightwater Research|CPI_2024": "3.1",
+        "Brightwater Research|CPI_2025": "2.6",
+        "Clearview Economics|GDP_2024": "1.8",
+        "Clearview Economics|GDP_2025": "2.0",
+        "Clearview Economics|CPI_2024": "3.6",
+        "Clearview Economics|CPI_2025": "3.0",
+        "Dunmore Analytics|GDP_2024": "2.5",
+        "Dunmore Analytics|GDP_2025": "2.2",
+        "Dunmore Analytics|CPI_2024": "3.2",
+        "Dunmore Analytics|CPI_2025": "na",
+        "Eastfield Partners|GDP_2024": "2.0",
+        "Eastfield Partners|GDP_2025": "1.8",
+        "Eastfield Partners|CPI_2024": "3.5",
+        "Eastfield Partners|CPI_2025": "2.9",
+        "Fenwick Group|GDP_2024": "1.7",
+        "Fenwick Group|GDP_2025": "na",
+        "Fenwick Group|CPI_2024": "na",
+        "Fenwick Group|CPI_2025": "2.7"
+      },
+      "ragged_rows": [
+        "Fenwick Group"
+      ],
+      "na_cells": [
+        "Brightwater Research|GDP_2025",
+        "Dunmore Analytics|CPI_2025",
+        "Fenwick Group|GDP_2025",
+        "Fenwick Group|CPI_2024"
+      ]
+    },
+    {
+      "id": "chart",
+      "kind": "chart",
+      "order": 1,
+      "description": "Synthesized Federal Budget chart (vector drawing, no data values)",
+      "cells": {}
+    },
+    {
+      "id": "historical_table",
+      "kind": "table",
+      "order": 2,
+      "schema": "historical_data",
+      "columns": [
+        "2021",
+        "2022",
+        "2023"
+      ],
+      "row_labels": [
+        "GDP Actual",
+        "CPI Actual",
+        "Unemployment"
+      ],
+      "cells": {
+        "GDP Actual|2021": "5.9",
+        "GDP Actual|2022": "2.1",
+        "GDP Actual|2023": "2.5",
+        "CPI Actual|2021": "4.7",
+        "CPI Actual|2022": "8.0",
+        "CPI Actual|2023": "4.1",
+        "Unemployment|2021": "5.4",
+        "Unemployment|2022": "3.7",
+        "Unemployment|2023": "3.5"
+      },
+      "ragged_rows": [],
+      "na_cells": []
+    },
+    {
+      "id": "prose",
+      "kind": "text",
+      "order": 3,
+      "description": "Government and Background Data text box",
+      "cells": {}
+    }
+  ]
+}
