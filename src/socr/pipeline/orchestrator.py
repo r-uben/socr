@@ -1815,6 +1815,41 @@ class UnifiedPipeline:
                     ps.attempts.append(att.output)
                 ps.best_output = decision.final_output
 
+                # GH-56: deterministic header repair for collapsed multi-band tables.
+                if ps.best_output and ps.best_output.text and self._page_has_tables(page_num, ps):
+                    try:
+                        import fitz
+
+                        from socr.tables.header_repair import repair_table_headers_on_page
+
+                        with fitz.open(state.handle.path) as _hdr_doc:
+                            _repaired_text, _hdr_n = repair_table_headers_on_page(
+                                _hdr_doc[page_num - 1],
+                                ps.best_output.text,
+                            )
+                        if _hdr_n > 0:
+                            ps.best_output.text = _repaired_text
+                            from socr.core.audit_log import AuditEvent
+
+                            state.events.append(
+                                AuditEvent(
+                                    page_num=page_num,
+                                    kind="table_header_repair",
+                                    engine=ps.best_output.engine or "",
+                                    detail=(
+                                        f"rebuilt {_hdr_n} collapsed table header(s) "
+                                        "from native geometry (post-route)"
+                                    ),
+                                    data={"repair_count": _hdr_n},
+                                )
+                            )
+                    except Exception as exc:
+                        logger.debug(
+                            "agentic header repair skipped on p%d (%s)",
+                            page_num,
+                            exc,
+                        )
+
                 # Provenance guard: when the judge rejected ALL ladder rungs for a
                 # born-digital table page, mark the page so _assemble_result treats
                 # any native-text fallback as audit-failed.

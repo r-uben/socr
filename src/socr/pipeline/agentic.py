@@ -404,6 +404,7 @@ class NativeTableVerifierJudge:
         try:
             fitz_page = self._get_fitz_page(page_num)
             vr = verify_native_table(fitz_page, output.text)
+            vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
         except Exception as exc:
             logger.warning(
                 "NativeTableVerifierJudge: verifier raised on p%d (%s); delegating to inner judge",
@@ -496,6 +497,43 @@ class NativeTableVerifierJudge:
 
         # No issue detected → delegate to inner judge
         return self._inner.assess(output, provider)
+
+    def _maybe_repair_collapsed_headers(self, fitz_page, output: PageOutput, vr):
+        """Rebuild collapsed multi-band headers from native geometry when detected."""
+        from socr.tables.header_repair import (
+            detect_header_column_collapse,
+            repair_table_headers_on_page,
+        )
+        from socr.tables.native_verifier import verify_native_table
+        from socr.tables.reconcile import find_table_blocks
+
+        blocks = find_table_blocks(output.text)
+        if not blocks or not any(detect_header_column_collapse(b.grid)[0] for b in blocks):
+            return vr
+
+        repaired_text, repair_count = repair_table_headers_on_page(fitz_page, output.text)
+        if repair_count == 0:
+            return vr
+
+        output.text = repaired_text
+        new_vr = verify_native_table(fitz_page, repaired_text)
+        self._emit_event(
+            page_num=output.page_num,
+            kind="table_header_repair",
+            engine=output.engine or "",
+            detail=(
+                f"rebuilt {repair_count} collapsed table header(s) from native geometry "
+                f"(cols {vr.output_col_count}→{new_vr.output_col_count})"
+            ),
+            data={
+                "repair_count": repair_count,
+                "native_lane_count_before": vr.native_lane_count,
+                "output_col_count_before": vr.output_col_count,
+                "output_col_count_after": new_vr.output_col_count,
+                "verifier_state_after": new_vr.state,
+            },
+        )
+        return new_vr
 
     def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:
         if self._record_event is None:
