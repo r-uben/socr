@@ -1554,7 +1554,7 @@ class UnifiedPipeline:
             try:
                 from socr.tables.extract import OllamaTableReader, TableCropExtractor
 
-                _table_model = self._resolve_judge_model()
+                _table_model = self._resolve_crop_vlm_model()
                 if _table_model:
                     _qwen_family = ("qwen",)
                     _crop_timeout = (
@@ -2071,6 +2071,24 @@ class UnifiedPipeline:
                 continue
         return None
 
+    def _resolve_crop_vlm_model(self) -> str | None:
+        """Vision model for bounded table-crop reread (dual-pass / crop fallback).
+
+        Honors ``strict_local``: cloud judge models (e.g. ``qwen3.5:cloud``) are
+        never used for crop repair — only the local instruct VLM
+        (``qwen3-vl:30b-a3b-instruct``) or another explicitly local override.
+        """
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        if self.config.strict_local:
+            if self.config.judge_model and "cloud" not in self.config.judge_model:
+                return self.config.judge_model
+            return PROFILE_QWEN_LOCAL.model
+
+        if self.config.judge_model:
+            return self.config.judge_model
+        return self._resolve_judge_model()
+
     def _phase_judge_hard_pages(self, state: DocumentState) -> None:
         """Run a VLM judge on HARD pages (tables/equations) to catch semantic
         corruption the heuristic audit cannot see. Rejected pages lose their
@@ -2233,16 +2251,68 @@ class UnifiedPipeline:
         # that the remaining crops represent the full table set; patching on
         # incomplete evidence risks data loss. Force flag-only for this page.
         effective_auto_patch = self.config.auto_patch_tables and not had_timeout
+        crop_repair_fallback = False
+        crop_repair_declined = False
+        original_text = bo.text
 
-        try:
-            result = reconcile_page_tables(
-                bo.text,
+        def _reconcile_with_optional_fallback(fitz_page=None):
+            nonlocal effective_auto_patch, crop_repair_fallback, crop_repair_declined
+            from socr.tables.crop_repair import (
+                crop_patch_improves_verification,
+                page_needs_crop_repair_fallback,
+            )
+
+            needs_crop_fallback = not had_timeout and page_needs_crop_repair_fallback(
+                original_text,
+                native_table_unverifiable=getattr(ps, "native_table_unverifiable", False),
+                fitz_page=fitz_page,
+            )
+            if needs_crop_fallback and not effective_auto_patch:
+                candidate = reconcile_page_tables(
+                    original_text,
+                    [(c.markdown, c.source) for c in crops],
+                    auto_patch=True,
+                )
+                if candidate.patched and crop_patch_improves_verification(
+                    original_text,
+                    candidate.text,
+                    fitz_page=fitz_page,
+                ):
+                    effective_auto_patch = True
+                    crop_repair_fallback = True
+                    return candidate
+                crop_repair_declined = bool(candidate.patched or candidate.disagreements)
+                return reconcile_page_tables(
+                    original_text,
+                    [(c.markdown, c.source) for c in crops],
+                    auto_patch=False,
+                )
+            return reconcile_page_tables(
+                original_text,
                 [(c.markdown, c.source) for c in crops],
                 auto_patch=effective_auto_patch,
             )
-        except Exception as exc:  # reconcile failure must not drop the page
-            logger.warning("dual-pass reconcile errored on p%d (%s); keeping text", page_num, exc)
-            return 0, 0
+
+        try:
+            import fitz
+
+            with fitz.open(state.handle.path) as _crop_doc:
+                result = _reconcile_with_optional_fallback(_crop_doc[page_num - 1])
+        except Exception as exc:
+            try:
+                result = _reconcile_with_optional_fallback(None)
+            except Exception as inner_exc:
+                logger.warning(
+                    "dual-pass reconcile errored on p%d (%s); keeping text",
+                    page_num,
+                    inner_exc,
+                )
+                return 0, 0
+            logger.debug(
+                "crop-repair fallback gate skipped on p%d (%s); reconcile without native geometry",
+                page_num,
+                exc,
+            )
 
         # Patch and emit AuditEvents OUTSIDE any try/except -- a bug here must
         # propagate so the caller sees it and the page is never left in a
@@ -2251,6 +2321,16 @@ class UnifiedPipeline:
         if result.patched:
             bo.text = result.text
             patched_delta = 1
+            if crop_repair_fallback:
+                bo.audit_notes.append(
+                    f"dual-pass crop-repair fallback p{page_num}: "
+                    "verification improved; patched from local VLM crop"
+                )
+        elif crop_repair_declined:
+            bo.audit_notes.append(
+                f"dual-pass crop-repair fallback declined p{page_num}: "
+                "crop reading did not improve verification"
+            )
 
         flagged_delta = 0
         for d in result.disagreements:
@@ -2308,7 +2388,7 @@ class UnifiedPipeline:
         from socr.tables import locate_tables
         from socr.tables.extract import OllamaTableReader, TableCropExtractor
 
-        model = self._resolve_judge_model()
+        model = self._resolve_crop_vlm_model()
         if not model:
             return  # no vision model available; nothing to do
 
