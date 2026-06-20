@@ -28,10 +28,15 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "table_extract.md"
 
-# Crops cover a small fraction of a page, so they can afford a higher render DPI
-# than a full page without large images: small table digits/parens become crisp.
-# This is a rendering setting, not a model threshold.
-DEFAULT_CROP_DPI = 400
+# Crops cover a small fraction of a page, so a moderate render DPI keeps small
+# table digits/parens crisp while staying fast. 400 dpi was measured to push a
+# single dense-table crop read on qwen3-vl:30b-a3b-instruct past the per-crop
+# wall-clock deadline (GH-56), which forced crop timeouts and disabled the
+# Tier-2 crop-repair fallback. 250 dpi is ~3x faster per read (a full page reads
+# in ~120 s at 200 dpi) and remains legible for dense numerals, so crop reads fit
+# the deadline and the fallback can actually fire. Rendering setting, not a model
+# threshold.
+DEFAULT_CROP_DPI = 250
 # Padding (PDF points) around a located bbox so a rule or edge digit is never
 # clipped by an off-by-a-pixel boundary.
 _CROP_PADDING_PT = 6.0
@@ -49,9 +54,11 @@ _CROP_PADDING_PT = 6.0
 # scope; callers that need hard GPU preemption must restart the Ollama process.
 #
 # Basis: the httpx OllamaTableReader.timeout default is 120 s; we give the
-# ThreadPoolExecutor a headroom multiplier of 1.5 so the I/O timeout can fire
-# first in normal wedge scenarios. Callers may pass a different deadline.
-_CROP_WALL_CLOCK_MULTIPLIER = 1.5
+# ThreadPoolExecutor a headroom multiplier of 2.0 so the I/O timeout can fire
+# first in normal wedge scenarios and dense multi-table pages (GH-56) get modest
+# extra room before the wall-clock guard trips. Callers may pass a different
+# deadline.
+_CROP_WALL_CLOCK_MULTIPLIER = 2.0
 # Minimum deadline, regardless of multiplier outcome, to avoid rounding to 0.
 _CROP_DEADLINE_FLOOR_S = 30.0
 
