@@ -1349,6 +1349,52 @@ class UnifiedPipeline:
             return ""
 
     # ------------------------------------------------------------------
+    # GH-86: per-page VLM placeholder cleanup (agentic pre-flush seam)
+    # ------------------------------------------------------------------
+
+    def _sanitize_agentic_page_image_refs(
+        self,
+        state: DocumentState,
+        page_num: int,
+        page_out: PageOutput,
+        doc_dir: Path,
+    ) -> None:
+        """Strip VLM sentinel / phantom image refs before provisional flush.
+
+        PNG extraction and inline embedding remain in the assemble-time
+        ``_describe_and_embed_figures`` phase (PP-4 / PP-5 ``:pre-figures``
+        contract).  This hook only cleans page text so dead ``image-url`` /
+        ``image.png`` placeholders never reach fragments or the stitched body.
+        """
+        normalizer = OutputNormalizer()
+        text = page_out.text or ""
+        if not text.strip():
+            return
+
+        had_vlm_placeholders = normalizer.text_has_vlm_image_placeholders(text)
+        text = normalizer.strip_phantom_images(text, output_dir=doc_dir)
+
+        figures_disabled = not (self.config.save_figures or self.config.describe_figures)
+        if had_vlm_placeholders and figures_disabled:
+            ps = state.pages.get(page_num)
+            if ps and (ps.has_figures or ps.has_tables):
+                from socr.core.audit_log import AuditEvent
+
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="figure_placeholder_unresolved",
+                        engine="",
+                        detail=(
+                            "VLM image placeholder stripped; figure extraction disabled "
+                            "(save_figures=False)"
+                        ),
+                    )
+                )
+
+        page_out.text = text
+
+    # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
     # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
     # wedged VLM judge cannot block the orchestrator thread indefinitely.
@@ -1411,8 +1457,10 @@ class UnifiedPipeline:
           1. ``_reread_page_tables`` (PP-3) — OCR pages with tables only.
           2. Per-page equation detect+crop (GH-36a) — behind ``detect_equations``.
           3. Per-page equation LaTeX sidecar (GH-36b) — behind ``recover_clean_equations``.
-          4. Write-through blob cache (``put_page``).
-          5. Provisional fragment + sidecar flush (``terminal=False``).
+          4. Per-page VLM placeholder cleanup (GH-86) — strip sentinel image
+             refs before flush; PNG embed runs later in ``_describe_and_embed_figures``.
+          5. Write-through blob cache (``put_page``).
+          6. Provisional fragment + sidecar flush (``terminal=False``).
 
         Cascade HALT (fork B / judge-guard):
           - The judge is wrapped in ``_TimeoutJudge`` so a wedged VLM judge
@@ -1599,6 +1647,7 @@ class UnifiedPipeline:
         # sibling ``figures/`` directory next to the PDF when the contract is not
         # available (unit-test / partial-pipeline scenario).
         _chart_figures_dir: Path | None = None
+        _agentic_doc_dir: Path | None = None
         try:
             from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
 
@@ -1607,11 +1656,13 @@ class UnifiedPipeline:
             _chart_doc_dir = doc_dir_for(
                 output_dir, relative_key(_chart_pdf_path, _chart_scan_root)
             )
+            _agentic_doc_dir = _chart_doc_dir
             _chart_figures_dir = figures_dir_for(_chart_doc_dir)
         except Exception as exc:
             logger.debug("PP-7: could not compute chart figures_dir via contract: %s", exc)
             # Fallback: sibling figures/ next to the output dir.
             _chart_figures_dir = output_dir / "figures"
+            _agentic_doc_dir = output_dir
 
         # ====================================================================
         # ONE fused loop over ALL pages in page order (native AND ocr).
@@ -1989,6 +2040,15 @@ class UnifiedPipeline:
                     # GH-36b: LaTeX sidecar (behind recover_clean_equations flag).
                     if _recover_eq:
                         self._attach_equation_latex_sidecars(state, [bo])
+
+            # GH-86: strip VLM sentinel image refs before provisional flush.
+            if _agentic_doc_dir is not None:
+                self._sanitize_agentic_page_image_refs(
+                    state,
+                    page_num,
+                    bo,
+                    _agentic_doc_dir,
+                )
 
             # Write-through blob cache (replay-cache continuity).
             if _page_blob_store is not None:

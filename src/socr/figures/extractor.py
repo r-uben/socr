@@ -105,6 +105,19 @@ class ExtractionResult:
     cap_page: int | None = None
 
 
+@dataclass
+class PageExtractionResult:
+    """Returned by ``FigureExtractor.extract_page()`` (PP-4 / GH-86).
+
+    ``next_counter`` is the doc-global figure counter after this page finishes.
+    ``cap_reached`` is ``True`` when ``max_total`` was hit on or during this page.
+    """
+
+    figures: list[ExtractedFigure] = field(default_factory=list)
+    next_counter: int = 1
+    cap_reached: bool = False
+
+
 # --- Defaults ---
 RENDER_DPI = 150
 MAX_DIM = 1024
@@ -252,6 +265,76 @@ class FigureExtractor:
 
         logger.info(f"Extracted {len(figures)} figures from {pdf_path.name}")
         return ExtractionResult(figures=figures, cap_reached=cap_reached, cap_page=cap_page)
+
+    def extract_page(
+        self,
+        page,
+        page_num: int,
+        pdf,
+        counter: int,
+    ) -> PageExtractionResult:
+        """Extract figures from a single open fitz page (PP-4 per-page entry).
+
+        The caller threads ``counter`` doc-globally across pages so
+        ``figure_<N>_page<P>.png`` filenames stay monotonic.  Returns an
+        empty figure list (``cap_reached=True``) when ``counter`` already
+        exceeds ``max_total``.
+        """
+        if counter > self.max_total:
+            return PageExtractionResult(figures=[], next_counter=counter, cap_reached=True)
+
+        if self.save_dir:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+
+        figures: list[ExtractedFigure] = []
+        per_page = 0
+        processed: set[tuple[int, int, int, int]] = set()
+
+        page_width = page.rect.width
+        page_height = page.rect.height
+        page_area = page_width * page_height
+        is_landscape = page_width > page_height
+
+        min_area_ratio = MIN_VECTOR_AREA_RATIO * 0.5 if is_landscape else MIN_VECTOR_AREA_RATIO
+        max_area_ratio = 0.98 if is_landscape else MAX_VECTOR_AREA_RATIO
+        min_drawings = 3 if is_landscape else MIN_DRAWINGS_FOR_VECTOR
+
+        try:
+            with _timeout_guard(PAGE_EXTRACTION_TIMEOUT, f"page {page_num}"):
+                counter, per_page = self._extract_page_figures(
+                    page,
+                    page_num,
+                    pdf,
+                    figures,
+                    counter,
+                    per_page,
+                    processed,
+                    page_width,
+                    page_height,
+                    page_area,
+                    is_landscape,
+                    min_area_ratio,
+                    max_area_ratio,
+                    min_drawings,
+                )
+        except TimeoutError:
+            logger.warning(
+                "Figure extraction timed out on page %d, skipping page figures",
+                page_num,
+            )
+        except Exception as e:
+            logger.warning(
+                "Figure extraction failed on page %d: %s: %s",
+                page_num,
+                type(e).__name__,
+                e,
+            )
+
+        return PageExtractionResult(
+            figures=figures,
+            next_counter=counter,
+            cap_reached=counter > self.max_total,
+        )
 
     def _extract_page_figures(
         self,
