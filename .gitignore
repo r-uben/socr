@@ -69,3 +69,6 @@ scratch/
 
 # Local HPC deployment scripts (cluster-specific; not versioned)
 hpc/
+
+# Local HPC runbook (not versioned)
+HPC.md
