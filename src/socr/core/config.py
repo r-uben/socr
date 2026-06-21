@@ -272,6 +272,12 @@ class PipelineConfig:
     def __post_init__(self) -> None:
         if isinstance(self.output_dir, str):
             self.output_dir = Path(self.output_dir)
+        # One env var drives both vLLM paths: when VLLM_BASE_URL is set (the gate
+        # the qwen-ocr whole-page CLI uses) and the crop URL is still the default,
+        # adopt it so the crop reader and whole-page OCR hit the same server.
+        _vllm_env = os.environ.get("VLLM_BASE_URL")
+        if _vllm_env and self.qwen_vllm_url == "http://localhost:8000/v1":
+            self.qwen_vllm_url = _vllm_env
 
     def get_engines_by_priority(self) -> list[EngineType]:
         """Get enabled engines sorted by priority."""

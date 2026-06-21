@@ -8,11 +8,29 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from socr.engines.qwen import QwenEngine
 from socr.tables.extract import (
     OllamaTableReader,
     VllmTableReader,
     make_table_reader,
 )
+
+
+class TestQwenAvailabilityVllm:
+    """GH-88: with VLLM_BASE_URL set, qwen is available without the Ollama model."""
+
+    def test_vllm_url_makes_qwen_available_without_ollama(self, monkeypatch):
+        monkeypatch.setattr("socr.engines.base.BaseEngine.is_available", lambda self: True)
+        # Ollama model is MISSING — must be bypassed when VLLM_BASE_URL is set.
+        monkeypatch.setattr("socr.engines.qwen._check_ollama_model", lambda m: "not pulled")
+        monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        assert QwenEngine().is_available() is True
+
+    def test_no_vllm_url_still_requires_ollama(self, monkeypatch):
+        monkeypatch.setattr("socr.engines.base.BaseEngine.is_available", lambda self: True)
+        monkeypatch.setattr("socr.engines.qwen._check_ollama_model", lambda m: "not pulled")
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+        assert QwenEngine().is_available() is False
 
 
 def _png(tmp_path: Path) -> Path:

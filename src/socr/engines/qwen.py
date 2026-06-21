@@ -17,6 +17,7 @@ exactly ONE place that maps (backend, model-pin) → (resolved-backend, resolved
 """
 
 import logging
+import os
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
@@ -89,9 +90,17 @@ class QwenEngine(BaseEngine):
         return "qwen-ocr"
 
     def is_available(self) -> bool:
-        """CLI installed AND the local instruct MoE (OLLAMA_MODEL) is pulled."""
+        """CLI installed AND a usable backend.
+
+        Local path: the instruct MoE (OLLAMA_MODEL) must be pulled in Ollama.
+        vLLM path (e.g. HPC, where Ollama is forbidden on server GPUs): when
+        ``VLLM_BASE_URL`` is set the qwen-ocr CLI serves via vLLM, so the local
+        Ollama model is NOT required. Mirrors qwen-ocr's own backend gate.
+        """
         if not super().is_available():
             return False
+        if os.environ.get("VLLM_BASE_URL"):
+            return True
         error = _check_ollama_model(OLLAMA_MODEL)
         if error:
             logger.debug(f"[{self.name}] {error}")
