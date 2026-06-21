@@ -1349,6 +1349,52 @@ class UnifiedPipeline:
             return ""
 
     # ------------------------------------------------------------------
+    # GH-86: per-page VLM placeholder cleanup (agentic pre-flush seam)
+    # ------------------------------------------------------------------
+
+    def _sanitize_agentic_page_image_refs(
+        self,
+        state: DocumentState,
+        page_num: int,
+        page_out: PageOutput,
+        doc_dir: Path,
+    ) -> None:
+        """Strip VLM sentinel / phantom image refs before provisional flush.
+
+        PNG extraction and inline embedding remain in the assemble-time
+        ``_describe_and_embed_figures`` phase (PP-4 / PP-5 ``:pre-figures``
+        contract).  This hook only cleans page text so dead ``image-url`` /
+        ``image.png`` placeholders never reach fragments or the stitched body.
+        """
+        normalizer = OutputNormalizer()
+        text = page_out.text or ""
+        if not text.strip():
+            return
+
+        had_vlm_placeholders = normalizer.text_has_vlm_image_placeholders(text)
+        text = normalizer.strip_phantom_images(text, output_dir=doc_dir)
+
+        figures_disabled = not (self.config.save_figures or self.config.describe_figures)
+        if had_vlm_placeholders and figures_disabled:
+            ps = state.pages.get(page_num)
+            if ps and (ps.has_figures or ps.has_tables):
+                from socr.core.audit_log import AuditEvent
+
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="figure_placeholder_unresolved",
+                        engine="",
+                        detail=(
+                            "VLM image placeholder stripped; figure extraction disabled "
+                            "(save_figures=False)"
+                        ),
+                    )
+                )
+
+        page_out.text = text
+
+    # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
     # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
     # wedged VLM judge cannot block the orchestrator thread indefinitely.
@@ -1411,8 +1457,10 @@ class UnifiedPipeline:
           1. ``_reread_page_tables`` (PP-3) — OCR pages with tables only.
           2. Per-page equation detect+crop (GH-36a) — behind ``detect_equations``.
           3. Per-page equation LaTeX sidecar (GH-36b) — behind ``recover_clean_equations``.
-          4. Write-through blob cache (``put_page``).
-          5. Provisional fragment + sidecar flush (``terminal=False``).
+          4. Per-page VLM placeholder cleanup (GH-86) — strip sentinel image
+             refs before flush; PNG embed runs later in ``_describe_and_embed_figures``.
+          5. Write-through blob cache (``put_page``).
+          6. Provisional fragment + sidecar flush (``terminal=False``).
 
         Cascade HALT (fork B / judge-guard):
           - The judge is wrapped in ``_TimeoutJudge`` so a wedged VLM judge
@@ -1554,7 +1602,7 @@ class UnifiedPipeline:
             try:
                 from socr.tables.extract import OllamaTableReader, TableCropExtractor
 
-                _table_model = self._resolve_judge_model()
+                _table_model = self._resolve_crop_vlm_model()
                 if _table_model:
                     _qwen_family = ("qwen",)
                     _crop_timeout = (
@@ -1599,6 +1647,7 @@ class UnifiedPipeline:
         # sibling ``figures/`` directory next to the PDF when the contract is not
         # available (unit-test / partial-pipeline scenario).
         _chart_figures_dir: Path | None = None
+        _agentic_doc_dir: Path | None = None
         try:
             from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
 
@@ -1607,11 +1656,13 @@ class UnifiedPipeline:
             _chart_doc_dir = doc_dir_for(
                 output_dir, relative_key(_chart_pdf_path, _chart_scan_root)
             )
+            _agentic_doc_dir = _chart_doc_dir
             _chart_figures_dir = figures_dir_for(_chart_doc_dir)
         except Exception as exc:
             logger.debug("PP-7: could not compute chart figures_dir via contract: %s", exc)
             # Fallback: sibling figures/ next to the output dir.
             _chart_figures_dir = output_dir / "figures"
+            _agentic_doc_dir = output_dir
 
         # ====================================================================
         # ONE fused loop over ALL pages in page order (native AND ocr).
@@ -1815,6 +1866,41 @@ class UnifiedPipeline:
                     ps.attempts.append(att.output)
                 ps.best_output = decision.final_output
 
+                # GH-56: deterministic header repair for collapsed multi-band tables.
+                if ps.best_output and ps.best_output.text and self._page_has_tables(page_num, ps):
+                    try:
+                        import fitz
+
+                        from socr.tables.header_repair import repair_table_headers_on_page
+
+                        with fitz.open(state.handle.path) as _hdr_doc:
+                            _repaired_text, _hdr_n = repair_table_headers_on_page(
+                                _hdr_doc[page_num - 1],
+                                ps.best_output.text,
+                            )
+                        if _hdr_n > 0:
+                            ps.best_output.text = _repaired_text
+                            from socr.core.audit_log import AuditEvent
+
+                            state.events.append(
+                                AuditEvent(
+                                    page_num=page_num,
+                                    kind="table_header_repair",
+                                    engine=ps.best_output.engine or "",
+                                    detail=(
+                                        f"rebuilt {_hdr_n} collapsed table header(s) "
+                                        "from native geometry (post-route)"
+                                    ),
+                                    data={"repair_count": _hdr_n},
+                                )
+                            )
+                    except Exception as exc:
+                        logger.debug(
+                            "agentic header repair skipped on p%d (%s)",
+                            page_num,
+                            exc,
+                        )
+
                 # Provenance guard: when the judge rejected ALL ladder rungs for a
                 # born-digital table page, mark the page so _assemble_result treats
                 # any native-text fallback as audit-failed.
@@ -1955,6 +2041,15 @@ class UnifiedPipeline:
                     if _recover_eq:
                         self._attach_equation_latex_sidecars(state, [bo])
 
+            # GH-86: strip VLM sentinel image refs before provisional flush.
+            if _agentic_doc_dir is not None:
+                self._sanitize_agentic_page_image_refs(
+                    state,
+                    page_num,
+                    bo,
+                    _agentic_doc_dir,
+                )
+
             # Write-through blob cache (replay-cache continuity).
             if _page_blob_store is not None:
                 try:
@@ -2035,6 +2130,24 @@ class UnifiedPipeline:
             except Exception:
                 continue
         return None
+
+    def _resolve_crop_vlm_model(self) -> str | None:
+        """Vision model for bounded table-crop reread (dual-pass / crop fallback).
+
+        Honors ``strict_local``: cloud judge models (e.g. ``qwen3.5:cloud``) are
+        never used for crop repair — only the local instruct VLM
+        (``qwen3-vl:30b-a3b-instruct``) or another explicitly local override.
+        """
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        if self.config.strict_local:
+            if self.config.judge_model and "cloud" not in self.config.judge_model:
+                return self.config.judge_model
+            return PROFILE_QWEN_LOCAL.model
+
+        if self.config.judge_model:
+            return self.config.judge_model
+        return self._resolve_judge_model()
 
     def _phase_judge_hard_pages(self, state: DocumentState) -> None:
         """Run a VLM judge on HARD pages (tables/equations) to catch semantic
@@ -2198,16 +2311,68 @@ class UnifiedPipeline:
         # that the remaining crops represent the full table set; patching on
         # incomplete evidence risks data loss. Force flag-only for this page.
         effective_auto_patch = self.config.auto_patch_tables and not had_timeout
+        crop_repair_fallback = False
+        crop_repair_declined = False
+        original_text = bo.text
 
-        try:
-            result = reconcile_page_tables(
-                bo.text,
+        def _reconcile_with_optional_fallback(fitz_page=None):
+            nonlocal effective_auto_patch, crop_repair_fallback, crop_repair_declined
+            from socr.tables.crop_repair import (
+                crop_patch_improves_verification,
+                page_needs_crop_repair_fallback,
+            )
+
+            needs_crop_fallback = not had_timeout and page_needs_crop_repair_fallback(
+                original_text,
+                native_table_unverifiable=getattr(ps, "native_table_unverifiable", False),
+                fitz_page=fitz_page,
+            )
+            if needs_crop_fallback and not effective_auto_patch:
+                candidate = reconcile_page_tables(
+                    original_text,
+                    [(c.markdown, c.source) for c in crops],
+                    auto_patch=True,
+                )
+                if candidate.patched and crop_patch_improves_verification(
+                    original_text,
+                    candidate.text,
+                    fitz_page=fitz_page,
+                ):
+                    effective_auto_patch = True
+                    crop_repair_fallback = True
+                    return candidate
+                crop_repair_declined = bool(candidate.patched or candidate.disagreements)
+                return reconcile_page_tables(
+                    original_text,
+                    [(c.markdown, c.source) for c in crops],
+                    auto_patch=False,
+                )
+            return reconcile_page_tables(
+                original_text,
                 [(c.markdown, c.source) for c in crops],
                 auto_patch=effective_auto_patch,
             )
-        except Exception as exc:  # reconcile failure must not drop the page
-            logger.warning("dual-pass reconcile errored on p%d (%s); keeping text", page_num, exc)
-            return 0, 0
+
+        try:
+            import fitz
+
+            with fitz.open(state.handle.path) as _crop_doc:
+                result = _reconcile_with_optional_fallback(_crop_doc[page_num - 1])
+        except Exception as exc:
+            try:
+                result = _reconcile_with_optional_fallback(None)
+            except Exception as inner_exc:
+                logger.warning(
+                    "dual-pass reconcile errored on p%d (%s); keeping text",
+                    page_num,
+                    inner_exc,
+                )
+                return 0, 0
+            logger.debug(
+                "crop-repair fallback gate skipped on p%d (%s); reconcile without native geometry",
+                page_num,
+                exc,
+            )
 
         # Patch and emit AuditEvents OUTSIDE any try/except -- a bug here must
         # propagate so the caller sees it and the page is never left in a
@@ -2216,6 +2381,16 @@ class UnifiedPipeline:
         if result.patched:
             bo.text = result.text
             patched_delta = 1
+            if crop_repair_fallback:
+                bo.audit_notes.append(
+                    f"dual-pass crop-repair fallback p{page_num}: "
+                    "verification improved; patched from local VLM crop"
+                )
+        elif crop_repair_declined:
+            bo.audit_notes.append(
+                f"dual-pass crop-repair fallback declined p{page_num}: "
+                "crop reading did not improve verification"
+            )
 
         flagged_delta = 0
         for d in result.disagreements:
@@ -2273,7 +2448,7 @@ class UnifiedPipeline:
         from socr.tables import locate_tables
         from socr.tables.extract import OllamaTableReader, TableCropExtractor
 
-        model = self._resolve_judge_model()
+        model = self._resolve_crop_vlm_model()
         if not model:
             return  # no vision model available; nothing to do
 

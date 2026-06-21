@@ -328,7 +328,7 @@ class TestStripPhantomImages:
         # Create a real file
         img = tmp_path / "real.png"
         img.write_bytes(b"\x89PNG")
-        text = f"See ![fig](real.png) here"
+        text = "See ![fig](real.png) here"
         norm = OutputNormalizer()
         result = norm.strip_phantom_images(text, output_dir=tmp_path)
         assert "![fig](real.png)" in result
@@ -362,3 +362,15 @@ class TestStripPhantomImages:
         result = norm.strip_phantom_images(text, output_dir=None)
         # Should not have 3+ consecutive newlines
         assert "\n\n\n" not in result
+
+    def test_vlm_sentinel_image_url_always_stripped(self, tmp_path: Path) -> None:
+        text = "See ![caption](image-url) end"
+        norm = OutputNormalizer()
+        result = norm.strip_phantom_images(text, output_dir=tmp_path)
+        assert "image-url" not in result
+        assert "![caption]" not in result
+
+    def test_text_has_vlm_image_placeholders(self) -> None:
+        norm = OutputNormalizer()
+        assert norm.text_has_vlm_image_placeholders("![x](image.png)")
+        assert not norm.text_has_vlm_image_placeholders("![x](figures/figure_1_page1.png)")

@@ -65,6 +65,27 @@ class OutputNormalizer:
     # Markdown image references: ![alt](path)
     _RE_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 
+    # VLM OCR engines emit generic placeholder paths when they "see" a figure
+    # but have no real asset.  These must never survive into saved markdown —
+    # a real extracted figure is always ``figures/figure_<N>_page<P>.png``.
+    _VLM_PLACEHOLDER_BASENAMES: frozenset[str] = frozenset(
+        {
+            "image.png",
+            "image.jpeg",
+            "image.jpg",
+            "image.gif",
+            "image.webp",
+            "image-url",
+            "image_url",
+            "imageurl",
+            "img.png",
+            "img.jpeg",
+            "img.jpg",
+            "placeholder.png",
+            "figure.png",
+        }
+    )
+
     # Markdown fences wrapping entire output (VLMs often wrap in ```markdown...```)
     _RE_MD_FENCE = re.compile(
         r"^```(?:markdown|md|text|ocr)?\s*\n(.*?)```\s*$",
@@ -157,6 +178,25 @@ class OutputNormalizer:
 
     # --- phantom image stripping ---
 
+    @classmethod
+    def is_vlm_placeholder_path(cls, path_str: str) -> bool:
+        """True when *path_str* is a known VLM sentinel, not a real asset."""
+        cleaned = path_str.strip().strip("<>").split("?", 1)[0]
+        basename = Path(cleaned).name.lower()
+        return basename in cls._VLM_PLACEHOLDER_BASENAMES
+
+    def text_has_vlm_image_placeholders(self, text: str) -> bool:
+        """Return True if *text* contains a markdown image ref to a VLM sentinel."""
+        if "![" not in text:
+            return False
+        for match in self._RE_MD_IMAGE.finditer(text):
+            full = match.group(0)
+            paren_start = full.rfind("(")
+            path_str = full[paren_start + 1 : -1].strip()
+            if self.is_vlm_placeholder_path(path_str):
+                return True
+        return False
+
     def strip_phantom_images(self, text: str, output_dir: Path | None = None) -> str:
         """Remove markdown image references that point to nonexistent files.
 
@@ -186,6 +226,10 @@ class OutputNormalizer:
             # Absolute URLs are never phantom (external images)
             if path_str.startswith(("http://", "https://", "data:")):
                 return False
+
+            # VLM sentinels are never real assets — strip even if a namesake file exists.
+            if self.is_vlm_placeholder_path(path_str):
+                return True
 
             # Absolute local paths — check existence directly
             p = Path(path_str)
