@@ -66,8 +66,10 @@ def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
         # silently landing on the local Ollama runtime.
         resolved_model = OLLAMA_MODEL
     else:
-        # vllm / api: pass the configured model (or empty → CLI picks its own default).
-        resolved_model = model
+        # vllm / api: the qwen-ocr CLI must request the EXACT model the vLLM server
+        # is serving. Use config.qwen_vllm_model (e.g. Qwen/Qwen3-VL-30B-A3B-Instruct);
+        # without it the CLI sends its own default model name and the server 404s.
+        resolved_model = config.qwen_vllm_model or model
 
     logger.info(
         "[qwen] resolved backend=%r model=%r (pinned=%s)",
