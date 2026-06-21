@@ -120,6 +120,20 @@ def common_options(f):
         help="Backend for the qwen engine",
     )(f)
     f = click.option(
+        "--qwen-vllm-url",
+        type=str,
+        default=None,
+        help="OpenAI-compatible base URL of the vLLM server for the agentic VLM "
+        "path (HPC), e.g. http://node07:8000/v1. Used when --qwen-backend vllm.",
+    )(f)
+    f = click.option(
+        "--qwen-vllm-model",
+        type=str,
+        default=None,
+        help="HF model id served by vLLM for the agentic VLM path "
+        "(default Qwen/Qwen3-VL-30B-A3B-Instruct). Used when --qwen-backend vllm.",
+    )(f)
+    f = click.option(
         "--qwen-model",
         type=str,
         default=None,
@@ -217,6 +231,8 @@ def build_config(
     timeout: int = 1800,
     dpi: int | None = None,
     qwen_backend: str | None = None,
+    qwen_vllm_url: str | None = None,
+    qwen_vllm_model: str | None = None,
     qwen_model: str | None = None,
     save_figures: bool = False,
     describe_figures: bool = False,
@@ -284,6 +300,10 @@ def build_config(
         config.render_dpi = dpi
     if qwen_backend is not None:
         config.qwen_backend = qwen_backend
+    if qwen_vllm_url is not None:
+        config.qwen_vllm_url = qwen_vllm_url
+    if qwen_vllm_model is not None:
+        config.qwen_vllm_model = qwen_vllm_model
     if qwen_model is not None:
         config.qwen_model = qwen_model
         config.qwen_model_pinned = True

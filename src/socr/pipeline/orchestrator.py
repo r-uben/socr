@@ -1600,18 +1600,23 @@ class UnifiedPipeline:
         _crop_timeout: float | None = None
         if self.config.dual_pass_tables:
             try:
-                from socr.tables.extract import OllamaTableReader, TableCropExtractor
+                from socr.tables.extract import TableCropExtractor, make_table_reader
 
                 _table_model = self._resolve_crop_vlm_model()
                 if _table_model:
                     _qwen_family = ("qwen",)
                     _crop_timeout = (
                         DEFAULT_PROVIDER_TIMEOUTS.get(EngineType.QWEN, 120.0)
-                        if any(_table_model.startswith(p) for p in _qwen_family)
+                        if any(_table_model.lower().startswith(p) for p in _qwen_family)
                         else 120.0
                     )
                     _table_extractor = TableCropExtractor(
-                        OllamaTableReader(model=_table_model, timeout=_crop_timeout)
+                        make_table_reader(
+                            backend=self.config.qwen_backend,
+                            model=_table_model,
+                            timeout=_crop_timeout,
+                            vllm_url=self.config.qwen_vllm_url,
+                        )
                     )
             except Exception as exc:
                 logger.warning(
@@ -2189,6 +2194,11 @@ class UnifiedPipeline:
         """
         from socr.core.providers import PROFILE_QWEN_LOCAL
 
+        # vLLM/server backend (HPC): use the HF model id served by vLLM, not an
+        # ollama tag. The crop-reader factory routes to the OpenAI-compatible reader.
+        if self.config.qwen_backend in ("vllm", "sglang", "api"):
+            return self.config.qwen_vllm_model
+
         if self.config.strict_local:
             if self.config.judge_model and "cloud" not in self.config.judge_model:
                 return self.config.judge_model
@@ -2495,7 +2505,7 @@ class UnifiedPipeline:
         matching the pre-refactor exception boundary exactly.
         """
         from socr.tables import locate_tables
-        from socr.tables.extract import OllamaTableReader, TableCropExtractor
+        from socr.tables.extract import TableCropExtractor, make_table_reader
 
         model = self._resolve_crop_vlm_model()
         if not model:
@@ -2521,13 +2531,20 @@ class UnifiedPipeline:
         _qwen_family = ("qwen",)
         crop_timeout = (
             DEFAULT_PROVIDER_TIMEOUTS.get(EngineType.QWEN, 120.0)
-            if any(model.startswith(p) for p in _qwen_family)
+            if any(model.lower().startswith(p) for p in _qwen_family)
             else 120.0
         )
 
         try:
             # Reader and extractor are built ONCE at doc scope; reused per page.
-            extractor = TableCropExtractor(OllamaTableReader(model=model, timeout=crop_timeout))
+            extractor = TableCropExtractor(
+                make_table_reader(
+                    backend=self.config.qwen_backend,
+                    model=model,
+                    timeout=crop_timeout,
+                    vllm_url=self.config.qwen_vllm_url,
+                )
+            )
         except Exception as exc:
             logger.warning("dual-pass extractor unavailable (%s)", exc)
             return

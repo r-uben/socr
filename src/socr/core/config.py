@@ -248,6 +248,12 @@ class PipelineConfig:
     glm_backend: str = "ollama"  # "ollama", "transformers", or "vllm"
     glm_task: str = "text"  # "text", "formula", "table", "figure"
     qwen_backend: str = "auto"  # "auto", "ollama", "vllm", or "api"
+    # HF model id served by vLLM/SGLang for the agentic VLM crop path when
+    # qwen_backend == "vllm" (HPC: Ollama is forbidden on server GPUs). The HF
+    # equivalent of the local ollama tag qwen3-vl:30b-a3b-instruct.
+    qwen_vllm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    # OpenAI-compatible base URL of the vLLM server for the agentic VLM path.
+    qwen_vllm_url: str = "http://localhost:8000/v1"
     # Default sentinel: empty string means "not user-pinned; let the engine resolver pick
     # the right model for the resolved backend." When qwen_model_pinned is True the value
     # is an explicit user override and must reach qwen-ocr unchanged.
