@@ -1929,6 +1929,27 @@ class UnifiedPipeline:
                             exc,
                         )
 
+                # GH-90: scanned-table source-evidence fail-closed floor.
+                _source_ev_rejected = any(
+                    "source_evidence_table" in (att.reason or "") for att in decision.attempts
+                )
+                if _source_ev_rejected and not ps.is_born_digital:
+                    ps.scanned_table_evidence_failed = True
+                    if _chart_figures_dir is not None:
+                        ps.d3_floor_png_ref = self._render_d3_floor_png(
+                            state.handle.path,
+                            page_num,
+                            _chart_figures_dir,
+                        )
+                    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+                    png_ref = ps.d3_floor_png_ref
+                    floor_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+                    if ps.best_output is not None:
+                        ps.best_output.text = floor_text
+                        ps.best_output.status = PageStatus.ERROR
+                        ps.best_output.audit_passed = False
+                        ps.best_output.failure_mode = FailureMode.HALLUCINATION
+
                 # Provenance guard: when the judge rejected ALL ladder rungs for a
                 # born-digital table page, mark the page so _assemble_result treats
                 # any native-text fallback as audit-failed.
@@ -2569,6 +2590,7 @@ class UnifiedPipeline:
         from socr.pipeline.agentic import (
             HeuristicPageJudge,
             NativeTableVerifierJudge,
+            SourceEvidenceTableJudge,
             VLMPageJudge,
         )
 
@@ -2631,10 +2653,15 @@ class UnifiedPipeline:
         def record_event(event) -> None:
             state.events.append(event)
 
-        return NativeTableVerifierJudge(
+        native_judge = NativeTableVerifierJudge(
             inner=inner_judge,
             get_fitz_page=get_fitz_page,
             is_table_page=is_table_page,
+            record_event=record_event,
+        )
+        return SourceEvidenceTableJudge(
+            inner=native_judge,
+            get_fitz_page=get_fitz_page,
             record_event=record_event,
         )
 
