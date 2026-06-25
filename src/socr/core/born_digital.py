@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # "ABCDEF+CMMI10".
 _MATH_FONT_RE = re.compile(
     r"(?i)(CMMI|CMSY|CMEX|MSAM|MSBM|"  # Computer Modern + AMS math
-    r"STIXMath|XITSMath|LatinModernMath|LMMath|"  # OpenType math (modern LaTeX)
+    r"STIXMath|STIXSize|STIXNonUnicode|XITSMath|LatinModernMath|LMMath|"  # STIX/OpenType math
     r"AsanaMath|LibertinusMath|CambriaMath|NewCMMath|"  # other OTF math families
     r"Euler|rsfs)"  # Euler script, RSFS (calligraphic)
 )
@@ -58,6 +58,66 @@ def line_has_corrupt_math(line: str) -> bool:
     return any(ch in _MATH_CORRUPTION_GLYPHS for ch in line)
 
 
+# Semantically-empty characters that publishers inject into the text layer for
+# justification / line-breaking. They carry no content but corrupt downstream use:
+# the soft hyphen splits words so search misses them ("hetero\xadgeneous" != the
+# query), and zero-width spaces wedge themselves around sub/superscripts so math
+# reads as "c​i,t". Native text bypasses ``OutputNormalizer`` (it is set
+# straight from the PDF text layer), so it must be cleaned HERE, at the extraction
+# boundary, or the junk ships unaltered.
+_ZERO_WIDTH_STRIP = frozenset({chr(0x200B), chr(0x00AD)})  # ZWSP, soft hyphen
+# Non-breaking / figure / thin / hair / narrow spaces. Collapsed to U+0020 (not
+# stripped): they ARE spaces, just typographic variants that break search and
+# token splitting. Plain ASCII space is the portable form for Markdown prose.
+_EXOTIC_SPACES = frozenset(
+    chr(c) for c in (0x00A0, 0x2002, 0x2003, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F)
+)
+
+
+def clean_native_text(text: str) -> tuple[str, int, int]:
+    """Strip semantically-empty invisibles and normalize exotic spaces.
+
+    Returns ``(cleaned, n_stripped, n_spaces_normalized)``. Lossless for content:
+    only removes zero-width chars (ZWSP, soft hyphen) and collapses typographic
+    spaces to U+0020. Does NOT touch Private Use Area glyphs — those are a content
+    signal (see :func:`count_pua_chars`) and are flagged, never silently altered.
+    Deliberately not NFKC: that would fold math alphanumerics (𝒯, superscripts)
+    into ASCII and create a NEW silent math corruption.
+    """
+    stripped = 0
+    spaced = 0
+    out: list[str] = []
+    for ch in text:
+        if ch in _ZERO_WIDTH_STRIP:
+            stripped += 1
+        elif ch in _EXOTIC_SPACES:
+            spaced += 1
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out), stripped, spaced
+
+
+def count_pua_chars(text: str) -> int:
+    """Count Unicode Private Use Area codepoints in a text layer.
+
+    A born-digital text layer should never contain PUA characters: they are
+    font-private glyphs (math symbols the font maps without a real ToUnicode
+    entry — e.g. UniMath U+F766 = script-T, STIXNonUnicode U+E14B). They render
+    correctly ONLY inside the embedding font and become boxes or vanish anywhere
+    else, so their presence is a direct fingerprint of weak/broken ToUnicode and
+    hence silent math-glyph loss. Covers the BMP PUA and both supplementary PUA-A/B
+    planes.
+    """
+    return sum(
+        1
+        for ch in text
+        if 0xE000 <= ord(ch) <= 0xF8FF
+        or 0xF0000 <= ord(ch) <= 0xFFFFD
+        or 0x100000 <= ord(ch) <= 0x10FFFD
+    )
+
+
 @dataclass
 class PageAssessment:
     """Per-page born-digital assessment."""
@@ -75,6 +135,7 @@ class PageAssessment:
     has_equations: bool = False  # page contains math/equations
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
+    has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
     notes: list[str] = field(default_factory=list)
 
@@ -298,8 +359,15 @@ class BornDigitalDetector:
         """
         notes: list[str] = []
 
-        # Extract raw text from the PDF text layer
+        # Extract raw text from the PDF text layer, then clean it at the boundary:
+        # native text never passes through OutputNormalizer, so publisher-injected
+        # zero-width spaces / soft hyphens / exotic spaces must be removed here or
+        # they ship verbatim (broken search, unreadable math). PUA glyphs survive
+        # the clean and are detected separately as a math-glyph-loss signal.
         raw_text = page.get_text("text")
+        raw_text, _zw_stripped, _spaces_normalized = clean_native_text(raw_text)
+        pua_count = count_pua_chars(raw_text)
+        has_unmapped_math_glyphs = pua_count > 0
         char_count = len(raw_text)
         words = raw_text.split()
         word_count = len(words)
@@ -578,12 +646,21 @@ class BornDigitalDetector:
         self._last_extraction_had_unverifiable: bool = False
 
         if has_tables:
-            # Use structured extraction that renders tables as markdown
-            native_text = self.extract_structured(page)
+            # Use structured extraction that renders tables as markdown. Clean it
+            # too: extract_structured builds its own text from the layer, so it
+            # carries the same invisibles as raw_text and bypasses the boundary
+            # clean above.
+            native_text, _, _ = clean_native_text(self.extract_structured(page))
             notes.append("born-digital: structured extraction (tables detected)")
         else:
             native_text = raw_text.strip()
             notes.append("born-digital: clean text layer detected")
+
+        if _zw_stripped or _spaces_normalized:
+            notes.append(
+                f"native layer cleaned: stripped {_zw_stripped} zero-width char(s), "
+                f"normalized {_spaces_normalized} exotic space(s)"
+            )
 
         # TR-3: read the per-region geometry hard-fail flag written by
         # extract_structured → _verify_regions during table extraction above.
@@ -605,6 +682,18 @@ class BornDigitalDetector:
                 "glyphs); equation regions need image-OCR -> LaTeX"
             )
 
+        # Unmapped math glyphs (PUA): the native prose is trustworthy, but math
+        # symbols are font-private and lost outside the embedding font. We do NOT
+        # set needs_ocr_enhancement here — that would route the whole page to OCR,
+        # the lane empirically shown to make these pages worse (it falls back to the
+        # same broken native layer). The flag surfaces via the audit log (and, when
+        # equation recovery is enabled, the region-crop lane), never silently.
+        if has_unmapped_math_glyphs:
+            notes.append(
+                f"unmapped math glyphs ({pua_count} private-use codepoint(s)); native prose "
+                "trusted, math symbols are font-private (weak ToUnicode) -> need region OCR"
+            )
+
         return PageAssessment(
             page_num=page_num,
             is_born_digital=True,
@@ -619,6 +708,7 @@ class BornDigitalDetector:
             has_equations=has_equations,
             needs_ocr_enhancement=needs_ocr_enhancement,
             has_corrupt_math=has_corrupt_math,
+            has_unmapped_math_glyphs=has_unmapped_math_glyphs,
             has_unverifiable_table_region=has_unverifiable_table_region,
             notes=notes,
         )

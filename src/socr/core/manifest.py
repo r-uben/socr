@@ -52,8 +52,12 @@ logger = logging.getLogger(__name__)
 # attempts fallback, explicit failure markers, flagged native fallback.
 # Pages cached under v1 carry the fabricated-number corruption and MUST be
 # invalidated.
+# v3 (issue #92): native-layer cleaning at the born-digital extraction boundary —
+# zero-width spaces / soft hyphens stripped, exotic spaces normalized. This changes
+# the saved native bytes for any born-digital page that carried publisher invisibles
+# (native text bypasses OutputNormalizer), so pages cached under v2 must reprocess.
 MANIFEST_SCHEMA_VERSION = "1"
-NORMALIZER_VERSION = "2"
+NORMALIZER_VERSION = "3"
 ASSEMBLY_VERSION = "2"
 
 # Legacy page separator. socr now assembles bodies and replays with the
