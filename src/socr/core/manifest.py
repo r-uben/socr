@@ -280,6 +280,25 @@ def _winning_page_output(
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
         return p.best_output
+    # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
+    # rejected a VLM-emitted markdown table on a scan, shipping the fluent
+    # hallucination is worse than an explicit failure marker — same D3 pattern.
+    if (
+        not p.is_born_digital
+        and getattr(p, "scanned_table_evidence_failed", False)
+        and bool(p.attempts)
+    ):
+        d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+        png_ref = getattr(p, "d3_floor_png_ref", "")
+        d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+        return PageOutput(
+            page_num=page_num,
+            text=d3_text,
+            status=PageStatus.ERROR,
+            engine=p.best_output.engine if p.best_output else "qwen",
+            audit_passed=False,
+            failure_mode=FailureMode.HALLUCINATION,
+        )
     if p.is_born_digital and p.native_text:
         # TR-3: D3 fail-closed floor.  When the OCR ladder failed for a table
         # page AND the per-region geometry verifier flagged a hard-fail

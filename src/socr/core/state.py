@@ -39,6 +39,7 @@ class PageState:
     judge_rejected: bool = False  # VLM judge rejected the best output
     native_table_structure_failed: bool = False  # native table text lost its grid
     native_table_unverifiable: bool = False  # TR-3: per-region verifier flagged hard-fail
+    scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
     chart_asset_render_failed: bool = False  # PP-7: chart-lane PNG render failed
 

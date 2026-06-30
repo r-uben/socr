@@ -347,6 +347,99 @@ class VLMPageJudge:
         )
 
 
+class SourceEvidenceTableJudge:
+    """Fail-closed source-evidence gate for VLM-emitted markdown tables (GH-90).
+
+    Runs BEFORE the inner judge chain on ANY model output that contains markdown
+    table blocks, regardless of ``PageState.has_tables``.  Born-digital pages
+    with native PyMuPDF words defer to ``NativeTableVerifierJudge``; scanned pages
+    with no native words verify cell tokens against local non-generative evidence
+    (page/crop raster + optional classical OCR).  Unsupported or unverifiable
+    tables hard-reject before heuristic acceptance.
+    """
+
+    def __init__(
+        self,
+        inner: PageJudge,
+        get_fitz_page: Callable[[int], object] | None,
+        record_event: Callable[[object], None] | None = None,
+        *,
+        ocr_image_fn: Callable[[object], str] | None = None,
+    ) -> None:
+        self._inner = inner
+        self._get_fitz_page = get_fitz_page
+        self._record_event = record_event
+        self._ocr_image_fn = ocr_image_fn
+
+    def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
+        from socr.tables.reconcile import find_table_blocks
+        from socr.tables.source_evidence import verify_scanned_table
+
+        if not find_table_blocks(output.text or ""):
+            return self._inner.assess(output, provider)
+
+        if output.status != PageStatus.SUCCESS or not output.text.strip():
+            return self._inner.assess(output, provider)
+
+        if self._get_fitz_page is None:
+            return self._inner.assess(output, provider)
+
+        page_num = output.page_num
+        try:
+            fitz_page = self._get_fitz_page(page_num)
+            result = verify_scanned_table(
+                fitz_page,
+                output.text,
+                ocr_image_fn=self._ocr_image_fn,
+            )
+        except Exception as exc:
+            logger.warning(
+                "SourceEvidenceTableJudge: verifier raised on p%d (%s); delegating to inner",
+                page_num,
+                exc,
+            )
+            return self._inner.assess(output, provider)
+
+        if result.deferred:
+            return self._inner.assess(output, provider)
+
+        if not result.verifiable or not result.passed:
+            from socr.core.result import FailureMode
+
+            self._emit_event(
+                page_num=page_num,
+                kind="source_evidence_table_reject",
+                engine=output.engine or "",
+                detail=result.reason,
+                data={
+                    "verifiable": result.verifiable,
+                    "passed": result.passed,
+                },
+            )
+            output.audit_passed = False
+            output.status = PageStatus.ERROR
+            output.failure_mode = FailureMode.HALLUCINATION
+            return AcceptDecision(
+                accept=False,
+                reason=f"source_evidence_table: {result.reason}",
+                confidence=0.0,
+            )
+
+        return self._inner.assess(output, provider)
+
+    def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:
+        if self._record_event is None:
+            return
+        try:
+            from socr.core.audit_log import AuditEvent
+
+            self._record_event(
+                AuditEvent(page_num=page_num, kind=kind, engine=engine, detail=detail, data=data)
+            )
+        except Exception as exc:
+            logger.debug("SourceEvidenceTableJudge: failed to record audit event: %s", exc)
+
+
 class NativeTableVerifierJudge:
     """Two-tier deterministic pre-check for born-digital table pages.
 
