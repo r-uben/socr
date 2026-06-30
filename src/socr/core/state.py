@@ -33,6 +33,7 @@ class PageState:
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded raster images
     has_equations: bool = False  # page contains math/equations
+    has_unmapped_math_glyphs: bool = False  # PUA glyphs in native layer -> silent math-glyph loss
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
@@ -173,6 +174,7 @@ class DocumentState:
                 ps.has_tables = pa.has_tables
                 ps.has_figures = pa.has_figures
                 ps.has_equations = pa.has_equations
+                ps.has_unmapped_math_glyphs = getattr(pa, "has_unmapped_math_glyphs", False)
                 if pa.is_born_digital:
                     ps.native_text = pa.native_text
                     ps.needs_ocr_enhancement = pa.needs_ocr_enhancement

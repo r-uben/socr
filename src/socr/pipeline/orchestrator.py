@@ -1840,6 +1840,34 @@ class UnifiedPipeline:
                 )
                 ps.attempts.append(native_out)
                 ps.best_output = native_out
+
+                # #92: born-digital page shipped as native text while carrying
+                # unmapped math glyphs (PUA / weak ToUnicode) that equation recovery
+                # did not reach. The prose is sound, but the math symbols are
+                # font-private and lost — surface it (never silent). Page stays
+                # SUCCESS (prose is usable); the event records the math-glyph gap.
+                if getattr(ps, "has_unmapped_math_glyphs", False) and not (
+                    self.config.detect_equations and self.config.recover_clean_equations
+                ):
+                    from socr.core.audit_log import AuditEvent
+
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="native_math_unrecovered",
+                            engine="native",
+                            detail=(
+                                "born-digital native text shipped with unmapped math glyphs "
+                                "(private-use codepoints, weak ToUnicode); math symbols not "
+                                "recovered — enable --detect-equations --recover-clean-equations "
+                                "for region OCR -> LaTeX"
+                            ),
+                            data={
+                                "has_equations": ps.has_equations,
+                                "recover_clean_equations": self.config.recover_clean_equations,
+                            },
+                        )
+                    )
             else:
                 # Route OCR page through the cost ladder.
                 remaining = None
