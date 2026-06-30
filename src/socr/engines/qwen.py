@@ -45,8 +45,10 @@ def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
 
     Rules (in priority order):
     1. Explicit user pin (``config.qwen_model_pinned``): pass model through unchanged.
-    2. Non-local backend ("vllm", "api"): pass model through unchanged (may be empty,
-       letting the CLI use its own default).
+    2. Non-local backend ("vllm", "api") without a pin: request ``config.qwen_vllm_model``
+       (the exact model the OpenAI-compatible server is serving), falling back to
+       ``config.qwen_model`` only if ``qwen_vllm_model`` is blank. The CLI's own default
+       must never be relied on here: a mismatched model name makes the server 404.
     3. Local/auto backend ("auto", "ollama") without a pin: use ``OLLAMA_MODEL``,
        the validated instruct MoE.  A cloud model string must never reach a local backend
        via this path.

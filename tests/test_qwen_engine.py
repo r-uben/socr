@@ -91,18 +91,27 @@ def test_resolve_blank_model_on_local_backend_uses_local_instruct():
     assert model == OLLAMA_MODEL
 
 
-def test_resolve_vllm_backend_passes_model_through():
-    """Non-local backend (vllm) passes the model string as-is."""
-    cfg = PipelineConfig(qwen_backend="vllm", qwen_model="Qwen/Qwen3-VL-7B")
+def test_resolve_vllm_backend_requests_served_model():
+    """Non-local backend (vllm) requests config.qwen_vllm_model (the served model name)."""
+    cfg = PipelineConfig(qwen_backend="vllm", qwen_vllm_model="Qwen/Qwen3-VL-7B")
     _, model = resolve_qwen_intent(cfg)
     assert model == "Qwen/Qwen3-VL-7B"
 
 
-def test_resolve_api_backend_passes_empty_model_through():
-    """Non-local backend (api) with no model passes empty string (CLI picks default)."""
-    cfg = PipelineConfig(qwen_backend="api", qwen_model="")
+def test_resolve_nonlocal_backend_falls_back_to_qwen_model_when_vllm_model_blank():
+    """When qwen_vllm_model is blank, a non-local backend falls back to qwen_model
+    (empty here, letting the CLI pick its own default)."""
+    cfg = PipelineConfig(qwen_backend="api", qwen_vllm_model="", qwen_model="")
     _, model = resolve_qwen_intent(cfg)
     assert model == ""
+
+
+def test_resolve_api_backend_also_requests_served_model():
+    """The api backend, like vllm, requests config.qwen_vllm_model (both are
+    OpenAI-compatible servers that 404 on a mismatched model name)."""
+    cfg = PipelineConfig(qwen_backend="api", qwen_vllm_model="Qwen/Qwen3-VL-30B-A3B-Instruct")
+    _, model = resolve_qwen_intent(cfg)
+    assert model == "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
 
 # ---------------------------------------------------------------------------
@@ -126,8 +135,10 @@ def test_build_command_explicit_model_pin_reaches_cli_unchanged():
 
 
 def test_build_command_blank_model_omits_model_flag_on_nonlocal_backend():
-    """Blank model on a non-local backend (api) produces no --model flag."""
-    cfg = PipelineConfig(qwen_backend="api", qwen_model="")
+    """Fully blank model on a non-local backend (api) produces no --model flag,
+    restoring the CLI's own default. Requires blanking qwen_vllm_model too, since it
+    otherwise supplies the served model name."""
+    cfg = PipelineConfig(qwen_backend="api", qwen_vllm_model="", qwen_model="")
     cmd = QwenEngine()._build_command("/tmp/in", "/tmp/out", cfg)
     assert "--model" not in cmd
 
