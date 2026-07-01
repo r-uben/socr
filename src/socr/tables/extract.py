@@ -142,6 +142,77 @@ class OllamaTableReader:
         return _clean_markdown(resp.json().get("response", ""))
 
 
+class VllmTableReader:
+    """Crop reader for an OpenAI-compatible server (vLLM / SGLang).
+
+    Used on HPC, where Ollama/llama.cpp are forbidden on server GPUs and the
+    VLM is served by vLLM. Talks ``/v1/chat/completions`` with the crop image as
+    a base64 data URL (OpenAI multimodal message). Mirrors ``OllamaTableReader``
+    so it drops into the same ``TableReader`` slot; exposes ``.timeout`` so the
+    crop wall-clock deadline scales the same way.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str = "http://localhost:8000/v1",
+        timeout: float = 120.0,
+        api_key: str = "EMPTY",
+    ) -> None:
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.host = base_url  # for cascade-probe parity with OllamaTableReader
+        self._api_key = api_key
+        self._prompt = load_table_prompt()
+
+    def read(self, image_path: Path) -> str:
+        image_b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
+        resp = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            json={
+                "model": self.model,
+                "temperature": 0,  # transcription must be deterministic
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": self._prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                            },
+                        ],
+                    }
+                ],
+            },
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        choices = resp.json().get("choices") or [{}]
+        return _clean_markdown(choices[0].get("message", {}).get("content", ""))
+
+
+def make_table_reader(
+    *,
+    backend: str,
+    model: str,
+    timeout: float = 120.0,
+    ollama_host: str = "http://localhost:11434",
+    vllm_url: str = "http://localhost:8000/v1",
+) -> TableReader:
+    """Build the crop reader for *backend* ("vllm"/"sglang" -> OpenAI server, else Ollama).
+
+    Keeps Ollama as the default local path; selects the vLLM/OpenAI reader for
+    server/HPC backends. Single place that maps backend -> reader so both crop
+    construction sites stay consistent.
+    """
+    if backend in ("vllm", "sglang", "openai", "api"):
+        return VllmTableReader(model=model, base_url=vllm_url, timeout=timeout)
+    return OllamaTableReader(model=model, host=ollama_host, timeout=timeout)
+
+
 class TableCropExtractor:
     """Render table crops and read them with an injected ``TableReader``."""
 

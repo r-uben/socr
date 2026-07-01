@@ -17,6 +17,7 @@ exactly ONE place that maps (backend, model-pin) → (resolved-backend, resolved
 """
 
 import logging
+import os
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
@@ -44,8 +45,10 @@ def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
 
     Rules (in priority order):
     1. Explicit user pin (``config.qwen_model_pinned``): pass model through unchanged.
-    2. Non-local backend ("vllm", "api"): pass model through unchanged (may be empty,
-       letting the CLI use its own default).
+    2. Non-local backend ("vllm", "api") without a pin: request ``config.qwen_vllm_model``
+       (the exact model the OpenAI-compatible server is serving), falling back to
+       ``config.qwen_model`` only if ``qwen_vllm_model`` is blank. The CLI's own default
+       must never be relied on here: a mismatched model name makes the server 404.
     3. Local/auto backend ("auto", "ollama") without a pin: use ``OLLAMA_MODEL``,
        the validated instruct MoE.  A cloud model string must never reach a local backend
        via this path.
@@ -65,8 +68,10 @@ def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
         # silently landing on the local Ollama runtime.
         resolved_model = OLLAMA_MODEL
     else:
-        # vllm / api: pass the configured model (or empty → CLI picks its own default).
-        resolved_model = model
+        # vllm / api: the qwen-ocr CLI must request the EXACT model the vLLM server
+        # is serving. Use config.qwen_vllm_model (e.g. Qwen/Qwen3-VL-30B-A3B-Instruct);
+        # without it the CLI sends its own default model name and the server 404s.
+        resolved_model = config.qwen_vllm_model or model
 
     logger.info(
         "[qwen] resolved backend=%r model=%r (pinned=%s)",
@@ -89,9 +94,17 @@ class QwenEngine(BaseEngine):
         return "qwen-ocr"
 
     def is_available(self) -> bool:
-        """CLI installed AND the local instruct MoE (OLLAMA_MODEL) is pulled."""
+        """CLI installed AND a usable backend.
+
+        Local path: the instruct MoE (OLLAMA_MODEL) must be pulled in Ollama.
+        vLLM path (e.g. HPC, where Ollama is forbidden on server GPUs): when
+        ``VLLM_BASE_URL`` is set the qwen-ocr CLI serves via vLLM, so the local
+        Ollama model is NOT required. Mirrors qwen-ocr's own backend gate.
+        """
         if not super().is_available():
             return False
+        if os.environ.get("VLLM_BASE_URL"):
+            return True
         error = _check_ollama_model(OLLAMA_MODEL)
         if error:
             logger.debug(f"[{self.name}] {error}")
