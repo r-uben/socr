@@ -4,6 +4,22 @@ Live, prioritized next-actions. Detail lives in `TICKETS.md` and `docs/log/`.
 Last updated: 2026-06-10.
 
 ## Now / next
+- [ ] **Bug: `--recover-clean-equations` (GH-36b) no-ops on native-trusted pages** —
+      found live on a real paper (40pp econ draft, inline display equations in the
+      methods section). Native-first correctly glyph-scrambles those equations
+      (stacked fraction/subscript layout read in wrong order), and GH-36a's
+      `--detect-equations` correctly *finds* the equation region on those same
+      pages — but GH-36b then skips splicing the recovered LaTeX back in every
+      time, logging `"has detected equations but no PageOutput; skipping"`. Root
+      cause: no `PageOutput` exists yet for a native-trusted page at the point
+      GH-36b tries to attach the recovered LaTeX. This is exactly the failure mode
+      the flag exists to fix, so today it only helps equations on pages that
+      already route through OCR for other reasons (tables, scans) — the common
+      case (equation embedded in an otherwise-prose page) is silently unfixed.
+      Repro: `socr process paper.pdf --detect-equations --recover-clean-equations`
+      on any born-digital paper with inline display equations; grep the run log
+      for `no PageOutput`. Current workaround is `--no-native-first` (full-page
+      OCR, bypasses native trust entirely) — expensive, not a real fix.
 - [ ] **#39 Stage 2 — hand-verified ground truth** for table/equation pages of the
       10-paper benchmark set (seed candidates from native/premium-VLM output as
       `page_N.table.md` grids; human checks the numbers). Blocks Stage 3.
