@@ -106,3 +106,68 @@ data. Hierarchy comes from x-indentation. Matching is by normalized label in doc
 order, so a label reused under two parents ("Other measures") cannot be credited twice.
 
 Reproduce: the paths in the bake-off note Setup table, plus `score_page(page, markdown)`.
+
+---
+
+# Addendum (2026-07-31) — the trigger, calibrated
+
+The section above closed by saying a trigger "still needs designing from signals
+that demonstrably fire", and named two candidates. With the metric in hand, all
+candidates can be cross-tabulated against the ground truth of *does escalation
+actually help this page* (a gain of more than one percentage point).
+
+A candidate the original Unit B sketch never considered turns out to dominate: on a
+born-digital page the exactness metric is computable **at runtime, model-free, at
+zero cost**, because the native text layer is right there. That is a direct measure
+of the defect rather than a structural proxy for it.
+
+| trigger | fires | true pos | false pos | missed | precision | recall |
+|---|---:|---:|---:|---:|---:|---:|
+| **native-exactness < 100%** | 13/16 | 9 | 4 | 0 | **69%** | **100%** |
+| a ground-truth row is missing | 13/16 | 9 | 4 | 0 | 69% | 100% |
+| orphan value rows present | 4/16 | 4 | 0 | 5 | 100% | 44% |
+| tables declared, none emitted | 3/16 | 3 | 0 | 6 | 100% | 33% |
+| `dualpass_flagged` (current) | 16/16 | 9 | 7 | 0 | 56% | 100% |
+
+## Recommendation
+
+**Escalate when the emitted table disagrees with its own native text layer.**
+
+It strictly dominates the signal socr flags on today: identical recall (100%, no
+missed gains), better precision (69% vs 56%), and it fires on three fewer pages.
+
+The discrimination is exactly what #95 found missing. Pages 45, 59 and 60 are
+100% correct and this trigger stays silent on all three — while `dualpass_flagged`
+fires on them, because it fires on every table page in the document.
+
+Properties that matter for the lane:
+
+- **Parameter-free.** "Disagrees at all" — not a tuned threshold. Equivalent
+  formulations (`exactness < 100%`, `rows_not_found > 0`) select the same 13 pages.
+- **Model-free and free.** No engine call to decide whether to make an engine call.
+- **Fail-safe direction.** The four false positives (39, 53, 61, 67) cost one cloud
+  call each, ~$0.0002, and escalation was never worse than the incumbent on any
+  page in this document. Over-triggering costs money, not correctness.
+- **Same oracle as the canary.** The trigger asks "does the incumbent disagree with
+  native?"; the canary asks "does the candidate invent tokens native does not have?"
+  One oracle, two questions, and it degrades coherently: where the native layer is a
+  poor oracle the trigger fires and the canary then rejects, so the page is left
+  alone at the cost of a wasted call.
+
+## Limits, stated plainly
+
+- **Born-digital only.** A scanned page has no native oracle, so neither trigger nor
+  canary can run. Those pages stay out of the lane, as already planned.
+- **One document, no negative controls for precision.** 16 table pages from one
+  report. The 69% precision figure is a point estimate on a small, unrepresentative
+  sample; the *ordering* against `dualpass_flagged` is the robust part.
+- **The trigger cannot see permutations the canary also cannot see.** Both are token
+  containment against the same layer. This trigger works on the OBR mode-(a) pages
+  because the shift also *drops rows* (parents emptied, orphans trailing), which
+  `rows_not_found` catches — not because it detects misalignment as such. A pure
+  permutation with every label intact would score below 100% on cell values and so
+  would still fire; a permutation that also preserved cell-to-label binding would be
+  invisible, but that is not a failure mode observed here.
+- Page 53 fires and never improves (0.0% → 0.0%): its native layer does not parse
+  into scorable rows at all. It is a permanent false positive until that parse is
+  fixed, and it is the reason precision is 69% rather than 75%.
