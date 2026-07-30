@@ -4,9 +4,10 @@ Empirical pass over an existing strict-local run to answer the design fork in **
 (escalate vs fail-closed on ambiguous tables) with a measurement instead of a panel, and
 to check **#95**'s premise (is the dual-pass flag list a signal worth surfacing?).
 
-Outcome in one line: **escalation to a vision model works** (32.5% → ~100% on the worst
-page), **the dual-pass detector is reliable**, and **an unguarded escalation lane will
-silently fabricate entire tables** — demonstrated, not hypothesised.
+Outcome in one line: **escalation to a vision model works** (38.6% → 74.0% across 16 table
+pages, never worse on any page, and it recovers two pages socr dropped or fail-closed),
+**the dual-pass detector is reliable**, and **an unguarded escalation lane will silently
+fabricate entire tables** — demonstrated, not hypothesised.
 
 ## Setup
 
@@ -31,11 +32,25 @@ from the emitted markdown table; count cells that match positionally per label. 
 label cannot be matched at all count as fully missed, which is the right severity for a
 citation corpus — an unlabelled `-18.4` is unusable.
 
-**Known limitation, and a requirement for the real harness:** keying by bare label collides
-when a hierarchical table reuses a child label. `Other measures` appears twice in Table 1
-(under *Growth Plan* and under *Autumn Statement*), and the scorer credits the first match
-only. This understated agy's page-13 score by 6 cells. **The productionised harness for #96
-must key rows by `(parent, label)` path, not by label.** Scorer used here is in the appendix.
+**Known limitations. Both matter for reading the numbers below, and both are requirements for
+the real harness.**
+
+1. **Duplicate-label collision.** Keying by bare label collides when a hierarchical table
+   reuses a child label. `Other measures` appears twice in Table 1 (under *Growth Plan* and
+   under *Autumn Statement*), and the scorer credits the first match only. This understated
+   agy's page-13 score by 6 cells. **The productionised harness for #96 must key rows by
+   `(parent, label)` path, not by label.**
+
+2. **Per-page ceiling below 100%.** The native-layer parser is a heuristic
+   (non-numeric line, then the numeric lines following it) and does not handle every layout.
+   On some pages it caps *any* engine well below 100% — page 39 scores 79.7% for both socr
+   and agy even though their outputs are substantively identical and both correct, and on
+   pages 53 and 61 the parser matches no labels at all, scoring both engines 0.0% and 32.1%
+   respectively. **A tie between two engines on this metric usually means the ceiling was
+   reached, not that both failed.** Only divergences are informative; absolute per-page
+   values are lower bounds.
+
+Scorer used here is in the appendix.
 
 ## Result 1 — the flagged pages, measured
 
@@ -63,7 +78,8 @@ must key rows by `(parent, label)` path, not by label.** Scorer used here is in 
 | 65 | 39 | 232 | 0.0 | 39 | 7 | 14 | 2 |
 | 67 | 34 | 204 | 94.1 | 1 | 0 | 5 | 4 |
 
-**Aggregate: 870 / 2306 cells exact = 37.7%. 917 duplicate emitted rows.**
+**Aggregate over the 16 pages that actually contain tables: 870 / 2254 cells exact = 38.6%.
+917 duplicate emitted rows.** (Pages 37, 41 and 43 are excluded — see mode (c) below.)
 
 ### Four distinct failure modes, not one
 
@@ -96,9 +112,18 @@ their first word and scattered across phantom columns. Page 65:
 
 Values are correct and correctly ordered. The labels are destroyed, so the grid is unusable.
 
-**(c) Table absent entirely** — pages 37, 41, 43, 55. Native text shows a table; the
-fragment emits zero markdown table rows. Silent, unlike page 46 which at least fails loudly
-with `[page 46 failed: unverifiable table — see image]`.
+**(c) Table absent — page 55 only.** Native text shows `Table A: Implications of higher gas
+prices for near-term borrowing`; the fragment emits zero markdown table rows. Silent, unlike
+page 46 which at least fails loudly with
+`[page 46 failed: unverifiable table — see image]`.
+
+> **Correction.** An earlier revision of this note also listed pages 37, 41 and 43 under this
+> mode. That was wrong, and the error was mine, not socr's: those pages contain **Chart 16**,
+> **Chart 18** and **Chart D**, not tables. Their numeric lines are chart data labels, which
+> the ground-truth parser mistook for table rows (yielding phantom "ground truth" of 1, 1 and
+> 2 rows). socr was **correct** to emit no table on all three, and the escalation run
+> independently returned `NO TABLE` for each. Their phantom cells are excluded from the
+> aggregate above.
 
 **(d) Repetition runaway** — page 62. 865 consecutive copies of `| | | | | | | |`, reaching
 the final `.md` as 867 of 3177 lines (27% of the document). Filed separately as **#97**;
@@ -181,24 +206,80 @@ The second run added exactly this canary and it passed cleanly (`CAPTION: Table 
 effect of Government decisions since March / UNITS: £ billion / YEARS: 2022-23, …, 2027-28`),
 which is how Result 3 is known to be grounded rather than a lucky fabrication.
 
-## Implications for the open issues
+## Result 5 — escalation across all 19 flagged pages
+
+Result 3 rested on a single page. Extended to all 19, each run with the canary gate, 4
+concurrent:
+
+| page | socr % | agy % | gt cells | verdict |
+|-----:|-------:|------:|---------:|---------|
+| 13 | 32.5 | **95.2** | 126 | hierarchical shift fixed |
+| 39 | 79.7 | 79.7 | 74 | tie — socr already correct, scorer ceiling |
+| 45 | 100.0 | 100.0 | 49 | tie — both correct |
+| 46 | 0.0 | **100.0** | 75 | **socr fail-closed; agy recovered exactly** |
+| 48 | 0.0 | **76.8** | 82 | label shredding fixed |
+| 51 | 12.9 | **70.6** | 85 | label shredding fixed |
+| 53 | 0.0 | 0.0 | 52 | tie — scorer parses no labels, uninformative |
+| 55 | 0.0 | **100.0** | 33 | **socr dropped table; agy recovered exactly** |
+| 59 | 76.7 | 76.7 | 210 | tie — scorer ceiling |
+| 60 | 73.3 | 73.3 | 180 | tie — scorer ceiling |
+| 61 | 32.1 | 32.1 | 224 | tie — scorer parse failure, uninformative |
+| 62 | 3.6 | **32.1** | 168 | runaway avoided; still low (see #97) |
+| 63 | 77.8 | 77.8 | 189 | tie — scorer ceiling |
+| 64 | 0.0 | **89.7** | 271 | label shredding fixed |
+| 65 | 0.0 | **89.7** | 232 | label shredding fixed |
+| 67 | 94.1 | 94.1 | 204 | tie — both correct |
+| 37, 41, 43 | — | `NO TABLE` | — | chart pages; both engines agree, correctly |
+
+**Aggregate: socr 870 / 2254 = 38.6%, agy 1668 / 2254 = 74.0%.**
+
+Three findings that matter more than the aggregate:
+
+1. **agy was never worse than socr on any page.** Escalation carries no regression risk on
+   this document, which is what makes attempting it safe.
+2. **It recovers pages socr gives up on.** Page 46 was `table_region_unverifiable` +
+   `page_failed` — socr emitted a stub and an image. agy reproduced all 14 rows matching the
+   native layer. Page 55's dropped table likewise came back exact. So **fail-closed pages are
+   recoverable**, and fail-closed should be the fallback *after* escalation, not instead of it.
+3. **Mode (b) is fixed, not just mode (a).** Pages 48, 51, 64, 65 went from unusable (labels
+   destroyed) to 70–90%. The original scope of #96 was too narrow.
+
+The ties are not failures. Seven of them are pages where socr was already correct and both
+engines hit the scorer's ceiling; two (53, 61) are pages the scorer cannot parse. See the
+Method limitations.
+
+### Canary results
+
+All 15 table pages returned canaries consistent with the document: captions form the coherent
+sequence `Table 1, 2, 3, 4, 5, 6, 7, A.1, A.2, A.3, A.4, A.5, A.6, A.7, A.9`, with correct
+units and year headers. Zero canary mismatches, i.e. **zero fabrications in 19 correctly
+configured runs**. Combined with Result 4, the pattern is clear: fabrication is what happens
+when the model is denied its input, not a baseline rate. The canary detects exactly that
+condition, which is why it is the right gate.
+
+
 
 **#97 (new, most urgent)** — repetition runaway. Corrupting 27% of a shipped document today
 with no detector anywhere. Bounded guard plus audit kind. Independent of everything else.
 
 **#95** — surfacing. Confirmed with numbers: `metadata.json` reports
 `error: "page(s) 46 produced no usable output"`, naming one page, while the actual state is
-19 flagged pages at 37.7% aggregate exactness, four silently table-less pages, and a quarter
+16 table pages at 38.6% aggregate exactness, one silently dropped table (55), and a quarter
 of the document filled with blank rows. The signal being withheld is reliable (Result 2), so
 a `tables_trust.json` sidecar plus a doc-level count is worth building and low-risk.
 
-**#96** — now well-specified but no longer blocked on a design question:
-- escalate is viable (Result 3), so pick escalate-with-canary over fail-closed;
-- the canary and rejection rules above are mandatory, not optional hardening (Result 4);
-- scope must widen from mode (a) to all four modes;
-- the fixture metric must key rows by `(parent, label)` path;
-- native-layer reconciliation is a cheaper partial fix for mode (a) specifically, since the
-  correct row order is already present locally at zero cost.
+**#96** — no longer blocked on a design question:
+- escalate is viable and **never regressed a page** (Results 3, 5), so pick
+  escalate-with-canary, with fail-closed as the fallback *after* escalation rather than
+  instead of it — page 46 proves fail-closed pages are recoverable;
+- the canary and rejection rules are mandatory, not optional hardening (Result 4), and cost
+  nothing to check on born-digital pages;
+- scope must widen from mode (a) to modes (a), (b) and (c) — escalation demonstrably fixes
+  all three;
+- the fixture metric must key rows by `(parent, label)` path, and must be validated against a
+  page where the current output is known-good so its ceiling is known (Method, limitation 2);
+- native-layer reconciliation remains a cheaper partial fix for mode (a) specifically, since
+  the correct row order is already present locally at zero cost.
 
 ## Appendix — scorer used
 
