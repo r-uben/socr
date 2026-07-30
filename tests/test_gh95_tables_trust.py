@@ -257,3 +257,17 @@ def test_doc_level_note_is_bounded_regardless_of_document_size():
     assert note is not None
     assert len(note) < 100
     assert "200 page(s)" in note
+
+
+def test_doc_level_note_is_well_formed_prose():
+    """Regression: the note read "untrusted tables on page(s) 4 page(s), 11 flag(s)".
+
+    TRUST_NOTE_PREFIX ended in "on page(s)" from when the note enumerated pages;
+    switching it to counts left the stale fragment behind. Only a live run
+    surfaced it, because every earlier test asserted on substrings rather than
+    the whole string.
+    """
+    note = trust_note(build_tables_trust("doc.pdf", [_flagged(1), _flagged(2)]))
+
+    assert note == "untrusted tables on 2 page(s), 2 flag(s) (see tables_trust.json)"
+    assert "page(s) 2 page(s)" not in note

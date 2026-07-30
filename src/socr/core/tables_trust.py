@@ -154,7 +154,7 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
 
 # ``DocMetadata`` (ocr-output-contract) has a fixed field set with no slot for a
 # trust count, so the document-level signal rides in the one free-text field.
-TRUST_NOTE_PREFIX = "untrusted tables on page(s)"
+TRUST_NOTE_PREFIX = "untrusted tables"
 
 
 def trust_note(trust: TablesTrust) -> str | None:
@@ -172,6 +172,6 @@ def trust_note(trust: TablesTrust) -> str | None:
     if not trust.pages:
         return None
     return (
-        f"{TRUST_NOTE_PREFIX} {len(trust.pages)} page(s), "
+        f"{TRUST_NOTE_PREFIX} on {len(trust.pages)} page(s), "
         f"{trust.flag_count} flag(s) (see tables_trust.json)"
     )
