@@ -26,7 +26,11 @@ from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.normalizer import OutputNormalizer
+from socr.core.normalizer import (
+    MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS,
+    OutputNormalizer,
+    collapse_repeated_table_rows,
+)
 from socr.core.result import (
     DocumentStatus,
     EngineResult,
@@ -1395,6 +1399,69 @@ class UnifiedPipeline:
         page_out.text = text
 
     # ------------------------------------------------------------------
+    # GH-97: degenerate table-row repetition guard (agentic pre-flush seam)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _guard_agentic_page_table_repetition(
+        state: DocumentState,
+        page_num: int,
+        page_out: PageOutput,
+    ) -> None:
+        """Truncate runaway repeated table rows before the provisional flush.
+
+        Placed here rather than in ``OutputNormalizer`` because that runs at the
+        engine boundary, before table assembly: on the GH-97 reference run a
+        15-character empty row repeated 865 times survived normalization (too
+        short for the generic rule's 20-char floor) and reached 867 of the 3177
+        lines of the assembled document - 27% of it - with no audit event and no
+        doc-level signal.
+
+        Removal is content-safe: every dropped line is byte-identical to one
+        that is kept. The event is recorded unconditionally so the failure is
+        visible in ``audit_log.json`` and, via ``_repetition_truncated_note``,
+        in the document-level error surface.
+        """
+        text = page_out.text or ""
+        if not text:
+            return
+
+        cleaned, removed = collapse_repeated_table_rows(text)
+        if not removed:
+            return
+
+        page_out.text = cleaned
+
+        from socr.core.audit_log import AuditEvent
+
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="table_row_repetition_truncated",
+                engine=page_out.engine or "",
+                detail=(
+                    f"dropped {removed} consecutive duplicate table row(s); "
+                    f"kept at most {MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS} copies"
+                ),
+                data={"rows_removed": removed},
+            )
+        )
+
+    @staticmethod
+    def _repetition_truncated_note(events: list) -> str | None:
+        """Document-level one-liner naming pages whose tables were truncated.
+
+        Returns ``None`` when no page was affected, so a clean run's error
+        surface is left untouched.
+        """
+        pages = sorted({e.page_num for e in events if e.kind == "table_row_repetition_truncated"})
+        if not pages:
+            return None
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: degenerate table row repetition truncated"
+        )
+
+    # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
     # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
     # wedged VLM judge cannot block the orchestrator thread indefinitely.
@@ -2103,6 +2170,11 @@ class UnifiedPipeline:
                     bo,
                     _agentic_doc_dir,
                 )
+
+            # GH-97: truncate degenerate repeated table rows. Runs after table
+            # assembly (unlike OutputNormalizer) and before the flush, so the
+            # fragment, the sidecar and the stitched body all see one text.
+            self._guard_agentic_page_table_repetition(state, page_num, bo)
 
             # Write-through blob cache (replay-cache continuity).
             if _page_blob_store is not None:
@@ -4066,6 +4138,17 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_pp2_halt}"
             else:
                 final_result.error = _pp2_halt
+
+        # GH-97: surface degenerate table-row repetition at document level. The
+        # per-page audit events alone are not enough - a consumer gating on
+        # ``metadata.json`` must be able to see that a page's table was
+        # truncated without parsing the full audit log.
+        _rep_note = self._repetition_truncated_note(state.events)
+        if _rep_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_rep_note}"
+            else:
+                final_result.error = _rep_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
