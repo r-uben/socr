@@ -97,10 +97,10 @@ The thinking build never terminates — the timeout guard is its only defence.
 
 ```python
 # config.py — deterministic auto-probe (default mode), best-cheap-first
-AUTO_ENGINE_ORDER = [QWEN, GEMINI, MARKER, GLM, NOUGAT]   # DeepSeek + Mistral dropped
+AUTO_ENGINE_ORDER = [QWEN, GEMINI, MARKER, GLM, NOUGAT]  # DeepSeek + Mistral dropped
 
 # registry.py — local-only tier for tiered routing
-_LOCAL_ENGINE_ORDER = [QWEN, GLM, NOUGAT, MARKER]          # DeepSeek dropped
+_LOCAL_ENGINE_ORDER = [QWEN, GLM, NOUGAT, MARKER]  # DeepSeek dropped
 ```
 
 `resolve_auto_engine()` returns the first *available* engine in `AUTO_ENGINE_ORDER`
