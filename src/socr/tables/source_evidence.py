@@ -23,9 +23,8 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from socr.tables.native_verifier import _numeric_multiset_from_tokens
+from socr.tables.native_verifier import _numeric_multiset_from_tokens, is_numeric_token
 from socr.tables.reconcile import find_table_blocks
-from socr.tables.reconstruct import _NUM_TOKEN_RE, _NUMERIC_RE
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +97,7 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
                 cell = cell.strip()
                 if not cell or cell in ("---", "—"):
                     continue
-                if _NUM_TOKEN_RE.match(cell) and _NUMERIC_RE.search(cell):
+                if is_numeric_token(cell):
                     raw_numeric.append(cell)
                 # Content-label tokens come from data rows only (row 0 is the
                 # header).  Generic header words ("Category", "Description") are
@@ -131,7 +130,7 @@ def _tokens_from_plain_text(text: str) -> tuple[Counter, set[str]]:
         word = word.strip(".,;:!?()[]\"'")
         if not word:
             continue
-        if _NUM_TOKEN_RE.match(word) and _NUMERIC_RE.search(word):
+        if is_numeric_token(word):
             raw_numeric.append(word)
         for m in _CONTENT_TOKEN_RE.finditer(word):
             content.add(m.group(0).lower())

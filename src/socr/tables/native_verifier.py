@@ -410,6 +410,52 @@ def _parse_output_row_cells(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+# Currency symbols that prefix a value in fiscal tables.
+_CURRENCY_PREFIXES = frozenset("£$€¥")
+
+
+def strip_presentation(tok: str) -> str:
+    """Remove presentation-only decoration from a would-be numeric token.
+
+    GH-103. Three things are styling or encoding, not value, and each caused a
+    token to be dropped entirely rather than compared:
+
+    1. **Markdown emphasis.** ``**23,126**`` never matched the anchored
+       ``_NUM_TOKEN_RE``, so every bolded numeric cell vanished from the multiset.
+       On a table whose section-total rows are bold — which is how VLMs emit them —
+       the source-evidence gate then had nothing left to check and passed
+       vacuously.
+    2. **Unicode minus and dashes.** Native fiscal PDFs carry U+2212 while a VLM
+       emits ASCII ``-``. Both sides were dropped, so a value that actually agreed
+       looked like it was missing from both. (``reconcile._norm`` already folded
+       these; this path did not.)
+    3. **Currency prefixes.** ``£43.2`` failed on both sides, and asymmetrically
+       when the native layer glues the symbol and the markdown cell drops it
+       because the unit lives in the caption.
+
+    Deliberately NOT stripped: parentheses, trailing ``%`` and thousands commas,
+    which ``_normalize_numeric_token`` already handles and which carry meaning
+    (the econ negative convention).
+    """
+    tok = tok.strip().replace(" ", " ").strip()
+    for mark in ("**", "__", "*", "_"):
+        while tok.startswith(mark):
+            tok = tok[len(mark) :]
+        while tok.endswith(mark):
+            tok = tok[: -len(mark)]
+    for dash in ("−", "–", "—"):
+        tok = tok.replace(dash, "-")
+    while tok[:1] in _CURRENCY_PREFIXES:
+        tok = tok[1:]
+    return tok.strip()
+
+
+def is_numeric_token(tok: str) -> bool:
+    """True when *tok* is a table value once presentation is stripped."""
+    cleaned = strip_presentation(tok)
+    return bool(_NUM_TOKEN_RE.match(cleaned) and _NUMERIC_RE.search(cleaned))
+
+
 def _normalize_numeric_token(tok: str) -> str:
     """N2 canonical form for numeric-string comparison (no float parsing).
 
@@ -426,7 +472,7 @@ def _normalize_numeric_token(tok: str) -> str:
     Both native tokens and output tokens are normalized with this function
     before multiset comparison, so the comparison is always N2↔N2.
     """
-    tok = tok.strip()
+    tok = strip_presentation(tok)
     # Strip parenthesis wrappers (econ-table negative-sign: (X) means -X)
     if tok.startswith("(") and tok.endswith(")") and len(tok) > 2:
         tok = tok[1:-1]
@@ -451,7 +497,7 @@ def _numeric_multiset_from_tokens(
     """
     result: Counter = Counter()
     for tok in raw_tokens:
-        if _NUM_TOKEN_RE.match(tok) and _NUMERIC_RE.search(tok):
+        if is_numeric_token(tok):
             result[_normalize_numeric_token(tok)] += 1
     return result
 
