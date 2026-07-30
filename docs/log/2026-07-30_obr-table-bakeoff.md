@@ -321,11 +321,13 @@ described in Method, and no tests.
 ```python
 import re, sys, json
 
-NUM = re.compile(r'^-?[\d,]+\.?\d*$|^-?\d+$')
-SKIP = ('of which', 'note:', 'memo:')
+NUM = re.compile(r"^-?[\d,]+\.?\d*$|^-?\d+$")
+SKIP = ("of which", "note:", "memo:")
+
 
 def norm(s):
-    return re.sub(r'[^a-z0-9]+', '', s.lower())
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
 
 def truth(path):
     """label -> [values] from a PDF page's native text layer."""
@@ -346,28 +348,31 @@ def truth(path):
         rows.append((label, vals))
     return [(l, v) for l, v in rows if len(v) >= 2]
 
+
 def md_rows(path):
     """label -> [numeric cells] from an emitted markdown table."""
     out = []
     for line in open(path):
         s = line.strip()
-        if not s.startswith('|'):
+        if not s.startswith("|"):
             continue
-        cells = [c.strip() for c in s.strip('|').split('|')]
-        if cells and cells[0] and set(cells[0]) <= set(':- '):
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if cells and cells[0] and set(cells[0]) <= set(":- "):
             continue
-        lab = cells[0].replace('**', '').strip() if cells else ''
-        vals = [c.replace('**', '').strip() for c in cells[1:]
-                if NUM.match(c.replace('**', '').strip())]
+        lab = cells[0].replace("**", "").strip() if cells else ""
+        vals = [
+            c.replace("**", "").strip() for c in cells[1:] if NUM.match(c.replace("**", "").strip())
+        ]
         out.append((lab, vals))
     return out
+
 
 def main(native, md):
     gt, got = truth(native), md_rows(md)
     lookup = {}
     for lab, v in got:
         if lab:
-            lookup.setdefault(norm(lab), v)   # <-- collision on repeated labels
+            lookup.setdefault(norm(lab), v)  # <-- collision on repeated labels
     hit = tot = 0
     missing_rows, shifted = 0, []
     for lab, tv in gt:
@@ -378,20 +383,25 @@ def main(native, md):
             continue
         hit += sum(1 for a, b in zip(tv, gv) if a == b)
         if gv and tv and gv[0] != tv[0]:
-            shifted.append((lab, tv[0], gv[0] or '(empty)'))
+            shifted.append((lab, tv[0], gv[0] or "(empty)"))
     seen = {}
     for lab, v in got:
         k = (lab, tuple(v))
         seen[k] = seen.get(k, 0) + 1
-    return dict(gt_rows=len(gt), cells=tot, exact=hit,
-                pct=round(100 * hit / tot, 1) if tot else None,
-                rows_not_found=missing_rows,
-                orphan_rows=sum(1 for lab, v in got if not lab and v),
-                labelled_but_empty=sum(1 for lab, v in got if lab and not v),
-                duplicate_rows=sum(c - 1 for c in seen.values() if c > 1),
-                first_col_mismatch=len(shifted))
+    return dict(
+        gt_rows=len(gt),
+        cells=tot,
+        exact=hit,
+        pct=round(100 * hit / tot, 1) if tot else None,
+        rows_not_found=missing_rows,
+        orphan_rows=sum(1 for lab, v in got if not lab and v),
+        labelled_but_empty=sum(1 for lab, v in got if lab and not v),
+        duplicate_rows=sum(c - 1 for c in seen.values() if c > 1),
+        first_col_mismatch=len(shifted),
+    )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     print(json.dumps(main(sys.argv[1], sys.argv[2])))
 ```
 
