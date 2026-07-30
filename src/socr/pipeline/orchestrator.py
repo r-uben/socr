@@ -4149,6 +4149,18 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_rep_note}"
             else:
                 final_result.error = _rep_note
+        # GH-95: document-level table-distrust pointer. ``DocMetadata`` has a
+        # fixed field set with no slot for a trust count, so the signal rides in
+        # the one free-text field, prefixed with a stable token a downstream CLI
+        # can gate on by substring. ``tables_trust.json`` remains authoritative;
+        # this only tells a consumer to go look. Appended (never overwriting) so
+        # a lost-content or halt reason still reads first.
+        _trust_note = self._tables_trust_note(state)
+        if _trust_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_trust_note}"
+            else:
+                final_result.error = _trust_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
@@ -4312,8 +4324,51 @@ class UnifiedPipeline:
                 console.print(
                     f"  [dim]Audit log: {doc_dir / 'audit_log.json'} ({audit.summary_line()})[/dim]"
                 )
+            self._write_tables_trust(state, audit, doc_dir)
         except Exception as exc:  # never lose output over an audit-log write
             logger.warning("audit log write failed (non-fatal): %s", exc)
+
+    def _write_tables_trust(self, state: DocumentState, audit, doc_dir: Path) -> None:
+        """GH-95: write tables_trust.json beside audit_log.json.
+
+        Separate file rather than an inline callout in the assembled markdown:
+        the ``.md`` is produced by ``_rewrite_all_fragments``, whose byte-identity
+        with whole-doc assembly is guarded by golden tests, and #95 accepts a
+        sidecar. Prose-only pages therefore stay unmarked in the corpus.
+
+        Non-fatal by the same rule as the audit log: a trust-sidecar write must
+        never lose OCR output.
+        """
+        try:
+            from socr.core.tables_trust import build_tables_trust
+
+            trust = build_tables_trust(state.handle.filename, audit.events)
+            if not trust.pages:
+                return  # every table trusted — no sidecar to write
+            trust.save(doc_dir / "tables_trust.json")
+            if not self.config.quiet:
+                console.print(f"  [yellow]Table trust:[/yellow] {trust.summary_line()}")
+        except Exception as exc:
+            logger.warning("tables_trust.json write failed (non-fatal): %s", exc)
+
+    @staticmethod
+    def _tables_trust_note(state: DocumentState) -> str | None:
+        """GH-95: document-level table-distrust pointer, or None when clean.
+
+        Derived from ``state.events`` rather than ``build_run_audit`` because
+        every distrust kind is appended at the source; the derived-escalation
+        half of the audit contributes none of them. Non-fatal: a note that
+        cannot be derived must never fail the run.
+        """
+        try:
+            from socr.core.tables_trust import build_tables_trust, trust_note
+
+            events = list(getattr(state, "events", []))
+            filename = getattr(getattr(state, "handle", None), "filename", "")
+            return trust_note(build_tables_trust(filename, events))
+        except Exception as exc:
+            logger.warning("table-trust note derivation failed (non-fatal): %s", exc)
+            return None
 
     def _describe_and_embed_figures(
         self,

@@ -23,6 +23,12 @@ from dataclasses import dataclass, field
 _PIPE_LINE = re.compile(r"^\s*\|?.*\|.*$")  # a markdown table row contains a pipe
 _SEP_CELL = re.compile(r"^:?-{1,}:?$")  # ---, :---, ---:, :---: separator cell
 
+# GH-95: the note attached to a disagreement that *could* have been auto-patched
+# but was left flag-only because ``--auto-patch-tables`` is off. Named rather than
+# inlined so the trust sidecar can identify patch-eligible pages by constant
+# comparison instead of parsing prose out of the audit log.
+PATCH_ELIGIBLE_NOTE = "eligible for patch; flag-only (enable --auto-patch-tables)"
+
 
 @dataclass
 class CellDiff:
@@ -253,7 +259,7 @@ def reconcile_page_tables(
                         source=source,
                         action="flagged",
                         changed_cells=diffs,
-                        note="eligible for patch; flag-only (enable --auto-patch-tables)",
+                        note=PATCH_ELIGIBLE_NOTE,
                     )
                 )
         else:
