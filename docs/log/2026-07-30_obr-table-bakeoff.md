@@ -6,8 +6,9 @@ to check **#95**'s premise (is the dual-pass flag list a signal worth surfacing?
 
 Outcome in one line: **escalation to a vision model works** (38.6% → 74.0% across 16 table
 pages, never worse on any page, and it recovers two pages socr dropped or fail-closed),
-**the dual-pass detector is reliable**, and **an unguarded escalation lane will silently
-fabricate entire tables** — demonstrated, not hypothesised.
+**the dual-pass detector flags every table page including the correct ones** (so it is a
+triage list, not a trust verdict), and **an unguarded escalation lane will silently fabricate
+entire tables** — demonstrated, not hypothesised.
 
 ## Setup
 
@@ -100,7 +101,7 @@ headline spot-check passes (`64.2 / 39.8` sit in the un-nested top block and are
 while 67% of cells are on the wrong row. This is #96 as filed. Note the table carries its
 own checksum: `24.8 + 18.4 = 43.2`.
 
-**(b) Label truncation and column explosion** — pages 48, 51, 53, 64, 65. Labels are cut to
+**(b) Label truncation and column explosion** — pages 51, 53, 64, 65. Labels are cut to
 their first word and scattered across phantom columns. Page 65:
 
 | native | emitted |
@@ -125,21 +126,50 @@ page 46 which at least fails loudly with
 > independently returned `NO TABLE` for each. Their phantom cells are excluded from the
 > aggregate above.
 
-**(d) Repetition runaway** — page 62. 865 consecutive copies of `| | | | | | | |`, reaching
-the final `.md` as 867 of 3177 lines (27% of the document). Filed separately as **#97**;
-the fix is a bounded repeat guard plus an audit kind, independent of #96's routing design.
+**(d) Repetition runaway** — pages 62 and 48. Page 62 emits 865 consecutive copies of
+`| | | | | | | |`, reaching the final `.md` as 867 of 3177 lines (27% of the document). Page 48
+is the same defect in a worse form: a **wholly contentless** 12-column table — empty header,
+separator, then 15 identical empty rows, zero data — shipped as a table.
 
-## Result 2 — the dual-pass detector is trustworthy
+> **Correction.** An earlier revision filed page 48 under mode (b). It belongs here: its rows
+> carry no labels *and* no values, so nothing was truncated or shredded, it was never
+> populated.
 
-Scored every page with a substantial table, flagged or not. Exactly one substantial-table
-page was unflagged: **page 66, at 91.2%**. Zero false negatives.
+Filed separately as **#97** (fixed: `129c5cd`). Root cause was not a missing guard but two
+defects in the one that existed — `OutputNormalizer._RE_LINE_REPEAT` has an undocumented
+20-character floor, and the 15-character row is too short to match it; and `normalize()` runs
+at the *engine* boundary, before dual-pass, header repair and table reconstruction, so
+page 48's 37-character row (long enough to match) was never re-checked either.
 
-Caveat: thin base. Most table pages in this document were flagged, so "zero false
-negatives" rests on a single negative control. Worth re-checking on a second document
-before treating the flag list as a complete trust index.
+## Result 2 — the detector has perfect recall and unmeasurable precision
 
-This matters for **#95**: the signal being hidden from consumers is a *reliable* signal.
-Surfacing it is high-value and low-risk.
+**Corrected.** An earlier revision of this note claimed "zero false negatives, resting on a
+single negative control: page 66 at 91.2%". Page 66 **is** flagged — by
+`value_guard_row_count_warning`, which fires on pages 13, 46, 48, 51, 55, 64, 65, **66** and
+67. The earlier union only covered `dualpass_flagged`, `native_table_verifier_warn`,
+`table_region_unverifiable` and `page_failed`, so it missed it.
+
+The corrected picture: **20 of the 20 pages carrying a substantial table are flagged.** There
+are no negative controls at all, so "zero false negatives" is not a finding — it is
+untestable on this document. Recall is trivially 100%; precision cannot be measured.
+
+And precision is visibly poor. Pages that are entirely or nearly correct are flagged too:
+
+| page | exactness | flagged by |
+|-----:|----------:|------------|
+| 45 | **100.0%** | `native_table_verifier_warn`, `dualpass_flagged` |
+| 67 | 94.1% | `dualpass_flagged` |
+| 66 | 91.2% | `value_guard_row_count_warning` |
+
+**What this means for #95.** The sidecar is a **triage list, not a trust verdict** — "these
+pages need a human look", not "these pages are wrong". That is still worth surfacing: 20
+pages to check beats a `metadata.json` that names one. But a consumer must not read
+`untrusted_pages` as "these are the broken ones", and the flag list cannot be used to
+*measure* quality. Ranking flagged pages by severity is a real follow-up; the current signal
+is binary and saturated.
+
+Re-checking on a document where some table pages are *not* flagged is the only way to learn
+whether the detector discriminates at all.
 
 ## Result 3 — escalation works
 
@@ -265,8 +295,9 @@ with no detector anywhere. Bounded guard plus audit kind. Independent of everyth
 **#95** — surfacing. Confirmed with numbers: `metadata.json` reports
 `error: "page(s) 46 produced no usable output"`, naming one page, while the actual state is
 16 table pages at 38.6% aggregate exactness, one silently dropped table (55), and a quarter
-of the document filled with blank rows. The signal being withheld is reliable (Result 2), so
-a `tables_trust.json` sidecar plus a doc-level count is worth building and low-risk.
+of the document filled with blank rows. The signal is saturated rather than precise (Result 2), so
+the sidecar is worth building as a triage list — but it must not be presented as a verdict,
+and severity ranking is a follow-up.
 
 **#96** — no longer blocked on a design question:
 - escalate is viable and **never regressed a page** (Results 3, 5), so pick
