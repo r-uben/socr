@@ -325,3 +325,73 @@ class OutputNormalizer:
         text = self._RE_EXCESS_BLANK.sub("\n\n", text)
 
         return text.strip()
+
+
+# ----------------------------------------------------------------------
+# GH-97: degenerate table-row repetition
+# ----------------------------------------------------------------------
+#
+# ``OutputNormalizer._RE_LINE_REPEAT`` above already collapses a line that
+# repeats 5+ times, but it is not sufficient for table rows, for two reasons:
+#
+# 1. It only matches lines of 20+ characters, so a narrow table's empty row
+#    (``"| | | | | | | |"``, 15 chars) can never match it.
+# 2. ``normalize()`` runs at the *engine* boundary (``engines/base.py``), before
+#    dual-pass, header repair and table reconstruction. Degenerate rows those
+#    stages introduce or preserve are never re-checked.
+#
+# The function below covers exactly that gap: table rows only, no width floor,
+# applied at a post-assembly seam.
+#
+# Bound derivation (no magic number): measured over the OBR EFO November 2022
+# reference document (68 pages, 15 carrying tables). 13 of those pages have a
+# longest run of consecutive byte-identical table rows of exactly 1. The only
+# two exceptions are both VLM degeneration, not content - a run of 15 (p48, a
+# wholly contentless table) and 864 (p62, real content followed by 865 blank
+# rows). Legitimate tables in that corpus never repeat a row at all, so a run of
+# two is already anomalous. Two is kept as slack for genuine spacer rows in
+# layouts outside this corpus; longer runs are treated as a runaway.
+MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS = 2
+
+_RE_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+
+
+def collapse_repeated_table_rows(
+    text: str,
+    *,
+    max_run: int = MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS,
+) -> tuple[str, int]:
+    """Truncate runaway repetition of byte-identical markdown table rows.
+
+    Returns ``(text, rows_removed)``.
+
+    Only *consecutive* identical table rows are collapsed, and only down to
+    ``max_run`` surviving copies. Non-table lines are never touched - prose
+    repetition remains ``OutputNormalizer``'s generic rule's business.
+
+    Content-preserving by construction: every removed line is byte-identical to
+    a line that is kept, so no cell value can be lost. That matters because this
+    runs on a citation corpus where a dropped number is worse than a missing
+    one.
+    """
+    if not text:
+        return text, 0
+
+    out: list[str] = []
+    removed = 0
+    prev: str | None = None
+    kept_run = 0
+
+    for line in text.split("\n"):
+        is_row = bool(_RE_TABLE_ROW.match(line))
+        if is_row and line == prev:
+            kept_run += 1
+            if kept_run > max_run:
+                removed += 1
+                continue
+        else:
+            kept_run = 1 if is_row else 0
+            prev = line if is_row else None
+        out.append(line)
+
+    return "\n".join(out), removed
