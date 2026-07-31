@@ -451,3 +451,28 @@ def test_a_wholly_small_row_keeps_all_its_values(tmp_path):
     memo = [r for r in rows if "Memo" in r.label]
     assert memo, "the small row was dropped entirely"
     assert list(memo[0].values) == ["5.0", "6.0"]
+
+
+def test_bold_value_cells_are_scored_not_discarded(hierarchical_page):
+    """Third instance of the GH-103 defect, in the metric's own tokenizer.
+
+    Engines emit section-total rows in bold. ``BenchmarkScorer._is_numeric_cell``
+    anchors its regex without stripping markdown, so ``**43.2**`` read as
+    non-numeric, the row looked value-less and was discarded. It under-scored a
+    real engine by 39 points and would have argued for changing engines.
+    """
+    plain = "\n".join(
+        ["| | c1 | c2 | c3 |", "| --- | --- | --- | --- |"]
+        + [f"| {lab} | " + " | ".join(v) + " |" for lab, _d, v in _ROWS if v]
+    )
+    bold = "\n".join(
+        ["| | c1 | c2 | c3 |", "| --- | --- | --- | --- |"]
+        + [
+            f"| **{lab}** | " + " | ".join(f"**{x}**" for x in v) + " |"
+            for lab, _d, v in _ROWS
+            if v
+        ]
+    )
+
+    assert score_page(hierarchical_page, plain).pct == score_page(hierarchical_page, bold).pct
+    assert score_page(hierarchical_page, bold).pct == 100.0

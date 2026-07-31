@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 
 from socr.benchmark.scorer import BenchmarkScorer
+from socr.tables.native_verifier import strip_presentation
 
 # A row whose label is only a hierarchy marker ("of which:") introduces children of
 # the preceding labelled row; it carries no values of its own.
@@ -25,7 +26,15 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _is_value(cell: str) -> bool:
-    return bool(cell) and BenchmarkScorer._is_numeric_cell(cell)
+    """True when *cell* is a table value.
+
+    Emphasis is stripped first (GH-103's lesson, in a second tokenizer):
+    ``BenchmarkScorer._is_numeric_cell`` anchors its regex and does not tolerate
+    markdown, so a bold cell like ``**43.2**`` reads as non-numeric. Engines emit
+    section-total rows bold, so leaving this unstripped silently discards every
+    parent row — it under-scored a candidate by 39 points before this was found.
+    """
+    return bool(cell) and BenchmarkScorer._is_numeric_cell(strip_presentation(cell))
 
 
 def normalize_label(label: str) -> str:
