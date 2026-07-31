@@ -44,7 +44,13 @@ Issues = "https://github.com/r-uben/socr/issues"
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
-    "ruff>=0.8.0",
+    # Pinned exactly, not a floor. CI runs `uv run ruff format --check .`, which
+    # resolves the newest matching release rather than uv.lock; ruff 0.16 began
+    # formatting Python code blocks inside Markdown by default, so an untouched
+    # docs file turned red overnight and blocked every open PR (see #102, #107).
+    # A ruff upgrade should be a deliberate commit that fixes any new findings in
+    # one place, not something that happens to `main` while nobody is looking.
+    "ruff==0.16.0",
 ]
 # OCR Engine CLIs — install individually based on needs
 # NOTE: marker-ocr-cli requires pillow<11 while deepseek-ocr-cli requires pillow>=11.

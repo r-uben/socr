@@ -11,8 +11,13 @@ pages, audits quality, and falls back. Two modes: deterministic (default) and
   `src/socr`**, so edits are picked up — but that means a *separate git worktree* would test
   the **main** tree's source, not its own. Do code work in the main checkout, one branch at a time.
 - **Tests:** `~/venvs/socr/bin/pytest <paths> -q`. Full suite is ~1070 tests.
-- **Lint (BLOCKING CI gate):** `~/venvs/socr/bin/ruff format --check <files>` and `ruff check <files>`.
-  Run on every file you touch; CI fails on a format diff.
+- **Lint (BLOCKING CI gate):** run it the way CI does — `uvx ruff@0.16.0 format --check .`
+  Only the **format** step blocks; `ruff check` runs with `continue-on-error`.
+  **Do NOT use `~/venvs/socr/bin/ruff` for the format gate.** That venv has an older
+  ruff which refuses to format Python code blocks inside Markdown ("experimental,
+  enable preview mode"), so it reports clean on files CI rejects — this exact gap
+  turned `main` red and blocked four PRs (#102, #107). Ruff is pinned exactly in
+  `pyproject.toml`; bump it in a deliberate commit that fixes any new findings.
 - **CI has NO ollama / no provider.** Any test that drives `_phase_agentic` / `process()` in
   agentic mode **must patch `_available_engines_for_agentic`** (e.g. return `[PROFILE_QWEN_LOCAL]`
   from `socr.core.providers`) or it passes locally (ollama installed) and **fails in CI** (the
