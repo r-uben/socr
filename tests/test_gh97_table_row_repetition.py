@@ -202,3 +202,62 @@ def test_doc_level_note_is_none_on_a_clean_run():
     events = [AuditEvent(page_num=13, kind="dualpass_flagged")]
 
     assert UnifiedPipeline._repetition_truncated_note(events) is None
+
+
+# ----------------------------------------------------------------------
+# GH-98: scope. The guard's premise is VLM degeneration.
+# ----------------------------------------------------------------------
+
+
+def test_a_native_page_is_never_truncated():
+    """A character-exact native extraction cannot have degenerated.
+
+    And there the collapse is unsafe: repeated rows may be real content. A
+    wide-format appendix table with five consecutive all-zero rows and no per-row
+    label is legitimate on a native page; truncating it to two drops three rows.
+    """
+    state = _FakeState()
+    original = "\n".join(["| Region | 0.0 | 0.0 |"] * 5)
+    page = _page(original)
+
+    UnifiedPipeline._guard_agentic_page_table_repetition(state, 62, page, is_native=True)
+
+    assert page.text == original, "native text must pass through untouched"
+    assert state.events == []
+
+
+def test_row_multiplicity_is_preserved_on_native_pages():
+    """The gap #97's own content-safety test could not see.
+
+    ``test_no_content_can_be_lost`` asserts set equality, so it is blind to
+    multiplicity: five identical rows collapsing to two passes it. On a VLM page
+    that is the intended behaviour; on a native page it is content loss.
+    """
+    state = _FakeState()
+    row = "| Region | 0.0 | 0.0 |"
+    page = _page("\n".join([row] * 5))
+
+    UnifiedPipeline._guard_agentic_page_table_repetition(state, 62, page, is_native=True)
+
+    assert page.text.count(row) == 5
+
+
+def test_a_vlm_page_is_still_truncated():
+    """The scoping must not disarm the guard on the pages it was built for."""
+    state = _FakeState()
+    page = _page("\n".join(["| Real GDP | 1.7 |"] + [_P62_ROW] * 865))
+
+    UnifiedPipeline._guard_agentic_page_table_repetition(state, 62, page, is_native=False)
+
+    assert page.text.count(_P62_ROW) == MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS
+    assert "table_row_repetition_truncated" in [e.kind for e in state.events]
+
+
+def test_the_default_still_guards():
+    """Callers that do not pass is_native get the protective behaviour."""
+    state = _FakeState()
+    page = _page("\n".join([_P62_ROW] * 20))
+
+    UnifiedPipeline._guard_agentic_page_table_repetition(state, 62, page)
+
+    assert page.text.count(_P62_ROW) == MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS
