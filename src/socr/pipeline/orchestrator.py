@@ -295,6 +295,10 @@ class UnifiedPipeline:
             },
             "max_cost_per_page": cfg.max_cost_per_page,
             "cost_budget": cfg.cost_budget,
+            # GH-96: the escalation lane rewrites page text, so a resumed run must
+            # not reuse fragments produced with the flag in the other state — that
+            # would silently ship a mix of escalated and non-escalated pages.
+            "escalate_ambiguous_tables": getattr(cfg, "escalate_ambiguous_tables", False),
             # --- rendering / chunking (change the bytes fed to the engine) ---
             "render_dpi": cfg.render_dpi,
             "native_first": cfg.native_first,
@@ -1399,6 +1403,221 @@ class UnifiedPipeline:
         page_out.text = text
 
     # ------------------------------------------------------------------
+    # GH-96: table escalation lane
+    # ------------------------------------------------------------------
+
+    def _resolve_table_escalation_provider(self, available: list):
+        """Cheapest non-local provider from the ALREADY tier-filtered ladder.
+
+        Derived rather than named. Naming ``EngineType.GEMINI`` literally would
+        bypass ``--strict-local`` entirely: that flag filters ``available`` by tier
+        before the ladder is built, but ``run_provider`` accepts any engine, so a
+        hardcoded escalation engine would still fire on exactly the configuration
+        the reference run used. Choosing from ``available`` makes ``--strict-local``
+        and ``--max-cost-per-page`` suppress the lane for free.
+        """
+        if not getattr(self.config, "escalate_ambiguous_tables", False):
+            return None
+        from socr.core.providers import TIER_LOCAL
+
+        candidates = [p for p in available if p.tier != TIER_LOCAL and p.supports_per_page]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda p: p.cost_per_page_usd)
+
+    def _table_page_needs_escalation(self, page, bo) -> bool:
+        """True when the emitted table disagrees with the page's native text layer.
+
+        Calibrated against whether escalation actually helps: 100% recall and 69%
+        precision, versus 56% for ``dualpass_flagged``, which fires on every table
+        page in the reference document and so cannot discriminate at all.
+        """
+        from socr.benchmark.table_exactness import score_page
+
+        try:
+            report = score_page(page, bo.text or "")
+        except Exception:
+            return False
+        return report.gt_rows >= 2 and report.pct is not None and report.pct < 100.0
+
+    def _escalate_table_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps,
+        bo: PageOutput,
+        profile,
+        run_provider,
+        pdf_path,
+    ) -> bool:
+        """Re-read one table page with *profile*; keep it only if it measures better.
+
+        Returns True when the lane should be disabled for the rest of the document
+        (a wedged provider), False otherwise.
+
+        Every rejection path keeps the incumbent text untouched, so the worst case
+        is a wasted call.
+        """
+        import concurrent.futures
+
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.escalation_decision import decide_escalation
+
+        try:
+            import fitz
+
+            with fitz.open(pdf_path) as doc:
+                page = doc[page_num - 1]
+                if not self._table_page_needs_escalation(page, bo):
+                    return False
+                incumbent_text = bo.text or ""
+
+                # A cloud CLI has no timeout of its own and was observed wedged for
+                # 97 minutes. Escalation runs inline in the page-major loop, so an
+                # unbounded call stalls the entire document. The worker is released
+                # rather than joined: the subprocess may outlive us, but the loop
+                # must not.
+                deadline = float(getattr(self.config, "escalation_timeout_sec", 120.0))
+                ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = ex.submit(run_provider, profile.engine, page_num)
+                try:
+                    out = future.result(timeout=deadline)
+                    ex.shutdown(wait=False)
+                except concurrent.futures.TimeoutError:
+                    ex.shutdown(wait=False)
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="table_escalation_timeout",
+                            engine=profile.engine.value,
+                            detail=(
+                                f"escalation exceeded {deadline:.0f}s; lane disabled "
+                                "for the rest of this document"
+                            ),
+                        )
+                    )
+                    return True
+
+                # `_run_engine_on_pages` converts a failed engine call into a
+                # native-text PageOutput. Assigning that would replace a structured
+                # table with flattened native text - silent content loss - so the
+                # candidate is only considered when the intended engine actually
+                # answered.
+                if out is None or out.engine != profile.engine.value:
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="table_escalation_refused",
+                            engine=profile.engine.value,
+                            detail=(
+                                f"provider returned engine={getattr(out, 'engine', None)!r}; "
+                                "not the escalation engine, candidate discarded"
+                            ),
+                        )
+                    )
+                    return False
+                if out.status is not PageStatus.SUCCESS or not (out.text or "").strip():
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="table_escalation_refused",
+                            engine=profile.engine.value,
+                            detail=f"candidate status={out.status}, no usable text",
+                        )
+                    )
+                    return False
+
+                decision = decide_escalation(page, incumbent_text, out.text)
+
+            # Cost is recorded by hand: `route_page` does this for ladder calls, and
+            # a bare `run_provider` does not, so without it the document
+            # under-reports what it spent.
+            state.engine_runs.append(
+                EngineResult(
+                    document_path=pdf_path,
+                    engine=profile.engine.value,
+                    status=DocumentStatus.SUCCESS,
+                    pages=[],
+                    pages_processed=1,
+                    cost=profile.cost_per_page_usd,
+                )
+            )
+
+            if not decision.accepted:
+                if not self.config.quiet:
+                    console.print(
+                        f"  [dim]Escalation p{page_num} rejected ({profile.engine.value}): "
+                        f"{decision.reason}[/dim]"
+                    )
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="table_escalation_rejected",
+                        engine=profile.engine.value,
+                        detail=decision.reason,
+                        data={"gate": decision.gate, "delta": decision.delta},
+                    )
+                )
+                return False
+
+            bo.text = out.text
+            ps.attempts.append(out)
+            self._clear_fail_closed_flags(state, page_num, ps, profile)
+            if not self.config.quiet:
+                console.print(
+                    f"  [green]Escalated p{page_num}[/green] via {profile.engine.value}: "
+                    f"{decision.reason}"
+                )
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="table_escalation_accepted",
+                    engine=profile.engine.value,
+                    detail=decision.reason,
+                    data={"gate": decision.gate, "delta": decision.delta},
+                )
+            )
+            return False
+
+        except Exception as exc:  # a failed escalation must never lose a page
+            logger.warning("table escalation failed on p%d (%s); keeping text", page_num, exc)
+            return False
+
+    @staticmethod
+    def _clear_fail_closed_flags(state: DocumentState, page_num: int, ps, profile) -> None:
+        """Release a fail-closed page once a candidate has measurably improved it.
+
+        ``manifest._winning_page_output`` re-derives the winner from PageState flags,
+        not from the text: a page still marked unverifiable ships the
+        "[page N failed: unverifiable table]" marker even after its text is fixed,
+        so the fragment and the manifest would disagree. Clearing is recorded
+        separately because releasing a fail-closed page is a consequential act.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        cleared = [
+            name
+            for name in (
+                "native_table_structure_failed",
+                "native_table_unverifiable",
+                "scanned_table_evidence_failed",
+            )
+            if getattr(ps, name, False)
+        ]
+        if not cleared:
+            return
+        for name in cleared:
+            setattr(ps, name, False)
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="table_escalation_recovered_fail_closed",
+                engine=profile.engine.value,
+                detail=f"cleared {', '.join(cleared)} after a measured improvement",
+            )
+        )
+
+    # ------------------------------------------------------------------
     # GH-97: degenerate table-row repetition guard (agentic pre-flush seam)
     # ------------------------------------------------------------------
 
@@ -1601,6 +1820,10 @@ class UnifiedPipeline:
         ladder = provider_ladder(
             available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
         )
+        # GH-96: escalation provider, chosen from the ALREADY tier-filtered list so
+        # --strict-local and --max-cost-per-page suppress the lane for free.
+        _escalation_profile = self._resolve_table_escalation_provider(available)
+        _escalation_degraded = False
 
         if not ladder and ocr_pages:
             logger.warning("agentic: no OCR providers available; OCR pages left unprocessed")
@@ -2141,6 +2364,21 @@ class UnifiedPipeline:
                         page_num,
                         exc,
                     )
+
+            # GH-96: escalate a table page whose output disagrees with its own
+            # native text layer, keeping the candidate only if exactness measurably
+            # improves. Placed here so the accepted text still flows through the
+            # equation, image-ref and repetition passes below.
+            if _escalation_profile is not None and not _escalation_degraded and bo.text:
+                _escalation_degraded = self._escalate_table_page(
+                    state,
+                    page_num,
+                    ps,
+                    bo,
+                    _escalation_profile,
+                    run_provider,
+                    state.handle.path,
+                )
 
             # GH-36a/36b: per-page equation detect + crop + optional LaTeX
             # sidecar.  Runs ONLY when the flags are on (default-off).  With

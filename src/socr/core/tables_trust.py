@@ -36,6 +36,16 @@ from socr.tables.reconcile import PATCH_ELIGIBLE_NOTE
 #   - ``page_failed`` — not table-specific, and already surfaced at document
 #     level via ``LOST_CONTENT_NOTE``. Table pages that fail closed carry
 #     ``table_region_unverifiable`` as well, so they are still captured here.
+# GH-96: an accepted escalation replaced the page's table with one that measured
+# strictly better, so every distrust event recorded against the OLD text refers to
+# markdown that no longer exists. Without this the sidecar keeps steering consumers
+# away from a page the pipeline just fixed — on the reference run, a page taken from
+# 39.1% to 100.0% still listed as untrusted.
+#
+# Same rule as excluding ``dualpass_patched``: a resolved disagreement is not
+# distrust. It only arrives later in the pipeline.
+RESOLVING_KINDS: frozenset[str] = frozenset({"table_escalation_accepted"})
+
 TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
     {
         "dualpass_flagged",
@@ -45,6 +55,12 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         "table_region_unverifiable",
         "source_evidence_table_reject",
         "table_row_repetition_truncated",
+        # GH-96: an escalation that was refused or timed out leaves the SUSPECT
+        # table shipping, so the page stays untrusted. An ACCEPTED escalation is
+        # deliberately absent, by the same rule that excludes dualpass_patched:
+        # the disagreement was resolved and the shipped table is the better one.
+        "table_escalation_refused",
+        "table_escalation_timeout",
     }
 )
 
@@ -73,6 +89,9 @@ class TablesTrust:
 
     pdf_filename: str
     pages: dict[int, PageTrust] = field(default_factory=dict)
+    # Pages that WERE flagged but whose table was replaced by a better-measuring
+    # read. Reported so the resolution is visible rather than merely absent.
+    resolved_pages: list[int] = field(default_factory=list)
 
     @property
     def untrusted_pages(self) -> list[int]:
@@ -99,6 +118,7 @@ class TablesTrust:
             "untrusted_pages": self.untrusted_pages,
             "table_flags_n": self.flag_count,
             "counts_by_kind": self.counts_by_kind(),
+            "resolved_by_escalation": self.resolved_pages,
             "patch_eligible_pages": sorted(
                 num for num, page in self.pages.items() if page.patch_eligible
             ),
@@ -132,7 +152,16 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
     """
     trust = TablesTrust(pdf_filename=pdf_filename)
 
+    # Pages whose table was superseded by a measurably better read. Collected first
+    # because the resolving event is emitted AFTER the distrust events it resolves.
+    resolved = {
+        getattr(e, "page_num", 0) for e in events if getattr(e, "kind", "") in RESOLVING_KINDS
+    }
+    trust.resolved_pages = sorted(resolved)
+
     for event in events:
+        if getattr(event, "page_num", 0) in resolved:
+            continue
         kind = getattr(event, "kind", "")
         if kind not in TABLE_DISTRUST_KINDS:
             continue

@@ -271,3 +271,36 @@ def test_doc_level_note_is_well_formed_prose():
 
     assert note == "untrusted tables on 2 page(s), 2 flag(s) (see tables_trust.json)"
     assert "page(s) 2 page(s)" not in note
+
+
+def test_an_accepted_escalation_clears_the_page_from_the_index():
+    """GH-96: distrust recorded against text the pipeline has since replaced.
+
+    On the reference run a page was taken from 39.1% to 100.0% by escalation and
+    still listed as untrusted, so a consumer gating on the sidecar would keep
+    steering away from a page that is now perfect.
+
+    The resolving event is emitted AFTER the distrust events it resolves, so it
+    cannot be handled by ordering alone.
+    """
+    events = [
+        _flagged(1),
+        AuditEvent(page_num=1, kind="native_table_verifier_warn"),
+        AuditEvent(page_num=1, kind="table_escalation_accepted"),
+        _flagged(2),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == [2], "the resolved page must leave the index"
+    assert trust.to_dict()["resolved_by_escalation"] == [1]
+
+
+def test_a_rejected_escalation_leaves_the_page_untrusted():
+    """The suspect table still ships, so the distrust stands."""
+    events = [_flagged(1), AuditEvent(page_num=1, kind="table_escalation_rejected")]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == [1]
+    assert trust.to_dict()["resolved_by_escalation"] == []
