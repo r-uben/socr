@@ -112,3 +112,67 @@ never carry markdown; engine output routinely does.
 - `mistral-ocr` (`$0.001/page`, `auto_eligible=False`) is available and unmeasured.
 - One document, no negative controls. Treat orderings as robust and absolute values
   as provisional.
+
+---
+
+# Addendum — Pro does not close the gap, and a cloud CLI hung for 97 minutes
+
+## `gemini-3.1-pro-preview` is *worse* than flash on this task
+
+The open question above was whether pinning Pro closes the 78.2% → 86.9% gap to agy.
+It does not. Over the 7 table pages that completed before the run wedged:
+
+| page | socr | flash | **Pro** | agy |
+|-----:|-----:|------:|--------:|----:|
+| 13 | 38.4 | 100.0 | 100.0 | 100.0 |
+| 39 | 86.5 | 79.7 | 86.5 | 86.5 |
+| 45 | 100.0 | 100.0 | **79.6** | 100.0 |
+| 46 | 0.0 | 100.0 | **25.3** | 100.0 |
+| 48 | 0.0 | 85.1 | **25.7** | 100.0 |
+| 51 | 11.1 | 93.9 | 100.0 | 100.0 |
+| 53 | 0.0 | 0.0 | 0.0 | 0.0 |
+
+Partial aggregate, 561 cells: **socr 31.6%, flash 85.0%, Pro 67.4%, agy 88.9%.**
+
+**Decision: pin flash.** Better, cheaper, ~3× faster (11s vs 34s per page), and it
+did not hang. "Bigger model, better OCR" is false here.
+
+Sample caveat: 7 of 16 pages, so 67.4% should not be quoted as Pro's score. The
+safe claim is the ordering — Pro does not close the gap, and is behind flash on
+pages flash handles well.
+
+Note the CLI's own `--help` advertises `--model gemini-3.1-pro`, which returns
+`NOT_FOUND`. The working identifier is `gemini-3.1-pro-preview`.
+
+## A cloud OCR CLI hung indefinitely — trap #4, evidenced
+
+The Pro batch stopped after 10 of 19 pages and sat wedged mid-request on a single
+page for **97 minutes** with the process still alive, until killed manually. No
+timeout fired, because there is none on that path.
+
+This was already listed as a design risk for the lane. It is now a reproduction:
+
+- In the page-major agentic loop, escalation runs inline. A wedged cloud CLI stalls
+  the **entire document**, not just the page.
+- The existing cascade-halt cannot help: it triggers on `probe_ollama_idle()`, which
+  says nothing about a cloud subprocess.
+- So the lane needs its own wall-clock timeout and a document-level
+  `_escalation_degraded` latch that disables escalation after the first hang —
+  and must **not** set `backend_degraded`, which would emit a false
+  `PARTIAL_SAVE_VLM_TIMEOUT` blaming a local GPU that was never involved.
+
+## Consequence for the accept rule, now implemented
+
+`tables/escalation_decision.py`:
+
+    accept iff exactness(candidate) > exactness(incumbent)
+
+Applied to the full 16-page set with flash: **45.0% → 85.0%**, with all four
+regressions (39, 59, 60, 61) blocked and every page decided on measurement rather
+than deferred to the canary.
+
+One refinement found while validating: gate on whether the *ground truth* is usable,
+not on the report's `scorable` flag. That flag is set when no prediction label
+matched — evidence the prediction is bad, not that the measurement is invalid.
+Gating on it handed the incumbent's worst failures to the weaker canary, including
+two real 0% → ~86% recoveries.
