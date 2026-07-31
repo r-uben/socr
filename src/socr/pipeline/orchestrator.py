@@ -1658,6 +1658,7 @@ class UnifiedPipeline:
         state: DocumentState,
         page_num: int,
         page_out: PageOutput,
+        is_native: bool = False,
     ) -> None:
         """Truncate runaway repeated table rows before the provisional flush.
 
@@ -1668,6 +1669,13 @@ class UnifiedPipeline:
         lines of the assembled document - 27% of it - with no audit event and no
         doc-level signal.
 
+        Scope is deliberately the agentic path only. The observed runaway, and every
+        instance found since, came from the per-page VLM loop; the phase-major paths
+        (single-engine, multi-engine, consensus, repair) have never produced one in
+        this corpus. Extending the guard there would mean re-deriving its bound on
+        output nobody has measured, so they are left to ``OutputNormalizer``'s
+        generic rule until there is evidence they need more.
+
         Removal is content-safe: every dropped line is byte-identical to one
         that is kept. The event is recorded unconditionally so the failure is
         visible in ``audit_log.json`` and, via ``_repetition_truncated_note``,
@@ -1675,6 +1683,17 @@ class UnifiedPipeline:
         """
         text = page_out.text or ""
         if not text:
+            return
+
+        # GH-98: never applied to a character-exact native extraction. The guard
+        # exists because a VLM degenerates into repeating a row; that cannot happen
+        # when the text came straight from the PDF's own layer. And there the
+        # collapse is not safe: #97's guarantee is "no DISTINCT line is lost", which
+        # is weaker than "no information is lost" - row multiplicity changes. A
+        # wide-format appendix table with five consecutive all-zero rows and no
+        # per-row label is legitimate content on a native page, and truncating it to
+        # two silently drops three real rows.
+        if is_native:
             return
 
         cleaned, removed = collapse_repeated_table_rows(text)
@@ -2444,7 +2463,7 @@ class UnifiedPipeline:
             # GH-97: truncate degenerate repeated table rows. Runs after table
             # assembly (unlike OutputNormalizer) and before the flush, so the
             # fragment, the sidecar and the stitched body all see one text.
-            self._guard_agentic_page_table_repetition(state, page_num, bo)
+            self._guard_agentic_page_table_repetition(state, page_num, bo, is_native)
 
             # Write-through blob cache (replay-cache continuity).
             if _page_blob_store is not None:
