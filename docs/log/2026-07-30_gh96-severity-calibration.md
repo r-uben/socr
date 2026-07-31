@@ -149,10 +149,22 @@ Properties that matter for the lane:
   call each, ~$0.0002, and escalation was never worse than the incumbent on any
   page in this document. Over-triggering costs money, not correctness.
 - **Same oracle as the canary.** The trigger asks "does the incumbent disagree with
-  native?"; the canary asks "does the candidate invent tokens native does not have?"
-  One oracle, two questions, and it degrades coherently: where the native layer is a
-  poor oracle the trigger fires and the canary then rejects, so the page is left
-  alone at the cost of a wasted call.
+  native?"; the canary asks "does the candidate invent tokens native does not have,
+  and does it retain what the incumbent got right?" One oracle, two questions.
+
+> **Correction (2026-07-31).** An earlier revision of this section claimed that
+> where the native layer is a poor oracle "the trigger fires and the canary then
+> rejects", i.e. that the rule degenerates safely. That is backwards for the
+> one-sided containment rule as it was then stated: `⊆` gets *easier* as
+> `unsupported(incumbent)` grows, because a large incumbent-unsupported set is a
+> large superset to hide inside. The worst incumbents would have got the **laxest**
+> gate — precisely the pages that triggered escalation. Worse, a one-sided rule is
+> monotone in the wrong direction: `unsupported(∅) = ∅ ⊆ anything`, so a truncated
+> candidate is accepted against any incumbent at all. Both holes are closed by the
+> two-sided rule finally adopted (`introduced(cand) ⊆ introduced(inc)` **and**
+> `covered(cand) ⊇ covered(inc)`); see `socr/tables/escalation_canary.py`. The
+> trigger findings in the table above are unaffected — they concern which pages to
+> escalate, not how to judge the result.
 
 ## Limits, stated plainly
 
