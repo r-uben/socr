@@ -1544,6 +1544,11 @@ class UnifiedPipeline:
             )
 
             if not decision.accepted:
+                if not self.config.quiet:
+                    console.print(
+                        f"  [dim]Escalation p{page_num} rejected ({profile.engine.value}): "
+                        f"{decision.reason}[/dim]"
+                    )
                 state.events.append(
                     AuditEvent(
                         page_num=page_num,
@@ -1558,6 +1563,11 @@ class UnifiedPipeline:
             bo.text = out.text
             ps.attempts.append(out)
             self._clear_fail_closed_flags(state, page_num, ps, profile)
+            if not self.config.quiet:
+                console.print(
+                    f"  [green]Escalated p{page_num}[/green] via {profile.engine.value}: "
+                    f"{decision.reason}"
+                )
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
