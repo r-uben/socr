@@ -45,6 +45,12 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         "table_region_unverifiable",
         "source_evidence_table_reject",
         "table_row_repetition_truncated",
+        # GH-96: an escalation that was refused or timed out leaves the SUSPECT
+        # table shipping, so the page stays untrusted. An ACCEPTED escalation is
+        # deliberately absent, by the same rule that excludes dualpass_patched:
+        # the disagreement was resolved and the shipped table is the better one.
+        "table_escalation_refused",
+        "table_escalation_timeout",
     }
 )
 

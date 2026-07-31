@@ -204,6 +204,19 @@ class PipelineConfig:
     # reconcile against the whole-page OCR. Crop-vs-page disagreement is a
     # corruption flag; the crop reading is authoritative and patched in. No-ops
     # if no vision model is available. Reuses the judge model ladder.
+    # GH-96: re-read a table page with a cloud engine when its emitted table
+    # disagrees with the page's own native text layer, and keep the result only if
+    # hierarchy-aware exactness measurably improves. Automatic wherever a cloud rung
+    # is already in the ladder — `--strict-local` and `--max-cost-per-page` continue
+    # to suppress it by tier and cost, because the provider is chosen from the
+    # already-filtered ladder rather than named.
+    escalate_ambiguous_tables: bool = True
+
+    # Wall-clock budget for one escalation call. A cloud OCR CLI was observed
+    # wedged mid-request for 97 minutes with no timeout of its own; escalation runs
+    # inline in the page-major loop, so an unbounded call stalls the whole document.
+    escalation_timeout_sec: float = 120.0
+
     dual_pass_tables: bool = True
     # Auto-patch the crop reading into the page on disagreement. Default OFF
     # (flag-only): the crop reader's numeric fidelity is unproven, and a silent
