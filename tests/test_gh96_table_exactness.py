@@ -476,3 +476,48 @@ def test_bold_value_cells_are_scored_not_discarded(hierarchical_page):
 
     assert score_page(hierarchical_page, plain).pct == score_page(hierarchical_page, bold).pct
     assert score_page(hierarchical_page, bold).pct == 100.0
+
+
+def test_every_footnote_spelling_folds_to_one_key():
+    """Five spellings were found in the wild before this became one generic rule.
+
+    The native layer writes a bare trailing digit; one engine writes LaTeX, another
+    HTML, and multi-note markers appear as "1,2". Handling them one at a time left
+    identical rows one character apart so they never matched: a PERFECT page scored
+    85.1%, and one engine's aggregate was understated by 15 points, which reversed
+    the apparent ranking of two engines. It reached past reporting - the escalation
+    accept rule runs on this metric, so an engine was penalised for its footnote
+    syntax.
+    """
+    bare = normalize_label("Nominal GDP1")
+    assert bare == normalize_label("Nominal GDP<sup>1</sup>")
+    assert bare == normalize_label("Nominal GDP$^1$")
+    assert bare == normalize_label("Nominal GDP^{1}")
+    assert bare == normalize_label("Nominal GDP\u00b9")
+    # multi-note markers, both spellings
+    assert normalize_label("Nominal GDP (£ billion)1,2") == normalize_label(
+        "Nominal GDP (£ billion)<sup>1,2</sup>"
+    )
+
+
+def test_latex_and_bare_footnote_markers_fold_together():
+    """The native layer writes "Underlying differences1"; engines write "$^1$".
+
+    Handling only the bare-digit form left the two keys one character apart, so the
+    rows never matched and a PERFECT page scored 85.1% instead of 100%. That reached
+    past reporting: the escalation accept rule runs on this metric, so a candidate
+    writing footnotes in LaTeX was penalised against an incumbent that did not.
+    """
+    assert normalize_label("Underlying differences1") == normalize_label(
+        "Underlying differences$^1$"
+    )
+    assert normalize_label("Energy and cost-of-living support2") == normalize_label(
+        "Energy and cost-of-living support$^2$"
+    )
+    assert normalize_label("Income tax1") == normalize_label("Income tax^{1}")
+
+
+def test_a_trailing_number_that_is_not_a_footnote_still_distinguishes():
+    """The strip is anchored to a preceding letter, so these stay distinct."""
+    assert normalize_label("Panel 1") != normalize_label("Panel 2")
+    assert normalize_label("Table 3") != normalize_label("Table 4")

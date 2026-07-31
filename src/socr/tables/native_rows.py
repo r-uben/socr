@@ -21,7 +21,7 @@ from socr.tables.native_verifier import strip_presentation
 # the preceding labelled row; it carries no values of its own.
 _MARKER_RE = re.compile(r"^\s*of\s+which\s*:?\s*$", re.IGNORECASE)
 
-_FOOTNOTE_SUFFIX_RE = re.compile(r"(?<=[a-z\)])[0-9]{1,2}$")
+_FOOTNOTE_SUFFIX_RE = re.compile(r"(?<=[a-z\)])[0-9](?:[0-9,]{0,5})$")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -37,14 +37,44 @@ def _is_value(cell: str) -> bool:
     return bool(cell) and BenchmarkScorer._is_numeric_cell(strip_presentation(cell))
 
 
+# Footnote markers, in every spelling encountered. Each engine writes them
+# differently and the PDF's native layer writes them differently again, so this is
+# ONE generic rule rather than an accumulating list of special cases — that list
+# reached five entries (bare digit, "$^1$", "^{1}", "<sup>1</sup>", "<sup>1,2</sup>")
+# before it became clear the cases were endless.
+#
+# Every spelling is folded away entirely rather than to a bare digit: the marker is
+# a reference to a note, never part of the row's identity.
+_FOOTNOTE_MARKER_RE = re.compile(
+    r"(?:"
+    r"<sup>[\d,\s]{1,8}</sup>"  # HTML: <sup>1</sup>, <sup>1,2</sup>
+    r"|\$?\^\{?[\d,\s]{1,8}\}?\$?"  # LaTeX/markdown: $^1$, ^{1}, ^1
+    r"|[\u00b9\u00b2\u00b3\u2070-\u209f]+"  # unicode superscripts
+    r")\s*$"
+)
+
+# A bare trailing digit, anchored to a preceding letter or bracket so that
+# "Panel 1" and "Panel 2" stay distinct while "Income tax1" folds.
+
+
 def normalize_label(label: str) -> str:
     """Fold a row label to a comparison key.
 
-    Emphasis, footnote superscripts and punctuation are presentation; the words are
-    the identity.
+    Emphasis, footnote markers and punctuation are presentation; the words are the
+    identity.
+
+    Footnote markers are the hard part, because every producer spells them
+    differently: the PDF's native layer emits a bare trailing digit, one engine emits
+    LaTeX ("$^1$"), another emits HTML ("<sup>1,2</sup>"). Handling them one at a time
+    produced a run of near-misses where two identical rows differed by a single
+    character and simply never matched - a perfect page scored 85.1%, and one engine's
+    aggregate was understated by 15 points. That mattered beyond reporting: the
+    escalation accept rule runs on this metric, so an engine was being penalised for
+    its footnote syntax.
     """
     text = label.replace("**", "").replace("*", "").replace("__", "").strip()
     text = text.lower()
+    text = _FOOTNOTE_MARKER_RE.sub("", text).strip()
     text = _FOOTNOTE_SUFFIX_RE.sub("", text)
     return _NON_ALNUM_RE.sub("", text)
 
