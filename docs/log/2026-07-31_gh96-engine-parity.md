@@ -176,3 +176,64 @@ not on the report's `scorable` flag. That flag is set when no prediction label
 matched — evidence the prediction is bad, not that the measurement is invalid.
 Gating on it handed the incumbent's worst failures to the weaker canary, including
 two real 0% → ~86% recoveries.
+
+---
+
+# Correction (2026-08-01) — the engines are tied; this note's ranking was an artifact
+
+**Everything above that compares `gemini-ocr` against agy is wrong.** The gap was
+never real. It was produced by the metric penalising one engine for its footnote
+syntax.
+
+## What happened
+
+The metric compares row labels by a normalized key, and every producer spells
+footnote markers differently:
+
+| spelling | producer |
+|---|---|
+| `Underlying differences1` | the PDF's native text layer |
+| `Underlying differences$^1$` | LaTeX — socr's local qwen path |
+| `Nominal GDP<sup>1</sup>` | HTML — agy |
+| `Nominal GDP (£ billion)1,2` | multi-note marker, native |
+
+Only the bare-digit form was folded. So identical rows differed by a single
+character, never matched, and were scored as dropped. Each engine was penalised in
+proportion to how often it used a spelling the normalizer did not know.
+
+## Corrected aggregates, same 2359 cells
+
+| engine | this note said | actual |
+|---|---:|---:|
+| socr local qwen | 45.0% | **47.4%** |
+| agy | 86.9% | **94.1%** |
+| gemini-ocr | 78.2% | **94.1%** |
+
+**agy and `gemini-ocr` are tied.** The 8.7-point gap this note reports, and the
+39-point gap on page 13 it reports as an earlier artifact, were both the same bug
+at different magnitudes.
+
+## What this retires
+
+- The claim that `gemini-ocr` trails the oracle. It does not.
+- The open question of whether agy should be wrapped as a socr engine. The engine
+  already in the pipeline — pinnable, reproducible, costed — measures identically.
+- The Pro-vs-flash comparison in the addendum above is also suspect for the same
+  reason; it was scored with the biased metric. Flash remains the choice on cost,
+  speed and the observed hang, but the quality ordering in that table is not
+  evidence.
+
+## What it does not retire
+
+The socr-vs-cloud gap. Local 47.4% against cloud 94.1% is larger than this note
+originally reported, so the case for escalation is stronger, not weaker.
+
+## How it was found
+
+By opening page 48 beside the **rendered PDF** and noticing the output looked
+correct while the metric said 85.1%. It was 100%. Every earlier check had compared
+the metric against other numbers rather than against the document — which is why
+four successive measurement bugs survived until someone looked at the page.
+
+Fixed in `tables/native_rows.normalize_label` with one generic rule covering HTML,
+LaTeX, unicode and bare-digit markers.
