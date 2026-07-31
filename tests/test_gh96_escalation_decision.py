@@ -1,0 +1,148 @@
+"""GH-96: the escalation accept rule.
+
+Accept an escalated table only when it *measurably improves* the page, judged by
+hierarchy-aware exactness against the page's own native text layer.
+
+The rule replaced token containment (the canary) after measurement: escalating with
+socr's own ``gemini-ocr`` regresses four pages of the reference document, two of
+which the incumbent had perfect. Those regressions are entirely native-supported, so
+the canary accepts them — a regression is not an invention.
+"""
+
+from __future__ import annotations
+
+import fitz
+import pytest
+
+from socr.tables.escalation_decision import (
+    GATE_CANARY,
+    GATE_EXACTNESS,
+    GATE_NONE,
+    decide_escalation,
+)
+
+_ROWS = [
+    ("Total effect of decisions", ["42.8", "30.5", "2.6"]),
+    ("September energy package", ["43.2", "26.8", "3.7"]),
+    ("Energy price guarantee", ["24.8", "26.8", "3.7"]),
+    ("Energy bill relief scheme", ["18.4", "9.1", "5.5"]),
+]
+
+
+@pytest.fixture(scope="module")
+def page(tmp_path_factory):
+    path = tmp_path_factory.mktemp("gh96decide") / "t.pdf"
+    doc = fitz.open()
+    pg = doc.new_page()
+    y = 200.0
+    for label, values in _ROWS:
+        pg.insert_text((60.0, y), label, fontsize=9)
+        for x, v in zip((300.0, 360.0, 420.0), values):
+            pg.insert_text((x, y), v, fontsize=9)
+        y += 18.0
+    pg.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    pg.draw_line(fitz.Point(50, y), fitz.Point(470, y))
+    doc.save(path)
+    doc.close()
+    opened = fitz.open(path)
+    yield opened[0]
+    opened.close()
+
+
+def _md(rows):
+    out = ["| | c1 | c2 | c3 |", "| --- | --- | --- | --- |"]
+    for label, values in rows:
+        out.append(f"| {label} | " + " | ".join(values) + " |")
+    return "\n".join(out)
+
+
+_PERFECT = _md(_ROWS)
+# The GH-96 failure: values slid one row down inside the nested block.
+_SHIFTED = _md(
+    [
+        ("Total effect of decisions", ["42.8", "30.5", "2.6"]),
+        ("September energy package", ["", "", ""]),
+        ("Energy price guarantee", ["43.2", "26.8", "3.7"]),
+        ("Energy bill relief scheme", ["24.8", "26.8", "3.7"]),
+    ]
+)
+
+
+def test_a_real_improvement_is_accepted(page):
+    decision = decide_escalation(page, _SHIFTED, _PERFECT)
+
+    assert decision.accepted
+    assert decision.gate == GATE_EXACTNESS
+    assert decision.delta is not None and decision.delta > 0
+
+
+def test_a_regression_is_rejected(page):
+    """The case the canary cannot see: every value is native-supported."""
+    decision = decide_escalation(page, _PERFECT, _SHIFTED)
+
+    assert not decision.accepted
+    assert decision.gate == GATE_EXACTNESS
+    assert decision.delta is not None and decision.delta < 0
+
+
+def test_a_tie_is_rejected(page):
+    """An equal candidate is not an improvement; keep the incumbent, avoid churn."""
+    decision = decide_escalation(page, _PERFECT, _PERFECT)
+
+    assert not decision.accepted
+    assert decision.delta == 0.0
+
+
+def test_a_fabrication_is_rejected_on_quality_alone(page):
+    """No separate fabrication test is needed: invented data scores near zero."""
+    fabricated = _md(
+        [("Revenue", ["23,126", "25,123", "26,204"]), ("Taxes", ["19,451", "21,326", "22,239"])]
+    )
+
+    decision = decide_escalation(page, _SHIFTED, fabricated)
+
+    assert not decision.accepted
+
+
+def test_a_truncated_candidate_is_rejected(page):
+    decision = decide_escalation(page, _PERFECT, _md(_ROWS[:1]))
+
+    assert not decision.accepted
+
+
+def test_an_incumbent_with_no_matching_labels_is_still_compared(page):
+    """Shredded labels score 0 but the ground truth is fine — compare, don't defer.
+
+    Gating on the report's ``scorable`` flag would hand exactly the incumbent's
+    worst failures to the weaker canary. Two real 0% -> ~86% recoveries on the
+    reference document depend on this.
+    """
+    shredded = _md([("Ttl", ["42.8"]), ("Sep", ["43.2"])])
+
+    decision = decide_escalation(page, shredded, _PERFECT)
+
+    assert decision.accepted
+    assert decision.gate == GATE_EXACTNESS, "must be decided on measurement, not deferred"
+
+
+def test_a_page_with_no_ground_truth_falls_back_to_the_canary(tmp_path):
+    path = tmp_path / "blank.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(path)
+    doc.close()
+    opened = fitz.open(path)
+
+    decision = decide_escalation(opened[0], _PERFECT, _PERFECT)
+    opened.close()
+
+    assert decision.gate in (GATE_CANARY, GATE_NONE)
+    assert not decision.accepted, "with no oracle at all, keep the incumbent"
+
+
+def test_the_gate_used_is_always_recorded(page):
+    """The audit trail must never conflate a measured accept with a mere non-fabrication."""
+    decision = decide_escalation(page, _SHIFTED, _PERFECT)
+
+    assert decision.gate in (GATE_EXACTNESS, GATE_CANARY, GATE_NONE)
+    assert decision.reason
