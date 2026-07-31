@@ -41,6 +41,7 @@ from socr.tables.native_rows import (  # noqa: F401  (re-exported for the metric
     native_rows_from_page,
     normalize_label,
 )
+from socr.tables.native_verifier import strip_presentation
 
 
 @dataclass
@@ -89,7 +90,7 @@ def _split_label_and_values(cells: list[str]) -> tuple[str, list[str]]:
     if not cells:
         return "", []
     label = cells[0].replace("**", "").strip()
-    return label, [c.strip() for c in cells[1:]]
+    return label, [strip_presentation(c) for c in cells[1:]]
 
 
 def markdown_rows(markdown: str) -> tuple[list[LabeledRow], ExactnessReport]:
