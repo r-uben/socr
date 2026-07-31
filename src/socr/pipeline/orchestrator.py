@@ -1425,20 +1425,52 @@ class UnifiedPipeline:
             return None
         return min(candidates, key=lambda p: p.cost_per_page_usd)
 
-    def _table_page_needs_escalation(self, page, bo) -> bool:
+    def _table_page_needs_escalation(self, page, ps, bo) -> bool:
         """True when the emitted table disagrees with the page's native text layer.
 
         Calibrated against whether escalation actually helps: 100% recall and 69%
         precision, versus 56% for ``dualpass_flagged``, which fires on every table
         page in the reference document and so cannot discriminate at all.
+
+        GH-113: the ground truth must look like a GRID before anything is compared.
+        The native row parser will read two numeric lines of prose, or a chart's
+        axis labels, as a table — on a full document that escalated pages holding a
+        cover date ("November=['2022']"), a fragment of "4 per cent"
+        ("cent=['4']") and chart axes, each time paying for a cloud call to compare
+        an empty result against an empty result. The trigger's measured 69%
+        precision came from 16 hand-picked pages that all genuinely contained
+        tables, so this class of page was never in the calibration.
+
+        ``PageState.has_tables`` does NOT discriminate here — it is True on those
+        pages too — so the test is structural: a grid needs at least two value
+        columns, and at least two rows sharing that width. Both are minimums that
+        follow from what a table is, not tuned cutoffs.
+
+        Deliberately not "most rows share the modal width": a real +89-point
+        recovery on the reference document has only 7 of 17 rows at its modal
+        width, and a majority rule would have refused it.
         """
+        import collections
+
         from socr.benchmark.table_exactness import score_page
+        from socr.tables.native_rows import native_rows_from_page
+
+        try:
+            gt_rows = native_rows_from_page(page)
+        except Exception:
+            return False
+        widths = collections.Counter(len(r.values) for r in gt_rows)
+        if not widths:
+            return False
+        modal_width, rows_at_modal = widths.most_common(1)[0]
+        if modal_width < 2 or rows_at_modal < 2:
+            return False
 
         try:
             report = score_page(page, bo.text or "")
         except Exception:
             return False
-        return report.gt_rows >= 2 and report.pct is not None and report.pct < 100.0
+        return report.pct is not None and report.pct < 100.0
 
     def _escalate_table_page(
         self,
@@ -1468,7 +1500,7 @@ class UnifiedPipeline:
 
             with fitz.open(pdf_path) as doc:
                 page = doc[page_num - 1]
-                if not self._table_page_needs_escalation(page, bo):
+                if not self._table_page_needs_escalation(page, ps, bo):
                     return False
                 incumbent_text = bo.text or ""
 

@@ -81,7 +81,8 @@ class _State:
 
 
 class _PageState:
-    def __init__(self):
+    def __init__(self, has_tables=True):
+        self.has_tables = has_tables
         self.attempts = []
         self.native_table_structure_failed = False
         self.native_table_unverifiable = False
@@ -141,13 +142,86 @@ def test_the_lane_can_be_turned_off():
 def test_a_perfect_page_does_not_trigger(pdf_path):
     pipe = _pipeline()
     with fitz.open(pdf_path) as doc:
-        assert not pipe._table_page_needs_escalation(doc[0], _out(_PERFECT))
+        assert not pipe._table_page_needs_escalation(doc[0], _PageState(), _out(_PERFECT))
 
 
 def test_a_disagreeing_page_triggers(pdf_path):
     pipe = _pipeline()
     with fitz.open(pdf_path) as doc:
-        assert pipe._table_page_needs_escalation(doc[0], _out(_SHIFTED))
+        assert pipe._table_page_needs_escalation(doc[0], _PageState(), _out(_SHIFTED))
+
+
+def _one_column_pdf(path, rows):
+    """A page whose numeric lines are prose fragments, not a grid."""
+    doc = fitz.open()
+    pg = doc.new_page()
+    y = 200.0
+    for label, value in rows:
+        pg.insert_text((60.0, y), label, fontsize=9)
+        pg.insert_text((300.0, y), value, fontsize=9)
+        y += 18.0
+    pg.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    pg.draw_line(fitz.Point(50, y), fitz.Point(470, y))
+    doc.save(path)
+    doc.close()
+    return fitz.open(path)
+
+
+def test_prose_fragments_are_not_a_grid(tmp_path):
+    """GH-113: the native parser reads numeric prose lines as a table.
+
+    On a full document this escalated a cover date ("November=['2022']") and a
+    fragment of "4 per cent" ("cent=['4']"), each time paying for a cloud call to
+    compare an empty result against an empty result. PageState.has_tables does NOT
+    discriminate — it is True on those pages too.
+
+    A grid needs at least two value columns; these have one.
+    """
+    opened = _one_column_pdf(tmp_path / "prose.pdf", [("November", "2022"), ("CP", "749")])
+    pipe = _pipeline()
+
+    assert not pipe._table_page_needs_escalation(opened[0], _PageState(), _out(_SHIFTED))
+    opened.close()
+
+
+def test_a_single_wide_row_is_not_a_grid(tmp_path):
+    """One row of N values is a line; a grid needs two rows sharing that width."""
+    path = tmp_path / "onerow.pdf"
+    doc = fitz.open()
+    pg = doc.new_page()
+    pg.insert_text((60.0, 200.0), "1998- 2007 2010- 2019", fontsize=9)
+    for x, v in zip((300.0, 360.0, 420.0), ["1.5", "1.0", "2.7"]):
+        pg.insert_text((x, 200.0), v, fontsize=9)
+    pg.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    pg.draw_line(fitz.Point(50, 215), fitz.Point(470, 215))
+    doc.save(path)
+    doc.close()
+    opened = fitz.open(path)
+    pipe = _pipeline()
+
+    assert not pipe._table_page_needs_escalation(opened[0], _PageState(), _out(_SHIFTED))
+    opened.close()
+
+
+def test_a_non_grid_page_costs_nothing(tmp_path):
+    """End to end: no provider call, no event, no spend."""
+    opened = _one_column_pdf(tmp_path / "prose2.pdf", [("November", "2022"), ("CP", "749")])
+    pdf_path = tmp_path / "prose2.pdf"
+    opened.close()
+    pipe = _pipeline()
+    state, ps = _State(), _PageState()
+    bo = _out(_SHIFTED, engine="qwen")
+    calls = []
+
+    def run_provider(engine, page_num):
+        calls.append(engine)
+        return _out(_PERFECT)
+
+    pipe._escalate_table_page(state, 1, ps, bo, _GEMINI, run_provider, pdf_path)
+
+    assert calls == [], "a page with no table must never reach the provider"
+    assert state.events == []
+    assert state.engine_runs == []
 
 
 # ----------------------------------------------------------------------
