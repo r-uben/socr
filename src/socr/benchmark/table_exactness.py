@@ -260,7 +260,7 @@ def _rows_in_region(page, bbox) -> list[LabeledRow]:
     # chicken-and-egg (that stray 17 forms its own x-cluster and drags the boundary
     # left). A table row is a label followed by values, so the last non-numeric word
     # ends the label. Parameter-free, and correct for both cases above.
-    raw: list[tuple[float, str, list[str]]] = []
+    raw: list[tuple[float, str, list[tuple[float, str]]]] = []
     for band in bands:
         ordered = sorted(band, key=lambda w: w[0])
         last_text = -1
@@ -270,13 +270,15 @@ def _rows_in_region(page, bbox) -> list[LabeledRow]:
         if last_text < 0:
             continue  # numbers only: an orphan row, no label to key on
         label = " ".join(w[4].strip() for w in ordered[: last_text + 1]).strip()
-        values = [w[4].strip() for w in ordered[last_text + 1 :] if _is_value(w[4])]
+        values = [(w[0], w[4].strip()) for w in ordered[last_text + 1 :] if _is_value(w[4])]
         indent = ordered[0][0]
         if label and values and not _MARKER_RE.match(label):
             raw.append((indent, label, values))
 
     if not raw:
         return []
+
+    raw = _drop_footnote_markers(raw, _superscript_tokens(page, bbox))
 
     # Parent = the nearest preceding row at a strictly smaller indent.
     rows: list[LabeledRow] = []
@@ -288,6 +290,59 @@ def _rows_in_region(page, bbox) -> list[LabeledRow]:
         rows.append(LabeledRow(path=path, values=tuple(values)))
         stack.append((indent, label))
     return rows
+
+
+def _superscript_tokens(page, bbox) -> set[tuple[int, str]]:
+    """Locate footnote superscripts inside *bbox*, keyed by (rounded x, text).
+
+    A footnote marker is a separate word, so "Memo: UK oil and gas revenues5"
+    leaves a bare ``5`` between the label and the first real value. The
+    label/value split cannot see it — the token is numeric and follows the last
+    non-numeric word — so it inflates the row's width and injects a spurious
+    value into the ground truth.
+
+    Font size separates them, but only *within a row*. Comparing against the whole
+    region's modal size misfires badly: an entire "Memo:" row is often set smaller
+    than the table body, and region-wide sizing then flags all of its real values
+    as markers. A superscript is small relative to the text it is attached to, so
+    the comparison is per-row.
+
+    Deliberately not a width heuristic — trimming rows merely wider than the modal
+    row silently deletes real leading values from legitimately wide rows.
+    """
+    x0_lim, y0_lim, x1_lim, y1_lim = bbox
+    by_line: dict[tuple[int, int], list[tuple[float, float, str]]] = {}
+    for bi, block in enumerate(page.get_text("dict").get("blocks", [])):
+        for li, line in enumerate(block.get("lines", [])):
+            for span in line.get("spans", []):
+                sx0, sy0, sx1, sy1 = span.get("bbox", (0, 0, 0, 0))
+                if sx0 < x0_lim or sx1 > x1_lim or sy0 < y0_lim or sy1 > y1_lim:
+                    continue
+                text = (span.get("text") or "").strip()
+                if text:
+                    by_line.setdefault((bi, li), []).append(
+                        (round(span.get("size", 0.0), 1), sx0, text)
+                    )
+
+    markers: set[tuple[int, str]] = set()
+    for spans in by_line.values():
+        sizes = [s for s, _x, _t in spans]
+        row_size = max(set(sizes), key=sizes.count)
+        for size, x, text in spans:
+            if size < row_size and _is_value(text):
+                markers.add((round(x), text))
+    return markers
+
+
+def _drop_footnote_markers(
+    raw: list[tuple[float, str, list[tuple[float, str]]]],
+    superscripts: set[tuple[int, str]],
+) -> list[tuple[float, str, list[str]]]:
+    """Remove superscript markers that the label/value split counted as values."""
+    return [
+        (indent, label, [v for x, v in values if (round(x), v) not in superscripts])
+        for indent, label, values in raw
+    ]
 
 
 def score_rows(gt: list[LabeledRow], predicted: list[LabeledRow]) -> ExactnessReport:

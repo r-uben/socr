@@ -22,6 +22,7 @@ from socr.benchmark.scorer import BenchmarkScorer
 from socr.benchmark.table_exactness import (
     ExactnessReport,
     LabeledRow,
+    _superscript_tokens,
     markdown_rows,
     native_rows_from_page,
     normalize_label,
@@ -352,3 +353,101 @@ def test_an_engine_that_emitted_nothing_is_a_real_zero_not_a_ceiling():
 
     assert report.pct == 0.0
     assert report.scorable is True, "empty output is an engine failure, not a ceiling"
+
+
+def _one_row_pdf(path, rows):
+    """rows = [(label, label_size, [(value, size)])] laid out as a ruled table."""
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 200.0
+    for label, label_size, values in rows:
+        page.insert_text((60.0, y), label, fontsize=label_size)
+        x = 60.0 + len(label) * label_size * 0.5 + 4
+        for value, size in values:
+            page.insert_text((x, y), value, fontsize=size)
+            x = max(x + 40, _VALUE_XS[0])
+        y += 18.0
+    page.draw_line(fitz.Point(50, 190), fitz.Point(500, 190))
+    page.draw_line(fitz.Point(50, y), fitz.Point(500, y))
+    doc.save(path)
+    doc.close()
+    return fitz.open(path)
+
+
+class _StubPage:
+    """Minimal page exposing only the get_text("dict") shape the helper reads."""
+
+    def __init__(self, spans):
+        self._spans = spans
+
+    def get_text(self, kind):
+        assert kind == "dict"
+        return {
+            "blocks": [
+                {
+                    "lines": [
+                        {
+                            "spans": [
+                                {"size": size, "bbox": (x, 200.0, x + 10, 209.0), "text": text}
+                                for size, x, text in self._spans
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+
+def test_a_footnote_superscript_is_not_a_value():
+    """ "Memo: UK oil and gas revenues5" must not contribute a 5 to ground truth.
+
+    Built as a stub rather than a generated PDF: fitz puts each insert_text call
+    on its own line, so a synthetic page cannot place a label, its superscript and
+    its values in one line the way a real table does.
+    """
+    page = _StubPage(
+        [
+            (9.0, 60.0, "Memo: UK oil and gas revenues"),
+            (6.0, 210.0, "5"),
+            (9.0, 300.0, "2.6"),
+            (9.0, 360.0, "14.9"),
+        ]
+    )
+
+    markers = _superscript_tokens(page, (0.0, 0.0, 500.0, 500.0))
+
+    assert (210, "5") in markers
+    assert not any(t in ("2.6", "14.9") for _x, t in markers)
+
+
+def test_region_wide_sizing_would_delete_a_small_rows_data():
+    """Why the comparison is per-row, not per-region."""
+    page = _StubPage([(7.0, 60.0, "Memo: smaller row"), (7.0, 300.0, "5.0"), (7.0, 360.0, "6.0")])
+
+    markers = _superscript_tokens(page, (0.0, 0.0, 500.0, 500.0))
+
+    assert markers == set(), "a uniformly small row has no superscript in it"
+
+
+def test_a_wholly_small_row_keeps_all_its_values(tmp_path):
+    """Regression: comparing font size region-wide deleted a small row's real data.
+
+    A "Memo:" row is often set smaller than the table body. Sizing against the
+    region's modal size flagged every one of its values as a superscript; sizing
+    within the row does not.
+    """
+    path = tmp_path / "small_row.pdf"
+    opened = _one_row_pdf(
+        path,
+        [
+            ("Body row", 9.0, [("1.0", 9.0), ("2.0", 9.0)]),
+            ("Body row two", 9.0, [("3.0", 9.0), ("4.0", 9.0)]),
+            ("Memo: smaller row", 7.0, [("5.0", 7.0), ("6.0", 7.0)]),
+        ],
+    )
+    rows = native_rows_from_page(opened[0])
+    opened.close()
+
+    memo = [r for r in rows if "Memo" in r.label]
+    assert memo, "the small row was dropped entirely"
+    assert list(memo[0].values) == ["5.0", "6.0"]
