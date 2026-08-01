@@ -178,11 +178,10 @@ def _assign_lanes(
        first). This is a **per-partition** choice, not per-lane: per-lane is
        chicken-and-egg, since a lane's variance cannot be measured before the
        lane exists.
-    2. Within a partition, the cut between two lanes is chosen by
-       `_gap_cut_threshold` - the point where "spread inside one column" ends
-       and "space between columns" begins, derived from the page's own
-       geometry rather than a point constant (see that function's docstring
-       for how).
+    2. Within a partition, lanes come from ``_cluster_by_anchor`` - a
+       best-first, row-count-bounded split (see that function's docstring
+       for how), derived from the page's own geometry rather than a point
+       constant.
     3. A cluster only becomes a lane when it has support from **at least two
        distinct rows** - the same justification as the GH-113 grid rule: a lone
        numeral cannot demonstrate a column by itself. A value that snaps to no
@@ -254,141 +253,135 @@ def _cluster_by_anchor(
     tokens: list[tuple[int, int, float, float, str]],
     anchor: Callable[[tuple[int, int, float, float, str]], float],
 ) -> list[list[tuple[int, int, float, float, str]]]:
-    """Partition *tokens* left to right, cutting at the Otsu threshold over gaps."""
+    """Partition *tokens* into lanes by best-first, row-count-bounded bisection.
+
+    #123 TICKET-B2 reopen (real-page over-split), second attempt. Every earlier
+    version of this function placed *one* cut value and treated it as globally
+    decisive - most recently, "if an exact-zero gap is present, every positive
+    magnitude above it is a lane boundary" (see git history for the superseded
+    ``_gap_cut_threshold``). That branch was correct only on the fixtures it
+    was built against, which all had a clean zero floor with no other noise on
+    the winning anchor. Measured on the real reference document, 16 of 18
+    scorable pages violate that precondition: right-aligned numbers of
+    different digit counts (``"24.8"`` vs ``"177.0"``) render with sub-point
+    kerning drift, so the *same* logical column produces both an exact-zero
+    gap (two tokens that happen to land bit-identically) **and** a spread of
+    distinct positive magnitudes under 1.2pt that are pure rendering noise -
+    while the real column-to-column spacing is 20-70pt.
+
+    A first attempt at this reopen replaced the single cut with recursive,
+    row-support-validated bisection: split at the highest-``_between_group_
+    variance`` boundary, accept it only if both sides keep >=2 distinct rows
+    (GH-113's "a lone value cannot demonstrate a column" rule), recurse depth-
+    first into whichever side validated. That measurably made the real corpus
+    *worse* (page 13: 24 -> 56 lanes), because >=2-row support is too weak a
+    bar once a table has 20+ rows: almost any split leaves >=2 rows on each
+    side by pure chance (e.g. a 1-1.2pt kerning-scale sub-grid offset between
+    a table's body and a footnote/memo block), so depth-first recursion never
+    runs out of "validated" splits to make and fragments a single real column
+    into many spurious ones.
+
+    The fix keeps row-support validation (it correctly rejects a lone-value
+    split) but adds the one bound implied by the data itself: **a page cannot
+    have more real lanes than its widest row has values** - the same
+    ``widest_row`` invariant ``tests/test_corpus_rescore_gate.py`` already
+    uses as ground truth for "how many lanes should exist". That count is
+    read directly off *tokens* (the largest number of tokens any single row
+    contributes), not supplied externally, so it is not a tunable constant -
+    it is a fact about this page's own rows. Combined with **best-first**
+    ordering (search every open cluster at each step, apply the single
+    highest-scoring valid split across all of them, not the first one found
+    depth-first), the search always spends its bounded budget of splits on
+    the largest, most evidence-backed boundaries first: real 20-70pt column
+    gaps score far higher on ``_between_group_variance`` than any kerning-
+    scale sub-grid offset, so the true boundaries are exhausted, and the cap
+    is hit, before the search ever needs to look inside the noise band.
+
+    Known scope limit, stated rather than hidden: this bound assumes the
+    widest row on the page has no positionally-skipped column (the same
+    assumption the corpus gate's own ``widest_row`` ground truth already
+    makes). It also does not solve duplicated content: a page whose rows are
+    themselves duplicated (the same row rendered twice, byte-identical) makes
+    every noise-scale split look exactly as well-supported as a real one and
+    does not raise the widest single row's value count, so the cap alone
+    cannot separate real repeated structure from evidence manufactured by
+    duplication - that is a content-identity question, not a position one,
+    and out of this function's scope.
+    """
     ordered = sorted(tokens, key=anchor)
     if len(ordered) <= 1:
         return [ordered] if ordered else []
+    max_lanes = max(collections.Counter(tok[1] for tok in ordered).values())
+    return _split_bounded(ordered, anchor, max_lanes)
 
-    anchors = [anchor(t) for t in ordered]
-    gaps = [anchors[i + 1] - anchors[i] for i in range(len(anchors) - 1)]
-    cut = _gap_cut_threshold(gaps)
 
-    clusters: list[list[tuple[int, int, float, float, str]]] = [[ordered[0]]]
-    for i in range(1, len(ordered)):
-        if gaps[i - 1] > cut:
-            clusters.append([])
-        clusters[-1].append(ordered[i])
+def _split_bounded(
+    ordered: list[tuple[int, int, float, float, str]],
+    anchor: Callable[[tuple[int, int, float, float, str]], float],
+    max_lanes: int,
+) -> list[list[tuple[int, int, float, float, str]]]:
+    """Best-first bisection: apply the single best valid split repeatedly.
+
+    At each step, every current cluster proposes its own best row-supported
+    split (or none); the highest-scoring proposal across *all* clusters is
+    applied. Stops when no cluster has a valid split left, or when the
+    cluster count reaches *max_lanes* - whichever comes first.
+    """
+    clusters = [ordered]
+    while len(clusters) < max_lanes:
+        proposal = _best_proposal(clusters, anchor)
+        if proposal is None:
+            break
+        score, cluster_idx, left, right = proposal
+        clusters[cluster_idx : cluster_idx + 1] = [left, right]
     return clusters
 
 
-def _gap_cut_threshold(gaps: list[float]) -> float:
-    """The gap size above which two anchors belong to different lanes.
+def _best_proposal(
+    clusters: list[list[tuple[int, int, float, float, str]]],
+    anchor: Callable[[tuple[int, int, float, float, str]], float],
+) -> tuple[float, int, list, list] | None:
+    """The highest-scoring valid split among all *clusters*, or ``None``."""
+    best: tuple[float, int, list, list] | None = None
+    for cluster_idx, cluster in enumerate(clusters):
+        if len(cluster) <= 1:
+            continue
+        anchors = [anchor(t) for t in cluster]
+        if anchors[0] == anchors[-1]:
+            continue  # every anchor identical: nothing to split on
+        for score, split_i in _split_candidates(anchors):
+            left, right = cluster[:split_i], cluster[split_i:]
+            if _row_support(left) >= 2 and _row_support(right) >= 2:
+                if best is None or score > best[0]:
+                    best = (score, cluster_idx, left, right)
+                break  # this cluster's own best valid split; try the next cluster
+    return best
 
-    #123 TICKET-B2 reopen (second fix). The previous rule picked "the largest
-    ratio jump between consecutive **distinct** positive gap magnitudes" - a
-    single distinguished gap, chosen without regard to how many tokens actually
-    produced each magnitude. That formulation cannot work: there are two
-    distinct noise floors in real geometry (the exact-zero gap between tokens
-    sharing an anchor, and small non-zero jitter from digit widths or float
-    rounding), and a single ratio-jump search cannot separate either from real
-    column spacing. Folding zero into the search made *every* transition away
-    from it read as an infinite ratio, so it always won regardless of whether
-    the next value up was real spacing or itself still noise - it once picked a
-    5pt digit-jitter gap as the elbow over a real 55pt spacing. Excluding zero
-    lost the tokens-that-share-a-lane signal entirely, so on a regular grid
-    where the only other magnitude present was itself corrupted by sub-pt
-    float noise (``50.0`` vs ``50.000015`` pt, from glyph rendering at a
-    different page offset), the "largest ratio jump" was that meaningless
-    ``1.0000003`` between two magnitudes that are, in truth, the same lane
-    boundary measured twice.
 
-    The fix: stop choosing between a single pair of magnitudes and instead
-    partition the **whole weighted gap list** - every gap, in the multiplicity
-    it actually occurs, zero included - the way Otsu's method thresholds a
-    bimodal histogram. For every threshold candidate (a value between two
-    consecutive distinct magnitudes), split all gaps into "at or below" and
-    "above" and score the split by its between-group variance
-    (``_between_group_variance``); take the candidate that maximises it. This
-    is still parameter-free - the cut is selected by an objective computed
-    from the data, not a constant - but unlike a ratio jump it is a function
-    of *how much evidence* separates two candidate lane-boundary magnitudes,
-    not just their relative size. Two magnitudes that differ by a
-    rendering-noise fraction of a point (``50.0`` vs ``50.000015``) carry
-    almost no between-group variance if grouped apart, because their means are
-    nearly identical either way; splitting the exact-zero floor from either of
-    them carries enormous between-group variance, because the group means are
-    ~50pt apart. Otsu's search finds that gap regardless of how many other
-    magnitudes happen to be sitting near it, which a single max-ratio search
-    cannot.
+def _split_candidates(anchors: list[float]) -> list[tuple[float, int]]:
+    """Every split index with positive Otsu score, most evidence-backed first."""
+    scored = []
+    for i in range(1, len(anchors)):
+        score = _between_group_variance(anchors[:i], anchors[i:])
+        if score > 0.0:
+            scored.append((score, i))
+    scored.sort(key=lambda si: si[0], reverse=True)
+    return scored
 
-    With at most one distinct gap magnitude present there is nothing to
-    partition; the cut sits at that magnitude's own midpoint against the
-    implied zero floor (mirrors the previous rule's ``len(positive) == 1``
-    case, generalised to also cover an all-zero gap list, where the returned
-    cut of ``0.0`` correctly draws no boundary at all).
 
-    #123 TICKET-B2 reopen (paired columns). A two-way Otsu split over *all*
-    candidates still assumes there are exactly two gap-magnitude groups. A
-    paired-year table (each pair of columns close together, pairs far apart)
-    produces three: near-zero within a lane, a tight within-pair gap, and a
-    wide between-pair gap - and the variance-maximising split picks whichever
-    single boundary is most bimodal, which merges the tight within-pair gap
-    into the zero-lane and collapses each pair into one lane. Every gap this
-    function is called with is now itself pre-selected by `_assign_lanes`
-    trying multiple anchors (right/centre/left) and keeping whichever gives
-    the least total dispersion, so digit-width or rendering jitter that could
-    masquerade as a near-zero "real" gap is resolved by that anchor choice,
-    not here: by the time a gap list reaches this function, an exact-zero
-    entry is only ever produced by two tokens genuinely sharing the same
-    anchor, never noise. That makes zero-vs-positive a categorical
-    distinction, not one more magnitude to weigh in a variance search - see
-    the branch above, which isolates it unconditionally whenever present, so
-    every distinct positive magnitude (however many there are) starts a new
-    lane. The Otsu search below only ever runs on gap lists with no exact
-    zero at all, where the classic two-way split remains correct.
-    """
-    if not gaps:
-        return 0.0
-    candidates = sorted(set(gaps))
-    if len(candidates) == 1:
-        return candidates[0] / 2
-
-    if candidates[0] == 0.0:
-        # #123 TICKET-B2 (paired-column reopen). Exact zero is not a measured
-        # magnitude to weigh against its neighbours - it is the identity two
-        # anchors share only when they occupy the literal same position
-        # (IEEE-754 equality), which real, distinct token positions cannot
-        # produce by accident. Every candidate above it is a genuine measured
-        # distance and, on the anchor this function is actually called with,
-        # real column spacing: `_assign_lanes` already tried right/centre/left
-        # anchors and picked whichever gives the lowest total dispersion, so
-        # apparent near-zero jitter from digit width or float rounding is
-        # resolved by *that* choice, not by this one - by the time a zero
-        # floor shows up here it has real evidence (tokens genuinely sharing
-        # an anchor), and anything above it is signal. A paired-year table
-        # has two further distinct magnitudes (a tight within-pair gap, a
-        # wide between-pair gap) that must *both* start a new lane; running
-        # the two-way variance search on the positive side would only ever
-        # pick one of them as "the" boundary and merge the other into the
-        # zero-lane, which is exactly the paired-column collapse this branch
-        # avoids. The cut sits at the lowest positive magnitude's own
-        # midpoint against the zero floor - everything above it is a lane
-        # boundary, regardless of how many distinct positive magnitudes
-        # follow.
-        return candidates[1] / 2
-
-    best_cut = candidates[0] / 2
-    best_score = -1.0
-    for i in range(len(candidates) - 1):
-        threshold = candidates[i]
-        low = [g for g in gaps if g <= threshold]
-        high = [g for g in gaps if g > threshold]
-        score = _between_group_variance(low, high)
-        if score > best_score:
-            best_score = score
-            best_cut = (candidates[i] + candidates[i + 1]) / 2
-    return best_cut
+def _row_support(tokens: list[tuple[int, int, float, float, str]]) -> int:
+    """Number of distinct source rows contributing a token to *tokens*."""
+    return len({tok[1] for tok in tokens})
 
 
 def _between_group_variance(low: list[float], high: list[float]) -> float:
-    """Otsu's between-class variance for a two-way split of gap magnitudes.
+    """Otsu's between-class variance for splitting *low* from *high*.
 
-    Weighted by how many gaps actually fall on each side, not merely by which
-    distinct magnitudes are present - the property the previous ratio-jump
-    rule lacked. Maximising this over all candidate splits is equivalent to
-    minimising the summed within-group variance, and picks out the split
-    where the two groups are both internally tight *and* far apart, rather
-    than the split with the largest ratio between two arbitrary neighbours.
+    Weighted by how many anchors actually fall on each side. Maximising this
+    over all candidate splits is equivalent to minimising the summed
+    within-group variance: it picks out the split where the two groups are
+    both internally tight *and* far apart, rather than one chosen by the
+    relative size of two arbitrary neighbouring magnitudes.
     """
     total = len(low) + len(high)
     weight_low = len(low) / total

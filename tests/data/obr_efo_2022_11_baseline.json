@@ -1,92 +1,92 @@
 {
  "13": {
-  "lanes": 24,
-  "pct": 69.6,
+  "lanes": 6,
+  "pct": 100.0,
   "widest_row": 6
  },
  "24": {
-  "lanes": 3,
+  "lanes": 2,
   "pct": 0.0,
   "widest_row": 2
  },
  "39": {
-  "lanes": 19,
-  "pct": 54.1,
+  "lanes": 7,
+  "pct": 98.6,
   "widest_row": 7
  },
  "45": {
-  "lanes": 8,
-  "pct": 89.8,
+  "lanes": 7,
+  "pct": 98.0,
   "widest_row": 7
  },
  "46": {
-  "lanes": 21,
-  "pct": 38.7,
+  "lanes": 7,
+  "pct": 74.7,
   "widest_row": 7
  },
  "48": {
-  "lanes": 15,
-  "pct": 70.3,
+  "lanes": 7,
+  "pct": 100.0,
   "widest_row": 7
  },
  "51": {
-  "lanes": 21,
-  "pct": 55.6,
+  "lanes": 7,
+  "pct": 100.0,
   "widest_row": 7
  },
  "53": {
-  "lanes": 8,
+  "lanes": 4,
   "pct": 0.0,
   "widest_row": 4
  },
  "55": {
-  "lanes": 30,
-  "pct": 13.6,
+  "lanes": 6,
+  "pct": 50.0,
   "widest_row": 6
  },
  "59": {
-  "lanes": 18,
-  "pct": 78.3,
+  "lanes": 7,
+  "pct": 100.0,
   "widest_row": 7
  },
  "60": {
-  "lanes": 12,
-  "pct": 63.8,
+  "lanes": 6,
+  "pct": 100.0,
   "widest_row": 6
  },
  "61": {
-  "lanes": 31,
-  "pct": 47.3,
+  "lanes": 8,
+  "pct": 100.0,
   "widest_row": 8
  },
  "62": {
-  "lanes": 27,
-  "pct": 50.6,
+  "lanes": 6,
+  "pct": 100.0,
   "widest_row": 6
  },
  "63": {
-  "lanes": 33,
-  "pct": 42.9,
+  "lanes": 7,
+  "pct": 100.0,
   "widest_row": 7
  },
  "64": {
-  "lanes": 28,
-  "pct": 45.2,
+  "lanes": 7,
+  "pct": 100.0,
   "widest_row": 7
  },
  "65": {
-  "lanes": 16,
-  "pct": 65.2,
+  "lanes": 6,
+  "pct": 100.0,
   "widest_row": 6
  },
  "66": {
-  "lanes": 28,
-  "pct": 46.3,
+  "lanes": 7,
+  "pct": 100.0,
   "widest_row": 7
  },
  "67": {
-  "lanes": 18,
-  "pct": 52.5,
+  "lanes": 6,
+  "pct": 100.0,
   "widest_row": 6
  }
 }

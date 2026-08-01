@@ -43,7 +43,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | REOPENED — lanes over-split on real pages | B1 | 2 |
+| B2 | scoring correctness | DONE | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | TODO | B2 | 3 |
@@ -63,6 +63,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | socr-implementer (reopen fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-reopen-fix.md` |
 | B2 | socr-implementer (Otsu-cut fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-otsu-cut.md` |
 | B2 | socr-implementer (paired-columns fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-paired-columns-fix.md` |
+| B2 | socr-implementer (widest-row-cap fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-widest-row-cap.md` |
 
 ## Dispatch waves
 
@@ -198,3 +199,18 @@ the geometry their author already thought of.** 144 synthetic combinations passe
 the real document failed 16/18. Validate against the preserved corpus before believing
 any lane-geometry change, and never against a fresh OCR run — local-model variance
 exceeds the effect.
+
+### B2 — RESOLVED (widest-row-cap fix, `docs/log/2026-08-01_TICKET-B2-widest-row-cap.md`)
+
+A seventh attempt (the first of this pair failed and is documented in the log rather
+than hidden) replaced the zero-floor cut with best-first split search bounded by the
+page's own widest-row value count, instead of trying to place one "correct" cut.
+Row-support validation (GH-113's existing ≥2-row rule) alone was tried first and made
+the corpus *worse* (page 13: 24 → 56 lanes) — support alone is too weak a bar once a
+table has 20+ rows. Adding the widest-row cap plus best-first (not depth-first)
+ordering fixed it: **lane count now equals `widest_row` on all 16 previously
+over-splitting pages**, pct hit 100.0% on 12 of them, and `tests/data/
+obr_efo_2022_11_baseline.json` was re-recorded downward accordingly. Full before/after
+table and remaining scope limits (duplicated page content is still not distinguishable
+from real repeated structure by position alone) are in the log.
+

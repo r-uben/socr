@@ -72,7 +72,7 @@ helper must exclude not-scorable pages rather than counting them as zeros.
 asserts `score_page(...).scorable is False` and `.pct is None`; and
 `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
-### TICKET-B2 — positional comparison on BOTH sides · DONE (`docs/log/2026-08-01_TICKET-B2.md`; reopened for a lane-splitter regression on regular grids and re-closed, `docs/log/2026-08-01_TICKET-B2-reopen-fix.md`; reopened again for float-sensitivity in the dedup fix and closed with an Otsu-style cut, `docs/log/2026-08-01_TICKET-B2-otsu-cut.md`; reopened again for paired-column collapse and closed with a left anchor + zero-floor cut, `docs/log/2026-08-01_TICKET-B2-paired-columns-fix.md`) · depends-on: B1 · wave 2
+### TICKET-B2 — positional comparison on BOTH sides · DONE (`docs/log/2026-08-01_TICKET-B2.md`; reopened for a lane-splitter regression on regular grids and re-closed, `docs/log/2026-08-01_TICKET-B2-reopen-fix.md`; reopened again for float-sensitivity in the dedup fix and closed with an Otsu-style cut, `docs/log/2026-08-01_TICKET-B2-otsu-cut.md`; reopened again for paired-column collapse and closed with a left anchor + zero-floor cut, `docs/log/2026-08-01_TICKET-B2-paired-columns-fix.md`; reopened again for real-page over-splitting and closed with a best-first split bounded by the widest row's value count, `docs/log/2026-08-01_TICKET-B2-widest-row-cap.md`) · depends-on: B1 · wave 2
 **Merged with the former TICKET-B3 on 2026-08-01, after a first attempt was reverted
 (`ad649b5`, reverted by `717914d`). They are one change — see "Why merged".**
 
