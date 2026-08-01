@@ -116,6 +116,23 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   confirmed: 17 pages of spurious `0.0%` become not-scorable and the mean over each
   metric's own scorable set rises 44.3% → 49.1%. See "Next action".
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
+- **B2 limitation (MEDIUM, accepted) — sparse tables where NO row is complete under-split.**
+  The widest-row cap (`8dae02c`) bounds lane count by the widest row's value count. That is
+  presented as structural but is really an assumption: **it holds only if at least one row is
+  complete.** Reproducer — 4 real columns, 4 rows, each omitting a different one, so the
+  widest row has 3 values:
+
+  ```
+  Alpha  values=('1.1','1.2','1.3')  lanes=(0, 0, 1)   <- columns 0 and 1 merged
+  distinct lanes = 3 (truth = 4);  faithful transcription = 75%, not 100%
+  ```
+
+  This *is* the wrong direction (faithful OCR penalised), so it is accepted on evidence, not
+  on principle: it never bites on the reference corpus, because real financial tables carry a
+  total row. It replaced a far worse over-split — mean pct went 49.6% → **84.5%**, 12 of 18
+  pages at 100%, zero pages over-splitting. Revisit if a corpus without complete rows appears.
+  A related unproven risk the fix log flags: duplicated page content could manufacture row
+  support without raising the widest row's value count.
 - **B2 limitation (LOW, accepted) — decimal-aligned columns lose lane resolution.** The
   paired-column fix keys on an exact-zero gap magnitude existing under some anchor (left,
   right or centre). Decimal-aligned numbers with varying integer widths have no exact-zero
@@ -124,93 +141,44 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   decimal-aligned table. **This is not a wrong-direction defect** — a faithful transcription
   still scores 100%, and a column swap is still detected (83.3% vs 100%), just less sharply
   than under right alignment (75%). Accepted rather than fixed; decimal alignment is common
-  in financial tables, so revisit if the corpus re-score shows it mattering.
-- **A1 finding → now TICKET-B5** (own ticket, sequenced after B4). `native_rows_from_page`
-  never reconstructs a label split across two visual bands: whichever band carries the
-  values keeps only its own text, the other line is dropped, and a perfect transcription
-  scores as if the row were missing. Reproduced independently against the parser at 9pt
-  and 12pt gaps (label becomes `'debt'`) and at 6pt (bands merge, label scrambles to
-  `'Central debt government net'`). Held as a `strict=True` xfail in
-  `tests/test_metric_corruption_battery.py`. **Deliberately not folded into B3** — this
-  is label-*boundary* work and B3 takes the boundary as given; the landmine list records
-  that merging the two is what killed the earlier attempt.
-
-## Note on Stream A
-
-B5 is the first defect in this plan caught **before** it produced published numbers
-rather than after. The battery found it on its first run, in a transform the ticket had
-listed as *benign*. Weigh that when judging whether Stream A earned its place.
-
 ## Next action
 
-**THE CORPUS RE-SCORE WAS RUN. It changes the picture.** B1 is proven; B2's lane
-clustering fails on the real reference document. Method: scored the preserved run's 68
-emitted pages against the source PDF under the pre-B1/B2 modules (loaded from `18b3b64`
-into an isolated process — no checkout) and under current HEAD. No OCR was re-run.
+**B2 is DONE.** The corpus re-score — the plan's stated real acceptance test — has been run
+and both tickets are now validated against real pages rather than fixtures.
 
-### B1 — proven, keep it
+### Measured outcome
 
-17 pages that scored a spurious `0.0%` are now correctly not-scorable, every one with a
-tiny fabricated ground truth (0/1, 0/2, 0/14 cells). Mean over each metric's own scorable
-set: **44.3% → 49.1%**. That is the understatement TICKET-B1 claimed, measured at last;
-the review's "finding 2 — headline benefit undelivered" is now closed.
+| | before B1/B2 | after |
+|---|---|---|
+| pages scoring a spurious `0.0%` | 17 | 0 (correctly not-scorable) |
+| mean over each metric's own scorable set | 44.3% | 49.1% (B1 alone) |
+| mean pct after the lane fixes | 49.6% (over-split state) | **84.5%** |
+| pages at 100% | — | **12 of 18** |
+| pages over-splitting lanes | 16 of 18 | **0** |
 
-### B2 — lane clustering over-splits on real geometry
+Method: scored the preserved run's 68 emitted pages against the source PDF under the
+pre-B1/B2 modules (loaded from `18b3b64` into an isolated process — no checkout) and under
+HEAD. No OCR was re-run; local-model variance exceeds the effect.
 
-**16 of the 18 scorable pages** produce 2×–5× more lanes than the widest row has values:
+### Still below 100%, cause not yet separated
 
-| page | lanes | widest row | ratio | pct |
-|------|-------|-----------|-------|-----|
-| 55 | 30 | 6 | 5.0× | 13.6% |
-| 63 | 33 | 7 | 4.7× | 42.9% |
-| 13 | 24 | 6 | 4.0× | 69.6% |
-| 46 | 21 | 7 | 3.0× | 38.7% |
+p39 (98.6), p45 (98.0), p46 (74.7), p55 (50.0), p24 and p53 (0.0). **Unknown whether these
+are genuine qwen failures or residual metric defects** — p53 is the page the plan cites as
+carrying a real column shift, so 0% there may be the metric working. Rendered comparisons
+already exist in `~/Desktop/socr-qwen-failures/` and `~/Desktop/socr-engine-compare/`.
+Until this is separated, **84.5% is not known to be the metric's ceiling or the engine's.**
 
-Nine pages fell from 100% to under 55%, and they are exactly the over-split ones. Real
-ground truth looks like `lanes=(0, 1, 4, 8, 12, 16)` for a **six**-value row.
+### Remaining work
 
-**This is not "column shifts becoming visible" — the ground truth itself is wrong**, so
-faithful OCR is penalised. Same wrong-direction family as the original seven defects, at
-larger scale.
-
-**Cause — the disclosed scope limit, met in the wild.** The paired-column fix keys on an
-exact-zero gap existing under some anchor; when it does, *every* positive magnitude
-becomes a lane boundary. Real pages have both: some tokens coincidentally share an edge
-(so the branch fires) **and** pervasive sub-point jitter (so every jitter gap splits a
-lane). The fix log flagged exactly this shape and noted no fixture exercised it. The
-reference document does.
-
-### The gate that would have caught all of this
-
-`tests/test_corpus_rescore_gate.py` now scores the preserved run against a committed
-baseline (`tests/data/obr_efo_2022_11_baseline.json`). Monotone-improvement, deliberately
-not an absolute rule — there is no defensible constant for "how many lanes a table may
-have", so instead **lanes must not increase and pct must not decrease**. Re-record the
-baseline downward as fixes land, never upward.
-
-It **skips when the preserved run is absent**, which CI is. That is a real limitation,
-stated rather than hidden: this gate protects local work — which is where every one of
-these six regressions was actually caught.
+- **B5** — wrapped-label row reconstruction (held as a `strict=True` xfail).
+- **C1** — surface unexplained lanes *and* B1's `ceiling_note` through
+  `TABLE_DISTRUST_KINDS` to the document level. Carries B1 review finding 1.
+- Optionally: separate engine failure from metric defect on the six pages above.
 
 ### Standing lesson
 
-Six design-level failures in one ticket. The through-line: **synthetic fixtures encode
-the geometry their author already thought of.** 144 synthetic combinations passed while
-the real document failed 16/18. Validate against the preserved corpus before believing
-any lane-geometry change, and never against a fresh OCR run — local-model variance
-exceeds the effect.
-
-### B2 — RESOLVED (widest-row-cap fix, `docs/log/2026-08-01_TICKET-B2-widest-row-cap.md`)
-
-A seventh attempt (the first of this pair failed and is documented in the log rather
-than hidden) replaced the zero-floor cut with best-first split search bounded by the
-page's own widest-row value count, instead of trying to place one "correct" cut.
-Row-support validation (GH-113's existing ≥2-row rule) alone was tried first and made
-the corpus *worse* (page 13: 24 → 56 lanes) — support alone is too weak a bar once a
-table has 20+ rows. Adding the widest-row cap plus best-first (not depth-first)
-ordering fixed it: **lane count now equals `widest_row` on all 16 previously
-over-splitting pages**, pct hit 100.0% on 12 of them, and `tests/data/
-obr_efo_2022_11_baseline.json` was re-recorded downward accordingly. Full before/after
-table and remaining scope limits (duplicated page content is still not distinguishable
-from real repeated structure by position alone) are in the log.
-
+Seven attempts on one ticket, six of them design-level failures, every one caught by a probe
+outside the fixtures. **144 synthetic combinations passed while the real document failed 16
+of 18 pages.** The corpus gate (`tests/test_corpus_rescore_gate.py`) exists so that cannot
+recur silently; it skips in CI, so it protects local work only. Validate lane geometry
+against the preserved corpus before believing any change — and never against a fresh OCR run.
