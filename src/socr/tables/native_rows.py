@@ -166,18 +166,23 @@ def _assign_lanes(
 
     #123 TICKET-B2. Parameter-free by construction:
 
-    1. Cluster the value tokens' **right edges** (``x1``) and, separately, their
-       **centres**. Financial columns are right-aligned and left edges drift with
-       digit count, so right edges are the natural anchor - but a column of
-       centred text disperses less around its centre, so both are tried and the
-       partition with lower total within-lane dispersion wins (tie -> right edge,
-       the more common case). This is a **per-partition** choice, not per-lane:
-       per-lane is chicken-and-egg, since a lane's variance cannot be measured
-       before the lane exists.
-    2. Within a partition, the cut between two lanes is the largest *ratio jump*
-       between consecutive gaps in the sorted anchor list - the point where
-       "spread inside one column" ends and "space between columns" begins,
-       derived from the page's own geometry rather than a point constant.
+    1. Cluster the value tokens' **right edges** (``x1``), their **centres**,
+       and their **left edges** (``x0``). Financial columns are usually
+       right-aligned and left edges drift with digit count, so right edges
+       are the natural anchor - but a column of centred text disperses less
+       around its centre, and a column of left-aligned text (labels, or
+       fixed-width values) has an exactly constant left edge regardless of
+       digit count, disperses not at all around it. All three are tried and
+       the partition with lower total within-lane dispersion wins (tie ->
+       right, then centre, then left, in that order - the more common cases
+       first). This is a **per-partition** choice, not per-lane: per-lane is
+       chicken-and-egg, since a lane's variance cannot be measured before the
+       lane exists.
+    2. Within a partition, the cut between two lanes is chosen by
+       `_gap_cut_threshold` - the point where "spread inside one column" ends
+       and "space between columns" begins, derived from the page's own
+       geometry rather than a point constant (see that function's docstring
+       for how).
     3. A cluster only becomes a lane when it has support from **at least two
        distinct rows** - the same justification as the GH-113 grid rule: a lone
        numeral cannot demonstrate a column by itself. A value that snaps to no
@@ -198,9 +203,24 @@ def _assign_lanes(
     if flat:
         right_clusters = _cluster_by_anchor(flat, _anchor_right)
         centre_clusters = _cluster_by_anchor(flat, _anchor_centre)
+        left_clusters = _cluster_by_anchor(flat, _anchor_left)
         right_dispersion = _total_dispersion(right_clusters, _anchor_right)
         centre_dispersion = _total_dispersion(centre_clusters, _anchor_centre)
-        clusters = centre_clusters if centre_dispersion < right_dispersion else right_clusters
+        left_dispersion = _total_dispersion(left_clusters, _anchor_left)
+        # Tie-break on cluster count before anchor order: two partitions that
+        # explain the data equally well (same total dispersion, most often
+        # both exactly 0.0) are not equally good - the one with fewer
+        # clusters is the more parsimonious explanation, and the one with
+        # more clusters is by construction *never* a better fit, only ever a
+        # finer one (splitting a cluster can't raise its own dispersion, so
+        # over-splitting is free to "tie" without evidence). Anchor order
+        # (right, then centre, then left) only breaks remaining ties.
+        best = min(
+            (right_dispersion, len(right_clusters), 0, right_clusters),
+            (centre_dispersion, len(centre_clusters), 1, centre_clusters),
+            (left_dispersion, len(left_clusters), 2, left_clusters),
+        )
+        clusters = best[3]
 
         lane_clusters = [c for c in clusters if len({tok[1] for tok in c}) >= 2]
         lane_of_token: dict[int, int] = {
@@ -224,6 +244,10 @@ def _anchor_right(token: tuple[int, int, float, float, str]) -> float:
 
 def _anchor_centre(token: tuple[int, int, float, float, str]) -> float:
     return (token[2] + token[3]) / 2
+
+
+def _anchor_left(token: tuple[int, int, float, float, str]) -> float:
+    return token[2]
 
 
 def _cluster_by_anchor(
@@ -292,12 +316,56 @@ def _gap_cut_threshold(gaps: list[float]) -> float:
     implied zero floor (mirrors the previous rule's ``len(positive) == 1``
     case, generalised to also cover an all-zero gap list, where the returned
     cut of ``0.0`` correctly draws no boundary at all).
+
+    #123 TICKET-B2 reopen (paired columns). A two-way Otsu split over *all*
+    candidates still assumes there are exactly two gap-magnitude groups. A
+    paired-year table (each pair of columns close together, pairs far apart)
+    produces three: near-zero within a lane, a tight within-pair gap, and a
+    wide between-pair gap - and the variance-maximising split picks whichever
+    single boundary is most bimodal, which merges the tight within-pair gap
+    into the zero-lane and collapses each pair into one lane. Every gap this
+    function is called with is now itself pre-selected by `_assign_lanes`
+    trying multiple anchors (right/centre/left) and keeping whichever gives
+    the least total dispersion, so digit-width or rendering jitter that could
+    masquerade as a near-zero "real" gap is resolved by that anchor choice,
+    not here: by the time a gap list reaches this function, an exact-zero
+    entry is only ever produced by two tokens genuinely sharing the same
+    anchor, never noise. That makes zero-vs-positive a categorical
+    distinction, not one more magnitude to weigh in a variance search - see
+    the branch above, which isolates it unconditionally whenever present, so
+    every distinct positive magnitude (however many there are) starts a new
+    lane. The Otsu search below only ever runs on gap lists with no exact
+    zero at all, where the classic two-way split remains correct.
     """
     if not gaps:
         return 0.0
     candidates = sorted(set(gaps))
     if len(candidates) == 1:
         return candidates[0] / 2
+
+    if candidates[0] == 0.0:
+        # #123 TICKET-B2 (paired-column reopen). Exact zero is not a measured
+        # magnitude to weigh against its neighbours - it is the identity two
+        # anchors share only when they occupy the literal same position
+        # (IEEE-754 equality), which real, distinct token positions cannot
+        # produce by accident. Every candidate above it is a genuine measured
+        # distance and, on the anchor this function is actually called with,
+        # real column spacing: `_assign_lanes` already tried right/centre/left
+        # anchors and picked whichever gives the lowest total dispersion, so
+        # apparent near-zero jitter from digit width or float rounding is
+        # resolved by *that* choice, not by this one - by the time a zero
+        # floor shows up here it has real evidence (tokens genuinely sharing
+        # an anchor), and anything above it is signal. A paired-year table
+        # has two further distinct magnitudes (a tight within-pair gap, a
+        # wide between-pair gap) that must *both* start a new lane; running
+        # the two-way variance search on the positive side would only ever
+        # pick one of them as "the" boundary and merge the other into the
+        # zero-lane, which is exactly the paired-column collapse this branch
+        # avoids. The cut sits at the lowest positive magnitude's own
+        # midpoint against the zero floor - everything above it is a lane
+        # boundary, regardless of how many distinct positive magnitudes
+        # follow.
+        return candidates[1] / 2
 
     best_cut = candidates[0] / 2
     best_score = -1.0

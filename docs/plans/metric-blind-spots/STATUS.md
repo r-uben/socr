@@ -43,7 +43,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | REOPENED — paired columns collapse | B1 | 2 |
+| B2 | scoring correctness | DONE | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | TODO | B2 | 3 |
@@ -62,6 +62,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | socr-implementer (attempt 2) | DONE — see `docs/log/2026-08-01_TICKET-B2.md` |
 | B2 | socr-implementer (reopen fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-reopen-fix.md` |
 | B2 | socr-implementer (Otsu-cut fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-otsu-cut.md` |
+| B2 | socr-implementer (paired-columns fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-paired-columns-fix.md` |
 
 ## Dispatch waves
 
@@ -133,6 +134,49 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
+**B2 is DONE — the paired-column gate is green.** See
+`docs/log/2026-08-01_TICKET-B2-paired-columns-fix.md` for the fix and its verification
+sweep (144 synthetic combinations, plus the full suite and named protected tests).
+
+Two changes closed the residual gap, both in `_gap_cut_threshold`/`_assign_lanes`:
+
+1. A third, left-edge anchor in `_assign_lanes`'s existing dispersion-based
+   anchor-selection step (alongside right/centre), which resolves the battery
+   fixture's digit-width jitter by *anchor choice* rather than by the cut algorithm
+   (left-aligned text has an exactly constant left edge, zero dispersion).
+2. An unconditional zero-floor split in `_gap_cut_threshold`: when an exact-zero gap
+   magnitude is present, the cut isolates it unconditionally rather than running the
+   variance search, so every distinct positive magnitude — however many, as in a
+   paired-year table's within-pair and between-pair gaps — becomes a lane boundary.
+
+This is still parameter-free (no tuned constant; the only literal compared against is
+`0.0`, the exact float identity two same-lane anchors share by construction) but is
+narrower than a general N-class Otsu extension — see the log for the precise, checkable
+statement of how the class count is selected and the one residual scope limit it does
+not cover (no fixture in the required sweep exercises it).
+
+`~/venvs/socr/bin/pytest tests/ -q` — 1395 passed, 2 xfailed, 0 failed (up from 1392
+passed / 3 failed / 2 xfailed before this fix). `uvx ruff@0.16.0 format --check .` clean.
+
+Next: **B5** (wrapped-label row reconstruction) and **C1** (pipeline response to
+`ceiling_note`), both depending on B2 — now unblocked, either order, same shared
+working tree. The corpus re-score against `~/data/fiscal-ballast/_experiments/` — the
+plan's stated "real acceptance test" — is still outstanding and remains the
+orchestrator's job.
+
+### Standing lesson for the rest of this plan
+
+Five design-level failures in one ticket (B2/B3 seam, B4 seam, regular-grid collapse, float
+sensitivity, paired-column collapse). Every one shares a root: **a rule that assumes the data
+has exactly the structure the rule can represent** — one seam, one distinguished gap, two
+groups. Prefer formulations that *select* their own structure from an objective. And note
+that every one was found by a probe outside the existing fixtures, never by the suite:
+**fixtures encode the geometry their author already thought of.** Sweep offsets, widths,
+spacings and alignment before believing a green run.
+
+<details>
+<summary>Superseded — the paired-column-reopened writeup this replaces</summary>
+
 **The Otsu cut (`e50574d`) is ACCEPTED — a large, real improvement — but B2 is REOPENED for
 paired columns. The suite is deliberately RED on that one gate.**
 
@@ -175,20 +219,8 @@ selected by an objective computed from the data, not fixed by a constant.
 **Gate pinned (RED):** `test_paired_columns_do_not_collapse_into_one_lane` — 2 pairs at
 35/105pt, 2 pairs at 40/120pt, 3 pairs at 35/85pt.
 
-After this: **B5** (wrapped-label row reconstruction) and **C1** (pipeline response to
-`ceiling_note`), both depending on B2. The corpus re-score against
-`~/data/fiscal-ballast/_experiments/` — the plan's stated "real acceptance test" — is still
-outstanding and remains the orchestrator's job.
+</details>
 
-### Standing lesson for the rest of this plan
-
-Five design-level failures in one ticket (B2/B3 seam, B4 seam, regular-grid collapse, float
-sensitivity, paired-column collapse). Every one shares a root: **a rule that assumes the data
-has exactly the structure the rule can represent** — one seam, one distinguished gap, two
-groups. Prefer formulations that *select* their own structure from an objective. And note
-that every one was found by a probe outside the existing fixtures, never by the suite:
-**fixtures encode the geometry their author already thought of.** Sweep offsets, widths,
-spacings and alignment before believing a green run.
 
 <details>
 <summary>Superseded — the reopened-again writeup this replaces</summary>
