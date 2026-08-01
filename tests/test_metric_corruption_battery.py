@@ -300,3 +300,82 @@ def test_wrapped_label_is_scored_the_same_as_unwrapped(wrapped_label_page):
 
     assert report.scorable is True
     assert report.pct == 100.0
+
+
+# ----------------------------------------------------------------------
+# The invariant the battery was missing.
+#
+# Every assertion above is RELATIVE (``corrupted.pct < base.pct``), and the base
+# fixture's sparse row has a TRAILING gap ("| 0.5 |  |"), which stays aligned even
+# when the two sides of the comparison disagree about what a gap is. So the whole
+# battery could pass while a perfect transcription scored well under 100%.
+#
+# It did. TICKET-B2's first attempt (reverted in 717914d) made the markdown side
+# positional while the ground truth stayed compacted, and a faithful transcription
+# of a LEADING-gap sparse row scored 80% while a sloppy one that dropped the column
+# entirely scored 100% - the metric rewarding the engine that destroyed the table's
+# structure. Nothing in the battery moved.
+#
+# This pins the most basic metamorphic property of all, with the leading gap that
+# exposes the asymmetry: a perfect transcription scores 100%, full stop.
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def leading_gap_page(tmp_path):
+    """Three rows, two value columns; the middle row's only value is in column 2."""
+    path = tmp_path / "leading_gap.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    placements = [
+        ("Alpha", (("1.0", 0), ("2.0", 1))),
+        ("Sparse", (("0.5", 1),)),
+        ("Beta", (("4.0", 0), ("5.0", 1))),
+    ]
+    y = 200.0
+    for label, cells in placements:
+        page.insert_text((60.0, y), label, fontsize=9)
+        for value, column in cells:
+            page.insert_text((_VALUE_XS[column], y), value, fontsize=9)
+        y += 18.0
+    page.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    page.draw_line(fitz.Point(50, y), fitz.Point(470, y))
+    doc.save(path)
+    doc.close()
+
+    opened = fitz.open(path)
+    yield opened[0]
+    opened.close()
+
+
+def test_a_perfect_transcription_scores_100(leading_gap_page):
+    """A faithful transcription, gap included, must score 100%."""
+    md = _table_md([("Alpha", ("1.0", "2.0")), ("Sparse", ("", "0.5")), ("Beta", ("4.0", "5.0"))])
+
+    report = score_page(leading_gap_page, md)
+
+    assert report.scorable is True
+    assert report.pct == 100.0, f"faithful transcription scored {report.pct}%, not 100%"
+
+
+def test_dropping_a_column_never_beats_keeping_the_gap(leading_gap_page):
+    """The metric must never reward an engine for destroying column structure.
+
+    The direction matters more than either absolute score: if omitting the empty
+    cell outscores reproducing it, the production accept rule in
+    ``escalation_decision`` prefers the worse engine.
+    """
+    faithful = _table_md(
+        [("Alpha", ("1.0", "2.0")), ("Sparse", ("", "0.5")), ("Beta", ("4.0", "5.0"))]
+    )
+    sloppy = _table_md([("Alpha", ("1.0", "2.0")), ("Beta", ("4.0", "5.0"))], width=_WIDTH)
+    sloppy = sloppy.replace("| Beta |", "| Sparse | 0.5 |\n| Beta |", 1)
+
+    faithful_report = score_page(leading_gap_page, faithful)
+    sloppy_report = score_page(leading_gap_page, sloppy)
+
+    assert faithful_report.exact >= sloppy_report.exact, (
+        f"dropping the column scored {sloppy_report.exact} exact cells vs "
+        f"{faithful_report.exact} for keeping the gap - the metric is rewarding "
+        "structure-destroying output"
+    )

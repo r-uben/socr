@@ -7,8 +7,17 @@ Last updated: 2026-08-01
 Wave 1 done on `feat/123-metric-blind-spots`. B1 landed (`402395c`) and was
 reviewed (ACCEPT-WITH-FOLLOWUP, `docs/log/2026-08-01_TICKET-B1-review.md`). A1
 landed (`docs/log/2026-08-01_TICKET-A1.md`) and surfaced a second, untracked
-defect (wrapped-label row identity) — see "Findings carried forward". Wave 2
-(B2) next.
+defect (wrapped-label row identity) — now TICKET-B5.
+
+**Wave 2's first attempt was reverted.** B2 as written made the markdown side
+positional while the ground truth stayed compacted; on a leading-gap sparse table a
+faithful transcription then scored 80% while one that dropped the column entirely
+scored 100% — the metric rewarding structure-destroying OCR inside a production accept
+rule. The implementation followed the ticket exactly; the ticket's seam was wrong. B2
+and the former B3 are now **one ticket**, and two new invariants
+(`test_a_perfect_transcription_scores_100`,
+`test_dropping_a_column_never_beats_keeping_the_gap`) guard that regression. See
+`docs/log/2026-08-01_TICKET-B2-review.md`.
 
 Nothing here changes OCR behaviour. It changes what socr can *measure* — which
 matters because `escalation_decision` uses the metric as a production accept rule.
@@ -34,11 +43,11 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | TODO | B1 | 2 |
-| B3 | scoring correctness | TODO | B2 | 3 |
-| B4 | scoring correctness | TODO | B3 | 4 |
-| B5 | scoring correctness | TODO | B4 | 5 |
-| C1 | pipeline response | TODO | B4 | 5 |
+| B2 | scoring correctness | TODO (reverted once) | B1 | 2 |
+| B3 | — | CLOSED — merged into B2 | — | — |
+| B4 | scoring correctness | TODO | B2 | 3 |
+| B5 | scoring correctness | TODO | B4 | 4 |
+| C1 | pipeline response | TODO | B4 | 4 |
 
 ## Active Agents
 
@@ -48,6 +57,8 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B1 | socr-reviewer | STOPPED — mutated the shared tree; findings void |
 | B1 | orchestrating session | REVIEWED — ACCEPT-WITH-FOLLOWUP |
 | A1 | socr-implementer | DONE — `tests/test_metric_corruption_battery.py`, see `docs/log/2026-08-01_TICKET-A1.md` |
+| B2 | socr-implementer | REVERTED — `ad649b5`, reverted by `717914d` |
+| B2 | orchestrating session | REVIEWED — REJECT; the ticket seam was wrong, B2+B3 merged |
 
 ## Dispatch waves
 
@@ -56,13 +67,13 @@ matters because `escalation_decision` uses the metric as a production accept rul
   would test the *main* tree's source and agents must share one working tree. A1 and B1
   are write-disjoint but not behaviour-disjoint: A1's battery is written over
   `score_page`, whose contract B1 changes. B1 first, A1 against the settled contract.
-- **Wave 2:** B2
-- **Wave 3:** B3
-- **Wave 4:** B4
-- **Wave 5:** B5 and C1 — both depend only on B4, but they are **not** parallel (one
+- **Wave 2:** B2 (now includes the former B3 — markdown positions and ground-truth lanes
+  land together, never separately)
+- **Wave 3:** B4
+- **Wave 4:** B5 and C1 — both depend only on B4, but they are **not** parallel (one
   shared working tree). Either order; B5 touches `native_rows.py`, C1 does not.
 
-B2/B3/B4 all touch `table_exactness.py` or `native_rows.py` and are strictly ordered;
+B2/B4 both touch `table_exactness.py` or `native_rows.py` and are strictly ordered;
 do not parallelise them. In practice **no ticket in this plan can be parallelised with
 another** — one shared working tree, one branch.
 

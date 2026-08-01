@@ -72,50 +72,73 @@ helper must exclude not-scorable pages rather than counting them as zeros.
 asserts `score_page(...).scorable is False` and `.pct is None`; and
 `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
-### TICKET-B2 — stop discarding sparsity on both sides · TODO · depends-on: B1 · wave 2
+### TICKET-B2 — positional comparison on BOTH sides · TODO · depends-on: B1 · wave 2
+**Merged with the former TICKET-B3 on 2026-08-01, after a first attempt was reverted
+(`ad649b5`, reverted by `717914d`). They are one change — see "Why merged".**
+
 **Problem:** `markdown_rows` filters empty cells out of a row before comparing
 (`values = [c for c in raw_values if _is_value(c)]`), and ground-truth rows store a
 flat ordered list with no gaps. So `['-1.0','1.0','28.1','']` and
 `['2.5','0.5','','13.8']` both reduce to three values and both match a three-value
 ground truth. **A value in the wrong column scores as correct** — confirmed on OBR
-page 53, where Margin figures sit under Forecast in one block and correctly in
-another.
-**Do:** Preserve cell positions on the markdown side rather than compacting them.
-Ground truth keeps its native x-position per value (the field is added in B3; until
-then compare positionally against the preserved markdown shape). Removing the filter
-alone must make the shift-into-empty-cell case in TICKET-A1 fail the corruption
-battery's "strictly worse" assertion — i.e. flip that xfail to a pass.
-**Files:** `src/socr/benchmark/table_exactness.py`,
-`tests/test_metric_corruption_battery.py`
-**Done when:** the shift-into-empty-cell xfail from A1 is removed and passes; and
-`~/venvs/socr/bin/pytest tests/ -q` exits 0.
+page 53, where Margin figures sit under Forecast in one block and correctly in another.
+Separately, `native_rows_from_page` reads values in x-order and never records which
+column each landed in, so the ground truth cannot express a column shift at all.
 
-### TICKET-B3 — column identity in the ground truth · TODO · depends-on: B2 · wave 3
-**Problem:** `native_rows_from_page` reads values in x-order and never records which
-column each landed in, so the ground truth cannot express a column shift even once
-the markdown side preserves gaps.
-**Do:** Attach an anonymous lane index to each ground-truth value.
-- Cluster the **right edges** (`x1`) of value tokens, not left edges — financial
-  columns are right-aligned and left edges drift with digit count. Where a lane's
-  right-edge variance exceeds its centre-of-mass variance, anchor on the centre
-  instead; choose per lane by lower variance, no constant.
-- Cluster **only tokens right of the existing label boundary**, seeded by the current
-  last-non-numeric-word rule. A previous attempt clustered numerics *to find* the
-  boundary and a numeral inside a label ("Growth Plan after **17** October reversals")
-  formed its own cluster and dragged the boundary left. Decoupling the two is what
-  makes this survivable.
-- Require each lane to have support in **at least two rows** — same justification as
-  the GH-113 grid rule; a one-off numeral inside one label cannot form a lane.
-- Lanes are **anonymous indices**. Do not read headers for identity. Spanning and
-  multi-row headers are where native text layers are worst, and header-semantic
-  identity is out of scope for this plan.
-- A row whose values snap to no lane is flagged lane-ambiguous and scored
-  conservatively, never guessed.
-**Files:** `src/socr/tables/native_rows.py`, `tests/test_gh96_table_exactness.py`
-**Done when:** a test builds a page with a right-aligned numeric column, a numeral
-inside a label, and a sparse row, and asserts the numeral does not form a lane and the
-sparse row's value snaps to the correct lane index; and
-`~/venvs/socr/bin/pytest tests/ -q` exits 0.
+**Why merged — do not split these again.** The original plan fixed the markdown side in
+B2 and the ground-truth side in B3, telling B2 to "compare positionally against the
+preserved markdown shape" meanwhile. That interim state is incoherent: a positional list
+cannot be compared against a compacted one. The first attempt implemented B2 exactly as
+written, and on a **leading-gap** sparse table produced:
+
+| transcription | score |
+|---------------|-------|
+| faithful — reproduces the empty cell | **80%** |
+| sloppy — drops the column entirely | **100%** |
+
+The metric rewarded the engine that destroyed the table's structure, inside a production
+accept rule. That is not an implementation error; the seam was in the wrong place.
+
+**Do:**
+- Preserve cell positions on the **markdown** side rather than compacting them.
+- In the same change, attach an anonymous **lane index** to each **ground-truth** value:
+  - Cluster the **right edges** (`x1`) of value tokens, not left edges — financial
+    columns are right-aligned and left edges drift with digit count. Where a lane's
+    right-edge variance exceeds its centre-of-mass variance, anchor on the centre
+    instead; choose per lane by lower variance, no constant.
+  - Cluster **only tokens right of the existing label boundary**, seeded by the current
+    last-non-numeric-word rule. A previous attempt clustered numerics *to find* the
+    boundary and a numeral inside a label ("Growth Plan after **17** October reversals")
+    formed its own cluster and dragged the boundary left. Decoupling the two is what
+    makes this survivable.
+  - Require each lane to have support in **at least two rows** — same justification as
+    the GH-113 grid rule; a one-off numeral inside one label cannot form a lane.
+  - Lanes are **anonymous indices**. Do not read headers for identity. Spanning and
+    multi-row headers are where native text layers are worst, and header-semantic
+    identity is out of scope for this plan.
+  - A row whose values snap to no lane is flagged lane-ambiguous and scored
+    conservatively, never guessed.
+- Label-*boundary* reconstruction stays out of scope: wrapped labels are **TICKET-B5**.
+
+**Files:** `src/socr/benchmark/table_exactness.py`, `src/socr/tables/native_rows.py`,
+`tests/test_metric_corruption_battery.py`, `tests/test_gh96_table_exactness.py`
+**Done when:**
+- the `shift_into_adjacent_empty_cell` strict xfail from A1 is **removed** and passes
+  (it is `strict=True` — fixing the bug without removing the marker turns the suite red);
+- `test_a_perfect_transcription_scores_100` and
+  `test_dropping_a_column_never_beats_keeping_the_gap` still pass. These guard the exact
+  regression that got the first attempt reverted and **must not be weakened** to suit the
+  implementation;
+- a test builds a page with a right-aligned numeric column, a numeral inside a label, and
+  a sparse row, and asserts the numeral does not form a lane and the sparse row's value
+  snaps to the correct lane index;
+- `test_wrapped_label_is_scored_the_same_as_unwrapped` is **still xfailed** (that is B5);
+- `~/venvs/socr/bin/pytest tests/ -q` exits 0.
+
+### TICKET-B3 — merged into B2 · CLOSED
+Column identity in the ground truth. Absorbed into TICKET-B2 on 2026-08-01: the two
+halves cannot land separately without the metric transiently rewarding
+structure-destroying OCR. Number retained so existing references resolve.
 
 ### TICKET-B4 — global monotone column alignment · TODO · depends-on: B3 · wave 4
 **Problem:** Native lane count and emitted column count legitimately differ — 14 vs 6
