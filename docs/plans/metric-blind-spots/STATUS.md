@@ -37,6 +37,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | scoring correctness | TODO | B1 | 2 |
 | B3 | scoring correctness | TODO | B2 | 3 |
 | B4 | scoring correctness | TODO | B3 | 4 |
+| B5 | scoring correctness | TODO | B4 | 5 |
 | C1 | pipeline response | TODO | B4 | 5 |
 
 ## Active Agents
@@ -58,7 +59,8 @@ matters because `escalation_decision` uses the metric as a production accept rul
 - **Wave 2:** B2
 - **Wave 3:** B3
 - **Wave 4:** B4
-- **Wave 5:** C1
+- **Wave 5:** B5 and C1 — both depend only on B4, but they are **not** parallel (one
+  shared working tree). Either order; B5 touches `native_rows.py`, C1 does not.
 
 B2/B3/B4 all touch `table_exactness.py` or `native_rows.py` and are strictly ordered;
 do not parallelise them. In practice **no ticket in this plan can be parallelised with
@@ -100,19 +102,22 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   aggregate helper in `src/`; corpus scoring lives in
   `~/data/fiscal-ballast/_experiments/` and has not been re-scored against B1.
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
-- **A1 finding (untracked) → needs a ticket.** `native_rows_from_page` never
-  reconstructs a label genuinely split across two visual bands: whichever
-  band carries the row's values keeps only the text on that band, and the
-  other line is silently dropped. A perfect transcription of a
-  wrapped-label row scores as if the row were missing. Distinct from B2 (a
-  different root cause — row identity, not the empty-cell filter); landed as
-  a second `xfail` in `tests/test_metric_corruption_battery.py`, its own
-  reason string, does not reference B2. Details in
-  `docs/log/2026-08-01_TICKET-A1.md`. No ticket number assigned yet —
-  candidate for B5, or folding into B3 (row identity is already that
-  stream's subject).
+- **A1 finding → now TICKET-B5** (own ticket, sequenced after B4). `native_rows_from_page`
+  never reconstructs a label split across two visual bands: whichever band carries the
+  values keeps only its own text, the other line is dropped, and a perfect transcription
+  scores as if the row were missing. Reproduced independently against the parser at 9pt
+  and 12pt gaps (label becomes `'debt'`) and at 6pt (bands merge, label scrambles to
+  `'Central debt government net'`). Held as a `strict=True` xfail in
+  `tests/test_metric_corruption_battery.py`. **Deliberately not folded into B3** — this
+  is label-*boundary* work and B3 takes the boundary as given; the landmine list records
+  that merging the two is what killed the earlier attempt.
+
+## Note on Stream A
+
+B5 is the first defect in this plan caught **before** it produced published numbers
+rather than after. The battery found it on its first run, in a transform the ticket had
+listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
-Dispatch Wave 2 (B2). Decide whether the A1 wrapped-label finding gets its
-own ticket (suggested B5) or folds into B3 before B3 starts.
+Dispatch Wave 2 (B2).

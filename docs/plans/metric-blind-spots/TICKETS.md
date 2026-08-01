@@ -139,6 +139,50 @@ scope.
 asserts it scores strictly below the same table unshifted; the module docstring states
 the uniform-shift limitation; and `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
+### TICKET-B5 — reconstruct a row label wrapped across two lines · TODO · depends-on: B4 · wave 5
+**Found by TICKET-A1's corruption battery, 2026-08-01** — the eighth defect, and the
+first one this plan caught *before* it produced published numbers rather than after.
+That is the battery paying for itself; note it when judging whether Stream A was worth
+the effort.
+
+**Problem:** `native_rows_from_page` never reconstructs a label genuinely split across
+two visual bands. Whichever band carries the row's values keeps only the text on that
+band; the other line is silently dropped. Reproduced directly against the parser with a
+two-line label (`"Central government net"` / `"debt"`) plus a plain row:
+
+| line gap | parsed label | failure |
+|----------|--------------|---------|
+| 9pt, 12pt | `'debt'` | `"Central government net"` dropped entirely |
+| 6pt | `'Central debt government net'` | bands merge, words x-sorted, label scrambled |
+
+So a **perfect** transcription of a wrapped-label row matches no ground-truth label and
+scores as if the row were missing — the same wrong-direction shape as the original
+seven, understating the engine.
+
+Distinct from B2: that is the markdown-side empty-cell filter, this is native-side row
+identity. Distinct from `270cdab` ("don't merge a wrapped label with the line above
+it"), which only stops the parser interleaving a wrapped label with an *unrelated*
+neighbouring line — it was never a fix for a label spanning two lines of its own.
+
+**Sequenced after B4, deliberately.** This is label-*boundary* work, and B3 explicitly
+takes the boundary as given ("cluster only tokens right of the existing label boundary,
+seeded by the current last-non-numeric-word rule"). The landmine list records that an
+earlier attempt died by merging boundary-finding with lane clustering, and that
+decoupling them "is what makes this survivable". Do **not** fold this into B3, and do
+not touch lane clustering here.
+
+**Do:** Reconstruct multi-line row labels before the grid predicate runs. A continuation
+line is a text band with no values of its own, vertically adjacent to a value-bearing
+band, sharing its left edge. Join in reading order — never x-sort across bands, which is
+what produces the scrambled 6pt case. Derive adjacency from the page's own line metrics
+(font size, band spacing), not a constant.
+**Files:** `src/socr/tables/native_rows.py`, `tests/test_metric_corruption_battery.py`
+**Done when:** the `strict=True` xfail
+`test_wrapped_label_is_scored_the_same_as_unwrapped` is removed and passes at 9pt, 12pt
+**and** 6pt gaps; the existing regression
+`test_a_wrapped_label_is_not_merged_with_the_line_above` still passes (this must not
+reintroduce what `270cdab` fixed); and `~/venvs/socr/bin/pytest tests/ -q` exits 0.
+
 ## Stream C — pipeline response
 
 ### TICKET-C1 — surface unexplained lanes as content loss · TODO · depends-on: B4 · wave 5
