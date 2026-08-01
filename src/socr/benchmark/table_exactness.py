@@ -68,6 +68,21 @@ incumbent missed shifts everything after it by one column and would score near z
 *for being right*). The freedom is accepted and shipped; ``lane_count``,
 ``column_count``, ``lane_to_column`` and ``unmapped_nonempty_columns`` on
 ``ExactnessReport`` exist so a suspicious win is auditable, never so it is penalised.
+
+## #123 TICKET-C1: unexplained lanes are content loss, not diagnostics
+
+``unmapped_nonempty_columns`` is the emitted side of the gap; ``unexplained_lanes``
+is its mirror on the ground-truth side — lanes that carry a value in a matched row
+but that the best map never gave a column. That is not a shape mismatch to audit
+quietly; it is native-layer content with nowhere to land in the output, which is
+exactly what the repo's no-silent-content-loss rule exists to catch. Unlike the raw
+``native_lanes``/``output_cols`` gap logged by ``native_verifier`` (frequently
+benign — spanning or paired headers routinely produce a wide gap on a page that is
+fine), "does at least one lane go unexplained" is threshold-free: zero versus
+non-zero, not a tuned cutoff. ``escalation_decision`` therefore treats it as a
+lexicographically prior signal to ``exact`` (see that module), and the pipeline
+surfaces it as a named audit kind via ``tables_trust`` rather than only a diagnostic
+field nobody reads.
 """
 
 from __future__ import annotations
@@ -115,6 +130,12 @@ class ExactnessReport:
     column_count: int = 0  # M: distinct emitted markdown columns on the page
     lane_to_column: dict[int, int] = field(default_factory=dict)  # the chosen map
     unmapped_nonempty_columns: int = 0  # emitted columns with values the map didn't use
+    # #123 TICKET-C1: the mirror image of unmapped_nonempty_columns. A ground-truth
+    # lane that carries a value in a matched row but received no column under the
+    # best map — content the native layer has and the emitted table has nowhere to
+    # put. Unlike the raw lane/column gap this is threshold-free: zero versus
+    # non-zero is a fact about the data, not a tuned cutoff.
+    unexplained_lanes: int = 0
     misses: list[CellMiss] = field(default_factory=list)
     ceiling_note: str = ""
 
@@ -312,6 +333,13 @@ def score_rows(gt: list[LabeledRow], predicted: list[LabeledRow]) -> ExactnessRe
     used_columns = set(lane_to_column.values())
     all_columns_with_values = {c for row in predicted for c in row.columns}
     report.unmapped_nonempty_columns = len(all_columns_with_values - used_columns)
+
+    # #123 TICKET-C1: lanes that carry a value in a matched row but the map never
+    # used. A lane the map maps to a wrong column still counts as "explained" here
+    # (the miss is a value error, not a missing home); this only counts lanes with
+    # nowhere to go at all.
+    matched_lanes_with_values = {lane for want, _got in matched for lane in want.lanes if lane >= 0}
+    report.unexplained_lanes = len(matched_lanes_with_values - set(lane_to_column))
 
     for want, got in matched:
         if not want.lanes or not got.columns:

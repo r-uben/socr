@@ -304,3 +304,50 @@ def test_a_rejected_escalation_leaves_the_page_untrusted():
 
     assert trust.untrusted_pages == [1]
     assert trust.to_dict()["resolved_by_escalation"] == []
+
+
+# ----------------------------------------------------------------------
+# #123 TICKET-C1: not-scorable pages and unexplained lanes surface too
+# ----------------------------------------------------------------------
+
+
+def test_a_not_scorable_page_is_visible_at_the_document_level():
+    """B1's grid gate used to make a page (e.g. OBR p54) disappear silently.
+
+    It previously reported a loud, wrong 0.0%; now it must appear on the
+    document-level trust surface instead of vanishing without a trace.
+    """
+    events = [
+        AuditEvent(
+            page_num=54,
+            kind="table_not_scorable",
+            detail=(
+                "native text layer parsed 5 row(s) that do not form a grid; "
+                "not scorable against ground truth"
+            ),
+        )
+    ]
+
+    trust = build_tables_trust("obr_efo_2022_11.pdf", events)
+    payload = trust.to_dict()
+
+    assert trust.untrusted_pages == [54]
+    assert payload["counts_by_kind"] == {"table_not_scorable": 1}
+    assert "table_not_scorable" in payload["pages"]["54"]["reasons"]
+
+
+def test_unexplained_lanes_are_a_named_distrust_kind():
+    trust = build_tables_trust(
+        "doc.pdf",
+        [
+            AuditEvent(
+                page_num=13,
+                kind="table_unexplained_lanes",
+                detail="1 native lane(s) carry values in matched rows but map to no emitted column",
+                data={"unexplained_lanes": 1},
+            )
+        ],
+    )
+
+    assert trust.untrusted_pages == [13]
+    assert "table_unexplained_lanes" in TABLE_DISTRUST_KINDS

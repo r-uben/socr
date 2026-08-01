@@ -47,7 +47,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | DONE | B2 | 3 |
-| C1 | pipeline response | TODO | B2 | 3 |
+| C1 | pipeline response | DONE | B2 | 3 |
 
 ## Active Agents
 
@@ -65,6 +65,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | socr-implementer (paired-columns fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-paired-columns-fix.md` |
 | B2 | socr-implementer (widest-row-cap fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-widest-row-cap.md` |
 | B5 | socr-implementer | DONE — see `docs/log/2026-08-01_TICKET-B5.md` |
+| C1 | socr-implementer | DONE — see `docs/log/2026-08-01_TICKET-C1.md` |
 
 ## Dispatch waves
 
@@ -180,9 +181,22 @@ Until this is separated, **84.5% is not known to be the metric's ceiling or the 
 
 ### Remaining work
 
-- **C1** — surface unexplained lanes *and* B1's `ceiling_note` through
-  `TABLE_DISTRUST_KINDS` to the document level. Carries B1 review finding 1.
 - Optionally: separate engine failure from metric defect on the six pages above.
+- **C1's known gap:** visibility (`table_not_scorable` / `table_unexplained_lanes`)
+  is scoped to pages that reach `_table_page_needs_escalation` — `has_tables=True`
+  AND an escalation profile configured (`escalate_ambiguous_tables`). A run with
+  escalation disabled still ships a not-scorable/unexplained-lane page without a
+  trace. Inherent to `score_page`'s two documented call sites (both
+  escalation-only); out of C1's stated file scope. See
+  `docs/log/2026-08-01_TICKET-C1.md`.
+
+## Plan status
+
+**All tickets DONE.** A1, B1, B2 (incl. former B3/B4), B5, C1. See
+`docs/log/2026-08-01_TICKET-C1.md` for the last one, including confirmation the
+corpus gate stayed score-neutral (`3 passed`, unchanged) and full suite:
+1405 passed, 1 xfailed.
+
 
 ### Standing lesson
 

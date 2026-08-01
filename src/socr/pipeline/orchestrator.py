@@ -1425,7 +1425,9 @@ class UnifiedPipeline:
             return None
         return min(candidates, key=lambda p: p.cost_per_page_usd)
 
-    def _table_page_needs_escalation(self, page, ps, bo) -> bool:
+    def _table_page_needs_escalation(
+        self, state: DocumentState, page_num: int, page, ps, bo
+    ) -> bool:
         """True when the emitted table disagrees with the page's native text layer.
 
         Calibrated against whether escalation actually helps: 100% recall and 69%
@@ -1454,8 +1456,21 @@ class UnifiedPipeline:
         shared with the GH-96 exactness metric's own not-scorable gate (#123
         TICKET-B1) —
         one predicate, not two copies drifting apart.
+
+        #123 TICKET-C1: this is also the one place every table page's incumbent
+        text is scored against its own native layer regardless of whether
+        escalation ends up firing, so it doubles as the surfacing point for two
+        kinds of content loss that used to reach no surface at all: a not-scorable
+        page (B1's grid gate — previously a loud, wrong 0.0% became a silent
+        ``pct=None``) and a page carrying unexplained lanes (B2's lane alignment
+        found a native column the emitted table has nowhere to put). Both are
+        recorded as ``AuditEvent``s so ``tables_trust`` surfaces them at the
+        document level; if the page is later escalated and accepted, the existing
+        ``table_escalation_accepted`` resolution machinery clears them, same as any
+        other distrust kind recorded against text that no longer ships.
         """
         from socr.benchmark.table_exactness import score_page
+        from socr.core.audit_log import AuditEvent
         from socr.tables.native_rows import native_rows_from_page, rows_establish_grid
 
         try:
@@ -1463,12 +1478,44 @@ class UnifiedPipeline:
         except Exception:
             return False
         if not rows_establish_grid(gt_rows):
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="table_not_scorable",
+                    detail=(
+                        f"native text layer parsed {len(gt_rows)} row(s) that do not "
+                        "form a grid; not scorable against ground truth"
+                    ),
+                )
+            )
             return False
 
         try:
             report = score_page(page, bo.text or "")
         except Exception:
             return False
+
+        if report.ceiling_note:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="table_not_scorable",
+                    detail=report.ceiling_note,
+                )
+            )
+        elif report.unexplained_lanes:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="table_unexplained_lanes",
+                    detail=(
+                        f"{report.unexplained_lanes} native lane(s) carry values in "
+                        "matched rows but map to no emitted column"
+                    ),
+                    data={"unexplained_lanes": report.unexplained_lanes},
+                )
+            )
+
         return report.pct is not None and report.pct < 100.0
 
     def _escalate_table_page(
@@ -1499,7 +1546,7 @@ class UnifiedPipeline:
 
             with fitz.open(pdf_path) as doc:
                 page = doc[page_num - 1]
-                if not self._table_page_needs_escalation(page, ps, bo):
+                if not self._table_page_needs_escalation(state, page_num, page, ps, bo):
                     return False
                 incumbent_text = bo.text or ""
 

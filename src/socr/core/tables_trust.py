@@ -61,6 +61,15 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # the disagreement was resolved and the shipped table is the better one.
         "table_escalation_refused",
         "table_escalation_timeout",
+        # #123 TICKET-C1: two more shapes of the same no-silent-content-loss rule.
+        # "table_unexplained_lanes" — the native layer supports a column the
+        # emitted table has no home for; a threshold-free fact once B2's lane
+        # alignment exists (zero versus non-zero, not a tuned gap).
+        # "table_not_scorable" — B1's grid gate (no usable ground truth) used to
+        # make a page silently disappear from measurement; routed through the
+        # same mechanism rather than a second one, per the B1 review finding.
+        "table_unexplained_lanes",
+        "table_not_scorable",
     }
 )
 

@@ -286,7 +286,7 @@ removed xfail).
 
 ## Stream C — pipeline response
 
-### TICKET-C1 — surface unexplained lanes as content loss · TODO · depends-on: B4 · wave 5
+### TICKET-C1 — surface unexplained lanes as content loss · DONE (`docs/log/2026-08-01_TICKET-C1.md`) · depends-on: B2 (formerly listed as B4, merged into B2) · wave 5
 **Problem:** The pipeline already computes `native_lanes=14, output_cols=6, gap=8` and
 only writes it to the log. The raw gap must not be thresholded — 14-vs-6 is frequently
 benign — but once B4's alignment exists there is a threshold-free derived fact:
