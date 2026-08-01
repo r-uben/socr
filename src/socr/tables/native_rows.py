@@ -164,14 +164,28 @@ def _rows_in_region(page, bbox) -> list[LabeledRow]:
     # (1) cluster words into visual rows by y-interval overlap
     words.sort(key=lambda w: (w[1], w[0]))
     bands: list[list[tuple[float, float, float, float, str]]] = []
-    band_y1 = None
+    band_y0 = band_y1 = None
     for word in words:
-        if band_y1 is None or word[1] >= band_y1:
-            bands.append([word])
-            band_y1 = word[3]
+        wy0, wy1 = word[1], word[3]
+        if band_y1 is None:
+            overlaps = False
         else:
+            # Any overlap at all is too weak a test. A wrapped label at tight
+            # leading overlaps the line above by a descender, and merging the two
+            # then interleaves their words by x-sort: "Central government net /
+            # debt" became "Central net government debt". Require the shared span
+            # to exceed half the shorter line's height - the definitional midpoint
+            # for "same visual row", not a tuned value.
+            shared = min(band_y1, wy1) - max(band_y0, wy0)
+            shorter = min(band_y1 - band_y0, wy1 - wy0)
+            overlaps = shorter > 0 and shared > shorter / 2
+        if overlaps:
             bands[-1].append(word)
-            band_y1 = max(band_y1, word[3])
+            band_y0 = min(band_y0, wy0)
+            band_y1 = max(band_y1, wy1)
+        else:
+            bands.append([word])
+            band_y0, band_y1 = wy0, wy1
 
     # (2) split each row at its last non-numeric word.
     #
