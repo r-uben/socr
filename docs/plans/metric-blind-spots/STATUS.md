@@ -45,9 +45,9 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B1 | scoring correctness | DONE | — | 1 |
 | B2 | scoring correctness | TODO (reverted once) | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
-| B4 | scoring correctness | TODO | B2 | 3 |
-| B5 | scoring correctness | TODO | B4 | 4 |
-| C1 | pipeline response | TODO | B4 | 4 |
+| B4 | — | CLOSED — merged into B2 | — | — |
+| B5 | scoring correctness | TODO | B2 | 3 |
+| C1 | pipeline response | TODO | B2 | 3 |
 
 ## Active Agents
 
@@ -67,15 +67,14 @@ matters because `escalation_decision` uses the metric as a production accept rul
   would test the *main* tree's source and agents must share one working tree. A1 and B1
   are write-disjoint but not behaviour-disjoint: A1's battery is written over
   `score_page`, whose contract B1 changes. B1 first, A1 against the settled contract.
-- **Wave 2:** B2 (now includes the former B3 — markdown positions and ground-truth lanes
-  land together, never separately)
-- **Wave 3:** B4
-- **Wave 4:** B5 and C1 — both depend only on B4, but they are **not** parallel (one
-  shared working tree). Either order; B5 touches `native_rows.py`, C1 does not.
+- **Wave 2:** B2 (now includes the former B3 **and** B4 — lanes, markdown positions, and the
+  global monotone map land together, never separately)
+- **Wave 3:** B5 and C1 — both depend only on B2, but they are **not** parallel (one shared
+  working tree). Either order; B5 touches `native_rows.py`, C1 does not.
 
-B2/B4 both touch `table_exactness.py` or `native_rows.py` and are strictly ordered;
-do not parallelise them. In practice **no ticket in this plan can be parallelised with
-another** — one shared working tree, one branch.
+B2 is now the whole metric change and is strictly ordered before everything else. In practice
+**no ticket in this plan can be parallelised with another** — one shared working tree, one
+branch.
 
 ## Validation that the plan worked
 
@@ -131,4 +130,6 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
-Dispatch Wave 2 (B2).
+Dispatch B2 — now the whole metric change (former B3 + B4 folded in), with the alignment
+rule settled by panel. Design note: `docs/log/2026-08-01_TICKET-B2-design.md`. Panel archive:
+`~/.local/share/consilium/runs/2026/08/20260801T143554Z-8166`.

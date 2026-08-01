@@ -120,6 +120,33 @@ accept rule. That is not an implementation error; the seam was in the wrong plac
     conservatively, never guessed.
 - Label-*boundary* reconstruction stays out of scope: wrapped labels are **TICKET-B5**.
 
+**The alignment rule — settled by panel, 2026-08-01 (`/consilium`, codex:gpt-5.5 +
+gemini:antigravity, 2 rounds, converged).** The map is fitted to the prediction being
+scored, so a wider output has strictly more admissible maps — `C(M,L)`: at L=6, M=14 gives
+**3003**. Three corrections were considered; ship the first:
+
+- **(a) SHIP — score each engine under its own best map**, equal ground-truth denominator,
+  and **document the freedom** in the module docstring beside the uniform-shift limitation.
+- **(b) REJECTED — do not penalise unmapped candidate columns.** Both panelists rejected
+  this independently and for the same reason: it makes strictness a function of the
+  *prediction's shape*, which is precisely the rule the reverted first attempt violated. It
+  also punishes a candidate for extracting a column the ground truth itself missed.
+- **(c) REJECTED — do not score both sides under the incumbent's map.** Tempting (it removes
+  the candidate's extra search freedom) and it was the panel's opening recommendation, but
+  it is **structurally anti-improvement**: if the incumbent missed a left-hand stub column,
+  a candidate that *correctly detects it* has every column shifted by one and scores near
+  zero **for being right**. Column indices are ordinal, not semantic; one structural
+  correction cascades misalignment across everything to its right.
+
+**The freedom is real — do not dismiss it in the docstring.** The exploit mechanism is
+low-entropy repeated cell values (`0.0`, `-`, `n/a`, blanks): a wider output gives the
+alignment more paths to route a lane through them and harvest coincidental exact matches.
+
+**Expose it as diagnostics, never as penalties** — `M`, `L`, the chosen map, and unmapped
+non-empty columns. Diagnostics keep the accept rule uncontaminated while making a suspicious
+win auditable. This is largely **TICKET-C1**'s unexplained-lane count arriving from an
+independent direction; wire them to the same surface rather than building a second one.
+
 **Files:** `src/socr/benchmark/table_exactness.py`, `src/socr/tables/native_rows.py`,
 `tests/test_metric_corruption_battery.py`, `tests/test_gh96_table_exactness.py`
 **Done when:**
@@ -129,40 +156,61 @@ accept rule. That is not an implementation error; the seam was in the wrong plac
   `test_dropping_a_column_never_beats_keeping_the_gap` still pass. These guard the exact
   regression that got the first attempt reverted and **must not be weakened** to suit the
   implementation;
+- **a padding test:** a candidate padded with extra columns of repeated low-entropy values
+  (`0.0`, `-`, blanks) must not outscore a faithful narrower transcription. This is the
+  panel's identified exploit for the map-search freedom and nothing currently covers it;
+- **an escalation-asymmetry test:** a candidate that is a same-shift-plus-spurious-column
+  variant of the incumbent must not be accepted. Without it the rejected option (a)-variant
+  from the design note would land green;
+- **`cells == number of ground-truth values`**, pinned as a test — it is what keeps
+  `exact > exact` a single-denominator comparison. Blank lanes must **not** count as cells;
 - a test builds a page with a right-aligned numeric column, a numeral inside a label, and
   a sparse row, and asserts the numeral does not form a lane and the sparse row's value
-  snaps to the correct lane index;
+  snaps to the correct lane index (name the observable `lanes` field so the implementer
+  does not invent a private API);
+- the module docstring documents both the uniform-shift limitation and the map-search
+  freedom, the latter without dismissing it;
 - `test_wrapped_label_is_scored_the_same_as_unwrapped` is **still xfailed** (that is B5);
 - `~/venvs/socr/bin/pytest tests/ -q` exits 0.
+
+**Validation, separate from the unit suite:** re-score the two preserved runs in
+`~/data/fiscal-ballast/_experiments/` before and after and record the flip count. STATUS.md
+calls this the real acceptance test. Accepts will flip **both ways** — down where a column
+shift was previously invisible, up where a leading gap previously misaligned an otherwise
+correct row. Do **not** re-run OCR; local-model variance exceeds the effect.
+
+**Also measure:** `orchestrator.py:1469` triggers escalation on `pct < 100.0`, so a stricter
+metric puts more pages under 100 and fires **more second-engine calls**. Measure the
+direction in the same re-score pass rather than discovering it as a bill. And
+`escalation_decision`'s module-docstring calibration table (45.0 / 81.7 / 85.0) was measured
+under the old meaning of `exact`; re-measure or annotate it — do not leave it standing
+unqualified.
 
 ### TICKET-B3 — merged into B2 · CLOSED
 Column identity in the ground truth. Absorbed into TICKET-B2 on 2026-08-01: the two
 halves cannot land separately without the metric transiently rewarding
 structure-destroying OCR. Number retained so existing references resolve.
 
-### TICKET-B4 — global monotone column alignment · TODO · depends-on: B3 · wave 4
-**Problem:** Native lane count and emitted column count legitimately differ — 14 vs 6
-on OBR page 53, because paired-year headers and stub columns collapse. Index equality
-cannot be used.
-**Do:** Compute one global, monotone, injective mapping from emitted markdown columns
-to native lanes per table (per panel), chosen to maximise total cell agreement across
-all matched rows. Needleman-Wunsch over columns; the pairing score for (md column j,
-lane k) is the count of rows where the values agree. No thresholds.
+### TICKET-B4 — merged into B2 · CLOSED
+Global monotone column alignment. Absorbed into TICKET-B2 on 2026-08-01, after the design
+pass (`docs/log/2026-08-01_TICKET-B2-design.md`) showed there is no coherent state in which
+lanes exist but are not yet aligned. **The comparison contract between an L-lane space and
+an M-column space *is* the alignment.** Every B2-alone rule either craters legitimate L≠M
+pages or makes strictness a function of the prediction's shape — the latter measured to
+create a *new* wrong-direction accept (a shifted candidate carrying one spurious empty
+column scores 5/5 against the shifted incumbent's 4/5, where today both tie at 5 and are
+rejected). Number retained so existing references resolve.
 
-Because the mapping is **global**, a table where one block is shifted and another is
-not cannot satisfy both — the correct block pins the mapping and the shifted block's
-cells score as errors. That is exactly the OBR page 53 case.
+**Two corrections to the original B4 text, carried into B2:**
+- *"per table (per panel)"* → **per page**. Per-panel is not implementable:
+  `BenchmarkScorer._markdown_table_cells` (`benchmark/scorer.py:443`) flattens every pipe
+  table on the page into one grid with no table boundaries, and there is no table
+  segmentation on either side.
+- The uniform-shift limitation still must be documented in the module docstring, and now
+  has a sharper sibling: the map is fitted to the prediction being scored, so an output
+  with more columns has strictly more admissible maps.
 
-**Document the limit in the module docstring:** a *uniformly* shifted table, where
-every row consistently places Margin under Forecast, is absorbed by the mapping and
-still scores clean. Fixing that needs header semantics and is deliberately out of
-scope.
-**Files:** `src/socr/benchmark/table_exactness.py`, `tests/test_gh96_table_exactness.py`
-**Done when:** a test builds a two-block table with one block shifted one column and
-asserts it scores strictly below the same table unshifted; the module docstring states
-the uniform-shift limitation; and `~/venvs/socr/bin/pytest tests/ -q` exits 0.
-
-### TICKET-B5 — reconstruct a row label wrapped across two lines · TODO · depends-on: B4 · wave 5
+### TICKET-B5 — reconstruct a row label wrapped across two lines · TODO · depends-on: B2 · wave 3
 **Found by TICKET-A1's corruption battery, 2026-08-01** — the eighth defect, and the
 first one this plan caught *before* it produced published numbers rather than after.
 That is the battery paying for itself; note it when judging whether Stream A was worth
