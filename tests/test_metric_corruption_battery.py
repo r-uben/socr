@@ -236,29 +236,31 @@ def test_corrupting_transform_makes_score_strictly_worse(battery_page, name, tra
 # Not folded into BENIGN above: it perturbs the *native PDF*, not the markdown,
 # so it needs its own fixture pair.
 #
-# This is a SECOND defect found by this battery, distinct from TICKET-B2 and not
-# tracked by an existing ticket. #123's own commit 270cdab ("don't merge a
-# wrapped label with the line above it") stops the row parser from
-# INTERLEAVING a wrapped label's words with an unrelated neighbouring line, but
-# it does not reconstruct a label that is genuinely split across two visual
-# bands: whichever band carries the row's values keeps only the text on that
-# band, and the other line is silently dropped from the ground truth entirely.
-# A perfect transcription of a page with a two-line-wrapped row label is
-# therefore scored as if that row were missing - the same wrong-direction shape
-# as all seven defects this battery exists to catch.
+# This is a SECOND defect found by this battery, distinct from TICKET-B2 and
+# fixed by TICKET-B5. #123's own commit 270cdab ("don't merge a wrapped label
+# with the line above it") stops the row parser from INTERLEAVING a wrapped
+# label's words with an unrelated neighbouring line, but it did not
+# reconstruct a label that is genuinely split across two visual bands - see
+# TICKET-B5 in docs/plans/metric-blind-spots/TICKETS.md and
+# native_rows._merge_continuation_bands.
 # ----------------------------------------------------------------------
 
 
-@pytest.fixture
-def wrapped_label_page(tmp_path):
-    """ "Central government net debt" wrapped across two lines, plus one plain row."""
-    path = tmp_path / "wrapped_label.pdf"
+def _build_wrapped_label_pdf(path, gap: float):
+    """ "Central government net debt" wrapped across two lines, plus one plain row.
+
+    *gap* is the vertical distance between the label's two lines' baselines. #123
+    TICKET-B5 covers three geometries: 9pt and 12pt (the two lines stay separate
+    visual bands - normal leading) and 6pt (tight enough leading that the two
+    lines' bounding boxes overlap and the existing same-row band-merge rule
+    already joins them into one band).
+    """
     doc = fitz.open()
     page = doc.new_page()
     page.insert_text((60.0, 200.0), "Central government net", fontsize=9)
-    page.insert_text((60.0, 209.0), "debt", fontsize=9)
+    page.insert_text((60.0, 200.0 + gap), "debt", fontsize=9)
     for x, value in zip(_VALUE_XS, ("1.0", "2.0")):
-        page.insert_text((x, 209.0), value, fontsize=9)
+        page.insert_text((x, 200.0 + gap), value, fontsize=9)
     page.insert_text((60.0, 230.0), "Other row", fontsize=9)
     for x, value in zip(_VALUE_XS, ("4.0", "5.0")):
         page.insert_text((x, 230.0), value, fontsize=9)
@@ -266,23 +268,17 @@ def wrapped_label_page(tmp_path):
     page.draw_line(fitz.Point(50, 245), fitz.Point(470, 245))
     doc.save(path)
     doc.close()
+    return fitz.open(path)
 
-    opened = fitz.open(path)
+
+@pytest.fixture(params=[9.0, 12.0, 6.0], ids=["gap_9pt", "gap_12pt", "gap_6pt"])
+def wrapped_label_page(tmp_path, request):
+    path = tmp_path / "wrapped_label.pdf"
+    opened = _build_wrapped_label_pdf(path, request.param)
     yield opened[0]
     opened.close()
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Second defect found by this battery, not tracked by an existing "
-        "ticket: native_rows_from_page never reconstructs a label genuinely "
-        "split across two visual bands - it keeps only the text on the "
-        "value-bearing band and silently drops the other line, so a perfect "
-        "transcription of a wrapped-label row scores as if the row were "
-        "missing."
-    ),
-    strict=True,
-)
 def test_wrapped_label_is_scored_the_same_as_unwrapped(wrapped_label_page):
     md = _table_md([("Central government net debt", ("1.0", "2.0")), ("Other row", ("4.0", "5.0"))])
 

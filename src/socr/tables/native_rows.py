@@ -494,6 +494,10 @@ def _rows_in_region(page, bbox) -> list[tuple[tuple[str, ...], list[tuple[float,
             bands.append([word])
             band_y0, band_y1 = wy0, wy1
 
+    # (1b) fold a wrapped label's continuation line into the row that carries
+    # its values. #123 TICKET-B5.
+    bands = _merge_continuation_bands(bands, _span_fonts(page, bbox))
+
     # (2) split each row at its last non-numeric word.
     #
     # Neither "everything before the first number" nor an x-clustered column
@@ -502,9 +506,15 @@ def _rows_in_region(page, bbox) -> list[tuple[tuple[str, ...], list[tuple[float,
     # chicken-and-egg (that stray 17 forms its own x-cluster and drags the boundary
     # left). A table row is a label followed by values, so the last non-numeric word
     # ends the label. Parameter-free, and correct for both cases above.
+    #
+    # Ordered by _reading_order rather than plain x0 - #123 TICKET-B5. See that
+    # function's docstring: a band can hold a genuine wrapped label folded onto
+    # its value line by step (1)'s half-height rule, which needs top-line-then-
+    # bottom-line order, not x0 order, or the two lines' words interleave
+    # ("Central government net" / "debt" became "Central debt government net").
     raw: list[tuple[float, str, list[tuple[float, float, str]]]] = []
     for band in bands:
-        ordered = sorted(band, key=lambda w: w[0])
+        ordered = _reading_order(band)
         last_text = -1
         for idx, word in enumerate(ordered):
             if not _is_value(word[4]):
@@ -532,6 +542,216 @@ def _rows_in_region(page, bbox) -> list[tuple[tuple[str, ...], list[tuple[float,
         rows.append((path, values))
         stack.append((indent, label))
     return rows
+
+
+def _reading_order(
+    band: list[tuple[float, float, float, float, str]],
+) -> list[tuple[float, float, float, float, str]]:
+    """Order a band's words for the label/value split in step (2). #123 TICKET-B5.
+
+    Plain left-to-right (x0) order is correct for the vast majority of bands,
+    which hold exactly one printed line - "one line" here means "whatever
+    step (1)'s half-height grouping over-reached to include", not "words with
+    equal y0"; two words on one printed line can legitimately have different
+    y0 ("Nominal" and "GDP1" read left to right despite "GDP1"'s digit glyph
+    starting 1.6pt lower than "Nominal"'s cap height, on page 61 of the
+    reference corpus).
+
+    A band that instead holds two GENUINE physical lines - a wrapped label at
+    tight leading, merged into its value line below by step (1)'s half-height
+    rule before this function ever runs - needs top-line-then-bottom-line
+    order, not x0 order, or the two lines' words interleave ("Central
+    government net" / "debt" becomes "Central debt government net").
+
+    Told apart the same way the band-level merge above tells a continuation
+    line from unrelated content: a genuine two-line split shares one left
+    edge, unrelated content sharing a band by accident (an over-wide table
+    region absorbing a chart legend) usually does not. Bisect the band by y0
+    at every candidate boundary, keep only the bisections where BOTH halves'
+    own leftmost word shares one left edge (nearest-point precision, as
+    elsewhere in this module), and take the most confident one (the largest
+    y0 gap at the boundary). No qualifying bisection - the ordinary case -
+    falls back to plain x0 order, which is also the safe fallback for a wide
+    band that accidentally absorbed unrelated content: it does not invent a
+    line split that was never there.
+    """
+    if len(band) < 2:
+        return list(band)
+    by_y0 = sorted(band, key=lambda w: w[1])
+    best: tuple[float, int] | None = None
+    for i in range(1, len(by_y0)):
+        gap = by_y0[i][1] - by_y0[i - 1][1]
+        if gap <= 0:
+            continue
+        top, bottom = by_y0[:i], by_y0[i:]
+        top_left = round(min(w[0] for w in top))
+        bottom_left = round(min(w[0] for w in bottom))
+        if top_left == bottom_left and (best is None or gap > best[0]):
+            best = (gap, i)
+    if best is None:
+        return sorted(band, key=lambda w: w[0])
+    split_i = best[1]
+    top, bottom = by_y0[:split_i], by_y0[split_i:]
+    return sorted(top, key=lambda w: w[0]) + sorted(bottom, key=lambda w: w[0])
+
+
+def _span_fonts(page, bbox) -> list[tuple[tuple[float, float, float, float], str]]:
+    """Font name per text span inside *bbox*, for ``_merge_continuation_bands``.
+
+    ``page.get_text("words")`` (used everywhere else in this module) does not
+    carry font identity, so this is a second, narrower read of the same
+    region purely to recover it - nothing downstream of the band merge sees
+    or depends on this data.
+    """
+    spans: list[tuple[tuple[float, float, float, float], str]] = []
+    for block in page.get_text("dict", clip=bbox).get("blocks", ()):
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                spans.append((tuple(span["bbox"]), span["font"]))
+    return spans
+
+
+def _font_of(
+    word: tuple[float, float, float, float, str],
+    spans: list[tuple[tuple[float, float, float, float], str]],
+) -> str | None:
+    """The font of whichever span's box contains *word*'s centre point."""
+    cx = (word[0] + word[2]) / 2
+    cy = (word[1] + word[3]) / 2
+    for (sx0, sy0, sx1, sy1), font in spans:
+        if sx0 <= cx <= sx1 and sy0 <= cy <= sy1:
+            return font
+    return None
+
+
+def _merge_continuation_bands(
+    bands: list[list[tuple[float, float, float, float, str]]],
+    spans: list[tuple[tuple[float, float, float, float], str]] = (),
+) -> list[list[tuple[float, float, float, float, str]]]:
+    """Fold a wrapped label's continuation line into the row that carries its
+    values. #123 TICKET-B5.
+
+    A row label genuinely split across two visual bands - "Central government
+    net" / "debt" - has no numeric values of its own on its first line, so
+    step (2) below would otherwise drop it as an orphan (a label with nothing
+    to attach it to). A continuation line is identified structurally, from
+    the page's own geometry, never a point constant:
+
+    - **no values of its own** - the defining property of a continuation
+      line, not a data row;
+    - **the band immediately below it already carries values, on its own,
+      before any merging** - single-hop only, deliberately. A first version
+      chained right-to-left without this restriction, so any run of
+      text-only bands sharing one left edge (a units note, a chart legend
+      fragment, a blank line between real content - all common inside a
+      located table bbox that is scoped generously) folded together and,
+      wherever the chain eventually reached ANY numeric band regardless of
+      distance, glued the whole run onto that band's values as if it were
+      one row. On the real reference document this fabricated a phantom
+      first row spanning half a page (measured on OBR page 48: a "£ billion"
+      units note, an unrelated chart-legend fragment, and the table's real
+      first data row all merged into one label). Anchoring the merge to a
+      band that *already* has values, checked before any merge happens
+      rather than accumulated through one, bounds the blast radius to
+      exactly the shape TICKET-B5 asks for - a label wrapped across two
+      lines - and nothing an unrelated run of text-only bands can reach;
+    - **vertically adjacent to that band** - bounded by the *text-only*
+      band's own text height (``bottom - top``), the same page-native metric
+      already used above to decide whether two lines share one visual row. A
+      real gap between two distinct table rows is about a full row height or
+      more; the gap between a wrapped line and its own continuation is at
+      most one line height, often negative (the two already overlap enough
+      to share one band, just not enough to trigger the half-height merge
+      above);
+    - **shares the left edge** of the band below it - a continuation is a
+      literal line wrap, not a new indent level. Compared at the nearest
+      point precision already used for word geometry elsewhere in this module
+      (``_superscript_tokens``'s ``round(x0)``), not exact float equality;
+    - **is not a hierarchy marker** - "of which:" is a text-only band by the
+      same definition above (no values of its own) and, on a table with
+      indented children, regularly sits at the exact indent and gap of the
+      child row beneath it. It already has its own identity
+      (``_MARKER_RE``, checked below at the word level rather than after
+      joining, since joining is what this function decides); a continuation
+      line never does;
+    - **shares the target band's font** - the geometric rule above (no
+      values, adjacent, same left edge) turned out NOT to be enough: the
+      reference corpus carries section headers ("Key fiscal determinants",
+      "Financial and property sectors") set flush with the data row directly
+      beneath them at the exact same indent and a gap tighter than one line
+      height - geometrically identical to a genuine wrapped continuation, and
+      wrongly folded into that row before this check existed (measured on
+      OBR pages 59, 60, 62, 63, 66, 67: "Key fiscal determinants" absorbed
+      into "Employment (million)", etc.). What actually distinguishes them is
+      typographic, not geometric: a continuation is the same label carrying
+      on, so it is set in the same font as the row it continues; a section
+      header is conventionally set apart (bold/medium weight here) from the
+      body text it introduces. Font identity is read from the page itself
+      (``_span_fonts``/``_font_of``, a second pass over the same region,
+      since ``page.get_text("words")`` used everywhere else in this module
+      does not carry it) - not a named font, just an equality check against
+      whatever the target band already uses. A word whose centre point falls
+      in no span keeps this check permissive (``None == None`` still passes
+      for two undetected bands) rather than blocking a real continuation on
+      an extraction gap.
+
+    Known scope limits, stated rather than hidden:
+
+    - a label wrapped across **three or more** lines only has its innermost
+      line reconstructed - the single-hop restriction above is deliberate,
+      and TICKET-B5 asks for two lines;
+    - a text-only header set in the SAME font as the row beneath it, at the
+      same indent and closer than one line height, is still indistinguishable
+      from a wrapped continuation. No fixture or corpus page in this plan
+      exercises that shape.
+    """
+    if not bands:
+        return bands
+
+    def _band_font(band: list[tuple[float, float, float, float, str]]) -> str | None:
+        for word in band:
+            font = _font_of(word, spans)
+            if font is not None:
+                return font
+        return None
+
+    def _top(band: list[tuple[float, float, float, float, str]]) -> tuple[float, float]:
+        top_y0 = min(w[1] for w in band)
+        top_x0 = min(w[0] for w in band if w[1] == top_y0)
+        return top_y0, top_x0
+
+    def _text(band: list[tuple[float, float, float, float, str]]) -> str:
+        ordered = sorted(band, key=lambda w: w[0])
+        return " ".join(w[4].strip() for w in ordered).strip()
+
+    tops = [_top(b) for b in bands]
+    bottoms = [max(w[3] for w in b) for b in bands]
+    has_value = [any(_is_value(w[4]) for w in b) for b in bands]
+    is_marker = [bool(_MARKER_RE.match(_text(b))) for b in bands]
+    fonts = [_band_font(b) for b in bands]
+
+    merged: list[list[tuple[float, float, float, float, str]]] = []
+    i = 0
+    n = len(bands)
+    while i < n:
+        if (
+            not has_value[i]
+            and not is_marker[i]
+            and i + 1 < n
+            and has_value[i + 1]
+            and fonts[i] == fonts[i + 1]
+        ):
+            top_y0, top_x0 = tops[i]
+            height = bottoms[i] - top_y0
+            next_top_y0, next_top_x0 = tops[i + 1]
+            gap = next_top_y0 - bottoms[i]
+            if gap <= height and round(next_top_x0) == round(top_x0):
+                merged.append(bands[i] + bands[i + 1])
+                i += 2
+                continue
+        merged.append(bands[i])
+        i += 1
+    return merged
 
 
 def _superscript_tokens(page, bbox) -> set[tuple[int, str]]:

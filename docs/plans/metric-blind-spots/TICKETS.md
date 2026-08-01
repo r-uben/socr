@@ -210,7 +210,7 @@ rejected). Number retained so existing references resolve.
   has a sharper sibling: the map is fitted to the prediction being scored, so an output
   with more columns has strictly more admissible maps.
 
-### TICKET-B5 — reconstruct a row label wrapped across two lines · TODO · depends-on: B2 · wave 3
+### TICKET-B5 — reconstruct a row label wrapped across two lines · DONE · depends-on: B2 · wave 3
 **Found by TICKET-A1's corruption battery, 2026-08-01** — the eighth defect, and the
 first one this plan caught *before* it produced published numbers rather than after.
 That is the battery paying for itself; note it when judging whether Stream A was worth
@@ -253,6 +253,36 @@ what produces the scrambled 6pt case. Derive adjacency from the page's own line 
 **and** 6pt gaps; the existing regression
 `test_a_wrapped_label_is_not_merged_with_the_line_above` still passes (this must not
 reintroduce what `270cdab` fixed); and `~/venvs/socr/bin/pytest tests/ -q` exits 0.
+
+**Done, see `docs/log/2026-08-01_TICKET-B5.md`.** Two new pieces of geometry, both derived
+from the page's own data, no constants:
+
+- `_merge_continuation_bands` folds a text-only band with no values into the value-bearing
+  band immediately below it, single-hop, when the two share a left edge, the gap is no
+  wider than the text-only band's own line height, it is not a hierarchy marker, **and**
+  both bands are set in the same font. The font check was not in the original design and
+  had to be added: the reference corpus carries bold section headers ("Key fiscal
+  determinants") flush against the data row beneath them, geometrically identical to a
+  genuine wrapped continuation (same indent, gap under one line height) — without the font
+  check, 7 real pages regressed by folding the header into the row's label. A continuation
+  is literally the same label carrying on, so it is set in the row's own font; a header is
+  conventionally set apart.
+- `_reading_order` replaces plain x0-sort inside a band with a same-page-derived bisection:
+  split the band by its largest y0 gap, keep the split only if both halves independently
+  share one left edge, and read top-half-then-bottom-half in that case, x0-order otherwise.
+  Needed because the 6pt-gap case is already one merged band by the time step (2) runs, so
+  the label/value split itself must know reading order, not just band construction. A
+  cruder `(y1, x0)` sort tried first broke real pages (word bbox top edges are not level
+  across glyphs of different heights on one physical line, e.g. "Nominal" vs "GDP1"'s
+  digit) and, separately, exposed a *pre-existing* bug in step (1)'s band clustering (a
+  transitively-chained y-overlap test can absorb x-unrelated content — e.g. a rotated axis
+  title plus a chart-legend fragment — into one band on a generously-scoped table bbox);
+  that bug is out of B5's scope and was not touched.
+
+Corpus gate: all 19 preserved pages score byte-identical to `obr_efo_2022_11_baseline.json`
+(no page regresses, none improves) — the baseline needed no re-recording. Full suite:
+1401 passed, 1 xfailed (base 1398/2 + 3 new cases from the gap-parametrized fixture − the
+removed xfail).
 
 ## Stream C — pipeline response
 

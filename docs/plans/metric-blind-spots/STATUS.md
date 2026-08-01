@@ -46,7 +46,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | scoring correctness | DONE | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
-| B5 | scoring correctness | TODO | B2 | 3 |
+| B5 | scoring correctness | DONE | B2 | 3 |
 | C1 | pipeline response | TODO | B2 | 3 |
 
 ## Active Agents
@@ -64,6 +64,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | socr-implementer (Otsu-cut fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-otsu-cut.md` |
 | B2 | socr-implementer (paired-columns fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-paired-columns-fix.md` |
 | B2 | socr-implementer (widest-row-cap fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-widest-row-cap.md` |
+| B5 | socr-implementer | DONE — see `docs/log/2026-08-01_TICKET-B5.md` |
 
 ## Dispatch waves
 
@@ -170,7 +171,6 @@ Until this is separated, **84.5% is not known to be the metric's ceiling or the 
 
 ### Remaining work
 
-- **B5** — wrapped-label row reconstruction (held as a `strict=True` xfail).
 - **C1** — surface unexplained lanes *and* B1's `ceiling_note` through
   `TABLE_DISTRUST_KINDS` to the document level. Carries B1 review finding 1.
 - Optionally: separate engine failure from metric defect on the six pages above.
