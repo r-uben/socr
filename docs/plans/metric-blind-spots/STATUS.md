@@ -117,6 +117,15 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   confirmed: 17 pages of spurious `0.0%` become not-scorable and the mean over each
   metric's own scorable set rises 44.3% → 49.1%. See "Next action".
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
+- **B5 verified, but its corpus value is UNPROVEN.** The fix is real — the original
+  reproducer now yields `'Central government net debt'` at 6pt, 9pt **and** 12pt gaps, where
+  before it gave `'debt'` (label dropped) or `'Central debt government net'` (scrambled).
+  But diffing ground-truth labels across all 68 corpus pages pre/post B5: only **7 pages
+  change, and every one is a chart/figure page already in B1's not-scorable set** (p19, p23,
+  p29, p33, p34, p50 — axis-fragment garbage before and after). **No scorable table page
+  moved**, which is why the corpus baseline is byte-identical. The OBR document's real tables
+  do not contain band-split row labels. The defect was genuine and is fixed; whether it
+  matters on any real corpus is still unknown.
 - **B2 limitation (MEDIUM, accepted) — sparse tables where NO row is complete under-split.**
   The widest-row cap (`8dae02c`) bounds lane count by the widest row's value count. That is
   presented as structural but is really an assumption: **it holds only if at least one row is
