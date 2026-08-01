@@ -43,7 +43,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | DONE | B1 | 2 |
+| B2 | scoring correctness | REOPENED — lane splitter collapses regular grids | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | TODO | B2 | 3 |
@@ -131,11 +131,44 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
-B2 landed on `feat/123-metric-blind-spots` (uncommitted-SHA pending; see decision log).
-Full suite: 1384 passed, 2 xfailed (up from 1379/3 pre-B2 — +4 new tests, +1 xfail
-flipped to pass, 0 regressions). One deviation from the design note found and fixed
-during implementation (gap-cut-threshold midpoint, not endpoint — see decision log);
-otherwise implemented as designed. Dispatch B5 next (depends only on B2); C1 after,
+**B2 attempt 2 (`27aa432`) is REOPENED — the suite is deliberately RED on this branch.**
+
+The lane splitter only works when column spacing is *irregular*. Measured directly against
+`native_rows_from_page`:
+
+| geometry | lanes |
+|----------|-------|
+| 4 cols, evenly spaced | `(0,0,0,0)` — all collapse |
+| 3 cols, evenly spaced | `(0,0,0)` — all collapse |
+| 4 cols, uneven | `(0,0,1,1)` — partial |
+| 2 cols | `(0,1)` ✅ |
+
+A faithful transcription of a dense 4-column grid scores **25%** (3/12) — worse than the
+pre-lane positional comparison, which scored regular grids correctly. Regular evenly-spaced
+columns are the canonical financial-table geometry.
+
+**Mechanism:** `_gap_cut_threshold` filters gaps to `g > 0`, but **zero *is* the within-lane
+magnitude** — tokens in one column share an anchor exactly. Discarding zeros destroys the
+elbow the rule depends on. A regular grid leaves `[60,60,60]`, every consecutive ratio is
+`1.0`, the midpoint of two equal values is that value, and the caller's strict `>` never
+fires. The single-distinct-gap case was patched at landing; the all-equal-gaps case was not.
+
+**Why the suite was green at 1384 passed:** every fixture used exactly **two** columns — the
+one width the splitter handles. `test_a_perfect_transcription_of_a_regular_grid_scores_100`
+now parametrises widths 2/3/4/5; 3, 4 and 5 fail. That is the gate.
+
+Everything else in `27aa432` looks sound — lanes plumbing, the alignment map, diagnostics
+fields, and the four new tests — so the fix is scoped to `_assign_lanes`/`_gap_cut_threshold`,
+not a revert.
+
+### Standing lesson for the rest of this plan
+
+This is the **third** design-level failure in one ticket (B2/B3 seam, B4 seam, now the split
+rule). The pattern: **"no magic thresholds" keeps producing parameter-free heuristics that
+fail on the most *regular* input**, because a regular grid carries no distributional signal to
+derive a boundary from. The constraint is right, but derive from *structure* (within-lane gap
+is zero because tokens share an anchor) rather than from *variation in the data*. Every fixture
+must cover width ≥ 3.
 either order, same shared working tree. The before/after corpus re-score against
 `~/data/fiscal-ballast/_experiments/` — the plan's stated "real acceptance test" — is
 still outstanding and is the orchestrator's job, not an implementer's.

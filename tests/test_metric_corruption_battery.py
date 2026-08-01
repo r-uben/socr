@@ -456,3 +456,52 @@ def test_padding_with_low_entropy_columns_never_beats_a_faithful_transcription(t
         f"padding with junk columns scored {padded_report.exact} exact cells vs "
         f"{faithful_report.exact} for the faithful narrower transcription"
     )
+
+
+# ----------------------------------------------------------------------
+# Width coverage.
+#
+# Every fixture above uses exactly TWO value columns, which is the one width the
+# lane splitter handled when it first landed (27aa432): a regular grid of three or
+# more evenly-spaced columns collapsed into a single lane, and a faithful
+# transcription of a dense 4-column table scored 25% instead of 100% - worse than
+# the pre-lane positional comparison it replaced. The suite was green throughout
+# because nothing exercised width >= 3.
+#
+# Regular, evenly-spaced columns are the canonical financial-table geometry, so
+# this parametrises the perfect-transcription invariant across widths.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("width", [2, 3, 4, 5])
+def test_a_perfect_transcription_of_a_regular_grid_scores_100(tmp_path, width):
+    """Evenly-spaced columns must not collapse into one lane."""
+    xs = tuple(250.0 + 50.0 * i for i in range(width))
+    labels = ("Alpha", "Beta", "Gamma")
+    values = [tuple(f"{r + 1}.{c + 1}" for c in range(width)) for r in range(len(labels))]
+
+    path = tmp_path / f"regular_{width}.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 200.0
+    for label, row_values in zip(labels, values):
+        page.insert_text((60.0, y), label, fontsize=9)
+        for x, value in zip(xs, row_values):
+            page.insert_text((x, y), value, fontsize=9)
+        y += 18.0
+    page.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    page.draw_line(fitz.Point(50, y), fitz.Point(470, y))
+    doc.save(path)
+    doc.close()
+
+    opened = fitz.open(path)
+    try:
+        report = score_page(opened[0], _table_md(list(zip(labels, values)), width=width))
+    finally:
+        opened.close()
+
+    assert report.scorable is True
+    assert report.pct == 100.0, (
+        f"faithful transcription of a {width}-column regular grid scored "
+        f"{report.pct}% ({report.exact}/{report.cells})"
+    )
