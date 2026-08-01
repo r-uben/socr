@@ -4,8 +4,11 @@ Last updated: 2026-08-01
 
 ## Stage
 
-Wave 1 in progress on `feat/123-metric-blind-spots`. B1 landed (`402395c`) and was
-reviewed (ACCEPT-WITH-FOLLOWUP, `docs/log/2026-08-01_TICKET-B1-review.md`). A1 next.
+Wave 1 done on `feat/123-metric-blind-spots`. B1 landed (`402395c`) and was
+reviewed (ACCEPT-WITH-FOLLOWUP, `docs/log/2026-08-01_TICKET-B1-review.md`). A1
+landed (`docs/log/2026-08-01_TICKET-A1.md`) and surfaced a second, untracked
+defect (wrapped-label row identity) — see "Findings carried forward". Wave 2
+(B2) next.
 
 Nothing here changes OCR behaviour. It changes what socr can *measure* — which
 matters because `escalation_decision` uses the metric as a production accept rule.
@@ -29,7 +32,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
-| A1 | grade the metric | TODO | — | 1 |
+| A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
 | B2 | scoring correctness | TODO | B1 | 2 |
 | B3 | scoring correctness | TODO | B2 | 3 |
@@ -43,6 +46,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B1 | socr-implementer | DONE (`402395c`) |
 | B1 | socr-reviewer | STOPPED — mutated the shared tree; findings void |
 | B1 | orchestrating session | REVIEWED — ACCEPT-WITH-FOLLOWUP |
+| A1 | socr-implementer | DONE — `tests/test_metric_corruption_battery.py`, see `docs/log/2026-08-01_TICKET-A1.md` |
 
 ## Dispatch waves
 
@@ -96,7 +100,19 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   aggregate helper in `src/`; corpus scoring lives in
   `~/data/fiscal-ballast/_experiments/` and has not been re-scored against B1.
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
+- **A1 finding (untracked) → needs a ticket.** `native_rows_from_page` never
+  reconstructs a label genuinely split across two visual bands: whichever
+  band carries the row's values keeps only the text on that band, and the
+  other line is silently dropped. A perfect transcription of a
+  wrapped-label row scores as if the row were missing. Distinct from B2 (a
+  different root cause — row identity, not the empty-cell filter); landed as
+  a second `xfail` in `tests/test_metric_corruption_battery.py`, its own
+  reason string, does not reference B2. Details in
+  `docs/log/2026-08-01_TICKET-A1.md`. No ticket number assigned yet —
+  candidate for B5, or folding into B3 (row identity is already that
+  stream's subject).
 
 ## Next action
 
-Dispatch A1. Then Wave 2 (B2).
+Dispatch Wave 2 (B2). Decide whether the A1 wrapped-label finding gets its
+own ticket (suggested B5) or folds into B3 before B3 starts.

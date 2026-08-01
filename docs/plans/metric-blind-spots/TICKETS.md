@@ -30,7 +30,7 @@ graph implements:
 
 ## Stream A — grade the metric itself
 
-### TICKET-A1 — corruption battery over the scorer · TODO · depends-on: none · wave 1
+### TICKET-A1 — corruption battery over the scorer · DONE · depends-on: none · wave 1
 **Problem:** Nothing tests the metric. Seven defects were found by accident, each
 after it had already produced published numbers. All seven share one shape: a known
 perturbation of the input moved the score in the wrong direction, or failed to move
