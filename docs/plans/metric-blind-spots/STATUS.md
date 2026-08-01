@@ -43,7 +43,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | DONE — lane splitter fixed for regular grids | B1 | 2 |
+| B2 | scoring correctness | REOPENED — split rule unsound (float-sensitive) | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | TODO | B2 | 3 |
@@ -132,35 +132,54 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
-**B2's reopened defect is fixed** (`docs/log/2026-08-01_TICKET-B2-reopen-fix.md`). Root cause:
-`_gap_cut_threshold` filtered gaps to `g > 0` but did not **deduplicate** — a regular grid
-repeats one between-lane gap magnitude across every row pair, so the "one distinct value has
-nothing to compare against but 0" special case never triggered on anything wider than 2
-columns. Fix: `sorted({g for g in gaps if g > 0})` (dedup), one line. Full suite green:
-**1388 passed, 2 xfailed** (was 1385 passed / 3 failed / 1 xfailed on the pinned-red gate).
-`uvx ruff@0.16.0 format --check .` clean.
+**B2 is REOPENED AGAIN — the suite is deliberately RED. The ratio-jump splitting rule is
+structurally unsound, not buggy.**
 
-**Residual limitation, not gated by any test, carried forward rather than silently
-fixed:** columns with *uneven* spacing (e.g. 50/70/90pt gaps, no digit-width noise) still
-lane-split only partially — `(0,0,1,2)` instead of `(0,1,2,3)` — both before and after this
-fix; it is unchanged by it either direction. The ratio-elbow rule finds one global "largest
-jump" in the sorted gap list, but an uneven grid can have *multiple* legitimate between-lane
-magnitudes with no true noise floor to contrast against, and every attempt to make zero
-participate in the elbow search to catch this case regressed the (working, left-aligned,
-digit-width-noise) battery fixture instead — see the reopen-fix log's "Alternatives tried and
-rejected" for the concrete before/after numbers. Needs a different technique (per-lane
-dispersion across candidate cluster counts, not one global threshold), not a threshold tweak.
-File as a follow-up ticket if uneven-column real-world tables turn out to matter for the
-corpus re-score below.
+The dedup fix (`ca90cd4`) made regular grids work *at one page offset*. Shifting the same
+table 20pt left breaks it:
+
+| fixture | distinct x1 gaps | lanes | faithful |
+|---------|------------------|-------|----------|
+| 5 cols @50pt from **x=250** | `[0.0, 50.0]` | `(0,1,2,3,4)` | 100% |
+| 5 cols @50pt from **x=230** | `[0.0, 50.0, **50.000015**]` | `(0,1,1,1,1)` | 40% |
+
+That third magnitude is floating-point noise from glyph rendering. With zeros filtered out
+the distinct list is `{50.0, 50.000015}`, so the "largest ratio jump" is the meaningless
+`50.0 → 50.000015` (ratio 1.0000003), the threshold lands at `50.0000075`, and only that one
+noisy gap exceeds it. **Dedup made lane assignment depend on exact float equality of measured
+geometry.** The existing tests pass because their offset happens to render cleanly; real PDFs
+carry this noise constantly.
+
+**Both failed fixes bracket the real problem.** There are **two** noise floors — exact zero
+(tokens sharing an anchor) and small non-zero jitter (digit widths, float error). Including
+zero in the elbow search fixes regular grids but breaks the digit-noise fixture, because a
+transition away from exact zero is always an infinite ratio and always wins. Excluding zero
+fixes the digit-noise fixture but breaks regular grids. *"Largest ratio jump between
+consecutive distinct magnitudes"* cannot separate either floor from real column spacing —
+**the rule is the wrong formulation, and no threshold tweak rescues it.**
+
+**Replacement (decided 2026-08-01):** choose the cut by **maximising between-group versus
+within-group separation over all candidate cuts** (Jenks/Otsu-style 1-D partitioning), rather
+than picking one ratio jump. Still parameter-free — the cut is selected by an objective
+computed from the data, not by a constant — and it is robust to both noise floors because a
+noise magnitude and a spacing magnitude land in different groups regardless of their ratio.
+This should also fix the uneven-spacing case (`(0,0,1,2)` instead of `(0,1,2,3)`), which the
+ratio rule never handled either.
+
+**Gates now pinned (both RED):**
+- `test_a_perfect_transcription_of_a_regular_grid_scores_100` — widths 2/3/4/5
+- `test_lane_assignment_is_invariant_to_page_offset` — same grid at x=230/240/250/260;
+  230 and 240 fail
 
 ### Standing lesson for the rest of this plan
 
-This is the **third** design-level failure in one ticket (B2/B3 seam, B4 seam, now the split
-rule). The pattern: **"no magic thresholds" keeps producing parameter-free heuristics that
-fail on the most *regular* input**, because a regular grid carries no distributional signal to
-derive a boundary from. The constraint is right, but derive from *structure* (within-lane gap
-is zero because tokens share an anchor) rather than from *variation in the data*. Every fixture
-must cover width ≥ 3.
+This is the **fourth** design-level failure in one ticket (B2/B3 seam, B4 seam, the split
+rule collapsing regular grids, the split rule's float sensitivity). All four share one root:
+**"no magic thresholds" keeps producing parameter-free heuristics derived from *variation in
+the data*, applied to inputs whose defining property is regularity.** A regular grid has no
+variation to derive from, and measured geometry always carries noise. Derive from *structure*
+or from an *objective over candidate partitions* — never from a single distinguished gap in a
+sorted list. Every fixture must cover width ≥ 3 **and** vary the page offset.
 either order, same shared working tree. The before/after corpus re-score against
 `~/data/fiscal-ballast/_experiments/` — the plan's stated "real acceptance test" — is
 still outstanding and is the orchestrator's job, not an implementer's.

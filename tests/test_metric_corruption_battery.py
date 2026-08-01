@@ -505,3 +505,54 @@ def test_a_perfect_transcription_of_a_regular_grid_scores_100(tmp_path, width):
         f"faithful transcription of a {width}-column regular grid scored "
         f"{report.pct}% ({report.exact}/{report.cells})"
     )
+
+
+# ----------------------------------------------------------------------
+# Offset invariance.
+#
+# The regular-grid test above passes at one particular page offset. Shifting the
+# same table 20pt left changes nothing structurally, but glyph rendering emits a
+# third distinct gap magnitude from floating-point noise (50.0 vs 50.000015).
+# The ratio-jump splitter then picks that meaningless 50.0 -> 50.000015 jump as
+# its elbow instead of the real 0 -> 50 one, and four of five columns collapse
+# into a single lane.
+#
+# Lane assignment must be a function of the table's structure, not of where the
+# table happens to sit on the page or of sub-micrometre rendering noise. Real
+# PDFs carry this noise constantly; the fixtures above were simply lucky.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("start_x", [230.0, 240.0, 250.0, 260.0])
+def test_lane_assignment_is_invariant_to_page_offset(tmp_path, start_x):
+    """The same grid, shifted horizontally, must produce the same lanes."""
+    width = 5
+    xs = tuple(start_x + 50.0 * i for i in range(width))
+    labels = ("Alpha", "Beta", "Gamma")
+    values = [tuple(f"{r + 1}.{c + 1}" for c in range(width)) for r in range(len(labels))]
+
+    path = tmp_path / f"offset_{int(start_x)}.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 200.0
+    for label, row_values in zip(labels, values):
+        page.insert_text((60.0, y), label, fontsize=9)
+        for x, value in zip(xs, row_values):
+            page.insert_text((x, y), value, fontsize=9)
+        y += 18.0
+    page.draw_line(fitz.Point(50, 190), fitz.Point(560, 190))
+    page.draw_line(fitz.Point(50, y), fitz.Point(560, y))
+    doc.save(path)
+    doc.close()
+
+    opened = fitz.open(path)
+    try:
+        report = score_page(opened[0], _table_md(list(zip(labels, values)), width=width))
+    finally:
+        opened.close()
+
+    assert report.pct == 100.0, (
+        f"a faithful transcription of the same grid at x={start_x} scored "
+        f"{report.pct}% ({report.exact}/{report.cells}) — lane assignment is "
+        "sensitive to page offset or rendering noise"
+    )
