@@ -45,6 +45,11 @@ fixture pairs (native PDF + emitted markdown). Assert two properties:
 
 The shift-into-empty-cell case **must fail on today's code**. Land it xfail-marked
 with a reference to TICKET-B2, which makes it pass.
+
+**Constraint from B1 (landed 2026-08-01):** every fixture must clear the grid predicate
+in `native_rows.rows_establish_grid` — at least two value columns, and at least two rows
+sharing that width. A fixture that does not is silently *not-scorable*: `pct` is `None`
+and every "strictly worse" assertion then compares against `None`.
 **Files:** `tests/test_metric_corruption_battery.py`
 **Done when:** `~/venvs/socr/bin/pytest tests/test_metric_corruption_battery.py -q`
 exits 0 with at least one `xfail` reported, and the xfail's reason names TICKET-B2.
@@ -150,12 +155,22 @@ and roll it into the document-level surface. In `escalation_decision`, never acc
 candidate that **increases** unexplained lanes; prefer the candidate that decreases
 them, with exactness as the tiebreak. "Zero versus non-zero" is a fact about the data,
 not a tuned cutoff.
+
+**Also — folded in from the B1 review (finding 1), 2026-08-01.** `ceiling_note` reaches
+no surface: `grep -rn "ceiling_note" src/` outside `table_exactness.py` returns zero
+hits. B1 made a chart page *not-scorable* but also **invisible** — OBR page 54 used to
+report a loud, wrong `0.0%` and now reports `pct=None` with no trace anywhere. Wrong
+number → no number and no trace is exactly what the no-silent-content-loss rule exists
+to prevent. Route not-scorable pages through the **same** audit-kind machinery this
+ticket builds (a second input to one mechanism, not a second mechanism). Details in
+`docs/log/2026-08-01_TICKET-B1-review.md`.
 **Files:** `src/socr/benchmark/table_exactness.py`,
 `src/socr/tables/escalation_decision.py`, `src/socr/core/tables_trust.py`,
 `src/socr/pipeline/orchestrator.py`, `tests/test_gh96_escalation_decision.py`
 **Done when:** a test asserts a candidate that increases unexplained lanes is rejected
-even when its exactness is higher; the new kind is in `TABLE_DISTRUST_KINDS`; and
-`~/venvs/socr/bin/pytest tests/ -q` exits 0.
+even when its exactness is higher; the new kind is in `TABLE_DISTRUST_KINDS`; a
+not-scorable page (B1's grid gate) is visible on the document-level surface rather than
+silently absent; and `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
 ## Explicitly out of scope
 
