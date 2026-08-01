@@ -8,7 +8,7 @@ Wave 1 done on `feat/123-metric-blind-spots`. B1 landed (`402395c`) and was
 reviewed (ACCEPT-WITH-FOLLOWUP, `docs/log/2026-08-01_TICKET-B1-review.md`). A1
 landed (`docs/log/2026-08-01_TICKET-A1.md`) and surfaced a second, untracked
 defect (wrapped-label row identity) — see "Findings carried forward". Wave 2
-(B2) next.
+(B2) landed, see `docs/log/2026-08-01_TICKET-B2.md`. Wave 3 (B3) next.
 
 Nothing here changes OCR behaviour. It changes what socr can *measure* — which
 matters because `escalation_decision` uses the metric as a production accept rule.
@@ -34,7 +34,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | TODO | B1 | 2 |
+| B2 | scoring correctness | DONE | B1 | 2 |
 | B3 | scoring correctness | TODO | B2 | 3 |
 | B4 | scoring correctness | TODO | B3 | 4 |
 | B5 | scoring correctness | TODO | B4 | 5 |
@@ -48,6 +48,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B1 | socr-reviewer | STOPPED — mutated the shared tree; findings void |
 | B1 | orchestrating session | REVIEWED — ACCEPT-WITH-FOLLOWUP |
 | A1 | socr-implementer | DONE — `tests/test_metric_corruption_battery.py`, see `docs/log/2026-08-01_TICKET-A1.md` |
+| B2 | socr-implementer | DONE — `src/socr/benchmark/table_exactness.py`, see `docs/log/2026-08-01_TICKET-B2.md` |
 
 ## Dispatch waves
 
@@ -120,4 +121,4 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
-Dispatch Wave 2 (B2).
+Dispatch Wave 3 (B3).

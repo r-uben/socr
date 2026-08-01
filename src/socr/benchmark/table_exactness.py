@@ -112,6 +112,17 @@ def markdown_rows(markdown: str) -> tuple[list[LabeledRow], ExactnessReport]:
     for cells in grid:
         label, raw_values = _split_label_and_values(cells)
         values = [c for c in raw_values if _is_value(c)]
+        # #123 TICKET-B2: an empty cell is a position, not nothing. Compacting
+        # ``raw_values`` down to ``values`` (as the row was scored on until now)
+        # throws that position away on both sides of a comparison, so a value
+        # shifted into an adjacent empty cell reduces to the same multiset as the
+        # correct row and scores as a match. ``positional_values`` keeps every
+        # column - blank ones as "" - so the shift is visible at comparison time.
+        # Ground truth has no per-value x-position of its own yet (added in B3);
+        # until then this is what "compare positionally" means: the emitted
+        # shape is preserved, and the ground truth's flat value order is read
+        # against it column-by-column instead of against a compacted list.
+        positional_values = [c if _is_value(c) else "" for c in raw_values]
 
         signature = tuple(cells)
         seen[signature] = seen.get(signature, 0) + 1
@@ -135,7 +146,7 @@ def markdown_rows(markdown: str) -> tuple[list[LabeledRow], ExactnessReport]:
             continue
 
         path = (parent, label) if parent else (label,)
-        rows.append(LabeledRow(path=tuple(p for p in path if p), values=tuple(values)))
+        rows.append(LabeledRow(path=tuple(p for p in path if p), values=tuple(positional_values)))
         last_label = label
 
     diag.duplicate_rows = sum(n - 1 for n in seen.values() if n > 1)

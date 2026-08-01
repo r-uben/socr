@@ -173,16 +173,6 @@ CORRUPTING = [
     pytest.param(
         "shift_into_adjacent_empty_cell",
         lambda rows: _replace_row(rows, 4, values=("", "0.5")),
-        marks=pytest.mark.xfail(
-            reason=(
-                "#123 TICKET-B2: markdown_rows filters empty cells out of a row "
-                "before comparing, so a value shifted into an adjacent empty "
-                "cell still reduces to the same value multiset and scores as "
-                "correct. Fixed by TICKET-B2 (preserve cell positions instead "
-                "of compacting them)."
-            ),
-            strict=True,
-        ),
         id="shift_into_adjacent_empty_cell",
     ),
     pytest.param(

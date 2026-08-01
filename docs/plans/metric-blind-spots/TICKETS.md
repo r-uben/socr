@@ -72,7 +72,7 @@ helper must exclude not-scorable pages rather than counting them as zeros.
 asserts `score_page(...).scorable is False` and `.pct is None`; and
 `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
-### TICKET-B2 — stop discarding sparsity on both sides · TODO · depends-on: B1 · wave 2
+### TICKET-B2 — stop discarding sparsity on both sides · DONE · depends-on: B1 · wave 2
 **Problem:** `markdown_rows` filters empty cells out of a row before comparing
 (`values = [c for c in raw_values if _is_value(c)]`), and ground-truth rows store a
 flat ordered list with no gaps. So `['-1.0','1.0','28.1','']` and
