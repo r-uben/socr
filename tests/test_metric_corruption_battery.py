@@ -556,3 +556,62 @@ def test_lane_assignment_is_invariant_to_page_offset(tmp_path, start_x):
         f"{report.pct}% ({report.exact}/{report.cells}) — lane assignment is "
         "sensitive to page offset or rendering noise"
     )
+
+
+# ----------------------------------------------------------------------
+# Paired columns.
+#
+# A single Otsu cut assumes TWO groups of gap magnitudes: within-lane noise and
+# between-lane spacing. Paired-year tables produce THREE - ~0 within a lane, a
+# tight gap within a pair, and a wide gap between pairs - so one cut has to put
+# the tight within-pair gap somewhere, and it lands with the noise. Each pair
+# then collapses into a single lane and a faithful transcription scores 50%.
+#
+# This is the shape TICKET-B2 itself cites: "14 vs 6 on OBR page 53, because
+# paired-year headers and stub columns collapse". It matters beyond the score -
+# when two real columns share one lane the ground truth can no longer tell them
+# apart, so a column shift between them is invisible again, which is the defect
+# this ticket exists to remove.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("within_pair", "between_pairs", "pairs"),
+    [(35.0, 105.0, 2), (40.0, 120.0, 2), (35.0, 85.0, 3)],
+)
+def test_paired_columns_do_not_collapse_into_one_lane(tmp_path, within_pair, between_pairs, pairs):
+    """Tight column pairs separated by wide gaps must still be distinct lanes."""
+    xs: list[float] = [260.0]
+    for pair in range(pairs):
+        if pair:
+            xs.append(xs[-1] + between_pairs)
+        xs.append(xs[-1] + within_pair)
+    width = len(xs)
+    labels = ("Total spending", "Welfare", "Debt interest")
+    values = [tuple(f"{r + 1}.{c + 1}" for c in range(width)) for r in range(len(labels))]
+
+    path = tmp_path / f"paired_{pairs}_{int(within_pair)}.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    y = 200.0
+    for label, row_values in zip(labels, values):
+        page.insert_text((60.0, y), label, fontsize=9)
+        for x, value in zip(xs, row_values):
+            text_width = fitz.get_text_length(value, fontsize=9)
+            page.insert_text((x - text_width, y), value, fontsize=9)
+        y += 18.0
+    page.draw_line(fitz.Point(40.0, 190.0), fitz.Point(575.0, 190.0))
+    page.draw_line(fitz.Point(40.0, y), fitz.Point(575.0, y))
+    doc.save(path)
+    doc.close()
+
+    opened = fitz.open(path)
+    try:
+        report = score_page(opened[0], _table_md(list(zip(labels, values)), width=width))
+    finally:
+        opened.close()
+
+    assert report.pct == 100.0, (
+        f"{pairs} column pairs ({within_pair}pt within, {between_pairs}pt between) "
+        f"scored {report.pct}% ({report.exact}/{report.cells}) — pairs collapsed"
+    )
