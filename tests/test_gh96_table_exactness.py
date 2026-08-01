@@ -125,6 +125,66 @@ def test_a_numeral_inside_a_label_is_not_read_as_a_value(tmp_path):
     assert list(rows[0].values) == ["8.1", "18.8", "19.3"]
 
 
+def test_lane_construction_skips_the_label_numeral_and_snaps_the_sparse_row(tmp_path):
+    """#123 TICKET-B2: lane construction, end to end.
+
+    A right-aligned numeric column, a numeral inside a label ("17"), and a sparse
+    row all on the same page: the numeral must not form its own lane (it never
+    reaches the clusterer - the boundary is fixed before lanes are assigned), and
+    the sparse row's lone value must snap to the SAME lane index as the dense rows'
+    value in that column, not a different or missing one.
+    """
+    path = tmp_path / "lane_construction.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    rows: list[tuple[str, tuple[str | None, ...]]] = [
+        ("Growth Plan after 17 October reversals", ("8.1", "18.8", "19.3")),
+        ("Alpha", ("1.0", "2.0", "3.0")),
+        ("Sparse", (None, "5.0", None)),
+        ("Beta", ("4.0", "6.0", "7.0")),
+    ]
+    y = 200.0
+    for label, values in rows:
+        page.insert_text((60.0, y), label, fontsize=9)
+        for x, value in zip(_VALUE_XS, values):
+            if value is not None:
+                page.insert_text((x, y), value, fontsize=9)
+        y += 18.0
+    page.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    page.draw_line(fitz.Point(50, y), fitz.Point(470, y))
+    doc.save(path)
+    doc.close()
+
+    opened = fitz.open(path)
+    gt = native_rows_from_page(opened[0])
+    opened.close()
+
+    by_label = {r.label: r for r in gt}
+    growth = by_label["Growth Plan after 17 October reversals"]
+    assert growth.values == ("8.1", "18.8", "19.3"), "the 17 must stay inside the label"
+    assert len(set(growth.lanes)) == 3, "the numeral must not drag a fourth lane into being"
+
+    sparse = by_label["Sparse"]
+    beta = by_label["Beta"]
+    assert sparse.values == ("5.0",)
+    assert sparse.lanes == (beta.lanes[1],), (
+        "the sparse row's value must snap to the correct (middle) lane index"
+    )
+
+
+def test_cells_equals_the_number_of_ground_truth_values(hierarchical_page):
+    """#123 TICKET-B2: ``cells`` stays ground-truth-only so ``exact > exact`` is a
+    single-denominator comparison. Lanes annotate ``values``, they never filter it."""
+    md = "\n".join(
+        ["| | c1 | c2 | c3 |", "| --- | --- | --- | --- |"]
+        + [f"| {label} | " + " | ".join(values) + " |" for label, _d, values in _ROWS if values]
+    )
+    report = score_page(hierarchical_page, md)
+    gt = native_rows_from_page(hierarchical_page)
+
+    assert report.cells == sum(len(row.values) for row in gt)
+
+
 # ----------------------------------------------------------------------
 # Scoring
 # ----------------------------------------------------------------------

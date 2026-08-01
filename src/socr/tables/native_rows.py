@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import collections
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from socr.benchmark.scorer import BenchmarkScorer
@@ -86,11 +87,27 @@ class LabeledRow:
 
     ``path`` is ``(parent, ..., label)``. The last element is the row's own label;
     everything before it is the enclosing hierarchy, used for reporting so a failure
-    names the block it occurred in.
+    names the block it occurred in. ``values`` stays compacted (empty cells dropped)
+    on both the ground-truth and markdown sides, as it always has - existing readers
+    (``escalation_canary``, ``rows_establish_grid``) consume it as plain strings.
+
+    #123 TICKET-B2: two parallel, optional position fields, each empty by default so
+    a hand-built ``LabeledRow`` (as most tests below construct) degrades to the
+    pre-B2 positional comparison rather than being silently mis-scored:
+
+    - ``lanes`` (ground truth only): the page-level anonymous column-lane index for
+      each entry in ``values``, assigned by ``_assign_lanes``. ``-1`` marks a
+      lane-ambiguous value - a lone numeric with no supporting peer elsewhere on the
+      page - which the scorer must not fold into the alignment.
+    - ``columns`` (markdown only): the row's own emitted column position for each
+      entry in ``values``, i.e. where the value actually sat in the predicted grid
+      before compaction.
     """
 
     path: tuple[str, ...]
     values: tuple[str, ...]
+    lanes: tuple[int, ...] = ()
+    columns: tuple[int, ...] = ()
 
     @property
     def label(self) -> str:
@@ -120,6 +137,12 @@ def native_rows_from_page(page) -> list[LabeledRow]:
 
     Note ``native_verifier._rows_by_y`` is deliberately NOT reused here — it keeps
     numeric tokens only, because it exists for lane counting.
+
+    #123 TICKET-B2: once every region's rows are collected, ``_assign_lanes``
+    clusters their value positions into anonymous column lanes **across the whole
+    page**, not per region - ``BenchmarkScorer._markdown_table_cells`` flattens every
+    pipe table on the page into one grid with no table boundaries, so a per-region
+    lane space would not have anything to compare against on the markdown side.
     """
     from socr.tables.locate import locate_tables
 
@@ -130,10 +153,139 @@ def native_rows_from_page(page) -> list[LabeledRow]:
     if not boxes:
         return []
 
-    rows: list[LabeledRow] = []
+    raw_rows: list[tuple[tuple[str, ...], list[tuple[float, float, str]]]] = []
     for box in boxes:
-        rows.extend(_rows_in_region(page, box.bbox))
+        raw_rows.extend(_rows_in_region(page, box.bbox))
+    return _assign_lanes(raw_rows)
+
+
+def _assign_lanes(
+    raw_rows: list[tuple[tuple[str, ...], list[tuple[float, float, str]]]],
+) -> list[LabeledRow]:
+    """Cluster every row's value positions into page-wide anonymous column lanes.
+
+    #123 TICKET-B2. Parameter-free by construction:
+
+    1. Cluster the value tokens' **right edges** (``x1``) and, separately, their
+       **centres**. Financial columns are right-aligned and left edges drift with
+       digit count, so right edges are the natural anchor - but a column of
+       centred text disperses less around its centre, so both are tried and the
+       partition with lower total within-lane dispersion wins (tie -> right edge,
+       the more common case). This is a **per-partition** choice, not per-lane:
+       per-lane is chicken-and-egg, since a lane's variance cannot be measured
+       before the lane exists.
+    2. Within a partition, the cut between two lanes is the largest *ratio jump*
+       between consecutive gaps in the sorted anchor list - the point where
+       "spread inside one column" ends and "space between columns" begins,
+       derived from the page's own geometry rather than a point constant.
+    3. A cluster only becomes a lane when it has support from **at least two
+       distinct rows** - the same justification as the GH-113 grid rule: a lone
+       numeral cannot demonstrate a column by itself. A value that snaps to no
+       surviving lane is **lane-ambiguous**, marked ``-1`` and excluded from the
+       scorer's alignment rather than guessed.
+    """
+    if not raw_rows:
+        return []
+
+    # token = (token_idx, row_idx, x0, x1, text), flattened in row/x order.
+    flat: list[tuple[int, int, float, float, str]] = []
+    token_idx = 0
+    for row_idx, (_path, values) in enumerate(raw_rows):
+        for x0, x1, text in values:
+            flat.append((token_idx, row_idx, x0, x1, text))
+            token_idx += 1
+
+    if flat:
+        right_clusters = _cluster_by_anchor(flat, _anchor_right)
+        centre_clusters = _cluster_by_anchor(flat, _anchor_centre)
+        right_dispersion = _total_dispersion(right_clusters, _anchor_right)
+        centre_dispersion = _total_dispersion(centre_clusters, _anchor_centre)
+        clusters = centre_clusters if centre_dispersion < right_dispersion else right_clusters
+
+        lane_clusters = [c for c in clusters if len({tok[1] for tok in c}) >= 2]
+        lane_of_token: dict[int, int] = {
+            tok[0]: lane_idx for lane_idx, cluster in enumerate(lane_clusters) for tok in cluster
+        }
+    else:
+        lane_of_token = {}
+
+    rows: list[LabeledRow] = []
+    idx = 0
+    for path, values in raw_rows:
+        lanes = tuple(lane_of_token.get(idx + i, -1) for i in range(len(values)))
+        idx += len(values)
+        rows.append(LabeledRow(path=path, values=tuple(v[2] for v in values), lanes=lanes))
     return rows
+
+
+def _anchor_right(token: tuple[int, int, float, float, str]) -> float:
+    return token[3]
+
+
+def _anchor_centre(token: tuple[int, int, float, float, str]) -> float:
+    return (token[2] + token[3]) / 2
+
+
+def _cluster_by_anchor(
+    tokens: list[tuple[int, int, float, float, str]],
+    anchor: Callable[[tuple[int, int, float, float, str]], float],
+) -> list[list[tuple[int, int, float, float, str]]]:
+    """Partition *tokens* left to right, cutting at the largest gap-ratio jump."""
+    ordered = sorted(tokens, key=anchor)
+    if len(ordered) <= 1:
+        return [ordered] if ordered else []
+
+    anchors = [anchor(t) for t in ordered]
+    gaps = [anchors[i + 1] - anchors[i] for i in range(len(anchors) - 1)]
+    cut = _gap_cut_threshold(gaps)
+
+    clusters: list[list[tuple[int, int, float, float, str]]] = [[ordered[0]]]
+    for i in range(1, len(ordered)):
+        if gaps[i - 1] > cut:
+            clusters.append([])
+        clusters[-1].append(ordered[i])
+    return clusters
+
+
+def _gap_cut_threshold(gaps: list[float]) -> float:
+    """The gap size above which two anchors belong to different lanes.
+
+    Sort the (positive) gaps and find the largest ratio between consecutive
+    entries - the elbow between "within-lane spread" and "between-lane spacing".
+    The boundary returned is the **midpoint** between those two magnitudes, not
+    either endpoint: a regular grid (every row spaced by the identical gap, e.g.
+    two dense columns 60pt apart) has only one *distinct* positive gap value, so
+    that single value both is, and is being compared against, the boundary -
+    returning it verbatim would make the caller's strict ``>`` never fire and
+    every column collapse into one lane. With no positive gaps at all there is
+    nothing to cut; the implied "within-lane" floor is 0.
+    """
+    positive = sorted(g for g in gaps if g > 0)
+    if not positive:
+        return 0.0
+    if len(positive) == 1:
+        return positive[0] / 2
+    ratios = [
+        positive[i + 1] / positive[i] if positive[i] > 0 else float("inf")
+        for i in range(len(positive) - 1)
+    ]
+    cut_index = ratios.index(max(ratios))
+    return (positive[cut_index] + positive[cut_index + 1]) / 2
+
+
+def _total_dispersion(
+    clusters: list[list[tuple[int, int, float, float, str]]],
+    anchor: Callable[[tuple[int, int, float, float, str]], float],
+) -> float:
+    """Sum of within-cluster variance across *clusters*, under *anchor*."""
+    total = 0.0
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        values = [anchor(t) for t in cluster]
+        mean = sum(values) / len(values)
+        total += sum((v - mean) ** 2 for v in values) / len(values)
+    return total
 
 
 def rows_establish_grid(rows: list[LabeledRow]) -> bool:
@@ -164,8 +316,13 @@ def rows_establish_grid(rows: list[LabeledRow]) -> bool:
     return modal_width >= 2 and rows_at_modal >= 2
 
 
-def _rows_in_region(page, bbox) -> list[LabeledRow]:
+def _rows_in_region(page, bbox) -> list[tuple[tuple[str, ...], list[tuple[float, float, str]]]]:
     """Labelled rows from the words falling inside one table bbox.
+
+    Returns ``(path, values)`` pairs rather than finished ``LabeledRow`` objects —
+    ``values`` carries each value token's ``(x0, x1, text)`` so the caller
+    (``native_rows_from_page``) can cluster lanes across every region on the page
+    before ``LabeledRow.lanes`` is assigned. #123 TICKET-B2.
 
     Two things this must get right, both learned from the OBR reference page:
 
@@ -177,9 +334,12 @@ def _rows_in_region(page, bbox) -> list[LabeledRow]:
 
     2. **The label/value boundary is a column position, not "the first number".**
        "Growth Plan after 17 October reversals" contains a numeral inside the label.
-       The value columns are found by clustering the x-positions of numeric tokens
-       across the whole region (reusing the native verifier's lane clusterer), and
-       anything left of the first value column is label text.
+       The boundary is the row's own **last non-numeric word** (below), never by
+       clustering numeric x-positions to find it: an earlier attempt did that, and
+       a numeral inside a label formed its own x-cluster and dragged the boundary
+       left. Lane clustering (page-wide, over tokens already known to be values) is
+       decoupled into ``_assign_lanes`` and runs strictly after this boundary is
+       fixed.
     """
     x0_lim, y0_lim, x1_lim, y1_lim = bbox
     words = [
@@ -224,7 +384,7 @@ def _rows_in_region(page, bbox) -> list[LabeledRow]:
     # chicken-and-egg (that stray 17 forms its own x-cluster and drags the boundary
     # left). A table row is a label followed by values, so the last non-numeric word
     # ends the label. Parameter-free, and correct for both cases above.
-    raw: list[tuple[float, str, list[tuple[float, str]]]] = []
+    raw: list[tuple[float, str, list[tuple[float, float, str]]]] = []
     for band in bands:
         ordered = sorted(band, key=lambda w: w[0])
         last_text = -1
@@ -234,7 +394,7 @@ def _rows_in_region(page, bbox) -> list[LabeledRow]:
         if last_text < 0:
             continue  # numbers only: an orphan row, no label to key on
         label = " ".join(w[4].strip() for w in ordered[: last_text + 1]).strip()
-        values = [(w[0], w[4].strip()) for w in ordered[last_text + 1 :] if _is_value(w[4])]
+        values = [(w[0], w[2], w[4].strip()) for w in ordered[last_text + 1 :] if _is_value(w[4])]
         indent = ordered[0][0]
         if label and values and not _MARKER_RE.match(label):
             raw.append((indent, label, values))
@@ -245,13 +405,13 @@ def _rows_in_region(page, bbox) -> list[LabeledRow]:
     raw = _drop_footnote_markers(raw, _superscript_tokens(page, bbox))
 
     # Parent = the nearest preceding row at a strictly smaller indent.
-    rows: list[LabeledRow] = []
+    rows: list[tuple[tuple[str, ...], list[tuple[float, float, str]]]] = []
     stack: list[tuple[float, str]] = []
     for indent, label, values in raw:
         while stack and stack[-1][0] >= indent:
             stack.pop()
         path = tuple(lbl for _i, lbl in stack) + (label,)
-        rows.append(LabeledRow(path=path, values=tuple(values)))
+        rows.append((path, values))
         stack.append((indent, label))
     return rows
 
@@ -299,11 +459,15 @@ def _superscript_tokens(page, bbox) -> set[tuple[int, str]]:
 
 
 def _drop_footnote_markers(
-    raw: list[tuple[float, str, list[tuple[float, str]]]],
+    raw: list[tuple[float, str, list[tuple[float, float, str]]]],
     superscripts: set[tuple[int, str]],
-) -> list[tuple[float, str, list[str]]]:
+) -> list[tuple[float, str, list[tuple[float, float, str]]]]:
     """Remove superscript markers that the label/value split counted as values."""
     return [
-        (indent, label, [v for x, v in values if (round(x), v) not in superscripts])
+        (
+            indent,
+            label,
+            [(x0, x1, v) for x0, x1, v in values if (round(x0), v) not in superscripts],
+        )
         for indent, label, values in raw
     ]

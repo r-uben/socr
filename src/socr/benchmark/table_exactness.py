@@ -26,6 +26,48 @@ that table) cannot be credited twice against the same source row.
 
 Deliberately model-free: on a born-digital page the native text layer supplies the
 true label order and every digit at zero cost.
+
+## #123 TICKET-B2: column position, once rows are matched
+
+Matching a row by label says nothing about whether its *values* landed in the right
+column. ``markdown_rows`` used to filter empty cells out of a row before scoring, and
+``native_rows_from_page`` read values in x-order with no record of which column each
+came from — so ``['-1.0', '1.0', '28.1', '']`` and ``['2.5', '0.5', '', '13.8']`` both
+reduced to three values and both matched a three-value ground truth. A value in the
+wrong column scored as correct.
+
+The fix keeps ``LabeledRow.values`` compacted on both sides (unchanged: it is what
+keeps ``cells`` — ground-truth only — a stable denominator) and adds two *parallel*
+position fields: ``lanes`` on the ground-truth side (an anonymous, page-wide column
+index assigned by clustering native value positions) and ``columns`` on the markdown
+side (each value's own position in its emitted row, before compaction). Scoring then
+looks for **one global, monotone, injective map** from lanes to columns — chosen to
+maximise total cell agreement across every matched row on the page — rather than
+comparing raw ordinal positions. "Global" and "monotone" both matter: a *local*,
+per-row map would let column identity drift row to row, and a non-monotone map could
+explain a genuine column *transposition* as if it were correct.
+
+**Uniform-shift limitation.** A whole-page shift by exactly one lane in the same
+direction, applied identically to incumbent and candidate, is invisible to this
+metric in the specific case where every shifted value happens to still land on some
+lane the map can use — column identity here is positional and page-relative, not
+semantic (no header is read), so the metric cannot distinguish "the right value in
+the right column" from "the right value in a column that coincidentally lines up".
+
+**Map-search freedom (do not dismiss this).** The map is fitted to the *prediction*
+being scored, so a wider emitted table has strictly more admissible monotone maps to
+choose from (``C(M, L)`` of them, at ``L`` lanes and ``M`` columns) — freedom that
+grows with ``M``. The mechanism a wider output could exploit is low-entropy, repeated
+cell values (``0.0``, ``-``, blanks): more columns give the map more paths to route a
+lane through one of them and harvest a coincidental match. This was weighed against
+two corrections — penalising unmapped candidate columns, and scoring both sides under
+the incumbent's map — and both were rejected: the first makes strictness a function of
+the *prediction's* shape rather than the ground truth's, and the second is
+structurally anti-improvement (a candidate that correctly finds a stub column the
+incumbent missed shifts everything after it by one column and would score near zero
+*for being right*). The freedom is accepted and shipped; ``lane_count``,
+``column_count``, ``lane_to_column`` and ``unmapped_nonempty_columns`` on
+``ExactnessReport`` exist so a suspicious win is auditable, never so it is penalised.
 """
 
 from __future__ import annotations
@@ -66,6 +108,13 @@ class ExactnessReport:
     orphan_rows: int = 0  # prediction rows carrying values but no label
     labelled_but_empty: int = 0  # prediction rows with a label and no values
     duplicate_rows: int = 0  # byte-identical repeated prediction rows
+    lane_ambiguous_cells: int = 0  # GT values with no page-wide lane support (#123 B2)
+    # Diagnostics only (#123 TICKET-B2) — NEVER used to penalise a score, only to make
+    # a suspicious win auditable. See the module docstring's "map-search freedom".
+    lane_count: int = 0  # L: distinct ground-truth lanes on the page
+    column_count: int = 0  # M: distinct emitted markdown columns on the page
+    lane_to_column: dict[int, int] = field(default_factory=dict)  # the chosen map
+    unmapped_nonempty_columns: int = 0  # emitted columns with values the map didn't use
     misses: list[CellMiss] = field(default_factory=list)
     ceiling_note: str = ""
 
@@ -111,7 +160,8 @@ def markdown_rows(markdown: str) -> tuple[list[LabeledRow], ExactnessReport]:
 
     for cells in grid:
         label, raw_values = _split_label_and_values(cells)
-        values = [c for c in raw_values if _is_value(c)]
+        columns = [i for i, c in enumerate(raw_values) if _is_value(c)]
+        values = [raw_values[i] for i in columns]
 
         signature = tuple(cells)
         seen[signature] = seen.get(signature, 0) + 1
@@ -135,11 +185,81 @@ def markdown_rows(markdown: str) -> tuple[list[LabeledRow], ExactnessReport]:
             continue
 
         path = (parent, label) if parent else (label,)
-        rows.append(LabeledRow(path=tuple(p for p in path if p), values=tuple(values)))
+        rows.append(
+            LabeledRow(
+                path=tuple(p for p in path if p),
+                values=tuple(values),
+                columns=tuple(columns),
+            )
+        )
         last_label = label
 
     diag.duplicate_rows = sum(n - 1 for n in seen.values() if n > 1)
     return rows, diag
+
+
+def _best_lane_column_map(
+    matched: list[tuple[LabeledRow, LabeledRow]], lane_count: int, column_count: int
+) -> dict[int, int]:
+    """The single monotone, injective lane -> column map maximising total agreement.
+
+    #123 TICKET-B2. A Needleman-Wunsch-shaped DP over an ``L`` x ``M`` grid: lane
+    ``i`` may map to column ``j`` (score = how many matched rows agree there), skip a
+    lane (it maps nowhere), or skip a column (nothing maps to it) — never both a skip
+    and a map at once, and never non-monotonically (lane order must match column
+    order, so a genuine transposition cannot be explained away). ``O(L*M)``, pure
+    Python, negligible next to the OCR call this gates.
+
+    Ties are broken deterministically — map over skip-column over skip-lane — so a
+    tied score always yields the same map; only ``misses`` attribution could differ
+    between two equally-scoring maps, never ``exact``.
+    """
+    if lane_count == 0 or column_count == 0:
+        return {}
+
+    score = [[0] * column_count for _ in range(lane_count)]
+    for want, got in matched:
+        got_by_column = dict(zip(got.columns, got.values))
+        for lane, expected in zip(want.lanes, want.values):
+            if not (0 <= lane < lane_count):
+                continue
+            for column, actual in got_by_column.items():
+                if column >= column_count:
+                    continue
+                if BenchmarkScorer._norm_cell(actual) == BenchmarkScorer._norm_cell(expected):
+                    score[lane][column] += 1
+
+    dp = [[0] * (column_count + 1) for _ in range(lane_count + 1)]
+    choice = [[""] * (column_count + 1) for _ in range(lane_count + 1)]
+    for i in range(lane_count + 1):
+        for j in range(column_count + 1):
+            if i == 0 and j == 0:
+                continue
+            best, best_choice = -1, ""
+            if i > 0 and j > 0:
+                candidate = dp[i - 1][j - 1] + score[i - 1][j - 1]
+                if candidate > best:
+                    best, best_choice = candidate, "map"
+            if j > 0 and dp[i][j - 1] > best:
+                best, best_choice = dp[i][j - 1], "skip_column"
+            if i > 0 and dp[i - 1][j] > best:
+                best, best_choice = dp[i - 1][j], "skip_lane"
+            dp[i][j] = best
+            choice[i][j] = best_choice
+
+    mapping: dict[int, int] = {}
+    i, j = lane_count, column_count
+    while i > 0 or j > 0:
+        move = choice[i][j]
+        if move == "map":
+            mapping[i - 1] = j - 1
+            i -= 1
+            j -= 1
+        elif move == "skip_column":
+            j -= 1
+        else:
+            i -= 1
+    return mapping
 
 
 def score_rows(gt: list[LabeledRow], predicted: list[LabeledRow]) -> ExactnessReport:
@@ -149,6 +269,13 @@ def score_rows(gt: list[LabeledRow], predicted: list[LabeledRow]) -> ExactnessRe
     matched to the n-th predicted occurrence. That is what stops a label reused under
     two parents from being credited twice against the same source row - the collision
     that made an earlier scratch scorer understate a near-perfect page by 6 cells.
+
+    #123 TICKET-B2: once rows are matched by label, each cell is compared through the
+    page's single global lane->column map (see the module docstring), not by raw
+    ordinal position. A ``LabeledRow`` built without position data (``lanes``/
+    ``columns`` both the default ``()``) - as most of this module's own unit tests
+    build them - falls back to the pre-B2 ordinal comparison for that row pair, so
+    hand-built fixtures keep their original meaning.
     """
     report = ExactnessReport(gt_rows=len(gt))
 
@@ -156,21 +283,83 @@ def score_rows(gt: list[LabeledRow], predicted: list[LabeledRow]) -> ExactnessRe
     for row in predicted:
         pending.setdefault(row.key, []).append(row)
 
+    matched: list[tuple[LabeledRow, LabeledRow]] = []
+    not_found: list[LabeledRow] = []
     for want in gt:
         report.cells += len(want.values)
         queue = pending.get(want.key)
         if not queue:
-            report.rows_not_found += 1
+            not_found.append(want)
+            continue
+        matched.append((want, queue.pop(0)))
+
+    report.rows_not_found = len(not_found)
+    for want in not_found:
+        for column, expected in enumerate(want.values):
+            report.misses.append(
+                CellMiss(path=want.path, column=column, expected=expected, got=None)
+            )
+
+    lane_count = (
+        max((lane for want, _got in matched for lane in want.lanes if lane >= 0), default=-1) + 1
+    )
+    column_count = max((c for row in predicted for c in row.columns), default=-1) + 1
+    lane_to_column = _best_lane_column_map(matched, lane_count, column_count)
+    report.lane_count = lane_count
+    report.column_count = column_count
+    report.lane_to_column = dict(lane_to_column)
+
+    used_columns = set(lane_to_column.values())
+    all_columns_with_values = {c for row in predicted for c in row.columns}
+    report.unmapped_nonempty_columns = len(all_columns_with_values - used_columns)
+
+    for want, got in matched:
+        if not want.lanes or not got.columns:
+            # No position data on one side (a hand-built fixture that never set
+            # lanes/columns): degrade to the pre-B2 ordinal comparison rather than
+            # treating every value as lane-ambiguous.
             for column, expected in enumerate(want.values):
-                report.misses.append(
-                    CellMiss(path=want.path, column=column, expected=expected, got=None)
-                )
+                actual = got.values[column] if column < len(got.values) else ""
+                if BenchmarkScorer._norm_cell(actual) == BenchmarkScorer._norm_cell(expected):
+                    report.exact += 1
+                else:
+                    report.misses.append(
+                        CellMiss(path=want.path, column=column, expected=expected, got=actual)
+                    )
             continue
 
-        got = queue.pop(0)
+        got_by_column = dict(zip(got.columns, got.values))
+        row_mapped_columns = {
+            lane_to_column[lane] for lane in want.lanes if lane >= 0 and lane in lane_to_column
+        }
+        row_unmapped_values = [v for c, v in got_by_column.items() if c not in row_mapped_columns]
+
         for column, expected in enumerate(want.values):
-            actual = got.values[column] if column < len(got.values) else ""
-            if BenchmarkScorer._norm_cell(actual) == BenchmarkScorer._norm_cell(expected):
+            lane = want.lanes[column] if column < len(want.lanes) else -1
+
+            if lane < 0:
+                # Lane-ambiguous (#123 TICKET-B2 design note §4): excluded from the
+                # alignment - it must not consume a lane slot in the injective map,
+                # the "stray numeral drags the boundary" failure in miniature.
+                # Credited only on presence among the row's OWN unmapped columns,
+                # never guessed positionally.
+                report.lane_ambiguous_cells += 1
+                if any(
+                    BenchmarkScorer._norm_cell(v) == BenchmarkScorer._norm_cell(expected)
+                    for v in row_unmapped_values
+                ):
+                    report.exact += 1
+                else:
+                    report.misses.append(
+                        CellMiss(path=want.path, column=column, expected=expected, got=None)
+                    )
+                continue
+
+            mapped_column = lane_to_column.get(lane)
+            actual = got_by_column.get(mapped_column) if mapped_column is not None else None
+            if actual is not None and BenchmarkScorer._norm_cell(
+                actual
+            ) == BenchmarkScorer._norm_cell(expected):
                 report.exact += 1
             else:
                 report.misses.append(

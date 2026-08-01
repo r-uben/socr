@@ -173,16 +173,6 @@ CORRUPTING = [
     pytest.param(
         "shift_into_adjacent_empty_cell",
         lambda rows: _replace_row(rows, 4, values=("", "0.5")),
-        marks=pytest.mark.xfail(
-            reason=(
-                "#123 TICKET-B2: markdown_rows filters empty cells out of a row "
-                "before comparing, so a value shifted into an adjacent empty "
-                "cell still reduces to the same value multiset and scores as "
-                "correct. Fixed by TICKET-B2 (preserve cell positions instead "
-                "of compacting them)."
-            ),
-            strict=True,
-        ),
         id="shift_into_adjacent_empty_cell",
     ),
     pytest.param(
@@ -378,4 +368,91 @@ def test_dropping_a_column_never_beats_keeping_the_gap(leading_gap_page):
         f"dropping the column scored {sloppy_report.exact} exact cells vs "
         f"{faithful_report.exact} for keeping the gap - the metric is rewarding "
         "structure-destroying output"
+    )
+
+
+# ----------------------------------------------------------------------
+# #123 TICKET-B2 design note, section 6: the alignment is fitted independently to
+# whichever markdown is being scored, so a wider candidate has strictly more
+# admissible maps (C(M, L)) than a narrower one. Nothing above catches that -
+# every fixture pair above has the SAME column count on both sides of a
+# comparison. Pin the asymmetry directly: an incumbent and a same-shift candidate
+# that additionally pads on a spurious column must score the same, not better.
+# ----------------------------------------------------------------------
+
+
+def test_same_shift_plus_spurious_column_never_beats_the_incumbent(leading_gap_page):
+    """A wider candidate must not win on extra map freedom alone.
+
+    Both markdowns apply the identical shift (the sparse row's value lands in
+    column 1 instead of column 2); the candidate additionally appends a spurious
+    third column filled with a low-entropy repeated value. If the extra column
+    bought the candidate a better map, ``accept candidate iff candidate.exact >
+    incumbent.exact`` would prefer it over an equally-wrong incumbent for free.
+    """
+    incumbent = _table_md(
+        [("Alpha", ("1.0", "2.0")), ("Sparse", ("0.5", "")), ("Beta", ("4.0", "5.0"))],
+        width=2,
+    )
+    candidate = _table_md(
+        [
+            ("Alpha", ("1.0", "2.0", "0.0")),
+            ("Sparse", ("0.5", "", "0.0")),
+            ("Beta", ("4.0", "5.0", "0.0")),
+        ],
+        width=3,
+    )
+
+    incumbent_report = score_page(leading_gap_page, incumbent)
+    candidate_report = score_page(leading_gap_page, candidate)
+
+    assert candidate_report.exact <= incumbent_report.exact, (
+        f"same-shift-plus-spurious-column candidate scored {candidate_report.exact} "
+        f"exact cells vs {incumbent_report.exact} for the incumbent it should not beat"
+    )
+
+
+def test_padding_with_low_entropy_columns_never_beats_a_faithful_transcription(tmp_path):
+    """Padding with junk columns must not outscore a faithful, narrower transcription.
+
+    Three dense rows, two real value columns. The padded candidate reproduces both
+    real columns faithfully and then appends three extra columns of repeated
+    low-entropy values (``0.0``, ``-``, blank) that could never be the map target
+    for any ground-truth lane. Padding must not raise the score above the faithful
+    transcription's.
+    """
+    value_xs = (300.0, 360.0)
+    path = tmp_path / "padding.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    rows = [
+        ("Alpha", ("1.0", "2.0")),
+        ("Beta", ("4.0", "5.0")),
+        ("Gamma", ("6.0", "7.0")),
+    ]
+    y = 200.0
+    for label, values in rows:
+        page.insert_text((60.0, y), label, fontsize=9)
+        for x, value in zip(value_xs, values):
+            page.insert_text((x, y), value, fontsize=9)
+        y += 18.0
+    page.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    page.draw_line(fitz.Point(50, y), fitz.Point(470, y))
+    doc.save(path)
+    doc.close()
+
+    opened = fitz.open(path)
+    page = opened[0]
+
+    faithful = _table_md(rows, width=2)
+    padded_rows = [(label, (*values, "0.0", "-", "")) for label, values in rows]
+    padded = _table_md(padded_rows, width=5)
+
+    faithful_report = score_page(page, faithful)
+    padded_report = score_page(page, padded)
+    opened.close()
+
+    assert padded_report.exact <= faithful_report.exact, (
+        f"padding with junk columns scored {padded_report.exact} exact cells vs "
+        f"{faithful_report.exact} for the faithful narrower transcription"
     )

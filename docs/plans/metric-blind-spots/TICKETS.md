@@ -72,7 +72,7 @@ helper must exclude not-scorable pages rather than counting them as zeros.
 asserts `score_page(...).scorable is False` and `.pct is None`; and
 `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
-### TICKET-B2 — positional comparison on BOTH sides · TODO · depends-on: B1 · wave 2
+### TICKET-B2 — positional comparison on BOTH sides · DONE (`docs/log/2026-08-01_TICKET-B2.md`) · depends-on: B1 · wave 2
 **Merged with the former TICKET-B3 on 2026-08-01, after a first attempt was reverted
 (`ad649b5`, reverted by `717914d`). They are one change — see "Why merged".**
 

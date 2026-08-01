@@ -32,6 +32,14 @@ Measured over 16 table pages, escalating the 13 the trigger fires on:
     canary-only accept rule           81.7%
     accept iff exactness improves     85.0%
 
+These three numbers predate #123 TICKET-B2's lane-aware column alignment (`exact`
+used to compare markdown and ground truth positionally, column-index to
+column-index; it now compares under each side's best monotone lane-to-column map).
+The relative ordering the decision relies on — canary-only < exactness-gate — is
+not expected to change, since B2 only tightens what counts as a match, but the
+literal percentages above are stale and want a re-measurement against the same
+16-page corpus before being cited again.
+
 Better, and **monotone by construction**: no page can leave worse than it arrived.
 The canary cannot offer that. It also subsumes the canary's own job — a fabrication
 scores near zero and a truncated candidate scores low, so both are rejected on

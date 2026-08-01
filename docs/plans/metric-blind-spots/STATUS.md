@@ -43,7 +43,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | TODO (reverted once) | B1 | 2 |
+| B2 | scoring correctness | DONE | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | TODO | B2 | 3 |
@@ -57,8 +57,9 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B1 | socr-reviewer | STOPPED — mutated the shared tree; findings void |
 | B1 | orchestrating session | REVIEWED — ACCEPT-WITH-FOLLOWUP |
 | A1 | socr-implementer | DONE — `tests/test_metric_corruption_battery.py`, see `docs/log/2026-08-01_TICKET-A1.md` |
-| B2 | socr-implementer | REVERTED — `ad649b5`, reverted by `717914d` |
+| B2 | socr-implementer (attempt 1) | REVERTED — `ad649b5`, reverted by `717914d` |
 | B2 | orchestrating session | REVIEWED — REJECT; the ticket seam was wrong, B2+B3 merged |
+| B2 | socr-implementer (attempt 2) | DONE — see `docs/log/2026-08-01_TICKET-B2.md` |
 
 ## Dispatch waves
 
@@ -130,6 +131,11 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
-Dispatch B2 — now the whole metric change (former B3 + B4 folded in), with the alignment
-rule settled by panel. Design note: `docs/log/2026-08-01_TICKET-B2-design.md`. Panel archive:
-`~/.local/share/consilium/runs/2026/08/20260801T143554Z-8166`.
+B2 landed on `feat/123-metric-blind-spots` (uncommitted-SHA pending; see decision log).
+Full suite: 1384 passed, 2 xfailed (up from 1379/3 pre-B2 — +4 new tests, +1 xfail
+flipped to pass, 0 regressions). One deviation from the design note found and fixed
+during implementation (gap-cut-threshold midpoint, not endpoint — see decision log);
+otherwise implemented as designed. Dispatch B5 next (depends only on B2); C1 after,
+either order, same shared working tree. The before/after corpus re-score against
+`~/data/fiscal-ballast/_experiments/` — the plan's stated "real acceptance test" — is
+still outstanding and is the orchestrator's job, not an implementer's.
