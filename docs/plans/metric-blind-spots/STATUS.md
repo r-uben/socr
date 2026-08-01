@@ -43,7 +43,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | REOPENED — split rule unsound (float-sensitive) | B1 | 2 |
+| B2 | scoring correctness | DONE (Otsu cut, `docs/log/2026-08-01_TICKET-B2-otsu-cut.md`) | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | TODO | B2 | 3 |
@@ -61,6 +61,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | orchestrating session | REVIEWED — REJECT; the ticket seam was wrong, B2+B3 merged |
 | B2 | socr-implementer (attempt 2) | DONE — see `docs/log/2026-08-01_TICKET-B2.md` |
 | B2 | socr-implementer (reopen fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-reopen-fix.md` |
+| B2 | socr-implementer (Otsu-cut fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-otsu-cut.md` |
 
 ## Dispatch waves
 
@@ -132,6 +133,23 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
+**B2 is now DONE (again).** The ratio-jump splitting rule was replaced with an
+Otsu/Jenks-style 1-D partition (`docs/log/2026-08-01_TICKET-B2-otsu-cut.md`): every
+candidate cut is scored by between-group variance over the *whole weighted gap list*
+(zero included, undeduplicated), not by the ratio between one distinguished pair of
+magnitudes. Both pinned gates are green, the uneven-spacing gap flagged in the prior
+fix's log is also fixed (verified directly, not gated by a test), and the full suite
+is 1392 passed / 2 xfailed / 0 failed. `uvx ruff@0.16.0 format --check .` clean.
+
+Remaining work in this plan: **B5** (wrapped-label row reconstruction, still `TODO`,
+depends on B2) and **C1** (pipeline response to `ceiling_note`, `TODO`, depends on B2)
+— both now unblocked. The corpus re-score against
+`~/data/fiscal-ballast/_experiments/` (the plan's stated "real acceptance test") is
+still outstanding and remains the orchestrator's job.
+
+<details>
+<summary>Superseded — the reopened-again writeup this replaces</summary>
+
 **B2 is REOPENED AGAIN — the suite is deliberately RED. The ratio-jump splitting rule is
 structurally unsound, not buggy.**
 
@@ -183,3 +201,5 @@ sorted list. Every fixture must cover width ≥ 3 **and** vary the page offset.
 either order, same shared working tree. The before/after corpus re-score against
 `~/data/fiscal-ballast/_experiments/` — the plan's stated "real acceptance test" — is
 still outstanding and is the orchestrator's job, not an implementer's.
+
+</details>

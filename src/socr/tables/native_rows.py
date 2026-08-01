@@ -230,7 +230,7 @@ def _cluster_by_anchor(
     tokens: list[tuple[int, int, float, float, str]],
     anchor: Callable[[tuple[int, int, float, float, str]], float],
 ) -> list[list[tuple[int, int, float, float, str]]]:
-    """Partition *tokens* left to right, cutting at the largest gap-ratio jump."""
+    """Partition *tokens* left to right, cutting at the Otsu threshold over gaps."""
     ordered = sorted(tokens, key=anchor)
     if len(ordered) <= 1:
         return [ordered] if ordered else []
@@ -250,35 +250,84 @@ def _cluster_by_anchor(
 def _gap_cut_threshold(gaps: list[float]) -> float:
     """The gap size above which two anchors belong to different lanes.
 
-    Sort the **distinct** positive gaps and find the largest ratio between
-    consecutive entries - the elbow between "within-lane spread" (digit-count
-    noise inside one column, plus the exact-zero gap between tokens that share
-    an anchor outright) and "between-lane spacing". The boundary returned is
-    the **midpoint** between those two magnitudes, not either endpoint.
+    #123 TICKET-B2 reopen (second fix). The previous rule picked "the largest
+    ratio jump between consecutive **distinct** positive gap magnitudes" - a
+    single distinguished gap, chosen without regard to how many tokens actually
+    produced each magnitude. That formulation cannot work: there are two
+    distinct noise floors in real geometry (the exact-zero gap between tokens
+    sharing an anchor, and small non-zero jitter from digit widths or float
+    rounding), and a single ratio-jump search cannot separate either from real
+    column spacing. Folding zero into the search made *every* transition away
+    from it read as an infinite ratio, so it always won regardless of whether
+    the next value up was real spacing or itself still noise - it once picked a
+    5pt digit-jitter gap as the elbow over a real 55pt spacing. Excluding zero
+    lost the tokens-that-share-a-lane signal entirely, so on a regular grid
+    where the only other magnitude present was itself corrupted by sub-pt
+    float noise (``50.0`` vs ``50.000015`` pt, from glyph rendering at a
+    different page offset), the "largest ratio jump" was that meaningless
+    ``1.0000003`` between two magnitudes that are, in truth, the same lane
+    boundary measured twice.
 
-    Deduplication is what makes a regular grid work. A dense column of
-    same-width numbers repeats one between-lane gap verbatim (e.g. four
-    50pt-spaced columns leave the *distinct* positive gap list ``[50]``, not
-    a single-element list only when there happens to be one column pair to
-    begin with) - without deduplication that value's *count* would drown out
-    the ratio search entirely: every consecutive pair in the raw list reads
-    ``50/50 == 1``, there is no jump anywhere, and the caller's strict ``>``
-    then never fires, collapsing every column into one lane. A single
-    *distinct* positive value has nothing to contrast against but the 0
-    floor implied by tokens that share an anchor exactly, so it is cut at its
-    own midpoint - the pre-existing ``len(positive) == 1`` rule, now reached
-    whenever there is one lane boundary rather than only when there is
-    literally one raw gap. With no positive gaps at all there is nothing to
-    cut; the implied "within-lane" floor is 0.
+    The fix: stop choosing between a single pair of magnitudes and instead
+    partition the **whole weighted gap list** - every gap, in the multiplicity
+    it actually occurs, zero included - the way Otsu's method thresholds a
+    bimodal histogram. For every threshold candidate (a value between two
+    consecutive distinct magnitudes), split all gaps into "at or below" and
+    "above" and score the split by its between-group variance
+    (``_between_group_variance``); take the candidate that maximises it. This
+    is still parameter-free - the cut is selected by an objective computed
+    from the data, not a constant - but unlike a ratio jump it is a function
+    of *how much evidence* separates two candidate lane-boundary magnitudes,
+    not just their relative size. Two magnitudes that differ by a
+    rendering-noise fraction of a point (``50.0`` vs ``50.000015``) carry
+    almost no between-group variance if grouped apart, because their means are
+    nearly identical either way; splitting the exact-zero floor from either of
+    them carries enormous between-group variance, because the group means are
+    ~50pt apart. Otsu's search finds that gap regardless of how many other
+    magnitudes happen to be sitting near it, which a single max-ratio search
+    cannot.
+
+    With at most one distinct gap magnitude present there is nothing to
+    partition; the cut sits at that magnitude's own midpoint against the
+    implied zero floor (mirrors the previous rule's ``len(positive) == 1``
+    case, generalised to also cover an all-zero gap list, where the returned
+    cut of ``0.0`` correctly draws no boundary at all).
     """
-    positive = sorted({g for g in gaps if g > 0})
-    if not positive:
+    if not gaps:
         return 0.0
-    if len(positive) == 1:
-        return positive[0] / 2
-    ratios = [positive[i + 1] / positive[i] for i in range(len(positive) - 1)]
-    cut_index = ratios.index(max(ratios))
-    return (positive[cut_index] + positive[cut_index + 1]) / 2
+    candidates = sorted(set(gaps))
+    if len(candidates) == 1:
+        return candidates[0] / 2
+
+    best_cut = candidates[0] / 2
+    best_score = -1.0
+    for i in range(len(candidates) - 1):
+        threshold = candidates[i]
+        low = [g for g in gaps if g <= threshold]
+        high = [g for g in gaps if g > threshold]
+        score = _between_group_variance(low, high)
+        if score > best_score:
+            best_score = score
+            best_cut = (candidates[i] + candidates[i + 1]) / 2
+    return best_cut
+
+
+def _between_group_variance(low: list[float], high: list[float]) -> float:
+    """Otsu's between-class variance for a two-way split of gap magnitudes.
+
+    Weighted by how many gaps actually fall on each side, not merely by which
+    distinct magnitudes are present - the property the previous ratio-jump
+    rule lacked. Maximising this over all candidate splits is equivalent to
+    minimising the summed within-group variance, and picks out the split
+    where the two groups are both internally tight *and* far apart, rather
+    than the split with the largest ratio between two arbitrary neighbours.
+    """
+    total = len(low) + len(high)
+    weight_low = len(low) / total
+    weight_high = len(high) / total
+    mean_low = sum(low) / len(low)
+    mean_high = sum(high) / len(high)
+    return weight_low * weight_high * (mean_high - mean_low) ** 2
 
 
 def _total_dispersion(
