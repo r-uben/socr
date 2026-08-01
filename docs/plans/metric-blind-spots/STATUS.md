@@ -1,6 +1,6 @@
 # STATUS — metric blind spots (socr #123)
 
-Last updated: 2026-08-01
+Last updated: 2026-08-02
 
 ## Stage
 
@@ -48,6 +48,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | DONE | B2 | 3 |
 | C1 | pipeline response | DONE | B2 | 3 |
+| C2 | pipeline response | DONE | C1 | follow-up |
 
 ## Active Agents
 
@@ -66,6 +67,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | socr-implementer (widest-row-cap fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-widest-row-cap.md` |
 | B5 | socr-implementer | DONE — see `docs/log/2026-08-01_TICKET-B5.md` |
 | C1 | socr-implementer | DONE — see `docs/log/2026-08-01_TICKET-C1.md` |
+| C2 | socr-implementer | DONE — see `docs/log/2026-08-02_TICKET-C2.md` |
 
 ## Dispatch waves
 
@@ -113,12 +115,14 @@ the change did nothing — that diff is the real acceptance test, not the unit s
 ## Findings carried forward
 ## Findings carried forward
 
-- **B1 finding 1 (HIGH) → PARTLY closed by C1; remainder is TICKET-C2.** `ceiling_note` now
-  reaches `tables_trust` (`untrusted_pages`, `counts_by_kind`, per-page `reasons`) via the new
-  `table_not_scorable` kind — **but only on cloud-enabled runs.** The surfacing point sits
-  behind `_pick_escalation_provider`, which returns `None` when no non-local provider is
-  available, so a local-only run still ships all 17 not-scorable pages with no trace. socr is
-  local-first by design, so this is a normal configuration. See TICKET-C2.
+- **B1 finding 1 (HIGH) → CLOSED by C1 + C2.** `ceiling_note` now reaches `tables_trust`
+  (`untrusted_pages`, `counts_by_kind`, per-page `reasons`) via the new `table_not_scorable`
+  kind, on **every run**, not only cloud-enabled ones. C1 wired the emitter to
+  `_table_page_needs_escalation`; C2 added a call site (`_surface_table_scoring`) reachable
+  with no escalation profile, so a local-only run (socr's default configuration) no longer
+  ships all 17 not-scorable pages with no trace. Measured added cost: ~9.3s total / ~137ms
+  mean per page on the 68-page reference document — negligible against per-page VLM
+  inference, so surfacing is always-on with no opt-out. See `docs/log/2026-08-02_TICKET-C2.md`.
 - **B1 finding 2 (MEDIUM) → CLOSED by the corpus re-score.** 17 pages of spurious `0.0%`
   become not-scorable; mean over each metric's own scorable set rises 44.3% → 49.1%.
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
@@ -154,18 +158,15 @@ published numbers rather than after. It then caught two more during B5's own imp
 
 ## Next action
 
-**All five tickets are DONE** (A1, B1, B2, B5, C1). Branch `feat/123-metric-blind-spots`,
-1405 passed / 1 xfailed, lint clean, **not pushed, no PR opened.**
+**All six tickets are DONE** (A1, B1, B2, B5, C1, C2). Branch `feat/123-metric-blind-spots`,
+1406 passed / 1 xfailed, lint clean, **not pushed, no PR opened.**
 
 Remaining, in order of value:
 
-1. **TICKET-C2** — surface content loss on local-only runs. B1 finding 1 is only half-closed;
-   17 pages still ship silently when no cloud provider is configured. Carries a real
-   cost/visibility decision, spelled out in the ticket.
-2. **Separate engine failure from metric defect** on p46/p55/p24/p53, using the rendered
+1. **Separate engine failure from metric defect** on p46/p55/p24/p53, using the rendered
    comparisons already on the Desktop. Without it we do not know whether 84.5% is the
    metric's ceiling or qwen's.
-3. Open the PR when the above are settled.
+2. Open the PR when the above is settled.
 
 ## Standing lessons from this plan
 

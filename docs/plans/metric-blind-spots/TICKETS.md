@@ -317,7 +317,7 @@ even when its exactness is higher; the new kind is in `TABLE_DISTRUST_KINDS`; a
 not-scorable page (B1's grid gate) is visible on the document-level surface rather than
 silently absent; and `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
-### TICKET-C2 — surface content loss on local-only runs · TODO · depends-on: C1 · follow-up
+### TICKET-C2 — surface content loss on local-only runs · DONE (`docs/log/2026-08-02_TICKET-C2.md`) · depends-on: C1 · follow-up
 **Found reviewing C1, 2026-08-02.** C1 closes B1 review finding 1 **only for cloud-enabled
 runs.** The surfacing lives in `_table_page_needs_escalation`, and the call chain is:
 
@@ -349,6 +349,17 @@ and it is why C1 did not simply do it.
 **Done when:** a test asserts a not-scorable page reaches `tables_trust` on a run with **no
 non-local provider available**; the added per-page cost is measured and recorded; and
 `~/venvs/socr/bin/pytest tests/ -q` exits 0.
+
+**Done, see `docs/log/2026-08-02_TICKET-C2.md`.** One new method,
+`_surface_table_scoring`, calls the existing `_table_page_needs_escalation` emitter
+(no new predicate, no new event kind) from an `elif` arm of the per-page loop's
+escalation block that fires whenever the `if` (provider present, lane not degraded)
+does not — the `if` branch itself, and every existing escalation test, is unchanged.
+Measured cost on the OBR reference document (68 pages, 18 clearing the grid
+predicate): `native_rows_from_page` + `score_page` combined ≈ 9.3s total, ≈137ms
+mean/page, ≈692ms worst case — negligible against the per-page VLM inference this
+loop already pays for, so the decision is **always-on, no opt-out**. Corpus gate
+unchanged (3 passed, score-neutral); full suite 1406 passed, 1 xfailed; lint clean.
 
 ## Explicitly out of scope
 

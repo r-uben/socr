@@ -1518,6 +1518,40 @@ class UnifiedPipeline:
 
         return report.pct is not None and report.pct < 100.0
 
+    def _surface_table_scoring(
+        self, state: DocumentState, page_num: int, ps, bo: PageOutput
+    ) -> None:
+        """Score a table page against its native layer even with no escalation lane.
+
+        #123 TICKET-C2: ``_table_page_needs_escalation`` is the one place both
+        kinds of content loss it documents (a not-scorable page, an unexplained
+        lane) reach ``tables_trust`` — but until now it only ran from
+        ``_escalate_table_page``, which never runs unless a non-local provider is
+        configured. socr is local-first by design, so on a local-only run (no
+        cloud provider, ``--strict-local``, or a cost cap suppressing the lane)
+        every not-scorable page and unexplained-lane page shipped with no trace,
+        same as before TICKET-C1. This is the escalation-independent twin call:
+        same predicate, same single emitter, no second contract.
+
+        Measured on the OBR reference document (68 pages, 18 clearing the grid
+        predicate): ``native_rows_from_page`` + ``score_page`` cost ~9.3s total,
+        ~137ms mean per page, worst single page ~540ms — negligible against the
+        per-page VLM inference this loop already pays for, so this runs
+        unconditionally rather than behind an opt-out.
+        """
+        try:
+            import fitz
+
+            with fitz.open(state.handle.path) as doc:
+                page = doc[page_num - 1]
+                self._table_page_needs_escalation(state, page_num, page, ps, bo)
+        except Exception as exc:
+            logger.warning(
+                "table scoring failed on p%d (%s); no distrust events emitted",
+                page_num,
+                exc,
+            )
+
     def _escalate_table_page(
         self,
         state: DocumentState,
@@ -2476,6 +2510,12 @@ class UnifiedPipeline:
                     run_provider,
                     state.handle.path,
                 )
+            elif bo.text:
+                # #123 TICKET-C2: no escalation lane this page (no provider, the
+                # lane is degraded, or the lane is off) — still score against the
+                # native layer so not-scorable pages and unexplained lanes surface
+                # on a local-only run instead of shipping with no trace.
+                self._surface_table_scoring(state, page_num, ps, bo)
 
             # GH-36a/36b: per-page equation detect + crop + optional LaTeX
             # sidecar.  Runs ONLY when the flags are on (default-off).  With
