@@ -116,6 +116,15 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   aggregate helper in `src/`; corpus scoring lives in
   `~/data/fiscal-ballast/_experiments/` and has not been re-scored against B1.
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
+- **B2 limitation (LOW, accepted) — decimal-aligned columns lose lane resolution.** The
+  paired-column fix keys on an exact-zero gap magnitude existing under some anchor (left,
+  right or centre). Decimal-aligned numbers with varying integer widths have no exact-zero
+  floor under *any* of the three, so the rightmost column can fall below the two-row lane
+  support rule and come back lane-ambiguous (`-1`). Measured: `(0,1,2,-1)` on a 4-column
+  decimal-aligned table. **This is not a wrong-direction defect** — a faithful transcription
+  still scores 100%, and a column swap is still detected (83.3% vs 100%), just less sharply
+  than under right alignment (75%). Accepted rather than fixed; decimal alignment is common
+  in financial tables, so revisit if the corpus re-score shows it mattering.
 - **A1 finding → now TICKET-B5** (own ticket, sequenced after B4). `native_rows_from_page`
   never reconstructs a label split across two visual bands: whichever band carries the
   values keeps only its own text, the other line is dropped, and a perfect transcription
