@@ -250,25 +250,33 @@ def _cluster_by_anchor(
 def _gap_cut_threshold(gaps: list[float]) -> float:
     """The gap size above which two anchors belong to different lanes.
 
-    Sort the (positive) gaps and find the largest ratio between consecutive
-    entries - the elbow between "within-lane spread" and "between-lane spacing".
-    The boundary returned is the **midpoint** between those two magnitudes, not
-    either endpoint: a regular grid (every row spaced by the identical gap, e.g.
-    two dense columns 60pt apart) has only one *distinct* positive gap value, so
-    that single value both is, and is being compared against, the boundary -
-    returning it verbatim would make the caller's strict ``>`` never fire and
-    every column collapse into one lane. With no positive gaps at all there is
-    nothing to cut; the implied "within-lane" floor is 0.
+    Sort the **distinct** positive gaps and find the largest ratio between
+    consecutive entries - the elbow between "within-lane spread" (digit-count
+    noise inside one column, plus the exact-zero gap between tokens that share
+    an anchor outright) and "between-lane spacing". The boundary returned is
+    the **midpoint** between those two magnitudes, not either endpoint.
+
+    Deduplication is what makes a regular grid work. A dense column of
+    same-width numbers repeats one between-lane gap verbatim (e.g. four
+    50pt-spaced columns leave the *distinct* positive gap list ``[50]``, not
+    a single-element list only when there happens to be one column pair to
+    begin with) - without deduplication that value's *count* would drown out
+    the ratio search entirely: every consecutive pair in the raw list reads
+    ``50/50 == 1``, there is no jump anywhere, and the caller's strict ``>``
+    then never fires, collapsing every column into one lane. A single
+    *distinct* positive value has nothing to contrast against but the 0
+    floor implied by tokens that share an anchor exactly, so it is cut at its
+    own midpoint - the pre-existing ``len(positive) == 1`` rule, now reached
+    whenever there is one lane boundary rather than only when there is
+    literally one raw gap. With no positive gaps at all there is nothing to
+    cut; the implied "within-lane" floor is 0.
     """
-    positive = sorted(g for g in gaps if g > 0)
+    positive = sorted({g for g in gaps if g > 0})
     if not positive:
         return 0.0
     if len(positive) == 1:
         return positive[0] / 2
-    ratios = [
-        positive[i + 1] / positive[i] if positive[i] > 0 else float("inf")
-        for i in range(len(positive) - 1)
-    ]
+    ratios = [positive[i + 1] / positive[i] for i in range(len(positive) - 1)]
     cut_index = ratios.index(max(ratios))
     return (positive[cut_index] + positive[cut_index + 1]) / 2
 

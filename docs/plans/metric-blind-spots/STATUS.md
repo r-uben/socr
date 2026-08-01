@@ -43,7 +43,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | REOPENED — lane splitter collapses regular grids | B1 | 2 |
+| B2 | scoring correctness | DONE — lane splitter fixed for regular grids | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | TODO | B2 | 3 |
@@ -60,6 +60,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B2 | socr-implementer (attempt 1) | REVERTED — `ad649b5`, reverted by `717914d` |
 | B2 | orchestrating session | REVIEWED — REJECT; the ticket seam was wrong, B2+B3 merged |
 | B2 | socr-implementer (attempt 2) | DONE — see `docs/log/2026-08-01_TICKET-B2.md` |
+| B2 | socr-implementer (reopen fix) | DONE — see `docs/log/2026-08-01_TICKET-B2-reopen-fix.md` |
 
 ## Dispatch waves
 
@@ -131,35 +132,26 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
-**B2 attempt 2 (`27aa432`) is REOPENED — the suite is deliberately RED on this branch.**
+**B2's reopened defect is fixed** (`docs/log/2026-08-01_TICKET-B2-reopen-fix.md`). Root cause:
+`_gap_cut_threshold` filtered gaps to `g > 0` but did not **deduplicate** — a regular grid
+repeats one between-lane gap magnitude across every row pair, so the "one distinct value has
+nothing to compare against but 0" special case never triggered on anything wider than 2
+columns. Fix: `sorted({g for g in gaps if g > 0})` (dedup), one line. Full suite green:
+**1388 passed, 2 xfailed** (was 1385 passed / 3 failed / 1 xfailed on the pinned-red gate).
+`uvx ruff@0.16.0 format --check .` clean.
 
-The lane splitter only works when column spacing is *irregular*. Measured directly against
-`native_rows_from_page`:
-
-| geometry | lanes |
-|----------|-------|
-| 4 cols, evenly spaced | `(0,0,0,0)` — all collapse |
-| 3 cols, evenly spaced | `(0,0,0)` — all collapse |
-| 4 cols, uneven | `(0,0,1,1)` — partial |
-| 2 cols | `(0,1)` ✅ |
-
-A faithful transcription of a dense 4-column grid scores **25%** (3/12) — worse than the
-pre-lane positional comparison, which scored regular grids correctly. Regular evenly-spaced
-columns are the canonical financial-table geometry.
-
-**Mechanism:** `_gap_cut_threshold` filters gaps to `g > 0`, but **zero *is* the within-lane
-magnitude** — tokens in one column share an anchor exactly. Discarding zeros destroys the
-elbow the rule depends on. A regular grid leaves `[60,60,60]`, every consecutive ratio is
-`1.0`, the midpoint of two equal values is that value, and the caller's strict `>` never
-fires. The single-distinct-gap case was patched at landing; the all-equal-gaps case was not.
-
-**Why the suite was green at 1384 passed:** every fixture used exactly **two** columns — the
-one width the splitter handles. `test_a_perfect_transcription_of_a_regular_grid_scores_100`
-now parametrises widths 2/3/4/5; 3, 4 and 5 fail. That is the gate.
-
-Everything else in `27aa432` looks sound — lanes plumbing, the alignment map, diagnostics
-fields, and the four new tests — so the fix is scoped to `_assign_lanes`/`_gap_cut_threshold`,
-not a revert.
+**Residual limitation, not gated by any test, carried forward rather than silently
+fixed:** columns with *uneven* spacing (e.g. 50/70/90pt gaps, no digit-width noise) still
+lane-split only partially — `(0,0,1,2)` instead of `(0,1,2,3)` — both before and after this
+fix; it is unchanged by it either direction. The ratio-elbow rule finds one global "largest
+jump" in the sorted gap list, but an uneven grid can have *multiple* legitimate between-lane
+magnitudes with no true noise floor to contrast against, and every attempt to make zero
+participate in the elbow search to catch this case regressed the (working, left-aligned,
+digit-width-noise) battery fixture instead — see the reopen-fix log's "Alternatives tried and
+rejected" for the concrete before/after numbers. Needs a different technique (per-lane
+dispersion across candidate cluster counts, not one global threshold), not a threshold tweak.
+File as a follow-up ticket if uneven-column real-world tables turn out to matter for the
+corpus re-score below.
 
 ### Standing lesson for the rest of this plan
 
