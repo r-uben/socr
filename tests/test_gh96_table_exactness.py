@@ -521,3 +521,37 @@ def test_a_trailing_number_that_is_not_a_footnote_still_distinguishes():
     """The strip is anchored to a preceding letter, so these stay distinct."""
     assert normalize_label("Panel 1") != normalize_label("Panel 2")
     assert normalize_label("Table 3") != normalize_label("Table 4")
+
+
+def test_a_wrapped_label_is_not_merged_with_the_line_above(tmp_path):
+    """Wrapped labels overlap the line above by a descender at tight leading.
+
+    Merging on ANY y-overlap then interleaves the two lines' words by x-sort:
+    "Central government net / debt" became "Central net government debt", the row
+    never matched its ground truth, and five pages of a real document were reported
+    at 86-95% when they were 100%.
+    """
+    path = tmp_path / "wrapped.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    # two label lines at tight leading, then a data row
+    page.insert_text((60.0, 200.0), "Central government net", fontsize=9)
+    page.insert_text((60.0, 209.0), "debt", fontsize=9)
+    for x, v in zip(_VALUE_XS, ["1.0", "2.0", "3.0"]):
+        page.insert_text((x, 209.0), v, fontsize=9)
+    page.insert_text((60.0, 230.0), "Other row", fontsize=9)
+    for x, v in zip(_VALUE_XS, ["4.0", "5.0", "6.0"]):
+        page.insert_text((x, 230.0), v, fontsize=9)
+    page.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    page.draw_line(fitz.Point(50, 245), fitz.Point(470, 245))
+    doc.save(path)
+    doc.close()
+
+    opened = fitz.open(path)
+    rows = native_rows_from_page(opened[0])
+    opened.close()
+
+    labels = [r.label for r in rows]
+    assert not any("net government" in lbl for lbl in labels), (
+        f"words from two lines were interleaved: {labels}"
+    )
