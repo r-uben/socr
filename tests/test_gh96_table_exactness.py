@@ -355,6 +355,35 @@ def test_an_engine_that_emitted_nothing_is_a_real_zero_not_a_ceiling():
     assert report.scorable is True, "empty output is an engine failure, not a ceiling"
 
 
+def test_chart_legend_rows_are_not_scorable(tmp_path):
+    """#123 TICKET-B1: OBR reference page 54 is prose plus two fan charts, no table.
+
+    ``native_rows_from_page`` reads the charts' axis labels and legend as if
+    they were table rows - a cover date ("November" / "2022"), an axis label
+    ("Central forecast" / "4"), a legend entry ("Percentage of GDP" / "2") -
+    each a single label paired with a single number. socr correctly emitted no
+    table, and the page used to score 0.0% against ground truth that was never
+    a grid, silently counting a page with no table as an engine failure.
+    """
+    path = tmp_path / "chart_legend.pdf"
+    opened = _one_row_pdf(
+        path,
+        [
+            ("November", 9.0, [("2022", 9.0)]),
+            ("Central forecast", 9.0, [("4", 9.0)]),
+            ("Percentage of GDP", 9.0, [("2", 9.0)]),
+        ],
+    )
+
+    report = score_page(opened[0], "")
+    opened.close()
+
+    assert report.scorable is False
+    assert report.pct is None
+    assert report.gt_rows == 0, "fabricated rows must not count as usable ground truth"
+    assert "grid" in report.ceiling_note
+
+
 def _one_row_pdf(path, rows):
     """rows = [(label, label_size, [(value, size)])] laid out as a ruled table."""
     doc = fitz.open()

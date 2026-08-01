@@ -26,11 +26,17 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | TODO | — | 1 |
-| B1 | scoring correctness | TODO | — | 1 |
+| B1 | scoring correctness | DONE | — | 1 |
 | B2 | scoring correctness | TODO | B1 | 2 |
 | B3 | scoring correctness | TODO | B2 | 3 |
 | B4 | scoring correctness | TODO | B3 | 4 |
 | C1 | pipeline response | TODO | B4 | 5 |
+
+## Active Agents
+
+| Ticket | Agent | Status |
+|--------|-------|--------|
+| B1 | socr-implementer (claude-sonnet-5) | DONE |
 
 ## Dispatch waves
 

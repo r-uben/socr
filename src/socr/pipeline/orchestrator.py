@@ -1449,21 +1449,20 @@ class UnifiedPipeline:
         Deliberately not "most rows share the modal width": a real +89-point
         recovery on the reference document has only 7 of 17 rows at its modal
         width, and a majority rule would have refused it.
-        """
-        import collections
 
+        The grid predicate itself lives in ``native_rows.rows_establish_grid``,
+        shared with the GH-96 exactness metric's own not-scorable gate (#123
+        TICKET-B1) —
+        one predicate, not two copies drifting apart.
+        """
         from socr.benchmark.table_exactness import score_page
-        from socr.tables.native_rows import native_rows_from_page
+        from socr.tables.native_rows import native_rows_from_page, rows_establish_grid
 
         try:
             gt_rows = native_rows_from_page(page)
         except Exception:
             return False
-        widths = collections.Counter(len(r.values) for r in gt_rows)
-        if not widths:
-            return False
-        modal_width, rows_at_modal = widths.most_common(1)[0]
-        if modal_width < 2 or rows_at_modal < 2:
+        if not rows_establish_grid(gt_rows):
             return False
 
         try:

@@ -40,6 +40,7 @@ from socr.tables.native_rows import (  # noqa: F401  (re-exported for the metric
     _superscript_tokens,
     native_rows_from_page,
     normalize_label,
+    rows_establish_grid,
 )
 from socr.tables.native_verifier import strip_presentation
 
@@ -195,8 +196,26 @@ def score_rows(gt: list[LabeledRow], predicted: list[LabeledRow]) -> ExactnessRe
 
 
 def score_page(page, markdown: str) -> ExactnessReport:
-    """Score a page's emitted markdown against its own native text layer."""
+    """Score a page's emitted markdown against its own native text layer.
+
+    #123 TICKET-B1: the native row parser reads chart axis labels and legends as if they
+    were table rows (OBR reference page 54: prose plus two fan charts, no table,
+    scored 0.0% against five fabricated ground-truth rows). Before scoring,
+    ``gt`` must clear the same GH-113 grid predicate the escalation trigger
+    uses. Below it, this returns with ``gt_rows=0`` and ``cells=0`` — not a
+    fabricated-row count — so a caller thresholding on ``gt_rows`` (as
+    ``escalation_decision`` does) also treats the page as having no usable
+    ground truth, rather than only ``.scorable`` catching it.
+    """
     gt = native_rows_from_page(page)
+    if not rows_establish_grid(gt):
+        return ExactnessReport(
+            ceiling_note=(
+                f"native text layer parsed {len(gt)} row(s) that do not form a "
+                "grid (need at least two value columns shared by at least two "
+                "rows); ground truth does not establish a table, not scorable"
+            )
+        )
     predicted, diag = markdown_rows(markdown)
     report = score_rows(gt, predicted)
     report.orphan_rows = diag.orphan_rows

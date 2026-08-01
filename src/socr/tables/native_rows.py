@@ -11,6 +11,7 @@ parser used by the production pipeline; the benchmark package re-exports it.
 
 from __future__ import annotations
 
+import collections
 import re
 from dataclasses import dataclass
 
@@ -133,6 +134,34 @@ def native_rows_from_page(page) -> list[LabeledRow]:
     for box in boxes:
         rows.extend(_rows_in_region(page, box.bbox))
     return rows
+
+
+def rows_establish_grid(rows: list[LabeledRow]) -> bool:
+    """GH-113: True when *rows* look like a table grid, not prose or chart labels.
+
+    The row parser above will happily read two numeric lines of prose, or a
+    chart's axis labels and legend, as if they were table rows — on the OBR
+    reference document that fabricated rows from a cover date
+    ("November=['2022']"), a fragment of "4 per cent" ("cent=['4']"), and a fan
+    chart's axes and legend (page 54, scored 0.0% against ground truth that was
+    never a table). ``rows`` alone cannot discriminate; the shape can: a grid
+    needs at least two value columns, and at least two rows sharing that width.
+    Both are minimums that follow from what a table is, not tuned cutoffs.
+
+    Deliberately not "most rows share the modal width": a real +89-point
+    recovery on the reference document has only 7 of 17 rows at its modal
+    width, and a majority rule would have refused it.
+
+    Shared by the GH-96 exactness metric (ground truth must be scorable) and the
+    GH-113 escalation trigger (don't pay for a cloud call to compare an empty
+    result against an empty result) — one predicate, not two copies drifting
+    apart.
+    """
+    widths = collections.Counter(len(r.values) for r in rows)
+    if not widths:
+        return False
+    modal_width, rows_at_modal = widths.most_common(1)[0]
+    return modal_width >= 2 and rows_at_modal >= 2
 
 
 def _rows_in_region(page, bbox) -> list[LabeledRow]:

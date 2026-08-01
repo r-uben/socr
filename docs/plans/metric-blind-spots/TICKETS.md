@@ -51,7 +51,7 @@ exits 0 with at least one `xfail` reported, and the xfail's reason names TICKET-
 
 ## Stream B — scoring correctness
 
-### TICKET-B1 — refuse to score a page with no table · TODO · depends-on: none · wave 1
+### TICKET-B1 — refuse to score a page with no table · DONE · depends-on: none · wave 1
 **Problem:** Page 54 of the OBR reference document is prose and two fan charts. socr
 correctly emitted no table; `native_rows_from_page` invented five rows from chart
 legends and axis labels, and the page scored **0.0%**. Reported aggregates therefore
