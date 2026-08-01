@@ -43,7 +43,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 |--------|--------|--------|------------|------|
 | A1 | grade the metric | DONE | — | 1 |
 | B1 | scoring correctness | DONE | — | 1 |
-| B2 | scoring correctness | DONE | B1 | 2 |
+| B2 | scoring correctness | REOPENED — lanes over-split on real pages | B1 | 2 |
 | B3 | — | CLOSED — merged into B2 | — | — |
 | B4 | — | CLOSED — merged into B2 | — | — |
 | B5 | scoring correctness | TODO | B2 | 3 |
@@ -111,10 +111,9 @@ the change did nothing — that diff is the real acceptance test, not the unit s
 
 - **B1 finding 1 (HIGH) → folded into C1.** `ceiling_note` reaches no surface; a
   not-scorable page is invisible rather than loudly wrong.
-- **B1 finding 2 (MEDIUM) → open.** The ticket's headline benefit (engine aggregates
-  stop counting no-table pages as failures) is *not* delivered by B1 alone — there is no
-  aggregate helper in `src/`; corpus scoring lives in
-  `~/data/fiscal-ballast/_experiments/` and has not been re-scored against B1.
+- **B1 finding 2 (MEDIUM) → CLOSED by the corpus re-score.** The headline benefit is
+  confirmed: 17 pages of spurious `0.0%` become not-scorable and the mean over each
+  metric's own scorable set rises 44.3% → 49.1%. See "Next action".
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
 - **B2 limitation (LOW, accepted) — decimal-aligned columns lose lane resolution.** The
   paired-column fix keys on an exact-zero gap magnitude existing under some anchor (left,
@@ -143,147 +142,59 @@ listed as *benign*. Weigh that when judging whether Stream A earned its place.
 
 ## Next action
 
-**B2 is DONE — the paired-column gate is green.** See
-`docs/log/2026-08-01_TICKET-B2-paired-columns-fix.md` for the fix and its verification
-sweep (144 synthetic combinations, plus the full suite and named protected tests).
+**THE CORPUS RE-SCORE WAS RUN. It changes the picture.** B1 is proven; B2's lane
+clustering fails on the real reference document. Method: scored the preserved run's 68
+emitted pages against the source PDF under the pre-B1/B2 modules (loaded from `18b3b64`
+into an isolated process — no checkout) and under current HEAD. No OCR was re-run.
 
-Two changes closed the residual gap, both in `_gap_cut_threshold`/`_assign_lanes`:
+### B1 — proven, keep it
 
-1. A third, left-edge anchor in `_assign_lanes`'s existing dispersion-based
-   anchor-selection step (alongside right/centre), which resolves the battery
-   fixture's digit-width jitter by *anchor choice* rather than by the cut algorithm
-   (left-aligned text has an exactly constant left edge, zero dispersion).
-2. An unconditional zero-floor split in `_gap_cut_threshold`: when an exact-zero gap
-   magnitude is present, the cut isolates it unconditionally rather than running the
-   variance search, so every distinct positive magnitude — however many, as in a
-   paired-year table's within-pair and between-pair gaps — becomes a lane boundary.
+17 pages that scored a spurious `0.0%` are now correctly not-scorable, every one with a
+tiny fabricated ground truth (0/1, 0/2, 0/14 cells). Mean over each metric's own scorable
+set: **44.3% → 49.1%**. That is the understatement TICKET-B1 claimed, measured at last;
+the review's "finding 2 — headline benefit undelivered" is now closed.
 
-This is still parameter-free (no tuned constant; the only literal compared against is
-`0.0`, the exact float identity two same-lane anchors share by construction) but is
-narrower than a general N-class Otsu extension — see the log for the precise, checkable
-statement of how the class count is selected and the one residual scope limit it does
-not cover (no fixture in the required sweep exercises it).
+### B2 — lane clustering over-splits on real geometry
 
-`~/venvs/socr/bin/pytest tests/ -q` — 1395 passed, 2 xfailed, 0 failed (up from 1392
-passed / 3 failed / 2 xfailed before this fix). `uvx ruff@0.16.0 format --check .` clean.
+**16 of the 18 scorable pages** produce 2×–5× more lanes than the widest row has values:
 
-Next: **B5** (wrapped-label row reconstruction) and **C1** (pipeline response to
-`ceiling_note`), both depending on B2 — now unblocked, either order, same shared
-working tree. The corpus re-score against `~/data/fiscal-ballast/_experiments/` — the
-plan's stated "real acceptance test" — is still outstanding and remains the
-orchestrator's job.
+| page | lanes | widest row | ratio | pct |
+|------|-------|-----------|-------|-----|
+| 55 | 30 | 6 | 5.0× | 13.6% |
+| 63 | 33 | 7 | 4.7× | 42.9% |
+| 13 | 24 | 6 | 4.0× | 69.6% |
+| 46 | 21 | 7 | 3.0× | 38.7% |
 
-### Standing lesson for the rest of this plan
+Nine pages fell from 100% to under 55%, and they are exactly the over-split ones. Real
+ground truth looks like `lanes=(0, 1, 4, 8, 12, 16)` for a **six**-value row.
 
-Five design-level failures in one ticket (B2/B3 seam, B4 seam, regular-grid collapse, float
-sensitivity, paired-column collapse). Every one shares a root: **a rule that assumes the data
-has exactly the structure the rule can represent** — one seam, one distinguished gap, two
-groups. Prefer formulations that *select* their own structure from an objective. And note
-that every one was found by a probe outside the existing fixtures, never by the suite:
-**fixtures encode the geometry their author already thought of.** Sweep offsets, widths,
-spacings and alignment before believing a green run.
+**This is not "column shifts becoming visible" — the ground truth itself is wrong**, so
+faithful OCR is penalised. Same wrong-direction family as the original seven defects, at
+larger scale.
 
-<details>
-<summary>Superseded — the paired-column-reopened writeup this replaces</summary>
+**Cause — the disclosed scope limit, met in the wild.** The paired-column fix keys on an
+exact-zero gap existing under some anchor; when it does, *every* positive magnitude
+becomes a lane boundary. Real pages have both: some tokens coincidentally share an edge
+(so the branch fires) **and** pervasive sub-point jitter (so every jitter gap splits a
+lane). The fix log flagged exactly this shape and noted no fixture exercised it. The
+reference document does.
 
-**The Otsu cut (`e50574d`) is ACCEPTED — a large, real improvement — but B2 is REOPENED for
-paired columns. The suite is deliberately RED on that one gate.**
+### The gate that would have caught all of this
 
-The ratio-jump rule was replaced with an Otsu/Jenks-style 1-D partition
-(`docs/log/2026-08-01_TICKET-B2-otsu-cut.md`): every candidate cut is scored by
-between-group variance over the whole weighted gap list, not by the ratio between one
-distinguished pair of magnitudes.
+`tests/test_corpus_rescore_gate.py` now scores the preserved run against a committed
+baseline (`tests/data/obr_efo_2022_11_baseline.json`). Monotone-improvement, deliberately
+not an absolute rule — there is no defensible constant for "how many lanes a table may
+have", so instead **lanes must not increase and pct must not decrease**. Re-record the
+baseline downward as fixes land, never upward.
 
-Verified independently, well beyond the fixtures:
+It **skips when the preserved run is absent**, which CI is. That is a real limitation,
+stated rather than hidden: this gate protects local work — which is where every one of
+these six regressions was actually caught.
 
-| sweep | result |
-|-------|--------|
-| even spacing × widths 2-6 × fractional offsets 207.3-268.9 × spacings 42-73pt | **164/164 clean** |
-| right-aligned columns with varying digit counts (the real financial case) | clean |
-| font sizes 6/7/9/11/14 | clean |
-| moderately uneven spacing (50/70/90, 40/90/55, 80/45/95, 50/52/54) | clean — fixed |
-| **paired columns** (35pt within a pair, 105pt between pairs) | **`(0,0,1,1)` → 50%** |
+### Standing lesson
 
-Offset sensitivity and the regular-grid collapse are genuinely gone. Otsu weights by *how
-much evidence* supports each magnitude, so float noise (support of 1, near-identical means)
-can no longer win the elbow.
-
-**The residual defect is structural and narrower.** A single Otsu cut assumes **two** groups
-— within-lane noise and between-lane spacing. Paired-year tables have **three** magnitudes:
-~0 within a lane, a tight gap within a pair, a wide gap between pairs. One cut must place the
-tight within-pair gap somewhere, and it lands with the noise, so each pair collapses into one
-lane.
-
-This is the shape the ticket itself cites — *"14 vs 6 on OBR page 53, because paired-year
-headers and stub columns collapse."* It matters beyond the 50% score: when two real columns
-share one lane the ground truth can no longer tell them apart, so **a column shift between
-paired columns is invisible again** — the defect B2 exists to remove.
-
-**Not a regression** — every previous rule failed here too. It was simply never measured.
-
-**Fix:** extend the single cut to **multi-class** — choose the *number* of lane groups by the
-same variance objective rather than assuming two. Still parameter-free: the class count is
-selected by an objective computed from the data, not fixed by a constant.
-
-**Gate pinned (RED):** `test_paired_columns_do_not_collapse_into_one_lane` — 2 pairs at
-35/105pt, 2 pairs at 40/120pt, 3 pairs at 35/85pt.
-
-</details>
-
-
-<details>
-<summary>Superseded — the reopened-again writeup this replaces</summary>
-
-**B2 is REOPENED AGAIN — the suite is deliberately RED. The ratio-jump splitting rule is
-structurally unsound, not buggy.**
-
-The dedup fix (`ca90cd4`) made regular grids work *at one page offset*. Shifting the same
-table 20pt left breaks it:
-
-| fixture | distinct x1 gaps | lanes | faithful |
-|---------|------------------|-------|----------|
-| 5 cols @50pt from **x=250** | `[0.0, 50.0]` | `(0,1,2,3,4)` | 100% |
-| 5 cols @50pt from **x=230** | `[0.0, 50.0, **50.000015**]` | `(0,1,1,1,1)` | 40% |
-
-That third magnitude is floating-point noise from glyph rendering. With zeros filtered out
-the distinct list is `{50.0, 50.000015}`, so the "largest ratio jump" is the meaningless
-`50.0 → 50.000015` (ratio 1.0000003), the threshold lands at `50.0000075`, and only that one
-noisy gap exceeds it. **Dedup made lane assignment depend on exact float equality of measured
-geometry.** The existing tests pass because their offset happens to render cleanly; real PDFs
-carry this noise constantly.
-
-**Both failed fixes bracket the real problem.** There are **two** noise floors — exact zero
-(tokens sharing an anchor) and small non-zero jitter (digit widths, float error). Including
-zero in the elbow search fixes regular grids but breaks the digit-noise fixture, because a
-transition away from exact zero is always an infinite ratio and always wins. Excluding zero
-fixes the digit-noise fixture but breaks regular grids. *"Largest ratio jump between
-consecutive distinct magnitudes"* cannot separate either floor from real column spacing —
-**the rule is the wrong formulation, and no threshold tweak rescues it.**
-
-**Replacement (decided 2026-08-01):** choose the cut by **maximising between-group versus
-within-group separation over all candidate cuts** (Jenks/Otsu-style 1-D partitioning), rather
-than picking one ratio jump. Still parameter-free — the cut is selected by an objective
-computed from the data, not by a constant — and it is robust to both noise floors because a
-noise magnitude and a spacing magnitude land in different groups regardless of their ratio.
-This should also fix the uneven-spacing case (`(0,0,1,2)` instead of `(0,1,2,3)`), which the
-ratio rule never handled either.
-
-**Gates now pinned (both RED):**
-- `test_a_perfect_transcription_of_a_regular_grid_scores_100` — widths 2/3/4/5
-- `test_lane_assignment_is_invariant_to_page_offset` — same grid at x=230/240/250/260;
-  230 and 240 fail
-
-### Standing lesson for the rest of this plan
-
-This is the **fourth** design-level failure in one ticket (B2/B3 seam, B4 seam, the split
-rule collapsing regular grids, the split rule's float sensitivity). All four share one root:
-**"no magic thresholds" keeps producing parameter-free heuristics derived from *variation in
-the data*, applied to inputs whose defining property is regularity.** A regular grid has no
-variation to derive from, and measured geometry always carries noise. Derive from *structure*
-or from an *objective over candidate partitions* — never from a single distinguished gap in a
-sorted list. Every fixture must cover width ≥ 3 **and** vary the page offset.
-either order, same shared working tree. The before/after corpus re-score against
-`~/data/fiscal-ballast/_experiments/` — the plan's stated "real acceptance test" — is
-still outstanding and is the orchestrator's job, not an implementer's.
-
-</details>
+Six design-level failures in one ticket. The through-line: **synthetic fixtures encode
+the geometry their author already thought of.** 144 synthetic combinations passed while
+the real document failed 16/18. Validate against the preserved corpus before believing
+any lane-geometry change, and never against a fresh OCR run — local-model variance
+exceeds the effect.
