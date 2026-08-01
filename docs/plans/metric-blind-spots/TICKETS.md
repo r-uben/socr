@@ -317,6 +317,39 @@ even when its exactness is higher; the new kind is in `TABLE_DISTRUST_KINDS`; a
 not-scorable page (B1's grid gate) is visible on the document-level surface rather than
 silently absent; and `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
+### TICKET-C2 — surface content loss on local-only runs · TODO · depends-on: C1 · follow-up
+**Found reviewing C1, 2026-08-02.** C1 closes B1 review finding 1 **only for cloud-enabled
+runs.** The surfacing lives in `_table_page_needs_escalation`, and the call chain is:
+
+```
+_escalation_profile = _pick_escalation_provider(available)   # None when no non-local provider
+    -> if _escalation_profile is not None:  _escalate_table_page(...)
+        -> if not _table_page_needs_escalation(...): return    # <- the only surfacing point
+```
+
+`_pick_escalation_provider` returns `None` when `[p for p in available if p.tier != TIER_LOCAL
+and p.supports_per_page]` is empty. So on a **local-only run** — no cloud provider configured,
+`--strict-local`, or a cost cap suppressing the lane — `_table_page_needs_escalation` never
+runs and **not-scorable pages and unexplained lanes are as invisible as they were before C1.**
+
+That is not an edge case: socr is local-first by design (CLAUDE.md — "local qwen VLM first,
+cloud only on a judge signal"), so local-only is a normal, arguably default configuration. The
+corpus re-score found **17 of 68 pages** not-scorable; on a local-only run every one of them
+still ships with no trace, which is exactly what the no-silent-content-loss rule forbids.
+
+**Do:** Emit the `table_not_scorable` and `table_unexplained_lanes` audit events from a point
+in the page loop that does not depend on `_escalation_profile`.
+
+**The real decision this ticket must settle — do not skip it.** Surfacing on every run means
+scoring every table page against its native layer on every run, including local-only runs that
+currently do none of that work. Measure that cost on the reference document before choosing:
+always-on, or on-by-default-with-an-opt-out. This is a cost/visibility trade, not a bug fix,
+and it is why C1 did not simply do it.
+**Files:** `src/socr/pipeline/orchestrator.py`, `tests/test_gh95_tables_trust.py`
+**Done when:** a test asserts a not-scorable page reaches `tables_trust` on a run with **no
+non-local provider available**; the added per-page cost is measured and recorded; and
+`~/venvs/socr/bin/pytest tests/ -q` exits 0.
+
 ## Explicitly out of scope
 
 - **Header-semantic column identity.** Reading spanning/multi-row headers from the

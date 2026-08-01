@@ -111,97 +111,74 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   so tests in a clone still exercise the main tree's source.
 
 ## Findings carried forward
+## Findings carried forward
 
-- **B1 finding 1 (HIGH) → folded into C1.** `ceiling_note` reaches no surface; a
-  not-scorable page is invisible rather than loudly wrong.
-- **B1 finding 2 (MEDIUM) → CLOSED by the corpus re-score.** The headline benefit is
-  confirmed: 17 pages of spurious `0.0%` become not-scorable and the mean over each
-  metric's own scorable set rises 44.3% → 49.1%. See "Next action".
+- **B1 finding 1 (HIGH) → PARTLY closed by C1; remainder is TICKET-C2.** `ceiling_note` now
+  reaches `tables_trust` (`untrusted_pages`, `counts_by_kind`, per-page `reasons`) via the new
+  `table_not_scorable` kind — **but only on cloud-enabled runs.** The surfacing point sits
+  behind `_pick_escalation_provider`, which returns `None` when no non-local provider is
+  available, so a local-only run still ships all 17 not-scorable pages with no trace. socr is
+  local-first by design, so this is a normal configuration. See TICKET-C2.
+- **B1 finding 2 (MEDIUM) → CLOSED by the corpus re-score.** 17 pages of spurious `0.0%`
+  become not-scorable; mean over each metric's own scorable set rises 44.3% → 49.1%.
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
-- **B5 verified, but its corpus value is UNPROVEN.** The fix is real — the original
-  reproducer now yields `'Central government net debt'` at 6pt, 9pt **and** 12pt gaps, where
-  before it gave `'debt'` (label dropped) or `'Central debt government net'` (scrambled).
-  But diffing ground-truth labels across all 68 corpus pages pre/post B5: only **7 pages
-  change, and every one is a chart/figure page already in B1's not-scorable set** (p19, p23,
-  p29, p33, p34, p50 — axis-fragment garbage before and after). **No scorable table page
-  moved**, which is why the corpus baseline is byte-identical. The OBR document's real tables
-  do not contain band-split row labels. The defect was genuine and is fixed; whether it
-  matters on any real corpus is still unknown.
+- **B5 verified, corpus value UNPROVEN.** The reproducer now yields
+  `'Central government net debt'` at 6pt, 9pt and 12pt, where before it gave `'debt'` or the
+  scrambled `'Central debt government net'`. But diffing ground-truth labels across all 68
+  corpus pages, only 7 change and **every one is a chart page already in B1's not-scorable
+  set** — no scorable table page moved. The OBR document's real tables carry no band-split
+  labels. Defect genuine and fixed; whether it matters on any real corpus is unknown.
 - **B2 limitation (MEDIUM, accepted) — sparse tables where NO row is complete under-split.**
-  The widest-row cap (`8dae02c`) bounds lane count by the widest row's value count. That is
-  presented as structural but is really an assumption: **it holds only if at least one row is
-  complete.** Reproducer — 4 real columns, 4 rows, each omitting a different one, so the
-  widest row has 3 values:
-
-  ```
-  Alpha  values=('1.1','1.2','1.3')  lanes=(0, 0, 1)   <- columns 0 and 1 merged
-  distinct lanes = 3 (truth = 4);  faithful transcription = 75%, not 100%
-  ```
-
-  This *is* the wrong direction (faithful OCR penalised), so it is accepted on evidence, not
-  on principle: it never bites on the reference corpus, because real financial tables carry a
-  total row. It replaced a far worse over-split — mean pct went 49.6% → **84.5%**, 12 of 18
-  pages at 100%, zero pages over-splitting. Revisit if a corpus without complete rows appears.
-  A related unproven risk the fix log flags: duplicated page content could manufacture row
+  The widest-row cap bounds lane count by the widest row's value count, which is presented as
+  structural but really assumes at least one row is complete. Reproducer: 4 real columns, each
+  row omitting a different one → columns 0 and 1 merge, faithful transcription scores 75%.
+  Wrong direction, accepted **on evidence not principle** — it does not bite on the reference
+  corpus (financial tables carry total rows) and it replaced a far worse over-split (mean
+  49.6% → 84.5%). A related unproven risk: duplicated page content could manufacture row
   support without raising the widest row's value count.
-- **B2 limitation (LOW, accepted) — decimal-aligned columns lose lane resolution.** The
-  paired-column fix keys on an exact-zero gap magnitude existing under some anchor (left,
-  right or centre). Decimal-aligned numbers with varying integer widths have no exact-zero
-  floor under *any* of the three, so the rightmost column can fall below the two-row lane
-  support rule and come back lane-ambiguous (`-1`). Measured: `(0,1,2,-1)` on a 4-column
-  decimal-aligned table. **This is not a wrong-direction defect** — a faithful transcription
-  still scores 100%, and a column swap is still detected (83.3% vs 100%), just less sharply
-  than under right alignment (75%). Accepted rather than fixed; decimal alignment is common
+- **B2 limitation (LOW, accepted) — decimal-aligned columns lose lane resolution.** No
+  exact-zero gap exists under any anchor, so the rightmost column can come back
+  lane-ambiguous (`(0,1,2,-1)`). Not the wrong direction: faithful still 100%, shifts still
+  caught (83.3% vs 100%), just less sharply than right alignment's 75%.
+- **Unseparated: whether p46 (74.7%), p55 (50.0%), p24 and p53 (0.0%) are qwen failures or
+  residual metric defects.** p53 is the page the plan cites as carrying a real column shift,
+  so 0% there may be the metric working. Rendered comparisons exist in
+  `~/Desktop/socr-qwen-failures/` and `~/Desktop/socr-engine-compare/`. **Until this is
+  separated, 84.5% cannot be attributed to either the metric or the engine.**
+
+## Note on Stream A
+
+The corruption battery found the eighth defect (B5) on its first run, in a transform the
+ticket had listed as *benign* — the first defect in this plan caught before it produced
+published numbers rather than after. It then caught two more during B5's own implementation.
+
 ## Next action
 
-**B2 is DONE.** The corpus re-score — the plan's stated real acceptance test — has been run
-and both tickets are now validated against real pages rather than fixtures.
+**All five tickets are DONE** (A1, B1, B2, B5, C1). Branch `feat/123-metric-blind-spots`,
+1405 passed / 1 xfailed, lint clean, **not pushed, no PR opened.**
 
-### Measured outcome
+Remaining, in order of value:
 
-| | before B1/B2 | after |
-|---|---|---|
-| pages scoring a spurious `0.0%` | 17 | 0 (correctly not-scorable) |
-| mean over each metric's own scorable set | 44.3% | 49.1% (B1 alone) |
-| mean pct after the lane fixes | 49.6% (over-split state) | **84.5%** |
-| pages at 100% | — | **12 of 18** |
-| pages over-splitting lanes | 16 of 18 | **0** |
+1. **TICKET-C2** — surface content loss on local-only runs. B1 finding 1 is only half-closed;
+   17 pages still ship silently when no cloud provider is configured. Carries a real
+   cost/visibility decision, spelled out in the ticket.
+2. **Separate engine failure from metric defect** on p46/p55/p24/p53, using the rendered
+   comparisons already on the Desktop. Without it we do not know whether 84.5% is the
+   metric's ceiling or qwen's.
+3. Open the PR when the above are settled.
 
-Method: scored the preserved run's 68 emitted pages against the source PDF under the
-pre-B1/B2 modules (loaded from `18b3b64` into an isolated process — no checkout) and under
-HEAD. No OCR was re-run; local-model variance exceeds the effect.
+## Standing lessons from this plan
 
-### Still below 100%, cause not yet separated
-
-p39 (98.6), p45 (98.0), p46 (74.7), p55 (50.0), p24 and p53 (0.0). **Unknown whether these
-are genuine qwen failures or residual metric defects** — p53 is the page the plan cites as
-carrying a real column shift, so 0% there may be the metric working. Rendered comparisons
-already exist in `~/Desktop/socr-qwen-failures/` and `~/Desktop/socr-engine-compare/`.
-Until this is separated, **84.5% is not known to be the metric's ceiling or the engine's.**
-
-### Remaining work
-
-- Optionally: separate engine failure from metric defect on the six pages above.
-- **C1's known gap:** visibility (`table_not_scorable` / `table_unexplained_lanes`)
-  is scoped to pages that reach `_table_page_needs_escalation` — `has_tables=True`
-  AND an escalation profile configured (`escalate_ambiguous_tables`). A run with
-  escalation disabled still ships a not-scorable/unexplained-lane page without a
-  trace. Inherent to `score_page`'s two documented call sites (both
-  escalation-only); out of C1's stated file scope. See
-  `docs/log/2026-08-01_TICKET-C1.md`.
-
-## Plan status
-
-**All tickets DONE.** A1, B1, B2 (incl. former B3/B4), B5, C1. See
-`docs/log/2026-08-01_TICKET-C1.md` for the last one, including confirmation the
-corpus gate stayed score-neutral (`3 passed`, unchanged) and full suite:
-1405 passed, 1 xfailed.
-
-
-### Standing lesson
-
-Seven attempts on one ticket, six of them design-level failures, every one caught by a probe
-outside the fixtures. **144 synthetic combinations passed while the real document failed 16
-of 18 pages.** The corpus gate (`tests/test_corpus_rescore_gate.py`) exists so that cannot
-recur silently; it skips in CI, so it protects local work only. Validate lane geometry
-against the preserved corpus before believing any change — and never against a fresh OCR run.
+- **Synthetic fixtures encode the geometry their author already thought of.** 144 synthetic
+  combinations passed while the real document failed 16 of 18 pages. `tests/test_corpus_rescore_gate.py`
+  exists so that cannot recur silently — but it **skips in CI**, so it protects local work only.
+- **Seven attempts on TICKET-B2, six of them design-level failures.** Every one shared a root:
+  a rule that assumes the data has exactly the structure the rule can represent — one seam,
+  one distinguished gap, two groups, a clean zero floor, one complete row. Prefer formulations
+  that select their own structure, and probe real pages before believing a green run.
+- **Never validate against a fresh OCR run.** Local-model variance exceeds every effect here.
+  Re-score the preserved runs in `~/data/fiscal-ballast/_experiments/`; to get a genuine
+  "before", load old modules from git into an isolated process rather than checking out.
+- **Never `git checkout` / `switch` / `stash` / `reset` while agents are running** — one
+  shared working tree. A `git clone` is not isolation either: the editable install resolves
+  `import socr` to the main checkout.
