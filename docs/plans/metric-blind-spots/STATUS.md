@@ -120,9 +120,14 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   kind, on **every run**, not only cloud-enabled ones. C1 wired the emitter to
   `_table_page_needs_escalation`; C2 added a call site (`_surface_table_scoring`) reachable
   with no escalation profile, so a local-only run (socr's default configuration) no longer
-  ships all 17 not-scorable pages with no trace. Measured added cost: ~9.3s total / ~137ms
-  mean per page on the 68-page reference document — negligible against per-page VLM
-  inference, so surfacing is always-on with no opt-out. See `docs/log/2026-08-02_TICKET-C2.md`.
+  ships all 17 not-scorable pages with no trace. Cost: ~137ms mean per page.
+  **The rationale originally recorded for that cost was wrong** and was corrected in
+  `e6a6242`: it compared against per-page VLM inference, but the reference document's run log
+  records **65 of 68 pages as born-digital trusted native text**, which never run a VLM — so
+  the cost was close to pure addition on exactly the pages that were previously nearly free.
+  Now gated on `_page_has_tables`: prose pages skip the scoring entirely, chart pages still
+  reach it (`has_tables` is True there, which is why B1 existed) and still surface as
+  not-scorable. See `docs/log/2026-08-02_TICKET-C2.md`.
 - **B1 finding 2 (MEDIUM) → CLOSED by the corpus re-score.** 17 pages of spurious `0.0%`
   become not-scorable; mean over each metric's own scorable set rises 44.3% → 49.1%.
 - Findings 3 and 4 (LOW) in `docs/log/2026-08-01_TICKET-B1-review.md`.
