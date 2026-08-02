@@ -361,6 +361,87 @@ mean/page, ≈692ms worst case — negligible against the per-page VLM inference
 loop already pays for, so the decision is **always-on, no opt-out**. Corpus gate
 unchanged (3 passed, score-neutral); full suite 1406 passed, 1 xfailed; lint clean.
 
+### TICKET-B6 — stop absorbing a non-numeric data column into the row label · TODO · depends-on: B2 · follow-up
+**Found by the engine-vs-metric separation on the corpus, 2026-08-02. Highest-value item
+left in this plan: it zeroes an entire page class for *every* engine.**
+
+**Problem:** OBR page 53 (printed p.49, Table 7) has a literal **Met / Not Met** column. socr
+emits it correctly as its own column:
+
+```
+| March 2022 forecast | Met | -1.0 | 1.0 | 28.1 |
+```
+
+`native_rows_from_page`'s label boundary is the **last non-numeric word**, so it swallows the
+`Met` into the label:
+
+```
+label='March 2022 forecast Met'   values=('-1.0', '1.0', '28.1')
+```
+
+`'March 2022 forecast Met'` never matches the emitted `'March 2022 forecast'`. **Normalized
+label overlap on that page: 0 of 6.** All 17 rows fail to match, and the page scores **0.0%**.
+
+**It is not engine-specific — that is the tell.** The preserved comparison run records
+`agy 0.0%` and `gemini-ocr 0.0%` on the same page. Three independent engines scoring zero on
+a page they transcribed well is the metric, not the OCR.
+
+This behaviour is already in STATUS.md's landmine list ("tables with non-numeric data columns
+are currently absorbed into the label by the last-non-numeric-word rule") but was never
+connected to a score. It is worth a page of the reference document, and the whole class of
+target/status/flag columns that financial tables routinely carry.
+
+**Do:** Let the label boundary end before a **column** of non-numeric values, rather than
+before the last non-numeric word in the row. Signal available without a new heuristic: B2's
+lane machinery already establishes columns from token geometry with ≥2-row support — a
+non-numeric column has consistent x-position across rows, whereas a numeral or word inside a
+prose label does not.
+
+**Landmine — read before starting.** A previous attempt died by clustering numerics *to find*
+the boundary; a numeral inside a label ("Growth Plan after **17** October reversals") formed
+its own cluster and dragged the boundary left. Keep boundary-finding and lane clustering
+decoupled — that decoupling is what made B2 survivable. There is a regression fixture for the
+in-label numeral; it must keep passing.
+**Files:** `src/socr/tables/native_rows.py`, `tests/test_metric_corruption_battery.py`
+**Done when:** a test builds a table with a literal `Met`/`Not Met` column and asserts the
+label excludes it and the row matches an emitted table that keeps it as a column; the in-label
+numeral fixture still passes; the corpus gate improves on p53 and regresses nowhere; and
+`~/venvs/socr/bin/pytest tests/ -q` exits 0.
+
+### TICKET-B7 — qwen drops repeated values within a row · TODO · depends-on: none · follow-up
+**Found by the engine-vs-metric separation, 2026-08-02. This one is a real OCR defect, not a
+metric defect — the first in this plan.**
+
+**Problem:** On OBR page 53, the printed row is
+
+```
+March 2022 forecast   Met   1.3   1.3   36.2   36.2
+```
+
+— four numbers, because *£bn Forecast* and *£bn Margin* happen to be equal. socr emitted:
+
+```
+| March 2022 forecast | Met | 1.3 | 1.3 | 36.2 |
+```
+
+The repeated `36.2` is **gone**. Same on the two rows below it: `-26.3` and `-8.7` each appear
+twice in print and once in the output. Verified by occurrence count against the rendered page,
+not inferred from the parser.
+
+**This is silent content loss on a citation corpus** — the repo's own no-silent-content-loss
+rule — and it is invisible to a presence check, which is how the first pass of this
+investigation missed it: every *distinct* value is present, only the duplicate is dropped.
+
+**Do:** Diagnose first, then decide. Is the model deduplicating, or is a downstream
+markdown/table normalisation step collapsing adjacent identical cells? Check the raw model
+output in the preserved run's `cache/` before assuming it is the model. **Do not tune a
+prompt against one page** — confirm the mechanism.
+**Files:** to be determined by the diagnosis; likely `src/socr/tables/` or the emission path
+**Done when:** the mechanism is identified and stated; if it is a post-processing collapse it
+is fixed with a test; if it is genuinely the model, that is recorded with evidence and a
+decision on whether it is addressable. Any fix must not re-run OCR to validate — local-model
+variance exceeds the effect.
+
 ## Explicitly out of scope
 
 - **Header-semantic column identity.** Reading spanning/multi-row headers from the

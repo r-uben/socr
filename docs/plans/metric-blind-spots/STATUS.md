@@ -49,6 +49,8 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | B5 | scoring correctness | DONE | B2 | 3 |
 | C1 | pipeline response | DONE | B2 | 3 |
 | C2 | pipeline response | DONE | C1 | follow-up |
+| B6 | scoring correctness | TODO | B2 | follow-up |
+| B7 | engine defect | TODO | — | follow-up |
 
 ## Active Agents
 
@@ -113,7 +115,6 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   so tests in a clone still exercise the main tree's source.
 
 ## Findings carried forward
-## Findings carried forward
 
 - **B1 finding 1 (HIGH) → CLOSED by C1 + C2.** `ceiling_note` now reaches `tables_trust`
   (`untrusted_pages`, `counts_by_kind`, per-page `reasons`) via the new `table_not_scorable`
@@ -149,11 +150,21 @@ the change did nothing — that diff is the real acceptance test, not the unit s
   exact-zero gap exists under any anchor, so the rightmost column can come back
   lane-ambiguous (`(0,1,2,-1)`). Not the wrong direction: faithful still 100%, shifts still
   caught (83.3% vs 100%), just less sharply than right alignment's 75%.
-- **Unseparated: whether p46 (74.7%), p55 (50.0%), p24 and p53 (0.0%) are qwen failures or
-  residual metric defects.** p53 is the page the plan cites as carrying a real column shift,
-  so 0% there may be the metric working. Rendered comparisons exist in
-  `~/Desktop/socr-qwen-failures/` and `~/Desktop/socr-engine-compare/`. **Until this is
-  separated, 84.5% cannot be attributed to either the metric or the engine.**
+- **SEPARATED, 2026-08-02 — the residual is mostly the METRIC, plus one real engine defect.**
+  Compared emitted markdown against the native layer and against a render of the printed page:
+  - **p53 (0.0%) — metric.** The printed table has a literal `Met`/`Not Met` column; socr emits
+    it correctly as a column, and the last-non-numeric-word rule swallows it into the row
+    label, so 0 of 6 labels match and all 17 rows fail. `agy` and `gemini-ocr` also score
+    **0.0%** on this page — three engines failing identically is the scorer. → **TICKET-B6.**
+  - **p53 also carries a real engine defect.** The printed row is `1.3 1.3 36.2 36.2`; socr
+    emitted three numbers. `36.2`, `-26.3` and `-8.7` each appear twice in print and once in
+    the output — repeated values silently dropped. Invisible to a presence check, which is how
+    the first pass missed it. → **TICKET-B7.**
+  - **p46 (74.7%) and p55 (50.0%) — metric.** Every ground-truth value is present in the
+    emitted markdown and rows match; the loss is in alignment/label matching, not extraction.
+  - **p24 (0.0%) — engine.** No table emitted at all. A real zero, correctly measured.
+  So **84.5% is largely the metric's ceiling, not qwen's** — but not purely: real content loss
+  exists underneath it.
 
 ## Note on Stream A
 
