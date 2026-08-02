@@ -1534,10 +1534,17 @@ class UnifiedPipeline:
         same predicate, same single emitter, no second contract.
 
         Measured on the OBR reference document (68 pages, 18 clearing the grid
-        predicate): ``native_rows_from_page`` + ``score_page`` cost ~9.3s total,
-        ~137ms mean per page, worst single page ~540ms — negligible against the
-        per-page VLM inference this loop already pays for, so this runs
-        unconditionally rather than behind an opt-out.
+        predicate): ``native_rows_from_page`` + ``score_page`` cost ~137ms mean
+        per page, worst single page ~540ms. Note the baseline this is weighed
+        against: **65 of those 68 pages are born-digital trusted native text and
+        never run a VLM at all**, so on a document like this the cost is not
+        hidden behind model inference — it is close to pure addition. It is
+        accepted anyway, and kept off an opt-out flag, because the caller gates
+        on ``_page_has_tables``: prose pages skip it entirely, and a page with
+        table-like structure is exactly the page where silently shipping
+        unexplained lanes or an unscorable grid is the failure this exists to
+        prevent. Chart pages still reach it — ``has_tables`` is True there, which
+        is why TICKET-B1 was needed — so the not-scorable surface keeps them.
         """
         try:
             import fitz
@@ -2510,11 +2517,16 @@ class UnifiedPipeline:
                     run_provider,
                     state.handle.path,
                 )
-            elif bo.text:
+            elif bo.text and self._page_has_tables(page_num, ps):
                 # #123 TICKET-C2: no escalation lane this page (no provider, the
                 # lane is degraded, or the lane is off) — still score against the
                 # native layer so not-scorable pages and unexplained lanes surface
                 # on a local-only run instead of shipping with no trace.
+                #
+                # Gated on _page_has_tables so prose pages skip the ~137ms scoring
+                # cost entirely: they have no table to lose. Chart pages still
+                # reach it (has_tables is True there — that is precisely why
+                # TICKET-B1 exists), so they still surface as not-scorable.
                 self._surface_table_scoring(state, page_num, ps, bo)
 
             # GH-36a/36b: per-page equation detect + crop + optional LaTeX
