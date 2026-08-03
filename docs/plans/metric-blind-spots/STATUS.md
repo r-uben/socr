@@ -51,6 +51,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | C2 | pipeline response | DONE | C1 | follow-up |
 | B6 | scoring correctness | TODO | B2 | follow-up |
 | B7 | engine defect | TODO | — | follow-up |
+| B8 | trust surface | TODO | — | follow-up |
 
 ## Active Agents
 
@@ -156,10 +157,17 @@ the change did nothing — that diff is the real acceptance test, not the unit s
     it correctly as a column, and the last-non-numeric-word rule swallows it into the row
     label, so 0 of 6 labels match and all 17 rows fail. `agy` and `gemini-ocr` also score
     **0.0%** on this page — three engines failing identically is the scorer. → **TICKET-B6.**
-  - **p53 also carries a real engine defect.** The printed row is `1.3 1.3 36.2 36.2`; socr
-    emitted three numbers. `36.2`, `-26.3` and `-8.7` each appear twice in print and once in
-    the output — repeated values silently dropped. Invisible to a presence check, which is how
-    the first pass missed it. → **TICKET-B7.**
+  - **p53 also carries a real engine defect — diagnosed 2026-08-03, and the first framing of
+    it was wrong.** It is not "repeated values dropped". The model emitted a header declaring
+    **four** data columns for a table that needs **five** (the `Met`/`Not Met` status column
+    plus four numbers), so `Met` takes the first numeric slot and every fully-populated row
+    pushes its last value off the right edge. Confirmed against the raw model cache
+    (`engine: qwen`, `page_num: 53`) — the loss is present before any socr processing, so it
+    is the model, not post-processing. → **TICKET-B7** (rewritten around the real mechanism).
+  - **The damage was detected and shipped anyway.** The same cached blob records
+    `confidence: 0.0` and `dual-pass flagged: … (+55 more)` — 56 cell disagreements — with
+    `audit_passed: True`. The signal existed and did not gate. → **TICKET-B8**, likely higher
+    value than B7 because it catches the class rather than the instance.
   - **p46 (74.7%) and p55 (50.0%) — metric.** Every ground-truth value is present in the
     emitted markdown and rows match; the loss is in alignment/label matching, not extraction.
   - **p24 (0.0%) — engine.** No table emitted at all. A real zero, correctly measured.

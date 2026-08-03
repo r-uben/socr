@@ -408,39 +408,89 @@ label excludes it and the row matches an emitted table that keeps it as a column
 numeral fixture still passes; the corpus gate improves on p53 and regresses nowhere; and
 `~/venvs/socr/bin/pytest tests/ -q` exits 0.
 
-### TICKET-B7 — qwen drops repeated values within a row · TODO · depends-on: none · follow-up
-**Found by the engine-vs-metric separation, 2026-08-02. This one is a real OCR defect, not a
-metric defect — the first in this plan.**
+### TICKET-B7 — a non-numeric status column costs the row its last value · TODO · depends-on: none · follow-up
+**Diagnosed from the preserved run's raw model cache, 2026-08-03. This is a real OCR defect,
+not a metric defect. It was first written up as "qwen drops repeated values" — that framing
+was wrong and is corrected below; do not go hunting for a dedup bug.**
 
-**Problem:** On OBR page 53, the printed row is
-
-```
-March 2022 forecast   Met   1.3   1.3   36.2   36.2
-```
-
-— four numbers, because *£bn Forecast* and *£bn Margin* happen to be equal. socr emitted:
+**Mechanism.** On OBR page 53 the model emitted this header:
 
 ```
-| March 2022 forecast | Met | 1.3 | 1.3 | 36.2 |
+| | Per cent of GDP |        | £ billion |        |
+| | Forecast        | Margin | Forecast  | Margin |
 ```
 
-The repeated `36.2` is **gone**. Same on the two rows below it: `-26.3` and `-8.7` each appear
-twice in print and once in the output. Verified by occurrence count against the rendered page,
-not inferred from the parser.
+Four data columns. The printed table needs **five**: the literal `Met` / `Not Met` status
+column plus those four numbers. No column was allocated for the status field, so `Met` takes
+the first numeric slot and every fully-populated row pushes its final value off the right
+edge:
 
-**This is silent content loss on a citation corpus** — the repo's own no-silent-content-loss
-rule — and it is invisible to a presence check, which is how the first pass of this
-investigation missed it: every *distinct* value is present, only the duplicate is dropped.
+```
+printed:   March 2022 forecast   Met   1.3   1.3   36.2   36.2
+emitted:   | March 2022 forecast | Met | 1.3 | 1.3 | 36.2 |
+```
 
-**Do:** Diagnose first, then decide. Is the model deduplicating, or is a downstream
-markdown/table normalisation step collapsing adjacent identical cells? Check the raw model
-output in the preserved run's `cache/` before assuming it is the model. **Do not tune a
-prompt against one page** — confirm the mechanism.
-**Files:** to be determined by the diagnosis; likely `src/socr/tables/` or the emission path
-**Done when:** the mechanism is identified and stated; if it is a post-processing collapse it
-is fixed with a test; if it is genuinely the model, that is recorded with evidence and a
-decision on whether it is addressable. Any fix must not re-run OCR to validate — local-model
-variance exceeds the effect.
+`36.2` was not deduplicated — it fell off the end. The same cell is missing from every row
+with a full complement of values, including `| March 2022 forecast | Met | -1.0 | 1.0 | 28.1 |`
+where the repeated-value theory does not apply at all.
+
+**Confirmed as the model, not post-processing.** The raw cached blob
+(`cache/1d/1db22f…json`, `engine: qwen`, `page_num: 53`) already has five columns before any
+socr processing touches it.
+
+**Silent content loss on a citation corpus** — a missing figure with no error and no flag,
+which the repo's own rule ranks as worse than a missing page. A presence check cannot see it:
+every *distinct* value survives.
+
+**Do:**
+- Establish first whether this is general or specific to a status column: build fixtures with
+  a non-numeric column in first, middle and last position and see which lose cells. The
+  mechanism above predicts the loss is about **column-count allocation**, not about the word
+  `Met` — confirm or refute that before changing anything.
+- **Do not tune the prompt against this page.** If the fix is prompt-side it must be justified
+  by the general shape (a table whose data columns are not all numeric), not by one document.
+- Check whether TICKET-B6 interacts: B6 fixes the *ground truth* swallowing the same column.
+  The two are independent bugs about the same table feature, on opposite sides of the
+  comparison. Fixing B6 alone would make this page's score go *up* while the value is still
+  missing — worth knowing before either lands.
+**Files:** to be determined by the diagnosis; likely the table-extraction prompt/handling path
+**Done when:** the mechanism is established as general or status-column-specific with fixture
+evidence; a fix lands with a test that does not depend on this one page; and
+`~/venvs/socr/bin/pytest tests/ -q` exits 0. **Do not re-run OCR to validate** — local-model
+variance exceeds the effect; use the preserved run.
+
+### TICKET-B8 — a table flagged with 56 disagreements and confidence 0.0 still passes · TODO · depends-on: none · follow-up
+**Found alongside B7, 2026-08-03. Likely higher value than B7 itself: it catches the class,
+not the instance.**
+
+**Problem:** The same cached page-53 blob records:
+
+```
+confidence: 0.0
+audit_notes: ["dual-pass flagged: table 0: 'Per cent of GDP' -> '' (+55 more)"]
+audit_passed: True
+```
+
+The dual-pass audit **detected** the damage — 56 cell disagreements, confidence floored at
+zero — and the page shipped anyway. The signal existed and did not gate. B7's content loss
+would have been caught here without knowing anything about status columns.
+
+**Do:** Work out why `audit_passed` is True given that evidence, and what the intended
+relationship is between `confidence`, `audit_notes` and the trust surface. This is a gating
+question, not a threshold-tuning exercise — **do not invent a disagreement cutoff.** Look for
+a threshold-free fact first (e.g. confidence exactly 0.0 alongside a non-empty dual-pass flag
+list is a fact about the data, in the same sense C1's "unexplained lanes > 0" is).
+
+Note the existing surface: `dualpass_flagged` is already in `TABLE_DISTRUST_KINDS`, and
+`_table_page_needs_escalation`'s docstring records that it "fires on every table page in the
+reference document and so cannot discriminate at all" — that measurement is why it was not
+used as an escalation trigger. Any change must not resurrect it as one; the question is
+whether it should nonetheless *surface* distrust when confidence is zero.
+**Files:** likely `src/socr/core/tables_trust.py`, `src/socr/pipeline/orchestrator.py`
+**Done when:** the reason `audit_passed` is True is stated; a decision is recorded on whether
+zero confidence plus a non-empty flag list should surface; if it should, a test asserts page
+53's shape reaches the document-level trust surface; and `~/venvs/socr/bin/pytest tests/ -q`
+exits 0.
 
 ## Explicitly out of scope
 
