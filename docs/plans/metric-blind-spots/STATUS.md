@@ -51,7 +51,7 @@ matters because `escalation_decision` uses the metric as a production accept rul
 | C2 | pipeline response | DONE | C1 | follow-up |
 | B6 | scoring correctness | TODO | B2 | follow-up |
 | B7 | engine defect | TODO | — | follow-up |
-| B8 | trust surface | TODO | — | follow-up |
+| B8 | — | CLOSED — invalid, premise was a misreading | — | — |
 
 ## Active Agents
 
@@ -164,10 +164,13 @@ the change did nothing — that diff is the real acceptance test, not the unit s
     pushes its last value off the right edge. Confirmed against the raw model cache
     (`engine: qwen`, `page_num: 53`) — the loss is present before any socr processing, so it
     is the model, not post-processing. → **TICKET-B7** (rewritten around the real mechanism).
-  - **The damage was detected and shipped anyway.** The same cached blob records
-    `confidence: 0.0` and `dual-pass flagged: … (+55 more)` — 56 cell disagreements — with
-    `audit_passed: True`. The signal existed and did not gate. → **TICKET-B8**, likely higher
-    value than B7 because it catches the class rather than the instance.
+  - **The damage was detected AND surfaced — B8 was filed on a misreading and is closed.**
+    `audit_passed` in a cached page blob is the per-page hallucination check, not the table
+    trust surface. The run's own `tables_trust.json` has page 53 in `untrusted_pages` with
+    three reasons, one of them naming the exact shortfall (`output_cols=5` against
+    `native_lanes=14`) and another the missing values (`19 numeric rows vs 21 native`).
+    The surfacing works. **This also lowers B7's severity**: the loss is real but flagged, not
+    silent, so it is not the no-silent-content-loss violation first claimed.
   - **p46 (74.7%) and p55 (50.0%) — metric.** Every ground-truth value is present in the
     emitted markdown and rows match; the loss is in alignment/label matching, not extraction.
   - **p24 (0.0%) — engine.** No table emitted at all. A real zero, correctly measured.

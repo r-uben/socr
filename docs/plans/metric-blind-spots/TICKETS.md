@@ -438,9 +438,14 @@ where the repeated-value theory does not apply at all.
 (`cache/1d/1db22f…json`, `engine: qwen`, `page_num: 53`) already has five columns before any
 socr processing touches it.
 
-**Silent content loss on a citation corpus** — a missing figure with no error and no flag,
-which the repo's own rule ranks as worse than a missing page. A presence check cannot see it:
-every *distinct* value survives.
+**Content loss, but NOT silent — corrected 2026-08-05.** This was first written up as silent
+loss violating the no-silent-content-loss rule. It is not: the preserved run flags page 53 with
+`value_guard_row_count_warning` ("output has 19 numeric row(s) but native has 21 effective"),
+`native_table_verifier_warn` (`output_cols=5` against `native_lanes=14`) and `dualpass_flagged`,
+and the page is `untrusted` with `patch_eligible: false`. The value is still missing, so this is
+a real defect worth fixing — but it announces itself, which lowers its severity and means it is
+**not** the rule violation the first write-up claimed. A presence check cannot see the loss;
+the trust surface can, and does.
 
 **Do:**
 - Establish first whether this is general or specific to a status column: build fixtures with
@@ -459,38 +464,28 @@ evidence; a fix lands with a test that does not depend on this one page; and
 `~/venvs/socr/bin/pytest tests/ -q` exits 0. **Do not re-run OCR to validate** — local-model
 variance exceeds the effect; use the preserved run.
 
-### TICKET-B8 — a table flagged with 56 disagreements and confidence 0.0 still passes · TODO · depends-on: none · follow-up
-**Found alongside B7, 2026-08-03. Likely higher value than B7 itself: it catches the class,
-not the instance.**
+### TICKET-B8 — CLOSED, INVALID (filed on a misreading, 2026-08-03; withdrawn 2026-08-05)
+The ticket claimed the damage on page 53 "was detected and shipped anyway" because the cached
+blob records `audit_passed: True` alongside `confidence: 0.0` and 56 dual-pass disagreements.
 
-**Problem:** The same cached page-53 blob records:
+**That was wrong.** `audit_passed` is the per-page hallucination/accept check — a different
+mechanism from the table trust surface. Checking the preserved run's own `tables_trust.json`:
 
 ```
-confidence: 0.0
-audit_notes: ["dual-pass flagged: table 0: 'Per cent of GDP' -> '' (+55 more)"]
-audit_passed: True
+untrusted_pages: [22, 25, 35, 37, 39, 41, 43, 45, 46, 53, 56, 59, 60, 61, 62, 64, 65, 66, 67]
+page 53 reasons: dualpass_flagged, native_table_verifier_warn, value_guard_row_count_warning
+  - value_guard_row_count_warning: output has 19 numeric row(s) but native has 21 effective
+  - native_table_verifier_warn: ambiguous_lane_count_mismatch: native_lanes=14, output_cols=5, gap=9
+  - dualpass_flagged: table 0: 'Per cent of GDP' -> '' (+55 more)
 ```
 
-The dual-pass audit **detected** the damage — 56 cell disagreements, confidence floored at
-zero — and the page shipped anyway. The signal existed and did not gate. B7's content loss
-would have been caught here without knowing anything about status columns.
+Three independent kinds fired, one of them naming the exact column shortfall that causes B7,
+and the page is `flagged: true` with `patch_eligible: false`. **The surfacing works.** The page
+was accepted as text and flagged as untrusted for tables, which is the intended behaviour.
 
-**Do:** Work out why `audit_passed` is True given that evidence, and what the intended
-relationship is between `confidence`, `audit_notes` and the trust surface. This is a gating
-question, not a threshold-tuning exercise — **do not invent a disagreement cutoff.** Look for
-a threshold-free fact first (e.g. confidence exactly 0.0 alongside a non-empty dual-pass flag
-list is a fact about the data, in the same sense C1's "unexplained lanes > 0" is).
-
-Note the existing surface: `dualpass_flagged` is already in `TABLE_DISTRUST_KINDS`, and
-`_table_page_needs_escalation`'s docstring records that it "fires on every table page in the
-reference document and so cannot discriminate at all" — that measurement is why it was not
-used as an escalation trigger. Any change must not resurrect it as one; the question is
-whether it should nonetheless *surface* distrust when confidence is zero.
-**Files:** likely `src/socr/core/tables_trust.py`, `src/socr/pipeline/orchestrator.py`
-**Done when:** the reason `audit_passed` is True is stated; a decision is recorded on whether
-zero confidence plus a non-empty flag list should surface; if it should, a test asserts page
-53's shape reaches the document-level trust surface; and `~/venvs/socr/bin/pytest tests/ -q`
-exits 0.
+Kept as a closed entry rather than deleted, so nobody re-derives the same false premise from
+the same cache field. The lesson: `audit_passed` in a cached page blob says nothing about the
+table trust surface — read `tables_trust.json`, not the blob.
 
 ## Explicitly out of scope
 
