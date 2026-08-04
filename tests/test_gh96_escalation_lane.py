@@ -141,14 +141,16 @@ def test_the_lane_can_be_turned_off():
 
 def test_a_perfect_page_does_not_trigger(pdf_path):
     pipe = _pipeline()
+    state = _State()
     with fitz.open(pdf_path) as doc:
-        assert not pipe._table_page_needs_escalation(doc[0], _PageState(), _out(_PERFECT))
+        assert not pipe._table_page_needs_escalation(state, 1, doc[0], _PageState(), _out(_PERFECT))
 
 
 def test_a_disagreeing_page_triggers(pdf_path):
     pipe = _pipeline()
+    state = _State()
     with fitz.open(pdf_path) as doc:
-        assert pipe._table_page_needs_escalation(doc[0], _PageState(), _out(_SHIFTED))
+        assert pipe._table_page_needs_escalation(state, 1, doc[0], _PageState(), _out(_SHIFTED))
 
 
 def _one_column_pdf(path, rows):
@@ -179,9 +181,12 @@ def test_prose_fragments_are_not_a_grid(tmp_path):
     """
     opened = _one_column_pdf(tmp_path / "prose.pdf", [("November", "2022"), ("CP", "749")])
     pipe = _pipeline()
+    state = _State()
 
-    assert not pipe._table_page_needs_escalation(opened[0], _PageState(), _out(_SHIFTED))
+    assert not pipe._table_page_needs_escalation(state, 1, opened[0], _PageState(), _out(_SHIFTED))
     opened.close()
+    # #123 TICKET-C1: not-scorable is now surfaced, not silently absent.
+    assert [e.kind for e in state.events] == ["table_not_scorable"]
 
 
 def test_a_single_wide_row_is_not_a_grid(tmp_path):
@@ -198,13 +203,18 @@ def test_a_single_wide_row_is_not_a_grid(tmp_path):
     doc.close()
     opened = fitz.open(path)
     pipe = _pipeline()
+    state = _State()
 
-    assert not pipe._table_page_needs_escalation(opened[0], _PageState(), _out(_SHIFTED))
+    assert not pipe._table_page_needs_escalation(state, 1, opened[0], _PageState(), _out(_SHIFTED))
     opened.close()
 
 
 def test_a_non_grid_page_costs_nothing(tmp_path):
-    """End to end: no provider call, no event, no spend."""
+    """End to end: no provider call, no spend.
+
+    #123 TICKET-C1: an ``AuditEvent`` IS now expected — a not-scorable page must
+    surface, not disappear. What must still be zero is provider cost.
+    """
     opened = _one_column_pdf(tmp_path / "prose2.pdf", [("November", "2022"), ("CP", "749")])
     pdf_path = tmp_path / "prose2.pdf"
     opened.close()
@@ -220,7 +230,7 @@ def test_a_non_grid_page_costs_nothing(tmp_path):
     pipe._escalate_table_page(state, 1, ps, bo, _GEMINI, run_provider, pdf_path)
 
     assert calls == [], "a page with no table must never reach the provider"
-    assert state.events == []
+    assert [e.kind for e in state.events] == ["table_not_scorable"]
     assert state.engine_runs == []
 
 

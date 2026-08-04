@@ -1425,7 +1425,9 @@ class UnifiedPipeline:
             return None
         return min(candidates, key=lambda p: p.cost_per_page_usd)
 
-    def _table_page_needs_escalation(self, page, ps, bo) -> bool:
+    def _table_page_needs_escalation(
+        self, state: DocumentState, page_num: int, page, ps, bo
+    ) -> bool:
         """True when the emitted table disagrees with the page's native text layer.
 
         Calibrated against whether escalation actually helps: 100% recall and 69%
@@ -1449,28 +1451,113 @@ class UnifiedPipeline:
         Deliberately not "most rows share the modal width": a real +89-point
         recovery on the reference document has only 7 of 17 rows at its modal
         width, and a majority rule would have refused it.
-        """
-        import collections
 
+        The grid predicate itself lives in ``native_rows.rows_establish_grid``,
+        shared with the GH-96 exactness metric's own not-scorable gate (#123
+        TICKET-B1) —
+        one predicate, not two copies drifting apart.
+
+        #123 TICKET-C1: this is also the one place every table page's incumbent
+        text is scored against its own native layer regardless of whether
+        escalation ends up firing, so it doubles as the surfacing point for two
+        kinds of content loss that used to reach no surface at all: a not-scorable
+        page (B1's grid gate — previously a loud, wrong 0.0% became a silent
+        ``pct=None``) and a page carrying unexplained lanes (B2's lane alignment
+        found a native column the emitted table has nowhere to put). Both are
+        recorded as ``AuditEvent``s so ``tables_trust`` surfaces them at the
+        document level; if the page is later escalated and accepted, the existing
+        ``table_escalation_accepted`` resolution machinery clears them, same as any
+        other distrust kind recorded against text that no longer ships.
+        """
         from socr.benchmark.table_exactness import score_page
-        from socr.tables.native_rows import native_rows_from_page
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.native_rows import native_rows_from_page, rows_establish_grid
 
         try:
             gt_rows = native_rows_from_page(page)
         except Exception:
             return False
-        widths = collections.Counter(len(r.values) for r in gt_rows)
-        if not widths:
-            return False
-        modal_width, rows_at_modal = widths.most_common(1)[0]
-        if modal_width < 2 or rows_at_modal < 2:
+        if not rows_establish_grid(gt_rows):
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="table_not_scorable",
+                    detail=(
+                        f"native text layer parsed {len(gt_rows)} row(s) that do not "
+                        "form a grid; not scorable against ground truth"
+                    ),
+                )
+            )
             return False
 
         try:
             report = score_page(page, bo.text or "")
         except Exception:
             return False
+
+        if report.ceiling_note:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="table_not_scorable",
+                    detail=report.ceiling_note,
+                )
+            )
+        elif report.unexplained_lanes:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="table_unexplained_lanes",
+                    detail=(
+                        f"{report.unexplained_lanes} native lane(s) carry values in "
+                        "matched rows but map to no emitted column"
+                    ),
+                    data={"unexplained_lanes": report.unexplained_lanes},
+                )
+            )
+
         return report.pct is not None and report.pct < 100.0
+
+    def _surface_table_scoring(
+        self, state: DocumentState, page_num: int, ps, bo: PageOutput
+    ) -> None:
+        """Score a table page against its native layer even with no escalation lane.
+
+        #123 TICKET-C2: ``_table_page_needs_escalation`` is the one place both
+        kinds of content loss it documents (a not-scorable page, an unexplained
+        lane) reach ``tables_trust`` — but until now it only ran from
+        ``_escalate_table_page``, which never runs unless a non-local provider is
+        configured. socr is local-first by design, so on a local-only run (no
+        cloud provider, ``--strict-local``, or a cost cap suppressing the lane)
+        every not-scorable page and unexplained-lane page shipped with no trace,
+        same as before TICKET-C1. This is the escalation-independent twin call:
+        same predicate, same single emitter, no second contract.
+
+        Measured on the OBR reference document (68 pages, 18 clearing the grid
+        predicate): ``native_rows_from_page`` + ``score_page`` cost ~137ms mean
+        per page, worst single page ~540ms. Note the baseline this is weighed
+        against: **65 of those 68 pages are born-digital trusted native text and
+        never run a VLM at all**, so on a document like this the cost is not
+        hidden behind model inference — it is close to pure addition. It is
+        accepted anyway, and kept off an opt-out flag, because the caller gates
+        on ``_page_has_tables``: prose pages skip it entirely, and a page with
+        table-like structure is exactly the page where silently shipping
+        unexplained lanes or an unscorable grid is the failure this exists to
+        prevent. Chart pages still reach it — ``has_tables`` is True there, which
+        is why TICKET-B1 was needed — so the not-scorable surface keeps them.
+        """
+        try:
+            import fitz
+
+            with fitz.open(state.handle.path) as doc:
+                page = doc[page_num - 1]
+                self._table_page_needs_escalation(state, page_num, page, ps, bo)
+        except Exception as exc:
+            logger.warning(
+                "table scoring failed on p%d (%s); no distrust events emitted",
+                page_num,
+                exc,
+            )
 
     def _escalate_table_page(
         self,
@@ -1500,7 +1587,7 @@ class UnifiedPipeline:
 
             with fitz.open(pdf_path) as doc:
                 page = doc[page_num - 1]
-                if not self._table_page_needs_escalation(page, ps, bo):
+                if not self._table_page_needs_escalation(state, page_num, page, ps, bo):
                     return False
                 incumbent_text = bo.text or ""
 
@@ -2430,6 +2517,17 @@ class UnifiedPipeline:
                     run_provider,
                     state.handle.path,
                 )
+            elif bo.text and self._page_has_tables(page_num, ps):
+                # #123 TICKET-C2: no escalation lane this page (no provider, the
+                # lane is degraded, or the lane is off) — still score against the
+                # native layer so not-scorable pages and unexplained lanes surface
+                # on a local-only run instead of shipping with no trace.
+                #
+                # Gated on _page_has_tables so prose pages skip the ~137ms scoring
+                # cost entirely: they have no table to lose. Chart pages still
+                # reach it (has_tables is True there — that is precisely why
+                # TICKET-B1 exists), so they still surface as not-scorable.
+                self._surface_table_scoring(state, page_num, ps, bo)
 
             # GH-36a/36b: per-page equation detect + crop + optional LaTeX
             # sidecar.  Runs ONLY when the flags are on (default-off).  With

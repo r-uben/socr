@@ -32,6 +32,24 @@ Measured over 16 table pages, escalating the 13 the trigger fires on:
     canary-only accept rule           81.7%
     accept iff exactness improves     85.0%
 
+These three numbers predate #123 TICKET-B2's lane-aware column alignment (`exact`
+used to compare markdown and ground truth positionally, column-index to
+column-index; it now compares under each side's best monotone lane-to-column map).
+The relative ordering the decision relies on — canary-only < exactness-gate — is
+not expected to change, since B2 only tightens what counts as a match, but the
+literal percentages above are stale and want a re-measurement against the same
+16-page corpus before being cited again.
+
+**#123 TICKET-C1 refines the rule to be lexicographic, not a bare `exact` compare.**
+A wider candidate can raise `exact` while dropping a whole ground-truth lane the
+narrower incumbent covered (see ``table_exactness``'s "map-search freedom") — that
+is content loss and must never win on exactness alone. The gate therefore ranks
+``unexplained_lanes`` ahead of ``exact``:
+
+    fewer unexplained lanes  -> accept
+    more unexplained lanes   -> reject, regardless of exactness
+    equal unexplained lanes  -> exactness is the tiebreak (the rule above)
+
 Better, and **monotone by construction**: no page can leave worse than it arrived.
 The canary cannot offer that. It also subsumes the canary's own job — a fabrication
 scores near zero and a truncated candidate scores low, so both are rejected on
@@ -74,6 +92,12 @@ class EscalationDecision:
     reason: str
     incumbent_pct: float | None = None
     candidate_pct: float | None = None
+    # #123 TICKET-C1: carried through so a caller can surface content loss even on
+    # a rejected/accepted decision without re-scoring the page.
+    incumbent_unexplained_lanes: int = 0
+    candidate_unexplained_lanes: int = 0
+    incumbent_ceiling_note: str = ""
+    candidate_ceiling_note: str = ""
 
     @property
     def delta(self) -> float | None:
@@ -105,16 +129,42 @@ def decide_escalation(page, incumbent_markdown: str, candidate_markdown: str) ->
     # pages whose labels are shredded score 0 and would be waved through rather than
     # compared, including two real 0% -> ~86% recoveries.
     if incumbent.gt_rows >= _MIN_GROUND_TRUTH_ROWS:
-        improved = candidate.exact > incumbent.exact
+        # #123 TICKET-C1: unexplained lanes are content loss, and rank ahead of
+        # exactness rather than being folded into it — a candidate can score more
+        # exact cells while dropping a whole column the native layer supports, and
+        # that must never win. "Zero versus non-zero, fewer versus more" only:
+        # exactness is the tiebreak, not a way to outvote a lane increase.
+        lane_delta = candidate.unexplained_lanes - incumbent.unexplained_lanes
+        if lane_delta > 0:
+            improved = False
+            reason = (
+                f"candidate increases unexplained lanes "
+                f"({incumbent.unexplained_lanes} -> {candidate.unexplained_lanes}); "
+                f"rejected regardless of exactness ({incumbent.pct}% -> {candidate.pct}%)"
+            )
+        elif lane_delta < 0:
+            improved = True
+            reason = (
+                f"candidate decreases unexplained lanes "
+                f"({incumbent.unexplained_lanes} -> {candidate.unexplained_lanes}); "
+                f"accepted ({incumbent.pct}% -> {candidate.pct}%)"
+            )
+        else:
+            improved = candidate.exact > incumbent.exact
+            reason = (
+                f"exactness {incumbent.pct}% -> {candidate.pct}% "
+                f"({candidate.exact} vs {incumbent.exact} of {incumbent.cells} cells)"
+            )
         return EscalationDecision(
             accepted=improved,
             gate=GATE_EXACTNESS,
             incumbent_pct=incumbent.pct,
             candidate_pct=candidate.pct,
-            reason=(
-                f"exactness {incumbent.pct}% -> {candidate.pct}% "
-                f"({candidate.exact} vs {incumbent.exact} of {incumbent.cells} cells)"
-            ),
+            reason=reason,
+            incumbent_unexplained_lanes=incumbent.unexplained_lanes,
+            candidate_unexplained_lanes=candidate.unexplained_lanes,
+            incumbent_ceiling_note=incumbent.ceiling_note,
+            candidate_ceiling_note=candidate.ceiling_note,
         )
 
     # No usable ground truth: fall back to the weaker guarantee.
@@ -127,9 +177,13 @@ def decide_escalation(page, incumbent_markdown: str, candidate_markdown: str) ->
                 "page offers neither scorable ground truth nor a value oracle; "
                 "escalation cannot be judged, keeping the incumbent"
             ),
+            incumbent_ceiling_note=incumbent.ceiling_note,
+            candidate_ceiling_note=candidate.ceiling_note,
         )
     return EscalationDecision(
         accepted=verdict.accepted,
         gate=GATE_CANARY,
         reason=f"ground truth unscorable; canary only: {verdict.reason}",
+        incumbent_ceiling_note=incumbent.ceiling_note,
+        candidate_ceiling_note=candidate.ceiling_note,
     )

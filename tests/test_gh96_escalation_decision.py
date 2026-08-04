@@ -146,3 +146,46 @@ def test_the_gate_used_is_always_recorded(page):
 
     assert decision.gate in (GATE_EXACTNESS, GATE_CANARY, GATE_NONE)
     assert decision.reason
+
+
+# ----------------------------------------------------------------------
+# #123 TICKET-C1: unexplained lanes rank ahead of exactness
+# ----------------------------------------------------------------------
+
+# The incumbent gets every value wrong except the first column; the candidate
+# drops the third column entirely (fewer emitted columns than native lanes) but
+# nails everything it does emit. Candidate exactness is strictly higher, yet it
+# leaves a whole native lane with no home — that must never win.
+_INCUMBENT_MOSTLY_WRONG = _md([(label, [values[0], "99.9", "88.8"]) for label, values in _ROWS])
+_CANDIDATE_DROPS_A_COLUMN = "\n".join(
+    ["| | c1 | c2 |", "| --- | --- | --- |"]
+    + [f"| {label} | {values[0]} | {values[1]} |" for label, values in _ROWS]
+)
+
+
+def test_a_candidate_that_increases_unexplained_lanes_is_rejected_despite_higher_exactness(page):
+    decision = decide_escalation(page, _INCUMBENT_MOSTLY_WRONG, _CANDIDATE_DROPS_A_COLUMN)
+
+    assert decision.candidate_pct is not None and decision.incumbent_pct is not None
+    assert decision.candidate_pct > decision.incumbent_pct, (
+        "the fixture must actually exercise the trap: higher exactness, more loss"
+    )
+    assert decision.candidate_unexplained_lanes > decision.incumbent_unexplained_lanes
+    assert not decision.accepted
+    assert decision.gate == GATE_EXACTNESS
+
+
+def test_a_candidate_that_decreases_unexplained_lanes_is_preferred_even_at_equal_exactness(page):
+    """Fewer unexplained lanes wins outright; exactness is only the tiebreak."""
+    # Incumbent: drops the third column (like the candidate above). Candidate:
+    # recovers that column but gets nothing else more right, so exactness ties
+    # relative to that incumbent's own baseline — the win must come purely from
+    # unexplained lanes going to zero.
+    incumbent = _CANDIDATE_DROPS_A_COLUMN
+    candidate = _md([(label, [values[0], values[1], "88.8"]) for label, values in _ROWS])
+
+    decision = decide_escalation(page, incumbent, candidate)
+
+    assert decision.candidate_unexplained_lanes < decision.incumbent_unexplained_lanes
+    assert decision.accepted
+    assert decision.gate == GATE_EXACTNESS
