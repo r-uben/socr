@@ -1,19 +1,39 @@
 # STATUS - GitHub issue action plan
 
-Last updated: 2026-06-16
-Branch: `feat/001-issue-plans`
-Base reviewed: `7541175`
-GitHub source: open issues #34, #35, #36, #37, #39, #46, #47, #49, #50, #51
+Last updated: 2026-08-09
+Branch: `chore/triage-open-issues`
+Base reviewed: `29dc6f0` (`main`)
+GitHub source: open issues #39, #46, #49, #56, #64, #114, #127
+(#34, #35, #37, #50, #51 closed; #36, #47 shipped)
 
 ## Stage
 
-Implementation wave complete on PR #52. Eight tickets have shipped on
-`feat/001-issue-plans` and were accepted after implementer/reviewer passes:
-GH-51, GH-50, GH-34, GH-46-D2, GH-47A, GH-37, GH-35, and GH-35-FU.
+**Backlog reconciled 2026-08-09 after ~8 weeks of drift.** Every open issue was triaged by two
+independent models with mandatory file:line evidence, then the resulting decomposition was
+attacked by three orthogonal review lenses (coverage / gating-safety / ticket-size).
 
-Latest pushed head: `2409192` (`fix(35): GH-35-FU gate clean-short-text by raster coverage`).
-CI is green on GitHub: `test (3.11)` and `typecheck` passed. Local full-suite result reported by
-the ticket workflow: 837 tests passing, ruff clean.
+Closed as already-fixed, each confirmed independently by both triage models citing the same commit:
+- **#51** → `88b6cc8` (`resolve_qwen_intent` makes local resolution backend-agnostic)
+- **#50** → `67edaca` (`--save-figures` PNG-only; `--describe-figures` separate opt-in)
+
+New tickets are in `TICKETS.md` under "Open-issue backlog — 2026-08-09 reconciliation".
+
+**Two board claims were stale and are now corrected:**
+- `GH-49A` is genuinely DONE (`NativeTableVerifierJudge`, `pipeline/agentic.py:443`), but #49
+  grew a new deliverable *after* the ticket closed — native label→value binding. Now `GH-49B-DESIGN`.
+- `GH-46-E1` was deferred "until real usage shows needed profiles". Wrong frame: the Ollama-Cloud
+  rung is **unreachable**, not unrequested. Now `GH-46-E2`, and E1 remains separate (it is the
+  `/ocr` skill/profile interface, not the runtime ladder).
+
+**Verified defect found during triage (`GH-46-E2`):** the declared local → Ollama-Cloud → Gemini
+ladder has no middle rung, for two independent reasons — `_available_engines_for_agentic`
+(`orchestrator.py:2607`) can only emit `PROFILE_QWEN_LOCAL`, and `QwenEngine.is_available()`
+(`engines/qwen.py:96-112`) never probes cloud availability at all. The function's docstring and
+`providers.py:162` both claim otherwise; tests pass because they hand-construct the profile list
+rather than calling the real function. `docs/MODELS.md:121-123` honestly records it as open.
+
+Prior wave (PR #52, `2409192`) remains as recorded below: GH-51, GH-50, GH-34, GH-46-D2, GH-47A,
+GH-37, GH-35, GH-35-FU shipped and were accepted after implementer/reviewer passes.
 
 The durable planning format is:
 
@@ -24,18 +44,43 @@ The durable planning format is:
 
 ## Issue Review
 
+Refreshed 2026-08-09 from a two-model evidence-gated triage of every open issue.
+
 | Issue | Current read | Ticket mapping |
 |-------|--------------|----------------|
-| #51 | Open, actionable P0. Non-agentic qwen model resolution can silently mean cloud. | GH-51 |
-| #50 | Open, actionable P0. Split deterministic PNG extraction from VLM captions. | GH-50 |
-| #49 | ADR/docs mostly done on main; implementation still needed for native table verifier. | GH-49A |
-| #47 | Investigation done; follow-ups are concrete figure extraction/caption/verification tickets. | GH-47A, GH-47B, GH-47C |
-| #46 | Main #46 implementation mostly merged; sparse-row lane drift has a prompt-only fix, with manual CBO-row VLM validation still pending. | GH-46-D2, GH-46-E1 |
-| #39 | Stage 1 landed; Stage 2 human GT and Stage 3 calibration remain. | GH-39A, GH-39B |
-| #37 | Done in PR #52. User-facing `--native-only` / enhancement policy control landed. | GH-37 |
-| #36 | Partially addressed by corrupt-math recovery; clean equation-to-LaTeX route remains. | GH-36 |
-| #35 | Done in PR #52 plus GH-35-FU. Sparse/figure pages rescued, then image-dominant short-text pages gated by raster coverage. | GH-35, GH-35-FU |
-| #34 | Done in PR #52. Empty repair output is no longer promoted or logged as recovered. | GH-34 |
+| #127 | still-valid (unanimous). Native path discards size/flags/font and never calls `page.get_links()`. Filed 2026-08-09. | GH-127-P, -A, -B, -C, -D-DESIGN |
+| #114 | still-valid, **re-scoped**. HPC-egress premise invalidated by measurement in the issue's own comment; corpus-reprocessing scope survives and is unimplemented. Issue body needs rewriting. | GH-114-DESIGN |
+| #64 | still-valid (unanimous). Borderless 2-column tables fail both detection passes and fall to native text unflagged. Already recorded as PP-6's residual. | GH-64 |
+| #56 | partially-addressed (unanimous). #79/#87 landed; multi-section/nested-column reconstruction did not. Fork needs settling first. | GH-56-DESIGN |
+| #49 | partially-addressed (unanimous). GH-49A verifier DONE; native label→value *binding* is net-new. | GH-49B-DESIGN |
+| #46 | partially-addressed. Lineup constants landed (`6d6ee79`); the Ollama-Cloud rung is unreachable. | GH-46-E2, GH-46-E4, (GH-46-E1 separate) |
+| #39 | partially-addressed (unanimous). Stage 1 landed; no `calibration.lock.json` exists and the three ladder lists remain independent. | GH-39A (blocked), GH-39B |
+| #50, #51 | **CLOSED 2026-08-09** as already-fixed. | — |
+
+## Dispatch waves (2026-08-09 backlog)
+
+Design tickets write only `docs/log/*.md` and are file-disjoint from everything, so all four
+NEEDS-DESIGN rows can run concurrently with wave-1 implementation.
+
+| Wave | Tickets | Shared-file note |
+|------|---------|------------------|
+| 1 | GH-46-E2 · GH-127-P · GH-127-D-DESIGN · GH-56-DESIGN · GH-49B-DESIGN | disjoint |
+| 2 | GH-46-E4 · GH-127-A · GH-114-DESIGN | E4 serializes behind E2 on `engines/qwen.py` |
+| 3 | GH-127-B | `born_digital.py` serialization |
+| 4 | GH-127-C | `born_digital.py` serialization |
+| 5 | GH-64 | needs GH-127-C (`born_digital.py`) + GH-46-E2 (`orchestrator.py`) |
+| — | GH-39B | after GH-39A (human labels) + GH-46-E2 |
+
+**Stream B parallelism is low and that is real, not a modelling artifact:** GH-127-A/B/C and GH-64
+all own `src/socr/core/born_digital.py`. They are split for reviewability, not for concurrency.
+
+## Next action
+
+Dispatch wave 1. The four design tickets are free (docs-only); `GH-46-E2` is the only wave-1
+implementation ticket with a fully written Done-when, and it carries a named CI-hermeticity
+recipe — CI has no ollama, so both probe seams must be patched by name or the test passes locally
+and fails in CI.
+
 
 ## Completed in PR #52
 
@@ -144,14 +189,17 @@ Prompt each agent with exactly one ticket section from `docs/plans/TICKETS.md`, 
   is required.
 - Use `uv run` for Python (or the direct `~/venvs/socr/bin` binaries); never `python script.py`.
 - Report changed files, tests run, failures, and residual risks.
-- Commit on `feat/001-issue-plans` (never `main`); stage by name; do not push; one commit per ticket.
+- Commit on the ticket's own `feat/NN-…` / `fix/NN-…` branch (never `main`); stage by name; do not
+  push; one commit per ticket.
 - If you hit an architectural fork you cannot resolve from the ticket, stop and return
   `CONSILIUM-GATE` with a one-sentence question — do not guess past it.
 
-## Next Action
+## Next Action (superseded — historical)
 
-Merge PR #52 after this bookkeeping update lands. Next PR candidates:
+Recorded 2026-06-16, kept for provenance. All of it has since resolved: PR #52 merged, GH-47B
+and GH-49A are DONE, GH-36 shipped as GH-36a/GH-36b. The live next action is at the top of this
+file under "Next action".
 
-- GH-47B as the last ready implementation ticket.
-- GH-49A, GH-36, and GH-47C as a design-gated batch.
-- GH-39A/B only after human-verified benchmark ground truth exists.
+- ~~GH-47B as the last ready implementation ticket.~~
+- ~~GH-49A, GH-36, and GH-47C as a design-gated batch.~~
+- GH-39A/B only after human-verified benchmark ground truth exists. *(still true)*
