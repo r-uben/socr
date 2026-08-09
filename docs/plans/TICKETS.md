@@ -730,3 +730,175 @@ deterministically and route them to a saved chart image asset.
 - `src/socr/figures/extractor.py`
 - `src/socr/pipeline/orchestrator.py`
 - `tests/test_chart_lane.py` (new)
+
+---
+
+# Open-issue backlog — 2026-08-09 reconciliation
+
+Added after a two-model triage of every open issue (evidence-gated) plus a three-lens
+adversarial review of this decomposition (coverage / gating-safety / ticket-size).
+#50 and #51 were closed as already-fixed on 2026-08-09 and are out of scope.
+
+**Design tickets write only `docs/log/*.md`, so they are file-disjoint from all
+implementation work and parallelize freely.**
+
+## Stream A — routing / cost
+
+### GH-46-E2 — Make the Ollama-Cloud rung reachable in the agentic ladder · READY · depends-on: none · wave 1
+**Problem:** the declared local → Ollama-Cloud → Gemini ladder has no middle rung, for two
+independent reasons:
+1. `Orchestrator._available_engines_for_agentic()` (`src/socr/pipeline/orchestrator.py:2607`)
+   builds from `DEFAULT_PROVIDERS.get(engine_type)`, and `DEFAULT_PROVIDERS[EngineType.QWEN]`
+   is `PROFILE_QWEN_LOCAL` (`src/socr/core/providers.py:166`), so `PROFILE_QWEN_CLOUD` can
+   never be emitted.
+2. Even if emitted, it would be gated out: `QwenEngine.is_available()`
+   (`src/socr/engines/qwen.py:96-112`) returns True only via `VLLM_BASE_URL` or
+   `_check_ollama_model(OLLAMA_MODEL)` — the *local* instruct build. Cloud availability is
+   never probed.
+
+The function's docstring and `providers.py:162` both claim two QWEN rungs are supplied.
+`docs/MODELS.md:121-123` honestly records this as open. Tests pass over the gap because
+`tests/test_b2_routing.py` and `tests/test_providers.py` hand-construct or patch the profile
+list instead of calling the real function.
+
+**Do:** add a cloud-availability probe distinct from the local-model check; emit both QWEN
+profiles as distinct rungs when each backend is reachable. Do NOT change `DEFAULT_PROVIDERS`
+(the same-EngineType collision is deliberate and documented). Do NOT move the `strict_local`
+tier filter — it lives in the caller (`orchestrator.py:1953-1957`) and stays there.
+Fold in the `docs/MODELS.md` corrections: `:76-79` and `:118` claim figure description is
+Gemini-default and local-first is pending, but `_get_vision_engine()` already returns
+`LocalFirstFigureEngine`; and `:121-123` is what this ticket closes.
+
+**Files:** `src/socr/pipeline/orchestrator.py`, `src/socr/core/providers.py`,
+`src/socr/engines/qwen.py`, `src/socr/core/ollama_utils.py`, `docs/MODELS.md`,
+`tests/test_b2_routing.py`, `tests/test_providers.py`
+
+**Done when:**
+- A test constructs `PipelineConfig(agentic=True, enabled_engines=[EngineType.QWEN], quiet=True)`,
+  patches `socr.pipeline.orchestrator.get_engine` (module-level import at `orchestrator.py:43`
+  — patch the orchestrator namespace, not the engine module) AND the new cloud probe at its
+  definition site, then calls the real `_available_engines_for_agentic()` and asserts
+  `qwen-local-instruct` and `qwen-cloud` both appear as distinct rungs.
+- A test asserts that with `qwen-cloud` present, `_resolve_table_escalation_provider`
+  (`orchestrator.py:1409-1426`, `min` by cost) selects `qwen-cloud` ($0.0) over `gemini`
+  ($0.0002) — this is a real behavior change to the GH-96 escalation lane.
+- `grep -n "one place still cloud-default" docs/MODELS.md` returns nothing.
+- `~/venvs/socr/bin/pytest tests/test_b2_routing.py tests/test_providers.py -q` exits 0
+  **and** `uvx ruff@0.16.0 format --check .` is clean.
+
+**CI trap:** CI has no ollama and no `qwen-ocr` CLI, so an unstubbed probe returns False and
+the first assertion fails there while passing locally. Both seams must be patched by name.
+`strict_local` tier-drop is already covered hermetically by `tests/test_b2_routing.py:132-159`;
+do not re-assert it against the real function, which returns profiles unfiltered.
+
+### GH-46-E4 — Generalize the thinking-model prohibition · READY · depends-on: GH-46-E2 · wave 2
+**Problem:** the ban on thinking builds is hardcoded to specific model strings
+(`src/socr/engines/qwen.py:32-35`, `src/socr/core/config.py:166`). A later #46 comment asks
+that it extend to any Ollama model tagged `thinking`. Serialized behind GH-46-E2 (shared `qwen.py`).
+**Files:** `src/socr/engines/qwen.py`, `src/socr/core/config.py`, `tests/test_qwen_engine.py`
+**Done when:** a model tagged `thinking` is rejected by the resolver without naming it literally;
+`~/venvs/socr/bin/pytest tests/test_qwen_engine.py -q` exits 0.
+
+### GH-39A — Human-verified ground truth · BLOCKED (needs human labels) · unchanged
+### GH-39B — Calibration artifact + ladder unification · depends-on: GH-39A, GH-46-E2
+**Reconciliation (2026-08-09):** still valid. `src/socr/benchmark/calibrate.py` produces a
+`CalibrationReport` (save/load + `apply_to_config`), NOT the versioned `calibration.lock.json`
+this ticket specifies. `ENGINE_PRIORITY` (`core/config.py:33`), `AUTO_ENGINE_ORDER`
+(`core/config.py:53`) and `_LOCAL_ENGINE_ORDER` (`engines/registry.py:64`) remain three
+independent hardcoded lists. Gated on GH-46-E2 so the ladder is correct before it is unified.
+
+## Stream B — born-digital fidelity
+
+All implementation tickets here serialize on `src/socr/core/born_digital.py`.
+
+### GH-127-P — Make structured extraction reachable on prose-only pages · READY · depends-on: none · wave 1
+**Problem:** two independent bypasses keep prose pages away from the span loop
+(`born_digital.py:971-978`) where formatting metadata is available:
+(a) `_assess_page:648-656` calls `extract_structured` **only** when `has_tables`; prose pages
+get `raw_text.strip()`. (b) `extract_structured:908-909` returns `page.get_text("text").strip()`
+when no table regions are found. Any Markdown-structure work applied only to the span loop
+would silently affect table-bearing pages alone.
+**Do:** restructure both branches so span-level extraction runs on prose pages, with output
+byte-identical to today until a later ticket emits structure. Pure reachability refactor.
+**Files:** `src/socr/core/born_digital.py`, `tests/test_born_digital.py`
+**Done when:** a prose-only fixture page (no tables) provably traverses the span loop; existing
+born-digital output is unchanged (golden assertion); `~/venvs/socr/bin/pytest tests/test_born_digital.py -q` exits 0.
+
+### GH-127-A — Emphasis from span flags · depends-on: GH-127-P · wave 2
+### GH-127-B — Links from `page.get_links()` rect↔span overlap · depends-on: GH-127-A · wave 3
+### GH-127-C — List markers from line prefix + indent · depends-on: GH-127-B · wave 4
+Each: **Files** `src/socr/core/born_digital.py`, `tests/test_born_digital.py`. Serial because
+they share the file, not because of logic. Each **Done when:** its own fixture round-trips to
+`**`/`[text](url)`/`- ` respectively and `~/venvs/socr/bin/pytest tests/test_born_digital.py -q` exits 0.
+
+### GH-127-D-DESIGN — Heading-level derivation · NEEDS-DESIGN · `socr-designer` · depends-on: none · wave 1
+**Problem:** "heading level from span size relative to the page's body-text mode" is not an
+implementation detail — the mode is polluted by captions, running heads, table headers and
+footnotes, and "how much larger than mode" is an undecided rule. The repo's no-magic-numbers
+rule relocates this design question rather than eliminating it.
+**Sharp question:** what data-derived, documented rule maps a page's span-size distribution to
+H1/H2/H3 without a fixed pt threshold, and what does it do with multi-size lines?
+**Files:** `docs/log/2026-08-09_heading-derivation.md` (new)
+**Done when:** the design note exists, measures size histograms over a named fixture set, and
+states the rule precisely enough for a Done-when to be written for GH-127-D.
+
+### GH-64 — Audit-flag tabular-looking pages that fall to native text · depends-on: GH-127-C, GH-46-E2 · wave 5
+**Problem:** `_detect_tables` (`born_digital.py:720-745`) requires `has_numeric_columns`, needing
+`_MIN_LANES_PER_ROW = 3` (`tables/reconstruct.py:79`). A borderless two-column label|value table
+matches neither `find_tables()` nor the lane test, so it falls to native text unflagged; the
+structure-loss audit is gated behind `_page_has_tables` and cannot fire. Recorded as PP-6's
+residual in `docs/plans/progressive-pages/STATUS.md`.
+**Do:** geometry probe for repeated 2-lane alignment; emit an audit event on a page that routed
+to native text. Flag only — no routing change.
+**Files:** `src/socr/core/born_digital.py`, `src/socr/pipeline/orchestrator.py`, `tests/test_born_digital.py`
+**Done when:** `grep -rn "possible_table_structure_not_reconstructed" src/` returns a hit; a fixture
+page emits it; no existing routing test changes outcome.
+**Gating:** GH-127-C for `born_digital.py`, GH-46-E2 for `orchestrator.py`.
+
+### GH-56-DESIGN — Settle the residual #56 fork · NEEDS-DESIGN · `socr-designer` · depends-on: none · wave 1
+**Problem:** the draft ticket "deterministic multi-section / nested-column reconstructor"
+contradicts measured history: `docs/plans/table-repair/` records TR-0…TR-6 done and pure
+deterministic geometry proven **insufficient** on the real CE page, with TR-5 VLM segmentation
+deferred. An implementer given that ticket would re-litigate a settled failure.
+**Sharp question:** is the residual #56 gap a deterministic reconstructor in `reconstruct.py`,
+or the deferred VLM-for-structure + geometry value-guard path (TR-5/TR-7)?
+**Files:** `docs/log/2026-08-09_56-residual-fork.md` (new)
+**Done when:** the note picks one fork with evidence and names the wiring call site.
+
+### GH-49B-DESIGN — Native label→value binding · NEEDS-DESIGN · `socr-designer` · depends-on: none · wave 1
+**Problem:** #49's later comment (from GH-96) asks that a trustworthy native reconstruction
+*bind* the label→value mapping. Today `native_rows_from_page` (`tables/native_rows.py:125`)
+feeds only `benchmark/table_exactness.py` (grading) and `orchestrator.py:1474-1477` (escalation
+gate predicate) — it never corrects or replaces VLM output. GH-49A (the verifier) is genuinely DONE.
+**Sharp questions:** (1) replace page markdown from native rows, or only accept/reject a VLM
+candidate when labels bind? (2) what makes a native reconstruction "trustworthy" enough to
+override? (3) how do hierarchical paths, empty parent rows and multi-table pages become markdown
+without inventing columns?
+**Files:** `docs/log/2026-08-09_native-binding.md` (new)
+**Done when:** the note answers all three and states an outsider-checkable acceptance test.
+**Note:** GH-49B does NOT depend on GH-56-R — `native_rows.py` imports only `benchmark.scorer`
+and `tables.native_verifier`, never `tables.reconstruct`. Its real gate is `orchestrator.py`
+serialization against GH-64.
+
+### GH-114-DESIGN — Post-hoc `socr escalate` · NEEDS-DESIGN · `socr-designer` · depends-on: GH-49B-DESIGN · wave 2
+**Problem:** escalation happens only inside the live page-major loop (`orchestrator.py:1562-1703`,
+mutating `DocumentState`). No CLI path re-escalates an existing document directory; `replay`
+(`cli.py:588-628`) deliberately makes zero engine calls, and `manifest.py` rebuilds markdown from
+stored page blobs, so rewriting fragments alone would not update replay output.
+**Scope correction:** the original HPC-egress premise was invalidated by measurement in the
+issue's own comment (egress 403 from lnode01/cnode05 — the in-process lane works on HPC).
+Surviving scope is corpus reprocessing for pre-#96 documents and deliberate strict-local runs,
+plus manifest consistency and fingerprint semantics. **The issue body needs rewriting to match.**
+**Files:** `docs/log/2026-08-09_post-hoc-escalate.md` (new)
+**Done when:** the note defines reprocess identity (what fingerprint change means here), the CLI
+surface, and manifest-consistency rules.
+
+## Resolved without a ticket
+
+**#56 resume/PARTIAL semantics.** Triage disagreed on whether an unrecoverable page prevents a
+document from sticking on resume. Settled by evidence: a matching checksum + fingerprint makes a
+`PARTIAL` document resume-skippable (`orchestrator.py:80-107`); a non-success result carrying text
+is recorded `PARTIAL` (`:4655-4661`) and persisted (`:4691-4692`); when reprocessing IS forced,
+failed pages are not accepted as terminal and are retried (`:4106-4121`). Covered by
+`tests/test_silent_content_destruction.py:619-637` and `tests/test_pp5_resume_ledger.py:755-780`.
+Working as designed. No ticket.
