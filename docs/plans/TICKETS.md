@@ -865,7 +865,19 @@ or the deferred VLM-for-structure + geometry value-guard path (TR-5/TR-7)?
 **Files:** `docs/log/2026-08-09_56-residual-fork.md` (new)
 **Done when:** the note picks one fork with evidence and names the wiring call site.
 
-### GH-49B-DESIGN — Native label→value binding · NEEDS-DESIGN · `socr-designer` · depends-on: none · wave 1
+### GH-49B-DESIGN — Native label→value binding · DONE (2026-08-10) · depends-on: none · wave 1
+**Decision:** `docs/log/2026-08-09_native-binding.md`. Numeric-cell rebind over the VLM's
+Markdown skeleton — VLM keeps authorship of all structure; native overwrites numbers only,
+all-or-nothing per table, gated on one-to-one region match + **full hierarchy path** keys
+(not leaf labels) + bijective document order + no `-1` lanes; submitted as a zero-cost
+candidate through `decide_escalation`. Ambiguity fails closed and flags the page.
+**Scope limit:** born-digital only. On a scan `native_rows_from_page` returns nothing,
+`rows_establish_grid` fails, and `orchestrator.py:1477-1479` bails with `table_not_scorable`.
+Scanned tables stay on the weaker canary gate (`escalation_decision.py:29-36`).
+**Blocks the implementation ticket — two owner decisions open:** (1) ship default-on or
+flag-gated for one corpus-measurement cycle; (2) absorb the two-sided cost (per-region
+matching also requires the Markdown parser to learn table boundaries — region flattening is
+deliberate, `native_rows.py:141-145`) or split it into its own gating ticket.
 **Problem:** #49's later comment (from GH-96) asks that a trustworthy native reconstruction
 *bind* the label→value mapping. Today `native_rows_from_page` (`tables/native_rows.py:125`)
 feeds only `benchmark/table_exactness.py` (grading) and `orchestrator.py:1474-1477` (escalation
@@ -874,13 +886,35 @@ gate predicate) — it never corrects or replaces VLM output. GH-49A (the verifi
 candidate when labels bind? (2) what makes a native reconstruction "trustworthy" enough to
 override? (3) how do hierarchical paths, empty parent rows and multi-table pages become markdown
 without inventing columns?
-**Files:** `docs/log/2026-08-09_native-binding.md` (new)
-**Done when:** the note answers all three and states an outsider-checkable acceptance test.
+**Files:** `docs/log/2026-08-09_native-binding.md` — written 2026-08-10.
+**Done when:** ~~the note answers all three and states an outsider-checkable acceptance test.~~
+Met. The note answers all three sharp questions and specifies
+`tests/test_native_binding.py`, including a guard asserting a scanned page is a no-op **and**
+is flagged (so the dead path cannot later be "fixed" by loosening the gate).
 **Note:** GH-49B does NOT depend on GH-56-R — `native_rows.py` imports only `benchmark.scorer`
 and `tables.native_verifier`, never `tables.reconstruct`. Its real gate is `orchestrator.py`
 serialization against GH-64.
 
-### GH-114-DESIGN — Post-hoc `socr escalate` · NEEDS-DESIGN · `socr-designer` · depends-on: GH-49B-DESIGN · wave 2
+### GH-114-DESIGN — Post-hoc `socr escalate` · DONE (2026-08-10) · depends-on: GH-49B-DESIGN · wave 2
+**Decision:** `docs/log/2026-08-09_post-hoc-escalate.md`. **In place — the escalated version
+becomes the official copy** (owner call, 2026-08-10). A derived sibling would fork every
+document and leave the *better* copy outside the resume path, so future `socr agent` runs
+would silently continue from the worse text. Shape: `socr escalate <doc_dir> --pdf <pdf>` as a
+staged transaction — refuse on `input_checksum` mismatch or missing artifacts, re-run the grid
+trigger, gate every candidate through `decide_escalation` **verbatim** (no separate post-hoc
+policy), commit blob + fragment + sidecar + manifest entry + restitched `.md` + `tables_trust`
+together.
+**Blocks the implementation ticket — one constraint open:** deciding in-place did not dissolve
+the fingerprint objection, it converted it into a requirement. `_run_fingerprint` includes
+`escalate_ambiguous_tables` (`orchestrator.py:298-301`) precisely so a resumed run cannot
+"silently ship a mix of escalated and non-escalated pages" — which is what an in-place pass
+under the original fingerprint produces. Choose (a) bump the fingerprint and record the old one
+as lineage, or (b) keep it and record escalation state per page in the sidecar. Needs the code
+read first. Either way, `Manifest.save` (`manifest.py:207-209`) is a bare `write_text` with no
+tmp+rename and must be made atomic — in-place has no untouched original to fall back on.
+**Superseded record:** an earlier panel (2026-08-09) logged this as settled on *immutable
+sibling* with one model conceding. That round is not citable — a proposal agent was soliciting
+confirmatory evidence for a position it had already picked. Re-run clean, the panel split.
 **Problem:** escalation happens only inside the live page-major loop (`orchestrator.py:1562-1703`,
 mutating `DocumentState`). No CLI path re-escalates an existing document directory; `replay`
 (`cli.py:588-628`) deliberately makes zero engine calls, and `manifest.py` rebuilds markdown from
@@ -889,9 +923,11 @@ stored page blobs, so rewriting fragments alone would not update replay output.
 issue's own comment (egress 403 from lnode01/cnode05 — the in-process lane works on HPC).
 Surviving scope is corpus reprocessing for pre-#96 documents and deliberate strict-local runs,
 plus manifest consistency and fingerprint semantics. **The issue body needs rewriting to match.**
-**Files:** `docs/log/2026-08-09_post-hoc-escalate.md` (new)
-**Done when:** the note defines reprocess identity (what fingerprint change means here), the CLI
-surface, and manifest-consistency rules.
+**Files:** `docs/log/2026-08-09_post-hoc-escalate.md` — written 2026-08-10.
+**Done when:** ~~the note defines reprocess identity, the CLI surface, and manifest-consistency
+rules.~~ Partially met — CLI surface and manifest-consistency rules are defined; **reprocess
+identity is deliberately left as the one open fork (a)/(b) above**, because picking it needs the
+resume-gate code read rather than a panel opinion.
 
 ## Resolved without a ticket
 
