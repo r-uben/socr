@@ -744,7 +744,7 @@ implementation work and parallelize freely.**
 
 ## Stream A — routing / cost
 
-### GH-46-E2 — Make the Ollama-Cloud rung reachable in the agentic ladder · READY · depends-on: none · wave 1
+### GH-46-E2 — Make the Ollama-Cloud rung reachable in the agentic ladder · DONE (2026-08-10) · depends-on: none · wave 1
 **Problem:** the declared local → Ollama-Cloud → Gemini ladder has no middle rung, for two
 independent reasons:
 1. `Orchestrator._available_engines_for_agentic()` (`src/socr/pipeline/orchestrator.py:2607`)
@@ -790,6 +790,21 @@ Gemini-default and local-first is pending, but `_get_vision_engine()` already re
 the first assertion fails there while passing locally. Both seams must be patched by name.
 `strict_local` tier-drop is already covered hermetically by `tests/test_b2_routing.py:132-159`;
 do not re-assert it against the real function, which returns profiles unfiltered.
+
+**Shipped (`ae68364`, 2026-08-10).** `cloud_model_available()` in `engines/qwen.py` — a
+module-level function, not a `QwenEngine` method, because `is_available()` probes the LOCAL tier
+and one engine object cannot answer for two backends sharing `EngineType.QWEN`; keeping it off the
+class also stops a `get_engine` mock (every attribute truthy) from satisfying it vacuously.
+`DEFAULT_PROVIDERS` untouched as instructed; tier filter left in `_phase_agentic`. One correction
+found while implementing: the local probe's `except` used `continue`, which would have suppressed
+the cloud rung whenever the local probe raised — the two rungs are now genuinely independent, with
+a test for it. Escalation-lane behaviour change verified: `qwen-cloud` ($0.0000) now wins over
+`gemini` ($0.0002). Hermeticity proven, not assumed — 19/19 pass with `ollama` and `qwen-ocr`
+absent from `PATH`. Full suite 1413 passed / 1 xfailed; `ruff format --check` and `ruff check` clean.
+`docs/MODELS.md` corrections folded in; the ticket's `grep` gate returns nothing.
+`core/providers.py` and `core/ollama_utils.py` needed no change — `providers.py:162` and the
+`_available_engines_for_agentic` docstring were already describing this design, they were just
+describing something that did not exist yet.
 
 ### GH-46-E4 — Generalize the thinking-model prohibition · READY · depends-on: GH-46-E2 · wave 2
 **Problem:** the ban on thinking builds is hardcoded to specific model strings
