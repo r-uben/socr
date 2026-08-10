@@ -2611,8 +2611,25 @@ class UnifiedPipeline:
         that two profiles sharing the same ``EngineType`` — e.g. QWEN local and
         QWEN cloud — can appear as distinct rungs in the ladder. Pass the result
         directly to ``provider_ladder()`` which accepts ``list[ProviderProfile]``.
+
+        GH-46-E2: ``DEFAULT_PROVIDERS`` is keyed by ``EngineType`` and therefore
+        holds at most one profile per engine — ``EngineType.QWEN`` maps to
+        ``PROFILE_QWEN_LOCAL``. Iterating it alone could never emit the cloud
+        rung, so the declared local -> Ollama-Cloud -> Gemini ladder had no
+        middle rung despite this docstring promising one. The cloud profile is
+        appended from its own probe instead. ``DEFAULT_PROVIDERS`` is left alone:
+        the same-EngineType collision there is deliberate and documented.
+
+        The two QWEN rungs are probed INDEPENDENTLY. A machine with the cloud
+        model but no local pull gets the cloud rung alone; a machine with only
+        the local build gets the local rung alone. Neither gates the other.
+
+        Tier filtering (``--strict-local``) is NOT applied here — it stays in the
+        caller (``_phase_agentic``), which is the only place that knows the run's
+        policy. This function reports reachability, not eligibility.
         """
-        from socr.core.providers import DEFAULT_PROVIDERS
+        from socr.core.providers import DEFAULT_PROVIDERS, PROFILE_QWEN_CLOUD
+        from socr.engines.qwen import cloud_model_available
 
         available = []
         for engine_type in self.config.enabled_engines:
@@ -2623,7 +2640,13 @@ class UnifiedPipeline:
                 if get_engine(engine_type).is_available():
                     available.append(prof)
             except Exception:  # availability probe must never crash routing
-                continue
+                pass  # NOT `continue` — the cloud probe below is independent
+            if engine_type is EngineType.QWEN:
+                try:
+                    if cloud_model_available():
+                        available.append(PROFILE_QWEN_CLOUD)
+                except Exception:  # same rule: a probe must never crash routing
+                    pass
         return available
 
     # Vision models tried (in order) as the hard-page judge when judge_model is

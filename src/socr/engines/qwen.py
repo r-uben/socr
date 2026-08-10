@@ -40,6 +40,36 @@ OLLAMA_MODEL = "qwen3-vl:30b-a3b-instruct"
 _LOCAL_BACKENDS: frozenset[str] = frozenset({"auto", "ollama"})
 
 
+def cloud_model_available() -> bool:
+    """Whether the Ollama-Cloud rung is reachable right now.
+
+    GH-46-E2. Deliberately a module-level function rather than a
+    ``QwenEngine`` method, and deliberately separate from
+    ``QwenEngine.is_available()``:
+
+    - ``is_available()`` probes the LOCAL tier — ``VLLM_BASE_URL`` or the local
+      instruct build (``OLLAMA_MODEL``). It returns False on a machine that can
+      only reach cloud, so it cannot stand in for cloud reachability.
+    - ``PROFILE_QWEN_LOCAL`` and ``PROFILE_QWEN_CLOUD`` share one
+      ``EngineType.QWEN``, so the ladder needs one signal *per backend* to emit
+      them as distinct rungs. One engine object cannot answer for both.
+    - Keeping it off the engine class also keeps the two probes independently
+      patchable. A test that stubs ``get_engine`` gets a mock whose every
+      attribute is truthy, which would make a method-based cloud probe pass
+      vacuously and hide the real gate.
+
+    The model name comes from ``PROFILE_QWEN_CLOUD`` so the profile registry
+    stays the single source of truth for what the cloud rung actually runs.
+
+    Note the shared precondition this does NOT re-check: the ``qwen-ocr`` CLI.
+    Both rungs are driven by it, and its absence is already surfaced by the
+    local probe and by the provider's own failure path.
+    """
+    from socr.core.providers import PROFILE_QWEN_CLOUD
+
+    return _check_ollama_model(PROFILE_QWEN_CLOUD.model) is None
+
+
 def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
     """Return (resolved_backend, resolved_model) for the qwen-ocr-cli invocation.
 
