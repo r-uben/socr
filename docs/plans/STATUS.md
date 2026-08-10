@@ -50,7 +50,7 @@ Refreshed 2026-08-09 from a two-model evidence-gated triage of every open issue.
 |-------|--------------|----------------|
 | #127 | still-valid (unanimous). Native path discards size/flags/font and never calls `page.get_links()`. Filed 2026-08-09. | GH-127-P, -A, -B, -C, -D-DESIGN |
 | #114 | still-valid, **re-scoped**. HPC-egress premise invalidated by measurement in the issue's own comment; corpus-reprocessing scope survives and is unimplemented. Issue body needs rewriting. | GH-114-DESIGN |
-| #64 | still-valid (unanimous). Borderless 2-column tables fail both detection passes and fall to native text unflagged. Already recorded as PP-6's residual. | GH-64 |
+| #64 | still-valid (unanimous). Borderless 2-column tables fail both detection passes and fall to native text unflagged. Already recorded as PP-6's residual. **Widened 2026-08-10:** carries a second, verified leak — audit depth depends on provider availability. | GH-64 |
 | #56 | partially-addressed (unanimous). #79/#87 landed; multi-section/nested-column reconstruction did not. Fork needs settling first. | GH-56-DESIGN |
 | #49 | partially-addressed (unanimous). GH-49A verifier DONE; native label→value *binding* is net-new. | GH-49B-DESIGN |
 | #46 | partially-addressed. Lineup constants landed (`6d6ee79`); the Ollama-Cloud rung is unreachable. | GH-46-E2, GH-46-E4, (GH-46-E1 separate) |
@@ -97,6 +97,16 @@ sub-delegation, no inter-agent messaging. Without that rule the 2026-08-09 panel
 untracked second agent tier and one proposal agent solicited confirmatory evidence for a
 position it had already chosen, producing a false GH-114 consensus. Same panel re-run under the
 rule: 743k tokens instead of 1.67M, no sprawl, and the contested fork surfaced honestly.
+
+**Tested and rejected (2026-08-10): "the free lane ships unverified" as a NEW issue.** A
+falsification panel (`.claude/workflows/free-tier-audit.js`) partially refuted the claim. Free
+`engine="native"` output *is* checked in several places — `native_math_unrecovered`
+(`orchestrator.py:2282-2303`), the fail-closed chart lane (`:2160-2242`), `_surface_table_scoring`
+(`:1521-1560`), manifest-freeze demotion (`manifest.py:263-351`), and a DEBUG-only
+`_check_token_coverage` (`born_digital.py:1042-1094`). What is true is narrower and already
+GH-64's subject: those checks share one fate, gated on the `has_tables` signal whose failure
+*defines* the bug. **Do not file a general "free lane unverified" issue** — the panel's only net-new
+finding (availability-dependent audit depth) has been folded into GH-64 instead.
 
 
 ## Completed in PR #52
