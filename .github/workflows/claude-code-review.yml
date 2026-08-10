@@ -41,6 +41,16 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # TEMPORARY (2026-08-10) — diagnostic only, revert once the cause is known.
+          # claude-review has failed on every PR (#126, #128, #129, #130) with
+          # is_error:true after 274ms, 1 turn, $0.00 — it never reaches the API.
+          # The credential IS present (CLAUDE_CODE_OAUTH_TOKEN is masked in the log,
+          # not empty) and the marketplace/plugin install cleanly, so the failure is
+          # at the auth/quota door. The action redacts the SDK result string by
+          # default, which is the one field naming the cause. This unhides it.
+          # NOTE: this repo is public, so Claude's output lands in public Actions
+          # logs while this line is present. Remove it as soon as the error is read.
+          show_full_output: true
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
