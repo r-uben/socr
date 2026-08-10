@@ -265,7 +265,30 @@ def route_page(
         if remaining_budget is not None:
             remaining_budget -= prof.cost_per_page_usd
 
-        decision = judge.assess(output, prof)
+        try:
+            decision = judge.assess(output, prof)
+        except Exception as exc:  # a judge blowing up must not kill the document
+            # Mirror the provider guard above. The text is real — only the
+            # verdict is missing — so the attempt is recorded UNJUDGED and stays
+            # eligible for ``_best_effort``; the loop escalates. Without this an
+            # HTTP error from the judge backend (e.g. a 404 on a model that was
+            # never pulled) propagates out of the per-page loop in
+            # ``_phase_agentic`` and takes the whole document with it (#133).
+            logger.warning("judge failed on page %s at %s: %s", page_num, prof.engine.value, exc)
+            attempts.append(
+                ProviderAttempt(
+                    engine=prof.engine,
+                    output=output,
+                    cost_usd=prof.cost_per_page_usd,
+                    accepted=False,
+                    reason=f"judge raised: {exc}",
+                    provider_id=prof.id,
+                    model=prof.model,
+                    backend=prof.backend,
+                )
+            )
+            continue
+
         attempts.append(
             ProviderAttempt(
                 engine=prof.engine,
