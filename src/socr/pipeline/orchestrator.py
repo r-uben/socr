@@ -50,6 +50,12 @@ from socr.tables.extract import probe_ollama_idle
 logger = logging.getLogger(__name__)
 console = Console()
 
+# Provenance value recorded when no vision judge could be built and the page gate
+# is the heuristic checker. A literal sentinel (not "") so the distinction between
+# "heuristics judged this run" and "this field was never populated" survives into
+# metadata.json and the run fingerprint (#133).
+JUDGE_IDENTITY_HEURISTIC = "heuristic"
+
 
 def _page_blob_key(page_output_dict: dict) -> str:
     """Content-addressed key for a serialised PageOutput dict.
@@ -115,6 +121,19 @@ class UnifiedPipeline:
         result = pipeline.process(pdf_path, output_dir)
         results = pipeline.process_batch(input_dir, output_dir)
     """
+
+    # Memoized judge-model resolution (#133). ``_resolve_judge_model`` probes
+    # Ollama over HTTP once per entry in ``_JUDGE_MODEL_CANDIDATES``, and it is
+    # consulted from ``_run_fingerprint``, which runs ONCE PER PAGE via
+    # ``_flush_page_sidecar`` — resolving eagerly each time would cost 3 probes
+    # per page. Sentinel ``False`` = not yet resolved (``None`` is a legitimate
+    # result meaning "no VLM judge is available").
+    #
+    # Declared at CLASS level, not in ``__init__``: tests construct pipelines via
+    # ``object.__new__(UnifiedPipeline)`` to skip constructor side effects, and a
+    # fingerprint call on such an instance must not explode on a missing
+    # attribute. Assignment in ``_resolve_judge_model`` shadows it per instance.
+    _judge_model_cache: str | None | bool = False
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
@@ -313,7 +332,22 @@ class UnifiedPipeline:
             "audit_min_words": cfg.audit_min_words,
             "judge_hard_pages": cfg.judge_hard_pages,
             "judge_backend": cfg.judge_backend,
-            "judge_model": cfg.judge_model,
+            # The RESOLVED judge identity, not the (possibly empty) config field.
+            # Under the default auto-resolution ``cfg.judge_model`` is "", so
+            # pulling or removing a judge model changed how pages were gated
+            # without changing the fingerprint — and terminal pages resumed under
+            # the other judge (#133). Availability-dependent BY DESIGN: a
+            # different judge is a different run, and the ledger must say so.
+            # ``JUDGE_IDENTITY_HEURISTIC`` when no vision judge is available, so
+            # heuristic-gated pages never resume as VLM-gated ones. An explicit
+            # ``--judge-backend heuristic`` short-circuits the resolver: no VLM
+            # can run, so probing Ollama would cost 3 HTTP round-trips to record
+            # a model that never judges.
+            "judge_model": (
+                JUDGE_IDENTITY_HEURISTIC
+                if cfg.judge_backend == "heuristic"
+                else (self._resolve_judge_model() or JUDGE_IDENTITY_HEURISTIC)
+            ),
             "dual_pass_tables": cfg.dual_pass_tables,
             "truncation_retries": cfg.truncation_retries,
             "max_retries": cfg.max_retries,
@@ -1996,8 +2030,9 @@ class UnifiedPipeline:
             for p in ladder
         ]
 
-        # Record judge model for manifest provenance (B3).
-        state.agentic_judge_model = self._resolve_judge_model() or ""
+        # Judge provenance (B3) is recorded INSIDE _build_page_judge, from the
+        # judge it actually built — not from _resolve_judge_model, which reports
+        # what was wanted rather than what ran (#133).
         _inner_judge = self._build_page_judge(state)
 
         # Use calibrated defaults when no explicit override is configured.
@@ -2654,18 +2689,30 @@ class UnifiedPipeline:
     _JUDGE_MODEL_CANDIDATES = ["qwen3.5:cloud", "minicpm-v:8b", "qwen3-vl:8b"]
 
     def _resolve_judge_model(self) -> str | None:
-        """Pick an available vision model for judging, or None if none usable."""
+        """Pick an available vision model for judging, or None if none usable.
+
+        Memoized for the lifetime of the pipeline (#133): every call probes
+        Ollama once per candidate, and ``_run_fingerprint`` consults this on
+        every page sidecar flush. An explicit ``--judge-model`` short-circuits
+        the probing entirely and is returned verbatim, so an operator override
+        is never silently discarded because the daemon was briefly unreachable.
+        """
         from socr.judge.ollama_judge import OllamaVisionJudge
 
         if self.config.judge_model:
             return self.config.judge_model
+        if self._judge_model_cache is not False:
+            return self._judge_model_cache  # type: ignore[return-value]
+        resolved: str | None = None
         for model in self._JUDGE_MODEL_CANDIDATES:
             try:
                 if OllamaVisionJudge(model=model).is_available():
-                    return model
+                    resolved = model
+                    break
             except Exception:
                 continue
-        return None
+        self._judge_model_cache = resolved
+        return resolved
 
     def _resolve_crop_vlm_model(self) -> str | None:
         """Vision model for bounded table-crop reread (dual-pass / crop fallback).
@@ -3086,6 +3133,7 @@ class UnifiedPipeline:
         table pages BEFORE the inner judge is called (Consilium decision
         20260615T170212Z-0362, Option C).  Scanned pages bypass cleanly.
         """
+        from socr.core.audit_log import AuditEvent
         from socr.pipeline.agentic import (
             HeuristicPageJudge,
             NativeTableVerifierJudge,
@@ -3095,21 +3143,60 @@ class UnifiedPipeline:
 
         backend = self.config.judge_backend
         inner_judge = None
+        judge_identity = JUDGE_IDENTITY_HEURISTIC
+        resolved_model: str | None = None
         if backend in ("vlm", "auto"):
             try:
                 from socr.judge.ollama_judge import OllamaVisionJudge
 
-                vj = (
-                    OllamaVisionJudge(model=self.config.judge_model)
-                    if self.config.judge_model
-                    else OllamaVisionJudge()
-                )
-                if vj.is_available():
-                    inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
+                # Build the judge from the RESOLVED model, not the module
+                # default. Constructing bare fell back to ``qwen2-vl:7b`` — a
+                # model that is not even in ``_JUDGE_MODEL_CANDIDATES`` — so on
+                # any machine without that exact pull the judge silently became
+                # the heuristic checker while the manifest still named a VLM
+                # (#133).
+                resolved_model = self._resolve_judge_model()
+                if resolved_model:
+                    vj = OllamaVisionJudge(model=resolved_model)
+                    if vj.is_available():
+                        inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
+                        judge_identity = resolved_model
             except Exception as exc:
                 logger.warning("VLM judge unavailable (%s); using heuristics", exc)
-            if inner_judge is None and backend == "vlm" and not self.config.quiet:
-                console.print("  [yellow]VLM judge unavailable -> heuristic judge[/yellow]")
+            if inner_judge is None:
+                # Surface REGARDLESS of backend. ``judge_backend`` defaults to
+                # "auto", and warning only under an explicit "vlm" meant the
+                # default path degraded in total silence — the one place this
+                # repo's "failures surface at every level" rule was not applied
+                # to the judge itself.
+                detail = (
+                    f"requested judge model {resolved_model!r} is not available"
+                    if resolved_model
+                    else "no vision model from the judge candidate ladder is available"
+                )
+                if not self.config.quiet:
+                    console.print(
+                        f"  [yellow]VLM judge unavailable ({detail}) -> "
+                        "heuristic judge; pages are gated by word-count/structure "
+                        "checks, NOT by a vision model[/yellow]"
+                    )
+                state.events.append(
+                    AuditEvent(
+                        page_num=0,
+                        kind="judge_degraded_to_heuristic",
+                        engine="",
+                        detail=detail,
+                        data={
+                            "judge_backend": backend,
+                            "requested_model": resolved_model or "",
+                            "candidates": list(self._JUDGE_MODEL_CANDIDATES),
+                        },
+                    )
+                )
+        # Provenance records the judge that ACTUALLY ran (#133): the previous
+        # value came from ``_resolve_judge_model`` regardless of what was built,
+        # so metadata.json could name a VLM for pages heuristics had judged.
+        state.agentic_judge_model = judge_identity
         if inner_judge is None:
             # Sparse-aware at the DECISION point: without this, the heuristic
             # fallback judge rejects correct sparse pages at every rung and the

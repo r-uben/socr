@@ -22,6 +22,11 @@ DEFAULT_MODEL = "qwen2-vl:7b"
 DEFAULT_HOST = "http://localhost:11434"
 
 
+def _with_implicit_tag(name: str) -> str:
+    """Ollama resolves an untagged model reference to ``:latest``."""
+    return name if ":" in name else f"{name}:latest"
+
+
 class OllamaVisionJudge:
     """Judge backed by a local Ollama vision model."""
 
@@ -37,12 +42,19 @@ class OllamaVisionJudge:
         self._prompt = load_judge_prompt()
 
     def is_available(self) -> bool:
-        """True if the Ollama server is up and the model is pulled."""
+        """True if the Ollama server is up and THIS EXACT model is pulled.
+
+        Matched on the full ``name:tag``. A prefix match on the name alone (the
+        historical behaviour) let an installed ``qwen3-vl:30b-a3b-instruct``
+        satisfy a request for ``qwen3-vl:8b``: the model reported as available,
+        then ``judge()`` 404'd at judge time on a model that was never pulled
+        (#133). Availability must mean the pull, not the family.
+        """
         try:
             resp = httpx.get(f"{self.host}/api/tags", timeout=5.0)
             resp.raise_for_status()
-            names = {m.get("name", "") for m in resp.json().get("models", [])}
-            return any(self.model.split(":")[0] in n for n in names)
+            names = {_with_implicit_tag(m.get("name", "")) for m in resp.json().get("models", [])}
+            return _with_implicit_tag(self.model) in names
         except (httpx.HTTPError, ValueError):
             return False
 
