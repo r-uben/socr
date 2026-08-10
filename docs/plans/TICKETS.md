@@ -868,12 +868,49 @@ to native text. Flag only — no routing change. **The probe must run on every p
 whether an escalation provider exists — otherwise it inherits the shared fate it exists to break.
 Deterministic only: no model call, and reuse the word geometry already read during born-digital
 assessment rather than re-reading the page.
+
+**The trust criterion is CROSS-ROW ALIGNMENT STABILITY, not lane count.** This is the design
+question the ticket previously left open ("repeated 2-lane alignment" never said what makes the
+repetition trustworthy), and getting it wrong reproduces the bug: socr's existing guard against
+false-positive table detection *is* the lane count (`_MIN_LANES_PER_ROW = 3`), so a probe built on
+lane count structurally cannot see the two-column case. Ask a different question instead —
+**a table's column positions are stable across rows; prose word positions are not.** Shape of the
+test, in order:
+1. group words into rows by y-proximity;
+2. within a row, cluster x-positions into lanes by gap;
+3. keep rows with **2+** lanes;
+4. require several such rows contiguously;
+5. **verify the lane start positions agree across those rows** — this step, not the lane count,
+   is what separates a borderless label|value table from a paragraph.
+
+This is the criterion that admits two-column tables while still rejecting prose, and it is what
+bounds the false-positive risk the panel flagged (bibliographies, glossaries, key/value lists,
+leader-dot contents). Expect a residue that alignment alone cannot separate — table-of-contents
+pages in particular — and handle it explicitly rather than by tightening the gap constants.
+
+**Derive every constant from the page** (median inter-row spacing, median inter-word gap, font
+size), never a tuned literal — the no-magic-thresholds rule applies with full force here, and it
+is the main reason not to lift an existing implementation verbatim.
+
+**Prior art — `firecrawl/pdf-inspector` (MIT), read 2026-08-10 at `src/tables/detect_heuristic.rs`.**
+An independent deterministic extractor that solves this exact problem with the criterion above
+(`find_table_regions_strict`, `:768-830`; `min_cols = 2` at `:945`). Two things to know if you open
+it: its doc comment claims "3+ distinct X-position clusters" while the code requires
+`cluster_starts.len() >= 2` — the code is correct and the comment is stale; and its constants are
+tuned literals (8pt row tolerance, 20pt cluster gap, 25pt gap floor) that must NOT be copied. Cite
+the provenance in the implementing code comment. Same repo also carries a **script-attachment
+filter** (`:465-479`): sub/superscripts in display equations otherwise cluster into phantom table
+regions on TeX-style pages. socr processes that corpus and has no such filter — likely a live
+false-positive source for this probe. Out of scope here; file it if the fixture work confirms it.
 **Files:** `src/socr/core/born_digital.py`, `src/socr/pipeline/orchestrator.py`, `tests/test_born_digital.py`
 **Done when:** `grep -rn "possible_table_structure_not_reconstructed" src/` returns a hit; a fixture
 page emits it; the event is in `TABLE_DISTRUST_KINDS` (`core/tables_trust.py:47-73`) so it reaches
 the page sidecar, `tables_trust.json`, the document metadata trust note and the CLI summary; the
 fixture emits it **with no escalation provider configured** (the local-only branch is the one that
-currently has no coverage); no existing routing test changes outcome.
+currently has no coverage); **a plain multi-paragraph prose fixture does NOT emit it, and neither
+does a leader-dot table-of-contents page** — a probe with only a positive fixture proves nothing,
+since the failure mode being guarded against is over-firing on prose; no existing routing test
+changes outcome.
 **Gating:** GH-127-C for `born_digital.py`, GH-46-E2 for `orchestrator.py`.
 **Adjacent, not in scope:** `_check_token_coverage` (`born_digital.py:1042-1094`) is an existing
 deterministic post-hoc coverage diagnostic that is region-gated and DEBUG-only, so it never surfaces.
