@@ -848,12 +848,36 @@ states the rule precisely enough for a Done-when to be written for GH-127-D.
 matches neither `find_tables()` nor the lane test, so it falls to native text unflagged; the
 structure-loss audit is gated behind `_page_has_tables` and cannot fire. Recorded as PP-6's
 residual in `docs/plans/progressive-pages/STATUS.md`.
+**Shared-fate verification (2026-08-10 panel):** the single false `has_tables` boolean switches off
+*every* table-conditional audit on the page at once — this is why the class ships SUCCESS at $0.00
+with no trace, not merely why detection misses it.
+**Second leak — verification depth depends on provider availability (verified `orchestrator.py:2510-2530`):**
+the `if` at `:2510` is gated only on `_escalation_profile is not None and not _escalation_degraded
+and bo.text` — **no** `_page_has_tables` — so with an escalation provider reachable, every
+text-bearing page (including free `engine="native"`) reaches `_table_page_needs_escalation`. The
+`elif` at `:2520` **is** `_page_has_tables`-gated. So the same PDF is audited to different depths
+depending on whether a provider happens to be up: local-only runs, `--strict-local`, CI, and anyone
+hit by the unreachable middle rung (GH-46-E2) fall to the gated branch and get nothing. Note the
+`elif` gate is a deliberate priced trade-off (its comment: prose pages skip ~137ms scoring because
+"they have no table to lose") — this ticket does not remove it, it adds a cheaper probe beside it.
+Even on the escalation-enabled branch a GH-64 page returns early at `:1480-1491` before `score_page`
+(no located region / no grid), so it earns at most `table_not_scorable`, never an exactness compare.
 **Do:** geometry probe for repeated 2-lane alignment; emit an audit event on a page that routed
-to native text. Flag only — no routing change.
+to native text. Flag only — no routing change. **The probe must run on every page shipping
+`engine="native"`, ignoring BOTH gates** — regardless of `_page_has_tables` and regardless of
+whether an escalation provider exists — otherwise it inherits the shared fate it exists to break.
+Deterministic only: no model call, and reuse the word geometry already read during born-digital
+assessment rather than re-reading the page.
 **Files:** `src/socr/core/born_digital.py`, `src/socr/pipeline/orchestrator.py`, `tests/test_born_digital.py`
 **Done when:** `grep -rn "possible_table_structure_not_reconstructed" src/` returns a hit; a fixture
-page emits it; no existing routing test changes outcome.
+page emits it; the event is in `TABLE_DISTRUST_KINDS` (`core/tables_trust.py:47-73`) so it reaches
+the page sidecar, `tables_trust.json`, the document metadata trust note and the CLI summary; the
+fixture emits it **with no escalation provider configured** (the local-only branch is the one that
+currently has no coverage); no existing routing test changes outcome.
 **Gating:** GH-127-C for `born_digital.py`, GH-46-E2 for `orchestrator.py`.
+**Adjacent, not in scope:** `_check_token_coverage` (`born_digital.py:1042-1094`) is an existing
+deterministic post-hoc coverage diagnostic that is region-gated and DEBUG-only, so it never surfaces.
+Promoting it to an audit event is a separate cheap win — file it if this ticket confirms the seam.
 
 ### GH-56-DESIGN — Settle the residual #56 fork · NEEDS-DESIGN · `socr-designer` · depends-on: none · wave 1
 **Problem:** the draft ticket "deterministic multi-section / nested-column reconstructor"
