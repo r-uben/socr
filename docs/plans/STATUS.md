@@ -1,6 +1,6 @@
 # STATUS - GitHub issue action plan
 
-Last updated: 2026-08-09
+Last updated: 2026-08-10
 Branch: `chore/triage-open-issues`
 Base reviewed: `29dc6f0` (`main`)
 GitHub source: open issues #39, #46, #49, #56, #64, #114, #127
@@ -59,13 +59,13 @@ Refreshed 2026-08-09 from a two-model evidence-gated triage of every open issue.
 
 ## Dispatch waves (2026-08-09 backlog)
 
-Design tickets write only `docs/log/*.md` and are file-disjoint from everything, so all four
-NEEDS-DESIGN rows can run concurrently with wave-1 implementation.
+Design tickets write only `docs/log/*.md` and are file-disjoint from everything, so they run
+concurrently with wave-1 implementation. Two of the four are now DONE (2026-08-10).
 
 | Wave | Tickets | Shared-file note |
 |------|---------|------------------|
-| 1 | GH-46-E2 · GH-127-P · GH-127-D-DESIGN · GH-56-DESIGN · GH-49B-DESIGN | disjoint |
-| 2 | GH-46-E4 · GH-127-A · GH-114-DESIGN | E4 serializes behind E2 on `engines/qwen.py` |
+| 1 | GH-46-E2 · GH-127-P · GH-127-D-DESIGN · GH-56-DESIGN · ~~GH-49B-DESIGN~~ (DONE) | disjoint |
+| 2 | GH-46-E4 · GH-127-A · ~~GH-114-DESIGN~~ (DONE) | E4 serializes behind E2 on `engines/qwen.py` |
 | 3 | GH-127-B | `born_digital.py` serialization |
 | 4 | GH-127-C | `born_digital.py` serialization |
 | 5 | GH-64 | needs GH-127-C (`born_digital.py`) + GH-46-E2 (`orchestrator.py`) |
@@ -76,10 +76,27 @@ all own `src/socr/core/born_digital.py`. They are split for reviewability, not f
 
 ## Next action
 
-Dispatch wave 1. The four design tickets are free (docs-only); `GH-46-E2` is the only wave-1
-implementation ticket with a fully written Done-when, and it carries a named CI-hermeticity
-recipe — CI has no ollama, so both probe seams must be patched by name or the test passes locally
-and fails in CI.
+**Two of the four design tickets are settled (2026-08-10): `GH-49B-DESIGN` and `GH-114-DESIGN`.**
+Notes in `docs/log/2026-08-09_native-binding.md` and `docs/log/2026-08-09_post-hoc-escalate.md`.
+Neither can become an implementation ticket yet — each ends on a named open decision:
+
+- **GH-49B** — (1) default-on or flag-gated for one measurement cycle? (2) absorb the two-sided
+  cost, since per-region matching also requires the Markdown parser to learn table boundaries?
+- **GH-114** — owner ruled **in place / official copy**. Remaining: how a half-escalated document
+  announces itself, given `_run_fingerprint` includes `escalate_ambiguous_tables`
+  (`orchestrator.py:298-301`) exactly to prevent that mixture. Needs the resume-gate code read.
+
+Still open as design work: `GH-127-D-DESIGN`, `GH-56-DESIGN`.
+
+Dispatch-ready implementation: `GH-46-E2` remains the only ticket with a fully written Done-when,
+and it carries a named CI-hermeticity recipe — CI has no ollama, so both probe seams must be
+patched by name or the test passes locally and fails in CI. `GH-127-P` is next after it.
+
+**Method note (2026-08-10):** design-panel agents must run as read-only **leaf nodes** — no
+sub-delegation, no inter-agent messaging. Without that rule the 2026-08-09 panel spawned an
+untracked second agent tier and one proposal agent solicited confirmatory evidence for a
+position it had already chosen, producing a false GH-114 consensus. Same panel re-run under the
+rule: 743k tokens instead of 1.67M, no sprawl, and the contested fork surfaced honestly.
 
 
 ## Completed in PR #52
