@@ -73,10 +73,12 @@ The thinking build never terminates — the timeout guard is its only defence.
 ### 2. Figures (images)
 - **Extraction is model-free:** PyMuPDF locates figures, crops the frame, writes the
   PNG to `figures/`. No model involved in *finding* the figure.
-- **Description** currently routes to the **Gemini vision API** (`engines/gemini_api.py`).
-  This is the one place still cloud-default. Making it local-first
-  (`qwen3.5:cloud` → Gemini only on empty/failure) is a tracked follow-up — figure
-  descriptions are lower-stakes than text, so the cloud dependency here is least costly.
+- **Description** is **local-first** (`_get_vision_engine`, `pipeline/orchestrator.py:5279`):
+  when Ollama is reachable it returns a `LocalFirstFigureEngine` that tries the local
+  VLM and falls back to the **Gemini vision API** (`engines/gemini_api.py`) per call on
+  an empty or failed result; Gemini is used directly only when Ollama is unavailable.
+  Figure descriptions are lower-stakes than text, so a cloud fallback here is the least
+  costly one to keep.
 
 ### 3. Tables (markdown grids)
 - **Values come from native text — native is ground truth.** A VLM is *never* the
@@ -115,10 +117,12 @@ and is a larger, separately-tested change:
 - Dropping DeepSeek / demoting Mistral from the **agentic** escalation ladder
   (`DEFAULT_PROVIDERS` / `ENGINE_PRIORITY`). Today they remain in the cost registry for
   replay and `cost_of`.
-- Local-first **figure description** in `engines/gemini_api.py`.
-- Splitting provider identity by **engine + backend + model** (`QWEN` currently means
-  either local `qwen3-vl:8b` or cloud `qwen3.5:cloud`) and fixing
-  `QwenEngine.is_available()` so cloud availability is not gated on a local model.
+- Splitting provider identity by **engine + backend + model** at the *engine* layer.
+  GH-46-E2 closed the routing half of this: `_available_engines_for_agentic` now emits
+  `PROFILE_QWEN_LOCAL` and `PROFILE_QWEN_CLOUD` as independently probed rungs, so the
+  local → Ollama-Cloud → Gemini ladder has its middle rung. `EngineType.QWEN` still
+  names two backends, and `DEFAULT_PROVIDERS` still holds only one profile per engine —
+  a deliberate collision, worked around rather than removed.
 
 ## How to add or re-rank an engine
 
