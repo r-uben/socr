@@ -1,7 +1,7 @@
 # STATUS - GitHub issue action plan
 
 Last updated: 2026-08-10
-Branch: `chore/triage-open-issues`
+Branch: `main` (reconciliation branches merged: PRs #128, #129, #130)
 Base reviewed: `29dc6f0` (`main`)
 GitHub source: open issues #39, #46, #49, #56, #64, #114, #127
 (#34, #35, #37, #50, #51 closed; #36, #47 shipped)
@@ -53,7 +53,7 @@ Refreshed 2026-08-09 from a two-model evidence-gated triage of every open issue.
 | #64 | still-valid (unanimous). Borderless 2-column tables fail both detection passes and fall to native text unflagged. Already recorded as PP-6's residual. **Widened 2026-08-10:** carries a second, verified leak — audit depth depends on provider availability. | GH-64 |
 | #56 | partially-addressed (unanimous). #79/#87 landed; multi-section/nested-column reconstruction did not. Fork needs settling first. | GH-56-DESIGN |
 | #49 | partially-addressed (unanimous). GH-49A verifier DONE; native label→value *binding* is net-new. | GH-49B-DESIGN |
-| #46 | partially-addressed. Lineup constants landed (`6d6ee79`); the Ollama-Cloud rung is unreachable. | GH-46-E2, GH-46-E4, (GH-46-E1 separate) |
+| #46 | **GH-46-E2 SHIPPED 2026-08-10** (`f4dad26`) — the Ollama-Cloud rung is reachable. GH-46-E4 unblocked; GH-46-E1 (skill/profile interface) still separate. | ~~GH-46-E2~~, GH-46-E4, (GH-46-E1 separate) |
 | #39 | partially-addressed (unanimous). Stage 1 landed; no `calibration.lock.json` exists and the three ladder lists remain independent. | GH-39A (blocked), GH-39B |
 | #50, #51 | **CLOSED 2026-08-09** as already-fixed. | — |
 
@@ -88,9 +88,22 @@ Neither can become an implementation ticket yet — each ends on a named open de
 
 Still open as design work: `GH-127-D-DESIGN`, `GH-56-DESIGN`.
 
-Dispatch-ready implementation: `GH-46-E2` remains the only ticket with a fully written Done-when,
-and it carries a named CI-hermeticity recipe — CI has no ollama, so both probe seams must be
-patched by name or the test passes locally and fails in CI. `GH-127-P` is next after it.
+**`GH-46-E2` SHIPPED (`f4dad26`, PR #130, merged 2026-08-10)** — the first code of this
+reconciliation. The Ollama-Cloud rung is reachable; `_resolve_table_escalation_provider` now picks
+`qwen-cloud` ($0.0000) over `gemini` ($0.0002). Hermeticity proven, not assumed: 19/19 pass with
+`ollama` and `qwen-ocr` absent from `PATH`. Full suite 1413 passed / 1 xfailed.
+
+`GH-46-E4` is unblocked by it. `GH-127-P` is **frozen** — see the Stream B note below.
+
+**Stream B is frozen pending a build-vs-borrow decision (2026-08-10).**
+`firecrawl/pdf-inspector` (MIT, Rust + PyO3) is a purely deterministic born-digital extractor that
+already ships most of Stream B: heading tiers from character-weighted font size, links/AcroForm,
+lists, code blocks, multi-column reading order, and alignment-based table detection. Do not build
+`GH-127-A/B/C/D` or `GH-64` before deciding how much to borrow. The algorithms are borrowable
+(reimplement in Python, cite provenance); its tuned literals are not — they violate the
+no-magic-thresholds rule. The GH-64 criterion already banked from it is recorded in `TICKETS.md`.
+One unticketed lead found there: a script-attachment filter, without which display-equation
+sub/superscripts form phantom table regions on TeX pages — a corpus socr processes.
 
 **Method note (2026-08-10):** design-panel agents must run as read-only **leaf nodes** — no
 sub-delegation, no inter-agent messaging. Without that rule the 2026-08-09 panel spawned an
