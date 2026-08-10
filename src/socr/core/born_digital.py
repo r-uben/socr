@@ -58,6 +58,31 @@ def line_has_corrupt_math(line: str) -> bool:
     return any(ch in _MATH_CORRUPTION_GLYPHS for ch in line)
 
 
+# A slash that BEGINS a token and is immediately followed by a digit: "(/997)",
+# "/55-84", "pp. /23". This is the eaten-leading-digit signature — a stroke glyph
+# decoded as '/' where a digit belongs, so "(1997)" ships as "(/997)".
+#
+# Deliberately narrower than the ratio's `/\d|\d/|\(/`. That broader pattern is
+# correct for a DENSITY score, where a few false hits wash out, but it fires on
+# text this corpus is full of — "1/2", "2019/20", "12/31/2024", "9/11",
+# "example.com/2024" — and so cannot drive an absolute-count gate. Requiring the
+# slash to start the token excludes every one of those (the slash there is
+# preceded by a digit or letter) while still catching both the eaten year and the
+# eaten page range.
+_DIGIT_CORRUPTION_RE = re.compile(r"(?<![0-9A-Za-z])/[0-9]")
+
+
+def count_digit_corruption(text: str) -> int:
+    """Number of eaten-leading-digit occurrences in ``text``.
+
+    An ABSOLUTE count, never a ratio: the corpus invariant is per-token ("a wrong
+    number is worse than a missing one"), so page length must not dilute it. Two
+    destroyed citation years are two destroyed citation years whether the page
+    carries 500 words or 5,000 (#136).
+    """
+    return len(_DIGIT_CORRUPTION_RE.findall(text or ""))
+
+
 # Semantically-empty characters that publishers inject into the text layer for
 # justification / line-breaking. They carry no content but corrupt downstream use:
 # the soft hyphen splits words so search misses them ("hetero\xadgeneous" != the
@@ -137,6 +162,11 @@ class PageAssessment:
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
+    #: #136: mid-band encoding corruption of the COSMETIC class (lost spaces, fused
+    #: words) — the page is trustworthy for content but its text layer is suspect.
+    #: Propagated to PageState so the agentic native lane can emit a durable audit
+    #: event; the historical ``notes`` entry alone reached nothing that ships.
+    has_encoding_hygiene_suspect: bool = False
     notes: list[str] = field(default_factory=list)
 
 
@@ -297,6 +327,11 @@ class BornDigitalDetector:
     # image, not the broken encoding). Set well above the header-only case so a clean
     # body is never sent to a slower/lossier VLM over a few bad header tokens.
     MAX_ENCODING_CORRUPTION = 0.05
+    # #136: eaten-leading-digit occurrences that route the page to OCR, as an
+    # ABSOLUTE count rather than a density. One is enough: a single "(/997)" is a
+    # wrong publication year, which the corpus invariant ranks as worse than a
+    # missing one, and no amount of surrounding clean prose makes it less wrong.
+    MAX_DIGIT_CORRUPTION_HITS = 1
 
     def __init__(
         self,
@@ -596,6 +631,37 @@ class BornDigitalDetector:
         # corruption means the text layer can't be trusted page-wide -> read the
         # image instead. (Mild, header-only glitches are flagged below, not escalated.)
         encoding_corruption = self._encoding_corruption_ratio(raw_text)
+        # #136: eaten-leading-digit corruption is a WRONG NUMBER, not a hygiene
+        # defect, so it is gated on absolute count and routed to OCR at the first
+        # occurrence — the same remedy as pervasive corruption below, for the same
+        # reason: OCR RECOVERS the true digit instead of merely confessing that one
+        # was lost. Ratio gating cannot serve this class; the identical damage
+        # scores 3% on a references page and 0.75% on a long prose page, and the
+        # second ships under the flag floor with no signal at all.
+        #
+        # A false positive costs one extra OCR pass on a page (spend); a false
+        # negative ships a wrong citation year as SUCCESS. For a citation corpus
+        # that asymmetry justifies erring hot.
+        digit_corruption = count_digit_corruption(raw_text)
+        if digit_corruption >= self.MAX_DIGIT_CORRUPTION_HITS:
+            notes.append(
+                f"text-layer digit corruption ({digit_corruption} eaten-digit "
+                "occurrence(s), e.g. '(/997)' for '(1997)') -> OCR"
+            )
+            return PageAssessment(
+                page_num=page_num,
+                is_born_digital=False,
+                native_text="",
+                confidence=0.75,
+                char_count=char_count,
+                word_count=word_count,
+                font_count=font_count,
+                has_images=has_images,
+                has_tables=has_tables,
+                has_figures=has_figures,
+                has_equations=has_equations,
+                notes=notes,
+            )
         if encoding_corruption > self.MAX_ENCODING_CORRUPTION:
             notes.append(f"text-layer encoding corrupted ({encoding_corruption:.1%}) -> OCR")
             return PageAssessment(
@@ -637,7 +703,14 @@ class BornDigitalDetector:
         # Flag mild encoding corruption (e.g. a broken header font) for visibility
         # without escalating: the body is still trustworthy, but the page is marked
         # suspect so it is never silently relied on.
-        if encoding_corruption > self.ENCODING_CORRUPTION_FLAG:
+        #
+        # #136: "marked suspect" used to mean ONLY this note, and nothing in the
+        # pipeline reads PageAssessment.notes — so the page shipped SUCCESS with no
+        # surface anywhere. The flag below is what carries the mark into PageState,
+        # the sidecar and the audit log. The digit class never reaches here; it was
+        # routed to OCR above.
+        encoding_hygiene_suspect = encoding_corruption > self.ENCODING_CORRUPTION_FLAG
+        if encoding_hygiene_suspect:
             notes.append(f"text-layer encoding suspect ({encoding_corruption:.1%})")
 
         # TR-3: reset the per-extraction unverifiable flag so _assess_page can
@@ -710,6 +783,7 @@ class BornDigitalDetector:
             has_corrupt_math=has_corrupt_math,
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
             has_unverifiable_table_region=has_unverifiable_table_region,
+            has_encoding_hygiene_suspect=encoding_hygiene_suspect,
             notes=notes,
         )
 

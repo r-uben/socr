@@ -2336,6 +2336,31 @@ class UnifiedPipeline:
                             },
                         )
                     )
+
+                # #136: the text layer showed cosmetic encoding corruption (lost
+                # spaces, fused words) in the flag band. The page ships SUCCESS —
+                # the content is sound and a reader recovers "JournalofFinance" —
+                # but the mark must reach something that ships. Before this, the
+                # detector's "marked suspect so it is never silently relied on"
+                # went only into PageAssessment.notes, which nothing in the
+                # pipeline reads. Digit corruption never reaches here; it is
+                # routed to OCR at detection.
+                if getattr(ps, "has_encoding_hygiene_suspect", False):
+                    from socr.core.audit_log import AuditEvent
+
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="native_encoding_hygiene_suspect",
+                            engine="native",
+                            detail=(
+                                "born-digital native text shipped from a suspect text layer "
+                                "(mid-word capitals / run-on tokens from dropped inter-word "
+                                "spaces); content is trusted, spacing is not"
+                            ),
+                            data={"class": "hygiene"},
+                        )
+                    )
             else:
                 # Route OCR page through the cost ladder.
                 remaining = None

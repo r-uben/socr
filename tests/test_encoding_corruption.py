@@ -27,6 +27,14 @@ _CLEAN = "The estimated coefficient on schooling is 0.082 and significant at the
 _CORRUPT = (
     "The coefficienton schoolingis 0./82 significantAt the / percent across /204 firmsInThe set"
 )
+# Same hygiene signatures (mid-word capitals, run-on tokens) with NO eaten-digit
+# occurrences. Needed since #136: the digit gate short-circuits _assess_page
+# before the ratio is consulted, so text containing "/204" no longer reaches the
+# ratio path and cannot exercise it.
+_CORRUPT_HYGIENE = (
+    "The coefficienton schoolingis significantAt the percentAcross "
+    "firmsInTheSampleSet estimatedValueOfCoefficients robustnessCheckResults"
+)
 
 
 def test_score_zero_on_clean_text():
@@ -47,21 +55,31 @@ def test_score_needs_enough_tokens():
 
 
 def test_pervasive_corruption_routes_to_ocr():
+    """The RATIO path: pervasive hygiene corruption, no eaten digits."""
     det = BornDigitalDetector()
-    _doc, page = _page([_CORRUPT] * 12)
+    _doc, page = _page([_CORRUPT_HYGIENE] * 12)
     a = det._assess_page(page, 1)
     assert a.is_born_digital is False  # not trusted -> OCR
     assert any("encoding corrupted" in n for n in a.notes)
 
 
 def test_mild_corruption_is_flagged_not_escalated():
+    """The FLAG band, hygiene class only — content trusted, spacing suspect.
+
+    #136 changed what belongs here: this page used to carry "(/997) /53-/93",
+    i.e. three eaten publication digits, and asserted they stayed born-digital.
+    That is now the escalation case (see test_encoding_signature_tiers_gh136).
+    A dropped SPACE is recoverable by any reader; a dropped DIGIT is a wrong
+    number, and the two no longer share a policy.
+    """
     det = BornDigitalDetector()
     # mostly clean body + a couple corrupted tokens (a broken header font)
-    lines = [_CLEAN] * 11 + ["FrenchfJoumal ofFinancial Economics 43 (/997) /53-/93"]
+    lines = [_CLEAN] * 11 + ["FrenchfJoumal ofFinancial Economics 43 volumeNumberFortyThree"]
     _doc, page = _page(lines)
     a = det._assess_page(page, 1)
     assert a.is_born_digital is True  # body still trusted
     assert any("encoding suspect" in n for n in a.notes)  # but recorded
+    assert a.has_encoding_hygiene_suspect is True  # ...on a field that ships
 
 
 def test_clean_page_not_flagged():
