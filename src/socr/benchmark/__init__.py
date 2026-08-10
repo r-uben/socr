@@ -2,7 +2,12 @@
 
 from socr.benchmark.calibrate import CalibrationReport, EngineProfile, RepairCalibrator
 from socr.benchmark.dataset import BenchmarkPaper, BenchmarkSet, build_benchmark_set
-from socr.benchmark.ground_truth import GroundTruthExtractor, PageGroundTruth
+from socr.benchmark.ground_truth import (
+    GroundTruthExtractor,
+    PageGroundTruth,
+    exclusion_report,
+    usable_truths,
+)
 from socr.benchmark.rasterize import PaperRasterizer
 from socr.benchmark.runner import BenchmarkResults, BenchmarkRunner, EngineRun
 from socr.benchmark.scorer import BenchmarkScorer, DocumentScore, PageScore
@@ -19,6 +24,8 @@ __all__ = [
     "EngineRun",
     "GroundTruthExtractor",
     "PageGroundTruth",
+    "exclusion_report",
+    "usable_truths",
     "PageScore",
     "PaperRasterizer",
     "RepairCalibrator",
