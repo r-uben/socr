@@ -45,6 +45,22 @@ def test_percent_and_thousands_separators_are_values():
     assert _is_data_row(["Employment", "1,204", ""])
 
 
+def test_decorated_values_are_still_values():
+    """Reviewer finding on #149: the anchored `_NUM_TOKEN_RE` rejects every one
+    of these, so a starred coefficient row — the common shape in an econometrics
+    table — would have been promoted to header despite carrying observations."""
+    assert _is_data_row(["Surprise", "0.67***", ""])
+    assert _is_data_row(["Surprise", "-0.253*", ""])
+    assert _is_data_row(["Section total", "**23,126**", ""])
+    assert _is_data_row(["Deficit", "−0.253", ""])  # U+2212
+    assert _is_data_row(["Revenue", "£43.2", ""])
+
+
+def test_word_header_survives_presentation_stripping():
+    """Emphasis stripping must not turn a bold word header into data."""
+    assert not _is_data_row(["Firm", "**Nominal**", "**Real**"])
+
+
 def test_word_header_with_named_label_column_is_not_data():
     """A header may name its label column; its cells are words, not values."""
     assert not _is_data_row(["Firm", "Nominal", "Real"])
@@ -61,6 +77,11 @@ def test_label_only_row_is_not_data():
 
 def test_row_with_no_data_columns_is_not_data():
     assert not _is_data_row(["0.67"])
+
+
+def test_empty_row_is_not_data():
+    """`_is_header_row` guards the empty case, so no IndexError reaches here."""
+    assert not _is_data_row([])
 
 
 # ---------------------------------------------------------------------------

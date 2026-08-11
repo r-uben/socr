@@ -223,19 +223,30 @@ def _is_data_row(row: list[str]) -> bool:
     cell holds a value-shaped token (``0.67``, ``(0.14)``, ``1,204``, ``45%``).
     That is the shape of a table body line: label + values.
 
+    Value-shapedness is delegated to ``native_verifier.is_numeric_token``, which
+    strips presentation before matching (GH-103): significance markers
+    (``0.67***``), markdown emphasis (``**23,126**``), unicode minus
+    (``−0.253``) and currency prefixes (``£43.2``). The bare anchored
+    ``_NUM_TOKEN_RE`` rejects all of those, which would let a starred coefficient
+    row — the common case in an econometrics table — become the header again.
+
     Deliberately narrower than the negation of ``_is_header_row``. A header may
     well name its label column (``['Firm', 'Nominal', 'Real']``) — that row is
     not data because its cells are words, not values. The residual ambiguity is
-    an all-numeric single-line header such as ``['Firm', '2024', '2025']``,
-    which is indistinguishable from data by shape alone; it is treated as data,
-    trading a lost column name for a guaranteed-present observation. Multi-line
-    headers, where the year band sits on its own row with an empty column 0, are
-    unaffected — ``_is_header_row`` accepts those and ``_collapse_header_prefix``
-    merges them before this check runs.
+    a single-line header whose cells are themselves numeric, such as
+    ``['Firm', '2024', '2025']`` or ``['Variable', '(1)', '(2)']``; those are
+    indistinguishable from data by shape alone and are treated as data, trading
+    a lost column name for a guaranteed-present observation. Multi-line headers,
+    where the year or column-number band sits on its own row with an empty
+    column 0, are unaffected — ``_is_header_row`` accepts those and
+    ``_collapse_header_prefix`` merges them before this check runs.
     """
+    # Imported lazily: native_verifier imports _NUM_TOKEN_RE from this module.
+    from socr.tables.native_verifier import is_numeric_token
+
     if _is_header_row(row):
         return False
-    return any(_NUM_TOKEN_RE.match(c.strip()) for c in row[1:] if c.strip())
+    return any(is_numeric_token(c) for c in row[1:] if c.strip())
 
 
 def _grid_to_markdown(grid: list[list[str]]) -> str:
