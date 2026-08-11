@@ -56,7 +56,6 @@ _LIVE = {
     "quiet",
     "qwen_backend",
     "qwen_model",
-    "qwen_vllm_url",
     "recover_clean_equations",
     "render_dpi",
     "reprocess",
@@ -120,7 +119,12 @@ _UNEXERCISED = {
     "qwen_vllm_model",
     "qwen_model_pinned",
     "judge_backend",  # read by _build_page_judge, stubbed here
-    "auto_patch_tables",  # read by _reread_page_tables, which needs a live crop VLM
+    # Read only inside the table-extractor block, which is gated on
+    # _resolve_crop_vlm_model() finding a live vision model. Pinned to None in
+    # the fixture so this classification does not depend on whether the machine
+    # running the tests happens to have one pulled.
+    "auto_patch_tables",
+    "qwen_vllm_url",
     "describe_figures",  # read by the figure-description lane, not reached here
     # Consumed outside the orchestrator entirely (cli.py, engine subprocesses):
     "dry_run",
@@ -221,6 +225,14 @@ def readers(tmp_path_factory):
 
     pipe._available_engines_for_agentic = lambda: [providers.PROFILE_QWEN_LOCAL]
     pipe._build_page_judge = lambda state: _YesJudge()
+    # Determinism, not convenience: _resolve_crop_vlm_model probes Ollama over
+    # HTTP. Left live, the classification depends on whether the developer
+    # happens to have a vision model pulled — the table-extractor block (and
+    # everything it reads) runs on a workstation and is skipped in CI. That is
+    # the exact local-passes/CI-fails trap this repo documents, and it failed
+    # this test's first CI run on `qwen_vllm_url`. Pinned to None so the fixture
+    # takes the same branch everywhere.
+    pipe._resolve_crop_vlm_model = lambda: None
     pipe._run_engine_on_pages = lambda state, nums, nat, eng, phase: [
         PageOutput(
             page_num=p,
