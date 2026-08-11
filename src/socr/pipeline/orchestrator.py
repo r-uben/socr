@@ -1137,6 +1137,62 @@ class UnifiedPipeline:
         pa = self._assessment_for_page(page_num)
         return bool(pa and pa.has_tables)
 
+    def _decide_page_lane(
+        self,
+        page_num: int,
+        ps: PageState,
+        *,
+        pdf_path: Path | None = None,
+        detect_charts: bool = True,
+    ):
+        """Modality router: native PDF reading vs OCR LLM (vs chart-asset).
+
+        Pure policy lives in ``socr.pipeline.page_router.decide_page_lane``.
+        Chart-mark detection (fitz I/O) is optional and only runs when the page
+        is otherwise a trusted-native candidate — OCR-bound pages never open
+        the PDF just to look for charts.
+        """
+        from socr.pipeline.page_router import PageLane, decide_page_lane
+
+        has_tables = self._page_has_tables(page_num, ps)
+        base = decide_page_lane(
+            native_first=self.config.native_first,
+            native_only=self.config.native_only,
+            is_born_digital=ps.is_born_digital,
+            native_text=ps.native_text,
+            needs_ocr_enhancement=ps.needs_ocr_enhancement,
+            has_tables=has_tables,
+            has_chart_marks=False,
+        )
+        if not detect_charts or base.lane is not PageLane.NATIVE or pdf_path is None:
+            return base
+
+        chart_marks = False
+        try:
+            import fitz
+
+            with fitz.open(pdf_path) as doc:
+                chart_marks = has_chart_marks(doc[page_num - 1])
+        except Exception as exc:
+            logger.debug(
+                "_decide_page_lane p%d: chart detect failed (%s); treating as no marks",
+                page_num,
+                exc,
+            )
+            chart_marks = False
+
+        if not chart_marks:
+            return base
+        return decide_page_lane(
+            native_first=self.config.native_first,
+            native_only=self.config.native_only,
+            is_born_digital=ps.is_born_digital,
+            native_text=ps.native_text,
+            needs_ocr_enhancement=ps.needs_ocr_enhancement,
+            has_tables=has_tables,
+            has_chart_marks=True,
+        )
+
     def _is_trusted_native_without_ocr(self, page_num: int, ps: PageState) -> bool:
         """Whether a page may bypass OCR and ship native text directly.
 
@@ -1144,20 +1200,14 @@ class UnifiedPipeline:
         model/VLM path because PyMuPDF text often flattens grids even when the
         character layer is otherwise clean. ``--native-only`` remains the
         explicit override for born-digital pages.
+
+        Delegates to ``page_router.decide_page_lane`` (chart marks ignored —
+        chart pages are still "trusted native" candidates that the chart lane
+        intercepts).
         """
-        if not self.config.native_first or not ps.is_born_digital or not ps.native_text:
-            return False
+        from socr.pipeline.page_router import PageLane
 
-        if self.config.native_only:
-            return True
-
-        if ps.needs_ocr_enhancement:
-            return False
-
-        if self._page_has_tables(page_num, ps):
-            return False
-
-        return True
+        return self._decide_page_lane(page_num, ps, detect_charts=False).lane is PageLane.NATIVE
 
     def _is_agentic_trusted_native(self, page_num: int, ps: PageState) -> bool:
         """Backward-compatible alias for the agentic native-bypass predicate."""
@@ -1185,26 +1235,12 @@ class UnifiedPipeline:
         Do NOT call this predicate when ``_is_trusted_native_without_ocr`` returns False
         (i.e. the page would go to the OCR ladder anyway); there is nothing to intercept.
         """
-        # Must be a trusted native candidate first (chart lane is a sub-case of native).
-        if not self._is_trusted_native_without_ocr(page_num, ps):
-            return False
-        # Tables route to the ladder — never to the chart lane.
-        if self._page_has_tables(page_num, ps):
-            return False
-        # Open the PDF page and run the vector detector.
-        try:
-            import fitz
+        from socr.pipeline.page_router import PageLane
 
-            with fitz.open(pdf_path) as doc:
-                page = doc[page_num - 1]
-                return has_chart_marks(page)
-        except Exception as exc:
-            logger.debug(
-                "_is_chart_asset_page p%d: fitz open/detect failed (%s); defaulting to False",
-                page_num,
-                exc,
-            )
-            return False
+        return (
+            self._decide_page_lane(page_num, ps, pdf_path=pdf_path, detect_charts=True).lane
+            is PageLane.CHART_ASSET
+        )
 
     def _render_chart_page_png(
         self,
@@ -1936,6 +1972,10 @@ class UnifiedPipeline:
 
         ``_classify`` remains doc-wide (``_phase_analyze``); the fused loop
         handles only the post-classification per-page lifecycle (fork C2).
+
+        Per-page modality routing (native PDF reading vs OCR LLM vs chart-asset)
+        goes through ``_decide_page_lane`` / ``page_router.decide_page_lane`` and
+        is recorded as a ``page_lane`` audit event before extraction.
         """
         from socr.core.providers import provider_ladder
         from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
@@ -2139,9 +2179,15 @@ class UnifiedPipeline:
         # at the end of its lifecycle (salvage-only; authoritative bytes come
         # from _rewrite_all_fragments at assemble time — fork A).
         # ====================================================================
+        from socr.core.audit_log import AuditEvent
+        from socr.pipeline.page_router import PageLane
+
         for page_num in sorted(state.pages):
             ps = state.pages[page_num]
-            is_native = self._is_agentic_trusted_native(page_num, ps)
+            # Modality decision is deferred until after the resume gate so we do
+            # not open the PDF for chart marks on pages we will skip anyway.
+            page_lane_decision = None
+            is_native = False
 
             # Cascade halt guard (top-of-loop): once the backend has degraded
             # (previously timed out AND failed the health probe), halt for ALL
@@ -2186,16 +2232,34 @@ class UnifiedPipeline:
                     console.print(f"  p{page_num}: [dim]resumed (terminal ledger hit)[/dim]")
                 continue
 
+            # Page-lane modality router: native PDF reading vs OCR LLM vs chart.
+            # Chart detection runs only for trusted-native candidates.
+            page_lane_decision = self._decide_page_lane(
+                page_num, ps, pdf_path=state.handle.path, detect_charts=True
+            )
+            is_native = page_lane_decision.lane in (PageLane.NATIVE, PageLane.CHART_ASSET)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="page_lane",
+                    engine=page_lane_decision.lane.value,
+                    detail=page_lane_decision.reason,
+                    data={
+                        "lane": page_lane_decision.lane.value,
+                        "reason": page_lane_decision.reason,
+                    },
+                )
+            )
+
             # PP-7: Chart-asset lane — intercept before the native-bypass branch.
             # A born-digital native page that carries vector chart marks (or an
             # embedded raster image) routes here instead of shipping as raw word-
             # salad prose.  B1 representation: native prose retained + chart PNG
             # ref embedded + explicit audit flag.  Force PNG even when --save-
             # figures is off (chart PNGs are mandatory preservation artifacts).
-            if is_native and self._is_chart_asset_page(page_num, ps, state.handle.path):
+            if page_lane_decision.lane is PageLane.CHART_ASSET:
                 if not self.config.quiet:
                     console.print(f"  p{page_num}: [cyan]chart-asset lane[/cyan]")
-                from socr.core.audit_log import AuditEvent
 
                 chart_png_ref = ""
                 chart_render_failed = False
@@ -2296,8 +2360,10 @@ class UnifiedPipeline:
                     )
                 )
 
-            elif is_native:
+            elif page_lane_decision.lane is PageLane.NATIVE:
                 # Tier 1: born-digital trusted native text — free, no OCR.
+                if not self.config.quiet:
+                    console.print(f"  p{page_num}: [green]native[/green] (no OCR)")
                 native_out = PageOutput(
                     page_num=page_num,
                     text=ps.native_text,
@@ -2317,8 +2383,6 @@ class UnifiedPipeline:
                 if getattr(ps, "has_unmapped_math_glyphs", False) and not (
                     self.config.detect_equations and self.config.recover_clean_equations
                 ):
-                    from socr.core.audit_log import AuditEvent
-
                     state.events.append(
                         AuditEvent(
                             page_num=page_num,
@@ -2346,8 +2410,6 @@ class UnifiedPipeline:
                 # pipeline reads. Digit corruption never reaches here; it is
                 # routed to OCR at detection.
                 if getattr(ps, "has_encoding_hygiene_suspect", False):
-                    from socr.core.audit_log import AuditEvent
-
                     state.events.append(
                         AuditEvent(
                             page_num=page_num,

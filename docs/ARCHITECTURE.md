@@ -1,12 +1,23 @@
 # socr Architecture
 
-socr turns a PDF into Markdown by routing each page to an OCR engine, checking
-the result, and re-trying on a different engine when the result is poor. It runs
-in two modes that differ only in **how the engine for a page is chosen**.
+socr turns a PDF into Markdown by routing each page first to a *modality*
+(native PDF text vs OCR LLM vs chart asset), then — only when OCR is needed —
+to an OCR engine, checking the result, and re-trying on a different engine
+when the result is poor. It runs in two modes that differ only in **how the
+OCR engine for a page is chosen**.
 
-## Two routing modes
+## Two routing levels (every page)
 
-### Deterministic (default — `socr paper.pdf`)
+1. **Modality** (`pipeline/page_router.py`): should this page use native PDF
+   reading, the chart-asset lane, or an OCR LLM? Trusted born-digital prose
+   skips OCR entirely — OCR is overkill for clean text layers. Each decision
+   is recorded as a `page_lane` audit event (`lane` + `reason`).
+2. **OCR provider** (`pipeline/agentic.route_page` / `route_ocr_provider`): when
+   OCR is required, which engine on the cost ladder?
+
+## Two OCR-engine selection modes
+
+### Deterministic (legacy routing — `--legacy-routing`)
 The engine is chosen **up front** by predicting page difficulty:
 1. Born-digital prose -> native text (no OCR, free).
 2. "Easy" pages -> the cheap local engine (`config.local_engine`).
@@ -17,10 +28,11 @@ layout, drawings, image density). Quality is checked by heuristics
 (`audit/heuristics.py`); failed pages are re-OCR'd by `pipeline/repair.py`
 (`RepairRouter`), which picks the next engine by **failure mode**.
 
-### Agentic, cost-aware (`socr paper.pdf --agentic`)
+### Agentic, cost-aware (default)
 The engine is chosen **dynamically** by cost while judging the real output:
 1. Born-digital prose -> native text (free; skip with `--no-native-first`).
-2. Every other page -> a **cost-ordered provider ladder** (cheapest first). Run
+2. Chart pages -> native prose + PNG asset (PP-7).
+3. Every other page -> a **cost-ordered provider ladder** (cheapest first). Run
    the cheapest; a **judge** accepts the output or escalates to the next-cheapest;
    stop at the first accepted output. Bounded by `max_retries` / `cost_budget`.
 
@@ -84,8 +96,10 @@ See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
   - `orchestrator.py`: `UnifiedPipeline` — the single pipeline. Phases:
     analyze -> backbone -> score -> repair -> assemble (deterministic), or
     analyze -> `_phase_agentic` -> assemble (agentic). Writes the manifest.
-  - `agentic.py`: `route_page()` (Python-owned per-page loop) + `PageJudge`
-    adapters (`VLMPageJudge`, `HeuristicPageJudge`).
+  - `page_router.py`: modality router — `decide_page_lane` chooses
+    `NATIVE` / `CHART_ASSET` / `OCR` before any OCR LLM call.
+  - `agentic.py`: `route_page()` / `route_ocr_provider` (OCR provider ladder) +
+    `PageJudge` adapters (`VLMPageJudge`, `HeuristicPageJudge`).
   - `repair.py`, `consensus.py`, `reconciler.py`, `hpc_pipeline.py`: repair
     routing, multi-engine consensus, and the HPC/vLLM path.
 - `figures/`: `FigureExtractor` (PyMuPDF embedded-image extraction + VLM captions).

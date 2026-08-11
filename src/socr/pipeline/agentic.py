@@ -147,7 +147,12 @@ def route_page(
     remaining_budget: float | None = None,
     provider_timeout: dict[EngineType, float] | None = None,
 ) -> PageDecision:
-    """Route one page: cheapest provider first, escalate until the judge accepts.
+    """OCR *provider* ladder for one page — cheapest first, escalate on reject.
+
+    This is **not** the native-PDF-vs-OCR decision. That modality router lives
+    in ``socr.pipeline.page_router.decide_page_lane`` and runs first; only pages
+    already classified as needing OCR reach this function. Prefer the alias
+    ``route_ocr_provider`` at new call sites for clarity.
 
     Escalation is bounded by ladder exhaustion and the cost controls — NOT by
     a retry count. The historical ``max_retries + 1`` cap made the paid rungs
@@ -307,6 +312,11 @@ def route_page(
 
     best = _best_effort(attempts, page_num)
     return PageDecision(page_num, best.output, attempts, accepted=False)
+
+
+# Prefer this name at new call sites: modality routing is decide_page_lane;
+# this function is only the OCR provider ladder.
+route_ocr_provider = route_page
 
 
 # ---------------------------------------------------------------------------

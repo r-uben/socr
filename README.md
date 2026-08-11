@@ -52,11 +52,36 @@ socr engines
 
 ## How it works
 
-socr routes **each page** to an OCR engine, checks the result, and re-tries on a
-different engine when the result is poor. It runs in two modes that differ in how
-the engine for a page is chosen.
+OCR is often overkill. For each page socr first decides **modality** — native
+PDF text vs OCR LLM vs chart asset — then, only when OCR is needed, picks an
+engine. Trusted born-digital prose ships the PDF text layer for free.
 
-### Deterministic mode (default)
+```
+PDF → for each page:
+        modality route (native | chart_asset | ocr)   ← page_router
+        if ocr: provider ladder (cheap → escalate)    ← route_ocr_provider
+        tables / figures / equations → FLUSH pages/NNN.md
+    → stitch fragments → Markdown + manifest
+```
+
+### Agentic, cost-aware mode (default)
+
+```
+PDF → for each page, in order:
+        lane → extract text → reconcile tables → place figures/charts → (equations)
+        → verify → FLUSH pages/NNN.md to disk → next page
+    → stitch fragments → Markdown (byte-identical to whole-doc assembly) + manifest
+```
+
+When a page needs OCR, the engine is chosen **dynamically by cost**: try the
+cheapest available provider first, let a judge decide accept-or-escalate, and
+climb the cost ladder (`local → cheap cloud → premium cloud`) only when the
+cheaper output is rejected. Stops at the first accepted output, bounded by
+`--cost-budget` / `--max-cost-per-page`. Each run records the winning provider +
+cost per page (and a `page_lane` audit reason) and writes a **manifest** that
+`socr replay` can reconstruct with zero model calls.
+
+### Deterministic / legacy routing (`--legacy-routing`)
 
 ```
 PDF → classify each page → easy: local engine · hard: primary engine
@@ -64,25 +89,8 @@ PDF → classify each page → easy: local engine · hard: primary engine
 ```
 
 The engine is chosen **up front** from predicted page difficulty (tables,
-equations, layout). Born-digital prose uses native text for free. Quality is
-checked by heuristics; failed pages fall back to another engine.
-
-### Agentic, cost-aware mode (`--agentic`)
-
-```
-PDF → for each page, in order:
-        route → extract text → reconcile tables → place figures/charts → (equations)
-        → verify → FLUSH pages/NNN.md to disk → next page
-    → stitch fragments → Markdown (byte-identical to whole-doc assembly) + manifest
-```
-
-The engine is chosen **dynamically by cost**: try the cheapest available provider
-first, let a judge (a vision model that looks at the page, or a heuristic
-fallback) decide accept-or-escalate, and climb the cost ladder
-(`local → cheap cloud → premium cloud`) only when the cheaper output is rejected.
-Stops at the first accepted output, bounded by `--cost-budget` / `--max-cost-per-page`.
-Each run records the winning provider + cost per page and writes a **manifest**
-that `socr replay` can reconstruct with zero model calls.
+equations, layout). Born-digital prose still uses native text for free. Quality
+is checked by heuristics; failed pages fall back to another engine.
 
 **Progressive, page-by-page processing.** In agentic mode socr is *page-major*: it
 finishes one page completely and **writes it to disk immediately** (`pages/NNN.md`
