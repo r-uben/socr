@@ -216,13 +216,46 @@ def _looks_tabular(grid: list[list[str]]) -> bool:
     return data_rows / nonempty_rows >= _MIN_DATA_ROW_FRAC
 
 
+def _is_data_row(row: list[str]) -> bool:
+    """True when *row* carries observations and must not become a header.
+
+    A row is data when it names an entity in column 0 **and** at least one data
+    cell holds a value-shaped token (``0.67``, ``(0.14)``, ``1,204``, ``45%``).
+    That is the shape of a table body line: label + values.
+
+    Deliberately narrower than the negation of ``_is_header_row``. A header may
+    well name its label column (``['Firm', 'Nominal', 'Real']``) — that row is
+    not data because its cells are words, not values. The residual ambiguity is
+    an all-numeric single-line header such as ``['Firm', '2024', '2025']``,
+    which is indistinguishable from data by shape alone; it is treated as data,
+    trading a lost column name for a guaranteed-present observation. Multi-line
+    headers, where the year band sits on its own row with an empty column 0, are
+    unaffected — ``_is_header_row`` accepts those and ``_collapse_header_prefix``
+    merges them before this check runs.
+    """
+    if _is_header_row(row):
+        return False
+    return any(_NUM_TOKEN_RE.match(c.strip()) for c in row[1:] if c.strip())
+
+
 def _grid_to_markdown(grid: list[list[str]]) -> str:
-    """Render a cleaned grid as a GitHub-markdown table (header = first row)."""
+    """Render a cleaned grid as a GitHub-markdown table.
+
+    Row 0 becomes the header row *unless* it is demonstrably a data row (see
+    ``_is_data_row``), in which case an empty header row is emitted and row 0
+    stays in the body. Promoting a data row invents a schema and removes an
+    observation from the table without any numeric-multiset check noticing
+    (GH-146); an empty header is ugly but lossless.
+    """
     if not grid:
         return ""
     ncol = len(grid[0])
-    header = grid[0]
-    body = grid[1:]
+    if _is_data_row(grid[0]):
+        header = [""] * ncol
+        body = grid
+    else:
+        header = grid[0]
+        body = grid[1:]
     lines = [
         "| " + " | ".join(_esc(c) for c in header) + " |",
         "| " + " | ".join(["---"] * ncol) + " |",
