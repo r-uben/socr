@@ -59,9 +59,14 @@ def line_has_corrupt_math(line: str) -> bool:
     return any(ch in _MATH_CORRUPTION_GLYPHS for ch in line)
 
 
-#: Left-to-right text. Exempt from furniture suppression on every page — see
+#: Left-to-right text. Exempt from relegation on every page — see
 #: ``block_is_page_furniture``.
 _HORIZONTAL = (1.0, 0.0)
+
+#: Decimal places used when comparing PyMuPDF line directions. They are unit
+#: vectors, so three places distinguish the axis-aligned cases (1,0) / (0,1) /
+#: (0,-1) while absorbing float noise in text set at a slight angle.
+_DIR_PRECISION = 3
 
 
 def dominant_text_direction(blocks: list) -> tuple[float, float]:
@@ -75,7 +80,7 @@ def dominant_text_direction(blocks: list) -> tuple[float, float]:
     for block in blocks:
         for line in block.get("lines", []) or []:
             d = line.get("dir", (1.0, 0.0))
-            key = (round(float(d[0]), 3), round(float(d[1]), 3))
+            key = (round(float(d[0]), _DIR_PRECISION), round(float(d[1]), _DIR_PRECISION))
             tally[key] = tally.get(key, 0) + 1
     if not tally:
         return (1.0, 0.0)
@@ -86,8 +91,13 @@ def block_is_page_furniture(block: dict, dominant: tuple[float, float]) -> bool:
     """True when a block runs against the page's prevailing text direction.
 
     Publisher stamps ride the page margin rotated 90 degrees — "Downloaded from
-    https://academic.oup.com/..." on every page of a JSTOR/OUP download. They are
-    not content, and they wreck reading order when spliced into prose.
+    https://academic.oup.com/..." on every page of a JSTOR/OUP download. Spliced
+    into prose they wreck its reading order.
+
+    Callers RELEGATE such blocks to the end of the page; they must not delete
+    them. Rotated text is not proof of worthlessness — a chart's axis labels and a
+    rotated table header are also counter-directional, and are content. Direction
+    is evidence about layout only (#145 review).
 
     Direction is the discriminator because it is a fact about the block rather
     than a guess about its words: matching on "Downloaded from" would be a
@@ -107,8 +117,8 @@ def block_is_page_furniture(block: dict, dominant: tuple[float, float]) -> bool:
     """
     dirs = [
         (
-            round(float(line.get("dir", dominant)[0]), 3),
-            round(float(line.get("dir", dominant)[1]), 3),
+            round(float(line.get("dir", dominant)[0]), _DIR_PRECISION),
+            round(float(line.get("dir", dominant)[1]), _DIR_PRECISION),
         )
         for line in block.get("lines", []) or []
     ]
@@ -1122,9 +1132,6 @@ class BornDigitalDetector:
 
         # Collect all region bboxes for the overlap-suppress check below.
         all_region_rects = [r for r, _ in table_regions]
-        # What the region replacements actually SAY — the basis for deciding a
-        # line is already represented (#145).
-        region_text_index = _region_token_index(table_regions)
 
         # Build output by interleaving prose text and region content.
         # Use text blocks from get_text("dict") to get position-aware text.
@@ -1135,6 +1142,7 @@ class BornDigitalDetector:
 
         blocks = page_dict.get("blocks", [])
         output_parts: list[str] = []
+        relegated_parts: list[str] = []
         region_idx = 0
         dominant = dominant_text_direction(blocks)
 
@@ -1143,11 +1151,22 @@ class BornDigitalDetector:
             if block.get("type", 0) == 1:
                 continue
 
-            # Step 0: publisher stamps run against the page's text direction.
-            # Dropped deliberately here — until #144 they were discarded only by
-            # the accident of overlapping a table region, so a page whose regions
-            # sat elsewhere spliced the stamp into the middle of its prose.
+            # Step 0: text running against the page's prevailing direction is
+            # RELEGATED to the end of the page, not deleted.
+            #
+            # The problem being solved is reading order, not the existence of the
+            # text: a publisher stamp spliced into the middle of a paragraph
+            # corrupts the prose around it. Relegation fixes that completely.
+            #
+            # Deleting it would ALSO discard legitimately rotated content — a
+            # chart's axis labels, a rotated table header, a marginal note — and
+            # this module must not delete text it cannot prove is worthless.
+            # Direction is evidence about layout, never about value (#145 review).
             if block_is_page_furniture(block, dominant):
+                for line in block.get("lines", []) or []:
+                    text = "".join(s.get("text", "") for s in line.get("spans", []) or [])
+                    if text.strip():
+                        relegated_parts.append(text.strip())
                 continue
 
             block_rect = fitz.Rect(block["bbox"])
@@ -1170,20 +1189,36 @@ class BornDigitalDetector:
             # that still shipped SUCCESS. On the reference page the notes block was
             # 23% inside the region and 77% outside, taking with it the sample
             # sizes and "robust standard errors are in parentheses" (#145).
-            coverage = max((_rect_coverage(block_rect, r) for r in all_region_rects), default=0.0)
+            #
+            # Coverage is measured PER REGION and the content test is run against
+            # the tokens of the regions this block actually overlaps. A combined
+            # index across every region on the page would let a line be deleted
+            # because its words appear in a DIFFERENT table — which does not make
+            # this region's replacement contain it.
+            covering = [
+                (r, md)
+                for (r, md) in table_regions
+                if _rect_coverage(block_rect, r) >= _REGION_COVERAGE_DROP
+            ]
 
             lines = block.get("lines", []) or []
-            if coverage > 0.0:
-                # Inside a region — but geometry alone must NOT decide. A region's
-                # rectangle routinely spans text its markdown never captured: the
-                # table's own title and column headers sit inside the bbox, and an
-                # over-long region swallows the first lines of the notes paragraph
-                # beneath the table. Dropping on position deleted all of those.
+            if covering:
+                # Mostly inside a region — but geometry alone must NOT decide. A
+                # region's rectangle routinely spans text its markdown never
+                # captured: the table's own title and column headers sit inside the
+                # bbox, and an over-long region swallows the first lines of the
+                # notes paragraph beneath the table. Dropping on position deleted
+                # all of those.
                 #
-                # So drop a line only when the region's markdown DEMONSTRABLY
-                # already contains it. Absence of the text in the replacement is
-                # proof that dropping would lose it (#145).
-                lines = [ln for ln in lines if not _line_is_in_region_text(ln, region_text_index)]
+                # So drop a line only when the covering region's markdown
+                # DEMONSTRABLY already contains it. Absence of the text in the
+                # replacement is proof that dropping would lose it (#145).
+                #
+                # A block less than half inside any region keeps every line
+                # untouched: the region does not represent it, so nothing about it
+                # is a candidate for suppression.
+                covering_tokens = _region_token_index(covering)
+                lines = [ln for ln in lines if not _line_is_in_region_text(ln, covering_tokens)]
 
             for line in lines:
                 spans = line.get("spans", [])
@@ -1196,6 +1231,10 @@ class BornDigitalDetector:
             _, region_content = table_regions[region_idx]
             output_parts.append(f"\n{region_content}\n")
             region_idx += 1
+
+        # Counter-directional text last, so it never interrupts the reading order
+        # it was removed from — and never disappears either.
+        output_parts.extend(relegated_parts)
 
         return "\n".join(output_parts).strip()
 
