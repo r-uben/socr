@@ -1,0 +1,316 @@
+"""GH-142: every CLI-backed config field must have a known status on the agentic path.
+
+Two flags were found promising behaviour the default agentic path does not
+deliver (`--max-cost-per-page` not constraining `$0.00` cloud rungs, `--no-audit`
+inert — #139). A sweep found eleven more that are hashed into the run fingerprint
+but never acted on, and three that are neither hashed nor read.
+
+A flag that lies is worse than a missing one: the user believes a constraint is
+in force and scripts around it. So this test pins the status of every field and
+fails when one changes category — or when a new field is added without being
+classified at all.
+
+METHOD. A recording proxy logs every config field read AND its caller during a
+hermetic agentic run. Caller attribution is load-bearing: `_run_fingerprint`
+reads most of the config on every page flush purely to hash it, so "was read" is
+not evidence a flag does anything. A field whose only readers are bookkeeping is
+hashed but never acted on.
+
+LIMIT, stated because it is easy to mistake for a result: instrumentation cannot
+distinguish "dead" from "read only on a path this fixture never takes". Fields in
+`_UNEXERCISED` are NOT claims of deadness — they are fields whose consumers are
+stubbed or unreached here, verified by reading the source instead.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+import fitz
+import pytest
+
+from socr.core.config import PipelineConfig
+from socr.core.result import PageOutput, PageStatus
+from socr.pipeline.agentic import AcceptDecision
+from socr.pipeline.orchestrator import UnifiedPipeline
+
+# --------------------------------------------------------------------------
+# Classification
+# --------------------------------------------------------------------------
+
+#: Read by real logic during an agentic run — the flag does something.
+#: VERIFIED by `test_live_flags_are_actually_live`; do not add by inspection.
+_LIVE = {
+    "agentic",
+    "audit_min_words",
+    "cost_budget",
+    "detect_equations",
+    "dual_pass_tables",
+    "escalate_ambiguous_tables",
+    "figures_max_per_page",
+    "figures_max_total",
+    "max_cost_per_page",
+    "native_first",
+    "native_only",
+    "primary_engine",
+    "quiet",
+    "qwen_backend",
+    "qwen_model",
+    "qwen_vllm_url",
+    "recover_clean_equations",
+    "render_dpi",
+    "reprocess",
+    "save_figures",
+    "strict_local",
+    "write_manifest",
+    "judge_model",
+    "multi_engine",
+    "gemini_model",
+    "gemini_task",
+    "glm_backend",
+    "glm_task",
+    "deepseek_backend",
+    "deepseek_task",
+    "mistral_model",
+    "nougat_model",
+}
+
+#: Hashed into the run fingerprint but never acted on in agentic mode. Each is
+#: consumed only by `_phase_repair`, `_backbone_native_first`, `_phase_consensus`,
+#: `_phase_judge_hard_pages`, or the single-/multi-engine branches of `process` —
+#: none of which the agentic path calls.
+#:
+#: These are not harmless: the fingerprint OVER-invalidates, so toggling a flag
+#: that changes nothing reprocesses an entire corpus.
+_INERT_BUT_FINGERPRINTED = {
+    "audit_enabled",  # #139 — the flag this whole issue started from
+    "chunk_size",
+    "chunk_threshold",
+    "consensus_enabled",
+    "consensus_ollama_model",
+    "consensus_use_llm",
+    "fallback_chain",
+    "judge_hard_pages",
+    "local_engine",
+    "max_retries",
+    "tiered",
+    "truncation_retries",
+    "figures_engine",
+}
+
+#: Neither read nor fingerprinted on the agentic path. Consumed only inside
+#: `_backbone_native_first` (`orchestrator.py:755, 857, 871`). Because they are
+#: absent from the fingerprint they are also invisible to the resume ledger in
+#: the modes where they DO work — the same class as the judge-model gap (#133).
+_INERT_AND_UNFINGERPRINTED = {
+    "math_model",
+    "recover_corrupt_math",
+    "clean_equation_model",
+}
+
+#: NOT a deadness claim. Consumers are stubbed or unreached by this fixture:
+#: engine-internal settings, the escalation lane (needs a second ladder rung),
+#: and HPC routing. Verified by reading the source, not by this run.
+_UNEXERCISED = {
+    "enabled_engines",  # consumed by _available_engines_for_agentic, stubbed here
+    "escalation_timeout_sec",  # escalation lane needs a 2nd ladder rung
+    "hpc",
+    "marker_device",
+    "deepseek_vllm_url",
+    "qwen_vllm_model",
+    "qwen_model_pinned",
+    "judge_backend",  # read by _build_page_judge, stubbed here
+    "auto_patch_tables",  # read by _reread_page_tables, which needs a live crop VLM
+    "describe_figures",  # read by the figure-description lane, not reached here
+    # Consumed outside the orchestrator entirely (cli.py, engine subprocesses):
+    "dry_run",
+    "verbose",
+    "workers",
+    "timeout",
+    "output_dir",
+}
+
+_BOOKKEEPING = {"_run_fingerprint", "_engine_determinants", "_write_metadata"}
+
+
+# --------------------------------------------------------------------------
+# Hermetic agentic run with a recording config
+# --------------------------------------------------------------------------
+
+
+class _Recorder:
+    """Transparent config proxy recording each field read and its caller."""
+
+    def __init__(self, inner, fields, calls):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_fields", fields)
+        object.__setattr__(self, "_calls", calls)
+
+    def __getattr__(self, name):
+        import sys
+
+        fields = object.__getattribute__(self, "_fields")
+        if name in fields:
+            frame = sys._getframe(1)
+            depth = 0
+            while frame is not None and depth < 6:
+                fn = frame.f_code.co_name
+                if fn not in ("__getattr__", "<genexpr>", "<listcomp>", "<dictcomp>"):
+                    object.__getattribute__(self, "_calls").setdefault(name, set()).add(fn)
+                    break
+                frame = frame.f_back
+                depth += 1
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_inner"), name, value)
+
+
+class _YesJudge:
+    def assess(self, output, provider):
+        return AcceptDecision(accept=True, reason="stub")
+
+
+def _fixture_pdf(path):
+    doc = fitz.open()
+    # prose
+    page = doc.new_page()
+    y = 80
+    for _ in range(14):
+        page.insert_text(
+            (60, y), "Estimated coefficient 0.082 significant at 1 percent", fontsize=9
+        )
+        y += 16
+    # table
+    page = doc.new_page()
+    y = 80
+    for row in range(10):
+        page.insert_text((60, y), f"Row{row}   {row}.12   {row}.34", fontsize=9)
+        y += 16
+    page.draw_line(fitz.Point(55, 70), fitz.Point(360, 70))
+    page.draw_line(fitz.Point(55, y), fitz.Point(360, y))
+    # chart
+    page = doc.new_page()
+    page.insert_text((60, 80), "Figure 1", fontsize=10)
+    for i in range(10):
+        page.draw_line(fitz.Point(60 + i * 20, 300), fitz.Point(80 + i * 20, 260 - i * 3))
+    # scanned (no text layer)
+    doc.new_page().draw_rect(fitz.Rect(50, 50, 400, 300))
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+@pytest.fixture(scope="module")
+def readers(tmp_path_factory):
+    """field -> set of functions that read it during a hermetic agentic run."""
+    from socr.core import providers
+
+    fields = {f.name for f in dataclasses.fields(PipelineConfig)}
+    calls: dict[str, set[str]] = {}
+    tmp = tmp_path_factory.mktemp("flagsweep")
+
+    cfg = PipelineConfig(
+        agentic=True,
+        quiet=True,
+        detect_equations=True,
+        recover_clean_equations=True,
+        save_figures=True,
+    )
+    pipe = UnifiedPipeline(_Recorder(cfg, fields, calls))
+
+    pipe._available_engines_for_agentic = lambda: [providers.PROFILE_QWEN_LOCAL]
+    pipe._build_page_judge = lambda state: _YesJudge()
+    pipe._run_engine_on_pages = lambda state, nums, nat, eng, phase: [
+        PageOutput(
+            page_num=p,
+            text=f"| a | b |\n| --- | --- |\n| 1 | 2 |\n\ntext {p}",
+            status=PageStatus.SUCCESS,
+            engine=str(getattr(eng, "value", eng)),
+        )
+        for p in nums
+    ]
+
+    pipe.process(_fixture_pdf(tmp / "f.pdf"), output_dir=tmp / "out")
+    return calls
+
+
+def _acted_on(readers) -> set[str]:
+    return {f for f, who in readers.items() if who - _BOOKKEEPING}
+
+
+# --------------------------------------------------------------------------
+# The guard
+# --------------------------------------------------------------------------
+
+
+def test_every_config_field_is_classified():
+    """A new flag must be classified, not silently assumed to work.
+
+    This is the assertion that stops recurrence: adding a field without deciding
+    whether it does anything on the default path now fails CI.
+    """
+    known = _LIVE | _INERT_BUT_FINGERPRINTED | _INERT_AND_UNFINGERPRINTED | _UNEXERCISED
+    actual = {f.name for f in dataclasses.fields(PipelineConfig)}
+
+    assert actual - known == set(), (
+        f"unclassified config field(s): {sorted(actual - known)}. Decide whether each "
+        "works on the agentic path, is non-agentic by design, or should be rejected "
+        "as an incompatible combination (see #142)."
+    )
+    assert known - actual == set(), (
+        f"classification lists a field that no longer exists: {sorted(known - actual)}"
+    )
+
+
+@pytest.mark.parametrize("field", sorted(_INERT_BUT_FINGERPRINTED))
+def test_inert_fields_are_still_inert(field, readers):
+    """If one of these starts doing something, the classification is stale.
+
+    Failing here is good news — it means a flag was wired up — but the lists and
+    the help text must be updated to match.
+    """
+    assert field not in _acted_on(readers), (
+        f"{field} is now acted on during an agentic run; move it to _LIVE and "
+        "update the CLI help text (#142)"
+    )
+
+
+@pytest.mark.parametrize("field", sorted(_INERT_AND_UNFINGERPRINTED))
+def test_unfingerprinted_inert_fields_stay_out_of_the_fingerprint(field, readers):
+    assert field not in _acted_on(readers)
+
+
+def test_known_live_flags_really_are_live(readers):
+    """The positive control: without this the guard could pass on a broken run.
+
+    A subset that must be exercised by this fixture specifically — if these stop
+    being read, the harness has silently stopped driving the pipeline (which has
+    happened once already, via an unwritten fixture directory).
+    """
+    must_be_live = {
+        "agentic",
+        "native_first",
+        "dual_pass_tables",
+        "detect_equations",
+        "max_cost_per_page",
+        "strict_local",
+    }
+    missing = must_be_live - _acted_on(readers)
+    assert missing == set(), f"harness is not driving the pipeline; unread: {sorted(missing)}"
+
+
+@pytest.mark.parametrize("field", sorted(_LIVE))
+def test_live_flags_are_actually_live(field, readers):
+    """Every _LIVE entry must be observed, not assumed.
+
+    Without this the classification could quietly rot in the dangerous
+    direction: a flag that stopped working would sit in _LIVE and no test would
+    notice. Assembling this list by inspection got 10 of 42 entries wrong on the
+    first attempt, which is exactly why it must be asserted rather than trusted.
+    """
+    assert field in _acted_on(readers), (
+        f"{field} is classified _LIVE but nothing outside bookkeeping read it during "
+        "an agentic run — either it stopped working, or it belongs in _UNEXERCISED "
+        "with a note on which consumer this fixture does not reach (#142)"
+    )
