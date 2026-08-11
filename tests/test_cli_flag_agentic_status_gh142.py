@@ -62,16 +62,7 @@ _LIVE = {
     "save_figures",
     "strict_local",
     "write_manifest",
-    "judge_model",
     "multi_engine",
-    "gemini_model",
-    "gemini_task",
-    "glm_backend",
-    "glm_task",
-    "deepseek_backend",
-    "deepseek_task",
-    "mistral_model",
-    "nougat_model",
 }
 
 #: Hashed into the run fingerprint but never acted on in agentic mode. Each is
@@ -126,6 +117,21 @@ _UNEXERCISED = {
     "auto_patch_tables",
     "qwen_vllm_url",
     "describe_figures",  # read by the figure-description lane, not reached here
+    # Per-engine model/task settings. Read by the engine when it actually runs;
+    # `_run_engine_on_pages` is stubbed here, so no engine subprocess is ever
+    # constructed. Their appearance under `_engine_determinants` is fingerprint
+    # bookkeeping only, which is why correct caller attribution matters.
+    "gemini_model",
+    "gemini_task",
+    "glm_backend",
+    "glm_task",
+    "deepseek_backend",
+    "deepseek_task",
+    "mistral_model",
+    "nougat_model",
+    # Both real consumers (_build_page_judge, _resolve_crop_vlm_model) are
+    # stubbed; the remaining reader is _resolve_judge_model under the fingerprint.
+    "judge_model",
     # Consumed outside the orchestrator entirely (cli.py, engine subprocesses):
     "dry_run",
     "verbose",
@@ -135,6 +141,23 @@ _UNEXERCISED = {
 }
 
 _BOOKKEEPING = {"_run_fingerprint", "_engine_determinants", "_write_metadata"}
+
+#: Frames to scan above a config read when attributing it. Must be deep enough
+#: to see a bookkeeping caller through its helpers: `_run_fingerprint` ->
+#: `_engine_determinants` -> `BaseEngine.resolved_model_version` -> the read is
+#: already three frames, and the fingerprint itself is reached from
+#: `_flush_page_sidecar` and `_load_terminal_page`. Twelve leaves margin without
+#: walking the whole stack on every attribute access.
+_STACK_SCAN_DEPTH = 12
+
+#: Recorded instead of a function name when ANY frame in the scanned window is
+#: bookkeeping. Attributing to the innermost frame alone is not enough: engine
+#: determinants are read inside `resolved_model_version` /
+#: `fingerprint_determinants`, whose names are not in `_BOOKKEEPING`, so a
+#: fingerprint-only read would be credited to the helper and counted as real
+#: behaviour — silently classifying an inert flag as live, which is exactly what
+#: this guard exists to prevent. Caught in review of this file's first version.
+_BOOKKEEPING_TOKEN = "<bookkeeping>"
 
 
 # --------------------------------------------------------------------------
@@ -155,15 +178,24 @@ class _Recorder:
 
         fields = object.__getattribute__(self, "_fields")
         if name in fields:
+            # Scan the whole window, not just the innermost frame: a read done
+            # inside an engine helper on behalf of the fingerprint must be
+            # credited to the fingerprint, not to the helper.
+            frames: list[str] = []
             frame = sys._getframe(1)
             depth = 0
-            while frame is not None and depth < 6:
+            while frame is not None and depth < _STACK_SCAN_DEPTH:
                 fn = frame.f_code.co_name
                 if fn not in ("__getattr__", "<genexpr>", "<listcomp>", "<dictcomp>"):
-                    object.__getattribute__(self, "_calls").setdefault(name, set()).add(fn)
-                    break
+                    frames.append(fn)
                 frame = frame.f_back
                 depth += 1
+            attributed = (
+                _BOOKKEEPING_TOKEN
+                if any(fn in _BOOKKEEPING for fn in frames)
+                else (frames[0] if frames else "<unknown>")
+            )
+            object.__getattribute__(self, "_calls").setdefault(name, set()).add(attributed)
         return getattr(object.__getattribute__(self, "_inner"), name)
 
     def __setattr__(self, name, value):
@@ -248,7 +280,7 @@ def readers(tmp_path_factory):
 
 
 def _acted_on(readers) -> set[str]:
-    return {f for f, who in readers.items() if who - _BOOKKEEPING}
+    return {f for f, who in readers.items() if who - {_BOOKKEEPING_TOKEN}}
 
 
 # --------------------------------------------------------------------------
@@ -326,3 +358,50 @@ def test_live_flags_are_actually_live(field, readers):
         "an agentic run — either it stopped working, or it belongs in _UNEXERCISED "
         "with a note on which consumer this fixture does not reach (#142)"
     )
+
+
+# --------------------------------------------------------------------------
+# The recorder's own correctness
+# --------------------------------------------------------------------------
+
+
+def test_reads_through_a_bookkeeping_helper_are_attributed_to_bookkeeping():
+    """Regression: attribution must look past the innermost frame.
+
+    The first version of this file recorded only the innermost non-recorder
+    frame. Engine determinants are read inside `resolved_model_version` /
+    `fingerprint_determinants`, which are called BY `_engine_determinants` for
+    the fingerprint — so those reads were credited to the helper and counted as
+    real behaviour. Nine fields were classified _LIVE on that basis, and the
+    suite passed, "verifying" them.
+
+    That is the exact failure this guard exists to prevent, so it gets its own
+    test rather than resting on the classification lists being right.
+    """
+    calls: dict[str, set[str]] = {}
+    cfg = PipelineConfig()
+    rec = _Recorder(cfg, {"gemini_model"}, calls)
+
+    def resolved_model_version():
+        return rec.gemini_model
+
+    def _engine_determinants():  # a name in _BOOKKEEPING
+        return resolved_model_version()
+
+    _engine_determinants()
+
+    assert calls["gemini_model"] == {_BOOKKEEPING_TOKEN}
+    assert "resolved_model_version" not in calls["gemini_model"]
+
+
+def test_reads_outside_bookkeeping_keep_their_real_caller():
+    """The other direction: genuine behaviour must not be swallowed as bookkeeping."""
+    calls: dict[str, set[str]] = {}
+    rec = _Recorder(PipelineConfig(), {"strict_local"}, calls)
+
+    def _phase_agentic():
+        return rec.strict_local
+
+    _phase_agentic()
+
+    assert calls["strict_local"] == {"_phase_agentic"}
