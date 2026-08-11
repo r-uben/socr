@@ -462,7 +462,11 @@ def repair_table_headers_in_text(
         repaired = repair_collapsed_header(block.grid, words)
         if repaired is None:
             continue
-        new_md = _grid_to_markdown(repaired)
+        # assume_header: `repaired`'s row 0 is a header this module just rebuilt
+        # from word geometry and gated on `_header_is_faithful`. Letting
+        # `_grid_to_markdown` re-infer it would demote a numeric-shaped header
+        # band and discard the repair (GH-146).
+        new_md = _grid_to_markdown(repaired, assume_header=True)
         lines[block.start : block.end + 1] = new_md.splitlines()
         repair_count += 1
 

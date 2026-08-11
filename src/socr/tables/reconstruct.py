@@ -249,7 +249,7 @@ def _is_data_row(row: list[str]) -> bool:
     return any(is_numeric_token(c) for c in row[1:] if c.strip())
 
 
-def _grid_to_markdown(grid: list[list[str]]) -> str:
+def _grid_to_markdown(grid: list[list[str]], *, assume_header: bool = False) -> str:
     """Render a cleaned grid as a GitHub-markdown table.
 
     Row 0 becomes the header row *unless* it is demonstrably a data row (see
@@ -257,11 +257,18 @@ def _grid_to_markdown(grid: list[list[str]]) -> str:
     stays in the body. Promoting a data row invents a schema and removes an
     observation from the table without any numeric-multiset check noticing
     (GH-146); an empty header is ugly but lossless.
+
+    ``assume_header`` opts out of that inference for callers that already know
+    row 0 is a header. ``header_repair`` is the one such caller: it rebuilds the
+    header from native word geometry and gates it on ``_header_is_faithful``, so
+    re-guessing there would discard a verified repair and emit an empty header
+    for any numeric-shaped header band (``['Firm', '2024', '2025']``). Evidence
+    beats inference — but only where the evidence actually exists.
     """
     if not grid:
         return ""
     ncol = len(grid[0])
-    if _is_data_row(grid[0]):
+    if not assume_header and _is_data_row(grid[0]):
         header = [""] * ncol
         body = grid
     else:
