@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -56,6 +57,116 @@ _MATH_CORRUPTION_GLYPHS = _MATH_MOJIBAKE_CHARS | _C0_CONTROL_CHARS
 def line_has_corrupt_math(line: str) -> bool:
     """True if a line contains font-map mojibake standing in for math symbols."""
     return any(ch in _MATH_CORRUPTION_GLYPHS for ch in line)
+
+
+#: Left-to-right text. Exempt from furniture suppression on every page — see
+#: ``block_is_page_furniture``.
+_HORIZONTAL = (1.0, 0.0)
+
+
+def dominant_text_direction(blocks: list) -> tuple[float, float]:
+    """The page's prevailing writing direction, from its own line dirs.
+
+    Derived from the page, never assumed to be horizontal: a rotated scan or a
+    CJK vertical layout has a different prevailing direction, and hard-coding
+    ``(1, 0)`` would classify every line on such a page as furniture.
+    """
+    tally: dict[tuple[float, float], int] = {}
+    for block in blocks:
+        for line in block.get("lines", []) or []:
+            d = line.get("dir", (1.0, 0.0))
+            key = (round(float(d[0]), 3), round(float(d[1]), 3))
+            tally[key] = tally.get(key, 0) + 1
+    if not tally:
+        return (1.0, 0.0)
+    return max(tally.items(), key=lambda kv: kv[1])[0]
+
+
+def block_is_page_furniture(block: dict, dominant: tuple[float, float]) -> bool:
+    """True when a block runs against the page's prevailing text direction.
+
+    Publisher stamps ride the page margin rotated 90 degrees — "Downloaded from
+    https://academic.oup.com/..." on every page of a JSTOR/OUP download. They are
+    not content, and they wreck reading order when spliced into prose.
+
+    Direction is the discriminator because it is a fact about the block rather
+    than a guess about its words: matching on "Downloaded from" would be a
+    publisher-specific string list that rots, while a stamp set at 90 degrees to
+    the body text is structurally distinguishable on any page, in any language.
+
+    A block with no directional lines is NOT furniture — absence of evidence must
+    not delete text (#145).
+
+    HORIZONTAL TEXT IS NEVER FURNITURE, even when it is the minority direction on
+    its page. A page whose table is set landscape has a ROTATED dominant
+    direction, and without this exemption the rule deletes the one horizontal
+    block on it — which on the reference document is the running head carrying
+    the page number, and a page number is citable content. Suppressing a stray
+    publisher stamp is worth little; deleting a page number is precisely the loss
+    this module exists to prevent, so the asymmetry is deliberate.
+    """
+    dirs = [
+        (
+            round(float(line.get("dir", dominant)[0]), 3),
+            round(float(line.get("dir", dominant)[1]), 3),
+        )
+        for line in block.get("lines", []) or []
+    ]
+    if not dirs:
+        return False
+    return all(d != dominant and d != _HORIZONTAL for d in dirs)
+
+
+#: Word tokens used to decide whether a region's markdown already contains a
+#: line. Letters and numbers only: punctuation and the markdown table scaffolding
+#: (pipes, dashes) must not count as content.
+_WORD_TOKEN_RE = re.compile(r"[^\W\d_]+|\d+(?:\.\d+)?")
+
+#: Fraction of a text block that must lie inside a table region before the
+#: region is treated as already representing it. Set at the midpoint because that
+#: is what "the region contains this block" means — most of the block is inside
+#: it. Not tuned: anything above 0.5 is a block the region genuinely covers, and
+#: anything below is a block that merely brushes the region's edge. The old
+#: behaviour was effectively a threshold of zero, which deleted a paragraph over
+#: a single point of contact (#145).
+_REGION_COVERAGE_DROP = 0.5
+
+
+def _region_token_index(regions) -> Counter:
+    """Multiset of word tokens across every region's markdown replacement."""
+    idx: Counter = Counter()
+    for _rect, md in regions:
+        idx.update(_WORD_TOKEN_RE.findall(md or ""))
+    return idx
+
+
+def _line_is_in_region_text(line: dict, region_tokens: Counter) -> bool:
+    """True when a region's markdown already contains this line's words.
+
+    The test for "already represented", replacing the geometric one. A line whose
+    every token appears in the replacement text is safe to drop; a line carrying
+    even one token the replacement lacks is content that would be lost, and is
+    kept — duplicated at worst.
+
+    A line with no word tokens (pure punctuation, a rule) is droppable: it
+    carries nothing to lose.
+    """
+    text = "".join(s.get("text", "") for s in line.get("spans", []) or [])
+    tokens = _WORD_TOKEN_RE.findall(text)
+    if not tokens:
+        return True
+    return all(region_tokens.get(t, 0) > 0 for t in tokens)
+
+
+def _rect_coverage(inner, outer) -> float:
+    """Fraction of ``inner``'s area that lies inside ``outer`` (0.0-1.0)."""
+    area = inner.get_area()
+    if area <= 0:
+        return 0.0
+    overlap = inner & outer
+    if not overlap.is_valid or overlap.is_empty:
+        return 0.0
+    return overlap.get_area() / area
 
 
 # A slash that BEGINS a token and is immediately followed by a digit: "(/997)",
@@ -1011,6 +1122,9 @@ class BornDigitalDetector:
 
         # Collect all region bboxes for the overlap-suppress check below.
         all_region_rects = [r for r, _ in table_regions]
+        # What the region replacements actually SAY — the basis for deciding a
+        # line is already represented (#145).
+        region_text_index = _region_token_index(table_regions)
 
         # Build output by interleaving prose text and region content.
         # Use text blocks from get_text("dict") to get position-aware text.
@@ -1022,10 +1136,18 @@ class BornDigitalDetector:
         blocks = page_dict.get("blocks", [])
         output_parts: list[str] = []
         region_idx = 0
+        dominant = dominant_text_direction(blocks)
 
         for block in blocks:
             # Skip image blocks (type 1)
             if block.get("type", 0) == 1:
+                continue
+
+            # Step 0: publisher stamps run against the page's text direction.
+            # Dropped deliberately here — until #144 they were discarded only by
+            # the accident of overlapping a table region, so a page whose regions
+            # sat elsewhere spliced the stamp into the middle of its prose.
+            if block_is_page_furniture(block, dominant):
                 continue
 
             block_rect = fitz.Rect(block["bbox"])
@@ -1039,17 +1161,35 @@ class BornDigitalDetector:
                 else:
                     break
 
-            # Check if this block overlaps any region (table or chart)
-            overlaps_region = any(block_rect.intersects(r) for r in all_region_rects)
+            # How much of this block does a table region already represent?
+            #
+            # This was `any(block_rect.intersects(r))` — true on ONE POINT of
+            # contact, dropping the whole block. A table region routinely ends a
+            # few points below its last rule, clipping the top line of the notes
+            # paragraph beneath it; the entire paragraph then vanished from a page
+            # that still shipped SUCCESS. On the reference page the notes block was
+            # 23% inside the region and 77% outside, taking with it the sample
+            # sizes and "robust standard errors are in parentheses" (#145).
+            coverage = max((_rect_coverage(block_rect, r) for r in all_region_rects), default=0.0)
 
-            if not overlaps_region:
-                # Extract text from this block
-                lines = block.get("lines", [])
-                for line in lines:
-                    spans = line.get("spans", [])
-                    line_text = "".join(s.get("text", "") for s in spans)
-                    if line_text.strip():
-                        output_parts.append(line_text.strip())
+            lines = block.get("lines", []) or []
+            if coverage > 0.0:
+                # Inside a region — but geometry alone must NOT decide. A region's
+                # rectangle routinely spans text its markdown never captured: the
+                # table's own title and column headers sit inside the bbox, and an
+                # over-long region swallows the first lines of the notes paragraph
+                # beneath the table. Dropping on position deleted all of those.
+                #
+                # So drop a line only when the region's markdown DEMONSTRABLY
+                # already contains it. Absence of the text in the replacement is
+                # proof that dropping would lose it (#145).
+                lines = [ln for ln in lines if not _line_is_in_region_text(ln, region_text_index)]
+
+            for line in lines:
+                spans = line.get("spans", [])
+                line_text = "".join(s.get("text", "") for s in spans)
+                if line_text.strip():
+                    output_parts.append(line_text.strip())
 
         # Append any remaining regions that come after all text blocks
         while region_idx < len(table_regions):
