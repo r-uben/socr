@@ -32,6 +32,7 @@ import pytest
 from socr.core.born_digital import (
     BornDigitalDetector,
     _line_is_in_region_text,
+    _REGION_COVERAGE_DROP,
     _rect_coverage,
     _region_token_index,
     block_is_page_furniture,
@@ -256,3 +257,61 @@ def test_horizontal_text_survives_a_rotated_page():
     assert dominant == (0.0, -1.0)
     assert block_is_page_furniture(running_head, dominant) is False
     assert block_is_page_furniture(stamp, dominant) is True
+
+
+# ---------------------------------------------------------------------------
+# Review corrections (#145 PR review)
+# ---------------------------------------------------------------------------
+
+
+def test_counter_directional_text_is_relegated_not_deleted(tmp_path):
+    """Rotated text keeps its content; only its POSITION is corrected.
+
+    Deleting it would also discard legitimately rotated content — a chart's axis
+    labels, a rotated table header, a marginal note. The problem is reading
+    order, and relegation solves that completely without losing a word.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    for i in range(6):
+        page.insert_text((60, 90 + i * 16), "body prose line that runs across", fontsize=9)
+    page.insert_text((560, 300), "Downloaded from https://example.com/x", fontsize=7, rotate=90)
+    path = tmp_path / "stamp.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    with fitz.open(path) as d:
+        out = BornDigitalDetector().extract_structured(d[0])
+
+    assert "Downloaded from" in out, "counter-directional text must not be deleted"
+    body = "\n".join(out.strip().split("\n")[:-1])
+    assert "Downloaded from" not in body, "it must not interrupt the prose either"
+
+
+def test_tokens_are_matched_against_the_covering_region_only():
+    """A line must not be deleted because ANOTHER table happens to contain its words.
+
+    Two regions on one page: a line overlapping region A whose words appear only
+    in region B is not represented by A's replacement, and dropping it loses text.
+    """
+    region_a = [(None, "| alpha | 1.00 |")]
+    region_b = [(None, "| beta | 2.00 |")]
+
+    assert _line_is_in_region_text(_line("beta 2.00"), _region_token_index(region_a)) is False
+    assert _line_is_in_region_text(_line("beta 2.00"), _region_token_index(region_b)) is True
+    combined = _region_token_index(region_a + region_b)
+    assert _line_is_in_region_text(_line("beta 2.00"), combined) is True, (
+        "a combined index is exactly the bug: region A would delete region B's line"
+    )
+
+
+def test_a_block_barely_touching_a_region_keeps_every_line():
+    """Below the coverage threshold the region does not represent the block at all.
+
+    Without this, a caption reading '0.67' beneath a table containing 0.67 is
+    deleted on a one-point overlap — the original defect in a new costume.
+    """
+    block = fitz.Rect(0, 361, 100, 416)
+    region = fitz.Rect(0, 129, 100, 374)
+
+    assert _rect_coverage(block, region) < _REGION_COVERAGE_DROP
