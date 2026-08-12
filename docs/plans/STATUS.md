@@ -1,10 +1,9 @@
 # STATUS - GitHub issue action plan
 
-Last updated: 2026-08-10
-Branch: `main` (reconciliation branches merged: PRs #128, #129, #130)
-Base reviewed: `29dc6f0` (`main`)
-GitHub source: open issues #39, #46, #49, #56, #64, #114, #127
-(#34, #35, #37, #50, #51 closed; #36, #47 shipped)
+Last updated: 2026-08-12
+**Active backlog:** [`issue-priority/TICKETS.md`](issue-priority/TICKETS.md) · index [`../../TODO.md`](../../TODO.md) · graph [`issue-priority-graph.md`](issue-priority-graph.md)
+
+Waves 1–8 are the dispatch order. Historical reconciliation notes below are retained for context.
 
 ## Stage
 

@@ -1,81 +1,100 @@
 # socr — TODO
 
-Live, prioritized next-actions. Detail lives in `TICKETS.md` and `docs/log/`.
-Last updated: 2026-06-10.
+GitHub is the source of truth for open work. This file is a **pointer index** only.
+Per-issue plans: [`docs/plans/issue-priority/TICKETS.md`](docs/plans/issue-priority/TICKETS.md)
+Schedule graph: [`docs/plans/issue-priority-graph.md`](docs/plans/issue-priority-graph.md) · Obsidian canvas: [`docs/plans/issue-priority-graph.canvas`](docs/plans/issue-priority-graph.canvas)
 
-## Now / next
-- [ ] **Bug: `--recover-clean-equations` (GH-36b) no-ops on native-trusted pages** —
-      found live on a real paper (40pp econ draft, inline display equations in the
-      methods section). Native-first correctly glyph-scrambles those equations
-      (stacked fraction/subscript layout read in wrong order), and GH-36a's
-      `--detect-equations` correctly *finds* the equation region on those same
-      pages — but GH-36b then skips splicing the recovered LaTeX back in every
-      time, logging `"has detected equations but no PageOutput; skipping"`. Root
-      cause: no `PageOutput` exists yet for a native-trusted page at the point
-      GH-36b tries to attach the recovered LaTeX. This is exactly the failure mode
-      the flag exists to fix, so today it only helps equations on pages that
-      already route through OCR for other reasons (tables, scans) — the common
-      case (equation embedded in an otherwise-prose page) is silently unfixed.
-      Repro: `socr process paper.pdf --detect-equations --recover-clean-equations`
-      on any born-digital paper with inline display equations; grep the run log
-      for `no PageOutput`. Current workaround is `--no-native-first` (full-page
-      OCR, bypasses native trust entirely) — expensive, not a real fix.
-- [ ] **#39 Stage 2 — hand-verified ground truth** for table/equation pages of the
-      10-paper benchmark set (seed candidates from native/premium-VLM output as
-      `page_N.table.md` grids; human checks the numbers). Blocks Stage 3.
-- [ ] **#39 Stage 3 — calibration artifact**: run `socr benchmark run` across the
-      now-validated CLI fleet, `calibrate --apply` writes `calibration.lock.json`
-      (page-type ladders, benchmark hash, engine+model+backend identity), and
-      AUTO_ENGINE_ORDER / _LOCAL_ENGINE_ORDER / RepairRouter / provider_ladder all
-      delegate to it. Design: `docs/log/2026-06-10_p1-routing-design.md`.
-- [ ] **Agentic live test** — uncapped cheapest-first ladder on the 6-page
-      Shrimali-Ahmad benchmark paper (waiting for the ocr-fleet session's
-      marker/nougat chain to free local compute).
-- [ ] **Regenerate the corrupted-era library copies** (Kuttner 2001, Bernanke-
-      Kuttner 2005) with the fixed pipeline; full corpus re-sweep waits for Stage 3.
-- [ ] **Textbook-class failures (TICKET-19..24)** — TICKET-19 prose-shredding fixed
-      on main (dc9e773); TICKET-23 equation→LaTeX partially addressed by
-      `--recover-corrupt-math` (opt-in, corrupt-math only); TICKET-20/22/24 open.
-      See `docs/log/2026-06-07_math-textbook-failures.md`.
-- [ ] **Per-page provenance, written by default** — record per page: engine,
-      model version, native-vs-model, table-reconstructed flag, encoding-corruption
-      score. Extend `core/audit_log.py`. Closes "which model read page N, and was
-      native trusted?" — the manifest is opt-in and `model_version` is often blank.
-      (Pairs naturally with Stage 3's engine+model identity work.)
-- [ ] **Firing-rate validation of structure-restore** across the corpus — how often
-      booktabs grids are recovered, false-positive check on prose/references. Sweeps
-      stalled on Google Drive I/O; the numeric-column gate makes them fast now.
+Last updated: 2026-08-12 · 41 open issues · do **lower wave numbers first**; within a wave, top first.
 
-## Done 2026-06-09/10 (detail in docs/log/)
-- P0 #38: pipeline no longer silently destroys content (html_tables, attempts
-  fallback, repair AUTO crash, judge wiring, figures ordering, flagged native).
-- P1 #39 Stage 1: uncapped escalation + budget pre-check, truncation gate,
-  sparse-page gate at decision points, benchmark coverage hard gate + page types
-  + table-cell fidelity. Two adversarial review rounds. 702 tests.
-- Validated end-to-end twice on Bernanke-Kuttner 2005 (the old total-failure
-  paper): 37/37 pages, judge 19/19 operational, clean tables, honest audit log.
+**Criterion:** silent content loss → tables/figures → knob honesty → architecture → north-star.
 
-## Soon
-- [ ] **Populate `model_version`** in manifest fingerprints (long-standing gap).
-- [ ] **Judge spot-check on native table pages** — native pages currently bypass
-      the VLM judge; a cheap image-vs-text check on native *tables* would catch
-      non-corruption native errors (mis-ordered columns, dropped sub/superscripts).
-- [ ] **Structure-restore polish** — strip caption-as-header rows; collapse the
-      empty separator column between stacked sub-tables; handle 2-numeric-column
-      tables (the gate currently needs >=3 numeric lanes/row).
+---
 
-## Later / optional
-- [ ] **Content-aware multi-table localization** — the rule-band detector over-
-      merges stacked tables and fragments wide ones; only matters once a use case
-      needs precise per-table crops (dual-pass on scans).
-- [ ] **Dual-pass on scans** — needs both image localization (built) AND a reliable
-      crop-read VLM; deferred until a use case justifies it.
-- [ ] `--anchor` opt-in flag (anchoring tested marginal; low priority).
-- [ ] qwen-ocr-cli GitHub remote (local-only; create if backup wanted).
+## Now — Wave 1 (destroy content)
 
-## Known limitations (documented, not bugs)
-- Dual-pass localizes only vector-ruled / booktabs tables; scanned tables need the
-  image detector + a reliable crop model.
-- Auto-patch is opt-in (`--auto-patch-tables`); default is flag-only by design.
-- `find_tables(text-strategy)` is ~quadratic in tokens; gated by numeric-column
-  structure + a word-count backstop.
+- [ ] **#150** charts extracted as tables (worst corpus pages) — start here
+- [ ] **#144** rowizer drops numeric values
+- [ ] **#147** landscape pages transposed
+- [ ] **#146** data row emitted as header
+- [ ] **#152** side-by-side tables merged
+- [ ] **#145** one-point table overlap deletes prose
+
+## Next — Wave 2 (fail closed)
+
+- [ ] **#162** table verifier exceptions fail open
+- [ ] **#166** all-failed crop rereads look clean
+- [ ] **#161** resume skips judge-rejected SUCCESS
+- [ ] **#140** math-font pages trusted native without audit
+
+## Next — Wave 3 (routing identity)
+
+- [ ] **#159** ProviderProfile identity discarded (cloud rung runs local)
+
+## Then — Wave 4 (gates & honesty)
+
+- [ ] **#151** recall ≠ structure gate *(after #144/#146)*
+- [ ] **#167** any raster ≠ chart *(after #150)*
+- [ ] **#163** OCR word must not defer scan gate *(after #162)*
+- [ ] **#154** `--max-cost-per-page` vs qwen-cloud $0 *(after #159)*
+- [ ] **#160** table escalation ignores budget *(after #154)*
+- [ ] **#139** `--no-audit` inert on agentic
+- [ ] **#168** `--config`/`--profile` values dropped
+- [ ] **#172** soft timeouts leave workers that block exit
+- [ ] **#177** single-file exit codes ≠ partial policy
+
+## Then — Wave 5 (equations)
+
+- [ ] **#157** `--recover-clean-equations` skips without PageOutput
+- [ ] **#165** PUA-only math skips recovery *(after #140)*
+- [ ] **#164** rejected recovery dumps full-page text *(after #157)*
+
+## Then — Wave 6 (provenance)
+
+- [ ] **#158** populate `model_version` in fingerprints
+- [ ] **#173** fingerprint omits `auto_patch_tables` / equation models *(after #158)*
+- [ ] **#171** terminal sidecars before figure provenance
+- [ ] **#170** replay ignores visual assets *(after #171)*
+- [ ] **#169** manifests drop non-empty reject reasons
+- [ ] **#142** audit every CLI flag vs agentic *(after known liars)*
+- [ ] **#64** audit tabular-looking native fallthrough
+
+## Then — Wave 7 (architecture)
+
+- [ ] **#178** ADR: stay Python / optional native kernels only after profiling
+- [ ] **#174** quarantine legacy; agentic first-class only *(before #155)*
+- [ ] **#175** break inverted package layering
+- [ ] **#176** dumb DocumentState + one text selector *(soft after #174)*
+- [ ] **#155** split `orchestrator.py` god-module *(after #174)*
+- [ ] **#156** TODO/TICKETS drift policy *(this rewrite)*
+
+## Later — Wave 8 (design / north-star)
+
+- [ ] **#49** three-layer method ADR (extract / verify / escalate)
+- [ ] **#39** quality-per-dollar calibration (`calibration.lock.json`) — needs GT
+- [ ] **#114** `socr escalate` post-hoc pass (design)
+- [ ] **#127** native headings/emphasis/lists/links
+- [ ] **#56** CE umbrella tracker — not a unit of work; tracks Waves 1–5
+
+---
+
+## Parallel lanes (if multiple agents)
+
+| Lane | Start | Order |
+|------|-------|-------|
+| A Content | Wave 1 | #150 → #144 → #147 → #146 → #152 → #145 → #151 → #167 |
+| B Trust | Wave 2 | #162 → #166 → #161 → #163 · #140 → #165 |
+| C Routing | Wave 3 | #159 → #154 → #160 → #142 |
+| D CLI | Wave 4 | #139 · #168 · #172 · #177 |
+| E Equations | Wave 5 | #157 → #164 |
+| F Provenance | Wave 6 | #158 → #173 · #171 → #170 · #169 · #64 |
+| G Arch | Wave 7 | #178 · #174 → #155 · #175 · #176 · #156 |
+
+## Done recently (pointers only)
+
+- See closed GitHub issues and `docs/log/`. Do not relist closed work here.
+
+## Policy
+
+1. Every checkbox above **must** link an open GitHub issue.
+2. Implementation detail lives in `docs/plans/issue-priority/TICKETS.md`, not here.
+3. When an issue closes, check it off here and mark the ticket DONE in the same PR.

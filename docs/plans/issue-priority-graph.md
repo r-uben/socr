@@ -7,6 +7,8 @@ Criterion: silent content loss → tables/figures → knob honesty → architect
 
 Open in Obsidian: [`issue-priority-graph.canvas`](issue-priority-graph.canvas)
 
+Root index: [`../../TODO.md`](../../TODO.md) · Per-issue plans: [`issue-priority/TICKETS.md`](issue-priority/TICKETS.md)
+
 ---
 
 ## Start here (single-lane order)
@@ -18,27 +20,28 @@ If one person / one agent: work top to bottom. Stop for hard deps only.
 3. **#147** landscape transposed
 4. **#146** data row as header
 5. **#152** side-by-side merge
-6. **#162** verifier fail-open
-7. **#166** crop failures look clean
-8. **#161** resume skips audit-failed
-9. **#140** math-font trusted native
-10. **#159** ProviderProfile identity
-11. **#151** structure gate *(after 144/146 preferred)*
-12. **#167** not every raster is a chart *(after 150)*
-13. **#163** OCR deferral *(after 162)*
-14. **#154** cloud priced $0 *(after 159)*
-15. **#160** escalation budget *(after 154)*
-16. **#139** `--no-audit` inert
-17. **#168** config/profile dropped
-18. **#172** soft timeout hang
-19. **#177** exit-code mismatch
-20. **#157** equation attach → then **#164**
-21. **#165** PUA math *(after 140)*
-22. **#158** model_version → then **#173**
-23. **#171** figures before terminal → then **#170**
-24. **#169** rejection reasons · **#64** fallthrough · **#142** flag audit last in this band
-25. **#178** ADR · **#174** quarantine → **#155** split · **#175/#176/#156** alongside
-26. Wave 8 is design only (**#49 #39 #114 #127 #56**) — not coding tickets
+6. **#145** one-point overlap deletes prose
+7. **#162** verifier fail-open
+8. **#166** crop failures look clean
+9. **#161** resume skips audit-failed
+10. **#140** math-font trusted native
+11. **#159** ProviderProfile identity
+12. **#151** structure gate *(after 144/146 preferred)*
+13. **#167** not every raster is a chart *(after 150)*
+14. **#163** OCR deferral *(after 162)*
+15. **#154** cloud priced $0 *(after 159)*
+16. **#160** escalation budget *(after 154)*
+17. **#139** `--no-audit` inert
+18. **#168** config/profile dropped
+19. **#172** soft timeout hang
+20. **#177** exit-code mismatch
+21. **#157** equation attach → then **#164**
+22. **#165** PUA math *(after 140)*
+23. **#158** model_version → then **#173**
+24. **#171** figures before terminal → then **#170**
+25. **#169** rejection reasons · **#64** fallthrough · **#142** flag audit last in this band
+26. **#178** ADR · **#174** quarantine → **#155** split · **#175/#176/#156** alongside
+27. Wave 8 is design only (**#49 #39 #114 #127 #56**) — not coding tickets
 
 ---
 
@@ -62,7 +65,7 @@ flowchart LR
 
   subgraph WAVE1["Wave 1 FIRST"]
     direction TB
-    I150((150)):::w1 --> I144((144)):::w1 --> I147((147)):::w1 --> I146((146)):::w1 --> I152((152)):::w1
+    I150((150)):::w1 --> I144((144)):::w1 --> I147((147)):::w1 --> I146((146)):::w1 --> I152((152)):::w1 --> I145((145)):::w1
   end
 
   subgraph WAVE2["Wave 2"]
@@ -175,6 +178,7 @@ Lanes A/B/C can start together on day one. D waits only on people, not deps. E n
 | 147 | landscape transposed | 1 | 3 |
 | 146 | data row as header | 1 | 4 |
 | 152 | side-by-side tables merged | 1 | 5 |
+| 145 | one-point overlap deletes prose | 1 | 6 |
 | 162 | verifier exceptions fail open | 2 | 1 |
 | 166 | crop failures look clean | 2 | 2 |
 | 161 | resume skips audit-failed | 2 | 3 |

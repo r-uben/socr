@@ -489,6 +489,16 @@
       "width": 220,
       "height": 110,
       "color": "0"
+    },
+    {
+      "id": "145",
+      "type": "text",
+      "text": "## 145\noverlap deletes prose",
+      "x": 0,
+      "y": 750,
+      "width": 220,
+      "height": 110,
+      "color": "1"
     }
   ],
   "edges": [
@@ -1019,6 +1029,14 @@
       "toNode": "176",
       "toSide": "left",
       "label": "soft"
+    },
+    {
+      "id": "er145",
+      "fromNode": "152",
+      "fromSide": "bottom",
+      "toNode": "145",
+      "toSide": "top",
+      "label": "next"
     }
   ]
 }
