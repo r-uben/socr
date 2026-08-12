@@ -144,6 +144,18 @@ DATA_STROKE_MIN_WIDTH = 1.0
 # literal) so it is tunable from data.
 CHART_MIN_CLUSTER_AREA: float = 120.0 * 120.0
 
+# Minimum fraction of a cluster's bbox area that a single drawing must cover to
+# be treated as an enclosing plot frame (axes box) rather than a datum inside
+# the plot. Derived from two measured populations on real corpus pages: plot
+# frames cover 0.85-0.99 of their cluster bbox (Heston p10 / page index 9: a
+# 932-drawing cluster whose largest single mark covers 0.876 of the cluster
+# area, with 928 marks interior to that frame; `_has_vector_data_marks` is
+# False on this cluster because the strokes are thin and neutral-coloured).
+# The largest single mark in measured table-ruling clusters covers <= 0.06 of
+# its cluster area. 0.5 sits far from both populations: a mark covering half
+# its cluster IS the frame, not a datum.
+CHART_FRAME_MIN_CLUSTER_COVERAGE: float = 0.5
+
 # --- Logo / letterhead filter (IMAGE blocks and raw xref images) ---
 # Fraction of page height defining the "top band" where logos/letterheads live.
 LOGO_TOP_MARGIN_RATIO: float = 0.20
@@ -812,6 +824,55 @@ def _has_vector_data_marks(drawings: list[dict]) -> bool:
     return False
 
 
+def _has_framed_data_cluster(
+    cluster_drawings: list[dict], bbox: tuple[float, float, float, float]
+) -> bool:
+    """True when the cluster looks like a plot frame enclosing many data marks.
+
+    Detector-only companion to ``_has_vector_data_marks`` (which is NOT
+    modified here). Thin-stroke, monochrome spike plots fail the coloured-
+    fill/thick-stroke test above, but they do draw an enclosing axes rectangle
+    around dozens to hundreds of interior marks. Two measured populations on
+    real corpus pages separate cleanly on coverage of a single mark's area
+    relative to its cluster's bbox area: plot frames cover 0.85-0.99, while
+    the largest single mark in table-ruling clusters covers <= 0.06 — see
+    ``CHART_FRAME_MIN_CLUSTER_COVERAGE`` for the derivation.
+
+    Only rect geometry is consulted (no width/color/fill/items) so this stays
+    a pure spatial-containment signal, independent of ``_has_vector_data_marks``.
+    """
+    x0, y0, x1, y1 = bbox
+    cluster_area = (x1 - x0) * (y1 - y0)
+    if cluster_area <= 0:
+        return False
+
+    rects = []
+    for d in cluster_drawings:
+        rect = d.get("rect")
+        if rect is None:
+            continue
+        rects.append((rect.x0, rect.y0, rect.x1, rect.y1))
+
+    for i, frame in enumerate(rects):
+        fx0, fy0, fx1, fy1 = frame
+        mark_area = (fx1 - fx0) * (fy1 - fy0)
+        coverage = mark_area / cluster_area
+        if coverage < CHART_FRAME_MIN_CLUSTER_COVERAGE:
+            continue
+
+        interior = 0
+        for j, other in enumerate(rects):
+            if j == i:
+                continue
+            ox0, oy0, ox1, oy1 = other
+            if ox0 >= fx0 and oy0 >= fy0 and ox1 <= fx1 and oy1 <= fy1:
+                interior += 1
+        if interior >= MIN_DRAWINGS_FOR_VECTOR:
+            return True
+
+    return False
+
+
 def _is_neutral_color(color) -> bool:
     if color is None:
         return True
@@ -863,7 +924,10 @@ def has_chart_marks(page) -> bool:
     Returns True when the page contains at least one spatially-coherent vector
     cluster that (a) meets the minimum bounding-box area gate
     (``CHART_MIN_CLUSTER_AREA``) and (b) passes ``_has_vector_data_marks``
-    (coloured fills or thick strokes — the positive chart signal).
+    (coloured fills or thick strokes) OR ``_has_framed_data_cluster`` (a plot
+    frame covering >= ``CHART_FRAME_MIN_CLUSTER_COVERAGE`` of the cluster bbox
+    plus >= ``MIN_DRAWINGS_FOR_VECTOR`` interior marks — catches thin-stroke
+    monochrome spike plots that have no coloured fill or thick stroke).
     Also returns True when the page carries at least one embedded raster image
     (``page.get_images()``), because an embedded PNG/JPEG chart is visually lost
     as native word-salad just like a vector one.
@@ -949,21 +1013,31 @@ def has_chart_marks(page) -> bool:
             )
             continue
 
-        # (b) Must pass the data-marks positive gate.
+        # (b) Must pass a positive gate: coloured/thick data marks, or a framed
+        # cluster of thin-stroke interior marks.
         has_data_marks = _has_vector_data_marks(cluster_drawings)
-        if not has_data_marks:
+        has_framed_cluster = _has_framed_data_cluster(cluster_drawings, bbox)
+        if not (has_data_marks or has_framed_cluster):
             logger.debug(
-                "has_chart_marks p%s: cluster area=%.0f — no data marks "
-                "(thin/neutral strokes only); skip",
+                "has_chart_marks p%s: cluster area=%.0f — no data marks and no "
+                "framed data cluster; skip",
                 page_num_label,
                 area,
             )
             continue
 
         ratio = area / max(page_area, 1.0)
+        gate_name = (
+            "both"
+            if has_data_marks and has_framed_cluster
+            else "data-marks"
+            if has_data_marks
+            else "framed-cluster"
+        )
         logger.debug(
-            "has_chart_marks p%s: CHART cluster found — area=%.0f ratio=%.3f %d drawings",
+            "has_chart_marks p%s: CHART cluster found (%s) — area=%.0f ratio=%.3f %d drawings",
             page_num_label,
+            gate_name,
             area,
             ratio,
             len(cluster_drawings),
