@@ -944,9 +944,9 @@ def _looks_like_table_grid(
                 p1, p2 = item[1], item[2]
                 dx = abs(p2.x - p1.x)
                 dy = abs(p2.y - p1.y)
-                if dy <= 1 and dx >= width * 0.4:
+                if dy <= AXIS_LINE_TOLERANCE_PT and dx >= width * 0.4:
                     horizontal += 1
-                elif dx <= 1 and dy >= height * 0.4:
+                elif dx <= AXIS_LINE_TOLERANCE_PT and dy >= height * 0.4:
                     vertical += 1
             elif kind == "re" and len(item) >= 2:
                 rect = item[1]
