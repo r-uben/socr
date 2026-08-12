@@ -134,3 +134,38 @@ class TestDetectPageStampsDirection:
         assessment = BornDigitalDetector().detect_page(pdf_path, 1)
         assert assessment.dominant_text_direction == (0.0, -1.0)
         assert assessment.text_is_rotated is True
+
+
+class TestDamagedPageDoesNotRaise:
+    """The direction probe runs before the signals body, so it must be guarded.
+
+    ``_assess_page_signals`` already tolerates damaged pages. Computing the
+    direction ahead of it moved an unguarded ``get_text("dict")`` in front of
+    that tolerance, so a page whose dict extraction fails would have raised out
+    of the detector instead of degrading. Every other ``get_text`` in the module
+    is wrapped; this asserts the new one is too.
+    """
+
+    class _DictExtractionFails:
+        """Delegates to a real page except for the ``dict`` extraction."""
+
+        def __init__(self, page: fitz.Page) -> None:
+            self._page = page
+
+        def get_text(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            if args and args[0] == "dict":
+                raise RuntimeError("damaged page: dict extraction failed")
+            return self._page.get_text(*args, **kwargs)
+
+        def __getattr__(self, name: str):  # noqa: ANN204
+            return getattr(self._page, name)
+
+    def test_dict_extraction_failure_falls_back_to_horizontal(self, tmp_path: Path) -> None:
+        pdf_path = tmp_path / "horizontal.pdf"
+        _horizontal_pdf(pdf_path)
+        with fitz.open(str(pdf_path)) as doc:
+            page = self._DictExtractionFails(doc[0])
+            assessment = BornDigitalDetector()._assess_page(page, 1)
+        # Absence of directional evidence is not evidence of rotation (#145).
+        assert assessment.dominant_text_direction == (1.0, 0.0)
+        assert assessment.text_is_rotated is False

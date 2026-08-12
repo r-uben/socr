@@ -548,8 +548,21 @@ class BornDigitalDetector:
         stamped onto whichever ``PageAssessment`` comes back — a single stamping
         point that survives every early return of the signals body, rather than
         threading the computation through 11 separate return sites.
+
+        The extraction is guarded because this call now runs *before*
+        ``_assess_page_signals``, whose body already tolerates damaged pages
+        (encoding failures, unreadable text layers). Unguarded, a page that used
+        to degrade into a low-confidence assessment would instead raise out of
+        the detector. Every other ``get_text`` call in this module is wrapped the
+        same way. The fallback is ``_HORIZONTAL``, matching the
+        absence-of-evidence precedent (#145): no directional evidence must not
+        route a page as rotated.
         """
-        direction = dominant_text_direction(page.get_text("dict").get("blocks", []))
+        try:
+            blocks = page.get_text("dict").get("blocks", [])
+        except Exception:
+            blocks = []
+        direction = dominant_text_direction(blocks)
         assessment = self._assess_page_signals(page, page_num)
         assessment.dominant_text_direction = direction
         if text_direction_is_rotated(direction):
