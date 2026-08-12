@@ -463,12 +463,36 @@ class TestIsChartAssetPage:
         pdf = _make_vector_chart_pdf(tmp_path)
         assert pipeline._is_chart_asset_page(1, ps, pdf) is True
 
-    def test_table_page_does_not_fire(self, tmp_path: Path) -> None:
-        """_is_chart_asset_page returns False for a table page (routes to ladder)."""
+    def test_table_page_with_chart_marks_also_fires(self, tmp_path: Path) -> None:
+        """GH-150 TICKET-B1: a table signal no longer suppresses chart ELIGIBILITY.
+
+        Scope: this pins the predicate only. `_is_chart_asset_page` answers
+        eligibility, not the final route — before B1 a table signal made it
+        return False outright, so a mixed page could never be arbitrated at all.
+
+        It does NOT assert that such a page reaches the page-level chart-asset
+        lane; it does not. Mixed pages are deliberately held out of that lane and
+        keep their normal route, where the chart is emitted inline at its own
+        y-position. That routing behaviour is pinned by
+        ``TestAgenticChartLaneRouting::
+        test_mixed_chart_table_page_keeps_its_normal_route``.
+        """
         pipeline = self._make_pipeline()
         ps = self._make_native_ps(has_tables=True)
         pdf = _make_vector_chart_pdf(tmp_path)
-        assert pipeline._is_chart_asset_page(1, ps, pdf) is False
+        assert pipeline._is_chart_asset_page(1, ps, pdf) is True
+
+    def test_trusted_native_still_false_for_table_page(self, tmp_path: Path) -> None:
+        """_is_trusted_native_without_ocr keeps excluding table pages (byte-identical).
+
+        Pins the predicate split (GH-150 TICKET-B1): the new shared
+        _is_native_eligible_without_ocr drops the table exclusion, but
+        _is_trusted_native_without_ocr must still apply it — its second caller
+        (the non-agentic native-bypass branch) must not change behavior.
+        """
+        pipeline = self._make_pipeline()
+        ps = self._make_native_ps(has_tables=True)
+        assert pipeline._is_trusted_native_without_ocr(1, ps) is False
 
     def test_prose_only_page_does_not_fire(self, tmp_path: Path) -> None:
         """_is_chart_asset_page returns False for a clean prose page."""
@@ -656,6 +680,10 @@ class TestAgenticChartLaneRouting:
         chart_events = [e for e in state.events if e.kind == "chart_asset_page"]
         assert chart_events, "Expected a 'chart_asset_page' AuditEvent"
         assert chart_events[0].page_num == 1
+        # GH-150 TICKET-B1: single-signal (chart-only) page must NOT emit an
+        # arbitration event — that event is reserved for both-signals pages.
+        arb_events = [e for e in state.events if e.kind == "chart_table_arbitration"]
+        assert not arb_events, "Chart-only page must not emit a chart_table_arbitration event"
 
     def test_chart_png_produced_without_save_figures_flag(self, tmp_path: Path) -> None:
         """PNG is saved by the chart lane even when save_figures=False."""
@@ -738,6 +766,108 @@ class TestAgenticChartLaneRouting:
         )
         chart_events = [e for e in state.events if e.kind == "chart_asset_page"]
         assert not chart_events, "Table page must not emit a chart_asset_page event"
+
+    def test_mixed_chart_table_page_keeps_its_normal_route(self, tmp_path: Path) -> None:
+        """GH-150 TICKET-B1: a page with BOTH chart marks and a table signal does NOT
+        take the page-level chart-asset lane.
+
+        The page-level lane appends its PNG ref after the whole of ``ps.native_text``,
+        which is correct only when the chart IS the page. On a mixed page the chart
+        sits between other regions, so appending sinks it below every table that
+        followed it in the source — the reading-order break caught by
+        ``test_table_repair_parity.py::TestEndToEndParity::
+        test_agentic_parity_on_ce_like_fixture``.
+
+        Such pages therefore keep their normal route, where
+        ``rowize_from_words_chart_aware`` emits an inline placeholder at the chart's
+        own y-position. This test pins that routing decision and the audit event that
+        records it, including the audit_log.json round-trip.
+        """
+        import json
+
+        from socr.core.audit_log import build_run_audit
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+        from socr.core.result import PageOutput, PageStatus
+
+        pdf = _make_vector_chart_pdf(tmp_path)
+        pipeline = _make_agentic_pipeline()
+        # Both signals: chart marks (from the fixture) AND has_tables=True.
+        state = _make_state_with_page(pdf, has_tables=True)
+        pipeline._last_assessment = state._last_assessment
+
+        # route_page must return a REAL PageOutput, not a bare MagicMock. With a
+        # MagicMock, ``best_output.engine != "chart_asset"`` and
+        # ``"![Chart page 1](" not in best_output.text`` are both vacuously True
+        # (MagicMock compares unequal to every string and its ``__contains__``
+        # returns False), so the two content assertions below would pass even if
+        # the page HAD been claimed by the page-level chart lane — the exact
+        # regression this test exists to catch.
+        mock_decision = MagicMock()
+        mock_decision.accepted = True
+        mock_decision.attempts = []
+        mock_decision.final_output = PageOutput(
+            page_num=1,
+            text="| Col A | Col B |\n|---|---|\n| 1.0 | 2.0 |",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
+            audit_passed=True,
+        )
+        mock_decision.winning_engine = "deepseek"
+        mock_decision.total_cost_usd = 0.002
+
+        with (
+            patch(
+                "socr.pipeline.orchestrator.route_page", return_value=mock_decision
+            ) as mock_route,
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+        ):
+            pipeline._phase_agentic(state, tmp_path)
+            # The page keeps its normal route rather than being intercepted.
+            mock_route.assert_called()
+
+        ps = state.pages[1]
+        assert ps.best_output is not None
+        # Not claimed by the page-level chart lane — it carries the ROUTED output.
+        assert ps.best_output.engine == "deepseek"
+        assert ps.best_output.engine != "chart_asset"
+
+        # The page-level lane's whole-page PNG ref must NOT be appended: on a mixed
+        # page the chart is represented inline by the region placeholder instead.
+        assert "![Chart page 1](" not in (ps.best_output.text or "")
+        # Positive control: the routed text really did survive to best_output, so
+        # the "not in" assertion above is inspecting real content, not a stub.
+        assert "| Col A | Col B |" in (ps.best_output.text or "")
+
+        chart_events = [e for e in state.events if e.kind == "chart_asset_page"]
+        assert not chart_events, "Mixed page must not emit a chart_asset_page event"
+
+        # The arbitration is still recorded — no silent routing.
+        arb_events = [e for e in state.events if e.kind == "chart_table_arbitration"]
+        assert len(arb_events) == 1, "Expected exactly one chart_table_arbitration event"
+        arb = arb_events[0]
+        assert arb.page_num == 1
+        assert arb.engine == "chart_region"
+        assert arb.data["winner"] == "chart_region"
+        assert arb.data["loser"] == "chart_asset_page"
+        assert arb.data["chart_marks"] is True
+        assert arb.data["table_signal"] is True
+
+        # Round-trip through the audit log to prove the event survives serialization.
+        audit = build_run_audit(state)
+        audit.save(tmp_path / "audit_log.json")
+        saved = json.loads((tmp_path / "audit_log.json").read_text())
+        saved_events = saved.get("events", saved) if isinstance(saved, dict) else saved
+        # Locate the arbitration event in whatever shape build_run_audit produced.
+        found = None
+        if isinstance(saved_events, list):
+            found = next(
+                (e for e in saved_events if e.get("kind") == "chart_table_arbitration"), None
+            )
+        assert found is not None, "chart_table_arbitration event must survive the audit round-trip"
+        assert found["page_num"] == 1
+        assert found["data"]["winner"] == "chart_region"
 
     def test_render_failure_produces_hard_audit_error(self, tmp_path: Path) -> None:
         """A chart-lane PNG render failure emits a 'chart_asset_render_failed' audit event.

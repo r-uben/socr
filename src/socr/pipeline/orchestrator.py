@@ -1137,13 +1137,12 @@ class UnifiedPipeline:
         pa = self._assessment_for_page(page_num)
         return bool(pa and pa.has_tables)
 
-    def _is_trusted_native_without_ocr(self, page_num: int, ps: PageState) -> bool:
-        """Whether a page may bypass OCR and ship native text directly.
+    def _is_native_eligible_without_ocr(self, page_num: int, ps: PageState) -> bool:
+        """Whether a page is native-eligible, WITHOUT the table exclusion.
 
-        Born-digital prose takes free native text. Pages with tables need the
-        model/VLM path because PyMuPDF text often flattens grids even when the
-        character layer is otherwise clean. ``--native-only`` remains the
-        explicit override for born-digital pages.
+        Same gates as ``_is_trusted_native_without_ocr`` minus the table check —
+        shared by that predicate and by ``_is_chart_asset_page`` (GH-150 TICKET-B1),
+        which needs eligibility without unconditionally losing to tables.
         """
         if not self.config.native_first or not ps.is_born_digital or not ps.native_text:
             return False
@@ -1154,10 +1153,23 @@ class UnifiedPipeline:
         if ps.needs_ocr_enhancement:
             return False
 
-        if self._page_has_tables(page_num, ps):
-            return False
-
         return True
+
+    def _is_trusted_native_without_ocr(self, page_num: int, ps: PageState) -> bool:
+        """Whether a page may bypass OCR and ship native text directly.
+
+        Born-digital prose takes free native text. Pages with tables need the
+        model/VLM path because PyMuPDF text often flattens grids even when the
+        character layer is otherwise clean. ``--native-only`` remains the
+        explicit override for born-digital pages — including table pages: it
+        short-circuits before the table check, exactly as the pre-split
+        predicate did (native_only returns True before ever reaching tables).
+        """
+        if not self._is_native_eligible_without_ocr(page_num, ps):
+            return False
+        if self.config.native_only:
+            return True
+        return not self._page_has_tables(page_num, ps)
 
     def _is_agentic_trusted_native(self, page_num: int, ps: PageState) -> bool:
         """Backward-compatible alias for the agentic native-bypass predicate."""
@@ -1168,28 +1180,36 @@ class UnifiedPipeline:
     # ------------------------------------------------------------------
 
     def _is_chart_asset_page(self, page_num: int, ps: PageState, pdf_path: Path) -> bool:
-        """PP-7: return True when a born-digital page should route to the chart-asset lane.
+        """PP-7: return True when a born-digital page carries chart marks.
 
-        Fires when ALL of:
+        This predicate answers *eligibility*, not the final route. Fires when ALL of:
           - The page is born-digital with native text (otherwise it goes to OCR anyway).
-          - It is NOT a table page (tables route to the VLM ladder; charts do not).
-          - It IS a trusted-native candidate (i.e. ``_is_trusted_native_without_ocr``
-            would have returned True — no needs_ocr_enhancement, native_first enabled).
+          - It IS native-eligible (i.e. ``_is_native_eligible_without_ocr`` returns True —
+            no needs_ocr_enhancement, native_first enabled). Tables no longer exclude a
+            page from this check (GH-150 TICKET-B1), because a mixed chart+table page must
+            still be *detectable* here in order to be arbitrated by the caller.
           - ``has_chart_marks`` detects at least one vector chart cluster OR embedded
             raster image on the page.
 
-        This predicate is called BEFORE the native-bypass branch in the agentic loop so
-        chart pages are intercepted and routed to the chart lane instead of shipping as
-        pure native word-salad prose.
+        Eligibility is NOT the page-level chart lane. The caller (``_phase_agentic``)
+        splits eligible pages in two:
 
-        Do NOT call this predicate when ``_is_trusted_native_without_ocr`` returns False
+          - **chart-only** (no table signal) → the page-level chart-asset lane, which
+            appends a whole-page PNG ref after ``ps.native_text``. Correct only when the
+            chart IS the page.
+          - **chart + table** → the *normal* route, where ``rowize_from_words_chart_aware``
+            emits an inline placeholder at the chart's own y-position. Appending would
+            sink the chart below every table that followed it and break source order.
+            The caller emits a ``chart_table_arbitration`` audit event for these.
+
+        This predicate is called BEFORE the native-bypass branch in the agentic loop so
+        chart pages are intercepted instead of shipping as pure native word-salad prose.
+
+        Do NOT call this predicate when ``_is_native_eligible_without_ocr`` returns False
         (i.e. the page would go to the OCR ladder anyway); there is nothing to intercept.
         """
-        # Must be a trusted native candidate first (chart lane is a sub-case of native).
-        if not self._is_trusted_native_without_ocr(page_num, ps):
-            return False
-        # Tables route to the ladder — never to the chart lane.
-        if self._page_has_tables(page_num, ps):
+        # Must be native-eligible first (chart lane is a sub-case of native).
+        if not self._is_native_eligible_without_ocr(page_num, ps):
             return False
         # Open the PDF page and run the vector detector.
         try:
@@ -1983,6 +2003,94 @@ class UnifiedPipeline:
             ocr_pages = [p for p in ocr_pages if p not in resumed_pages]
             native_fallback_pages = [p for p in native_fallback_pages if p not in resumed_pages]
 
+        # -- GH-150 TICKET-B1: precompute chart-vs-table arbitration winners ----
+        # Scan ALL of state.pages, not just ocr_pages: a page with chart marks and
+        # NO table signal is trusted-native and never appears in ocr_pages, but it
+        # still must be caught here or the loop's cached-set gate (below) would
+        # drop it back to plain native prose.
+        #
+        # A page carrying BOTH chart marks and a table signal is deliberately NOT a
+        # chart winner. The page-level lane appends its PNG ref after the whole of
+        # ``ps.native_text`` (see ``chart_body`` below), which is correct only when
+        # the chart IS the page. On a mixed page the chart sits between other
+        # regions, so appending sinks it below every table that followed it and
+        # breaks source order. Such pages keep their normal route, where
+        # ``rowize_from_words_chart_aware`` emits an inline placeholder at the
+        # chart's own y-position and ``_render_chart_region_pngs`` resolves it —
+        # position-preserving by construction.
+        chart_only_pages: set[int] = set()
+        chart_mixed_pages: set[int] = set()
+        for pn, ps in sorted(state.pages.items()):
+            if pn in resumed_pages:
+                continue
+            if not self._is_chart_asset_page(pn, ps, state.handle.path):
+                continue
+            if self._page_has_tables(pn, ps):
+                chart_mixed_pages.add(pn)
+            else:
+                chart_only_pages.add(pn)
+        chart_winner_pages: set[int] = chart_only_pages
+
+        # Record the arbitration for every mixed page. The decision is made here,
+        # so the event is emitted here — not inside the chart lane, which mixed
+        # pages no longer enter. No silent routing: a page whose chart competed
+        # with a table always leaves a trace naming which lane took it and why.
+        if chart_mixed_pages:
+            from socr.core.audit_log import AuditEvent as _ArbEvent
+
+            for pn in sorted(chart_mixed_pages):
+                state.events.append(
+                    _ArbEvent(
+                        page_num=pn,
+                        kind="chart_table_arbitration",
+                        engine="chart_region",
+                        detail=(
+                            "both chart and table signals fired; the page is held out "
+                            "of the page-level chart lane and keeps its normal route, "
+                            "so the chart is represented inline at its own position "
+                            "rather than appended after the page text"
+                        ),
+                        data={
+                            "winner": "chart_region",
+                            "loser": "chart_asset_page",
+                            "chart_marks": True,
+                            "table_signal": True,
+                            "rationale": (
+                                "the page-level lane appends its PNG ref after all "
+                                "page text, which breaks source order when the chart "
+                                "is one region among several"
+                            ),
+                        },
+                    )
+                )
+        # Prune chart winners from BOTH lists. As of this ticket the prune is a
+        # NO-OP by construction, and that is worth stating rather than implying
+        # otherwise: ``chart_winner_pages`` is exactly ``chart_only_pages``, whose
+        # members have no table signal, so ``_is_trusted_native_without_ocr``
+        # returns True for them — they never entered ``ocr_pages`` (built from
+        # ``not _is_agentic_trusted_native``) and therefore never entered
+        # ``native_fallback_pages`` (a subset of it).
+        #
+        # It is kept as a self-enforcing invariant: if ``chart_winner_pages`` is
+        # ever widened to include pages that DO carry a table signal, those pages
+        # would be in both lists, and the empty-ladder early return below would
+        # stamp them WARNING/MODEL_UNAVAILABLE (CI's exact no-provider state)
+        # before the loop ever ran. The prune makes that widening safe.
+        #
+        # Note what this does NOT cover: mixed chart+table pages are deliberately
+        # not winners, so they stay in both lists and ARE stamped unavailable on a
+        # no-provider run — correctly, since they genuinely need the ladder.
+        #
+        # Pruning alone would not stop routing in any case: the loop's else branch
+        # calls route_page unconditionally for non-native, non-chart pages, so the
+        # cached-set loop gate (see the chart-asset-lane branch below) is the
+        # load-bearing half.
+        if chart_winner_pages:
+            ocr_pages = [p for p in ocr_pages if p not in chart_winner_pages]
+            native_fallback_pages = [
+                p for p in native_fallback_pages if p not in chart_winner_pages
+            ]
+
         # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
         if self.config.strict_local:
@@ -2192,7 +2300,7 @@ class UnifiedPipeline:
             # salad prose.  B1 representation: native prose retained + chart PNG
             # ref embedded + explicit audit flag.  Force PNG even when --save-
             # figures is off (chart PNGs are mandatory preservation artifacts).
-            if is_native and self._is_chart_asset_page(page_num, ps, state.handle.path):
+            if page_num in chart_winner_pages:
                 if not self.config.quiet:
                     console.print(f"  p{page_num}: [cyan]chart-asset lane[/cyan]")
                 from socr.core.audit_log import AuditEvent
@@ -2535,11 +2643,16 @@ class UnifiedPipeline:
 
             # PP-3: in-loop table re-read (OCR pages with tables only).
             # Native text is character-exact — its tables need no re-read.
+            # The chart_asset clause is currently unreachable (chart winners have no
+            # table signal, so _page_has_tables already short-circuits); it is kept
+            # to match the escalation-site guard below, which IS load-bearing, and
+            # to stay correct if chart winners are ever widened to mixed pages.
             if (
                 not is_native
                 and _table_extractor is not None
                 and self._page_has_tables(page_num, ps)
                 and bo.text
+                and bo.engine != "chart_asset"
             ):
                 try:
                     import fitz
@@ -2567,7 +2680,12 @@ class UnifiedPipeline:
             # native text layer, keeping the candidate only if exactness measurably
             # improves. Placed here so the accepted text still flows through the
             # equation, image-ref and repetition passes below.
-            if _escalation_profile is not None and not _escalation_degraded and bo.text:
+            if (
+                _escalation_profile is not None
+                and not _escalation_degraded
+                and bo.text
+                and bo.engine != "chart_asset"
+            ):
                 _escalation_degraded = self._escalate_table_page(
                     state,
                     page_num,
