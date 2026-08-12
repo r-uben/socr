@@ -464,11 +464,18 @@ class TestIsChartAssetPage:
         assert pipeline._is_chart_asset_page(1, ps, pdf) is True
 
     def test_table_page_with_chart_marks_also_fires(self, tmp_path: Path) -> None:
-        """GH-150 TICKET-B1: chart wins unconditionally when both signals fire.
+        """GH-150 TICKET-B1: a table signal no longer suppresses chart ELIGIBILITY.
 
-        A page carrying both chart marks and a table signal must still route to
-        the chart-asset lane — an image reference loses nothing recoverable, a
-        pipe grid of axis labels loses everything.
+        Scope: this pins the predicate only. `_is_chart_asset_page` answers
+        eligibility, not the final route — before B1 a table signal made it
+        return False outright, so a mixed page could never be arbitrated at all.
+
+        It does NOT assert that such a page reaches the page-level chart-asset
+        lane; it does not. Mixed pages are deliberately held out of that lane and
+        keep their normal route, where the chart is emitted inline at its own
+        y-position. That routing behaviour is pinned by
+        ``TestAgenticChartLaneRouting::
+        test_mixed_chart_table_page_keeps_its_normal_route``.
         """
         pipeline = self._make_pipeline()
         ps = self._make_native_ps(has_tables=True)
