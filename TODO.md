@@ -3,6 +3,15 @@
 Live, prioritized next-actions. Detail lives in `TICKETS.md` and `docs/log/`.
 Last updated: 2026-06-10.
 
+> **Stale below this line (2026-08-12).** The body predates issues #139–#178 and the
+> extraction-defect work. Two corrections, pending a proper rewrite under #156 or PR #179:
+>
+> - **Extraction defects (#144/#146/#147/#150/#151/#152) are scheduled in
+>   [`docs/plans/extraction-defects/STATUS.md`](docs/plans/extraction-defects/STATUS.md)** —
+>   the sole owner of wave order and file ownership across those five plans. Wave 0 (PRs #148,
+>   #149) merged 2026-08-12; wave 1 is six parallel tickets.
+> - The `--recover-clean-equations` bug leading "Now / next" below is now filed as **#157**.
+
 ## Now / next
 - [ ] **Bug: `--recover-clean-equations` (GH-36b) no-ops on native-trusted pages** —
       found live on a real paper (40pp econ draft, inline display equations in the
