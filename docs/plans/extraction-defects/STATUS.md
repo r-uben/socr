@@ -17,16 +17,19 @@ three of them write the same files and each was scheduled in isolation.
 Ticket detail — Problem / Do / Files / Done when — lives in each folder's `TICKETS.md` and
 is unchanged. This file decides only **what may run at the same time**.
 
-## Wave 0 — merge gate (not a ticket)
+## Wave 0 — merge gate — **DONE 2026-08-12**
 
-Four downstream tickets are blocked on two open PRs, both already implemented:
+Both PRs are merged to `main`; the four tickets they gated are unblocked.
 
-- **PR #148** (`fix/145-region-overlap-drops-prose`) — adds `dominant_text_direction()`.
-  Until it merges, GH-147 A1 either duplicates it or is written twice.
-- **PR #149** (`fix/146-data-row-promoted-to-header`) — the `reconstruct.py` header work.
-  GH-144 A2 and GH-152 A1 rewrite the same file and must not branch from before it.
+- **PR #148** (GH-145) — `dominant_text_direction()` is on `main`, so GH-147 A1 reduces to
+  exposing it on `PageAssessment`.
+- **PR #149** (GH-146) — the `reconstruct.py` header work. GH-144 A2/A2b and GH-152 A1 may
+  now branch from `main`.
 
-Wave 1 does not depend on either and may start immediately. Waves 2+ may not.
+**Issue #146 is deliberately still open.** PR #149 fixed only cause 1 (a data row promoted to
+header). Cause 2 — the region excluding the header band — is tracked as **GH-144 A2b**, in the
+GH-144 folder because it is the same class of `reconstruct.py` boundary error and must
+serialize on the same file.
 
 ## File ownership (the reason waves exist)
 
@@ -34,7 +37,7 @@ One file, one wave. Collisions are what the per-folder schedules could not see.
 
 | File | Claimed by | Serialized as |
 |---|---|---|
-| `src/socr/tables/reconstruct.py` | GH-144 A2 · GH-152 A1 · GH-152 A2 | W2 → W3 → W4 |
+| `src/socr/tables/reconstruct.py` | GH-144 A2 · GH-144 A2b · GH-152 A1 · GH-152 A2 | W2 → W2 → W3 → W4 |
 | `src/socr/pipeline/orchestrator.py` | GH-150 B1 · GH-147 A2 · GH-151 B1 | W1 → W2 → W3 |
 | `src/socr/core/born_digital.py` | GH-147 A1 · GH-147 A2 · GH-151 B1 | W1 → W2 → W3 |
 | `tests/test_chart_detection_gh150.py` | GH-150 A2 · GH-150 B2 | W2 → W3 |
@@ -62,19 +65,22 @@ A wave closes when every ticket in it is reviewed and accepted, not when its cod
 GH-147 A1 assumes wave 0 merged #148; if it has, the ticket reduces to exposing the existing
 `dominant_text_direction()` on `PageAssessment`.
 
-### Wave 2 — 3 parallel
+### Wave 2 — 3 lanes
 
 | Ticket | Writes | Depends on |
 |---|---|---|
-| GH-144 A2 | `tables/reconstruct.py` | GH-144 A1 · PR #149 |
+| GH-144 A2 **then** A2b | `tables/reconstruct.py` | GH-144 A1 |
 | GH-147 A2 | `core/born_digital.py`, `pipeline/orchestrator.py` | GH-147 A1 |
 | GH-150 A2 | `tests/test_chart_detection_gh150.py` | GH-150 A1 |
+
+A2 and A2b are one lane held by **one agent in sequence**, not two parallel tickets. Waves
+bound concurrency, not how much work an agent may do on a file it already owns.
 
 ### Wave 3 — 4 parallel
 
 | Ticket | Writes | Depends on |
 |---|---|---|
-| GH-152 A1 | `tables/reconstruct.py` | GH-144 A2 |
+| GH-152 A1 | `tables/reconstruct.py` | GH-144 A2b |
 | GH-151 B1 | `core/born_digital.py`, `core/state.py`, `pipeline/orchestrator.py` | GH-151 A1+A2 · GH-147 A2 |
 | GH-150 B2 | `tests/test_chart_detection_gh150.py` | GH-150 A1+B1 |
 | GH-147 B1 | `tests/test_landscape_refusal_gh147.py`, `logs/` | GH-147 A2 |
@@ -84,7 +90,7 @@ GH-147 A1 assumes wave 0 merged #148; if it has, the ticket reduces to exposing 
 | Ticket | Writes | Depends on |
 |---|---|---|
 | GH-152 A2 | `tables/reconstruct.py` | GH-152 A1 |
-| GH-144 A3 | `logs/` | GH-144 A2 |
+| GH-144 A3 | `logs/` | GH-144 A2, A2b |
 | GH-151 B2 | GH-49 issue comment | GH-151 B1 |
 
 ### Wave 5
@@ -95,9 +101,10 @@ GH-147 A1 assumes wave 0 merged #148; if it has, the ticket reduces to exposing 
 
 ## Critical path
 
-`GH-144 A1 → GH-144 A2 → GH-152 A1 → GH-152 A2 → GH-152 B1` — five deep, all on
+`GH-144 A1 → A2 → A2b → GH-152 A1 → GH-152 A2 → GH-152 B1` — six tickets, all on
 `reconstruct.py`. Nothing else in the program is longer, so this chain sets the schedule;
-every other lane has slack. Staff it first and keep one agent on it.
+every other lane has slack. Staff it first and keep **one** agent on it — the file admits no
+concurrency, and handing it between agents costs more than it saves.
 
 ## Decisions taken here
 
@@ -129,4 +136,4 @@ overlaps these five plans. Where they disagree, **this file wins for #144/#145/#
 
 ## Next action
 
-Wave 0: merge PR #148 and PR #149. Then dispatch wave 1 as six parallel tickets.
+Wave 0 is done. Dispatch wave 1 as six parallel tickets.
