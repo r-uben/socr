@@ -34,13 +34,42 @@ is the #146 residual that A2b fixes, and it is cheapest to measure in the same p
 **Files:** `docs/plans/gh144-rowizer-destroys-values/logs/`
 **Done when:** a dated log states which of the two hypotheses holds, with per-value evidence for at least 10 destroyed values, and separately names the code path that excludes the header band from the region.
 
-### TICKET-A2 — never place a lane boundary inside a token · TODO · depends-on: A1 · wave 2
+### TICKET-A2 — reject the text-strategy grid when it splits a token · TODO · depends-on: A1 · wave 2
 **Problem:** A column boundary that splits a word or number is always wrong,
 whatever the x-clustering says.
-**Do:** Constrain lane boundaries to fall in whitespace between word bboxes. A
-candidate boundary intersecting a word's bbox must be moved to the nearest gap.
-**Files:** `src/socr/tables/reconstruct.py`
+
+⚠️ **Retargeted 2026-08-13 by A1's measurements — read the log before starting.**
+This ticket originally said "constrain lane boundaries to fall in whitespace…", which
+targets `_rowize_segment`'s lane placement. A1
+(`logs/2026-08-12_A1-boundary-diagnosis.md` §2 control, §6) measured `_rowize_segment`
+as **lossless** on the synthetic fixture and on all three NS loss pages (p17/p42/p43) —
+on those pages it never runs at all, because `reconstruct_table_regions` wins the ladder
+first. Implementing the original wording would pass review and CI while leaving the
+defect untouched. Do not do that.
+
+**Do:** The loss happens at grid construction inside `reconstruct_table_regions`
+(`src/socr/tables/reconstruct.py:92-128`), in the grid returned by
+`page.find_tables(vertical_strategy="text", horizontal_strategy="text")`. Add a
+rejection predicate over that grid: for each numeric native token on the page, test
+whether any lane boundary from `table.rows[n].cells` falls **strictly inside** that
+token's own bbox. On detection, reject the text-strategy grid for that region and fall
+through to the already-proven-lossless `rowize_from_word_list` /
+`rowize_from_words_chart_aware` path.
+The predicate is native-token multiset loss against the `table.extract()` grid — not a
+boundary-intersection count, and not a tuned threshold.
+
+**Files:** `src/socr/tables/reconstruct.py` **only.**
+A1 offered the caller gate in `extract_structured` (`core/born_digital.py:~1076-1082`)
+as an alternative fix site. **It is out of scope for this ticket:** `born_digital.py` is
+held by GH-147 A2 in the same wave, and taking it here would break wave 2's disjoint
+write sets. If the fix genuinely cannot live in `reconstruct.py`, stop and escalate to
+the coordinator rather than reaching into `born_digital.py`.
+
 **Done when:** `~/venvs/socr/bin/pytest tests/test_region_overlap_gh145.py::test_no_table_value_is_lost -q` passes (the strict xfail flips), and the full suite still passes.
+**Review guard:** the strict-xfail fixture never reaches the rowizer, so a green suite
+alone does not prove the defect is fixed. The reviewer must confirm the change lands in
+`reconstruct_table_regions`' handling of the text-strategy grid, and that NS p43's six
+split values survive.
 
 ### TICKET-A2b — include the header band in the table region · TODO · depends-on: A1, A2 · wave 2
 **Problem:** The #146 residual, and the reason issue #146 is still open after PR #149.
