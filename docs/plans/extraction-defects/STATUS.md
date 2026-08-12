@@ -134,25 +134,39 @@ overlaps these five plans. Where they disagree, **this file wins for #144/#145/#
 - Its prose says same-wave issues run in parallel while its graph draws Wave 1 as a serial
   chain. The waves above are parallel by write set, which is the only definition that holds.
 
-## Wave 1 dispatch state — 2026-08-12
+## Wave 1 — CLOSED 2026-08-12
 
-All six tickets are **written**; the wave is **not closed**. A wave closes on review
-acceptance, not on code existing.
+All six tickets **accepted**. `main` at `712ee90`; 1571 passed / 2 xfailed;
+`uvx ruff@0.16.0 format --check .` clean (280 files).
 
-| Ticket | State |
+| Ticket | Landed as |
 |---|---|
-| GH-151 A1 | merged `d4f6154` |
-| GH-150 A1 | PR #182 — green, `CHANGES_REQUESTED`; guards pushed as `e193ecf` |
-| GH-151 A2 | PR #184 — green, unreviewed |
-| GH-147 A1 | PR #185 — green, unreviewed |
-| GH-150 B1 | PR #186 — opened 2026-08-12 |
-| GH-144 A1 | landed with PR #180 (`afae0b9`) |
+| GH-151 A1 | `d4f6154` |
+| GH-144 A1 | PR #180 (`ea27edd`) |
+| GH-150 A1 | PR #182 (`dfa35ea`) |
+| GH-147 A1 | PR #185 |
+| GH-150 B1 | PR #186 (`712ee90`) |
 
-Merge order is forced: **#182 → #186** (they collide in `tests/test_chart_lane.py`), then
-#184 / #185 in any order.
+**GH-151 A2 (PR #184) is NOT part of the closed wave — parked as draft.** Its column
+binding is modal consensus: the most common row signature is taken as the correct column
+structure. In a citation corpus the minority rows are frequently the ones that matter (a
+wrapped header band, a totals row, a merged cell), and the primitive cannot distinguish
+"deviant because malformed" from "deviant because genuinely different". The ordinal
+predicate that would qualify it is gated on `value_col_count == len(centres)`, so outside
+that exact case the modal vote is unqualified. Being inert today is not a defence — the
+risk is adoption later on the strength of having been merged. **GH-151 B1 (wave 3) must
+not build its gate on this primitive**; it needs a design saying what column binding
+should key on instead.
+
+### Residual, still unfiled
+
+The chart-loss gap is **not fixed by B1 and has no issue**. Chart region placeholders are
+resolved only when the judge *rejects* the ladder output. If the judge *accepts* a VLM
+extraction on a mixed page, that output governs and the placeholder never reaches the
+final markdown — the chart is silently dropped. This is the "no silent content loss" red
+line.
 
 ## Next action
 
-Triage the bot comments on #182/#184/#185/#186 and merge in that order. Wave 2 —
-GH-144 A2→A2b (one agent, critical path), GH-147 A2, GH-150 A2 — dispatches once wave 1
-is accepted, not before.
+Dispatch wave 2: **GH-144 A2 → A2b** (critical path, both on `tables/reconstruct.py` —
+keep with ONE agent), plus **GH-147 A2** and **GH-150 A2** in parallel.
