@@ -54,6 +54,30 @@ Named tolerances (no magic literals):
 - ``_MIN_HARD_FAIL_LANES``: minimum number of distinct well-separated native
   lanes in a row required before we can call a collapse geometry-impossible.
   Set to 2: a single-column row cannot collapse by definition.
+
+GH-151 A2: column-binding check (additive, model-free, report-only)
+---------------------------------------------------------------------
+This section adds a THIRD, independent report — ``BindingReport``, produced
+by ``verify_column_binding`` / ``verify_column_binding_region`` below — that
+checks whether each output value token is bound to the correct NATIVE
+COLUMN LANE.  This is a different question from the value-guard above,
+which reasons about per-row numeric-token multisets and never looks at
+column identity.
+
+- No model call: pure PyMuPDF geometry (``page.get_text("words")``) plus
+  markdown parsing, exactly like the value-guard above.
+- Report-only: ``BindingReport`` carries no ``hard_fail`` / ``warn`` /
+  ``state`` field and is never merged into ``VerifierResult``.  Nothing in
+  this module, and no pipeline phase, reads it yet.
+- NO call site in this ticket. Consumption is TICKET-B1 (global wave 3,
+  extra depends-on GH-147 A2 — see docs/plans/extraction-defects/STATUS.md).
+- The companion evidence fields (``lane_shared_across_columns``,
+  ``column_order_violation``) are detail-only and carry NO severity of
+  their own; ``BindingReport.failed`` is derived purely from ``misbound``.
+
+Plan reference: c87af1a:docs/plans/gh151-structural-gate/TICKETS.md
+(TICKET-A2).  ``docs/plans/gh151-structural-gate/`` is not present on the
+main working tree — cite the commit path above, never a live path.
 """
 
 from __future__ import annotations
@@ -139,6 +163,53 @@ class VerifierResult:
     row_count_warn_reason: str = ""  # detail for the row_count_warn event
     # TR-6 tri-state verdict (derived from the fields above; set by _verify_from_words)
     state: str = VerifierState.AMBIGUOUS  # default before verification: AMBIGUOUS
+
+
+@dataclass
+class BindingReport:
+    """GH-151 A2: column-binding check for one table region.
+
+    Additive, model-free, report-only companion to ``VerifierResult`` — see
+    the module docstring's "GH-151 A2" section.  Checks whether each output
+    value token resolves to the NATIVE COLUMN LANE its output column
+    implies, independent of the value-guard's row-level multiset/label
+    checks above.
+
+    NO call site in this ticket; consumption is TICKET-B1 (global wave 3,
+    extra depends-on GH-147 A2).  Plan reference:
+    c87af1a:docs/plans/gh151-structural-gate/TICKETS.md (TICKET-A2).
+
+    Tri-state contract (for TICKET-B1 to assert on — a consumer keying only
+    on ``failed`` cannot tell "nothing checkable" from "clean" without the
+    counters below):
+
+    - **bypass**            — ``checked == 0 and unresolved == 0``
+      (scan page, no parseable markdown table, or no pairable rows).
+    - **nothing-checkable** — ``checked == 0 and unresolved > 0``
+      (value tokens were seen but none resolved into a checked
+      (row, value-column) signature).
+    - **clean**             — ``checked > 0 and not misbound``.
+    - **misbound**          — ``failed`` is True (``bool(misbound)``); this
+      is the ONLY thing that sets ``failed``.
+
+    ``lane_shared_across_columns`` / ``column_order_violation`` are
+    companion evidence for TICKET-B1's diagnosis, not verdicts — they NEVER
+    set ``failed``.
+    """
+
+    misbound: list[dict] = field(default_factory=list)
+    lane_shared_across_columns: bool = False
+    lane_shared_detail: list[dict] = field(default_factory=list)
+    column_order_violation: bool = False
+    column_order_detail: list[dict] = field(default_factory=list)
+    checked: int = 0  # (row, value-column) signatures that participated in comparison
+    certain: int = 0  # value tokens uniquely resolved to a lane
+    unresolved: int = 0  # value tokens that could not uniquely resolve to a lane
+
+    @property
+    def failed(self) -> bool:
+        """True iff ``misbound`` is non-empty. Companion flags never set this."""
+        return bool(self.misbound)
 
 
 # --------------------------------------------------------------------------
@@ -923,6 +994,277 @@ def _pair_output_to_native_rows(
 
 
 # --------------------------------------------------------------------------
+# GH-151 A2: column-binding check — private helpers (additive, report-only)
+# --------------------------------------------------------------------------
+
+
+def _pairing_scoped_native_rows(
+    native_row_list: list[tuple[float, list[tuple[float, str]]]],
+    output_data_rows: list[tuple[int, int, str]],
+    output_text: str,
+    scope_label: str = "page",
+) -> list[tuple[float, list[tuple[float, str]]]]:
+    """Inline mirror of ``_value_guard``'s row-scoping (GH-151 A2).
+
+    Column-binding needs the SAME scoped row set the value-guard checks
+    multisets against, so a value token is only ever compared against
+    genuinely-paired native rows — not chart tick labels or prose numerals
+    that share the page's word list.  This function mirrors, in the same
+    order, the two blocks inside ``_value_guard`` (see lines ~670-741 of
+    this module): (1) the leading header-like exclusion, then (2) the TR-6
+    pairing-derived y-band.  Extracting a single shared helper is deferred
+    (barred by this ticket — see module docstring); any future change to
+    ``_value_guard``'s scoping must be mirrored here by hand.
+
+    Reuses only the existing named constants (``_YBAND_SINGLE_ROW_HEIGHT_PT``,
+    ``_YBAND_ROW_HEIGHT_CAP_PT``) — introduces no new tolerance.
+    """
+    # --- (1) Leading header-like row exclusion ---
+    output_header_tokens = _output_header_numeric_tokens(output_text)
+
+    def _is_header_like(row_tokens: list[tuple[float, str]]) -> bool:
+        return bool(
+            output_header_tokens
+            and all(_normalize_numeric_token(w) in output_header_tokens for _x, w in row_tokens)
+        )
+
+    first_data_y: float | None = None
+    for y, row_tokens in native_row_list:
+        if not _is_header_like(row_tokens):
+            first_data_y = y
+            break
+
+    effective_native_rows = [
+        (y, row_tokens)
+        for y, row_tokens in native_row_list
+        if not (_is_header_like(row_tokens) and (first_data_y is None or y < first_data_y))
+    ]
+
+    # --- (2) TR-6 pairing-derived y-band ---
+    if effective_native_rows and output_data_rows:
+        prelim_pairs = _pair_output_to_native_rows(effective_native_rows, output_data_rows)
+        if prelim_pairs:
+            native_tok_to_y: dict[int, float] = {id(rt): y for y, rt in effective_native_rows}
+            matched_ys_direct: list[float] = []
+            for _out_row, matched_toks in prelim_pairs:
+                tok_id = id(matched_toks)
+                if tok_id in native_tok_to_y:
+                    matched_ys_direct.append(native_tok_to_y[tok_id])
+            if matched_ys_direct:
+                sorted_matched = sorted(matched_ys_direct)
+                if len(sorted_matched) >= 2:
+                    gaps = [b - a for a, b in zip(sorted_matched, sorted_matched[1:]) if b > a]
+                    row_height_est = (
+                        sorted(gaps)[len(gaps) // 2] if gaps else _YBAND_SINGLE_ROW_HEIGHT_PT
+                    )
+                else:
+                    row_height_est = _YBAND_SINGLE_ROW_HEIGHT_PT
+                row_height_est = min(row_height_est, _YBAND_ROW_HEIGHT_CAP_PT)
+                margin = row_height_est * 0.5
+                band_y0 = sorted_matched[0] - margin
+                band_y1 = sorted_matched[-1] + margin
+                scoped = [(y, rt) for y, rt in effective_native_rows if band_y0 <= y <= band_y1]
+                logger.debug(
+                    "native_verifier [%s] GH-151 A2 binding y-band: y=%.0f..%.0f "
+                    "(%d -> %d effective native rows; margin=%.1fpt)",
+                    scope_label,
+                    band_y0,
+                    band_y1,
+                    len(effective_native_rows),
+                    len(scoped),
+                    margin,
+                )
+                return scoped
+
+    return effective_native_rows
+
+
+def _derive_lane_centres(
+    scoped_rows: list[tuple[float, list[tuple[float, str]]]],
+) -> list[float]:
+    """Ordered native column-lane centres across the scoped rows (GH-151 A2).
+
+    ``_rows_by_y_from_words`` already filters to numeric tokens only, so
+    every x-position collected here is a genuine value token.  Clusters
+    them with the existing ``_cluster_x_positions`` (uses ``_LANE_X_TOL_PT``;
+    no new tolerance is introduced).  There is deliberately NO rejection
+    branch in lane resolution: every x that contributed to the scoped rows
+    also contributed to this clustering, so nearest-centre assignment
+    (see ``_nearest_lane_index``) is always deterministic and needs no
+    additional tolerance check.
+    """
+    xs: list[float] = [x for _y, row_tokens in scoped_rows for x, _w in row_tokens]
+    return _cluster_x_positions(xs)
+
+
+def _nearest_lane_index(x: float, centres: list[float]) -> int:
+    """Index of the centre nearest *x*; ties broken by the lower index."""
+    best_idx = 0
+    best_d = float("inf")
+    for idx, c in enumerate(centres):
+        d = abs(x - c)
+        if d < best_d:
+            best_d = d
+            best_idx = idx
+    return best_idx
+
+
+def _resolve_value_lane(
+    n2_value: str,
+    native_row_tokens: list[tuple[float, str]],
+    centres: list[float],
+) -> int | tuple | None:
+    """Resolve *n2_value* to a lane index within one paired native row (GH-151 A2).
+
+    Resolves ONLY when the N2-normalized value occurs EXACTLY once among
+    this row's native tokens (also N2-normalized).  A value repeated within
+    the row has no unique lane, so it is never greedily matched to the
+    leftmost occurrence — that would silently fabricate a binding.  Zero or
+    multiple occurrences return ``None``; the caller counts these toward
+    ``unresolved``, never toward ``misbound``.
+    """
+    matches = [(x, w) for x, w in native_row_tokens if _normalize_numeric_token(w) == n2_value]
+    if len(matches) != 1:
+        return None
+    x, _w = matches[0]
+    return _nearest_lane_index(x, centres)
+
+
+def _binding_from_words(
+    words: list,
+    output_text: str,
+    scope_label: str = "page",
+) -> BindingReport:
+    """Shared core of the GH-151 A2 column-binding check.
+
+    See ``BindingReport``'s docstring for the tri-state contract this
+    produces.  Additive / report-only: never raises, never touches
+    ``VerifierResult``.  NO call site in this ticket; consumer is
+    TICKET-B1 (global wave 3).  Plan reference:
+    c87af1a:docs/plans/gh151-structural-gate/TICKETS.md (TICKET-A2).
+    """
+    if not words:
+        return BindingReport()
+
+    output_col_count = _parse_output_col_count(output_text)
+    output_data_rows = _parse_output_data_rows(output_text)
+    if output_col_count < 2 or not output_data_rows:
+        return BindingReport()
+
+    native_row_list = sorted(_rows_by_y_from_words(words).items())
+    scoped = _pairing_scoped_native_rows(
+        native_row_list, output_data_rows, output_text, scope_label
+    )
+    pairs = _pair_output_to_native_rows(scoped, output_data_rows)
+    if not pairs:
+        # No row could be paired at all — nothing was checkable.  Counters
+        # stay at 0 (bypass); see BindingReport's tri-state docstring.
+        return BindingReport()
+
+    centres = _derive_lane_centres(scoped)
+    value_col_count = max(output_col_count - 1, 0)
+
+    # column_signatures[output_column_ordinal] = {row_idx: signature_tuple}
+    column_signatures: dict[int, dict[int, tuple[int, ...]]] = {}
+    certain = 0
+    unresolved = 0
+
+    for (row_idx, _cell_count, row_text), native_row_tokens in pairs:
+        cells = _parse_output_row_cells(row_text)  # cells[0] is the label stub
+        for col_idx, cell in enumerate(cells[1:]):
+            lanes: list[int] = []
+            for tok in cell.split():
+                if not is_numeric_token(tok):
+                    continue
+                n2 = _normalize_numeric_token(tok)
+                lane = _resolve_value_lane(n2, native_row_tokens, centres)
+                if lane is None:
+                    unresolved += 1
+                else:
+                    certain += 1
+                    lanes.append(lane)
+            if not lanes:
+                continue  # zero tokens resolved for this cell -> not checked
+            column_signatures.setdefault(col_idx, {})[row_idx] = tuple(lanes)
+
+    checked = sum(len(row_sigs) for row_sigs in column_signatures.values())
+
+    misbound: list[dict] = []
+    modal_single_lane: dict[int, int] = {}
+
+    for col_idx, row_sigs in sorted(column_signatures.items()):
+        counts = Counter(row_sigs.values())
+        best_count = max(counts.values())
+        # Deterministic tie-break: among tied counts, lexicographically
+        # smallest signature tuple.
+        modal_sig = min(sig for sig, c in counts.items() if c == best_count)
+        if len(modal_sig) == 1:
+            modal_single_lane[col_idx] = modal_sig[0]
+        for row_idx, sig in sorted(row_sigs.items()):
+            if sig != modal_sig:
+                misbound.append(
+                    {
+                        "row_idx": row_idx,
+                        "output_column": col_idx,
+                        "expected_signature": modal_sig,
+                        "observed_signature": sig,
+                        "predicate": "modal_disagreement",
+                    }
+                )
+
+    # Subsidiary ordinal predicate (ruling amendment 1): only meaningful when
+    # the value-column count exactly equals the ordered lane count — this
+    # structurally excludes packed paired-year layouts (V < L), so it can
+    # never reopen the geometry_impossible_collapse false-positive class
+    # (see module docstring lines 12-18 and 37-40).
+    if value_col_count == len(centres) and value_col_count > 0:
+        for col_idx, lane in sorted(modal_single_lane.items()):
+            if lane == col_idx:
+                continue
+            for row_idx, sig in sorted(column_signatures[col_idx].items()):
+                if len(sig) != 1:
+                    continue  # only single-lane row signatures participate
+                misbound.append(
+                    {
+                        "row_idx": row_idx,
+                        "output_column": col_idx,
+                        "expected_signature": (col_idx,),
+                        "observed_lane": lane,
+                        "predicate": "ordinal_mismatch",
+                    }
+                )
+
+    # Companion evidence — detail-only, NEVER sets `failed`.
+    lane_to_cols: dict[int, list[int]] = {}
+    for col_idx, lane in modal_single_lane.items():
+        lane_to_cols.setdefault(lane, []).append(col_idx)
+    lane_shared_detail = [
+        {"lane": lane, "columns": sorted(cols)}
+        for lane, cols in lane_to_cols.items()
+        if len(cols) >= 2
+    ]
+    lane_shared_across_columns = bool(lane_shared_detail)
+
+    ordered_cols = sorted(modal_single_lane.keys())
+    lanes_in_col_order = [modal_single_lane[c] for c in ordered_cols]
+    column_order_violation = any(b <= a for a, b in zip(lanes_in_col_order, lanes_in_col_order[1:]))
+    column_order_detail = (
+        [{"columns": ordered_cols, "lanes": lanes_in_col_order}] if column_order_violation else []
+    )
+
+    return BindingReport(
+        misbound=misbound,
+        lane_shared_across_columns=lane_shared_across_columns,
+        lane_shared_detail=lane_shared_detail,
+        column_order_violation=column_order_violation,
+        column_order_detail=column_order_detail,
+        checked=checked,
+        certain=certain,
+        unresolved=unresolved,
+    )
+
+
+# --------------------------------------------------------------------------
 # Public entry points
 # --------------------------------------------------------------------------
 
@@ -1093,3 +1435,64 @@ def verify_native_table_region(
 
     scope_label = f"region y={ry0:.0f}..{ry1:.0f}"
     return _verify_from_words(region_words, output_text, scope_label=scope_label)
+
+
+def verify_column_binding(page, output_text: str) -> BindingReport:
+    """Whole-page GH-151 A2 column-binding check (additive, report-only).
+
+    Mirrors ``verify_native_table``'s scan-bypass idiom.  NO call site in
+    this ticket; consumer is TICKET-B1 (global wave 3).  Plan reference:
+    c87af1a:docs/plans/gh151-structural-gate/TICKETS.md (TICKET-A2).
+
+    Args:
+        page:        A live fitz.Page object (PyMuPDF).
+        output_text: The OCR output text to check.
+
+    Returns a BindingReport (see its docstring for the tri-state contract).
+    """
+    try:
+        words = page.get_text("words")
+    except Exception:
+        logger.debug("native_verifier: get_text failed, bypassing (binding check)")
+        return BindingReport()
+    if not words:
+        logger.debug("native_verifier: no native words (scan page), bypassing (binding check)")
+        return BindingReport()
+    return _binding_from_words(words, output_text, scope_label="page")
+
+
+def verify_column_binding_region(
+    page,
+    output_text: str,
+    region_bbox,
+) -> BindingReport:
+    """Per-region GH-151 A2 column-binding check (additive, report-only).
+
+    Mirrors ``verify_native_table_region``'s bbox-clip idiom.  NO call site
+    in this ticket; consumer is TICKET-B1 (global wave 3).  Plan reference:
+    c87af1a:docs/plans/gh151-structural-gate/TICKETS.md (TICKET-A2).
+
+    Args:
+        page:         A live fitz.Page object (PyMuPDF).
+        output_text:  The OCR output text to check (should be the markdown
+                      for this region only, not the whole-page output).
+        region_bbox:  A ``fitz.Rect`` (or anything with ``.x0 .y0 .x1 .y1``)
+                      bounding the table region to scope the check to.
+
+    Returns a BindingReport scoped to the region.
+    """
+    try:
+        all_words = page.get_text("words")
+    except Exception:
+        logger.debug("native_verifier_region: get_text failed, bypassing (binding check)")
+        return BindingReport()
+    if not all_words:
+        return BindingReport()
+
+    rx0, ry0, rx1, ry1 = region_bbox.x0, region_bbox.y0, region_bbox.x1, region_bbox.y1
+    region_words = [w for w in all_words if rx0 <= w[0] <= rx1 and ry0 <= w[1] <= ry1]
+    if not region_words:
+        return BindingReport()
+
+    scope_label = f"region y={ry0:.0f}..{ry1:.0f}"
+    return _binding_from_words(region_words, output_text, scope_label=scope_label)
