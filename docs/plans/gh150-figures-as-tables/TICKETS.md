@@ -27,6 +27,13 @@ chart, (c) a dense prose page, (d) a real table; assert chart detection fires on
 (a) and (b) only.
 **Files:** `tests/test_chart_detection_gh150.py`
 **Done when:** `~/venvs/socr/bin/pytest tests/test_chart_detection_gh150.py -q` exits 0 with ≥4 tests, and the same file fails when A1 is reverted.
+**Fixture constraint (from the A1 ruling):** fixture (a), the thin-stroke spike
+plot, MUST draw an enclosing axes rectangle (`page.draw_rect`) plus
+`>= MIN_DRAWINGS_FOR_VECTOR` interior spike marks — not two bare axis lines —
+or the framed-cluster gate correctly returns False and the test misreads an
+A2 fixture bug as an A1 failure. The existing `tests/test_chart_lane.py::_make_monochrome_lineplot_pdf`
+(bare `draw_line` axes) must stay a documented False under
+`test_monochrome_lineplot_is_false_negative` and is out of A2's rewrite scope.
 
 ## Stream B — precedence
 

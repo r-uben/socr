@@ -483,8 +483,14 @@ def _has_filled_rects_or_thick_strokes(page, bbox: tuple[float, float, float, fl
     """Return True if the drawing cluster in *bbox* contains chart-like marks.
 
     Chart-like = filled rectangles (bars, area fills) or strokes wider than
-    hairline.  Mirrors the positive-signal check in figures/extractor.py
-    ``_has_vector_data_marks`` without requiring an import from that module.
+    hairline. Self-contained approximation of the extractor's data-marks
+    signal (kept import-free to avoid cycles from figures/extractor.py
+    ``_has_vector_data_marks``) — NOT a mirror: the semantics already differ
+    (any ``'f'``/``'fs'`` fill, any non-black colour, width > 1.0, vs. the
+    extractor's coloured-fill-or-thick-stroke check with a neutral-colour
+    carve-out). As of GH-150 A1, ``has_chart_marks`` additionally accepts
+    framed thin-stroke clusters via ``_has_framed_data_cluster``, which this
+    function does not implement.
     """
     try:
         drawings = page.get_drawings()
