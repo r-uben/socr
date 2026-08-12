@@ -210,6 +210,45 @@ def _make_dense_table_pdf(tmp_path: Path) -> Path:
     return pdf_path
 
 
+def _make_framed_spike_pdf(tmp_path: Path, *, frame: str = "rect", n_spikes: int = 8) -> Path:
+    """A monochrome spike plot: an enclosing frame plus thin neutral spikes.
+
+    Models the GH-150 A1 motivating page (Heston p10): the frame and every
+    spike are thin, neutral-coloured strokes, so ``_has_vector_data_marks``
+    returns False and only ``_has_framed_data_cluster`` can admit the cluster.
+
+    ``frame`` selects the enclosure variant:
+    - ``"rect"``: one axis-aligned frame rectangle (the genuine-chart case);
+    - ``"diagonal"``: a single corner-to-corner diagonal stroke whose bounding
+      box spans the cluster (a non-frame that must NOT qualify);
+    - ``"double"``: the frame rectangle drawn twice (fill+stroke-style
+      duplicate that must not count itself as an interior mark).
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 60), "Figure 2: Return Spikes by Interval", fontsize=11)
+
+    black = (0, 0, 0)
+    frame_rect = fitz.Rect(100, 100, 500, 500)
+    if frame == "diagonal":
+        page.draw_line(fitz.Point(100, 100), fitz.Point(500, 500), color=black, width=0.75)
+    else:
+        page.draw_rect(frame_rect, color=black, width=0.75)
+        if frame == "double":
+            page.draw_rect(frame_rect, color=black, width=0.75)
+
+    # Thin neutral spikes inside the frame (each its own drawing, tiny bbox).
+    gray = (0.25, 0.25, 0.25)
+    for i in range(n_spikes):
+        x = 130 + i * 40
+        page.draw_line(fitz.Point(x, 480), fitz.Point(x, 380 - (i % 4) * 20), color=gray, width=0.6)
+
+    pdf_path = tmp_path / f"framed_spikes_{frame}.pdf"
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
 # ---------------------------------------------------------------------------
 # has_chart_marks() unit tests
 # ---------------------------------------------------------------------------
@@ -307,6 +346,60 @@ class TestHasChartMarks:
             assert result is False, (
                 "Monochrome line-plot was detected as a chart.  If this is "
                 "intentional (detector improved), update the test comment."
+            )
+        finally:
+            doc.close()
+
+    def test_framed_monochrome_spike_plot_detected(self, tmp_path: Path) -> None:
+        """GH-150 A1: a framed monochrome spike plot IS detected.
+
+        All strokes are thin and neutral (``_has_vector_data_marks`` False),
+        but the axis-aligned frame covering the cluster with >= 5 interior
+        marks passes ``_has_framed_data_cluster``.
+        """
+        from socr.figures.extractor import has_chart_marks
+
+        pdf = _make_framed_spike_pdf(tmp_path, frame="rect")
+        doc, page = self._open_page(pdf)
+        try:
+            assert has_chart_marks(page) is True, (
+                "Framed monochrome spike plot was not detected — "
+                "_has_framed_data_cluster should admit this cluster"
+            )
+        finally:
+            doc.close()
+
+    def test_diagonal_stroke_is_not_a_frame(self, tmp_path: Path) -> None:
+        """A diagonal stroke whose bounding box spans the cluster is no frame.
+
+        Guards the structural frame test: frame candidates must be built of
+        axis-aligned strokes, so a large diagonal/curved decoration cannot
+        masquerade as a plot frame via its bounding box.
+        """
+        from socr.figures.extractor import has_chart_marks
+
+        pdf = _make_framed_spike_pdf(tmp_path, frame="diagonal")
+        doc, page = self._open_page(pdf)
+        try:
+            assert has_chart_marks(page) is False, (
+                "A diagonal stroke's bounding box was accepted as a plot frame"
+            )
+        finally:
+            doc.close()
+
+    def test_duplicate_frame_does_not_count_itself(self, tmp_path: Path) -> None:
+        """A frame drawn twice must not count its twin as an interior mark.
+
+        With only 4 real interior spikes, the duplicate frame drawing (which
+        is itself frame-sized) must not supply the 5th mark.
+        """
+        from socr.figures.extractor import MIN_DRAWINGS_FOR_VECTOR, has_chart_marks
+
+        pdf = _make_framed_spike_pdf(tmp_path, frame="double", n_spikes=MIN_DRAWINGS_FOR_VECTOR - 1)
+        doc, page = self._open_page(pdf)
+        try:
+            assert has_chart_marks(page) is False, (
+                "A duplicate frame drawing counted itself toward the interior-mark threshold"
             )
         finally:
             doc.close()

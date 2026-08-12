@@ -156,6 +156,12 @@ CHART_MIN_CLUSTER_AREA: float = 120.0 * 120.0
 # its cluster IS the frame, not a datum.
 CHART_FRAME_MIN_CLUSTER_COVERAGE: float = 0.5
 
+# Tolerance (pts) below which a line segment counts as horizontal/vertical.
+# Same convention as the axis tests in `_looks_like_table_grid` (dx/dy <= 1pt):
+# absorbs sub-point float noise from PDF transform matrices without admitting
+# genuinely diagonal strokes.
+AXIS_LINE_TOLERANCE_PT: float = 1.0
+
 # --- Logo / letterhead filter (IMAGE blocks and raw xref images) ---
 # Fraction of page height defining the "top band" where logos/letterheads live.
 LOGO_TOP_MARGIN_RATIO: float = 0.20
@@ -838,39 +844,72 @@ def _has_framed_data_cluster(
     the largest single mark in table-ruling clusters covers <= 0.06 — see
     ``CHART_FRAME_MIN_CLUSTER_COVERAGE`` for the derivation.
 
-    Only rect geometry is consulted (no width/color/fill/items) so this stays
-    a pure spatial-containment signal, independent of ``_has_vector_data_marks``.
+    Only rect geometry plus item *kinds* are consulted (no width/color/fill)
+    so this stays a spatial-containment signal, independent of
+    ``_has_vector_data_marks``. Two structural guards keep the gate honest
+    without new tuned thresholds:
+
+    - A frame candidate must be built entirely of axis-aligned strokes
+      (``re`` items and horizontal/vertical ``l`` segments, per
+      ``AXIS_LINE_TOLERANCE_PT``). A large polyline, curve, or diagonal
+      decoration whose *bounding box* happens to span the cluster must not
+      qualify as a frame. (The frame need not be a single ``re`` primitive:
+      real axes boxes — e.g. Heston p10 — are drawn as line segments plus
+      tick marks in one path.)
+    - An interior drawing that itself covers
+      >= ``CHART_FRAME_MIN_CLUSTER_COVERAGE`` of the cluster is frame-like:
+      by the same definitional bound that selects the frame, it *is* a frame,
+      not a datum. It does not count toward the interior-mark threshold, so a
+      duplicate copy of the frame (fill + stroke emitted as two drawings)
+      cannot count itself.
     """
     x0, y0, x1, y1 = bbox
     cluster_area = (x1 - x0) * (y1 - y0)
     if cluster_area <= 0:
         return False
 
-    rects = []
+    frames: list[tuple[float, float, float, float]] = []
+    marks: list[tuple[float, float, float, float]] = []
     for d in cluster_drawings:
         rect = d.get("rect")
         if rect is None:
             continue
-        rects.append((rect.x0, rect.y0, rect.x1, rect.y1))
-
-    for i, frame in enumerate(rects):
-        fx0, fy0, fx1, fy1 = frame
-        mark_area = (fx1 - fx0) * (fy1 - fy0)
-        coverage = mark_area / cluster_area
-        if coverage < CHART_FRAME_MIN_CLUSTER_COVERAGE:
+        mark_area = (rect.x1 - rect.x0) * (rect.y1 - rect.y0)
+        if mark_area / cluster_area >= CHART_FRAME_MIN_CLUSTER_COVERAGE:
+            if _is_axis_aligned_path(d):
+                frames.append((rect.x0, rect.y0, rect.x1, rect.y1))
             continue
+        marks.append((rect.x0, rect.y0, rect.x1, rect.y1))
 
+    for fx0, fy0, fx1, fy1 in frames:
         interior = 0
-        for j, other in enumerate(rects):
-            if j == i:
-                continue
-            ox0, oy0, ox1, oy1 = other
+        for ox0, oy0, ox1, oy1 in marks:
             if ox0 >= fx0 and oy0 >= fy0 and ox1 <= fx1 and oy1 <= fy1:
                 interior += 1
-        if interior >= MIN_DRAWINGS_FOR_VECTOR:
-            return True
+                if interior >= MIN_DRAWINGS_FOR_VECTOR:
+                    return True
 
     return False
+
+
+def _is_axis_aligned_path(drawing: dict) -> bool:
+    """True when every item is a rect or a horizontal/vertical line segment."""
+    items = drawing.get("items", [])
+    if not items:
+        return False
+    for item in items:
+        kind = item[0] if item else None
+        if kind == "re":
+            continue
+        if kind == "l" and len(item) >= 3:
+            p1, p2 = item[1], item[2]
+            if (
+                abs(p2.x - p1.x) <= AXIS_LINE_TOLERANCE_PT
+                or abs(p2.y - p1.y) <= AXIS_LINE_TOLERANCE_PT
+            ):
+                continue
+        return False
+    return True
 
 
 def _is_neutral_color(color) -> bool:
@@ -924,10 +963,11 @@ def has_chart_marks(page) -> bool:
     Returns True when the page contains at least one spatially-coherent vector
     cluster that (a) meets the minimum bounding-box area gate
     (``CHART_MIN_CLUSTER_AREA``) and (b) passes ``_has_vector_data_marks``
-    (coloured fills or thick strokes) OR ``_has_framed_data_cluster`` (a plot
-    frame covering >= ``CHART_FRAME_MIN_CLUSTER_COVERAGE`` of the cluster bbox
-    plus >= ``MIN_DRAWINGS_FOR_VECTOR`` interior marks — catches thin-stroke
-    monochrome spike plots that have no coloured fill or thick stroke).
+    (coloured fills or thick strokes) OR ``_has_framed_data_cluster`` (an
+    axis-aligned frame path covering >= ``CHART_FRAME_MIN_CLUSTER_COVERAGE``
+    of the cluster bbox plus >= ``MIN_DRAWINGS_FOR_VECTOR`` interior marks —
+    catches thin-stroke monochrome spike plots that have no coloured fill or
+    thick stroke).
     Also returns True when the page carries at least one embedded raster image
     (``page.get_images()``), because an embedded PNG/JPEG chart is visually lost
     as native word-salad just like a vector one.
@@ -1013,10 +1053,10 @@ def has_chart_marks(page) -> bool:
             )
             continue
 
-        # (b) Must pass a positive gate: coloured/thick data marks, or a framed
-        # cluster of thin-stroke interior marks.
+        # (b) Must pass a positive gate: coloured/thick data marks, or (only
+        # when those are absent) a framed cluster of thin-stroke interior marks.
         has_data_marks = _has_vector_data_marks(cluster_drawings)
-        has_framed_cluster = _has_framed_data_cluster(cluster_drawings, bbox)
+        has_framed_cluster = not has_data_marks and _has_framed_data_cluster(cluster_drawings, bbox)
         if not (has_data_marks or has_framed_cluster):
             logger.debug(
                 "has_chart_marks p%s: cluster area=%.0f — no data marks and no "
@@ -1027,13 +1067,7 @@ def has_chart_marks(page) -> bool:
             continue
 
         ratio = area / max(page_area, 1.0)
-        gate_name = (
-            "both"
-            if has_data_marks and has_framed_cluster
-            else "data-marks"
-            if has_data_marks
-            else "framed-cluster"
-        )
+        gate_name = "data-marks" if has_data_marks else "framed-cluster"
         logger.debug(
             "has_chart_marks p%s: CHART cluster found (%s) — area=%.0f ratio=%.3f %d drawings",
             page_num_label,
