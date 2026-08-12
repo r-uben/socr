@@ -1,0 +1,532 @@
+{
+  "nodes": [
+    {
+      "id": "now",
+      "type": "text",
+      "text": "## NOW\nstart Waves 1–3 in parallel",
+      "x": -120,
+      "y": -80,
+      "width": 240,
+      "height": 100,
+      "color": "0"
+    },
+    {
+      "id": "w1lab",
+      "type": "text",
+      "text": "# Wave 1\nDestroy content",
+      "x": -980,
+      "y": 120,
+      "width": 220,
+      "height": 80,
+      "color": "1"
+    },
+    {
+      "id": "150",
+      "type": "text",
+      "text": "## 150\ncharts → tables",
+      "x": -980,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "1"
+    },
+    {
+      "id": "144",
+      "type": "text",
+      "text": "## 144\ndrop numbers",
+      "x": -780,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "1"
+    },
+    {
+      "id": "147",
+      "type": "text",
+      "text": "## 147\nlandscape",
+      "x": -580,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "1"
+    },
+    {
+      "id": "146",
+      "type": "text",
+      "text": "## 146\nbad header",
+      "x": -380,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "1"
+    },
+    {
+      "id": "152",
+      "type": "text",
+      "text": "## 152\nside-by-side",
+      "x": -180,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "1"
+    },
+    {
+      "id": "w2lab",
+      "type": "text",
+      "text": "# Wave 2\nFail closed",
+      "x": 120,
+      "y": 120,
+      "width": 220,
+      "height": 80,
+      "color": "2"
+    },
+    {
+      "id": "162",
+      "type": "text",
+      "text": "## 162\nverify fail-open",
+      "x": 120,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "2"
+    },
+    {
+      "id": "166",
+      "type": "text",
+      "text": "## 166\ncrop looks clean",
+      "x": 320,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "2"
+    },
+    {
+      "id": "161",
+      "type": "text",
+      "text": "## 161\nresume skips",
+      "x": 520,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "2"
+    },
+    {
+      "id": "140",
+      "type": "text",
+      "text": "## 140\nmath-font trust",
+      "x": 720,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "2"
+    },
+    {
+      "id": "w3lab",
+      "type": "text",
+      "text": "# Wave 3\nRouting identity",
+      "x": 980,
+      "y": 120,
+      "width": 220,
+      "height": 80,
+      "color": "3"
+    },
+    {
+      "id": "159",
+      "type": "text",
+      "text": "## 159\nprofile identity",
+      "x": 980,
+      "y": 240,
+      "width": 180,
+      "height": 100,
+      "color": "3"
+    },
+    {
+      "id": "w4lab",
+      "type": "text",
+      "text": "# Wave 4\nGates and honesty",
+      "x": -980,
+      "y": 460,
+      "width": 260,
+      "height": 80,
+      "color": "4"
+    },
+    {
+      "id": "151",
+      "type": "text",
+      "text": "## 151\nstructure gate",
+      "x": -980,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "167",
+      "type": "text",
+      "text": "## 167\nnot every raster",
+      "x": -780,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "163",
+      "type": "text",
+      "text": "## 163\nOCR deferral",
+      "x": -580,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "154",
+      "type": "text",
+      "text": "## 154\ncloud $0",
+      "x": -380,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "160",
+      "type": "text",
+      "text": "## 160\nesc budget",
+      "x": -180,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "139",
+      "type": "text",
+      "text": "## 139\nno-audit inert",
+      "x": 20,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "168",
+      "type": "text",
+      "text": "## 168\nconfig drop",
+      "x": 220,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "172",
+      "type": "text",
+      "text": "## 172\ntimeout hang",
+      "x": 420,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "177",
+      "type": "text",
+      "text": "## 177\nexit codes",
+      "x": 620,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "4"
+    },
+    {
+      "id": "w5lab",
+      "type": "text",
+      "text": "# Wave 5\nEquations",
+      "x": 880,
+      "y": 460,
+      "width": 220,
+      "height": 80,
+      "color": "5"
+    },
+    {
+      "id": "157",
+      "type": "text",
+      "text": "## 157\nattach PageOutput",
+      "x": 880,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "165",
+      "type": "text",
+      "text": "## 165\nPUA detect",
+      "x": 1080,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "164",
+      "type": "text",
+      "text": "## 164\nno full dump",
+      "x": 1280,
+      "y": 580,
+      "width": 180,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "w6lab",
+      "type": "text",
+      "text": "# Wave 6\nProvenance",
+      "x": -980,
+      "y": 800,
+      "width": 220,
+      "height": 80,
+      "color": "6"
+    },
+    {
+      "id": "158",
+      "type": "text",
+      "text": "## 158\nmodel_version",
+      "x": -980,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "6"
+    },
+    {
+      "id": "173",
+      "type": "text",
+      "text": "## 173\nfingerprint",
+      "x": -780,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "6"
+    },
+    {
+      "id": "171",
+      "type": "text",
+      "text": "## 171\nfigs before terminal",
+      "x": -580,
+      "y": 920,
+      "width": 200,
+      "height": 100,
+      "color": "6"
+    },
+    {
+      "id": "170",
+      "type": "text",
+      "text": "## 170\nreplay assets",
+      "x": -360,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "6"
+    },
+    {
+      "id": "169",
+      "type": "text",
+      "text": "## 169\nreject reasons",
+      "x": -160,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "6"
+    },
+    {
+      "id": "142",
+      "type": "text",
+      "text": "## 142\nflag audit",
+      "x": 40,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "6"
+    },
+    {
+      "id": "64",
+      "type": "text",
+      "text": "## 64\nnative fallthrough",
+      "x": 240,
+      "y": 920,
+      "width": 200,
+      "height": 100,
+      "color": "6"
+    },
+    {
+      "id": "w7lab",
+      "type": "text",
+      "text": "# Wave 7\nArchitecture",
+      "x": 520,
+      "y": 800,
+      "width": 220,
+      "height": 80,
+      "color": "5"
+    },
+    {
+      "id": "178",
+      "type": "text",
+      "text": "## 178\nPython ADR",
+      "x": 520,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "174",
+      "type": "text",
+      "text": "## 174\nquarantine legacy",
+      "x": 720,
+      "y": 920,
+      "width": 200,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "175",
+      "type": "text",
+      "text": "## 175\nlayering",
+      "x": 940,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "176",
+      "type": "text",
+      "text": "## 176\ndumb state",
+      "x": 1140,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "155",
+      "type": "text",
+      "text": "## 155\nsplit orch",
+      "x": 1340,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "156",
+      "type": "text",
+      "text": "## 156\ndocs sync",
+      "x": 1540,
+      "y": 920,
+      "width": 180,
+      "height": 100,
+      "color": "5"
+    },
+    {
+      "id": "w8lab",
+      "type": "text",
+      "text": "# Wave 8\nNorth star (design)",
+      "x": -980,
+      "y": 1140,
+      "width": 280,
+      "height": 80,
+      "color": "0"
+    },
+    {
+      "id": "49",
+      "type": "text",
+      "text": "## 49\nthree-layer method",
+      "x": -980,
+      "y": 1260,
+      "width": 200,
+      "height": 100,
+      "color": "0"
+    },
+    {
+      "id": "39",
+      "type": "text",
+      "text": "## 39\n$/quality ladders",
+      "x": -760,
+      "y": 1260,
+      "width": 200,
+      "height": 100,
+      "color": "0"
+    },
+    {
+      "id": "114",
+      "type": "text",
+      "text": "## 114\npost-hoc escalate",
+      "x": -540,
+      "y": 1260,
+      "width": 200,
+      "height": 100,
+      "color": "0"
+    },
+    {
+      "id": "127",
+      "type": "text",
+      "text": "## 127\nnative structure",
+      "x": -320,
+      "y": 1260,
+      "width": 200,
+      "height": 100,
+      "color": "0"
+    },
+    {
+      "id": "56",
+      "type": "text",
+      "text": "## 56\nCE umbrella",
+      "x": -100,
+      "y": 1260,
+      "width": 180,
+      "height": 100,
+      "color": "0"
+    }
+  ],
+  "edges": [
+    {"id": "e1", "fromNode": "now", "fromSide": "bottom", "toNode": "150", "toSide": "top"},
+    {"id": "e2", "fromNode": "now", "fromSide": "bottom", "toNode": "144", "toSide": "top"},
+    {"id": "e3", "fromNode": "now", "fromSide": "bottom", "toNode": "147", "toSide": "top"},
+    {"id": "e4", "fromNode": "now", "fromSide": "bottom", "toNode": "146", "toSide": "top"},
+    {"id": "e5", "fromNode": "now", "fromSide": "bottom", "toNode": "152", "toSide": "top"},
+    {"id": "e6", "fromNode": "now", "fromSide": "bottom", "toNode": "162", "toSide": "top"},
+    {"id": "e7", "fromNode": "now", "fromSide": "bottom", "toNode": "166", "toSide": "top"},
+    {"id": "e8", "fromNode": "now", "fromSide": "bottom", "toNode": "161", "toSide": "top"},
+    {"id": "e9", "fromNode": "now", "fromSide": "bottom", "toNode": "140", "toSide": "top"},
+    {"id": "e10", "fromNode": "now", "fromSide": "bottom", "toNode": "159", "toSide": "top"},
+    {"id": "e11", "fromNode": "144", "fromSide": "bottom", "toNode": "151", "toSide": "top", "label": "soft"},
+    {"id": "e12", "fromNode": "146", "fromSide": "bottom", "toNode": "151", "toSide": "top", "label": "soft"},
+    {"id": "e13", "fromNode": "150", "fromSide": "bottom", "toNode": "167", "toSide": "top"},
+    {"id": "e14", "fromNode": "162", "fromSide": "bottom", "toNode": "163", "toSide": "top"},
+    {"id": "e15", "fromNode": "151", "fromSide": "right", "toNode": "163", "toSide": "left", "label": "soft"},
+    {"id": "e16", "fromNode": "159", "fromSide": "bottom", "toNode": "154", "toSide": "top"},
+    {"id": "e17", "fromNode": "154", "fromSide": "right", "toNode": "160", "toSide": "left"},
+    {"id": "e18", "fromNode": "139", "fromSide": "bottom", "toNode": "142", "toSide": "top", "label": "soft"},
+    {"id": "e19", "fromNode": "154", "fromSide": "bottom", "toNode": "142", "toSide": "top", "label": "soft"},
+    {"id": "e20", "fromNode": "168", "fromSide": "bottom", "toNode": "142", "toSide": "top", "label": "soft"},
+    {"id": "e21", "fromNode": "140", "fromSide": "bottom", "toNode": "165", "toSide": "top"},
+    {"id": "e22", "fromNode": "157", "fromSide": "right", "toNode": "164", "toSide": "left"},
+    {"id": "e23", "fromNode": "140", "fromSide": "right", "toNode": "157", "toSide": "top", "label": "soft"},
+    {"id": "e24", "fromNode": "158", "fromSide": "right", "toNode": "173", "toSide": "left"},
+    {"id": "e25", "fromNode": "161", "fromSide": "bottom", "toNode": "169", "toSide": "top", "label": "soft"},
+    {"id": "e26", "fromNode": "171", "fromSide": "right", "toNode": "170", "toSide": "left"},
+    {"id": "e27", "fromNode": "178", "fromSide": "right", "toNode": "155", "toSide": "left", "label": "soft"},
+    {"id": "e28", "fromNode": "174", "fromSide": "right", "toNode": "155", "toSide": "left"},
+    {"id": "e29", "fromNode": "174", "fromSide": "top", "toNode": "176", "toSide": "left", "label": "soft"},
+    {"id": "e30", "fromNode": "175", "fromSide": "right", "toNode": "155", "toSide": "left", "label": "soft"},
+    {"id": "e31", "fromNode": "159", "fromSide": "bottom", "toNode": "114", "toSide": "top", "label": "soft"},
+    {"id": "e32", "fromNode": "154", "fromSide": "bottom", "toNode": "114", "toSide": "top", "label": "soft"},
+    {"id": "e33", "fromNode": "49", "fromSide": "top", "toNode": "151", "toSide": "bottom", "label": "soft"},
+    {"id": "e34", "fromNode": "49", "fromSide": "top", "toNode": "162", "toSide": "bottom", "label": "soft"},
+    {"id": "e35", "fromNode": "56", "fromSide": "top", "toNode": "150", "toSide": "bottom", "label": "soft"},
+    {"id": "e36", "fromNode": "56", "fromSide": "top", "toNode": "144", "toSide": "bottom", "label": "soft"}
+  ]
+}
