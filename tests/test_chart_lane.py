@@ -780,6 +780,7 @@ class TestAgenticChartLaneRouting:
 
         from socr.core.audit_log import build_run_audit
         from socr.core.providers import PROFILE_QWEN_LOCAL
+        from socr.core.result import PageOutput, PageStatus
 
         pdf = _make_vector_chart_pdf(tmp_path)
         pipeline = _make_agentic_pipeline()
@@ -787,8 +788,30 @@ class TestAgenticChartLaneRouting:
         state = _make_state_with_page(pdf, has_tables=True)
         pipeline._last_assessment = state._last_assessment
 
+        # route_page must return a REAL PageOutput, not a bare MagicMock. With a
+        # MagicMock, ``best_output.engine != "chart_asset"`` and
+        # ``"![Chart page 1](" not in best_output.text`` are both vacuously True
+        # (MagicMock compares unequal to every string and its ``__contains__``
+        # returns False), so the two content assertions below would pass even if
+        # the page HAD been claimed by the page-level chart lane — the exact
+        # regression this test exists to catch.
+        mock_decision = MagicMock()
+        mock_decision.accepted = True
+        mock_decision.attempts = []
+        mock_decision.final_output = PageOutput(
+            page_num=1,
+            text="| Col A | Col B |\n|---|---|\n| 1.0 | 2.0 |",
+            status=PageStatus.SUCCESS,
+            engine="deepseek",
+            audit_passed=True,
+        )
+        mock_decision.winning_engine = "deepseek"
+        mock_decision.total_cost_usd = 0.002
+
         with (
-            patch("socr.pipeline.orchestrator.route_page") as mock_route,
+            patch(
+                "socr.pipeline.orchestrator.route_page", return_value=mock_decision
+            ) as mock_route,
             patch.object(
                 pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
             ),
@@ -799,12 +822,16 @@ class TestAgenticChartLaneRouting:
 
         ps = state.pages[1]
         assert ps.best_output is not None
-        # Not claimed by the page-level chart lane.
+        # Not claimed by the page-level chart lane — it carries the ROUTED output.
+        assert ps.best_output.engine == "deepseek"
         assert ps.best_output.engine != "chart_asset"
 
         # The page-level lane's whole-page PNG ref must NOT be appended: on a mixed
         # page the chart is represented inline by the region placeholder instead.
         assert "![Chart page 1](" not in (ps.best_output.text or "")
+        # Positive control: the routed text really did survive to best_output, so
+        # the "not in" assertion above is inspecting real content, not a stub.
+        assert "| Col A | Col B |" in (ps.best_output.text or "")
 
         chart_events = [e for e in state.events if e.kind == "chart_asset_page"]
         assert not chart_events, "Mixed page must not emit a chart_asset_page event"

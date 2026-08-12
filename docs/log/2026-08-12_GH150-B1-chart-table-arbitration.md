@@ -15,10 +15,32 @@ as a pipe grid of axis labels instead of an image reference.
 
 ## Decision
 
+> **Superseded during implementation — read this box first.** The decision below
+> ("chart wins unconditionally") is the *original* one and is only half of what
+> shipped. It holds for **chart-only** pages. For **mixed** chart+table pages the
+> shipped behaviour is the opposite: they are held OUT of the page-level chart
+> lane and keep their normal route.
+>
+> Why it changed: the page-level lane appends its PNG ref after the whole of
+> `ps.native_text`. That is correct only when the chart IS the page. On a mixed
+> page the chart sits between other regions, so appending sinks it below every
+> table that followed it and breaks source order. Mixed pages instead rely on
+> `rowize_from_words_chart_aware`, which emits an inline placeholder at the
+> chart's own y-position — position-preserving by construction.
+>
+> So the arbitration is **region-level, not page-level**: the winner recorded in
+> the `chart_table_arbitration` audit event is `chart_region`, not
+> `chart_asset_page`. `_is_chart_asset_page` answers *eligibility*; the caller
+> decides the route.
+
 **Chart wins unconditionally when both signals fire.** No new threshold, no
 tie-break, no `native_grid`-based gate. Rationale (encoded verbatim in the code
 comment and the `AuditEvent.data.rationale` field): an image reference loses
 nothing recoverable; a pipe grid of axis labels loses everything.
+
+The surviving core of this rationale is that the chart must never be destroyed by
+the table signal. What changed is *how* it is preserved — inline at its own
+position, rather than by handing the whole page to the chart lane.
 
 ### Predicate split
 
@@ -28,48 +50,67 @@ branch at `orchestrator.py:765` and the agentic-loop alias
 exclusion — its second caller's behavior must not drift.
 
 A new `_is_native_eligible_without_ocr` holds every gate EXCEPT the table
-exclusion. `_is_trusted_native_without_ocr` is now `_is_native_eligible_without_ocr(...)
-and not self._page_has_tables(...)` — observably byte-identical to before.
+exclusion. `_is_trusted_native_without_ocr` is now `_is_native_eligible_without_ocr(...)`
+followed by the `--native-only` short-circuit and `not self._page_has_tables(...)` —
+observably byte-identical to before (the `native_only` early return still precedes
+the table check, exactly as the pre-split predicate did).
 `_is_chart_asset_page` calls the new eligibility predicate instead, so a
-page with both a chart signal and a table signal can still reach the chart lane.
+page with both a chart signal and a table signal can still be *detected* — and then
+arbitrated by the caller, rather than unconditionally losing to the table signal.
 
 ### Precompute + prune, not an inline check
 
-`_phase_agentic` precomputes `chart_winner_pages` by scanning ALL of
-`state.pages` (not just `ocr_pages` — a chart-only page with no table signal is
-already trusted-native and never enters `ocr_pages`, so scanning only that list
-would silently drop such pages back to plain native prose). The set is pruned
-from BOTH `ocr_pages` and `native_fallback_pages` before the empty-ladder early
-return, for two independent reasons:
+`_phase_agentic` precomputes the eligible set by scanning ALL of `state.pages`
+(not just `ocr_pages` — a chart-only page with no table signal is already
+trusted-native and never enters `ocr_pages`, so scanning only that list would
+silently drop such pages back to plain native prose). Eligible pages split into
+`chart_only_pages` and `chart_mixed_pages`; **only the chart-only set becomes
+`chart_winner_pages`**.
 
-1. the empty-ladder return (CI's exact no-provider state) stamps every
-   `native_fallback_pages` entry `WARNING`/`MODEL_UNAVAILABLE` before the loop
-   runs — chart+table winners are NOT trusted-native (`has_tables` keeps
-   `_is_trusted_native_without_ocr` False for them), so without the prune they
-   would be falsely marked unavailable even though the chart lane needs no
-   provider at all;
-2. pruning the lists alone does not stop routing — the loop's `else` branch
-   calls `route_page` unconditionally for non-native, non-chart pages. The loop
-   gate (`if page_num in chart_winner_pages:`, replacing the old
-   `is_native and self._is_chart_asset_page(...)` check) is equally
-   load-bearing; landing only one of the two would ship the GH-150 bug behind a
-   false "chart won" audit trail.
+The winner set is pruned from BOTH `ocr_pages` and `native_fallback_pages` before
+the empty-ladder early return. **That prune is currently a no-op, deliberately
+kept as a self-enforcing invariant** — say so plainly rather than implying it is
+load-bearing:
+
+1. winners are chart-only, hence have no table signal, hence
+   `_is_trusted_native_without_ocr` returns True for them — so they never entered
+   `ocr_pages` (built from `not _is_agentic_trusted_native`) and never entered
+   `native_fallback_pages` (a subset of it). The prune removes nothing today. It
+   is retained so that widening `chart_winner_pages` to include table-bearing
+   pages stays safe: those pages *would* be in both lists, and the empty-ladder
+   return (CI's exact no-provider state) stamps every `native_fallback_pages`
+   entry `WARNING`/`MODEL_UNAVAILABLE` before the loop runs.
+
+   Note what is deliberately *not* covered: **mixed** pages are not winners, so
+   they stay in both lists and ARE stamped unavailable on a no-provider run —
+   correctly, since they genuinely need the ladder for their table.
+
+2. pruning the lists would not stop routing in any case — the loop's `else`
+   branch calls `route_page` unconditionally for non-native, non-chart pages. The
+   loop gate (`if page_num in chart_winner_pages:`, replacing the old
+   `is_native and self._is_chart_asset_page(...)` check) is the load-bearing
+   half.
 
 ### Two `bo.engine != "chart_asset"` guards
 
-Chart winners with a table signal fall through the per-page lifecycle with
-`is_native=False`, `has_tables=True`, and non-empty `bo.text` — the same shape a
-genuine OCR'd table page has. Two sites would otherwise overwrite the chart
-lane's `bo.text` with a re-scored table grid:
+Two sites could overwrite the chart lane's `bo.text` with a re-scored table grid:
 
-- the in-loop table re-read gate (`:2538` area);
-- the GH-96 escalation call site (`:2570` area).
+- the in-loop table re-read gate;
+- the GH-96 escalation call site.
 
 Both are guarded at the call site only (`bo.engine != "chart_asset"`); neither
-`_reread_page_tables` nor `_escalate_table_page` was touched. Chart winners now
-fall into the `elif bo.text and self._page_has_tables(...)` scoring branch
-(`_surface_table_scoring`, `:2580`) instead — intentional, chart pages surface
-as not-scorable rather than silently skipped. Chart winners also newly reach
+`_reread_page_tables` nor `_escalate_table_page` was touched.
+
+**Only the escalation guard is currently live.** The re-read gate already
+short-circuits on `self._page_has_tables(page_num, ps)`, which is False for every
+chart winner (winners are chart-only by construction), so its `chart_asset`
+clause is unreachable today. It is kept for symmetry with the live guard and to
+stay correct under the same widening described above. The escalation guard has no
+such preceding table check, so it is the one that actually fires.
+
+Chart winners fall into the `elif bo.text and self._page_has_tables(...)` scoring
+branch (`_surface_table_scoring`) instead — intentional, chart pages surface as
+not-scorable rather than silently skipped. Chart winners also newly reach
 `_guard_agentic_page_table_repetition` (repetition-line audit only, no routing
 effect).
 
