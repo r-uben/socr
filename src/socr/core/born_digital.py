@@ -127,6 +127,29 @@ def block_is_page_furniture(block: dict, dominant: tuple[float, float]) -> bool:
     return all(d != dominant and d != _HORIZONTAL for d in dirs)
 
 
+def text_direction_is_rotated(direction: tuple[float, float]) -> bool:
+    """True when a page's dominant text direction runs off the horizontal axis.
+
+    ``abs(dy) >= abs(dx)`` is an axis comparison — which axis the text run lies
+    closer to — not a numeric threshold; it reuses the same unit-vector line
+    directions as ``dominant_text_direction`` and introduces no new constant.
+
+    Ties (45 degrees, where ``abs(dx) == abs(dy)``) fail closed to rotated: the
+    y-clustering rowizer that assembles reading order from line positions is
+    provably wrong at 45 degrees, so a tied direction must not be treated as
+    safely horizontal.
+
+    The exact all-zero vector ``(0.0, 0.0)`` stays horizontal, per the
+    absence-of-evidence precedent (#145, see ``block_is_page_furniture`` above:
+    "A block with no directional lines is NOT furniture — absence of evidence
+    must not delete text"). A page with no directional evidence at all must not
+    be routed as rotated on the strength of that absence.
+    """
+    if direction == (0.0, 0.0):
+        return False
+    return abs(direction[1]) >= abs(direction[0])
+
+
 #: Word tokens used to decide whether a region's markdown already contains a
 #: line. Letters and numbers only: punctuation and the markdown table scaffolding
 #: (pipes, dashes) must not count as content.
@@ -288,7 +311,17 @@ class PageAssessment:
     #: Propagated to PageState so the agentic native lane can emit a durable audit
     #: event; the historical ``notes`` entry alone reached nothing that ships.
     has_encoding_hygiene_suspect: bool = False
+    #: The page's prevailing text-line direction, stamped once by ``_assess_page``
+    #: from ``dominant_text_direction()``. The ``_HORIZONTAL`` default conflates
+    #: "genuinely horizontal" with "no directional evidence" (an empty tally from
+    #: ``dominant_text_direction()``) — consumers must NOT read this field's
+    #: default as proof that directional text evidence existed.
+    dominant_text_direction: tuple[float, float] = _HORIZONTAL
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def text_is_rotated(self) -> bool:
+        return text_direction_is_rotated(self.dominant_text_direction)
 
 
 @dataclass
@@ -508,6 +541,22 @@ class BornDigitalDetector:
             return self._assess_page(doc[page_num - 1], page_num)
 
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
+        """Assess a page and stamp its dominant text direction onto the result.
+
+        ``_assess_page_signals`` has multiple early returns (encoding failures,
+        image-only pages, etc.), so the direction is computed once here and
+        stamped onto whichever ``PageAssessment`` comes back — a single stamping
+        point that survives every early return of the signals body, rather than
+        threading the computation through 11 separate return sites.
+        """
+        direction = dominant_text_direction(page.get_text("dict").get("blocks", []))
+        assessment = self._assess_page_signals(page, page_num)
+        assessment.dominant_text_direction = direction
+        if text_direction_is_rotated(direction):
+            assessment.notes.append(f"rotated text direction {direction}")
+        return assessment
+
+    def _assess_page_signals(self, page: fitz.Page, page_num: int) -> PageAssessment:
         """Assess whether a single page is born-digital.
 
         Uses multiple signals to distinguish genuine born-digital text from
