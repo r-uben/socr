@@ -134,6 +134,25 @@ overlaps these five plans. Where they disagree, **this file wins for #144/#145/#
 - Its prose says same-wave issues run in parallel while its graph draws Wave 1 as a serial
   chain. The waves above are parallel by write set, which is the only definition that holds.
 
+## Wave 1 dispatch state — 2026-08-12
+
+All six tickets are **written**; the wave is **not closed**. A wave closes on review
+acceptance, not on code existing.
+
+| Ticket | State |
+|---|---|
+| GH-151 A1 | merged `d4f6154` |
+| GH-150 A1 | PR #182 — green, `CHANGES_REQUESTED`; guards pushed as `e193ecf` |
+| GH-151 A2 | PR #184 — green, unreviewed |
+| GH-147 A1 | PR #185 — green, unreviewed |
+| GH-150 B1 | PR #186 — opened 2026-08-12 |
+| GH-144 A1 | landed with PR #180 (`afae0b9`) |
+
+Merge order is forced: **#182 → #186** (they collide in `tests/test_chart_lane.py`), then
+#184 / #185 in any order.
+
 ## Next action
 
-Wave 0 is done. Dispatch wave 1 as six parallel tickets.
+Triage the bot comments on #182/#184/#185/#186 and merge in that order. Wave 2 —
+GH-144 A2→A2b (one agent, critical path), GH-147 A2, GH-150 A2 — dispatches once wave 1
+is accepted, not before.
