@@ -239,6 +239,30 @@ def test_no_table_value_is_lost(table_page):
     assert not (nums(raw) - nums(out)), "extraction lost a numeric value"
 
 
+def test_rejected_grid_fallback_populates_the_header(table_page):
+    """GH-144 review finding 3: A2's fallback must not leave A2b's own
+    header-prepend step starved of words.
+
+    ``_numeric_row_bbox`` scoped the fallback rowizer to only the rows
+    carrying a numeric cell — that scope by construction excludes the header
+    band above them (a header cell has no numeric token), so
+    ``_prepend_header_band`` had nothing left to prepend. The fallback used
+    to ship with all six numeric data rows recovered but an EMPTY header row,
+    even though "Nominal / Real / Inflation" sit directly above the data on
+    the page. Surviving numbers is not enough — the header must survive too.
+    """
+    from socr.tables.reconstruct import reconstruct_table_regions
+
+    with fitz.open(table_page) as doc:
+        page = doc[0]
+        out = reconstruct_table_regions(page)
+
+    assert out, "expected at least one reconstructed table region"
+    header_line = out[0][1].splitlines()[0]
+    for label in ("Nominal", "Real", "Inflation"):
+        assert label in header_line, f"header row lost {label!r}: {header_line!r}"
+
+
 def test_horizontal_text_survives_a_rotated_page():
     """A landscape table makes the page's dominant direction rotated.
 
