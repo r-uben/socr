@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -33,11 +34,13 @@ fitz = pytest.importorskip("fitz")
 from socr.core.born_digital import BornDigitalDetector
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
+from socr.core.manifest import _winning_page_output
 from socr.core.providers import PROFILE_QWEN_LOCAL
-from socr.core.result import DocumentStatus, PageOutput, PageStatus
+from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables import structure_check
+from socr.tables.reconcile import find_table_blocks
 
 # ---------------------------------------------------------------------------
 # Fixture: a ruled regression-table page whose "R2" row is genuinely split
@@ -192,14 +195,28 @@ class TestProcessEndToEnd:
             "warning",
             "WARNING",
         )
+        # doneWhen: the SHIPPED page (not just the discarded attempt) carries
+        # FailureMode.NATIVE_TABLE_STRUCTURE_FAILED -- the surface the manifest
+        # actually freezes and ``pages/NNN.md`` is built from.
+        assert winning.get("failure_mode") == "native_table_structure_failed"
 
-        # End-to-end token preservation: every value token from the installed
-        # extractor's markdown survives into the shipped page text.
+        # End-to-end token preservation: every value token the installed
+        # extractor actually emitted survives into the shipped page text --
+        # not just the hardcoded _ROWS constants, so this genuinely compares
+        # against extract_structured's own output rather than merely
+        # re-asserting the fixture's own inputs.
         page = fitz.open(str(pdf_path))[0]
         extracted = BornDigitalDetector().extract_structured(page)
+        extracted_blocks = find_table_blocks(extracted)
+        assert extracted_blocks, f"no parseable table block in:\n{extracted}"
+        extracted_tokens = {
+            cell for block in extracted_blocks for row in block.grid for cell in row if cell.strip()
+        }
         shipped_pages = list(out_dir.rglob("pages/00001.md"))
         assert shipped_pages
         shipped_text = shipped_pages[0].read_text()
+        for token in extracted_tokens:
+            assert token in shipped_text, f"token {token!r} from extract_structured lost"
         for _, values in _ROWS:
             if values:
                 for v in values:
@@ -306,3 +323,251 @@ class TestDetachedLabelPredicate:
         ]
         report = structure_check.check_grid(grid)
         assert report.detached_label_rows == (2,)
+
+
+# ---------------------------------------------------------------------------
+# Wiring units (review finding BLOCKING 2) -- direct, hermetic assertions
+# against each of the six surfaces the ticket's BINDING CONSTRAINT names.
+# No PDF, no provider: a DocumentState/PageState built by hand, matching the
+# exact shape production code leaves the page in at each point. Each was
+# confirmed load-bearing by temporarily re-introducing the regression the
+# review named (deleting the manifest guard / adding the flag to the
+# needs_repair tuple) and observing the corresponding test fail; see the
+# ticket's fix log for the transcript.
+# ---------------------------------------------------------------------------
+
+
+def _bare_handle(pages: int = 1) -> DocumentHandle:
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        return DocumentHandle(path=Path("/tmp/fake-gh151-b1.pdf"), page_count=pages)
+
+
+class TestWiringUnits:
+    def test_score_per_page_forces_demotion_without_erasing_the_flag(self) -> None:
+        """(1) ``_score_per_page`` must not erase the flag or re-promote the
+        demoted attempt to ``audit_passed=True`` -- even though the grid it
+        is judging is otherwise clean and would pass the heuristic scorer if
+        the flag-check were skipped."""
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        clean_md = (
+            "| Forecast | 2026 | 2027 |\n| --- | --- | --- |\n| A | 1.2 | 1.3 |\n| B | 2.1 | 2.2 |"
+        )
+        ps.native_text = clean_md
+        ps.native_table_structure_defective = True
+        bo = PageOutput(
+            page_num=1,
+            text=clean_md,
+            status=PageStatus.SUCCESS,
+            engine="native",
+            audit_passed=True,
+        )
+        ps.attempts.append(bo)
+        ps.best_output = bo
+
+        pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipe._score_per_page(state)
+
+        assert bo.audit_passed is False
+        assert bo.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+        assert ps.best_output is None
+        assert ps.native_table_structure_defective is True  # not erased
+
+    def test_needs_repair_stays_false_on_the_flag_alone(self) -> None:
+        """(2) The flag alone must never force ``PageState.needs_repair`` --
+        that would trigger a real repair pass (and OCR spend) even under
+        ``--native-only``, undoing the settled ruling that the flag is
+        honoured downstream, not routed on."""
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = "native text"
+        ps.native_table_structure_defective = True
+        # Post-``_score_per_page`` shape: best_output cleared, the demoted
+        # native attempt is the only attempt.
+        ps.attempts.append(
+            PageOutput(
+                page_num=1,
+                text="native text",
+                status=PageStatus.WARNING,
+                engine="native",
+                audit_passed=False,
+                failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+            )
+        )
+
+        assert ps.needs_repair is False
+
+    def test_manifest_refuses_to_freeze_a_passing_native_defective_best_output(self) -> None:
+        """(3a) Manifest lock #1. Even if a flagged native attempt somehow
+        reached ``best_output`` with ``audit_passed=True`` (the PP-7-R1 bug
+        shape), the manifest must not freeze it as the winner. Reachable
+        only via this direct construction -- see the ticket fix log's note
+        that every live path already demotes before the manifest runs."""
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = "native text"
+        ps.native_table_structure_defective = True
+        bo = PageOutput(
+            page_num=1,
+            text="native text",
+            status=PageStatus.SUCCESS,
+            engine="native",
+            audit_passed=True,
+        )
+        ps.attempts.append(bo)
+        ps.best_output = bo
+
+        out = _winning_page_output(state, 1)
+
+        assert out is not bo
+        assert out.status == PageStatus.WARNING
+        assert out.audit_passed is False
+        assert out.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+
+    def test_manifest_native_is_fallback_fires_on_the_flag_alone(self) -> None:
+        """(3b/4) Manifest lock #2. With no ``best_output`` and no OTHER
+        deficiency flag set (not ``needs_ocr_enhancement``, not
+        ``native_table_structure_failed``, not ``chart_asset_render_failed``),
+        the B1 flag alone must OR into ``native_is_fallback`` so the shipped
+        page is WARNING, never a re-stamped SUCCESS."""
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = "native text"
+        ps.native_table_structure_defective = True
+        ps.attempts.append(
+            PageOutput(
+                page_num=1,
+                text="native text",
+                status=PageStatus.WARNING,
+                engine="native",
+                audit_passed=False,
+            )
+        )
+
+        out = _winning_page_output(state, 1)
+
+        assert out.status == PageStatus.WARNING
+        assert out.audit_passed is False
+        assert out.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+
+    def test_manifest_passing_non_native_winner_is_unaffected_by_the_flag(self) -> None:
+        """(6) The flag only gates the NATIVE attempt. A passing non-native
+        (e.g. VLM) winner must return immediately, unmodified -- the flag on
+        a native page must never veto an already-won non-native page."""
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = "native text"
+        ps.native_table_structure_defective = True
+        bo = PageOutput(
+            page_num=1,
+            text="qwen text",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        )
+        ps.attempts.append(bo)
+        ps.best_output = bo
+
+        out = _winning_page_output(state, 1)
+
+        assert out is bo
+        assert out.status == PageStatus.SUCCESS
+        assert out.audit_passed is True
+
+    def test_clear_fail_closed_flags_releases_the_flag(self) -> None:
+        """(5) A measured improvement (table escalation accepted) must
+        release the flag via ``_clear_fail_closed_flags``, or a page whose
+        text was genuinely fixed ships WARNING forever."""
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.native_table_structure_defective = True
+        profile = SimpleNamespace(engine=SimpleNamespace(value="qwen"))
+
+        UnifiedPipeline._clear_fail_closed_flags(state, 1, ps, profile)
+
+        assert ps.native_table_structure_defective is False
+        cleared_events = [
+            e for e in state.events if e.kind == "table_escalation_recovered_fail_closed"
+        ]
+        assert len(cleared_events) == 1
+        assert "native_table_structure_defective" in cleared_events[0].detail
+
+
+# ---------------------------------------------------------------------------
+# BLOCKING review finding: a page carrying all three flags at once
+# (``native_table_structure_defective``, ``native_table_structure_failed``,
+# ``native_table_unverifiable``) must land in ``d3_floor_pages`` ONLY -- not
+# also in ``native_fallback_pages``. The B1 disjunct was originally placed
+# OUTSIDE the TR-3 D3 exclusion, double-counting this exact combination and
+# producing two contradictory audit records for the same page (this ticket's
+# own synthetic fixture yields ``native_table_unverifiable: true``, so the
+# three-flag combination is not hypothetical -- see the fix log).
+# ---------------------------------------------------------------------------
+
+
+class TestThreeFlagPageIsNotDoubleCounted:
+    def test_defective_and_unverifiable_without_structure_failed_lands_in_native_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """B1's defective flag and TR-3's per-region unverifiable flag are set
+        independently. A page can carry ``native_table_structure_defective``
+        and ``native_table_unverifiable`` while ``native_table_structure_failed``
+        stays False (short-circuited before the heuristic scorer runs). That
+        page is NOT a D3 floor page (D3 requires ``native_table_structure_failed``
+        too), so excluding on ``native_table_unverifiable`` alone -- rather
+        than on the exact d3_floor_pages predicate -- would silently drop it
+        from BOTH lists, hiding a WARNING/audit_passed=False page from every
+        document-level failure surface."""
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = "| a | b |\n| --- | --- |\n| 1 | 2 |"
+        ps.native_table_structure_defective = True
+        ps.native_table_structure_failed = False
+        ps.native_table_unverifiable = True
+        ps.attempts.append(
+            PageOutput(
+                page_num=1,
+                text="ocr attempt",
+                status=PageStatus.WARNING,
+                engine="qwen",
+                audit_passed=False,
+            )
+        )
+
+        pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipe._phase_assemble(state, tmp_path)
+
+        kinds = [e.kind for e in state.events if e.page_num == 1]
+        assert "table_region_unverifiable" not in kinds  # not a D3 floor page
+        assert "native_fallback" in kinds  # must surface, not be silently dropped
+
+    def test_three_flag_page_lands_only_in_d3_floor(self, tmp_path: Path) -> None:
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = "| a | b |\n| --- | --- |\n| 1 | 2 |"
+        ps.native_table_structure_defective = True
+        ps.native_table_structure_failed = True
+        ps.native_table_unverifiable = True
+        ps.attempts.append(
+            PageOutput(
+                page_num=1,
+                text="ocr attempt",
+                status=PageStatus.WARNING,
+                engine="qwen",
+                audit_passed=False,
+            )
+        )
+
+        pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipe._phase_assemble(state, tmp_path)
+
+        kinds = [e.kind for e in state.events if e.page_num == 1]
+        assert kinds.count("table_region_unverifiable") == 1  # d3_floor_pages event
+        assert "native_fallback" not in kinds  # NOT also in native_fallback_pages

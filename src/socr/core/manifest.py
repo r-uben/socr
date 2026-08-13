@@ -348,11 +348,13 @@ def _winning_page_output(
         # as a FALLBACK, not a success: flagged WARNING / audit_passed=False
         # so the manifest and run summary stop stamping silent reversions as
         # passing pages.
+        native_table_defect = p.native_table_structure_failed or getattr(
+            p, "native_table_structure_defective", False
+        )
         native_is_fallback = (
             p.needs_ocr_enhancement
-            or p.native_table_structure_failed
+            or native_table_defect
             or p.chart_asset_render_failed  # PP-7: render failure must stay WARNING
-            or getattr(p, "native_table_structure_defective", False)  # GH-151 B1
         ) and bool(p.attempts)
         return PageOutput(
             page_num=page_num,
@@ -360,6 +362,18 @@ def _winning_page_output(
             status=PageStatus.WARNING if native_is_fallback else PageStatus.SUCCESS,
             engine="native",
             audit_passed=not native_is_fallback,
+            # GH-151 B1: the attempt-level PageOutput this synthetic page
+            # replaces already carries FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+            # (set at ``_score_per_page`` / the native ship sites) -- but that
+            # attempt is not reachable here (best_output was cleared when it
+            # was demoted). Re-derive the failure mode from the same flags
+            # rather than silently defaulting to NONE, so the shipped page
+            # matches the ticket's doneWhen at the surface that actually ships.
+            failure_mode=(
+                FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+                if native_table_defect and native_is_fallback
+                else FailureMode.NONE
+            ),
         )
     # Whole-document CLI path: recover this page's text from the split markdown.
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
