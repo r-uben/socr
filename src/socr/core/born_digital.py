@@ -563,13 +563,15 @@ class BornDigitalDetector:
         except Exception:
             blocks = []
         direction = dominant_text_direction(blocks)
-        assessment = self._assess_page_signals(page, page_num)
+        assessment = self._assess_page_signals(page, page_num, direction)
         assessment.dominant_text_direction = direction
         if text_direction_is_rotated(direction):
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment
 
-    def _assess_page_signals(self, page: fitz.Page, page_num: int) -> PageAssessment:
+    def _assess_page_signals(
+        self, page: fitz.Page, page_num: int, direction: tuple[float, float]
+    ) -> PageAssessment:
         """Assess whether a single page is born-digital.
 
         Uses multiple signals to distinguish genuine born-digital text from
@@ -902,12 +904,27 @@ class BornDigitalDetector:
         self._last_extraction_had_unverifiable: bool = False
 
         if has_tables:
-            # Use structured extraction that renders tables as markdown. Clean it
-            # too: extract_structured builds its own text from the layer, so it
-            # carries the same invisibles as raw_text and bypasses the boundary
-            # clean above.
-            native_text, _, _ = clean_native_text(self.extract_structured(page))
-            notes.append("born-digital: structured extraction (tables detected)")
+            if text_direction_is_rotated(direction):
+                # GH-147: the rowizer clusters rows by y; on a page whose text
+                # runs at 90 degrees the rows run along x, so extract_structured
+                # would emit a transposed grid as trusted native text. Refuse the
+                # native table lane and retain the prose instead — the page is
+                # still routed to OCR (needs_ocr_enhancement below) rather than
+                # shipping a table nobody asked to transpose.
+                native_text = raw_text.strip()
+                notes.append(
+                    "born-digital: native table reconstruction refused "
+                    f"(dominant text direction {direction} is rotated); prose retained, "
+                    "page routed to OCR"
+                )
+                needs_ocr_enhancement = True
+            else:
+                # Use structured extraction that renders tables as markdown. Clean it
+                # too: extract_structured builds its own text from the layer, so it
+                # carries the same invisibles as raw_text and bypasses the boundary
+                # clean above.
+                native_text, _, _ = clean_native_text(self.extract_structured(page))
+                notes.append("born-digital: structured extraction (tables detected)")
         else:
             native_text = raw_text.strip()
             notes.append("born-digital: clean text layer detected")
