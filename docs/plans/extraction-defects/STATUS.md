@@ -166,7 +166,73 @@ extraction on a mixed page, that output governs and the placeholder never reache
 final markdown — the chart is silently dropped. This is the "no silent content loss" red
 line.
 
+## Wave 2 — CLOSED 2026-08-13
+
+All three tickets **accepted and merged**. `main` at `13033a3`; 1591 passed / 1 xfailed;
+`uvx ruff@0.16.0 format --check .` clean (284 files).
+
+| Ticket | Landed as |
+|---|---|
+| GH-150 A2 | PR #194 (`4ac487d`) |
+| GH-144 A2+A2b | PR #192 (`d645b24`) |
+| GH-147 A2 | PR #193 (`13033a3`) |
+
+Dispatched as one `ticket-relay` workflow (GPT+Opus pair → Fable rules → Grok-4.6+GPT
+converge → Fable ratifies → Sonnet implements → Gemini reports), then one review round,
+one fix round per PR, then a second review round. Both #192 and #193 needed a fix round;
+#194 merged on the first pass.
+
+### Measured outcome, not just "merged"
+
+GH-144's acceptance is a measurement, not a green suite. On the NS QJE reference pages
+(sha256 `6611c6af…`), decimal-token loss through `extract_structured`:
+
+| Page (A1's naming) | fitz idx | before | after |
+|---|---|---|---|
+| p17 (TABLE II) | 16 | 5 lost | **0** |
+| p42 (Appendix A.1) | 41 | 35 lost | **0** |
+| p43 (Appendix A.2) | 42 | 13 lost | **0** |
+
+Before the fix, output also *exceeded* raw on two pages (duplication); after, output
+matches raw exactly. This measures token survival only — it does not certify table
+*shape*.
+
+### A review false-alarm worth not repeating
+
+#192's second reviewer returned REQUEST_CHANGES claiming the fix caused **100% table
+loss** on p17 and p42. It measured `reconstruct_table_regions` in isolation, loading the
+PR's source as a standalone module because the editable install resolves `import socr` to
+the checkout rather than the PR branch.
+
+The isolated observation was correct — that function does return `[]` on those pages. The
+conclusion was not: `extract_structured`'s `if not table_regions:` gate
+(`born_digital.py`) then fires `rowize_from_words_chart_aware`, which recovers the table
+whole. **Measuring one rung of the ladder is not evidence about the ladder.** Any claim
+about content loss must be measured at the caller, end to end. The rest of that review
+stood up and was useful — it confirmed the four earlier fixes and that the new tests are
+load-bearing rather than vacuous.
+
+### Residuals
+
+- **GH-195 undersells its own risk.** It is scoped as "the rejection ships as a quiet
+  WARNING". The review round showed the underlying failure mode can be whole-table, not
+  a few obscured values. Widen it.
+- The chart-loss gap below is still unfiled.
+- One nit left on `orchestrator.py`: `_is_trusted_native_without_ocr` still re-derives
+  "was this refused?" from `text_is_rotated and has_tables` instead of reading
+  `PageAssessment.native_table_lane_refused`. Provably equivalent at that call site
+  today (it is gated behind `is_born_digital`), so not a live bug — but it is the same
+  pattern GH-147 A2 removed from the audit predicate.
+
 ## Next action
 
-Dispatch wave 2: **GH-144 A2 → A2b** (critical path, both on `tables/reconstruct.py` —
-keep with ONE agent), plus **GH-147 A2** and **GH-150 A2** in parallel.
+**Dispatch wave 3 — three of its four tickets are ready:** GH-152 A1
+(`tables/reconstruct.py`), GH-150 B2 (`tests/test_chart_detection_gh150.py`), GH-147 B1
+(`tests/test_landscape_refusal_gh147.py`, `logs/`). Write sets are disjoint.
+
+**GH-151 B1 is NOT dispatchable and must not be included.** It depends on GH-151 A2,
+which is parked as draft PR #184 and was deliberately excluded from wave 1: its column
+binding is modal consensus, which cannot distinguish "deviant because malformed" from
+"deviant because genuinely different". B1 needs a design saying what column binding
+should key on instead — a `socr-designer` pass, not an implementer.
+
