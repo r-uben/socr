@@ -94,6 +94,27 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
 
     Same shape as the lines-strategy path in ``extract_structured`` so the caller
     can interleave them with prose identically. Never raises.
+
+    GH-144: the text-strategy grid from ``page.find_tables(strategy="text")``
+    infers lane boundaries from whitespace alignment, and on booktabs-style
+    label+value rows (single internal space in the label, a space RUN before
+    the first value) a lane boundary can land strictly inside a numeric
+    token's own bbox — splitting ``0.67`` into ``0`` + ``.67`` at the grid-
+    construction call itself (see
+    ``docs/plans/gh144-rowizer-destroys-values/logs/2026-08-12_A1-boundary-diagnosis.md``).
+    ``_destroyed_numeric_tokens`` detects this per table by re-locating each
+    native numeric token's raw extract() cell and checking the token string
+    survives verbatim; on detection the text-strategy grid is rejected and
+    the already-proven-lossless word-geometry rowizer (``rowize_from_word_list``)
+    is used instead, scoped to a TIGHT bbox built from ``_numeric_row_bbox``
+    (the union of this table's rows that actually carry a numeric cell) — not
+    the destroyed table's own ``bbox`` and not the page's full word list. Both
+    were tried first: the table's own whitespace-inferred ``bbox`` routinely
+    overruns into whatever text sits just beneath the last data row (that is
+    how the notes paragraph ended up inside the destroyed grid at all), and
+    the unclipped full page merges the table with that same trailing text
+    because the table-to-notes gap can be smaller than the rowizer's own
+    y-gap split threshold. Scoping to the numeric rows' own union avoids both.
     """
     try:
         import fitz
@@ -105,7 +126,8 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
         # clipping to a rule band. The word cap stays as a final cost backstop.
         if not has_numeric_columns(page):
             return []
-        if len(page.get_text("words")) > _MAX_PAGE_WORDS:
+        words = page.get_text("words")
+        if len(words) > _MAX_PAGE_WORDS:
             logger.debug("skipping text-strategy reconstruct: page too dense")
             return []
         result = page.find_tables(vertical_strategy="text", horizontal_strategy="text")
@@ -122,10 +144,194 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
         cleaned = _clean_grid(grid)
         if not _looks_tabular(cleaned):
             continue
+
+        destroyed = _destroyed_numeric_tokens(words, table, grid)
+        if destroyed:
+            for rec in destroyed:
+                logger.warning(
+                    "reconstruct_table_regions: text-strategy grid destroyed numeric "
+                    "token %r at bbox=%s (boundary=%s) — rejecting the text-strategy "
+                    "grid for region %s, falling back to the word-geometry rowizer "
+                    "scoped to the table's numeric rows",
+                    rec["value"],
+                    rec["bbox"],
+                    rec["boundary"],
+                    table.bbox,
+                )
+            # Fall back on the word-geometry rowizer, but scope it to a TIGHT
+            # bbox derived from this table's own numeric rows — not the raw,
+            # unclipped page (the trailing-notes gap is smaller than the
+            # rowizer's own split threshold, so an unclipped call merges the
+            # notes paragraph into the same segment and fragments it) and not
+            # the destroyed table's own `bbox` (find_tables' whitespace
+            # inference routinely overruns past the last numeric row into
+            # whatever text sits just beneath it — that is how the notes rows
+            # ended up inside this very grid). The tight bbox is the union of
+            # only the rows that contain at least one cell matching
+            # `_NUM_TOKEN_RE` verbatim: a data-driven boundary, not a tuned
+            # constant, and it is exactly the rows a numeric table owns.
+            tight = _numeric_row_bbox(table, grid)
+            scoped_words = words
+            if tight is not None:
+                scoped_words = [w for w in words if tight.contains(fitz.Point(w[0], w[1]))]
+            rowized = rowize_from_word_list(scoped_words)
+            if rowized:
+                return rowized
+            # Scoped fallback found nothing usable either: discard this
+            # page's regions so the caller's `if not table_regions:` gate
+            # fires the next strategy (extract_structured's chart-aware
+            # rowizer / plain get_text()) instead of shipping loss silently.
+            return []
+
         md = _grid_to_markdown(cleaned)
         if md:
             out.append((fitz.Rect(table.bbox), md))
     return out
+
+
+def _numeric_row_bbox(table, grid: list[list]):
+    """Return the ``fitz.Rect`` union of ``table``'s rows that carry a numeric
+    cell, or ``None`` if none do.
+
+    Used to re-scope the word-geometry rowizer fallback when the text-strategy
+    grid is rejected for destroying a numeric token: `table.bbox` itself is
+    whitespace-inferred and can overrun past the table's real content into
+    whatever text sits just beneath it (see ``reconstruct_table_regions``).
+    A row that contains no cell matching `_NUM_TOKEN_RE` verbatim is not part
+    of the numeric table this rejection concerns — data-driven, not a tuned
+    threshold.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return None
+
+    rect = None
+    for n, row in enumerate(getattr(table, "rows", [])):
+        grid_row = grid[n] if n < len(grid) else None
+        if grid_row is None:
+            continue
+        if not any(cell is not None and _NUM_TOKEN_RE.match(cell) for cell in grid_row):
+            continue
+        row_bbox = getattr(row, "bbox", None)
+        if row_bbox is None:
+            continue
+        r = fitz.Rect(row_bbox)
+        rect = r if rect is None else rect | r
+    return rect
+
+
+def _cell_contains_centre(cell, cx: float, cy: float) -> bool:
+    """True if ``cell`` (an ``(x0, y0, x1, y1)`` tuple) contains point ``(cx, cy)``.
+
+    Half-open membership matching PyMuPDF ``Table.extract()``'s own cell-fill
+    convention (``x0 <= cx < x1 and y0 <= cy < y1``) so a point sitting exactly
+    on a shared boundary belongs to the cell whose LOW edge it touches, not
+    both neighbours. Returns ``False`` when ``cell`` is ``None`` (an unfilled
+    / merged-away cell position has no rect to test against).
+    """
+    if cell is None:
+        return False
+    x0, y0, x1, y1 = cell
+    return x0 <= cx < x1 and y0 <= cy < y1
+
+
+def _destroyed_numeric_tokens(words: list, table, grid: list[list]) -> list[dict]:
+    """Return one record per native numeric token the text-strategy grid destroyed.
+
+    For every numeric native token on the page whose centre point falls inside
+    ``table.bbox`` (this table's scope — tokens elsewhere are not this table's
+    concern), locate the raw ``table.rows[n].cells[c]`` rect containing that
+    centre (rows/cells index-align with ``table.extract()``'s nested loops),
+    then check the token's exact string is a literal substring of the
+    corresponding RAW ``grid[n][c]`` cell (never the ``_clean_grid`` output —
+    cleaning drops/reindexes columns and would mis-map).
+
+    Conservative by construction: any ambiguity is counted as destroyed, never
+    silently skipped —
+
+    - no cell rect contains the token's centre ("no-cell"),
+    - the containing table cell is itself ``None`` ("cell=None", the merged-
+      cell case — inferred from the table containing at least one ``None``
+      cell elsewhere, since a ``None`` cell can never match
+      ``_cell_contains_centre``'s membership test directly),
+    - the aligned ``grid[n][c]`` position is out of range or ``None``
+      ("grid-missing" / "grid-none"),
+    - or the token string is not a literal substring of that raw cell text
+      ("boundary-split", carrying the containing cell rect and, as a
+      diagnostic only (not part of the reject decision), any cell x-edge that
+      sits strictly inside the token's own bbox — the mechanism A1 measured).
+
+    No page-level ``Counter``, no boundary-intersection count, no fuzzy
+    normalisation, no new threshold — exact string survival, scoped per table.
+    """
+    try:
+        import fitz
+    except ImportError:  # pragma: no cover
+        return []
+
+    bbox = fitz.Rect(table.bbox)
+    rows = getattr(table, "rows", [])
+    has_none_cell = any(
+        cell is None for row in rows for cell in (getattr(row, "cells", None) or [])
+    )
+
+    records: list[dict] = []
+    for w in words:
+        text = w[4]
+        if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):
+            continue
+        x0, y0, x1, y1 = w[0], w[1], w[2], w[3]
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if cx < bbox.x0 or cx >= bbox.x1 or cy < bbox.y0 or cy >= bbox.y1:
+            continue  # outside this table's scope — not this table's concern
+
+        containing = None
+        row_idx = col_idx = None
+        for n, row in enumerate(rows):
+            cells = getattr(row, "cells", None) or []
+            for c, cell in enumerate(cells):
+                if _cell_contains_centre(cell, cx, cy):
+                    containing = cell
+                    row_idx, col_idx = n, c
+                    break
+            if containing is not None:
+                break
+
+        if containing is None:
+            reason = "cell=None" if has_none_cell else "no-cell"
+            records.append({"value": text, "bbox": (x0, y0, x1, y1), "boundary": reason})
+            continue
+
+        grid_row = grid[row_idx] if row_idx is not None and row_idx < len(grid) else None
+        raw_cell = grid_row[col_idx] if grid_row is not None and col_idx < len(grid_row) else None
+        if grid_row is None or col_idx >= len(grid_row):
+            records.append({"value": text, "bbox": (x0, y0, x1, y1), "boundary": "grid-missing"})
+            continue
+        if raw_cell is None:
+            records.append({"value": text, "bbox": (x0, y0, x1, y1), "boundary": "grid-none"})
+            continue
+
+        if text not in raw_cell:
+            cell_x0, _cell_y0, cell_x1, _cell_y1 = containing
+            edge_inside = None
+            if cell_x0 > x0 and cell_x0 < x1:
+                edge_inside = cell_x0
+            elif cell_x1 > x0 and cell_x1 < x1:
+                edge_inside = cell_x1
+            records.append(
+                {
+                    "value": text,
+                    "bbox": (x0, y0, x1, y1),
+                    "boundary": {
+                        "reason": "boundary-split",
+                        "cell": containing,
+                        "raw_cell_text": raw_cell,
+                        "edge_inside_token_bbox": edge_inside,
+                    },
+                }
+            )
+    return records
 
 
 def has_numeric_columns(page) -> bool:
@@ -777,7 +983,7 @@ def rowize_from_word_list(
     # 4. For each segment, attempt to build a column-consistent grid.
     # ------------------------------------------------------------------
     out: list[tuple[object, str]] = []
-    for seg_ys in segments:
+    for i, seg_ys in enumerate(segments):
         seg_words: list = []
         for y in seg_ys:
             seg_words.extend(rows_by_y[y])
@@ -786,6 +992,13 @@ def rowize_from_word_list(
         if grid_and_rect is None:
             continue
         grid, x0, y0, x1, y1 = grid_and_rect
+
+        # GH-144 A2b (#146 residual): a column-header band stranded in the
+        # preceding segment (see _prepend_header_band) belongs to this table.
+        if i > 0:
+            grid, x0, y0, x1, y1 = _prepend_header_band(
+                grid, x0, y0, x1, y1, seg_words, segments[i - 1], rows_by_y
+            )
 
         cleaned = _clean_grid(grid)
         # TR-2: collapse multi-line headers (e.g. indicator row + year row)
@@ -802,6 +1015,100 @@ def rowize_from_word_list(
             out.append((fitz.Rect(x0, y0, x1, y1), md))
 
     return out
+
+
+def _numeric_lane_centers(num_words: list) -> list[float] | None:
+    """Cluster numeric-token x-positions into lanes; return each lane's centre.
+
+    Byte-faithful extraction of ``_rowize_segment``'s own lane-cluster block
+    (same algorithm as ``has_numeric_columns``), so a caller that needs a
+    segment's data-lane geometry without running the rest of
+    ``_rowize_segment`` — GH-144 A2b's header-prepend step — uses the
+    identical placement logic ``_rowize_segment`` uses for itself. Returns
+    ``None`` when fewer than ``_MIN_COLS`` lanes are found.
+    """
+    num_xs = sorted(set(w[0] for w in num_words))
+    lanes_x: list[list[float]] = []
+    for x in num_xs:
+        if lanes_x and x - lanes_x[-1][-1] <= _LANE_X_TOL_PT:
+            lanes_x[-1].append(x)
+        else:
+            lanes_x.append([x])
+
+    if len(lanes_x) < _MIN_COLS:
+        return None
+
+    return [sum(xs) / len(xs) for xs in lanes_x]
+
+
+def _prepend_header_band(
+    grid: list[list[str]],
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    seg_words: list,
+    prev_seg_ys: list[int],
+    rows_by_y: dict[int, list],
+) -> tuple[list[list[str]], float, float, float, float]:
+    """Prepend a header band stranded in the PRECEDING y-segment (GH-144 A2b).
+
+    ``rowize_from_word_list``'s y-gap segmenter can isolate a column-header
+    band (e.g. "Nominal  Real  Inflation") into its own segment when the gap
+    above the data rows exceeds the split threshold; that header-only segment
+    then has zero numeric tokens, so ``_rowize_segment`` discards it before it
+    is ever a region candidate (A1 log §5-6 — the #146 residual).
+
+    Walks ``prev_seg_ys`` bottom-up (the segment immediately above this one)
+    and absorbs the maximal TRAILING run of y-rows whose every word snaps to
+    one of THIS segment's data-lane x-centres, within the same
+    ``_LANE_X_TOL_PT * _LANE_SNAP_MULT`` tolerance ``_rowize_segment`` uses
+    for its own cell placement. Stops at the first row with any non-snapping
+    word (an unrelated title/subtitle/running-head line above the header),
+    so it never absorbs a prefix past a gap. Returns the grid and rect
+    unchanged when there is no previous segment, this segment has no numeric
+    lanes, or nothing in the previous segment snaps.
+    """
+    num_words = [w for w in seg_words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
+    lane_centers = _numeric_lane_centers(num_words)
+    if lane_centers is None or not prev_seg_ys:
+        return grid, x0, y0, x1, y1
+
+    snap_radius = _LANE_X_TOL_PT * _LANE_SNAP_MULT
+
+    def _snaps(word: tuple) -> bool:
+        return min(abs(c - word[0]) for c in lane_centers) <= snap_radius
+
+    eligible_ys: list[int] = []
+    for y in reversed(prev_seg_ys):
+        row_ws = rows_by_y.get(y, [])
+        if not row_ws or not all(_snaps(w) for w in row_ws):
+            break
+        eligible_ys.append(y)
+
+    if not eligible_ys:
+        return grid, x0, y0, x1, y1
+
+    eligible_ys.reverse()  # restore top-to-bottom reading order
+
+    header_rows: list[list[str]] = []
+    band_words: list = []
+    for y in eligible_ys:
+        row_ws = sorted(rows_by_y[y], key=lambda w: w[0])
+        band_words.extend(row_ws)
+        row_cells = [""] * len(lane_centers)
+        for w in row_ws:
+            best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
+            existing = row_cells[best]
+            row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
+        header_rows.append([""] + row_cells)  # empty label cell -> _is_header_row(True)
+
+    new_x0 = min([x0] + [w[0] for w in band_words])
+    new_y0 = min([y0] + [w[1] for w in band_words])
+    new_x1 = max([x1] + [w[2] for w in band_words])
+    new_y1 = max([y1] + [w[3] for w in band_words])
+
+    return header_rows + grid, new_x0, new_y0, new_x1, new_y1
 
 
 def _rowize_segment(
@@ -824,20 +1131,9 @@ def _rowize_segment(
     if len(num_words) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
         return None
 
-    # Cluster numeric x-positions into lanes (same algorithm as has_numeric_columns)
-    num_xs = sorted(set(w[0] for w in num_words))
-    lanes_x: list[list[float]] = []
-    for x in num_xs:
-        if lanes_x and x - lanes_x[-1][-1] <= _LANE_X_TOL_PT:
-            lanes_x[-1].append(x)
-        else:
-            lanes_x.append([x])
-
-    if len(lanes_x) < _MIN_COLS:
+    lane_centers = _numeric_lane_centers(num_words)
+    if lane_centers is None:
         return None
-
-    # Lane centres (mean x of all xs in the cluster)
-    lane_centers = [sum(xs) / len(xs) for xs in lanes_x]
     data_start_x = lane_centers[0]
 
     # Words further left than (data_start_x − snap_margin) form the label cell
