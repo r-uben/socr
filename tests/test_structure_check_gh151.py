@@ -33,7 +33,7 @@ def test_p26_grid_reported_defective():
     assert report.ragged is True
     assert report.row_widths == (8, 6, 7, 7, 7, 7, 7)
     assert report.orphan_rows == (3, 6)
-    assert report.findings == ("ragged", "orphan_rows")
+    assert report.findings == ("ragged", "orphan_rows", "detached_label")
     assert report.empty_cells == 21
     assert report.total_cells == 49
     assert report.footprint_cells == 56

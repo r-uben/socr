@@ -657,6 +657,26 @@ class UnifiedPipeline:
                     )
                 )
 
+        # GH-151 TICKET-B1: surface the grid-shape defect flag as a durable
+        # audit event, one per affected page. Keyed SOLELY on the flag stamped
+        # by born_digital.py -- do NOT re-run structure_check or re-derive the
+        # predicate here (the design note is explicit: the flag is
+        # authoritative, this loop does not re-inspect the grid).
+        for pa in assessment.pages:
+            if getattr(pa, "native_table_structure_defective", False):
+                state.events.append(
+                    AuditEvent(
+                        page_num=pa.page_num,
+                        kind="table_structure_failed",
+                        engine="native",
+                        detail=(
+                            "native table grid structurally defective (ragged widths "
+                            "and/or a detached label row); page not shipped as trusted "
+                            "native"
+                        ),
+                    )
+                )
+
         bd_count = assessment.born_digital_count
         if not self.config.quiet:
             if bd_count:
@@ -908,13 +928,23 @@ class UnifiedPipeline:
                         )
                 except Exception as exc:
                     logger.warning("math recovery failed on p%d: %s", page_num, exc)
+            # GH-151 TICKET-B1: a page can reach prose_pages with a structurally
+            # defective table grid only via --native-only (the non-native-only
+            # eligibility predicate already excludes has_tables pages). Demote
+            # instead of shipping SUCCESS/audit_passed=True -- this is the
+            # no-reroute honouring of the flag: no extra OCR attempt is
+            # triggered, the native text still ships, just flagged.
+            defective = getattr(ps, "native_table_structure_defective", False)
             page_outputs.append(
                 PageOutput(
                     page_num=page_num,
                     text=text,
-                    status=PageStatus.SUCCESS,
+                    status=PageStatus.WARNING if defective else PageStatus.SUCCESS,
                     engine=engine,
-                    audit_passed=True,
+                    audit_passed=not defective,
+                    failure_mode=(
+                        FailureMode.NATIVE_TABLE_STRUCTURE_FAILED if defective else FailureMode.NONE
+                    ),
                 )
             )
         if math_doc is not None:
@@ -1810,6 +1840,7 @@ class UnifiedPipeline:
             name
             for name in (
                 "native_table_structure_failed",
+                "native_table_structure_defective",  # GH-151 TICKET-B1
                 "native_table_unverifiable",
                 "scanned_table_evidence_failed",
             )
@@ -2444,12 +2475,22 @@ class UnifiedPipeline:
 
             elif is_native:
                 # Tier 1: born-digital trusted native text — free, no OCR.
+                # GH-151 TICKET-B1: a page reaches here with a structurally
+                # defective table grid only via --native-only (the non-
+                # native-only ``is_native`` predicate already excludes
+                # has_tables pages). Demote instead of shipping SUCCESS: this
+                # is the no-reroute honouring of the flag, no extra OCR
+                # attempt is triggered here.
+                defective = getattr(ps, "native_table_structure_defective", False)
                 native_out = PageOutput(
                     page_num=page_num,
                     text=ps.native_text,
-                    status=PageStatus.SUCCESS,
+                    status=PageStatus.WARNING if defective else PageStatus.SUCCESS,
                     engine="native",
-                    audit_passed=True,
+                    audit_passed=not defective,
+                    failure_mode=(
+                        FailureMode.NATIVE_TABLE_STRUCTURE_FAILED if defective else FailureMode.NONE
+                    ),
                     cost_usd=0.0,
                 )
                 ps.attempts.append(native_out)
@@ -3683,6 +3724,24 @@ class UnifiedPipeline:
             if page_state.is_born_digital and page_state.native_text:
                 latest_is_native = (latest.engine or "").startswith("native")
                 if latest_is_native:
+                    if page_state.native_table_structure_defective:
+                        # GH-151 TICKET-B1: the grid defect was found at
+                        # extraction time and is authoritative -- do NOT run
+                        # the heuristic scorer over it (that scorer is exactly
+                        # what missed p26: it tolerates the ragged/orphan
+                        # shapes this gate targets). Force the demotion and
+                        # skip straight past the heuristic path below so it
+                        # cannot re-promote this attempt to audit_passed=True.
+                        latest.audit_passed = False
+                        latest.status = PageStatus.WARNING
+                        latest.failure_mode = FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+                        detail = "native table grid structurally defective (GH-151 B1 gate)"
+                        latest.error = detail
+                        latest.audit_notes.append(detail)
+                        failures += 1
+                        if page_state.best_output is latest:
+                            page_state.best_output = None
+                        continue
                     if self._native_table_structure_gate_applies(page_num, latest, page_state):
                         scoring = self.scorer.score_native_table_structure(latest.text)
                         latest.audit_passed = scoring.passed
@@ -4161,7 +4220,8 @@ class UnifiedPipeline:
         Carries the fields that are NOT already in ``PageOutput.to_dict`` but
         are needed by later pipeline stages (PP-5 enrichment) or diagnostics:
         the PageState decision flags (``needs_ocr_enhancement``,
-        ``native_table_structure_failed``, ``judge_rejected``), page- and
+        ``native_table_structure_failed``, ``native_table_structure_defective``,
+        ``judge_rejected``), page- and
         run-level fingerprints, the winning output's full serialised dict, and
         a summary of audit events for this page.
 
@@ -4281,6 +4341,10 @@ class UnifiedPipeline:
             "needs_ocr_enhancement": bool(ps.needs_ocr_enhancement) if ps else False,
             "native_table_structure_failed": (
                 bool(ps.native_table_structure_failed) if ps else False
+            ),
+            # GH-151 TICKET-B1: grid-shape defect found at extraction time.
+            "native_table_structure_defective": (
+                bool(getattr(ps, "native_table_structure_defective", False)) if ps else False
             ),
             # TR-3: per-region geometry hard-fail flag (D3 floor trigger).
             "native_table_unverifiable": (
@@ -4470,6 +4534,11 @@ class UnifiedPipeline:
             ps.needs_ocr_enhancement = bool(meta.get("needs_ocr_enhancement", False))
             ps.native_table_structure_failed = bool(
                 meta.get("native_table_structure_failed", False)
+            )
+            # GH-151 TICKET-B1: restore the grid-shape defect flag so it
+            # survives resume instead of evaporating on a resumed run.
+            ps.native_table_structure_defective = bool(
+                meta.get("native_table_structure_defective", False)
             )
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
@@ -4690,6 +4759,7 @@ class UnifiedPipeline:
                     and not getattr(p, "native_table_unverifiable", False)
                 )
                 or p.chart_asset_render_failed  # PP-7: render failure surfaces at doc level
+                or getattr(p, "native_table_structure_defective", False)  # GH-151 B1
             )
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)

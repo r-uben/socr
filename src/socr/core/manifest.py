@@ -279,7 +279,18 @@ def _winning_page_output(
     """
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
-        return p.best_output
+        # GH-151 TICKET-B1: refuse to freeze a passing NATIVE best_output that
+        # carries the grid-shape defect flag. Without this, a page that
+        # slipped through with audit_passed=True (e.g. flag set after
+        # best_output was assigned) would still ship SUCCESS -- the exact
+        # PP-7-R1 bug shape the ticket warns about: a flag the manifest does
+        # not read re-stamps audit_passed=True and makes the gate inert. A
+        # passing NON-native best_output is unaffected and returns immediately.
+        native_defective = (p.best_output.engine or "").startswith("native") and getattr(
+            p, "native_table_structure_defective", False
+        )
+        if not native_defective:
+            return p.best_output
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
     # hallucination is worse than an explicit failure marker — same D3 pattern.
@@ -341,6 +352,7 @@ def _winning_page_output(
             p.needs_ocr_enhancement
             or p.native_table_structure_failed
             or p.chart_asset_render_failed  # PP-7: render failure must stay WARNING
+            or getattr(p, "native_table_structure_defective", False)  # GH-151 B1
         ) and bool(p.attempts)
         return PageOutput(
             page_num=page_num,

@@ -43,8 +43,9 @@ One file, one wave. Collisions are what the per-folder schedules could not see.
 | `tests/test_chart_detection_gh150.py` | GH-150 A2 · GH-150 B2 | W2 → W3 |
 | `src/socr/figures/extractor.py` | GH-150 A1 | W1 only |
 | `src/socr/tables/native_verifier.py` | GH-151 A2 | W1 only |
-| `src/socr/tables/structure_check.py` (new) | GH-151 A1 | W1 only |
+| `src/socr/tables/structure_check.py` (new) | GH-151 A1 · GH-151 B1 | W1 → W3 |
 | `src/socr/core/state.py` | GH-151 B1 | W3 only |
+| `src/socr/core/manifest.py` | GH-151 B1 | W3 only |
 
 ## Waves
 
@@ -81,7 +82,7 @@ bound concurrency, not how much work an agent may do on a file it already owns.
 | Ticket | Writes | Depends on |
 |---|---|---|
 | GH-152 A1 | `tables/reconstruct.py` | GH-144 A2b |
-| GH-151 B1 | `core/born_digital.py`, `core/state.py`, `pipeline/orchestrator.py` | GH-151 A1+A2 · GH-147 A2 |
+| GH-151 B1 | `core/born_digital.py`, `core/state.py`, `pipeline/orchestrator.py`, `tables/structure_check.py`, `core/manifest.py` | GH-151 A1+A2 · GH-147 A2 |
 | GH-150 B2 | `tests/test_chart_detection_gh150.py` | GH-150 A1+B1 |
 | GH-147 B1 | `tests/test_landscape_refusal_gh147.py`, `logs/` | GH-147 A2 |
 
