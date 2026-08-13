@@ -629,6 +629,34 @@ class UnifiedPipeline:
         self._last_assessment = assessment
         state.apply_born_digital(assessment)
 
+        # GH-147 A2: born_digital.py refuses the native table lane for rotated
+        # pages (transposed rowization) and retains prose instead. Surface that
+        # refusal as a durable audit event -- apply_born_digital only carries
+        # PageState fields, not events, so this is the one place per document
+        # run where every refused page is known at once.
+        #
+        # Keyed on PageAssessment.native_table_lane_refused, set ONLY inside the
+        # refusal branch in born_digital.py -- NOT re-derived from
+        # ``text_is_rotated and has_tables``. ``has_tables`` is stamped before
+        # the early non-born-digital returns, so that conjunction alone would
+        # also fire on a rotated scanned/garbled page with a ruled table, where
+        # the refusal branch never ran and there is no native text retained.
+        from socr.core.audit_log import AuditEvent
+
+        for pa in assessment.pages:
+            if pa.native_table_lane_refused:
+                state.events.append(
+                    AuditEvent(
+                        page_num=pa.page_num,
+                        kind="landscape_page_refused",
+                        engine="native",
+                        detail=(
+                            "native table reconstruction refused (dominant text direction "
+                            "is rotated); prose retained, page routed to OCR"
+                        ),
+                    )
+                )
+
         bd_count = assessment.born_digital_count
         if not self.config.quiet:
             if bd_count:
@@ -1164,11 +1192,21 @@ class UnifiedPipeline:
         explicit override for born-digital pages — including table pages: it
         short-circuits before the table check, exactly as the pre-split
         predicate did (native_only returns True before ever reaching tables).
+
+        GH-147 A2 narrows that override for the rotated+table conjunction: a
+        rotated page's native table lane is already refused in
+        ``born_digital.py`` (the rowizer would emit a transposed grid), so
+        ``--native-only`` must not bypass OCR for it either. Horizontal table
+        pages and rotated table-less pages are unaffected and still take the
+        unconditional ``native_only`` short-circuit.
         """
         if not self._is_native_eligible_without_ocr(page_num, ps):
             return False
         if self.config.native_only:
-            return True
+            pa = self._assessment_for_page(page_num)
+            rotated = bool(pa and pa.text_is_rotated)
+            if not (rotated and self._page_has_tables(page_num, ps)):
+                return True
         return not self._page_has_tables(page_num, ps)
 
     def _is_agentic_trusted_native(self, page_num: int, ps: PageState) -> bool:
