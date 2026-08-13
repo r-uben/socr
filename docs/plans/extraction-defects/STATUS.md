@@ -224,15 +224,75 @@ load-bearing rather than vacuous.
   today (it is gated behind `is_born_digital`), so not a live bug — but it is the same
   pattern GH-147 A2 removed from the audit predicate.
 
+## Wave 3 — CLOSED 2026-08-14 — one built, three RETARGETED
+
+The headline result is not the code. **Three of four tickets were sent back rather than
+built**, because their premises no longer held. A premise check was added to the dispatch
+harness for this wave — it caught all three on its first run.
+
+| Ticket | Outcome |
+|---|---|
+| GH-151 B1 | **BUILT** — PR #200, branch `feat/151-b1-structural-gate` (`9dbc5fe` + `2455279`) |
+| GH-152 A1 | **RETARGETED** — detector-only; integration moves to a recut A2 |
+| GH-150 B2 | **RETARGETED** — fixtures + pinned xfail; the real fix becomes new ticket C1 |
+| GH-147 B1 | **RETARGETED** — the metric was invalidated by GH-147 A2's own fix |
+
+Each retarget is written into its own folder's `TICKETS.md`. In one line each:
+
+- **GH-152 A1** — the ticket blamed the rowizer. Measurement showed the page-wide
+  text-strategy `find_tables` at `reconstruct.py:141` merges the tables *first* and
+  suppresses the fallback, so wiring only the rowizer is a measured end-to-end no-op. A1 is
+  now a detector; A2 is recut to consume it at **both** rungs.
+- **GH-150 B2** — the defect still reproduces (both PDFs copied, hashed, measured through the
+  installed package), but the production fix is a merge inside `born_digital.py`, which B2
+  does not own. B2 becomes fixtures plus a strict xfail; **new TICKET-C1** owns the fix and is
+  blocked on PR #200 for that file.
+- **GH-147 B1** — the ticket's own metric is dead. A2 sets `native_text = raw_text.strip()`
+  on refused pages (`born_digital.py:915-931`), so word recall there is **~1.0 by
+  construction** and the 20/40 figure cannot survive a correct fix. Retargeted onto refusal
+  rate plus a structural witness.
+
+### What this says about the remaining waves
+
+Three of four is not bad luck. This plan folder was authored against a codebase that has since
+moved twice (waves 1 and 2). **Waves 4 and 5 were written the same day and should be assumed
+stale until checked.** Treat a retarget as the expected outcome of a premise check, not as a
+failure — and check the premise before staffing, not after.
+
+### Ownership amendments
+
+- `src/socr/tables/structure_check.py` — released from wave-1-only; GH-151 B1 extends it.
+- `src/socr/core/manifest.py` — **added**, claimed by GH-151 B1. A flag the manifest does not
+  read re-stamps `audit_passed=True` (the PP-7-R1 bug shape), which would make the gate inert.
+- `src/socr/core/born_digital.py` — contended. GH-151 B1 holds it (PR #200); **GH-150 C1 needs
+  it next** and cannot dispatch until #200 merges. GH-152 A2 may also need it if left-to-right
+  reading order stays in its `Done when` — `born_digital.py:1201` re-sorts by `y0` alone, so
+  ordering cannot be delivered from `reconstruct.py`.
+
+### Process notes worth keeping
+
+- **Measure at the caller.** Any content-loss claim must go through
+  `BornDigitalDetector().extract_structured` or `process()`. Wave 2's #192 review produced a
+  false blocking finding — "100% table loss" — by measuring one rung in isolation; end to end,
+  the loss was zero. This is now written into the dispatch harness.
+- **A green suite is not a guard.** GH-151 B1 shipped with five of six wiring tests missing and
+  undisclosed; you could delete the guard enforcing the `--native-only` ruling and the whole
+  suite still passed. The follow-up round then found the *replacement* test could not
+  distinguish the correct fix from a simpler wrong one. Require proof that each new test fails
+  when the production line is reverted.
+- **The corpus lives in two places and neither is complete.** iCloud has 407 PDFs with 45
+  evicted to 0-byte placeholders; ProtonDrive has 277, essentially all real — and covers all 45
+  gaps. The union is complete. Google Drive holds a third archive copy that must not be read
+  from (kept quit by design, streams rather than stores). Copy to `/tmp` and verify byte size;
+  never open in place.
+
 ## Next action
 
-**Dispatch wave 3 — three of its four tickets are ready:** GH-152 A1
-(`tables/reconstruct.py`), GH-150 B2 (`tests/test_chart_detection_gh150.py`), GH-147 B1
-(`tests/test_landscape_refusal_gh147.py`, `logs/`). Write sets are disjoint.
+**Dispatch wave 3b — the three retargeted tickets**, now that each carries a scope grounded in
+measurement: GH-152 A1 (`tables/reconstruct.py`), GH-150 B2 (`tests/` + `fixtures/` + `logs/`),
+GH-147 B1 (`tests/` + `fixtures/` + `logs/`). Write sets are disjoint.
 
-**GH-151 B1 is NOT dispatchable and must not be included.** It depends on GH-151 A2,
-which is parked as draft PR #184 and was deliberately excluded from wave 1: its column
-binding is modal consensus, which cannot distinguish "deviant because malformed" from
-"deviant because genuinely different". B1 needs a design saying what column binding
-should key on instead — a `socr-designer` pass, not an implementer.
+**Then wave 4, gated on PR #200 merging:** GH-150 C1 and GH-152 A2 both want
+`born_digital.py`, so they serialize behind #200 and behind each other.
+
 
