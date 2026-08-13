@@ -671,8 +671,10 @@ class UnifiedPipeline:
                         engine="native",
                         detail=(
                             "native table grid structurally defective (ragged widths "
-                            "and/or a detached label row); page not shipped as trusted "
-                            "native"
+                            "and/or a detached label row); the native attempt is "
+                            "demoted to flagged WARNING and can no longer pass as a "
+                            "trusted native page (a non-native winner, if any, is "
+                            "unaffected)"
                         ),
                     )
                 )
@@ -4752,14 +4754,36 @@ class UnifiedPipeline:
             and (
                 p.needs_ocr_enhancement
                 or (
-                    p.native_table_structure_failed
-                    # TR-3: D3 floor pages already have their own distinct event;
-                    # exclude them from the generic native_fallback list so they
-                    # are not double-counted in the CLI summary.
-                    and not getattr(p, "native_table_unverifiable", False)
+                    # TR-3: D3 floor pages (see d3_floor_pages below --
+                    # ``native_table_structure_failed AND native_table_unverifiable``)
+                    # already have their own distinct event; exclude EXACTLY
+                    # that set from the generic native_fallback list so a page
+                    # is never double-counted. GH-151 B1's defect flag is OR'd
+                    # into the *include* side, not into the exclusion: a page
+                    # can carry ``native_table_structure_defective`` with
+                    # ``native_table_unverifiable`` also true (the TR-3
+                    # per-region geometry check runs independently of B1's
+                    # grid-shape check) without being a D3 floor page, because
+                    # D3 requires ``native_table_structure_failed`` too --
+                    # which B1's short-circuit in ``_score_per_page`` never
+                    # sets (it returns before the heuristic scorer that sets
+                    # it ever runs). Excluding on ``native_table_unverifiable``
+                    # alone silently dropped that page from BOTH lists, so it
+                    # never surfaced as a document failure despite shipping
+                    # WARNING/audit_passed=False -- excluding on the exact
+                    # d3_floor_pages predicate is the only condition that
+                    # matches what ``_winning_page_output`` (manifest.py)
+                    # actually ships.
+                    (
+                        p.native_table_structure_failed
+                        or getattr(p, "native_table_structure_defective", False)
+                    )
+                    and not (
+                        p.native_table_structure_failed
+                        and getattr(p, "native_table_unverifiable", False)
+                    )
                 )
                 or p.chart_asset_render_failed  # PP-7: render failure surfaces at doc level
-                or getattr(p, "native_table_structure_defective", False)  # GH-151 B1
             )
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
@@ -4800,7 +4824,8 @@ class UnifiedPipeline:
                         page_num=n,
                         kind="native_fallback",
                         engine="native",
-                        detail="OCR tried and never passed on a structured/enhancement page; "
+                        detail="structured/enhancement page did not ship a passing OCR "
+                        "result (OCR failed, was skipped, or ran under --native-only); "
                         "native text shipped flagged",
                     )
                 )
