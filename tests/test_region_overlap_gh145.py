@@ -220,18 +220,16 @@ def test_notes_beneath_a_table_survive_extraction(table_page):
     assert "106 observations" in out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GH-144: the word-geometry rowizer splits values while building the grid — "
-        "'3M Treasury yield 0.67' becomes '| 3M | Treasury | yield 0 | .67 |', "
-        "destroying 0.67. A separate and worse defect than GH-145: this loses "
-        "NUMBERS, and no amount of composition repair can restore a value the "
-        "reconstruction never emitted. This fixture is the minimal reproduction; "
-        "flip to passing when GH-144 is fixed."
-    ),
-)
 def test_no_table_value_is_lost(table_page):
+    """GH-144 regression: no numeric value may be destroyed by grid construction.
+
+    The text-strategy grid built inside ``reconstruct_table_regions`` used to place a
+    lane boundary inside a numeric token — ``'3M Treasury yield 0.67'`` became
+    ``'| 3M | Treasury | yield 0 | .67 |'``, destroying ``0.67``. Worse than GH-145:
+    it loses NUMBERS, and no composition repair can restore a value the
+    reconstruction never emitted. Fixed by rejecting a grid that splits a numeric
+    token and falling through to the lossless rowizer.
+    """
     with fitz.open(table_page) as doc:
         page = doc[0]
         raw = page.get_text("text")
