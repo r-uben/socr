@@ -205,3 +205,19 @@ def check_markdown(page_md: str) -> list[GridStructureReport]:
     the module docstring. That gap is left for TICKET-B1 to address.
     """
     return [check_grid(block.grid) for block in find_table_blocks(page_md)]
+
+
+def structural_gate_fires(reports: Sequence[GridStructureReport]) -> bool:
+    """Whether the GH-151 TICKET-B1 structural gate fires over a page's reports.
+
+    The single source of truth for the gate predicate: ``ragged`` or
+    ``detached_label_rows`` on any block, and nothing else -- never
+    ``GridStructureReport.defective`` as a whole (which also counts
+    ``orphan_rows``, deliberately excluded per the ticket's narrowing
+    decision; see ``check_grid``'s ``FINDING_ORPHAN_ROWS`` comment). Shared
+    by ``born_digital.py`` (the production caller) and the negative-control
+    tests, so a test asserting "the gate does not fire" is provably
+    asserting the same condition production branches on, not a
+    lookalike copy of it.
+    """
+    return any(r.ragged or r.detached_label_rows for r in reports)

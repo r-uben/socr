@@ -957,12 +957,12 @@ class BornDigitalDetector:
                 # excluded because a blank-label row with values is often a
                 # legitimate standard-error / t-statistic continuation row
                 # (fires on 27/29 real table blocks if included unnarrowed).
+                # ``structural_gate_fires`` is the single source of truth for
+                # this predicate -- tests import the same function.
                 from socr.tables import structure_check
 
                 reports = structure_check.check_markdown(native_text)
-                native_table_structure_defective = any(
-                    r.ragged or r.detached_label_rows for r in reports
-                )
+                native_table_structure_defective = structure_check.structural_gate_fires(reports)
         else:
             native_text = raw_text.strip()
             notes.append("born-digital: clean text layer detected")
