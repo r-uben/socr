@@ -4753,37 +4753,41 @@ class UnifiedPipeline:
             and p.native_text
             and (
                 p.needs_ocr_enhancement
-                or (
-                    # TR-3: D3 floor pages (see d3_floor_pages below --
-                    # ``native_table_structure_failed AND native_table_unverifiable``)
-                    # already have their own distinct event; exclude EXACTLY
-                    # that set from the generic native_fallback list so a page
-                    # is never double-counted. GH-151 B1's defect flag is OR'd
-                    # into the *include* side, not into the exclusion: a page
-                    # can carry ``native_table_structure_defective`` with
-                    # ``native_table_unverifiable`` also true (the TR-3
-                    # per-region geometry check runs independently of B1's
-                    # grid-shape check) without being a D3 floor page, because
-                    # D3 requires ``native_table_structure_failed`` too --
-                    # which B1's short-circuit in ``_score_per_page`` never
-                    # sets (it returns before the heuristic scorer that sets
-                    # it ever runs). Excluding on ``native_table_unverifiable``
-                    # alone silently dropped that page from BOTH lists, so it
-                    # never surfaced as a document failure despite shipping
-                    # WARNING/audit_passed=False -- excluding on the exact
-                    # d3_floor_pages predicate is the only condition that
-                    # matches what ``_winning_page_output`` (manifest.py)
-                    # actually ships.
-                    (
-                        p.native_table_structure_failed
-                        or getattr(p, "native_table_structure_defective", False)
-                    )
-                    and not (
-                        p.native_table_structure_failed
-                        and getattr(p, "native_table_unverifiable", False)
-                    )
-                )
+                or p.native_table_structure_failed
+                or getattr(p, "native_table_structure_defective", False)
                 or p.chart_asset_render_failed  # PP-7: render failure surfaces at doc level
+            )
+            # TR-3: D3 floor pages (see d3_floor_pages below --
+            # ``native_table_structure_failed AND native_table_unverifiable``)
+            # already have their own distinct event; exclude EXACTLY that set
+            # from the generic native_fallback list so a page is never
+            # double-counted. GH-151 B1's defect flag is OR'd into the
+            # *include* side, not into the exclusion: a page can carry
+            # ``native_table_structure_defective`` with
+            # ``native_table_unverifiable`` also true (the TR-3 per-region
+            # geometry check runs independently of B1's grid-shape check)
+            # without being a D3 floor page, because D3 requires
+            # ``native_table_structure_failed`` too -- which B1's
+            # short-circuit in ``_score_per_page`` never sets (it returns
+            # before the heuristic scorer that sets it ever runs). Excluding
+            # on ``native_table_unverifiable`` alone silently dropped that
+            # page from BOTH lists, so it never surfaced as a document
+            # failure despite shipping WARNING/audit_passed=False --
+            # excluding on the exact d3_floor_pages predicate is the only
+            # condition that matches what ``_winning_page_output``
+            # (manifest.py) actually ships.
+            #
+            # GH-151 B1 review round 2: this exclusion previously lived
+            # INSIDE the ``native_table_structure_failed`` disjunct above, so
+            # a page that ALSO carried ``needs_ocr_enhancement=True`` (e.g. a
+            # corrupt-math page whose table region separately hard-failed
+            # TR-3's per-region geometry check) satisfied the FIRST disjunct
+            # unconditionally and bypassed the exclusion entirely -- counted
+            # in both ``d3_floor_pages`` and ``native_fallback_pages``. Moving
+            # the exclusion outside the whole OR closes that gap: it now
+            # applies uniformly to every reason a page can enter this list.
+            and not (
+                p.native_table_structure_failed and getattr(p, "native_table_unverifiable", False)
             )
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)

@@ -48,7 +48,7 @@ plumbing (pairing, exactly-once resolve); do not carry forward `BindingReport.fa
 
 ## Stream B — consequence
 
-### TICKET-B1 — surface structural failure at page level · TODO · depends-on: A1, GH-147 A2 · wave 3
+### TICKET-B1 — surface structural failure at page level · WIP (review round 2 pushed, PR #200 awaiting merge) · depends-on: A1, GH-147 A2 · wave 3
 **Problem:** A defect nothing consumes is not a gate. A page whose emitted table is
 structurally broken ships as trusted native SUCCESS.
 

@@ -358,6 +358,45 @@ def test_unexplained_lanes_are_a_named_distrust_kind():
 
 
 # ----------------------------------------------------------------------
+# GH-151 TICKET-B1 review: a structural-gate page is not silently trusted
+# ----------------------------------------------------------------------
+
+
+def test_structural_gate_failure_is_a_named_distrust_kind():
+    """B1's structural gate (ragged / detached-label grid) demotes the shipped
+    page to WARNING/audit_passed=False; the trust file must agree, not still
+    call the page trusted while the audit log says its table structure
+    failed.
+
+    Load-bearing: removing ``table_structure_failed`` from
+    ``TABLE_DISTRUST_KINDS`` (as it was before this fix) makes this fail,
+    because ``build_tables_trust`` would then silently drop the event.
+    """
+    trust = build_tables_trust(
+        "doc.pdf",
+        [
+            AuditEvent(
+                page_num=26,
+                kind="table_structure_failed",
+                engine="native",
+                detail=(
+                    "native table grid structurally defective (ragged widths "
+                    "and/or a detached label row); the native attempt is "
+                    "demoted to flagged WARNING and can no longer pass as a "
+                    "trusted native page (a non-native winner, if any, is "
+                    "unaffected)"
+                ),
+            )
+        ],
+    )
+    payload = trust.to_dict()
+
+    assert trust.untrusted_pages == [26]
+    assert "table_structure_failed" in TABLE_DISTRUST_KINDS
+    assert "table_structure_failed" in payload["pages"]["26"]["reasons"]
+
+
+# ----------------------------------------------------------------------
 # #123 TICKET-C2: the same events must surface with no escalation lane
 # ----------------------------------------------------------------------
 

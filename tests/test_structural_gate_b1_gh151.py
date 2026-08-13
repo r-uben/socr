@@ -41,6 +41,7 @@ from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables import structure_check
 from socr.tables.reconcile import find_table_blocks
+from socr.tables.structure_check import structural_gate_fires as _gate_fires
 
 # ---------------------------------------------------------------------------
 # Fixture: a ruled regression-table page whose "R2" row is genuinely split
@@ -281,16 +282,55 @@ class TestDetachedLabelPredicate:
         """A labelled coefficient row followed by a blank-label SE row WITH
         values on the coefficient row is a legitimate continuation, not a
         split — because the left row of the pair is NOT label-only (it has
-        its own values)."""
+        its own values).
+
+        Asserts against ``structural_gate_fires`` -- the same function
+        ``born_digital.py`` calls to compute ``native_table_structure_defective``
+        (``ragged or detached_label_rows``) -- not just ``detached_label_rows``
+        alone. The grid is uniformly 3-wide, so
+        ``ragged`` is incidentally False here too; a prior version of this
+        test asserted only ``detached_label_rows == ()`` and so still passed
+        when the gate was (hypothetically) widened to include
+        ``orphan_rows``, which DOES fire on this exact grid (row 2 is a
+        blank-label row with values) -- meaning it pinned nothing the gate
+        actually depends on. See
+        ``test_se_control_is_load_bearing_against_a_widened_gate`` below for
+        the proof.
+        """
         grid = [
             ["", "col1", "col2"],
             ["beta", "1.23", "4.56"],
             ["", "(0.11)", "(0.22)"],  # SE row: blank label, has values
         ]
         report = structure_check.check_grid(grid)
-        assert report.detached_label_rows == ()
+        assert not _gate_fires([report])
+
+    def test_se_control_is_load_bearing_against_a_widened_gate(self) -> None:
+        """Proof that the SE-continuation control above pins the actual gate
+        predicate, not merely one of its inputs: the SE grid's own
+        ``orphan_rows`` finding DOES fire (row 2 is blank-label-with-values),
+        so a gate hypothetically widened to ``ragged or orphan_rows or
+        detached_label_rows`` — the exact regression the ticket's narrowing
+        decision rules out — trips on this fixture. If this assertion fails,
+        the SE control above is not exercising anything ``orphan_rows``
+        would also satisfy, and stops being evidence that excluding
+        ``orphan_rows`` from the gate matters.
+        """
+        grid = [
+            ["", "col1", "col2"],
+            ["beta", "1.23", "4.56"],
+            ["", "(0.11)", "(0.22)"],
+        ]
+        report = structure_check.check_grid(grid)
+        assert report.orphan_rows != ()  # the SE row is an orphan row...
+        assert not _gate_fires([report])  # ...but the actual gate does not fire on it
+        widened_gate_fires = bool(report.ragged or report.orphan_rows or report.detached_label_rows)
+        assert widened_gate_fires  # ...while a gate that included orphan_rows would
 
     def test_group_heading_above_column_band_does_not_fire_first_row(self) -> None:
+        """A group-heading row (label, no values) directly above a
+        ``(1)...(n)`` column-number band -- the other legitimate shape the
+        ticket's Done-when names -- must not trip the gate."""
         grid = [
             ["", "col1", "col2", "col3"],
             ["Panel A", "", "", ""],
@@ -298,6 +338,7 @@ class TestDetachedLabelPredicate:
         ]
         report = structure_check.check_grid(grid)
         assert report.detached_label_rows == ()
+        assert not _gate_fires([report])
 
     def test_group_heading_above_column_band_does_not_fire_mid_table(self) -> None:
         grid = [
@@ -309,6 +350,7 @@ class TestDetachedLabelPredicate:
         ]
         report = structure_check.check_grid(grid)
         assert report.detached_label_rows == ()
+        assert not _gate_fires([report])
 
     def test_split_footnote_pair_fires_as_a_deliberate_classification(self) -> None:
         """A footnote mangled into a grid (label-only note marker, followed by
@@ -552,6 +594,44 @@ class TestThreeFlagPageIsNotDoubleCounted:
         ps = state.pages[1]
         ps.is_born_digital = True
         ps.native_text = "| a | b |\n| --- | --- |\n| 1 | 2 |"
+        ps.native_table_structure_defective = True
+        ps.native_table_structure_failed = True
+        ps.native_table_unverifiable = True
+        ps.attempts.append(
+            PageOutput(
+                page_num=1,
+                text="ocr attempt",
+                status=PageStatus.WARNING,
+                engine="qwen",
+                audit_passed=False,
+            )
+        )
+
+        pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipe._phase_assemble(state, tmp_path)
+
+        kinds = [e.kind for e in state.events if e.page_num == 1]
+        assert kinds.count("table_region_unverifiable") == 1  # d3_floor_pages event
+        assert "native_fallback" not in kinds  # NOT also in native_fallback_pages
+
+    def test_three_flag_page_with_needs_ocr_enhancement_lands_only_in_d3_floor(
+        self, tmp_path: Path
+    ) -> None:
+        """Review round 2: the same D3-floor page (``native_table_structure_failed``
+        AND ``native_table_unverifiable``) but ALSO carrying
+        ``needs_ocr_enhancement=True`` (e.g. a corrupt-math page whose table
+        region separately hard-fails TR-3's per-region geometry check). The
+        exclusion previously lived inside the ``native_table_structure_failed``
+        disjunct only, so ``needs_ocr_enhancement`` -- the FIRST disjunct --
+        satisfied ``native_fallback_pages`` unconditionally and bypassed it,
+        double-counting the page. Proven load-bearing: reverting the exclusion
+        to live inside the disjunct (its round-1 placement) makes this fail.
+        """
+        state = DocumentState(handle=_bare_handle())
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = "| a | b |\n| --- | --- |\n| 1 | 2 |"
+        ps.needs_ocr_enhancement = True
         ps.native_table_structure_defective = True
         ps.native_table_structure_failed = True
         ps.native_table_unverifiable = True
