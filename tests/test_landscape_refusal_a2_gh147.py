@@ -17,6 +17,12 @@ evidence groups:
      ``landscape_page_refused`` audit event, in both ``state.events`` and the
      page sidecar, ships ``DocumentStatus.AUDIT_FAILED`` with a native-prose
      WARNING fallback, and accepts no OCR output.
+  4. Review negative control (PR #193): a non-born-digital rotated page that
+     also carries a ruled table -- ``has_tables`` is stamped before the early
+     non-born-digital returns in ``_assess_page_signals``, so the refusal
+     branch never runs and ``native_table_lane_refused`` stays False. The
+     audit predicate in ``_phase_analyze`` must not emit
+     ``landscape_page_refused`` for such a page.
 """
 
 from __future__ import annotations
@@ -27,11 +33,14 @@ from unittest.mock import patch
 
 import pytest
 
+fitz = pytest.importorskip("fitz")
+
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment, PageAssessment
 from socr.core.config import EngineType, PipelineConfig
+from socr.core.document import DocumentHandle
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import DocumentStatus, PageOutput, PageStatus
-from socr.core.state import PageState
+from socr.core.state import DocumentState, PageState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 # ---------------------------------------------------------------------------
@@ -92,7 +101,49 @@ def _rotated_prose_only_pdf(path: Path) -> None:
     doc.close()
 
 
-fitz = pytest.importorskip("fitz")
+def _rotated_garbled_grid_pdf(path: Path) -> None:
+    """Rotated ruled grid + CID-artifact prose: NOT born-digital.
+
+    Same ruled-grid table signal as ``_rotated_ruled_grid_pdf``, but the prose
+    carries literal ``(cid:N)`` font-mapping artifacts, a definitive
+    not-born-digital signal (``has_cid``) that ``_assess_page_signals``
+    checks via an early return -- before it ever reaches the rotated-table
+    refusal branch. ``has_tables`` is stamped before that early return, so
+    this is the exact page shape the review flagged: rotated AND has_tables,
+    but the refusal branch never ran.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+
+    x0, y0 = 100, 100
+    cw, rh = 60, 20
+    cols, rows = 3, 4
+    for r in range(rows + 1):
+        page.draw_line((x0, y0 + r * rh), (x0 + cols * cw, y0 + r * rh))
+    for c in range(cols + 1):
+        page.draw_line((x0 + c * cw, y0), (x0 + c * cw, y0 + rows * rh))
+    for r in range(rows):
+        for c in range(cols):
+            page.insert_text(
+                (x0 + c * cw + 5, y0 + r * rh + 15),
+                f"c{r}{c}",
+                fontsize=8,
+                fontname="helv",
+                rotate=90,
+            )
+
+    # CID font-mapping artifacts: a definitive "not born-digital" signal
+    # (``has_cid`` in ``_assess_page_signals``), reliably reached with a
+    # normal-length word list so this text never trips the earlier avg-word-
+    # length / short-text gates first.
+    cid_line = " ".join(f"(cid:{n})" for n in range(20))
+    prose_y = 400
+    for _ in range(3):
+        page.insert_text((72, prose_y), cid_line, fontsize=11, fontname="helv", rotate=90)
+        prose_y += 16
+
+    doc.save(str(path))
+    doc.close()
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +188,79 @@ class TestRotatedGridRefusesNativeTable:
         assert assessment.needs_ocr_enhancement is False
         for line in _PROSE_LINES:
             assert line in assessment.native_text
+
+
+# ---------------------------------------------------------------------------
+# Group 1b: PR #193 review -- audit predicate overbreadth negative control
+# ---------------------------------------------------------------------------
+
+
+class TestNonBornDigitalRotatedTableNoRefusalAudit:
+    """A rotated page with a ruled table that is classified NOT born-digital
+    (high garbage ratio) must never claim a native-table-lane refusal: the
+    refusal branch in ``_assess_page_signals`` lives past the early
+    non-born-digital returns and never runs for this page, even though
+    ``has_tables`` and ``text_is_rotated`` are both True.
+    """
+
+    def test_detect_page_flag_stays_false_on_non_bd_rotated_table_page(
+        self, tmp_path: Path
+    ) -> None:
+        pdf_path = tmp_path / "rotated_garbled_grid.pdf"
+        _rotated_garbled_grid_pdf(pdf_path)
+
+        assessment = BornDigitalDetector().detect_page(pdf_path, 1)
+
+        # The exact pre-condition the review flagged: both true, refusal not run.
+        assert assessment.is_born_digital is False
+        assert assessment.has_tables is True
+        assert assessment.text_is_rotated is True
+        assert assessment.native_table_lane_refused is False
+
+    def test_phase_analyze_emits_no_refusal_event_for_non_bd_rotated_table_page(
+        self, tmp_path: Path
+    ) -> None:
+        """Direct regression guard on the ``_phase_analyze`` audit predicate.
+
+        Without the fix (predicate re-derived as ``text_is_rotated and
+        has_tables``) this synthetic assessment -- non-born-digital, rotated,
+        has_tables True, ``native_table_lane_refused`` False -- would still
+        emit ``landscape_page_refused``. With the fix keyed on the explicit
+        flag, it must not.
+        """
+        pdf_path = tmp_path / "fake.pdf"
+        config = PipelineConfig(
+            primary_engine=EngineType.DEEPSEEK,
+            agentic=True,
+            enabled_engines=[EngineType.GEMINI],
+            quiet=True,
+            audit_enabled=False,
+            save_figures=False,
+            write_manifest=False,
+        )
+        pipeline = UnifiedPipeline(config)
+
+        non_bd_rotated_table_pa = PageAssessment(
+            page_num=1,
+            is_born_digital=False,
+            native_text="",
+            confidence=0.8,
+            has_tables=True,
+            dominant_text_direction=(0.0, -1.0),
+            native_table_lane_refused=False,
+        )
+        fake_assessment = DocumentAssessment(path=pdf_path, pages=[non_bd_rotated_table_pa])
+
+        state = DocumentState(handle=DocumentHandle(path=pdf_path, page_count=1))
+
+        with patch.object(pipeline.bd_detector, "detect", return_value=fake_assessment):
+            pipeline._phase_analyze(state)
+
+        refusal_events = [ev for ev in state.events if ev.kind == "landscape_page_refused"]
+        assert refusal_events == [], (
+            f"non-born-digital rotated table page must not emit landscape_page_refused; "
+            f"got {state.events}"
+        )
 
 
 # ---------------------------------------------------------------------------

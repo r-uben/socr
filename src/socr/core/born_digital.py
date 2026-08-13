@@ -311,6 +311,15 @@ class PageAssessment:
     #: Propagated to PageState so the agentic native lane can emit a durable audit
     #: event; the historical ``notes`` entry alone reached nothing that ships.
     has_encoding_hygiene_suspect: bool = False
+    #: GH-147 A2: set ONLY by the refusal branch in ``_assess_page_signals`` when
+    #: the native table lane is actually refused (rotated text direction + table
+    #: detected on a born-digital page). ``has_tables and text_is_rotated`` alone
+    #: over-fires: ``has_tables`` is stamped before the early non-born-digital
+    #: returns, so a rotated *scanned/garbled* page with a ruled table would also
+    #: match, even though the refusal branch never ran and there is no native
+    #: text to have retained. Audit code must key off this flag, not re-derive
+    #: "refusal happened" from conditions that merely correlate with it.
+    native_table_lane_refused: bool = False
     #: The page's prevailing text-line direction, stamped once by ``_assess_page``
     #: from ``dominant_text_direction()``. The ``_HORIZONTAL`` default conflates
     #: "genuinely horizontal" with "no directional evidence" (an empty tally from
@@ -903,6 +912,7 @@ class BornDigitalDetector:
         # without tables (which never call _verify_regions) are not flagged.
         self._last_extraction_had_unverifiable: bool = False
 
+        native_table_lane_refused = False
         if has_tables:
             if text_direction_is_rotated(direction):
                 # GH-147: the rowizer clusters rows by y; on a page whose text
@@ -918,6 +928,7 @@ class BornDigitalDetector:
                     "page routed to OCR"
                 )
                 needs_ocr_enhancement = True
+                native_table_lane_refused = True
             else:
                 # Use structured extraction that renders tables as markdown. Clean it
                 # too: extract_structured builds its own text from the layer, so it
@@ -984,6 +995,7 @@ class BornDigitalDetector:
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
             has_unverifiable_table_region=has_unverifiable_table_region,
             has_encoding_hygiene_suspect=encoding_hygiene_suspect,
+            native_table_lane_refused=native_table_lane_refused,
             notes=notes,
         )
 

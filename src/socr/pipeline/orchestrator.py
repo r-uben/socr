@@ -634,10 +634,17 @@ class UnifiedPipeline:
         # refusal as a durable audit event -- apply_born_digital only carries
         # PageState fields, not events, so this is the one place per document
         # run where every refused page is known at once.
+        #
+        # Keyed on PageAssessment.native_table_lane_refused, set ONLY inside the
+        # refusal branch in born_digital.py -- NOT re-derived from
+        # ``text_is_rotated and has_tables``. ``has_tables`` is stamped before
+        # the early non-born-digital returns, so that conjunction alone would
+        # also fire on a rotated scanned/garbled page with a ruled table, where
+        # the refusal branch never ran and there is no native text retained.
         from socr.core.audit_log import AuditEvent
 
         for pa in assessment.pages:
-            if pa.text_is_rotated and pa.has_tables:
+            if pa.native_table_lane_refused:
                 state.events.append(
                     AuditEvent(
                         page_num=pa.page_num,
