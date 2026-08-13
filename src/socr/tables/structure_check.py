@@ -9,8 +9,10 @@ Density (``empty_cell_ratio`` / the footprint-density derivation described on
 :class:`GridStructureReport`) is diagnostic only. It can never contribute a
 finding or make a grid ``defective`` — sparse tables are common and legitimate
 (blank cells in a regression table, missing observations), so no threshold on
-emptiness is applied anywhere in this module. The only two findings that can
-ever fire are width raggedness and same-row orphan labels.
+emptiness is applied anywhere in this module. Density never votes. Three
+findings can fire: width raggedness, same-row orphan labels (diagnostic
+only — never gates, see TICKET-B1), and detached label/values row pairs
+(``FINDING_DETACHED_LABEL``, a row-pair adjacency invariant).
 
 ``check_grid``'s input contract: a separator-free ``Sequence[Sequence[str]]``.
 Callers are expected to have already stripped markdown separator rows (the
@@ -36,6 +38,16 @@ and cannot see the missing row, so it cannot flag it; a fix belongs in
 Row indices are zero-based into the parsed, separator-free grid. Row 0 is
 always the header row.
 
+GH-151 TICKET-B1 adds a third finding, ``FINDING_DETACHED_LABEL``: a
+row-pair adjacency invariant, decidable from exactly one adjacent pair of
+body rows, that never references a third row or any cross-row signature
+(no modal vote, no majority, no numeric constant beyond the pair itself).
+It exists because ``FINDING_ORPHAN_ROWS`` alone cannot distinguish a
+legitimate standard-error / t-statistic continuation row (blank label,
+populated values, following a row that ALSO has values) from a genuinely
+severed label row (e.g. an ``R2`` label whose values were pushed onto the
+next row by a superscript). Density still never votes.
+
 Cell blankness is whitespace-only: a cell counts as empty iff
 ``not cell.strip()``. This is deliberately **not**
 ``native_verifier.strip_presentation``, which also strips standalone currency
@@ -54,6 +66,7 @@ from socr.tables.reconcile import find_table_blocks
 
 FINDING_RAGGED = "ragged"
 FINDING_ORPHAN_ROWS = "orphan_rows"
+FINDING_DETACHED_LABEL = "detached_label"
 
 
 @dataclass(frozen=True)
@@ -73,6 +86,9 @@ class GridStructureReport:
     row_widths: tuple[int, ...]
     ragged: bool
     orphan_rows: tuple[int, ...]  # body rows only (indices >= 1)
+    #: 0-based index of the LEFT row of each firing label/values split pair
+    #: (body rows only). See ``FINDING_DETACHED_LABEL`` / GH-151 TICKET-B1.
+    detached_label_rows: tuple[int, ...]
     empty_cells: int  # whitespace-empty among actual cells
     total_cells: int  # sum of row lengths
     footprint_cells: int  # len(grid) * max(row_widths), 0 when grid has no rows
@@ -90,6 +106,23 @@ class GridStructureReport:
         A fact about the evidence, explicitly not a routing decision.
         """
         return bool(self.findings)
+
+
+def _is_canonical_column_band(value_cells: Sequence[str]) -> bool:
+    """Whether the non-blank value cells read exactly ``(1), (2), ..., (k)``.
+
+    A group-heading row (label, no values) immediately above a ``(1)...(n)``
+    column-number band is a legitimate table layout, not a split row — the
+    heading has no values because it is a heading, and the numbered row has
+    no label because it is naming columns, not observations. Excluded here so
+    ``FINDING_DETACHED_LABEL`` does not fire on it. This is the ONLY exclusion
+    the predicate admits; it is local to the pair (no threshold, no reference
+    to any other row).
+    """
+    nonblank = [cell.strip() for cell in value_cells if cell.strip()]
+    if not nonblank:
+        return False
+    return nonblank == [f"({i})" for i in range(1, len(nonblank) + 1)]
 
 
 def check_grid(grid: Sequence[Sequence[str]]) -> GridStructureReport:
@@ -112,6 +145,32 @@ def check_grid(grid: Sequence[Sequence[str]]) -> GridStructureReport:
         if any(cell.strip() for cell in row[1:]):
             orphan_rows.append(i)
 
+    # GH-151 TICKET-B1: detached-label row pairs. A row-pair adjacency
+    # invariant only — never a modal/majority signature, never a numeric
+    # threshold. For each adjacent body-row pair (i, i+1) with i >= 1: row i
+    # carries a label and zero values, row i+1 carries values and no label.
+    # That shape is exactly a physically split row (e.g. an "R2" label whose
+    # values landed on the next line). The one exclusion is the canonical
+    # "(1) (2) ... (k)" column-number band, which is a legitimate heading
+    # pattern, not a split row.
+    detached_label_rows: list[int] = []
+    for i in range(1, len(grid) - 1):
+        row = grid[i]
+        follower = grid[i + 1]
+        if not row or not follower:
+            continue
+        if not row[0].strip():
+            continue  # left row has no label -> not a detached label
+        if any(cell.strip() for cell in row[1:]):
+            continue  # left row has values -> not label-only
+        if follower[0].strip():
+            continue  # follower has its own label -> not a split continuation
+        if not any(cell.strip() for cell in follower[1:]):
+            continue  # follower has no values either -> nothing to attach
+        if _is_canonical_column_band(follower[1:]):
+            continue  # group heading above a (1)...(n) band: legitimate
+        detached_label_rows.append(i)
+
     empty_cells = sum(1 for row in grid for cell in row if not cell.strip())
     total_cells = sum(row_widths)
     footprint_cells = len(grid) * max(row_widths) if row_widths else 0
@@ -121,11 +180,14 @@ def check_grid(grid: Sequence[Sequence[str]]) -> GridStructureReport:
         findings.append(FINDING_RAGGED)
     if orphan_rows:
         findings.append(FINDING_ORPHAN_ROWS)
+    if detached_label_rows:
+        findings.append(FINDING_DETACHED_LABEL)
 
     return GridStructureReport(
         row_widths=row_widths,
         ragged=ragged,
         orphan_rows=tuple(orphan_rows),
+        detached_label_rows=tuple(detached_label_rows),
         empty_cells=empty_cells,
         total_cells=total_cells,
         footprint_cells=footprint_cells,
