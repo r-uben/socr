@@ -36,21 +36,31 @@ is **0.998** — a full-page scan. `RASTER_DOMINANCE_RATIO` (0.90) already exist
 for exactly this case, but it is only consulted under the *clean-short-text exception*. This page
 has 2077 chars, so the check never runs.
 
-**Why this outranks the work it interrupts.** Numbers like `0271` (a lost decimal point) are
-*already wrong before socr touches them*. Every downstream table check then argues about the
-wreckage:
+**Why this was thought to outrank the work it interrupts — and what A1 found.** Numbers like `0271`
+(a lost decimal point) are *already wrong before socr touches them*, so every downstream table check
+then argues about the wreckage. The worry was that this contaminated the table-defect measurements.
+**A1 measured it and the worry was overstated:**
 - TR-3 fires here — correctly — but the mismatch is corrupt source text, not a reconstruction
-  defect. An unknown share of its measured firings (68/491, `#205`) may be these pages.
+  defect. ~~An unknown share of its measured firings (68/491, `#205`) may be these pages.~~
+  **Measured: 6 of 68 (8.8%).**
 - The GH-151 B1 shape gate counts garbled labels (`Sat. Eucx`) as genuine textual damage.
+  **Measured: 6 of 71 (8.5%).**
 - A page whose text reads `Eftes of Fedal Fixbds` should never reach the native path at all. It
-  should go to OCR, where the model reads the image and gets it right.
+  should go to OCR, where the model reads the image and gets it right. **This part stands
+  unchanged** — it is a real routing defect and the reason B1 is still worth building.
 
 This is a **silent content loss** breach at the routing layer: the free path is taken on a page
-where it cannot possibly be correct, and nothing says so.
+where it cannot possibly be correct, and nothing says so. That is true of 2.4% of pages, not of the
+corpus at large.
 
 ## Stream A — measure before fixing
 
-### TICKET-A1 — quantify the fake-native population · TODO · depends-on: none · wave 1
+### TICKET-A1 — quantify the fake-native population · **DONE** (`817e593`) · wave 1
+**Result:** 72/2972 pages (2.4%), 71 from two scanned documents, 0 from 37 of the 40 papers.
+TR-3 overlap **6/68 (8.8%)**; shape-gate overlap **6/71 (8.5%)**. Full log:
+`logs/2026-08-14_A1-fake-native-population.md`. The measurement **disproved this plan's premise**
+that the table-defect numbers were materially contaminated — see STATUS.md.
+**Original brief, kept for provenance:**
 **Problem:** The fix must be sized against the corpus, and tonight's table-defect numbers may be
 contaminated by these pages. Nobody knows how many there are.
 **Do:** Read-only measurement over the 40-paper list at `/tmp/b1probe/list.txt` (copy each PDF to
@@ -69,7 +79,7 @@ sampling rule at the top. State the opened-PDF count so a partial run cannot rea
 
 ## Stream B — detect
 
-### TICKET-B1 — consult raster dominance regardless of text length · TODO · depends-on: A1 · wave 2
+### TICKET-B1 — consult raster dominance regardless of text length · READY · depends-on: A1 ✓ · wave 2
 **Problem:** `RASTER_DOMINANCE_RATIO` already encodes "a full-page raster means this is a scan",
 but it is gated behind the clean-short-text exception, so a scan with a *long* baked-in OCR layer
 bypasses it entirely.
@@ -89,7 +99,37 @@ born-digital page from the same corpus still reports `True`; full suite passes.
 must stay `is_born_digital=True`. Over-refusing costs an OCR call; under-refusing costs content.
 Both directions need a test.
 
-### TICKET-B2 — lexical quality signal · BLOCKED · depends-on: A1 · wave 2 (conditional)
+**A1's findings — read these before implementing:**
+- **Do not touch the threshold.** Coverage runs 0.516–0.789, then a **hard gap containing zero
+  pages**, then 0.940–1.000. `RASTER_DOMINANCE_RATIO = 0.90` sits mid-gap; anything from ~0.80 to
+  ~0.93 behaves identically on this corpus. The constant is confirmed by measurement.
+- **A known false positive must be a fixture.** `2008__blinder_ehrmann_..._ECB.pdf` page 1 is a
+  full-bleed title page: coverage **1.000**, a clean **34-word** text layer, genuinely born-digital.
+  The naive rule refuses it. Decide deliberately how to handle it — a word-count floor is the
+  obvious lever, but **derive it, do not tune it**, and say so in the commit. Build a look-alike
+  fixture; **never commit the PDF** (public repo, copyrighted).
+- **The regression guard has real specimens.** The 16 pages at coverage 0.52–0.79 in
+  `2021__nagel__ml_ap.pdf` are genuine born-digital figure pages carrying 400+ words of native
+  prose and `has_tables=False`. Model the guard fixture on that shape, not on an invented page.
+
+### TICKET-B2 — lexical quality signal · **CLOSED, NOT BUILT** · decided by A1
+**Decision:** dropped. A1 was the conditional gate on this ticket and it came back negative — no
+material population of lexically-corrupt pages that B1's raster check misses. All 72 fake-native
+pages are inside the raster band by construction; a sweep of the other 2771 born-digital pages
+found the existing `has_encoding_hygiene_suspect` firing on 738 (26.6%), but spot-checking
+`2003__woodford.pdf` p5 showed the trigger tokens were `Cataloging-in-Publication` and a URL —
+**false positives of the ratio, not corruption.** Building a second lexical signal on that basis
+would add noise, not coverage.
+
+**Caveat, and the condition to reopen:** this is corpus-bound. 40 economics papers do not contain a
+PDF with a broken ToUnicode map and no raster — the exact class B2 was written for. That page type
+exists in the wild. **Reopen this ticket only with a measured specimen**, not on suspicion; the
+whole point of A1 was that suspicion overstates populations.
+**Evidence:** `logs/2026-08-14_A1-fake-native-population.md`, §"Are there fake-native pages raster
+coverage does NOT catch?"
+
+<details><summary>Original brief (kept for provenance)</summary>
+
 **Problem:** Raster dominance catches scans. It does **not** catch a born-digital PDF whose
 embedded text is corrupt for another reason (bad font subsetting, broken ToUnicode map), where
 the page has no raster at all.
@@ -101,6 +141,8 @@ threshold must be derived from the measured distribution and named.
 **Files:** `src/socr/core/born_digital.py`
 **Done when:** the decision to build or drop it is recorded in `logs/` with A1's numbers as the
 evidence.
+</details>
+
 
 ## Stream C — consequence
 
@@ -120,13 +162,19 @@ ticket serializes against those.
 `audit_passed=True`, and it appears in the OCR-routed set; a genuine born-digital page is
 unaffected.
 
-### TICKET-C2 — re-measure the table defect rates · TODO · depends-on: C1 · wave 4
-**Problem:** Every table-quality number measured before this fix may be contaminated by
-fake-native pages. Decisions on `#205` and PR #200 are waiting on figures that may be wrong.
+### TICKET-C2 — re-measure the table defect rates · **DOWNGRADED to tidy-up** · depends-on: C1 · wave 4
+**A1 removed this ticket's urgency.** It was written on "every table-quality number may be
+contaminated". Measured overlap is 8.8% (TR-3) and 8.5% (shape gate), so a re-measure moves TR-3
+from ~14.8% to roughly ~13.5% — a real correction, not a decision-changing one. **Do not hold
+`#205` or PR #200 for it.**
+**Problem (as amended):** the published figures include a small, now-quantified contamination.
+Once C1 excludes fake-native pages from the native path, the numbers should be restated once so
+the record is clean.
 **Do:** Re-run the TR-3 firing measurement and the GH-151 B1 shape-gate measurement over the same
 40-paper list, with fake-native pages now excluded from the native path. Report before/after for
 both, using the same sampling rule so the comparison is like-for-like.
 **Files:** `docs/plans/fake-native-pages/logs/`, and a comment on `#205`.
 **Done when:** a dated log gives before/after for both signals, and `#205` carries the corrected
-figures. If the corrected TR-3 rate differs materially from 13.8%, say so plainly — that number
-is currently load-bearing in the PR #200 decision.
+figures. State the corrected TR-3 rate plainly whether or not it differs materially — A1's finding
+was that it will not, and a re-measure that quietly confirms an expectation is still worth writing
+down.
