@@ -47,10 +47,71 @@ nothing recoverable, a pipe grid of axis labels loses everything.
 **Files:** `src/socr/pipeline/orchestrator.py`
 **Done when:** an `AuditEvent` of kind `chart_table_arbitration` appears in `audit_log.json` for a page where both fire, and `~/venvs/socr/bin/pytest tests/ -q` still passes.
 
-### TICKET-B2 — end-to-end: the two worst corpus pages · TODO · depends-on: A1, B1 · wave 3
-**Problem:** The fix must be demonstrated on the pages that motivated it, not only
-on synthetic fixtures.
-**Do:** Measure word recall and emitted output for Heston p10 and Drechsler p55
-before/after; assert each now emits an image reference rather than a pipe grid.
-**Files:** `tests/test_chart_detection_gh150.py`
-**Done when:** neither page's `native_text` contains a markdown table separator (`| --- |`), and both contain an image reference; recorded in `logs/`.
+### TICKET-B2 — pin the residual first-hit-wins gate (fixtures + xfail) · TODO · depends-on: A1, B1 · wave 3b
+**Problem:** The fix must be demonstrated on the pages that motivated it, not only on
+synthetic fixtures.
+
+⚠️ **RETARGETED 2026-08-13 by a wave-3 ruling.** The original `Done when` — "neither page's
+`native_text` contains `| --- |` and both contain an image reference" — **cannot be satisfied
+within this ticket's write set.** The wave-3 design pass copied both PDFs to `/tmp`, hashed
+them, and measured through the installed package:
+
+| Paper | bytes | sha256 (prefix) |
+|---|---|---|
+| Heston (p10) | 449,243 | `2ff4173d787d476c…` |
+| Drechsler (p55) | 711,917 | `d9eba00cd208b9fe…` |
+
+2 PDFs, 115 pages. **The defect still reproduces**: both target pages still carry a markdown
+pipe separator and no image reference. But the production fix is a **merge** — chart
+placeholders must be merged with non-empty `find_tables()` regions — and that lives in
+`src/socr/core/born_digital.py`, which this ticket does not own. Emptying `find_tables()` is a
+*labelled simulation* of reaching the existing fallback, not the after-state and not the patch
+to land.
+
+**Do:** Fixtures, tests and logs only.
+1. Record the **before** measurement (installed package, sha256-keyed, on the `/tmp` copies).
+2. Append a generated **mixed table-plus-chart** fixture and a **table-only negative control**.
+   The generator must assert on reopen: mixed page `find_tables() >= 1` and
+   `chart_region_bboxes() >= 1`; control `find_tables() >= 1` and `chart_region_bboxes() == 0`.
+   State in the log that the fixture is defined *from those predicates* — it proves the code
+   path, not corpus shape. **No corpus PDF or page extract in git** (public repo, copyrighted
+   journal articles).
+3. **Append** — do not rewrite — deterministic `BornDigitalDetector` tests. Provider-free:
+   fixture self-checks; a labelled rung check that `rowize_from_words_chart_aware` already
+   emits the placeholder when reached; green `detect_page` / `extract_structured` guards that a
+   genuine table and its prose survive and that a table-only page gains no image reference.
+4. One `xfail(strict=True)`: `extract_structured` on the mixed fixture emits both the table and
+   `![chart region`. Its docstring must say it is a pin until the `born_digital.py` merge lands,
+   and that the original B2 `Done when` is still open. Delete the marker in a follow-up **in
+   this same file** — do not leave a permanent xfail.
+
+**Binding constraints:** do NOT edit `born_digital.py`, `figures/extractor.py`, or
+`orchestrator.py`. Log the **before** (real end-to-end) and, separately, the stubbed-`find_tables`
+simulation — leave the *after* column empty until the source ticket lands. Do **not** present
+245/245 or 192/192 raw-word multiset retention as the issue's 17%/41% figures. Green mixed-page
+tests may only assert what is true today.
+
+**Files:** `tests/test_chart_detection_gh150.py`, `tests/fixtures/`, `logs/`
+**Done when:** the fixtures and tests above exist and pass, the strict xfail is present and
+documented as a pin, and the before-measurement is recorded with sizes and checksums.
+**B2 must NOT be marked done on the corpus pages** until TICKET-C1 lands and the xfail marker
+is deleted after a real installed-package *after* measurement.
+
+### TICKET-C1 — merge chart placeholders with non-empty table regions · TODO · depends-on: B2 · wave 4 · NEEDS OWNERSHIP GRANT
+**Problem:** This is the actual production fix the original B2 promised. On a mixed page, the
+first hit wins: a non-empty `find_tables()` result suppresses the chart placeholder entirely,
+so a page with both a table and a chart ships the table and silently drops the chart.
+
+**Do:** Merge chart region placeholders with non-empty `find_tables()` regions rather than
+letting either suppress the other. The fix is **merge**, not "skip `find_tables()` when a chart
+exists".
+
+**Files:** `src/socr/core/born_digital.py`
+⚠️ **BLOCKED ON OWNERSHIP.** `born_digital.py` is claimed by GH-151 B1, in flight as PR #200.
+The coordinator must re-cut ownership explicitly before dispatch — this ticket cannot start
+until #200 merges.
+**Done when:** neither Heston p10 nor Drechsler p55 `native_text` contains a markdown table
+separator where a chart belongs, both contain an image reference, measured through the
+installed package with sizes and checksums recorded; and B2's strict xfail is deleted in the
+same wave.
+
