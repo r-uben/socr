@@ -413,6 +413,34 @@ def _parse_output_row_cells(line: str) -> list[str]:
 # Currency symbols that prefix a value in fiscal tables.
 _CURRENCY_PREFIXES = frozenset("£$€¥")
 
+# Significance-star / footnote-mark glyphs that decorate a table value without
+# being part of it. GH-206: ASCII "*"/"_" were already stripped, but a large
+# share of typeset econometrics tables carry the LaTeX-produced Unicode forms
+# instead (\ast emits U+2217, not ASCII "*"), so the same value looked numeric
+# in one encoding and not the other. Restricted to marks that annotate a
+# *number* (stars, dagger/double-dagger, section sign); superscript letter
+# footnote refs (a, b, ...) are deliberately excluded because those also
+# decorate prose cells, and stripping them would loosen the predicate into
+# accepting label tokens.
+_PRESENTATION_MARKS = (
+    "**",
+    "__",
+    "*",
+    "_",
+    "∗",  # U+2217 ASTERISK OPERATOR (LaTeX \ast)
+    "⁎",  # U+204E LOW ASTERISK
+    "✱",  # U+2731 HEAVY ASTERISK
+    "†",  # U+2020 DAGGER
+    "‡",  # U+2021 DOUBLE DAGGER
+    "§",  # U+00A7 SECTION SIGN
+)
+
+# ".034" is a normal way to print a coefficient below 1 (no leading zero); a
+# bracket wrapper or a leading minus may sit in front of the dot. Anchored at
+# the start of the token so it cannot touch a decimal point elsewhere (e.g.
+# "1.5" or "12.034" are untouched).
+_LEADING_DECIMAL_RE = re.compile(r"^([\(\[]?-?)\.(?=\d)")
+
 
 def strip_presentation(tok: str) -> str:
     """Remove presentation-only decoration from a would-be numeric token.
@@ -420,11 +448,13 @@ def strip_presentation(tok: str) -> str:
     GH-103. Three things are styling or encoding, not value, and each caused a
     token to be dropped entirely rather than compared:
 
-    1. **Markdown emphasis.** ``**23,126**`` never matched the anchored
-       ``_NUM_TOKEN_RE``, so every bolded numeric cell vanished from the multiset.
-       On a table whose section-total rows are bold — which is how VLMs emit them —
-       the source-evidence gate then had nothing left to check and passed
-       vacuously.
+    1. **Markdown emphasis and significance marks.** ``**23,126**`` never
+       matched the anchored ``_NUM_TOKEN_RE``, so every bolded numeric cell
+       vanished from the multiset. On a table whose section-total rows are
+       bold — which is how VLMs emit them — the source-evidence gate then had
+       nothing left to check and passed vacuously. GH-206 extended this to the
+       Unicode significance-star/dagger glyphs typeset econometrics tables use
+       (see ``_PRESENTATION_MARKS``).
     2. **Unicode minus and dashes.** Native fiscal PDFs carry U+2212 while a VLM
        emits ASCII ``-``. Both sides were dropped, so a value that actually agreed
        looked like it was missing from both. (``reconcile._norm`` already folded
@@ -433,12 +463,16 @@ def strip_presentation(tok: str) -> str:
        when the native layer glues the symbol and the markdown cell drops it
        because the unit lives in the caption.
 
+    GH-206 also normalizes leading-decimal values (``.034`` → ``0.034``) so a
+    coefficient printed without its leading zero is recognised the same way on
+    both sides of a comparison.
+
     Deliberately NOT stripped: parentheses, trailing ``%`` and thousands commas,
     which ``_normalize_numeric_token`` already handles and which carry meaning
     (the econ negative convention).
     """
     tok = tok.strip().replace(" ", " ").strip()
-    for mark in ("**", "__", "*", "_"):
+    for mark in _PRESENTATION_MARKS:
         while tok.startswith(mark):
             tok = tok[len(mark) :]
         while tok.endswith(mark):
@@ -447,6 +481,7 @@ def strip_presentation(tok: str) -> str:
         tok = tok.replace(dash, "-")
     while tok[:1] in _CURRENCY_PREFIXES:
         tok = tok[1:]
+    tok = _LEADING_DECIMAL_RE.sub(r"\g<1>0.", tok)
     return tok.strip()
 
 
