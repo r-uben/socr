@@ -92,20 +92,108 @@ the flag from `needs_repair`, which is precisely the mechanism that would have m
 
 ## 4. Open questions for tomorrow
 
+**Read §4b first — a review round landed after this section was written and answers several of
+these, and changes the ranking.**
+
 1. **#200's fate** — the three options above. My lean: (2) then (1), so nothing that fires on a
    quarter of correct pages ever reaches `main`, but the reviewed wiring survives.
+   **Superseded — see §4b.1: both the reviewer and Fable reject (2), for different reasons.**
 2. **What does an escalation signal DO when it fires?** Table pages already route to the model.
    So the signal cannot mean "send to OCR" — that already happens. Candidates: escalate the
    *ladder* (local → cloud); refuse to accept the winner and re-run; or mark for repair. Each has
-   a different cost profile and none is designed.
+   a different cost profile and none is designed. **First concrete answer in §4b.4.**
 3. **Does the structural check run on the winner, including an accepted VLM grid?** If yes, that
    is a bigger change than B1 and touches the judge. If no, the silent-replacement gap stays open.
 4. **Is the TR-3 gap (§5.2) worth more than B1?** I think it might be. It needs an hour of
-   scoping, not a wave.
+   scoping, not a wave. **Sharpened in §4b.3 — it has an unmeasured precision problem of its own.**
 5. **Should `/paper-lookup` be fixed?** It names only iCloud. The corpus spans two locations and
    neither is complete alone (see §6). Deferred by the owner; still true.
 
 ---
+
+## 4b. Review round on #204 — reviewer proposals + Fable's independent judgement
+
+Two inputs landed after §4 was written: a seven-point ranked review on #204 (comment
+`5292582298`, plus an inline on the three options and a pointer on #200), and Fable's independent
+read of that review. Fable verified claims by probe rather than agreeing; artifacts in
+`/tmp/b1verify/`. Where they differ, both positions are recorded — neither is a decision.
+
+**0. A hazard that was real and is now fixed.** #204 was cut from `feat/151-b1-structural-gate`
+rather than `main`, so it carried #200's three implementation commits (1,963 insertions across
+`orchestrator.py`, `manifest.py`, `state.py`, `tables_trust.py`) while its body claimed docs only.
+Merging it would have landed the 26.9% shape gate. Rebuilt from `main` as `6ddcd62`; the PR now
+contains exactly three doc files. The reviewer's "do not merge as it stands" was correct when
+written and is stale now.
+
+**1. Both reject "narrow 26.9% → 14.3%" — but for different reasons, and the difference matters.**
+The reviewer's argument is principle: a tighter heuristic is still a heuristic, and B1 exists to
+stop treating markdown shape as structure. Fable disagrees with that reasoning and agrees with the
+conclusion on priority grounds: the design note §2.3 shows the pairs the narrowing *keeps* are
+dominated by genuinely damaged pages (garbled `Sd. B` / `SILL Error` labels, real `R2` splits),
+which is evidence of decent precision, not disqualification. And under the escalation reframe a
+false positive costs **compute, not content** — a much weaker objection than it was for a status
+label. Fable's defensible version: don't spend the next hour tightening shape when a
+better-grounded signal is already computed and inert.
+
+**2. The reviewer's counter-proposal (replace the predicate on #200's branch before merge, so
+26.9% never touches `main`) is available — but it is not a swap.** Fable verified the load-bearing
+claim independently: rebuilding B1's acceptance fixture and running `BornDigitalDetector.detect_page`
+on the current tree gives `has_unverifiable_table_region=True`, hard-fail reason
+`value_guard_multiset_mismatch: 1 paired row(s)`. So TR-3 does fire on B1's own fixture. Two
+qualifications Fable found:
+   - **No D3-floor collapse.** #200 uses a separate flag (`native_table_structure_defective`), so
+     swapping its source leaves the D3 conjunction at `manifest.py:311-313` intact. Checked.
+   - **But the swap creates a duplicate flag and rewrites the acceptance suite.** Under the swap,
+     `native_table_structure_defective` becomes bit-identical to the existing
+     `PageState.native_table_unverifiable` (`state.py:190` propagates the same field). The honest
+     shape is "give `native_table_unverifiable` the wiring #200 built", not "keep both names".
+     And the `GH151_P26_MD` seam test is **unimplementable** under TR-3 — it is a markdown string
+     with no PDF, so no geometry can run — while the negative controls are all shape-written. Real
+     move, but it is a test-suite rewrite plus a flag-dedup decision. Do not let it be scoped as
+     an afternoon's work.
+
+**3. The sharpest finding: TR-3's 25.3% is a firing rate, not a defect rate — nobody has measured
+its precision either.** The reviewer calls surfacing TR-3 the better next hour and says its
+"false-positive story is different". Fable: different in kind, yes; *measured*, no. The verifier is
+conservative by design (hard-fail reserved for clean row alignment; a multiset mismatch under a
+row-count discrepancy ships flagged instead — `native_verifier.py:826-846`), but a quarter of
+native tables firing "certain dropped/shifted value" is implausibly high — if true this pipeline
+would be known-broken in ways nothing else corroborates. TR-3 shares the `is_numeric_token`
+machinery whose `.034` / U+2217 gaps are follow-up 7(b), and notation-driven false positives inside
+the 25.3% were never separated. **Emitting an AuditEvent for the 62 pages costs nothing and honours
+"no silent content loss" — do that. Keying escalation or any ERROR/PARTIAL status on it before
+someone hand-judges a sample repeats the exact mistake that sank the 26.9% gate.**
+
+**4. First concrete answer to "what should escalation mean" (Fable):** a **stop-condition veto on
+the ladder**, with a fail-closed marker at the top rung. Structural soundness joins recall as an
+acceptance criterion on the *winning* candidate at each rung. Fails at local → escalate local→cloud.
+Fails at the top rung → do not silently ship the best-looking loser; ship it flagged with an
+explicit marker, the precedent the D3 floor already sets (`manifest.py:303-333` — marker + PNG ref,
+`audit_passed=False`). **Not** `needs_repair` (barred by the `--native-only` ruling), **not**
+deletion. This shape also absorbs the winner-side check naturally: the same predicate runs on
+whatever is about to ship, native or VLM, instead of only on the native attempt.
+Gating dependency: point 3. At unmeasured precision, wiring TR-3 into ladder escalation means
+escalating a quarter of table pages to cloud on unvalidated evidence.
+
+**5. Coverage asymmetry — the signals are NOT nested, so "replace shape with TR-3" loses real
+detections.** TR-3 misses **31 of the 66** shape-flagged pages (design note §2.4), and the narrowed
+shape gate's kept set is dominated by genuine damage (§2.3). Garbled-label splits are *textual* and
+plausibly invisible to a numeric-token multiset. The review treats Option C as strictly dominant;
+the note's own numbers say otherwise. **The eventual escalation predicate may legitimately be a
+disjunction of both signals.**
+
+**Points both agree on, and that survive:** do not design escalation semantics inside #200 (file
+it); the winner-side check is a separate, judge-touching ticket and must not be smuggled into a
+"replace the predicate" patch; file the two follow-ups (TR-3 unsurfaced; `is_numeric_token`
+notation gaps); `--native-only` stands; `orphan_rows` stays out; no majority vote; no new constants;
+#201 correctly held.
+
+**Fable's one-line conclusion:** the single most valuable next action is neither narrowing nor
+swapping — it is **hand-judging the 62 TR-3 pages so the escalation gate is built on a defect rate,
+not a firing rate.** That measurement is cheap and it gates everything else.
+
+---
+
 
 ## 5. Follow-ups surfaced and not yet filed
 
