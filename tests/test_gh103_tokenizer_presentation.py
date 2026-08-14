@@ -13,6 +13,11 @@ Every invented number in it was invisible to the tokenizer.
 Two related gaps fixed in the same pass: U+2212 minus (native fiscal PDFs carry it,
 VLMs emit ASCII ``-``, so both sides were dropped and a value that actually agreed
 looked absent from both) and currency prefixes.
+
+GH-206 closed two further gaps in the same predicate: leading-decimal values
+(``.034``, no leading zero — an ordinary way to print a coefficient below 1) and
+the Unicode significance-star/dagger glyphs typeset econometrics tables use
+(``∗`` U+2217 is what LaTeX ``\\ast`` emits, not ASCII ``*``).
 """
 
 from __future__ import annotations
@@ -103,6 +108,49 @@ def test_strip_presentation_leaves_meaning_bearing_marks():
     assert strip_presentation("(0.014)") == "(0.014)"
     assert strip_presentation("45%") == "45%"
     assert strip_presentation("1,204") == "1,204"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (".034", "0.034"),  # leading-decimal, no leading zero
+        ("(.034)", "(0.034)"),
+        ("-.034", "-0.034"),
+        ("0.67∗∗∗", "0.67"),  # U+2217 ASTERISK OPERATOR (LaTeX \ast)
+        ("0.67†", "0.67"),  # U+2020 DAGGER
+        ("0.67‡", "0.67"),  # U+2021 DOUBLE DAGGER
+        ("0.67§", "0.67"),  # U+00A7 SECTION SIGN
+    ],
+)
+def test_gh206_notation_gaps_are_stripped(raw, expected):
+    assert strip_presentation(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [".034", "(.034)", "-.034", "0.67∗∗∗", "0.67†", "0.67‡", "0.67§"],
+)
+def test_gh206_notation_gaps_are_recognised_as_numeric(raw):
+    assert is_numeric_token(raw)
+
+
+def test_gh206_leading_decimal_normalizes_the_same_as_its_zero_prefixed_form():
+    """The two sides of a comparison must not disagree over a missing leading zero."""
+    assert _normalize_numeric_token(".034") == _normalize_numeric_token("0.034")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "p<.05",  # not a bare value: comparator prefix
+        "e.g.",
+        "N/A",
+        "..034",  # malformed, not a value
+        ".a",
+    ],
+)
+def test_gh206_notation_fix_does_not_admit_prose_tokens(raw):
+    assert not is_numeric_token(raw)
 
 
 def test_content_labels_were_never_the_bug():
