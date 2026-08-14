@@ -117,6 +117,21 @@ computed on every table page and consumed by nothing — which is verbatim B1's 
 
 ## 2. Measurement (32 papers · 245 native-table pages · 422 blocks)
 
+> **Amended 2026-08-14 — do not quote 25.3% as "the" TR-3 rate.** An independent run over a
+> different 40-paper sample (`/tmp/b1probe/list.txt`) gives **491** native table pages and TR-3
+> firing on **68 (13.8%)**. Neither count is wrong: this section samples "every 10th paper from
+> the local papers library, first 400 by name", the other used a different list. The 25.3% vs
+> 13.8% spread is sampling variance across two small, differently-drawn samples of a library
+> where table density varies sharply between papers. The honest statement is that TR-3 fires on
+> **somewhere in the mid-teens to mid-twenties percent** of native table pages.
+>
+> The *relative* findings in this section are within-sample comparisons and are unaffected —
+> including the TR-3 vs shape coverage split and the 31-page non-overlap in §2.4. What is not
+> safe is treating the absolute base rate as settled, which it was starting to be in the #204
+> argument. See #205 for the reconciliation and for the separate finding that the
+> `is_numeric_token` notation gaps (#206/#207) explain only **2 of 68** firings — measured
+> before/after on the *same* papers, so sampling cannot account for it.
+
 ### 2.1 Base rates, per block and per page
 
 | Signal | blocks / 422 | pages / 245 |
