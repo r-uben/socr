@@ -264,10 +264,13 @@ failure — and check the premise before staffing, not after.
 - `src/socr/tables/structure_check.py` — released from wave-1-only; GH-151 B1 extends it.
 - `src/socr/core/manifest.py` — **added**, claimed by GH-151 B1. A flag the manifest does not
   read re-stamps `audit_passed=True` (the PP-7-R1 bug shape), which would make the gate inert.
-- `src/socr/core/born_digital.py` — contended. GH-151 B1 holds it (PR #200); **GH-150 C1 needs
-  it next** and cannot dispatch until #200 merges. GH-152 A2 may also need it if left-to-right
-  reading order stays in its `Done when` — `born_digital.py:1201` re-sorts by `y0` alone, so
-  ordering cannot be delivered from `reconstruct.py`.
+- `src/socr/core/born_digital.py` — contended, and now the **single bottleneck for all remaining
+  work**. Four claimants, in order: GH-151 B1 holds it (PR #200); **GH-150 C1 needs it next** and
+  cannot dispatch until #200 merges; GH-152 A2 may also need it if left-to-right reading order
+  stays in its `Done when` — `born_digital.py:1201` re-sorts by `y0` alone, so ordering cannot be
+  delivered from `reconstruct.py`; and **fake-native B1** (`docs/plans/fake-native-pages/`, merged
+  in #209) queues fourth. Nothing about that queue is parallelisable — resolving #200's direction
+  is what unsticks all four.
 
 ### Process notes worth keeping
 
@@ -285,6 +288,12 @@ failure — and check the premise before staffing, not after.
   gaps. The union is complete. Google Drive holds a third archive copy that must not be read
   from (kept quit by design, streams rather than stores). Copy to `/tmp` and verify byte size;
   never open in place.
+- **Size a vivid failure before letting it block work.** The fake-native plan was opened as an
+  interrupt on the belief that scanned-with-bad-OCR pages were contaminating the table-defect
+  numbers, and its STATUS said nothing on #200 should be decided until it landed. Measurement
+  (#209) put the population at 2.4% of pages and the overlap with TR-3 at 6/68 — it blocked
+  nothing. The read-only measurement was cheap and worth running; the *blocking claim* attached
+  to it was a generalisation from one dramatic page. Measure first, then decide what it stops.
 
 ## Next action
 
@@ -292,7 +301,12 @@ failure — and check the premise before staffing, not after.
 measurement: GH-152 A1 (`tables/reconstruct.py`), GH-150 B2 (`tests/` + `fixtures/` + `logs/`),
 GH-147 B1 (`tests/` + `fixtures/` + `logs/`). Write sets are disjoint.
 
-**Then wave 4, gated on PR #200 merging:** GH-150 C1 and GH-152 A2 both want
+**Then wave 4, gated on PR #200 merging:** GH-150 C1, GH-152 A2 and fake-native B1 all want
 `born_digital.py`, so they serialize behind #200 and behind each other.
+
+**The standing blocker is #200's direction, not its code.** It is rebuilt as an escalation signal
+(`docs/log/2026-08-14_gh151-b1-escalation-decision.md`); what remains undecided is what the signal
+should *do* — Fable's proposal is a stop-condition veto on the ladder with a fail-closed marker at
+the top rung. Until that is settled, four tickets sit still.
 
 
