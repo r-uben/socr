@@ -130,3 +130,17 @@ measurement of a selected subpopulation, and says so.
    fires on and TR-3 does not.
 3. Should the **table detector** be gated ahead of any of this? Indexes and figures reaching table
    reconstruction is a defect in its own right, independent of which structural gate ships.
+
+## Filed
+
+Both bugs this measurement surfaced were unfiled; filed 2026-08-15:
+
+- **#212** — `bug(agentic): EXACT_PASS accepts a model table with no structural check`.
+  `native_verifier.py:1055-1058` sets `EXACT_PASS` on purely numeric-multiset
+  conditions; `agentic.py:595-612` returns `accept=True, confidence=1.0` without ever
+  calling the inner visual/structural judge. Cross-referenced against #151, #162, #205.
+- **#213** — `bug(tables): book indexes and figures are routed to table reconstruction`.
+  3 of 7 TR-3 firings in this sample were not tables (two book back-matter indexes, one
+  figure); a two-column index's trailing page-number run is a numeric lane that a
+  numeric-lane geometry check fires on by construction. Cross-referenced against #150
+  and the closed #113.
