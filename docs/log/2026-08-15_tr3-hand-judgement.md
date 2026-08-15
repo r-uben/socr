@@ -144,3 +144,44 @@ Both bugs this measurement surfaced were unfiled; filed 2026-08-15:
   figure); a two-column index's trailing page-number run is a numeric lane that a
   numeric-lane geometry check fires on by construction. Cross-referenced against #150
   and the closed #113.
+
+## Corrections (2026-08-15, later the same day)
+
+Three claims in the sections above were checked against the code and did not survive. They
+are retracted here rather than edited in place, so the original reasoning stays legible.
+
+1. **"Both bugs this measurement surfaced were unfiled" is false.** The figure case was
+   already open as **#150** (`has_chart_marks` false negative on thin-vector-stroke charts,
+   plus unconditional table-lane precedence). **#213 has been narrowed to indexes only**, and
+   the figure page `018_2016__ramey__shocks` was added to #150 as evidence.
+
+2. **#212's "purely numeric-multiset conditions" is too broad.** `_value_guard`
+   (`native_verifier.py:644-688`, `:808-836`) includes a *structural* systematic
+   label-binding hard-fail, and the module's own docstring at `:112` reads
+   `"EXACT_PASS — scoped: row counts match, no label-binding, no multiset mismatch."`
+   The surviving, narrower claim is that there is **no header-attribution check** anywhere on
+   the accept path — so header-band loss and star-only row deletion are invisible, while
+   *dominant* interleaved label detachment is already caught. #212 was retitled and rewritten
+   accordingly.
+
+3. **#213's stated index mechanism is disproven.** A single trailing page-number lane cannot
+   route a page into table reconstruction via `has_numeric_columns`: that gate requires
+   `_MIN_LANES_PER_ROW = 3` numeric lanes per row and `_MIN_TABLE_ROWS = 3` such rows
+   (`reconstruct.py:86-88`), and an index row has exactly one numeric token. `_detect_tables`
+   tries `page.find_tables()` first (`born_digital.py:1006-1031`), which is now the leading
+   candidate but is **unverified**. #213's first task is instrumentation, not a fix.
+
+## Outcome of the #200 session
+
+Open question 1 above — whether the escalation predicate needs a header-attribution term — was
+attempted four times and **parked**, tracked as **#215**. Each implementation failed in one of
+two directions: abstaining on the 4-of-4 header-loss case, or returning `HARD` on byte-perfect
+correct tables carrying significance-star or `n.a.` rows. A false reject destroys correct
+output, so #200's gate ships on B1's predicate alone.
+
+Open question 2 — judging pages where B1 fires and TR-3 does not — remains **the blocking
+measurement**, and is the input that should decide whether #215 is worth building at all.
+
+A fourth defect was found along the way and filed as **#214**: the resume fingerprint has no
+source-version component, so a correctness fix is silently never applied to pages already
+marked terminal.

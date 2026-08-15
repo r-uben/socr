@@ -1,13 +1,31 @@
 # #200 shipping spec — the structural escalation gate, ratified
 
 Date: 2026-08-15
-Status: **spec ratified, one blocking pre-merge measurement named (OPEN DECISION 1).**
+Status: **SUPERSEDED IN PART — the header-attribution sections did not survive implementation.**
+
+> **Read this first (added 2026-08-15, after implementation).** The escalation-gate half of
+> this spec shipped as specified: #200's plumbing with B1's own predicate
+> (`ragged OR detached_label_rows`). The **header-attribution half did not**. Four
+> implementations were attempted; each either abstained on the 4-of-4 header-loss case this
+> spec exists to catch, or returned `HARD` on byte-perfect correct tables carrying
+> significance-star or `n.a.` rows. The reject term is parked and tracked as **#215**.
+>
+> Specific sections now known to be wrong, kept for the record rather than edited:
+> the reuse of the existing geometry chain to find a header band (it cannot recognise
+> `1997/2002` or `(1)(2)(3)` bands); exact-multiset anchoring as a unique table locator on a
+> multi-table page; whitespace-token equality as the comparison (it false-rejects
+> presentation-equivalent headers such as an en-dash vs a hyphen); and treating one surviving
+> token as preservation of a whole header cell.
+>
+> The measurement named as OPEN DECISION 1 remains the right next step, and is still unmade.
+
 Inputs: `2026-08-15_tr3-hand-judgement.md` (the measurement), `2026-08-14_gh151-b1-escalation-decision.md`,
 `2026-08-14_gh151-b1-predicate-design.md`, the 2026-08-15 consilium panel
 (`~/.local/share/consilium/runs/2026/08/20260815T003453Z-3777/`), and two independent model proposals.
 
 **Process note:** the adjudication brief said three proposals; the payload carried **two**. This
-document adjudicates the two that arrived. Nothing below rests on a third.
+document adjudicates the two that arrived. Nothing below rests on a third. (The third was
+discarded by the harness for omitting one required schema field, not for its content.)
 
 Every file:line below was read in the working tree at `docs/200-tr3-hand-judgement`
 (= `main` + one docs commit) unless explicitly marked *branch*.
