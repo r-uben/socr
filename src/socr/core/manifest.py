@@ -312,7 +312,19 @@ def _winning_page_output(
     """
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
-        return p.best_output
+        # An ``audit_passed`` native output on a page whose table was flagged
+        # unverifiable is a CONTRADICTION, and the contradiction must lose to
+        # the distrust flag rather than short-circuit past it. This state is
+        # reachable without any live scoring bug: the resume ledger's
+        # fingerprint has no source-version component (#214), so a page marked
+        # terminal SUCCESS by an older build is restored verbatim -- carrying
+        # ``audit_passed=True`` alongside ``native_table_unverifiable=True``.
+        # Falling through here re-demotes it through the normal path below.
+        native_unverifiable = (p.best_output.engine or "").startswith("native") and getattr(
+            p, "native_table_unverifiable", False
+        )
+        if not native_unverifiable:
+            return p.best_output
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
     # hallucination is worse than an explicit failure marker — same D3 pattern.

@@ -199,3 +199,37 @@ def test_ocr_attempt_text_never_substitutes_for_native(tmp_path) -> None:
     assert winning.text == native_text
     assert "OCR EXTRA" not in winning.text
     assert "COMPLETELY DIFFERENT" not in winning.text
+
+
+def test_stale_passing_best_output_cannot_outrank_table_distrust(tmp_path) -> None:
+    """A page can carry ``audit_passed=True`` AND ``native_table_unverifiable``.
+
+    That contradiction is reachable with no live scoring bug: the resume ledger's
+    fingerprint has no source-version component (#214), so a page stamped
+    terminal SUCCESS by an older build is restored verbatim. The distrust flag
+    must win; returning the passing output early would ship a known-damaged
+    table as clean SUCCESS.
+    """
+    state = _state_with_demoted_native_table(tmp_path, sidecar_appended=True)
+    ps = state.pages[1]
+
+    stale_passing = PageOutput(
+        page_num=1,
+        text=ps.native_text + "\n\n$$E = mc^2$$",
+        status=PageStatus.SUCCESS,
+        engine="native",
+        audit_passed=True,  # stale verdict from an older build
+    )
+    ps.best_output = stale_passing
+    assert ps.native_table_unverifiable is True
+
+    winning = _winning_page_output(state, 1)
+
+    assert winning.status is PageStatus.WARNING, (
+        "a stale passing best_output short-circuited past the table-distrust "
+        "flag and shipped a known-damaged table as clean"
+    )
+    assert winning.audit_passed is False
+    assert winning.failure_mode is FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+    # ...and the demotion still preserves the appended sidecar.
+    assert "$$E = mc^2$$" in winning.text
