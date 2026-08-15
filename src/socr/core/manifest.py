@@ -279,11 +279,7 @@ def _winning_page_output(
     """
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
-        native_unverifiable = (p.best_output.engine or "").startswith("native") and getattr(
-            p, "native_table_unverifiable", False
-        )
-        if not native_unverifiable:
-            return p.best_output
+        return p.best_output
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
     # hallucination is worse than an explicit failure marker — same D3 pattern.
@@ -349,9 +345,23 @@ def _winning_page_output(
             or native_table_defect
             or p.chart_asset_render_failed  # PP-7: render failure must stay WARNING
         ) and bool(p.attempts)
+        # GH-211 MAJOR-1: prefer the live best_output's text over the raw
+        # ``p.native_text`` snapshot when one exists. ``p.native_text`` is
+        # frozen at extraction time; ``best_output.text`` starts as the same
+        # string but may have content APPENDED afterwards -- notably GH-36b's
+        # equation LaTeX sidecar, spliced onto the PageOutput object in place
+        # (never onto ``native_text``). Demoting a page's table trust (WARNING
+        # status here) must not silently revert it to the pre-sidecar text.
+        fallback_text = (
+            p.best_output.text
+            if p.best_output
+            and p.best_output.text
+            and (p.best_output.engine or "").startswith("native")
+            else p.native_text
+        )
         return PageOutput(
             page_num=page_num,
-            text=p.native_text,
+            text=fallback_text,
             status=PageStatus.WARNING if native_is_fallback else PageStatus.SUCCESS,
             engine="native",
             audit_passed=not native_is_fallback,

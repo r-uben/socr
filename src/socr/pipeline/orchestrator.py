@@ -4725,6 +4725,28 @@ class UnifiedPipeline:
             and getattr(p, "native_table_unverifiable", False)
             and bool(p.attempts)
         ]
+        # GH-211 MAJOR-2: under --native-only the OCR ladder never runs, so a
+        # page demoted purely because the extraction-time TR-3 geometry check
+        # flagged it (``native_table_unverifiable``) never had an OCR attempt
+        # -- "OCR tried and never passed" (the native_fallback wording below)
+        # would be a lie for these pages. Split them into their own bucket so
+        # the audit log and CLI can say "native distrusted, OCR never run"
+        # instead. Guarded by ``all(... startswith("native"))`` so the narrow
+        # rotated+table exception (which DOES still route through OCR even
+        # under --native-only, see ``_is_trusted_native_without_ocr``) is
+        # correctly excluded and keeps the "OCR tried and failed" wording.
+        native_only_distrust_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if p.is_born_digital
+            and p.native_text
+            and self.config.native_only
+            and getattr(p, "native_table_unverifiable", False)
+            and not p.native_table_structure_failed
+            and p.attempts
+            and all((a.engine or "").startswith("native") for a in p.attempts)
+            and not (p.best_output and p.best_output.audit_passed)
+        ]
         native_fallback_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -4739,6 +4761,7 @@ class UnifiedPipeline:
             and not (
                 p.native_table_structure_failed and getattr(p, "native_table_unverifiable", False)
             )
+            and n not in native_only_distrust_pages  # GH-211: OCR never attempted here
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
         ]
@@ -4750,6 +4773,7 @@ class UnifiedPipeline:
         has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
+        pages_ok = pages_ok and not native_only_distrust_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -4760,7 +4784,7 @@ class UnifiedPipeline:
 
         state.status = status
 
-        if failed_pages or native_fallback_pages or d3_floor_pages:
+        if failed_pages or native_fallback_pages or d3_floor_pages or native_only_distrust_pages:
             from socr.core.audit_log import AuditEvent
 
             for n in failed_pages:
@@ -4780,6 +4804,24 @@ class UnifiedPipeline:
                         engine="native",
                         detail="OCR tried and never passed on a structured/enhancement page; "
                         "native text shipped flagged",
+                    )
+                )
+            # GH-211 MAJOR-2: --native-only distrust pages get their own kind
+            # here too. The authoritative "table_structure_failed" event was
+            # already recorded once, in ``_phase_analyze``, at extraction time
+            # (data={"defect": "unverifiable_table_region"}) -- this repeats
+            # the accurate "OCR never attempted" wording at assemble time so a
+            # reader scanning the tail of the audit log (or the CLI summary
+            # below) is not left with only the misleading native_fallback
+            # phrasing for these pages.
+            for n in native_only_distrust_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="native_only_table_distrusted",
+                        engine="native",
+                        detail="--native-only: table region unverifiable, OCR never "
+                        "attempted (ladder disabled); native text shipped flagged",
                     )
                 )
             # TR-3: distinct audit event for D3 floor pages — do NOT record
@@ -4810,6 +4852,12 @@ class UnifiedPipeline:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
                         f"fell back to native text: {native_fallback_pages}[/yellow]"
+                    )
+                if native_only_distrust_pages:
+                    console.print(
+                        f"  [yellow]{len(native_only_distrust_pages)} page(s) shipped native "
+                        f"text with an unverifiable table region (--native-only: OCR not "
+                        f"attempted): {native_only_distrust_pages}[/yellow]"
                     )
                 if d3_floor_pages:
                     console.print(

@@ -119,6 +119,22 @@ def test_native_only_unverifiable_table_is_flagged_without_rerouting(
     assert len(events) == 1
     assert events[0].page_num == 1
 
+    # GH-211 MAJOR-2: OCR was NEVER attempted on this page (--native-only
+    # disables the ladder). The generic "native_fallback" event lies here
+    # ("OCR tried and never passed"); it must not be recorded for a page
+    # whose only defect is native-table distrust under --native-only.
+    fallback_events = [event for event in state.events if event.kind == "native_fallback"]
+    assert fallback_events == [], (
+        "native_fallback claims OCR was tried and failed, but --native-only "
+        "never runs the OCR ladder -- this page was never attempted"
+    )
+    distrust_events = [
+        event for event in state.events if event.kind == "native_only_table_distrusted"
+    ]
+    assert len(distrust_events) == 1
+    assert distrust_events[0].page_num == 1
+    assert "OCR never attempted" in distrust_events[0].detail
+
     sidecar = json.loads(_only(output_dir, "pages/00001.json").read_text(encoding="utf-8"))
     assert sidecar["native_table_unverifiable"] is True
     assert sidecar["status"] == PageStatus.WARNING.value
