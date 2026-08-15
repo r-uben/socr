@@ -651,3 +651,237 @@ class TestThreeFlagPageIsNotDoubleCounted:
         kinds = [e.kind for e in state.events if e.page_num == 1]
         assert kinds.count("table_region_unverifiable") == 1  # d3_floor_pages event
         assert "native_fallback" not in kinds  # NOT also in native_fallback_pages
+
+
+# ---------------------------------------------------------------------------
+# GH-200: the header-attribution term (record and surface, never reroute).
+# A page whose grid is RECTANGULAR (B1's own grid-shape predicate does NOT
+# fire, and every numeral is correct so TR-3 would not fire either) but whose
+# header band is destroyed must still be demoted, end to end, under
+# --native-only.
+# ---------------------------------------------------------------------------
+
+_HDR_LABEL_X = _LABEL_X
+_HDR_VALUE_XS = _VALUE_XS
+_HDR_HEADER = ("Currency", "Low%", "Mid%", "High%", "Wide%", "Total%", "Extra%")
+_HDR_ROWS: list[tuple[str, tuple[str, ...]]] = [
+    ("alpha", ("1.0", "2.0", "3.0", "4.0", "5.0", "6.0")),
+    ("beta", ("1.1", "2.1", "3.1", "4.1", "5.1", "6.1")),
+    ("gamma", ("1.2", "2.2", "3.2", "4.2", "5.2", "6.2")),
+]
+
+
+def _destroyed_header_table_pdf(path: Path) -> None:
+    """A rectangular, non-ragged table whose native header words are real,
+    but whose emitted markdown (patched in the test) blanks them entirely."""
+    doc = fitz.open()
+    page = doc.new_page()
+
+    top = 170.0
+    y = top + _ROW_H
+    for i, cell in enumerate(_HDR_HEADER):
+        x = _HDR_LABEL_X if i == 0 else _HDR_VALUE_XS[i - 1]
+        page.insert_text((x, y), cell, fontsize=9, fontname="helv")
+    y += _ROW_H
+    for label, values in _HDR_ROWS:
+        page.insert_text((_HDR_LABEL_X, y), label, fontsize=9, fontname="helv")
+        for x, v in zip(_HDR_VALUE_XS, values):
+            page.insert_text((x, y), v, fontsize=9, fontname="helv")
+        y += _ROW_H
+
+    page.draw_line(fitz.Point(50, top), fitz.Point(500, top))
+    page.draw_line(fitz.Point(50, top + _ROW_H), fitz.Point(500, top + _ROW_H))
+    page.draw_line(fitz.Point(50, y), fitz.Point(500, y))
+
+    doc.save(str(path))
+    doc.close()
+
+
+def _blanked_header_markdown() -> str:
+    n_cols = len(_HDR_ROWS[0][1]) + 1
+    # Label cell survives (an all-blank row is dropped by the parser's own
+    # separator-row blind spot, see structure_check.py's module docstring
+    # and test_header_attribution.py::test_missing_header_band_is_hard);
+    # every data-lane header cell is blank.
+    blank_row = "| " + _HDR_HEADER[0] + " | " + " | ".join([""] * (n_cols - 1)) + " |"
+    sep_row = "| " + " | ".join(["---"] * n_cols) + " |"
+    rows = [blank_row, sep_row]
+    for label, values in _HDR_ROWS:
+        rows.append(f"| {label} | {' | '.join(values)} |")
+    return "\n".join(rows)
+
+
+class TestHeaderAttributionEndToEnd:
+    def test_native_only_records_header_defect_without_rerouting(self, tmp_path: Path) -> None:
+        """process() on a generated born-digital table PDF with native_only.
+
+        The emitted markdown (stubbed via ``extract_structured``) is
+        rectangular -- B1's own grid-shape predicate must NOT fire -- but its
+        header row is entirely blank while the native page carries real
+        header words over every data lane, so the header-attribution HARD
+        verdict must fire and demote the page without ever consulting the
+        OCR ladder.
+        """
+        pdf_path = tmp_path / "doc.pdf"
+        _destroyed_header_table_pdf(pdf_path)
+        out_dir = tmp_path / "out"
+
+        blanked_md = _blanked_header_markdown()
+        reports = structure_check.check_markdown(blanked_md)
+        assert not _gate_fires(reports), (
+            f"setup precondition failed: the blanked-header fixture must NOT "
+            f"trip the grid-shape gate on its own; reports: {reports}"
+        )
+
+        with patch.object(BornDigitalDetector, "extract_structured", return_value=blanked_md):
+            pipeline = UnifiedPipeline(_config())
+            with patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ):
+                result = pipeline.process(pdf_path, out_dir)
+
+        assert result.status == DocumentStatus.AUDIT_FAILED
+
+        audit_log_path = out_dir / "doc" / "audit_log.json"
+        if not audit_log_path.exists():
+            candidates = list(out_dir.rglob("audit_log.json"))
+            assert candidates, f"no audit_log.json found under {out_dir}"
+            audit_log_path = candidates[0]
+        audit_log = json.loads(audit_log_path.read_text())
+        events = audit_log.get("events", [])
+        fired = [e for e in events if e.get("kind") == "table_structure_failed"]
+        assert len(fired) == 1, f"expected exactly one table_structure_failed event, got {events}"
+
+        sidecar_candidates = list(out_dir.rglob("pages/00001.json"))
+        assert sidecar_candidates, f"no page sidecar found under {out_dir}"
+        sidecar = json.loads(sidecar_candidates[0].read_text())
+        assert sidecar["native_table_header_unattributed"] is True
+        assert sidecar.get("native_table_structure_defective") is False
+        winning = sidecar.get("winning_output") or sidecar
+        assert sidecar.get("status") in ("warning", "WARNING") or winning.get("status") in (
+            "warning",
+            "WARNING",
+        )
+        assert winning.get("failure_mode") == "native_table_structure_failed"
+
+        tables_trust_candidates = list(out_dir.rglob("tables_trust.json"))
+        assert tables_trust_candidates, f"no tables_trust.json found under {out_dir}"
+        tables_trust = json.loads(tables_trust_candidates[0].read_text())
+        assert "1" in tables_trust.get("pages", {}), (
+            f"tables_trust.json carries no distrust record for page 1: {tables_trust}"
+        )
+        assert "table_structure_failed" in tables_trust["pages"]["1"]["reasons"]
+
+        # No-reroute pin: exactly one attempt (native), zero cost -- the OCR
+        # ladder was never consulted even though the page was demoted.
+        assert sidecar["engine"] == "native"
+        assert sidecar["cost_usd"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# GH-200: post-route recheck. The GH-56 header repair mutates
+# ``ps.best_output.text`` AFTER the judge already accepted it, so the shipped
+# text may not be the text the structural gate saw. If repair produces a
+# ragged/detached-label grid, the page must be demoted IN PLACE (WARNING /
+# audit_passed=False), with exactly one audit event for the page.
+# ---------------------------------------------------------------------------
+
+
+class TestPostRouteHeaderRepairRecheck:
+    def test_post_route_header_repair_recheck(self, tmp_path: Path) -> None:
+        from socr.core.config import EngineType, PipelineConfig
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+        from socr.pipeline.agentic import PageDecision, ProviderAttempt
+
+        clean_text = (
+            "| Forecast | 2026 | 2027 |\n| --- | --- | --- |\n| A | 1.2 | 1.3 |\n| B | 2.1 | 2.2 |"
+        )
+        # A grid ``check_markdown`` genuinely reports as ragged -- rows of
+        # inconsistent width, the same shape ``structural_gate_fires`` gates
+        # on elsewhere in this file.
+        ragged_after_repair = "| Forecast | 2026 | 2027 |\n| A | 1.2 |\n| B | 2.1 | 2.2 | 2.3 |"
+        reports = structure_check.check_markdown(ragged_after_repair)
+        assert _gate_fires(reports), (
+            f"setup precondition failed: the post-repair fixture must trip "
+            f"the grid-shape gate; reports: {reports}"
+        )
+
+        doc = fitz.open()
+        doc.new_page()
+        pdf_path = tmp_path / "doc.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        config = PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            agentic=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.QWEN],
+            quiet=True,
+            audit_enabled=True,
+            save_figures=False,
+            write_manifest=False,
+            native_first=False,
+        )
+        pipeline = UnifiedPipeline(config)
+
+        def _accepted_route(page_num, ladder, run_provider, judge, **kwargs):
+            out = PageOutput(
+                page_num=page_num,
+                text=clean_text,
+                status=PageStatus.SUCCESS,
+                engine="qwen",
+                audit_passed=True,
+            )
+            prof = ladder[0]
+            att = ProviderAttempt(
+                engine=prof.engine,
+                output=out,
+                cost_usd=0.0,
+                accepted=True,
+                reason="stub-accept",
+                provider_id=prof.id,
+                model=prof.model,
+                backend=prof.backend,
+            )
+            return PageDecision(page_num=page_num, final_output=out, attempts=[att])
+
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch("socr.pipeline.orchestrator.route_page", side_effect=_accepted_route),
+            patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
+            patch(
+                "socr.tables.header_repair.repair_table_headers_on_page",
+                return_value=(ragged_after_repair, 1),
+            ),
+            # Force this synthetic (tableless-looking) page through the
+            # header-repair block, which is gated on ``_page_has_tables``.
+            patch.object(UnifiedPipeline, "_page_has_tables", return_value=True),
+        ):
+            result = pipeline.process(pdf_path, tmp_path / "out")
+
+        assert result.status == DocumentStatus.AUDIT_FAILED
+
+        out_dir = tmp_path / "out"
+        audit_log_path = out_dir / "doc" / "audit_log.json"
+        if not audit_log_path.exists():
+            candidates = list(out_dir.rglob("audit_log.json"))
+            assert candidates, f"no audit_log.json found under {out_dir}"
+            audit_log_path = candidates[0]
+        audit_log = json.loads(audit_log_path.read_text())
+        events = [e for e in audit_log.get("events", []) if e.get("page_num") == 1]
+        fired = [e for e in events if e.get("kind") == "table_structure_failed"]
+        assert len(fired) == 1, f"expected exactly one audit event for page 1, got {events}"
+        assert fired[0].get("data", {}).get("site") == "post_route_recheck"
+
+        sidecar_candidates = list(out_dir.rglob("pages/00001.json"))
+        assert sidecar_candidates, f"no page sidecar found under {out_dir}"
+        sidecar = json.loads(sidecar_candidates[0].read_text())
+        winning = sidecar.get("winning_output") or sidecar
+        assert sidecar.get("status") in ("warning", "WARNING") or winning.get("status") in (
+            "warning",
+            "WARNING",
+        )
+        assert sidecar.get("audit_passed") is False or winning.get("audit_passed") is False

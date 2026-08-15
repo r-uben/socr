@@ -678,6 +678,25 @@ class UnifiedPipeline:
                         ),
                     )
                 )
+            # GH-200: same treatment for the header-attribution defect. A
+            # separate flag from the grid-shape one above (a header can be
+            # destroyed on a perfectly rectangular grid); kept as its own
+            # event so the two causes stay distinguishable in the audit log.
+            if getattr(pa, "native_table_header_unattributed", False):
+                state.events.append(
+                    AuditEvent(
+                        page_num=pa.page_num,
+                        kind="table_structure_failed",
+                        engine="native",
+                        detail=(
+                            "native table header band not attributable to any emitted "
+                            "header cell (destroyed, not merely misplaced); the native "
+                            "attempt is demoted to flagged WARNING and can no longer "
+                            "pass as a trusted native page (a non-native winner, if "
+                            "any, is unaffected)"
+                        ),
+                    )
+                )
 
         bd_count = assessment.born_digital_count
         if not self.config.quiet:
@@ -930,13 +949,16 @@ class UnifiedPipeline:
                         )
                 except Exception as exc:
                     logger.warning("math recovery failed on p%d: %s", page_num, exc)
-            # GH-151 TICKET-B1: a page can reach prose_pages with a structurally
-            # defective table grid only via --native-only (the non-native-only
-            # eligibility predicate already excludes has_tables pages). Demote
-            # instead of shipping SUCCESS/audit_passed=True -- this is the
-            # no-reroute honouring of the flag: no extra OCR attempt is
-            # triggered, the native text still ships, just flagged.
-            defective = getattr(ps, "native_table_structure_defective", False)
+            # GH-151 TICKET-B1 / GH-200: a page can reach prose_pages with a
+            # structurally defective table grid or a destroyed table header
+            # only via --native-only (the non-native-only eligibility
+            # predicate already excludes has_tables pages). Demote instead of
+            # shipping SUCCESS/audit_passed=True -- this is the no-reroute
+            # honouring of the flag: no extra OCR attempt is triggered, the
+            # native text still ships, just flagged.
+            defective = getattr(ps, "native_table_structure_defective", False) or getattr(
+                ps, "native_table_header_unattributed", False
+            )
             page_outputs.append(
                 PageOutput(
                     page_num=page_num,
@@ -1843,6 +1865,7 @@ class UnifiedPipeline:
             for name in (
                 "native_table_structure_failed",
                 "native_table_structure_defective",  # GH-151 TICKET-B1
+                "native_table_header_unattributed",  # GH-200
                 "native_table_unverifiable",
                 "scanned_table_evidence_failed",
             )
@@ -2477,13 +2500,15 @@ class UnifiedPipeline:
 
             elif is_native:
                 # Tier 1: born-digital trusted native text — free, no OCR.
-                # GH-151 TICKET-B1: a page reaches here with a structurally
-                # defective table grid only via --native-only (the non-
-                # native-only ``is_native`` predicate already excludes
-                # has_tables pages). Demote instead of shipping SUCCESS: this
-                # is the no-reroute honouring of the flag, no extra OCR
-                # attempt is triggered here.
-                defective = getattr(ps, "native_table_structure_defective", False)
+                # GH-151 TICKET-B1 / GH-200: a page reaches here with a
+                # structurally defective table grid or a destroyed table
+                # header only via --native-only (the non-native-only
+                # ``is_native`` predicate already excludes has_tables pages).
+                # Demote instead of shipping SUCCESS: this is the no-reroute
+                # honouring of the flag, no extra OCR attempt is triggered here.
+                defective = getattr(ps, "native_table_structure_defective", False) or getattr(
+                    ps, "native_table_header_unattributed", False
+                )
                 native_out = PageOutput(
                     page_num=page_num,
                     text=ps.native_text,
@@ -2611,6 +2636,39 @@ class UnifiedPipeline:
                             exc,
                         )
 
+                # GH-200: the GH-56 repair above MUTATES ps.best_output.text
+                # after the judge already accepted it -- so the shipped text
+                # is not the text the structural gate saw. Re-run the
+                # grid-shape term ONLY (string-only, no geometry, free) on
+                # whatever text ships now; if repair produced a ragged/
+                # detached-label grid, demote in place. Routing is finished
+                # by this point -- do NOT reroute, just stop shipping it as a
+                # pass. Exactly one audit event per page: this is the sole
+                # recheck site after routing, distinct from the judge's own
+                # (pre-repair) escalation event.
+                if ps.best_output and ps.best_output.text and ps.best_output.audit_passed:
+                    from socr.tables.structure_check import (
+                        check_markdown,
+                        structural_gate_fires,
+                    )
+
+                    if structural_gate_fires(check_markdown(ps.best_output.text)):
+                        from socr.core.audit_log import AuditEvent
+
+                        ps.best_output.audit_passed = False
+                        ps.best_output.status = PageStatus.WARNING
+                        ps.best_output.failure_mode = FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+                        ps.native_table_structure_failed = True
+                        state.events.append(
+                            AuditEvent(
+                                page_num=page_num,
+                                kind="table_structure_failed",
+                                engine=ps.best_output.engine or "",
+                                detail="grid_shape defect found after post-route header repair",
+                                data={"defect": "grid_shape", "site": "post_route_recheck"},
+                            )
+                        )
+
                 # GH-90: scanned-table source-evidence fail-closed floor.
                 _source_ev_rejected = any(
                     "source_evidence_table" in (att.reason or "") for att in decision.attempts
@@ -2650,16 +2708,22 @@ class UnifiedPipeline:
                             ps.native_text,
                             _chart_figures_dir,
                         )
-                    # TR-3: D3 fail-closed floor PNG.  When the per-region
-                    # verifier also hard-failed (native_table_unverifiable=True),
+                    # TR-3 / GH-200: D3 fail-closed floor PNG.  When the per-region
+                    # verifier also hard-failed (native_table_unverifiable=True) OR
+                    # header attribution found a destroyed header band
+                    # (native_table_header_unattributed=True -- TR-3 is blind to
+                    # header loss by construction, see header_attribution.py),
                     # render a full-page PNG so the human can still SEE the table.
                     # The image ref is stored on ps.d3_floor_png_ref and picked up
                     # by _winning_page_output (manifest.py) when assembling the
-                    # final failed-table marker text.
+                    # final failed-table marker text. Without this widening the
+                    # D3 floor would ship a bare marker with no image on a
+                    # header-only defect -- still fail-closed, but a human
+                    # cannot see the table (see manifest.py:_winning_page_output).
                     if (
                         getattr(ps, "native_table_unverifiable", False)
-                        and _chart_figures_dir is not None
-                    ):
+                        or getattr(ps, "native_table_header_unattributed", False)
+                    ) and _chart_figures_dir is not None:
                         ps.d3_floor_png_ref = self._render_d3_floor_png(
                             state.handle.path,
                             page_num,
@@ -3726,9 +3790,12 @@ class UnifiedPipeline:
             if page_state.is_born_digital and page_state.native_text:
                 latest_is_native = (latest.engine or "").startswith("native")
                 if latest_is_native:
-                    if page_state.native_table_structure_defective:
-                        # GH-151 TICKET-B1: the grid defect was found at
-                        # extraction time and is authoritative -- do NOT run
+                    if page_state.native_table_structure_defective or getattr(
+                        page_state, "native_table_header_unattributed", False
+                    ):
+                        # GH-151 TICKET-B1 / GH-200: the grid defect or the
+                        # header-attribution defect was found at extraction
+                        # time and is authoritative -- do NOT run
                         # the heuristic scorer over it (that scorer is exactly
                         # what missed p26: it tolerates the ragged/orphan
                         # shapes this gate targets). Force the demotion and
@@ -3738,6 +3805,8 @@ class UnifiedPipeline:
                         latest.status = PageStatus.WARNING
                         latest.failure_mode = FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
                         detail = "native table grid structurally defective (GH-151 B1 gate)"
+                        if getattr(page_state, "native_table_header_unattributed", False):
+                            detail = "native table header not attributable (GH-200 gate)"
                         latest.error = detail
                         latest.audit_notes.append(detail)
                         failures += 1
@@ -4348,6 +4417,10 @@ class UnifiedPipeline:
             "native_table_structure_defective": (
                 bool(getattr(ps, "native_table_structure_defective", False)) if ps else False
             ),
+            # GH-200: header-attribution HARD verdict found at extraction time.
+            "native_table_header_unattributed": (
+                bool(getattr(ps, "native_table_header_unattributed", False)) if ps else False
+            ),
             # TR-3: per-region geometry hard-fail flag (D3 floor trigger).
             "native_table_unverifiable": (
                 bool(getattr(ps, "native_table_unverifiable", False)) if ps else False
@@ -4541,6 +4614,11 @@ class UnifiedPipeline:
             # survives resume instead of evaporating on a resumed run.
             ps.native_table_structure_defective = bool(
                 meta.get("native_table_structure_defective", False)
+            )
+            # GH-200: restore the header-attribution defect flag so it
+            # survives resume instead of evaporating on a resumed run.
+            ps.native_table_header_unattributed = bool(
+                meta.get("native_table_header_unattributed", False)
             )
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
@@ -4738,12 +4816,21 @@ class UnifiedPipeline:
         # no plausible-but-wrong table is ever emitted.  They are a STRICT SUBSET
         # of failed_pages (every D3 page is also a failed page), counted separately
         # for the distinct audit event and CLI summary.
+        # GH-200: widened identically to manifest.py's D3 conjunction -- a
+        # header-only defect (native_table_header_unattributed, TR-3 is blind
+        # to header loss by construction) is a D3 floor page too, else it is
+        # double-counted below (both in d3_floor_pages via the manifest ship
+        # and in native_fallback_pages via this list, since the exclusion
+        # predicate must match exactly what _winning_page_output ships).
         d3_floor_pages = [
             n
             for n, p in sorted(state.pages.items())
             if p.is_born_digital
             and p.native_table_structure_failed
-            and getattr(p, "native_table_unverifiable", False)
+            and (
+                getattr(p, "native_table_unverifiable", False)
+                or getattr(p, "native_table_header_unattributed", False)
+            )
             and bool(p.attempts)
         ]
         native_fallback_pages = [
@@ -4755,6 +4842,7 @@ class UnifiedPipeline:
                 p.needs_ocr_enhancement
                 or p.native_table_structure_failed
                 or getattr(p, "native_table_structure_defective", False)
+                or getattr(p, "native_table_header_unattributed", False)  # GH-200
                 or p.chart_asset_render_failed  # PP-7: render failure surfaces at doc level
             )
             # TR-3: D3 floor pages (see d3_floor_pages below --
@@ -4787,7 +4875,11 @@ class UnifiedPipeline:
             # the exclusion outside the whole OR closes that gap: it now
             # applies uniformly to every reason a page can enter this list.
             and not (
-                p.native_table_structure_failed and getattr(p, "native_table_unverifiable", False)
+                p.native_table_structure_failed
+                and (
+                    getattr(p, "native_table_unverifiable", False)
+                    or getattr(p, "native_table_header_unattributed", False)  # GH-200
+                )
             )
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)

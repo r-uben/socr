@@ -51,6 +51,13 @@ class PageState:
     #: if they were the same field. Set once in ``apply_born_digital``, never
     #: re-derived downstream.
     native_table_structure_defective: bool = False
+    #: GH-200: header-attribution HARD verdict (destroyed header band) found
+    #: in the native markdown at extraction time. Same treatment as
+    #: ``native_table_structure_defective`` immediately above: a SEPARATE
+    #: field, set once in ``apply_born_digital``, never re-derived
+    #: downstream, deliberately absent from ``needs_repair`` (see that
+    #: property's docstring -- forcing repair under --native-only is barred).
+    native_table_header_unattributed: bool = False
     native_table_unverifiable: bool = False  # TR-3: per-region verifier flagged hard-fail
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
@@ -206,6 +213,11 @@ class DocumentState:
                     # TICKETS.md TICKET-B1.
                     ps.native_table_structure_defective = getattr(
                         pa, "native_table_structure_defective", False
+                    )
+                    # GH-200: propagate the header-attribution defect flag.
+                    # Same non-repair-forcing treatment as the line above.
+                    ps.native_table_header_unattributed = getattr(
+                        pa, "native_table_header_unattributed", False
                     )
                     # TR-3: propagate per-region verifier hard-fail flag so the
                     # D3 selection in _winning_page_output can route to the floor.

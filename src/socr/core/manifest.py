@@ -286,8 +286,9 @@ def _winning_page_output(
         # PP-7-R1 bug shape the ticket warns about: a flag the manifest does
         # not read re-stamps audit_passed=True and makes the gate inert. A
         # passing NON-native best_output is unaffected and returns immediately.
-        native_defective = (p.best_output.engine or "").startswith("native") and getattr(
-            p, "native_table_structure_defective", False
+        native_defective = (p.best_output.engine or "").startswith("native") and (
+            getattr(p, "native_table_structure_defective", False)
+            or getattr(p, "native_table_header_unattributed", False)
         )
         if not native_defective:
             return p.best_output
@@ -320,7 +321,16 @@ def _winning_page_output(
         # A wrong/shifted number is worse than an obviously-missing one.
         if (
             p.native_table_structure_failed
-            and getattr(p, "native_table_unverifiable", False)
+            and (
+                getattr(p, "native_table_unverifiable", False)
+                # GH-200: TR-3 is blind by construction to header loss (the
+                # 2026-08-15 hand judgement: 4/4 damaged pages). A header-only
+                # defect satisfies native_table_structure_failed but never
+                # native_table_unverifiable, so without this OR it fell
+                # through to the native_is_fallback WARNING branch below and
+                # SHIPPED the header-destroyed native table text.
+                or getattr(p, "native_table_header_unattributed", False)
+            )
             and bool(p.attempts)
         ):
             # TR-3: D3 fail-closed floor text = failed-table marker + image ref.
@@ -348,8 +358,10 @@ def _winning_page_output(
         # as a FALLBACK, not a success: flagged WARNING / audit_passed=False
         # so the manifest and run summary stop stamping silent reversions as
         # passing pages.
-        native_table_defect = p.native_table_structure_failed or getattr(
-            p, "native_table_structure_defective", False
+        native_table_defect = (
+            p.native_table_structure_failed
+            or getattr(p, "native_table_structure_defective", False)
+            or getattr(p, "native_table_header_unattributed", False)
         )
         native_is_fallback = (
             p.needs_ocr_enhancement

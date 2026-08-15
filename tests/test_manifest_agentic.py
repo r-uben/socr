@@ -403,3 +403,92 @@ def test_budget_skip_stub_in_journal(tmp_path):
     assert skipped_entry["provider_id"] == "gemini"
     assert skipped_entry["accepted"] is False
     assert skipped_entry["reason"] == "budget exceeded"
+
+
+# ---------------------------------------------------------------------------
+# GH-200: D3 floor widening -- native_table_header_unattributed must reach
+# the same fail-closed floor as native_table_unverifiable (TR-3), because
+# TR-3 is blind to header loss by construction (see header_attribution.py).
+# ---------------------------------------------------------------------------
+
+from socr.core.manifest import _winning_page_output  # noqa: E402
+
+
+def _build_state_header_defect(
+    page_num: int = 1,
+    native_text: str = "collapsed| table |",
+    header_unattributed: bool = True,
+    png_ref: str = "",
+) -> DocumentState:
+    """A page whose header-attribution check found a HARD verdict (not TR-3).
+
+    native_table_unverifiable stays False throughout -- TR-3's numeric
+    multiset check is blind to header loss by construction, so this is
+    exactly the case the D3 floor widening exists for.
+    """
+    from socr.core.document import DocumentHandle
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(DocumentHandle, "__post_init__", lambda self: None)
+        handle = DocumentHandle(path=__import__("pathlib").Path("/tmp/fake.pdf"), page_count=1)
+    state = DocumentState(handle=handle)
+    ps = state.pages[page_num]
+    ps.is_born_digital = True
+    ps.native_text = native_text
+    ps.has_tables = True
+    ps.native_table_structure_failed = True
+    ps.native_table_unverifiable = False
+    ps.native_table_header_unattributed = header_unattributed
+    ps.d3_floor_png_ref = png_ref
+    ps.attempts.append(
+        PageOutput(
+            page_num=page_num,
+            text="ragged row-major attempt",
+            status=PageStatus.WARNING,
+            engine="qwen",
+            audit_passed=False,
+            failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+        )
+    )
+    return state
+
+
+def test_d3_floor_fires_on_header_defect() -> None:
+    """A header-only defect (TR-3 stays False) must still reach the D3 floor.
+
+    Before the GH-200 widening this fell through to the native_is_fallback
+    WARNING branch (manifest.py:340-350) and SHIPPED the header-destroyed
+    native table text -- verified fact from the ratified spec.
+    """
+    state = _build_state_header_defect(header_unattributed=True)
+    winner = _winning_page_output(state, 1, None)
+
+    assert winner is not None
+    assert "[page 1 failed:" in winner.text
+    assert "collapsed| table |" not in winner.text
+    assert winner.status == PageStatus.ERROR
+    assert winner.audit_passed is False
+    assert winner.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+
+
+def test_d3_floor_header_defect_false_keeps_native_fallback_warning() -> None:
+    """Paired negative: with the header flag False, the existing
+    native_is_fallback WARNING behaviour (manifest.py:340-350) is unchanged."""
+    state = _build_state_header_defect(header_unattributed=False)
+    winner = _winning_page_output(state, 1, None)
+
+    assert winner is not None
+    assert "[page 1 failed:" not in winner.text
+    assert winner.status == PageStatus.WARNING
+    assert winner.audit_passed is False
+
+
+def test_d3_floor_without_png_ships_marker_alone() -> None:
+    """PNG render failure degrades to the marker alone, never plausible table text."""
+    state = _build_state_header_defect(header_unattributed=True, png_ref="")
+    winner = _winning_page_output(state, 1, None)
+
+    assert winner is not None
+    assert winner.text.strip() == "[page 1 failed: unverifiable table — see image]"
+    assert winner.status == PageStatus.ERROR
+    assert winner.audit_passed is False

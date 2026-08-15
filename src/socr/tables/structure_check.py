@@ -221,3 +221,62 @@ def structural_gate_fires(reports: Sequence[GridStructureReport]) -> bool:
     lookalike copy of it.
     """
     return any(r.ragged or r.detached_label_rows for r in reports)
+
+
+# GH-200: the escalation-gate defect codes. A disjunction, evaluated in cost
+# order -- the grid-shape term is string-only and free; the header term needs
+# native word geometry and runs only when the shape term did not already fire.
+DEFECT_NONE = ""
+DEFECT_GRID_SHAPE = "grid_shape"
+DEFECT_HEADER_UNATTRIBUTED = "header_unattributed"
+
+
+def table_output_defect(output_md: str, words: list | None) -> str:
+    """Whether *output_md* (the text about to ship) has a structural defect.
+
+    GH-200 disjunction, evaluated in cost order:
+
+    1. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
+       ragged OR detached_label_rows, unchanged -- see ``structural_gate_fires``
+       docstring). String-only, no I/O.
+    2. ``header_attribution.header_attribution`` on every table block, HARD
+       verdict only (SOFT and UNVERIFIABLE never reject here -- see
+       ``header_attribution``'s module docstring). Needs *words* (native page
+       word geometry); when ``words`` is falsy this term is skipped entirely
+       and every block abstains, matching ``header_attribution``'s own
+       UNVERIFIABLE-on-no-words behaviour.
+
+    Deliberately NOT nested with TR-3 (``native_verifier.verify_native_table``)
+    -- TR-3 is evaluated by the caller as a separate disjunct. Measured in
+    ``docs/log/2026-08-14_gh151-b1-predicate-design.md``: the two signals do
+    not subsume each other (TR-3 misses 31/66 shape-gate pages; the shape gate
+    misses 27 pages TR-3 catches). Pure; no mutation, no model calls.
+    """
+    reports = check_markdown(output_md)
+    if structural_gate_fires(reports):
+        return DEFECT_GRID_SHAPE
+    if not words:
+        return DEFECT_NONE
+    from socr.tables.header_attribution import HeaderVerdict, header_attribution
+
+    for block in find_table_blocks(output_md):
+        if header_attribution(block.grid, words) is HeaderVerdict.HARD:
+            return DEFECT_HEADER_UNATTRIBUTED
+    return DEFECT_NONE
+
+
+def table_header_verdicts(output_md: str, words: list | None) -> list:
+    """Header-attribution verdict for every table block on *output_md*.
+
+    Exposed separately from ``table_output_defect`` so a caller can COUNT the
+    ``UNVERIFIABLE`` abstain rate (the hand-judgement/panel-mandated
+    surfacing: the abstain rate, not the precision, is the number a header
+    notation gap would show up in -- see ``header_attribution``'s module
+    docstring on ``_NUM_TOKEN_RE``'s leading-decimal blind spot). Pure; no
+    I/O, no event emission -- callers decide what, if anything, to record.
+    """
+    if not words:
+        return []
+    from socr.tables.header_attribution import header_attribution
+
+    return [header_attribution(block.grid, words) for block in find_table_blocks(output_md)]
