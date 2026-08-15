@@ -312,18 +312,26 @@ def _winning_page_output(
     """
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
-        # An ``audit_passed`` native output on a page whose table was flagged
-        # unverifiable is a CONTRADICTION, and the contradiction must lose to
-        # the distrust flag rather than short-circuit past it. This state is
-        # reachable without any live scoring bug: the resume ledger's
-        # fingerprint has no source-version component (#214), so a page marked
-        # terminal SUCCESS by an older build is restored verbatim -- carrying
-        # ``audit_passed=True`` alongside ``native_table_unverifiable=True``.
-        # Falling through here re-demotes it through the normal path below.
-        native_unverifiable = (p.best_output.engine or "").startswith("native") and getattr(
-            p, "native_table_unverifiable", False
+        # A passing NATIVE best_output that also carries a table-distrust flag
+        # is a CONTRADICTION, and the contradiction must lose to the flag
+        # rather than short-circuit past it. Two independent ways to reach it:
+        #
+        # * GH-151 B1: the flag is set AFTER best_output was assigned, so a
+        #   page slips through with audit_passed=True -- the PP-7-R1 shape,
+        #   where a flag the manifest does not read re-stamps SUCCESS and makes
+        #   the gate inert.
+        # * #214: the resume ledger's fingerprint has no source-version
+        #   component, so a page marked terminal SUCCESS by an older build is
+        #   restored verbatim, carrying audit_passed=True next to the flag.
+        #
+        # Falling through re-demotes it through the normal path below. A
+        # passing NON-native best_output is unaffected and returns immediately.
+        native_distrusted = (p.best_output.engine or "").startswith("native") and (
+            getattr(p, "native_table_unverifiable", False)
+            or getattr(p, "native_table_structure_defective", False)
+            or getattr(p, "native_table_header_unattributed", False)
         )
-        if not native_unverifiable:
+        if not native_distrusted:
             return p.best_output
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
@@ -354,7 +362,16 @@ def _winning_page_output(
         # A wrong/shifted number is worse than an obviously-missing one.
         if (
             p.native_table_structure_failed
-            and getattr(p, "native_table_unverifiable", False)
+            and (
+                getattr(p, "native_table_unverifiable", False)
+                # GH-200: TR-3 is blind by construction to header loss (the
+                # 2026-08-15 hand judgement: 4/4 damaged pages). A header-only
+                # defect satisfies native_table_structure_failed but never
+                # native_table_unverifiable, so without this OR it fell
+                # through to the native_is_fallback WARNING branch below and
+                # SHIPPED the header-destroyed native table text.
+                or getattr(p, "native_table_header_unattributed", False)
+            )
             and bool(p.attempts)
         ):
             # TR-3: D3 fail-closed floor text = failed-table marker + image ref.
@@ -382,8 +399,13 @@ def _winning_page_output(
         # as a FALLBACK, not a success: flagged WARNING / audit_passed=False
         # so the manifest and run summary stop stamping silent reversions as
         # passing pages.
-        native_table_defect = p.native_table_structure_failed or getattr(
-            p, "native_table_unverifiable", False
+        # Union of every table-distrust flag: #211's TR-3 unverifiable mark and
+        # GH-151 B1's grid-shape / header flags all demote the same way.
+        native_table_defect = (
+            p.native_table_structure_failed
+            or getattr(p, "native_table_unverifiable", False)
+            or getattr(p, "native_table_structure_defective", False)
+            or getattr(p, "native_table_header_unattributed", False)
         )
         native_is_fallback = (
             p.needs_ocr_enhancement
@@ -405,6 +427,13 @@ def _winning_page_output(
             status=PageStatus.WARNING if native_is_fallback else PageStatus.SUCCESS,
             engine="native",
             audit_passed=not native_is_fallback,
+            # GH-151 B1: the attempt-level PageOutput this synthetic page
+            # replaces already carries FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+            # (set at ``_score_per_page`` / the native ship sites) -- but that
+            # attempt is not reachable here (best_output was cleared when it
+            # was demoted). Re-derive the failure mode from the same flags
+            # rather than silently defaulting to NONE, so the shipped page
+            # matches the ticket's doneWhen at the surface that actually ships.
             failure_mode=(
                 FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
                 if native_table_defect and native_is_fallback

@@ -8,9 +8,12 @@ escalate only on rejection, bound by max_attempts, keep best on total failure.
 from __future__ import annotations
 
 import time
+from unittest.mock import MagicMock
 
+import fitz
 import pytest
 
+from socr.core.audit_log import AuditEvent
 from socr.core.config import EngineType
 from socr.core.providers import provider_ladder
 from socr.core.result import PageOutput, PageStatus
@@ -18,6 +21,7 @@ from socr.pipeline.agentic import (
     DEFAULT_PROVIDER_TIMEOUTS,
     AcceptDecision,
     HeuristicPageJudge,
+    NativeTableVerifierJudge,
     VLMPageJudge,
     route_page,
 )
@@ -247,3 +251,205 @@ def test_default_provider_timeouts_keys():
     for engine, seconds in DEFAULT_PROVIDER_TIMEOUTS.items():
         assert isinstance(seconds, float), f"{engine}: expected float, got {type(seconds)}"
         assert seconds > 0, f"{engine}: timeout must be positive"
+
+
+# --------------------------------------------------------------------------
+# GH-200: the winner-side structural/header escalation gate.
+#
+# TR-3 (native_verifier) proves the numbers are right; it is blind by
+# construction to header loss, detached labels, and star-only row deletion
+# (docs/log/2026-08-15_tr3-hand-judgement.md, 4/4 damaged pages). These pin
+# NativeTableVerifierJudge._apply_structural_gate, which runs
+# structure_check.table_output_defect on whatever text is ABOUT TO SHIP —
+# native or (via the same code path) VLM markdown — on every accepting exit
+# from assess(), not only the EXACT_PASS short-circuit.
+#
+# Hermetic: synthetic fitz pages, no ollama/GPU/provider.
+# --------------------------------------------------------------------------
+
+
+_GAP = 60.0  # must exceed the well-separated-lane threshold; see test_native_table_verifier.py
+
+
+def _md(header: list[str], rows: list[list[str]]) -> str:
+    sep = "| " + " | ".join(["---"] * len(header)) + " |"
+    lines = ["| " + " | ".join(header) + " |", sep]
+    for row in rows:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def _table_page_with_header(header_tokens: list[str] | None, data_values: list[str]) -> fitz.Page:
+    """Label + one data row of numeric values; header words (if any) carry a
+    '%' marker so header_repair._is_table_header_row recognises the band."""
+    doc = fitz.open()
+    page = doc.new_page(width=700, height=400)
+    xs = [100.0 + i * _GAP for i in range(len(data_values))]
+    if header_tokens is not None:
+        for x, tok in zip(xs, header_tokens):
+            page.insert_text((x, 100.0), tok, fontsize=9)
+    page.insert_text((20.0, 140.0), "row1", fontsize=9)
+    for x, val in zip(xs, data_values):
+        page.insert_text((x, 140.0), val, fontsize=9)
+    return page
+
+
+def _stub_inner(accept: bool = True) -> MagicMock:
+    inner = MagicMock()
+    inner.assess.return_value = AcceptDecision(accept=accept, reason="inner judge stub")
+    return inner
+
+
+class TestStructuralEscalationGate:
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "GH-200: the header-attribution reject disjunct is parked in "
+            "table_output_defect. The REQUIREMENT is unchanged -- a destroyed "
+            "header must be rejected -- but every predicate tried so far also "
+            "returns HARD on byte-perfect correct tables (significance-star and "
+            "n.a. rows), and a false reject destroys good output. This flips to "
+            "XPASS the moment a sound predicate is wired back in."
+        ),
+    )
+    def test_exact_pass_with_destroyed_header_is_rejected(self):
+        """Direct regression for the agentic.py EXACT_PASS hole: a
+        numerically-perfect, header-destroyed table must still reach
+        EXACT_PASS in the verifier AND be rejected by the structural gate
+        (never shipped at confidence 1.0 by the bare TR-3 accept)."""
+        page = _table_page_with_header(["Low%", "Mid%", "High%"], ["0.1", "0.2", "0.3"])
+        output_text = _md(["Currency", "", "", ""], [["row1", "0.1", "0.2", "0.3"]])
+        output = PageOutput(page_num=1, text=output_text, status=PageStatus.SUCCESS, confidence=0.9)
+
+        events: list[AuditEvent] = []
+        inner = _stub_inner(accept=True)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: page,
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+        decision = judge.assess(output, MagicMock())
+
+        assert any(e.kind == "native_table_verifier_exact_pass" for e in events), (
+            "verifier must reach EXACT_PASS on this fixture"
+        )
+        inner.assess.assert_not_called()  # EXACT_PASS never calls the inner judge
+        assert decision.accept is False
+        assert decision.reason.startswith("table_structure_failed")
+        assert any(e.kind == "table_structure_failed" for e in events)
+
+    @pytest.mark.parametrize(
+        "vr_kwargs",
+        [
+            pytest.param(
+                {"state": "EXACT_PASS", "hard_fail": False, "warn": False, "row_count_warn": False},
+                id="exact_pass",
+            ),
+            pytest.param(
+                {"state": "AMBIGUOUS", "hard_fail": False, "warn": True, "row_count_warn": False},
+                id="warn_delegate",
+            ),
+            pytest.param(
+                {"state": "AMBIGUOUS", "hard_fail": False, "warn": False, "row_count_warn": True},
+                id="no_issue_delegate",
+            ),
+        ],
+    )
+    def test_structural_gate_covers_all_three_accept_paths(self, monkeypatch, vr_kwargs):
+        """Guards against patching only the EXACT_PASS branch: parametrised
+        over agentic.py's three accepting exits (:592 warn-delegate,
+        :608 EXACT_PASS, :615 no-issue-delegate). Same stub-accepting inner
+        judge, same defective (ragged) text; all three must reject."""
+        from socr.tables.native_verifier import VerifierResult
+
+        vr = VerifierResult(native_lane_count=3, output_col_count=3, reason="stub", **vr_kwargs)
+        monkeypatch.setattr(
+            "socr.tables.native_verifier.verify_native_table", lambda page, text: vr
+        )
+
+        # Ragged grid: one body row 2 cells, one 3 cells -> B1 shape gate fires.
+        defective_text = "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 |\n| 3 | 4 | 5 |"
+        output = PageOutput(
+            page_num=2, text=defective_text, status=PageStatus.SUCCESS, confidence=0.9
+        )
+        blank_page = fitz.open().new_page(width=200, height=200)
+
+        inner = _stub_inner(accept=True)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: blank_page,
+            is_table_page=lambda pn: True,
+            record_event=lambda evt: None,
+        )
+        decision = judge.assess(output, MagicMock())
+        assert decision.accept is False
+        assert decision.reason == "table_structure_failed: grid_shape"
+
+    def test_verifier_exception_still_runs_shape_term(self, monkeypatch):
+        """Geometry raises inside the try block -> the inner judge is still
+        consulted (existing behaviour), but a ragged candidate must be
+        rejected by the (words-free) grid-shape term, not accepted by
+        delegation."""
+
+        def _raise(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("socr.tables.native_verifier.verify_native_table", _raise)
+
+        defective_text = "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 |\n| 3 | 4 | 5 |"
+        output = PageOutput(
+            page_num=3, text=defective_text, status=PageStatus.SUCCESS, confidence=0.9
+        )
+        inner = _stub_inner(accept=True)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: fitz.open().new_page(width=200, height=200),
+            is_table_page=lambda pn: True,
+            record_event=lambda evt: None,
+        )
+        decision = judge.assess(output, MagicMock())
+        inner.assess.assert_called_once()  # exception path still delegates
+        assert decision.accept is False
+        assert decision.reason == "table_structure_failed: grid_shape"
+
+    def test_ragged_candidate_with_clean_multiset_rejects(self):
+        """Disjunction control (a): B1's own shape gate must reject even
+        when TR-3's numeric multiset is clean -- neither term subsumes the
+        other."""
+        page = _table_page_with_header(None, ["0.1", "0.2", "0.3", "0.4"])
+        # Emitted grid is ragged: row 1 has 3 cells, row 2 has 4.
+        output_text = (
+            "| label | c1 | c2 |\n| --- | --- | --- |\n"
+            "| row1 | 0.1 | 0.2 |\n| row1b | 0.3 | 0.4 | extra |"
+        )
+        output = PageOutput(page_num=4, text=output_text, status=PageStatus.SUCCESS, confidence=0.9)
+        inner = _stub_inner(accept=True)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: page,
+            is_table_page=lambda pn: True,
+            record_event=lambda evt: None,
+        )
+        decision = judge.assess(output, MagicMock())
+        assert decision.accept is False
+        assert decision.reason == "table_structure_failed: grid_shape"
+
+    def test_rectangular_intact_header_but_multiset_mismatch_rejects_via_tr3(self):
+        """Disjunction control (b): a rectangular candidate with an intact
+        header but a numeric-multiset mismatch must still be rejected -- by
+        TR-3's own hard-fail, independent of the structural gate."""
+        page = _table_page_with_header(["Low%", "Mid%", "High%"], ["0.1", "0.2", "0.3"])
+        # Output drops 0.3 and invents 0.9 -- multiset mismatch, header intact.
+        output_text = _md(["Currency", "Low%", "Mid%", "High%"], [["row1", "0.1", "0.2", "0.9"]])
+        output = PageOutput(page_num=5, text=output_text, status=PageStatus.SUCCESS, confidence=0.9)
+        inner = _stub_inner(accept=True)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: page,
+            is_table_page=lambda pn: True,
+            record_event=lambda evt: None,
+        )
+        decision = judge.assess(output, MagicMock())
+        assert decision.accept is False
+        assert decision.reason.startswith("native_table_verifier:")

@@ -43,6 +43,21 @@ class PageState:
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
     native_table_structure_failed: bool = False  # native table text lost its grid
+    #: GH-151 TICKET-B1: grid-shape defect (ragged / detached-label row pair)
+    #: found in the native markdown at extraction time. Deliberately a
+    #: SEPARATE field from ``native_table_structure_failed`` above:
+    #: ``_score_per_page`` clears that flag on a passing heuristic score
+    #: (orchestrator.py), which would silently erase this structural verdict
+    #: if they were the same field. Set once in ``apply_born_digital``, never
+    #: re-derived downstream.
+    native_table_structure_defective: bool = False
+    #: GH-200: header-attribution HARD verdict (destroyed header band) found
+    #: in the native markdown at extraction time. Same treatment as
+    #: ``native_table_structure_defective`` immediately above: a SEPARATE
+    #: field, set once in ``apply_born_digital``, never re-derived
+    #: downstream, deliberately absent from ``needs_repair`` (see that
+    #: property's docstring -- forcing repair under --native-only is barred).
+    native_table_header_unattributed: bool = False
     native_table_unverifiable: bool = False  # TR-3: per-region verifier flagged hard-fail
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
@@ -66,6 +81,12 @@ class PageState:
         so an audit-rejected page runs out of candidates and is skipped.
         """
         if self.is_born_digital and self.native_text:
+            # GH-151 TICKET-B1: native_table_structure_defective is
+            # DELIBERATELY absent from this condition. Adding it would force
+            # a repair pass even under --native-only, which is settled as
+            # forbidden (docs/plans/gh151-structural-gate/TICKETS.md
+            # TICKET-B1). The flag is honoured downstream instead, at
+            # ``_score_per_page`` and the manifest/ship surfaces.
             if (
                 self.needs_ocr_enhancement
                 or self.native_table_structure_failed
@@ -185,6 +206,19 @@ class DocumentState:
                 if pa.is_born_digital:
                     ps.native_text = pa.native_text
                     ps.needs_ocr_enhancement = pa.needs_ocr_enhancement
+                    # GH-151 TICKET-B1: propagate the grid-shape defect flag.
+                    # Deliberately NOT added to needs_repair (state.py `needs_repair`
+                    # property) so it can never force OCR under --native-only —
+                    # that ruling is settled, see docs/plans/gh151-structural-gate/
+                    # TICKETS.md TICKET-B1.
+                    ps.native_table_structure_defective = getattr(
+                        pa, "native_table_structure_defective", False
+                    )
+                    # GH-200: propagate the header-attribution defect flag.
+                    # Same non-repair-forcing treatment as the line above.
+                    ps.native_table_header_unattributed = getattr(
+                        pa, "native_table_header_unattributed", False
+                    )
                     # TR-3: propagate per-region verifier hard-fail flag so the
                     # D3 selection in _winning_page_output can route to the floor.
                     if getattr(pa, "has_unverifiable_table_region", False):

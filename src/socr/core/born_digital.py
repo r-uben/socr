@@ -320,6 +320,28 @@ class PageAssessment:
     #: text to have retained. Audit code must key off this flag, not re-derive
     #: "refusal happened" from conditions that merely correlate with it.
     native_table_lane_refused: bool = False
+    #: GH-151 TICKET-B1: set ONLY inside the non-rotated, has_tables branch of
+    #: ``_assess_page_signals`` (the structured-extraction branch, not the
+    #: refusal branch, and never for non-table pages), from
+    #: ``structure_check.check_markdown`` run on the resulting native markdown.
+    #: True iff any table block on the page has ``ragged`` or
+    #: ``detached_label_rows`` findings (never ``defective`` as a whole, never
+    #: ``orphan_rows`` alone — see the design note at
+    #: ``docs/log/2026-08-13_gh151-b1-design.md``). Audit code MUST key off
+    #: this flag and MUST NEVER re-derive it from grid shape downstream — the
+    #: same GH-147 A2 rule as ``native_table_lane_refused`` above.
+    native_table_structure_defective: bool = False
+    #: GH-200: header-attribution HARD verdict on the native markdown (only
+    #: checked when the grid-shape check above did NOT already fire -- the
+    #: shape term is cheaper and, per the ratified spec, takes priority in
+    #: cost order). True iff ``header_attribution.header_attribution`` found
+    #: a data lane whose native header words are absent from the emitted
+    #: header row entirely (destroyed, not merely misplaced -- see
+    #: ``header_attribution``'s module docstring for SOFT vs HARD). SOFT and
+    #: UNVERIFIABLE verdicts never set this flag. Rides the exact same
+    #: propagation as ``native_table_structure_defective``: set once here,
+    #: never re-derived downstream, deliberately absent from ``needs_repair``.
+    native_table_header_unattributed: bool = False
     #: The page's prevailing text-line direction, stamped once by ``_assess_page``
     #: from ``dominant_text_direction()``. The ``_HORIZONTAL`` default conflates
     #: "genuinely horizontal" with "no directional evidence" (an empty tally from
@@ -913,6 +935,8 @@ class BornDigitalDetector:
         self._last_extraction_had_unverifiable: bool = False
 
         native_table_lane_refused = False
+        native_table_structure_defective = False
+        native_table_header_unattributed = False
         if has_tables:
             if text_direction_is_rotated(direction):
                 # GH-147: the rowizer clusters rows by y; on a page whose text
@@ -936,6 +960,39 @@ class BornDigitalDetector:
                 # clean above.
                 native_text, _, _ = clean_native_text(self.extract_structured(page))
                 notes.append("born-digital: structured extraction (tables detected)")
+
+                # GH-151 TICKET-B1: check the grid shape of the markdown this
+                # branch just produced. Set at the moment of the evidence,
+                # never re-derived downstream (the same rule GH-147 A2 states
+                # for native_table_lane_refused above). Gate narrowed to
+                # ragged / detached_label_rows only -- orphan_rows alone is
+                # excluded because a blank-label row with values is often a
+                # legitimate standard-error / t-statistic continuation row
+                # (fires on 27/29 real table blocks if included unnarrowed).
+                # ``structural_gate_fires`` is the single source of truth for
+                # this predicate -- tests import the same function.
+                from socr.tables import structure_check
+
+                reports = structure_check.check_markdown(native_text)
+                native_table_structure_defective = structure_check.structural_gate_fires(reports)
+
+                # GH-200: header-attribution term, disjunctive with the
+                # grid-shape check above -- TR-3's numeric multiset and the
+                # grid-shape gate are BOTH blind to a header band that is
+                # destroyed/detached while every numeral stays correct (the
+                # 2026-08-15 hand judgement: 4/4 damaged pages). Only the HARD
+                # verdict is a defect; SOFT and UNVERIFIABLE never gate here.
+                # Rides the exact same propagation as
+                # ``native_table_structure_defective`` above (state.py
+                # ``apply_born_digital``); deliberately absent from
+                # ``needs_repair`` for the same --native-only reason.
+                if not native_table_structure_defective:
+                    words = page.get_text("words")
+                    native_table_header_unattributed = (
+                        structure_check.table_output_defect(native_text, words)
+                        == structure_check.DEFECT_HEADER_UNATTRIBUTED
+                    )
+
         else:
             native_text = raw_text.strip()
             notes.append("born-digital: clean text layer detected")
@@ -996,6 +1053,8 @@ class BornDigitalDetector:
             has_unverifiable_table_region=has_unverifiable_table_region,
             has_encoding_hygiene_suspect=encoding_hygiene_suspect,
             native_table_lane_refused=native_table_lane_refused,
+            native_table_structure_defective=native_table_structure_defective,
+            native_table_header_unattributed=native_table_header_unattributed,
             notes=notes,
         )
 

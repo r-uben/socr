@@ -519,6 +519,7 @@ class NativeTableVerifierJudge:
 
         try:
             fitz_page = self._get_fitz_page(page_num)
+            words = fitz_page.get_text("words") if fitz_page is not None else None
             vr = verify_native_table(fitz_page, output.text)
             vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
         except Exception as exc:
@@ -527,7 +528,13 @@ class NativeTableVerifierJudge:
                 page_num,
                 exc,
             )
-            return self._inner.assess(output, provider)
+            # GH-200: geometry failed, so the header-attribution term cannot
+            # run -- but the grid-shape term (structural_gate_fires) is
+            # string-only and needs no words. Run it anyway so a ragged
+            # candidate is still rejected rather than accepted by silent
+            # delegation to the inner judge.
+            decision = self._inner.assess(output, provider)
+            return self._apply_structural_gate(decision, output, page_num, words=None)
 
         # TR-6 tri-state dispatch based on vr.state:
         #   EXACT_PASS   → ship immediately (no inner judge needed)
@@ -590,7 +597,8 @@ class NativeTableVerifierJudge:
                 },
             )
             # Defer to the inner judge — do NOT escalate here
-            return self._inner.assess(output, provider)
+            decision = self._inner.assess(output, provider)
+            return self._apply_structural_gate(decision, output, page_num, words)
 
         if vr.state == VerifierState.EXACT_PASS:
             # EXACT_PASS: ship immediately — no model needed
@@ -605,14 +613,70 @@ class NativeTableVerifierJudge:
                     "verifier_state": vr.state,
                 },
             )
-            return AcceptDecision(
+            decision = AcceptDecision(
                 accept=True,
                 reason="native_table_verifier: EXACT_PASS",
                 confidence=1.0,
             )
+            return self._apply_structural_gate(decision, output, page_num, words)
 
         # No issue detected → delegate to inner judge
-        return self._inner.assess(output, provider)
+        decision = self._inner.assess(output, provider)
+        return self._apply_structural_gate(decision, output, page_num, words)
+
+    def _apply_structural_gate(
+        self,
+        decision: AcceptDecision,
+        output: PageOutput,
+        page_num: int,
+        words: list | None,
+    ) -> AcceptDecision:
+        """GH-200: the winner-side structural/header check on whatever is ABOUT TO SHIP.
+
+        Runs on every ACCEPTING path out of ``assess`` -- the delegated-warn
+        path, the deterministic EXACT_PASS accept, the delegated-no-issue
+        path, and (grid-shape term only, ``words=None``) the verifier-
+        exception path. TR-3 (the multiset check above) proves the numbers
+        are right; it is blind by construction to header loss, detached
+        labels, and star-only row deletion (2026-08-15 hand judgement, 4/4
+        damaged pages). A rejecting inner decision is returned unchanged --
+        there is nothing to gate on a page that is not shipping anyway.
+        """
+        if not decision.accept:
+            return decision
+
+        from socr.tables.header_attribution import HeaderVerdict
+        from socr.tables.structure_check import table_header_verdicts, table_output_defect
+
+        defect = table_output_defect(output.text, words)
+        if not defect and words:
+            verdicts = table_header_verdicts(output.text, words)
+            if HeaderVerdict.UNVERIFIABLE in verdicts:
+                # Abstain, surfaced so its firing rate is measurable rather
+                # than silently swallowed (#206/#207 notation-gap risk).
+                self._emit_event(
+                    page_num=page_num,
+                    kind="table_header_unverifiable",
+                    engine=output.engine or "",
+                    detail="header-attribution geometry chain abstained",
+                    data={"verdicts": [v.value for v in verdicts]},
+                )
+
+        if not defect:
+            return decision
+
+        self._emit_event(
+            page_num=page_num,
+            kind="table_structure_failed",
+            engine=output.engine or "",
+            detail=defect,
+            data={"defect": defect},
+        )
+        return AcceptDecision(
+            accept=False,
+            reason=f"table_structure_failed: {defect}",
+            confidence=0.0,
+        )
 
     def _maybe_repair_collapsed_headers(self, fitz_page, output: PageOutput, vr):
         """Rebuild collapsed multi-band headers from native geometry when detected."""

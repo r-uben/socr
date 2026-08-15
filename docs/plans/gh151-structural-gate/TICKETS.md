@@ -48,7 +48,7 @@ plumbing (pairing, exactly-once resolve); do not carry forward `BindingReport.fa
 
 ## Stream B — consequence
 
-### TICKET-B1 — surface structural failure at page level · TODO · depends-on: A1, GH-147 A2 · wave 3
+### TICKET-B1 — surface structural failure at page level · DONE (shipped as an escalation gate per the 2026-08-15 panel ruling, feat/200-structural-escalation-gate) · depends-on: A1, GH-147 A2 · wave 3
 **Problem:** A defect nothing consumes is not a gate. A page whose emitted table is
 structurally broken ships as trusted native SUCCESS.
 
@@ -158,6 +158,44 @@ without them, honouring the flag is not safe and the question reopens.
 **Prevalence caveat:** the 20/29 figure is a measured *cost*, not a verified true-positive
 rate. It was self-graded by the design pass over four finance/macro papers. Do not cite it as
 a defect rate without independent re-inspection.
+
+**SHIPPED 2026-08-15 as an escalation gate, per the panel ruling recorded in
+`docs/plans/STATUS.md` context passed at dispatch and `docs/log/2026-08-15_tr3-hand-judgement.md`.**
+The plumbing this ticket built (the `PageState` field, the `table_structure_failed` audit
+event, the manifest D3-floor widening, `TABLE_DISTRUST_KINDS` membership, and
+`structural_gate_fires` as the shared entry point) is unchanged. What changed:
+
+1. B1's own predicate (`ragged OR detached_label_rows`) is kept exactly as designed — TR-3
+   (numeric-token multiset) turned out to be blind to 3 of 5 defect classes the 2026-08-15
+   hand judgement found (header loss, detached labels, star-only row deletion), so the plan
+   to swap B1's predicate for TR-3 was abandoned. TR-3 and the shape gate are a disjunction,
+   not a replacement of one by the other — measured non-overlap in
+   `docs/log/2026-08-14_gh151-b1-predicate-design.md:225-239` (35/66 overlap, 27 pages the
+   shape gate misses entirely).
+2. A third disjunctive term, header-attribution (`src/socr/tables/header_attribution.py`),
+   closes the header-loss gap TR-3 cannot see. `HARD` verdict only rejects; `SOFT` (tokens
+   present but mis-columned) is recorded, never rejects — see
+   `docs/log/2026-08-15_200-open-decision-1-resolved.md` for the pre-merge measurement that
+   kept it advisory (1-2 of 3 classifiable damaged pages were mis-columned, under the
+   promotion threshold).
+3. The winner-side hole is closed: `NativeTableVerifierJudge.assess`
+   (`src/socr/pipeline/agentic.py`) now runs the same structural/header check on whatever is
+   ABOUT TO SHIP — including the `EXACT_PASS` accept path, which previously shipped a
+   numerically-perfect, structurally-destroyed table at `confidence=1.0` without ever
+   consulting the inner judge.
+4. `--native-only` still never reroutes — record and surface only, following the existing
+   settled ruling in this same file above. At the top rung with nowhere left to escalate, the
+   D3 fail-closed floor (`manifest.py`) widened identically for the header-only defect.
+
+Implemented on `feat/200-structural-escalation-gate` (rebased onto current `main`, 3 commits
+ahead of the `feat/151-b1-structural-gate` base). Full suite 1648 passed / 1 xfailed;
+`uvx ruff@0.16.0 format --check .` clean.
+
+**Known follow-up, not blocking:** the firing rate of `table_output_defect` on VLM-produced
+(non-native) accepted output is unmeasured — the 26.9%/35/66/27 figures in
+`docs/log/2026-08-14_gh151-b1-predicate-design.md` were all measured on native markdown, a
+different population. Recommended before wide rollout: run `table_output_defect` over an
+existing agentic corpus run's accepted outputs and report the rate.
 
 ### TICKET-B2 — record the gate correction on GH-49 · TODO · depends-on: B1 · wave 3
 **Problem:** GH-49 currently carries my claim that word recall is the routing signal.

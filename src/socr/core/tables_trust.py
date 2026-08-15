@@ -70,6 +70,22 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # same mechanism rather than a second one, per the B1 review finding.
         "table_unexplained_lanes",
         "table_not_scorable",
+        # GH-151 TICKET-B1 review: a fourth shape of the same rule. A2/A2b's
+        # structural gate demotes a page to WARNING/audit_passed=False when the
+        # native grid genuinely splits a row's label from its values (ragged
+        # widths or a detached-label pair) -- without this, a consumer reading
+        # tables_trust.json would still mark that page trusted while the audit
+        # log and the shipped page status both say its table structure failed.
+        # No resolving kind is added alongside it (unlike
+        # ``table_escalation_accepted``): this event fires at analyze time from
+        # the native attempt alone, before OCR routing is decided, and no
+        # MEASURED comparison exists at the point a later OCR read ships
+        # instead -- so, in agentic mode, a page whose native attempt tripped
+        # this gate but whose final shipped output is a passing OCR table
+        # still surfaces here. That is over-flagging relative to the shipped
+        # content, not under-flagging; consistent with this module's own
+        # stated bias (a flag on a fine page costs a look, a missing flag on a
+        # wrong one costs a wrong number in the corpus).
         "table_structure_failed",
     }
 )

@@ -1,6 +1,14 @@
 # STATUS — GH-151 structure lost at full recall
 
-Last updated: 2026-08-11
+Last updated: 2026-08-15
+
+## B1 — DONE (2026-08-15)
+
+Shipped as the #200 escalation gate on `feat/200-structural-escalation-gate` per the
+2026-08-15 panel ruling. See TICKETS.md's B1 entry for the disjunction detail and
+`docs/log/2026-08-15_200-open-decision-1-resolved.md` for the pre-merge SOFT/HARD
+measurement the ratified spec required before merge. Full suite 1648 passed / 1 xfailed;
+lint clean. Not merged to `main` by this session — awaiting CI/review.
 
 ## Stage
 Scaffolded, not dispatched. The motivating page is verified: p26 now measures 100%

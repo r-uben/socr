@@ -9,8 +9,10 @@ Density (``empty_cell_ratio`` / the footprint-density derivation described on
 :class:`GridStructureReport`) is diagnostic only. It can never contribute a
 finding or make a grid ``defective`` — sparse tables are common and legitimate
 (blank cells in a regression table, missing observations), so no threshold on
-emptiness is applied anywhere in this module. The only two findings that can
-ever fire are width raggedness and same-row orphan labels.
+emptiness is applied anywhere in this module. Density never votes. Three
+findings can fire: width raggedness, same-row orphan labels (diagnostic
+only — never gates, see TICKET-B1), and detached label/values row pairs
+(``FINDING_DETACHED_LABEL``, a row-pair adjacency invariant).
 
 ``check_grid``'s input contract: a separator-free ``Sequence[Sequence[str]]``.
 Callers are expected to have already stripped markdown separator rows (the
@@ -36,6 +38,16 @@ and cannot see the missing row, so it cannot flag it; a fix belongs in
 Row indices are zero-based into the parsed, separator-free grid. Row 0 is
 always the header row.
 
+GH-151 TICKET-B1 adds a third finding, ``FINDING_DETACHED_LABEL``: a
+row-pair adjacency invariant, decidable from exactly one adjacent pair of
+body rows, that never references a third row or any cross-row signature
+(no modal vote, no majority, no numeric constant beyond the pair itself).
+It exists because ``FINDING_ORPHAN_ROWS`` alone cannot distinguish a
+legitimate standard-error / t-statistic continuation row (blank label,
+populated values, following a row that ALSO has values) from a genuinely
+severed label row (e.g. an ``R2`` label whose values were pushed onto the
+next row by a superscript). Density still never votes.
+
 Cell blankness is whitespace-only: a cell counts as empty iff
 ``not cell.strip()``. This is deliberately **not**
 ``native_verifier.strip_presentation``, which also strips standalone currency
@@ -54,6 +66,7 @@ from socr.tables.reconcile import find_table_blocks
 
 FINDING_RAGGED = "ragged"
 FINDING_ORPHAN_ROWS = "orphan_rows"
+FINDING_DETACHED_LABEL = "detached_label"
 
 
 @dataclass(frozen=True)
@@ -73,6 +86,9 @@ class GridStructureReport:
     row_widths: tuple[int, ...]
     ragged: bool
     orphan_rows: tuple[int, ...]  # body rows only (indices >= 1)
+    #: 0-based index of the LEFT row of each firing label/values split pair
+    #: (body rows only). See ``FINDING_DETACHED_LABEL`` / GH-151 TICKET-B1.
+    detached_label_rows: tuple[int, ...]
     empty_cells: int  # whitespace-empty among actual cells
     total_cells: int  # sum of row lengths
     footprint_cells: int  # len(grid) * max(row_widths), 0 when grid has no rows
@@ -90,6 +106,23 @@ class GridStructureReport:
         A fact about the evidence, explicitly not a routing decision.
         """
         return bool(self.findings)
+
+
+def _is_canonical_column_band(value_cells: Sequence[str]) -> bool:
+    """Whether the non-blank value cells read exactly ``(1), (2), ..., (k)``.
+
+    A group-heading row (label, no values) immediately above a ``(1)...(n)``
+    column-number band is a legitimate table layout, not a split row — the
+    heading has no values because it is a heading, and the numbered row has
+    no label because it is naming columns, not observations. Excluded here so
+    ``FINDING_DETACHED_LABEL`` does not fire on it. This is the ONLY exclusion
+    the predicate admits; it is local to the pair (no threshold, no reference
+    to any other row).
+    """
+    nonblank = [cell.strip() for cell in value_cells if cell.strip()]
+    if not nonblank:
+        return False
+    return nonblank == [f"({i})" for i in range(1, len(nonblank) + 1)]
 
 
 def check_grid(grid: Sequence[Sequence[str]]) -> GridStructureReport:
@@ -112,6 +145,32 @@ def check_grid(grid: Sequence[Sequence[str]]) -> GridStructureReport:
         if any(cell.strip() for cell in row[1:]):
             orphan_rows.append(i)
 
+    # GH-151 TICKET-B1: detached-label row pairs. A row-pair adjacency
+    # invariant only — never a modal/majority signature, never a numeric
+    # threshold. For each adjacent body-row pair (i, i+1) with i >= 1: row i
+    # carries a label and zero values, row i+1 carries values and no label.
+    # That shape is exactly a physically split row (e.g. an "R2" label whose
+    # values landed on the next line). The one exclusion is the canonical
+    # "(1) (2) ... (k)" column-number band, which is a legitimate heading
+    # pattern, not a split row.
+    detached_label_rows: list[int] = []
+    for i in range(1, len(grid) - 1):
+        row = grid[i]
+        follower = grid[i + 1]
+        if not row or not follower:
+            continue
+        if not row[0].strip():
+            continue  # left row has no label -> not a detached label
+        if any(cell.strip() for cell in row[1:]):
+            continue  # left row has values -> not label-only
+        if follower[0].strip():
+            continue  # follower has its own label -> not a split continuation
+        if not any(cell.strip() for cell in follower[1:]):
+            continue  # follower has no values either -> nothing to attach
+        if _is_canonical_column_band(follower[1:]):
+            continue  # group heading above a (1)...(n) band: legitimate
+        detached_label_rows.append(i)
+
     empty_cells = sum(1 for row in grid for cell in row if not cell.strip())
     total_cells = sum(row_widths)
     footprint_cells = len(grid) * max(row_widths) if row_widths else 0
@@ -121,11 +180,14 @@ def check_grid(grid: Sequence[Sequence[str]]) -> GridStructureReport:
         findings.append(FINDING_RAGGED)
     if orphan_rows:
         findings.append(FINDING_ORPHAN_ROWS)
+    if detached_label_rows:
+        findings.append(FINDING_DETACHED_LABEL)
 
     return GridStructureReport(
         row_widths=row_widths,
         ragged=ragged,
         orphan_rows=tuple(orphan_rows),
+        detached_label_rows=tuple(detached_label_rows),
         empty_cells=empty_cells,
         total_cells=total_cells,
         footprint_cells=footprint_cells,
@@ -143,3 +205,82 @@ def check_markdown(page_md: str) -> list[GridStructureReport]:
     the module docstring. That gap is left for TICKET-B1 to address.
     """
     return [check_grid(block.grid) for block in find_table_blocks(page_md)]
+
+
+def structural_gate_fires(reports: Sequence[GridStructureReport]) -> bool:
+    """Whether the GH-151 TICKET-B1 structural gate fires over a page's reports.
+
+    The single source of truth for the gate predicate: ``ragged`` or
+    ``detached_label_rows`` on any block, and nothing else -- never
+    ``GridStructureReport.defective`` as a whole (which also counts
+    ``orphan_rows``, deliberately excluded per the ticket's narrowing
+    decision; see ``check_grid``'s ``FINDING_ORPHAN_ROWS`` comment). Shared
+    by ``born_digital.py`` (the production caller) and the negative-control
+    tests, so a test asserting "the gate does not fire" is provably
+    asserting the same condition production branches on, not a
+    lookalike copy of it.
+    """
+    return any(r.ragged or r.detached_label_rows for r in reports)
+
+
+# GH-200: the escalation-gate defect codes. A disjunction, evaluated in cost
+# order -- the grid-shape term is string-only and free; the header term needs
+# native word geometry and runs only when the shape term did not already fire.
+DEFECT_NONE = ""
+DEFECT_GRID_SHAPE = "grid_shape"
+DEFECT_HEADER_UNATTRIBUTED = "header_unattributed"
+
+
+def table_output_defect(output_md: str, words: list | None) -> str:
+    """Whether *output_md* (the text about to ship) has a structural defect.
+
+    GH-200. Currently a single term:
+
+    1. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
+       ragged OR detached_label_rows, unchanged -- see ``structural_gate_fires``
+       docstring). String-only, no I/O.
+
+    **The header-attribution disjunct is deliberately NOT evaluated here.**
+    Four independent implementations of it (GH-151 T3's token-pattern rule,
+    ``062bdef``'s year-band rule, the positional rule, and the normalized
+    comparison) each failed in one of two directions: either abstaining on the
+    hand-judged 4-of-4 header-loss case, or returning HARD on *byte-perfect
+    correct* tables -- demonstrated on tables carrying significance-star rows
+    and ``n.a.`` cells, both ubiquitous in this corpus. A false HARD is not a
+    missed catch; it REJECTS correct output and can drive it to the fail-closed
+    marker. Until the predicate is sound, shipping it as a reject term trades a
+    known-incomplete gate for an actively destructive one.
+
+    ``header_attribution`` itself, ``table_header_verdicts`` below, and the
+    whole ``native_table_header_unattributed`` plumbing are intentionally kept:
+    the verdicts remain observable for measurement, resume still restores the
+    flag from older sidecars, and re-enabling the disjunct is a one-line change
+    once a sound predicate exists.
+
+    Deliberately NOT nested with TR-3 (``native_verifier.verify_native_table``)
+    -- TR-3 is evaluated by the caller as a separate disjunct. Measured in
+    ``docs/log/2026-08-14_gh151-b1-predicate-design.md``: the two signals do
+    not subsume each other (TR-3 misses 31/66 shape-gate pages; the shape gate
+    misses 27 pages TR-3 catches). Pure; no mutation, no model calls.
+    """
+    reports = check_markdown(output_md)
+    if structural_gate_fires(reports):
+        return DEFECT_GRID_SHAPE
+    return DEFECT_NONE
+
+
+def table_header_verdicts(output_md: str, words: list | None) -> list:
+    """Header-attribution verdict for every table block on *output_md*.
+
+    Exposed separately from ``table_output_defect`` so a caller can COUNT the
+    ``UNVERIFIABLE`` abstain rate (the hand-judgement/panel-mandated
+    surfacing: the abstain rate, not the precision, is the number a header
+    notation gap would show up in -- see ``header_attribution``'s module
+    docstring on ``_NUM_TOKEN_RE``'s leading-decimal blind spot). Pure; no
+    I/O, no event emission -- callers decide what, if anything, to record.
+    """
+    if not words:
+        return []
+    from socr.tables.header_attribution import header_attribution
+
+    return [header_attribution(block.grid, words) for block in find_table_blocks(output_md)]

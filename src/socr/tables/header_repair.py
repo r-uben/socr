@@ -348,20 +348,25 @@ def _data_row_ys(
     return data_ys
 
 
-def repair_collapsed_header(
-    grid: list[list[str]],
-    words: list,
-) -> list[list[str]] | None:
-    """Rebuild a collapsed header using native word geometry.
+def native_header_row(grid: list[list[str]], words: list) -> list[str] | None:
+    """Derive the header row implied by native word geometry.
 
-    Returns a new grid (header + original data rows, width-normalised) when
-    repair succeeds, else ``None``.  Data cell VALUES are taken from the input
-    *grid* — only the header structure is reconstructed.
+    Runs the SAME anchor -> lane -> header-band chain as
+    ``repair_collapsed_header``, but WITHOUT that function's
+    ``detect_header_column_collapse`` gate: header attribution (GH-200) must
+    also check tables whose header/data column counts already agree — that is
+    exactly the "destroyed but not collapsed" case (a header band replaced by
+    blanks, or shifted, while the column count stays put). Returns ``None`` on
+    any abstain in the chain: no anchor row with an exact numeric-multiset
+    match, fewer than 2 derived data lanes, or no lane-aligned header band
+    above the anchor. Callers must treat ``None`` as UNVERIFIABLE, never as a
+    pass or a fail.
+
+    Result[0] is the label cell (words left of the first data lane);
+    result[1:] are the per-lane header cells, one per derived data column.
     """
-    collapsed, _header_cols, expected_cols = detect_header_column_collapse(grid)
-    if not collapsed or not words:
+    if not words:
         return None
-
     rows_by_y = _all_rows_by_y(words)
     if not rows_by_y:
         return None
@@ -399,7 +404,27 @@ def repair_collapsed_header(
     if not header_grid:
         return None
 
-    header_row = _merge_multiline_header_rows(header_grid)
+    return _merge_multiline_header_rows(header_grid)
+
+
+def repair_collapsed_header(
+    grid: list[list[str]],
+    words: list,
+) -> list[list[str]] | None:
+    """Rebuild a collapsed header using native word geometry.
+
+    Returns a new grid (header + original data rows, width-normalised) when
+    repair succeeds, else ``None``.  Data cell VALUES are taken from the input
+    *grid* — only the header structure is reconstructed.
+    """
+    collapsed, _header_cols, expected_cols = detect_header_column_collapse(grid)
+    if not collapsed or not words:
+        return None
+
+    header_row = native_header_row(grid, words)
+    if header_row is None:
+        return None
+
     if len(header_row) != expected_cols:
         # Pad or trim to match the modal data width (never drop data columns).
         if len(header_row) < expected_cols:
@@ -428,11 +453,9 @@ def repair_collapsed_header(
 
     repaired = [header_row] + body_rows
     logger.debug(
-        "header_repair: rebuilt header %d→%d cols (anchor y=%d, %d header lines)",
+        "header_repair: rebuilt header %d→%d cols",
         _header_cols,
         expected_cols,
-        anchor_y_int,
-        len(header_grid),
     )
     return repaired
 

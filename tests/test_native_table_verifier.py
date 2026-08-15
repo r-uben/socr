@@ -455,10 +455,14 @@ class TestNativeTableVerifierAuditEvents:
         inner.assess.assert_called_once()
         assert decision.accept is True  # inner judge accepted
 
-        # Audit event
-        assert len(events) == 1
-        evt = events[0]
-        assert evt.kind == "native_table_verifier_warn"
+        # Audit event. GH-200: the winner-side structural gate also runs on
+        # this accepting exit and may additionally record a
+        # table_header_unverifiable abstain (2 native lanes -> the
+        # header-attribution geometry chain has nothing to check here) --
+        # filter by kind rather than asserting a fixed total.
+        warn_events = [e for e in events if e.kind == "native_table_verifier_warn"]
+        assert len(warn_events) == 1
+        evt = warn_events[0]
         assert evt.page_num == 2
         assert "native_lane_count" in evt.data
         assert "output_col_count" in evt.data
@@ -500,9 +504,11 @@ class TestNativeTableVerifierAuditEvents:
         # TR-6: EXACT_PASS short-circuits — inner judge is NOT called
         inner.assess.assert_not_called()
         assert decision.accept is True, "EXACT_PASS must accept"
-        # Exactly one audit event of kind native_table_verifier_exact_pass
-        assert len(events) == 1, f"Expected 1 exact_pass event, got {len(events)}"
-        assert events[0].kind == "native_table_verifier_exact_pass"
+        # GH-200: the structural gate also runs on this accepting exit and
+        # may additionally record a table_header_unverifiable abstain (the
+        # 3-lane fixture has no header words at all) -- filter by kind.
+        exact_pass_events = [e for e in events if e.kind == "native_table_verifier_exact_pass"]
+        assert len(exact_pass_events) == 1, f"expected 1 exact_pass event, got {exact_pass_events}"
 
     def test_scan_page_bypasses_verifier_in_judge(self):
         """Scanned page: no native words → verifier bypassed, inner judge called."""
