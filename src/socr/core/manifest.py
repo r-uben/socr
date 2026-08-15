@@ -260,6 +260,39 @@ def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
     )
 
 
+def _native_text_with_appends(p) -> str:
+    """The native text INCLUDING content appended after extraction.
+
+    ``p.native_text`` is frozen when the text layer is read. Later phases splice
+    extra content onto the ``PageOutput`` object in place -- notably GH-36b's
+    equation LaTeX sidecar -- without ever updating ``native_text``. Demoting a
+    page's table trust must not silently revert it to that pre-append snapshot.
+
+    Reading from ``attempts`` rather than ``best_output`` is deliberate and closes
+    two distinct holes:
+
+    * ``DocumentState.apply_result`` only promotes an ``audit_passed`` output to
+      ``best_output``, so a page demoted for table distrust never has one at all
+      on the deterministic path.
+    * ``_score_per_page`` explicitly clears ``best_output`` when it demotes the
+      latest attempt under ``--native-only``.
+
+    ``attempts`` survives both. Only a *native* attempt whose text EXTENDS the
+    frozen snapshot is accepted, so this can never substitute OCR text or
+    different content for the native reading -- if nothing extends it, the
+    snapshot is returned unchanged.
+    """
+    base = p.native_text or ""
+    if not base:
+        return base
+    for attempt in reversed(p.attempts or ()):
+        text = attempt.text or ""
+        if (attempt.engine or "").startswith("native") and len(text) > len(base):
+            if text.startswith(base):
+                return text
+    return base
+
+
 def _winning_page_output(
     state: DocumentState,
     page_num: int,
@@ -345,20 +378,15 @@ def _winning_page_output(
             or native_table_defect
             or p.chart_asset_render_failed  # PP-7: render failure must stay WARNING
         ) and bool(p.attempts)
-        # GH-211 MAJOR-1: prefer the live best_output's text over the raw
-        # ``p.native_text`` snapshot when one exists. ``p.native_text`` is
-        # frozen at extraction time; ``best_output.text`` starts as the same
-        # string but may have content APPENDED afterwards -- notably GH-36b's
-        # equation LaTeX sidecar, spliced onto the PageOutput object in place
-        # (never onto ``native_text``). Demoting a page's table trust (WARNING
-        # status here) must not silently revert it to the pre-sidecar text.
-        fallback_text = (
-            p.best_output.text
-            if p.best_output
-            and p.best_output.text
-            and (p.best_output.engine or "").startswith("native")
-            else p.native_text
-        )
+        # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
+        # native attempt carries content appended after extraction (GH-36b's
+        # equation sidecar). See ``_native_text_with_appends``: it reads from
+        # ``attempts``, which survives both ``apply_result``'s audit_passed gate
+        # and ``_score_per_page``'s explicit ``best_output = None`` on demotion.
+        # Reading ``best_output`` here instead would drop the sidecar on the
+        # deterministic --native-only path, which is exactly the path this
+        # ticket is about.
+        fallback_text = _native_text_with_appends(p)
         return PageOutput(
             page_num=page_num,
             text=fallback_text,
