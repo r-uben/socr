@@ -260,6 +260,39 @@ def _whole_doc_page_texts(state: DocumentState) -> _WholeDoc | None:
     )
 
 
+def _native_text_with_appends(p) -> str:
+    """The native text INCLUDING content appended after extraction.
+
+    ``p.native_text`` is frozen when the text layer is read. Later phases splice
+    extra content onto the ``PageOutput`` object in place -- notably GH-36b's
+    equation LaTeX sidecar -- without ever updating ``native_text``. Demoting a
+    page's table trust must not silently revert it to that pre-append snapshot.
+
+    Reading from ``attempts`` rather than ``best_output`` is deliberate and closes
+    two distinct holes:
+
+    * ``DocumentState.apply_result`` only promotes an ``audit_passed`` output to
+      ``best_output``, so a page demoted for table distrust never has one at all
+      on the deterministic path.
+    * ``_score_per_page`` explicitly clears ``best_output`` when it demotes the
+      latest attempt under ``--native-only``.
+
+    ``attempts`` survives both. Only a *native* attempt whose text EXTENDS the
+    frozen snapshot is accepted, so this can never substitute OCR text or
+    different content for the native reading -- if nothing extends it, the
+    snapshot is returned unchanged.
+    """
+    base = p.native_text or ""
+    if not base:
+        return base
+    for attempt in reversed(p.attempts or ()):
+        text = attempt.text or ""
+        if (attempt.engine or "").startswith("native") and len(text) > len(base):
+            if text.startswith(base):
+                return text
+    return base
+
+
 def _winning_page_output(
     state: DocumentState,
     page_num: int,
@@ -279,7 +312,19 @@ def _winning_page_output(
     """
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
-        return p.best_output
+        # An ``audit_passed`` native output on a page whose table was flagged
+        # unverifiable is a CONTRADICTION, and the contradiction must lose to
+        # the distrust flag rather than short-circuit past it. This state is
+        # reachable without any live scoring bug: the resume ledger's
+        # fingerprint has no source-version component (#214), so a page marked
+        # terminal SUCCESS by an older build is restored verbatim -- carrying
+        # ``audit_passed=True`` alongside ``native_table_unverifiable=True``.
+        # Falling through here re-demotes it through the normal path below.
+        native_unverifiable = (p.best_output.engine or "").startswith("native") and getattr(
+            p, "native_table_unverifiable", False
+        )
+        if not native_unverifiable:
+            return p.best_output
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
     # hallucination is worse than an explicit failure marker — same D3 pattern.
@@ -337,17 +382,34 @@ def _winning_page_output(
         # as a FALLBACK, not a success: flagged WARNING / audit_passed=False
         # so the manifest and run summary stop stamping silent reversions as
         # passing pages.
+        native_table_defect = p.native_table_structure_failed or getattr(
+            p, "native_table_unverifiable", False
+        )
         native_is_fallback = (
             p.needs_ocr_enhancement
-            or p.native_table_structure_failed
+            or native_table_defect
             or p.chart_asset_render_failed  # PP-7: render failure must stay WARNING
         ) and bool(p.attempts)
+        # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
+        # native attempt carries content appended after extraction (GH-36b's
+        # equation sidecar). See ``_native_text_with_appends``: it reads from
+        # ``attempts``, which survives both ``apply_result``'s audit_passed gate
+        # and ``_score_per_page``'s explicit ``best_output = None`` on demotion.
+        # Reading ``best_output`` here instead would drop the sidecar on the
+        # deterministic --native-only path, which is exactly the path this
+        # ticket is about.
+        fallback_text = _native_text_with_appends(p)
         return PageOutput(
             page_num=page_num,
-            text=p.native_text,
+            text=fallback_text,
             status=PageStatus.WARNING if native_is_fallback else PageStatus.SUCCESS,
             engine="native",
             audit_passed=not native_is_fallback,
+            failure_mode=(
+                FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+                if native_table_defect and native_is_fallback
+                else FailureMode.NONE
+            ),
         )
     # Whole-document CLI path: recover this page's text from the split markdown.
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
