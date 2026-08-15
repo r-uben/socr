@@ -70,6 +70,7 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # same mechanism rather than a second one, per the B1 review finding.
         "table_unexplained_lanes",
         "table_not_scorable",
+        "table_structure_failed",
     }
 )
 

@@ -279,7 +279,11 @@ def _winning_page_output(
     """
     p = state.pages[page_num]
     if p.best_output and p.best_output.audit_passed:
-        return p.best_output
+        native_unverifiable = (p.best_output.engine or "").startswith("native") and getattr(
+            p, "native_table_unverifiable", False
+        )
+        if not native_unverifiable:
+            return p.best_output
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
     # hallucination is worse than an explicit failure marker — same D3 pattern.
@@ -337,9 +341,12 @@ def _winning_page_output(
         # as a FALLBACK, not a success: flagged WARNING / audit_passed=False
         # so the manifest and run summary stop stamping silent reversions as
         # passing pages.
+        native_table_defect = p.native_table_structure_failed or getattr(
+            p, "native_table_unverifiable", False
+        )
         native_is_fallback = (
             p.needs_ocr_enhancement
-            or p.native_table_structure_failed
+            or native_table_defect
             or p.chart_asset_render_failed  # PP-7: render failure must stay WARNING
         ) and bool(p.attempts)
         return PageOutput(
@@ -348,6 +355,11 @@ def _winning_page_output(
             status=PageStatus.WARNING if native_is_fallback else PageStatus.SUCCESS,
             engine="native",
             audit_passed=not native_is_fallback,
+            failure_mode=(
+                FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+                if native_table_defect and native_is_fallback
+                else FailureMode.NONE
+            ),
         )
     # Whole-document CLI path: recover this page's text from the split markdown.
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
