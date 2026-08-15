@@ -301,6 +301,17 @@ def _stub_inner(accept: bool = True) -> MagicMock:
 
 
 class TestStructuralEscalationGate:
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "GH-200: the header-attribution reject disjunct is parked in "
+            "table_output_defect. The REQUIREMENT is unchanged -- a destroyed "
+            "header must be rejected -- but every predicate tried so far also "
+            "returns HARD on byte-perfect correct tables (significance-star and "
+            "n.a. rows), and a false reject destroys good output. This flips to "
+            "XPASS the moment a sound predicate is wired back in."
+        ),
+    )
     def test_exact_pass_with_destroyed_header_is_rejected(self):
         """Direct regression for the agentic.py EXACT_PASS hole: a
         numerically-perfect, header-destroyed table must still reach

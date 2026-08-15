@@ -234,17 +234,28 @@ DEFECT_HEADER_UNATTRIBUTED = "header_unattributed"
 def table_output_defect(output_md: str, words: list | None) -> str:
     """Whether *output_md* (the text about to ship) has a structural defect.
 
-    GH-200 disjunction, evaluated in cost order:
+    GH-200. Currently a single term:
 
     1. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
        ragged OR detached_label_rows, unchanged -- see ``structural_gate_fires``
        docstring). String-only, no I/O.
-    2. ``header_attribution.header_attribution`` on every table block, HARD
-       verdict only (SOFT and UNVERIFIABLE never reject here -- see
-       ``header_attribution``'s module docstring). Needs *words* (native page
-       word geometry); when ``words`` is falsy this term is skipped entirely
-       and every block abstains, matching ``header_attribution``'s own
-       UNVERIFIABLE-on-no-words behaviour.
+
+    **The header-attribution disjunct is deliberately NOT evaluated here.**
+    Four independent implementations of it (GH-151 T3's token-pattern rule,
+    ``062bdef``'s year-band rule, the positional rule, and the normalized
+    comparison) each failed in one of two directions: either abstaining on the
+    hand-judged 4-of-4 header-loss case, or returning HARD on *byte-perfect
+    correct* tables -- demonstrated on tables carrying significance-star rows
+    and ``n.a.`` cells, both ubiquitous in this corpus. A false HARD is not a
+    missed catch; it REJECTS correct output and can drive it to the fail-closed
+    marker. Until the predicate is sound, shipping it as a reject term trades a
+    known-incomplete gate for an actively destructive one.
+
+    ``header_attribution`` itself, ``table_header_verdicts`` below, and the
+    whole ``native_table_header_unattributed`` plumbing are intentionally kept:
+    the verdicts remain observable for measurement, resume still restores the
+    flag from older sidecars, and re-enabling the disjunct is a one-line change
+    once a sound predicate exists.
 
     Deliberately NOT nested with TR-3 (``native_verifier.verify_native_table``)
     -- TR-3 is evaluated by the caller as a separate disjunct. Measured in
@@ -255,13 +266,6 @@ def table_output_defect(output_md: str, words: list | None) -> str:
     reports = check_markdown(output_md)
     if structural_gate_fires(reports):
         return DEFECT_GRID_SHAPE
-    if not words:
-        return DEFECT_NONE
-    from socr.tables.header_attribution import HeaderVerdict, header_attribution
-
-    for block in find_table_blocks(output_md):
-        if header_attribution(block.grid, words) is HeaderVerdict.HARD:
-            return DEFECT_HEADER_UNATTRIBUTED
     return DEFECT_NONE
 
 

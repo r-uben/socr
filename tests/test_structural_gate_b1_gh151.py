@@ -712,6 +712,18 @@ def _blanked_header_markdown() -> str:
 
 
 class TestHeaderAttributionEndToEnd:
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "GH-200: the header-attribution reject disjunct is parked in "
+            "table_output_defect. The REQUIREMENT is unchanged -- a header "
+            "defect must be recorded and surfaced under --native-only -- but "
+            "every predicate tried so far also returns HARD on byte-perfect "
+            "correct tables (significance-star and n.a. rows), and a false "
+            "reject destroys good output. This flips to XPASS the moment a "
+            "sound predicate is wired back in."
+        ),
+    )
     def test_native_only_records_header_defect_without_rerouting(self, tmp_path: Path) -> None:
         """process() on a generated born-digital table PDF with native_only.
 
