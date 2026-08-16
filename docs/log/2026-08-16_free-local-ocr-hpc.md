@@ -166,7 +166,56 @@ First vLLM start took 13:35 (torch.compile); the second took 5:20 from the compi
 - `strip_thinking` (removes matched `<think>…</think>` blocks) was added as a backstop
   beyond the issue's scope, for servers that ignore the switch.
 
-## Is socr production-ready?
+## Visual assessment of the output — and what it turned up
+
+The 45 pages were reviewed side by side against the source PDF. Verdict from that review:
+
+- **Tables: good.** Held up against the rendered pages, consistent with 44/44 cells on
+  `ce_like_p4_dense.pdf`. This is the part that looked worst on paper and is in fact fine.
+- **Special characters: never broken.** An apparent mojibake explosion (`â€"`, `Î±`) was a
+  missing `<meta charset="utf-8">` in the *review harness*, not in socr. The markdown holds
+  real `—`, `α`, `β`, `∑`, `∆`, U+2212. Worth remembering as a false alarm shape: always
+  check the bytes before blaming the model.
+- **Display equations: genuinely destroyed.** New issue **#219**, below.
+
+## GH-219 — Palatino math fonts defeat display-equation detection
+
+Filed today from this run. Mechanism, measured:
+
+`detect_display_equations` requires `DISPLAY_MIN_MATH_SPAN_RATIO = 0.50` — half a line's
+characters must come from spans matching `_MATH_FONT_RE` (`core/born_digital.py:35`), a
+whitelist of TeX/STIX families (`CMMI|CMSY|CMEX|MSAM|MSBM|STIXMath|LatinModernMath|…`).
+
+`BHL_2026.pdf` p.6 sets its math in **PazoMath / PazoMath-Italic / URWPalladioL** — the
+standard `mathpazo` Palatino setup. None match. Measured ratios on the real equation lines:
+
+| line | ratio | fonts |
+|---|---:|---|
+| `∆s f fm = α + βs f fm−1 +` | **0.04** (1/25) | CMSY10, PazoMath, PazoMath-Italic, URWPalladioL-* |
+| `∑` (×4) | **0.00** (0/1) | PazoMath |
+
+So `regions: []`, and `--detect-equations --recover-clean-equations` are **no-ops** — verified
+by running them and diffing: output is byte-identical to `page.get_text()`. The page reports
+`1 trusted native text`, `Success | none`. No model is ever consulted, and nothing is flagged
+at page, document, or CLI level.
+
+Two aggravating details:
+
+1. The page-level math detector **does** fire (CMSY10 is present). Page-level and region-level
+   detectors disagree, and the region-level one silently wins.
+2. The `∑` glyphs — unambiguous display-math operators — score **0.00**, because here they come
+   from PazoMath rather than CMEX. Font identity is being used as a proxy for something glyph
+   identity would answer directly.
+
+**Blast radius:** `mathpazo` is a common economics/finance template. Every Palatino-set paper
+loses every display equation, silently. Same *shape* as #217 (a font whitelist that only knows
+TeX families), different mechanism and code path.
+
+**The fix that holds regardless of approach:** a page with page-level math signal that yields
+zero display regions should be flagged. That single change converts this class from silent loss
+into a visible warning, independent of how detection is eventually rewritten.
+
+
 
 Not yet, and today's work is not why.
 
@@ -175,7 +224,12 @@ Not yet, and today's work is not why.
   found 4 of 5 gate-flagged tables genuinely damaged, and this single 45-page run raised
   9 dual-pass disagreements plus 7 native-table-verifier warnings. The pipeline is telling
   you it is unsure about its tables, and the failure mode is silent number damage.
+- **Papers with display math set in anything but TeX fonts:** no — see #219. The equations
+  are destroyed silently and no flag exists to catch it.
 
 **Next action:** the resolution hypothesis does **not** apply to #217 (font-layer defect,
 see above). If it is tested at all, the target is the VLM-read path — table structure damage
 of the #213/#215 class — not the minus sign.
+
+**Cheapest high-value next step:** #219's flag-on-detector-disagreement. It does not require
+solving math detection, only noticing when the two existing detectors contradict each other.
