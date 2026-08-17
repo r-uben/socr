@@ -7,6 +7,7 @@ from rich.console import Console
 
 from socr import __version__
 from socr.core.config import EngineType, PipelineConfig
+from socr.review import html as review_html
 
 console = Console()
 
@@ -1004,6 +1005,76 @@ def _print_results_summary(results) -> None:
                     )
 
         console.print(paper_table)
+
+
+@cli.command()
+@click.argument("doc_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--pdf",
+    "pdf_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Source PDF the document directory was produced from",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Output HTML path (default: <doc_dir>/review.html)",
+)
+@click.option(
+    "--scale",
+    type=float,
+    default=None,
+    help=f"Page render scale (default {review_html.RENDER_SCALE}; higher is sharper and larger)",
+)
+@click.option(
+    "--quality",
+    type=int,
+    default=None,
+    help=f"JPEG quality for page images (default {review_html.JPEG_QUALITY})",
+)
+def review(
+    doc_dir: Path,
+    pdf_path: Path,
+    output: Path | None,
+    scale: float | None,
+    quality: int | None,
+) -> None:
+    """Build a side-by-side page-image/markdown page for hand judgement (GH-220)."""
+    out_path = output or (doc_dir / "review.html")
+
+    report = review_html.collect_pages(
+        doc_dir,
+        pdf_path,
+        scale=scale if scale is not None else review_html.RENDER_SCALE,
+        quality=quality if quality is not None else review_html.JPEG_QUALITY,
+    )
+    rendered = review_html.build_review_html(report)
+    size = len(rendered.encode("utf-8"))
+
+    if size >= review_html.WRITE_REFUSAL_FLOOR:
+        # Never silently drop pages to fit -- a short document would read as a complete one.
+        console.print(
+            f"[red]Refusing to write:[/red] {size / 1e6:.2f} MB exceeds the "
+            f"{review_html.WRITE_REFUSAL_FLOOR / 1e6:.0f} MB write floor "
+            f"(host cap {review_html.ARTIFACT_BYTE_CAP / 1e6:.0f} MB).\n"
+            f"Lower --scale or --quality and retry; pages are never dropped to fit."
+        )
+        raise SystemExit(1)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(rendered, encoding="utf-8")
+
+    console.print(f"\n[bold]Review page[/bold] {out_path}  [dim]({size / 1e6:.2f} MB)[/dim]")
+    console.print(f"  document status : [bold]{report.doc_status}[/bold]")
+    console.print(f"  pages           : {len(report.pages)}")
+    console.print(
+        f"  pages with a recorded signal : [bold]{report.suspect_count}[/bold]"
+        f"  [dim](of which {report.contradiction_count} also report success)[/dim]"
+    )
+    if report.untrusted_pages:
+        console.print(f"  pages with untrusted tables  : {len(report.untrusted_pages)}")
 
 
 def main() -> None:

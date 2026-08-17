@@ -287,6 +287,105 @@ def count_pua_chars(text: str) -> int:
     )
 
 
+#: Glyphs a PDF uses to draw an unordered list marker. Their presence in the text
+#: layer means the page *has* a list; flat text can only render them as literal
+#: characters mid-paragraph, which is the GH-127 symptom.
+_LIST_MARKER_GLYPHS = frozenset("•‣◦▪●⁃⁌⁍")
+
+#: A markdown list item or ATX heading in the emitted text. If the emitted text
+#: already carries these, nothing was lost and no signal fires.
+_MD_LIST_RE = re.compile(r"(?m)^\s*[-*+]\s+")
+_MD_HEADING_RE = re.compile(r"(?m)^#{1,6}\s+")
+
+
+def detect_native_structure_loss(page: fitz.Page, native_text: str) -> dict[str, int]:
+    """Count structural cues in the PDF that the emitted flat text cannot represent.
+
+    GH-127. The native lane ships ``page.get_text("text")``, which is a linear dump:
+    bullet glyphs become literal characters inside a paragraph, headings become
+    ordinary lines, and a paragraph number set in the margin lands inside the
+    sentence beside it. Measured on the EFO-Nov-2022 corpus, the native lane emitted
+    zero headings and zero list items across all 14 pages it handled, while the VLM
+    lane emitted 46 headings and 54 list items across 51 pages.
+
+    This function does not fix any of that. It reports what was lost so the loss
+    stops being invisible -- a page can then still ship, but not silently.
+
+    Every comparison is derived from the page's own measured geometry (its modal body
+    font size, its modal body left edge), never a tuned constant, because point sizes
+    and margins are document-specific.
+
+    Returns a dict of cue counts, whose names state their epistemic strength:
+    ``unrepresented_lists`` and ``unrepresented_headings`` are verified losses -- the
+    cue is present in the PDF *and* absent from the emitted text. ``marginal_number_cues``
+    is weaker: it proves only that the page sets numbers in its margin, not that they
+    were mangled. Do not report it as a loss count.
+
+    All zero means the flat dump was an adequate representation of this page's
+    structure, not that the text is correct.
+    """
+    cues = {"unrepresented_lists": 0, "unrepresented_headings": 0, "marginal_number_cues": 0}
+    try:
+        blocks = page.get_text("dict").get("blocks") or []
+    except Exception:  # noqa: BLE001 - a detector must never break extraction
+        return cues
+
+    spans: list[tuple[float, float, float, str]] = []  # (size, x0, x1, text)
+    for block in blocks:
+        for line in block.get("lines") or []:
+            for span in line.get("spans") or []:
+                text = str(span.get("text") or "")
+                if not text.strip():
+                    continue
+                bbox = span.get("bbox") or (0.0, 0.0, 0.0, 0.0)
+                spans.append((float(span.get("size") or 0.0), float(bbox[0]), float(bbox[2]), text))
+
+    if not spans:
+        return cues
+
+    # Body size, weighted by how much text is set in it. Footnotes are many short
+    # spans; weighting by character count keeps them from winning the vote.
+    weight_by_size: Counter[float] = Counter()
+    for size, _x0, _x1, text in spans:
+        weight_by_size[round(size, 1)] += len(text.strip())
+    body_size = weight_by_size.most_common(1)[0][0]
+
+    left_weight: Counter[float] = Counter(
+        round(x0, 1) for size, x0, _x1, _t in spans if round(size, 1) == body_size
+    )
+    if not left_weight:
+        return cues
+    body_left = left_weight.most_common(1)[0][0]
+
+    # 1 and 2. Count the SHORTFALL, not presence-or-absence. An earlier revision
+    # suppressed every source cue as soon as the output contained one markdown list
+    # or one heading, so a page with three source bullets and one emitted list item
+    # reported zero loss for the two that vanished -- the partial case, which is the
+    # common one, was invisible.
+    source_lists = sum(
+        1 for _s, _x0, _x1, text in spans if text.strip() and text.strip()[0] in _LIST_MARKER_GLYPHS
+    )
+    cues["unrepresented_lists"] = max(0, source_lists - len(_MD_LIST_RE.findall(native_text)))
+
+    # Heading spans are counted per span, so a title broken across lines counts once
+    # per line; the emitted side is counted the same way for the comparison to hold.
+    source_headings = sum(1 for size, _x0, _x1, _t in spans if round(size, 1) > body_size)
+    cues["unrepresented_headings"] = max(
+        0, source_headings - len(_MD_HEADING_RE.findall(native_text))
+    )
+
+    # 3. A digits-only span sitting entirely left of the body column: a marginal
+    #    paragraph number. Flat text drops it into the prose, creating a number that
+    #    was never in that sentence -- the worst outcome for a citation corpus.
+    cues["marginal_number_cues"] = sum(
+        1
+        for size, _x0, x1, text in spans
+        if text.strip().isdigit() and x1 < body_left and round(size, 1) == body_size
+    )
+
+    return cues
+
+
 @dataclass
 class PageAssessment:
     """Per-page born-digital assessment."""

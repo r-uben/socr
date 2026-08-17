@@ -72,6 +72,10 @@ def _page_blob_key(page_output_dict: dict) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# GH-214: process-lifetime cache for the source digest. Computed once, not per page.
+_SOURCE_DIGEST_CACHE: str | None = None
+
+
 def _manifest_versions() -> tuple[str, str]:
     """(NORMALIZER_VERSION, ASSEMBLY_VERSION), read at call time.
 
@@ -81,6 +85,70 @@ def _manifest_versions() -> tuple[str, str]:
     from socr.core import manifest
 
     return manifest.NORMALIZER_VERSION, manifest.ASSEMBLY_VERSION
+
+
+def _socr_version() -> str:
+    """socr's declared package version, read at call time (monkeypatchable in tests)."""
+    import socr
+
+    return str(getattr(socr, "__version__", ""))
+
+
+def _socr_source_digest() -> str:
+    """SHA-256 over every shipped ``socr`` ``.py`` file, computed once per process.
+
+    GH-214. ``_run_fingerprint`` records the run *configuration*, never socr's own
+    code, so fixing an extraction bug without touching config leaves the fingerprint
+    byte-identical: already-terminal pages pass the resume gate and the corrected
+    code never reaches them. The document then reports SUCCESS carrying output the
+    fix was supposed to replace.
+
+    Hashing the whole package rather than a curated module list is deliberate. A
+    curated list has to be maintained, and a module someone forgets to register
+    fails DANGEROUS — it silently reuses stale output, which is the very bug this
+    closes. Hashing everything can only fail SAFE: an output-neutral edit (a
+    comment, a docstring) costs one needless reprocess. Re-OCR is cheap; a stale
+    number in a citation corpus is not.
+
+    ``normalizer_version`` / ``assembly_version`` (issue #38) are the narrow,
+    hand-maintained form of this idea and stay where they are — they cover two
+    modules, this covers the rest, and a stale hand-bumped constant is exactly the
+    failure mode above.
+
+    Determinism matters more than speed here: paths are sorted and recorded
+    package-relative (so two checkouts of the same code agree), and generated
+    artefacts are excluded.
+    """
+    global _SOURCE_DIGEST_CACHE
+    if _SOURCE_DIGEST_CACHE is not None:
+        return _SOURCE_DIGEST_CACHE
+
+    import hashlib
+    from pathlib import Path as _Path
+
+    import socr
+
+    root = _Path(socr.__file__).resolve().parent
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            digest.update(str(path.relative_to(root)).encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(path.read_bytes())
+            digest.update(b"\x00")
+        _SOURCE_DIGEST_CACHE = digest.hexdigest()
+    except OSError:
+        # An unreadable tree must not silently degrade into "no code identity",
+        # which would re-open GH-214. A FIXED sentinel is not enough: two runs from
+        # different unreadable checkouts would share it and resume each other's
+        # pages. Tagging it with a per-process value keeps one run internally
+        # consistent while guaranteeing the next process reprocesses.
+        import uuid
+
+        _SOURCE_DIGEST_CACHE = f"unreadable-source-tree:{uuid.uuid4().hex}"
+    return _SOURCE_DIGEST_CACHE
 
 
 def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_dir: Path) -> bool:
@@ -383,6 +451,14 @@ class UnifiedPipeline:
             # versions (tests) flow through.
             "normalizer_version": _manifest_versions()[0],
             "assembly_version": _manifest_versions()[1],
+            # --- GH-214: socr's own source identity ---
+            # The two versions above cover the normalizer and assembler only. Every
+            # OTHER output-affecting module (born_digital, tables, judge, engines)
+            # could change without moving any value in this dict, so a correctness
+            # fix would leave already-terminal pages skippable and never reach them.
+            # Hashing the shipped package closes that generally, and fails safe:
+            # an output-neutral edit costs a reprocess, never a stale result.
+            "socr_source_digest": _socr_source_digest(),
         }
         return run_fingerprint(
             primary["model"], primary["backend"] or "socr", primary["task"], None, extra=extra
@@ -4423,6 +4499,13 @@ class UnifiedPipeline:
             "winning_output": winning_dict,
             # Run-level fingerprint (shared across all pages of this run).
             "run_fingerprint": self._run_fingerprint(),
+            # GH-214 provenance: which socr produced this page. The fingerprint
+            # above PREVENTS stale reuse from here on, but it is opaque -- it
+            # cannot answer "was this page made by older code?" for a page
+            # already on disk. These two fields make staleness detectable after
+            # the fact, which is what an existing corpus needs.
+            "socr_version": _socr_version(),
+            "socr_source_digest": _socr_source_digest(),
             # Input-PDF checksum: the PP-5 inner resume gate requires an EXACT
             # match so a changed input at the same relative path can never reuse
             # this fragment.  Empty string when the input is unreadable.
