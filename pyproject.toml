@@ -85,6 +85,11 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# review/html.py embeds a CSS/JS template as a raw string. Wrapping those lines to 100
+# chars would hurt the readability of the generated page, not the Python.
+"src/socr/review/html.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
