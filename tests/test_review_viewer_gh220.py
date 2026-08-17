@@ -263,5 +263,57 @@ def test_missing_evidence_is_visible_even_while_judging_cold(doc: tuple[Path, Pa
     assert "#rail button.gone" not in rendered.split("body:not(.reveal)")[1][:200]
 
 
+def test_script_breakout_is_escaped_in_both_payloads(doc: tuple[Path, Path]) -> None:
+    """Document-controlled text must not be able to close the inline script.
+
+    Two sequences break out: a literal `</script>` ends the element early, and
+    `<!--<script` flips the parser into script-data-double-escaped state so the real
+    closing tag stops working and the viewer silently dies.
+
+    The vectors differ in reach. Extracted markdown (page payload) and the
+    `metadata.json` status (summary payload) can both hold any bytes. A PDF *filename*
+    cannot literally contain `</script>` because `/` is a path separator -- but it can
+    hold `<`, so it is escaped on the same path rather than reasoned about separately.
+    """
+    doc_dir, pdf = doc
+    hostile_name = pdf.parent / "x<script>alert(1).pdf"
+    pdf.rename(hostile_name)
+    (doc_dir / "metadata.json").write_text(json.dumps({"status": "partial</script><b>x"}))
+    _plant(
+        doc_dir,
+        1,
+        md="text with <!--<script and </script> inside",
+        sidecar={"status": "success"},
+    )
+    _plant(doc_dir, 2, md="ok", sidecar={"status": "success"})
+
+    rendered = build_review_html(collect_pages(doc_dir, hostile_name))
+
+    script_body = rendered.split("<script>")[1].split("</script>")[0]
+    assert "</script" not in script_body
+    assert "<!--<script" not in script_body
+    # Encoding, not censorship: the data survives in escaped form.
+    assert "\\u003c/script>" in script_body
+    assert "\\u003cscript>alert(1)" in script_body
+
+
+def test_header_counts_statuses_instead_of_asserting_them(doc: tuple[Path, Path]) -> None:
+    """The header must report the real status mix, never claim one.
+
+    A viewer that states "every page reports success" when a page reports otherwise
+    hides the exact failure it exists to surface.
+    """
+    doc_dir, pdf = doc
+    _plant(doc_dir, 1, md="a", sidecar={"status": "success", "terminal": True})
+    _plant(doc_dir, 2, md="b", sidecar={"status": "error", "terminal": True})
+
+    rendered = build_review_html(collect_pages(doc_dir, pdf))
+    summary = json.loads(re.search(r"const SUMMARY = (\{.*?\});\n", rendered, re.S).group(1))
+
+    assert summary["reportedSuccess"] == 1
+    assert summary["reportedOther"] == 1
+    assert "Every one of the" not in rendered, "header must not assert a uniform status"
+
+
 def test_refusal_floor_leaves_headroom_under_the_host_cap() -> None:
     assert WRITE_REFUSAL_FLOOR < ARTIFACT_BYTE_CAP

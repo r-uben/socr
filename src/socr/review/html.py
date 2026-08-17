@@ -226,6 +226,22 @@ def _read_json(path: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _js_json(value: Any) -> str:
+    """Serialize for embedding inside an inline ``<script>``.
+
+    Escaping only ``</`` is not sufficient. Document text reaching this page is
+    untrusted -- a PDF filename, a ``metadata.json`` status, or extracted markdown can
+    contain anything -- and two sequences break out of a script element:
+    a literal ``</script>`` ends it early, and ``<!--<script`` puts the parser into the
+    script-data-double-escaped state so the real closing tag no longer closes it and the
+    viewer silently stops working.
+
+    Escaping every ``<`` as ``\\u003c`` closes both. The parsed JSON value is identical,
+    since ``\\u003c`` is just how JSON spells ``<``.
+    """
+    return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
+
+
 def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:
     """Render the self-contained HTML. No external hosts: CSP blocks every one."""
     payload = [
@@ -245,8 +261,14 @@ def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:
         }
         for p in report.pages
     ]
-    data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     page_title = title or "socr Page Judge"
+
+    # Count what is actually true rather than asserting it in the template. An
+    # earlier revision hardcoded "every page reports success", which is a claim the
+    # data does not establish -- and a viewer that states an unverified fact about
+    # page status is the exact failure it exists to catch.
+    reported_success = sum(1 for p in report.pages if p.reported_status == "success")
+    reported_other = len(report.pages) - reported_success
 
     summary = {
         "pdf": report.pdf_name,
@@ -256,12 +278,14 @@ def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:
         "contradictions": report.contradiction_count,
         "untrusted": len(report.untrusted_pages),
         "tableFlags": report.table_flag_count,
+        "reportedSuccess": reported_success,
+        "reportedOther": reported_other,
     }
 
     return (
         _TEMPLATE.replace("__TITLE__", html.escape(page_title))
-        .replace("__SUMMARY__", json.dumps(summary, ensure_ascii=False))
-        .replace("__PAGES__", data)
+        .replace("__SUMMARY__", _js_json(summary))
+        .replace("__PAGES__", _js_json(payload))
     )
 
 
@@ -418,8 +442,9 @@ function head(){
     '<b>DOCUMENT: '+esc(s.docStatus.toUpperCase())+'</b> &nbsp;&middot;&nbsp; '+
     s.pageCount+' pages &nbsp;&middot;&nbsp; '+s.untrusted+' pages with untrusted tables &nbsp;&middot;&nbsp; '+
     s.tableFlags+' table flags'+
-    '<div class="sub">Every one of the '+s.pageCount+' page sidecars reports <b>success</b>, '+
-    'including '+s.contradictions+' that carry recorded warnings. '+
+    '<div class="sub">'+s.reportedSuccess+' of '+s.pageCount+' page sidecars report '+
+    '<b>success</b>'+(s.reportedOther?', '+s.reportedOther+' report something else':'')+
+    '; '+s.contradictions+' of those carry recorded warnings. '+
     'A page with no recorded signal is <b>not verified</b> &mdash; it only means nothing was recorded. '+
     '<kbd>w</kbd> warnings &nbsp; <kbd>j</kbd>/<kbd>k</kbd> page &nbsp; <kbd>r</kbd> raw &nbsp; '+
     '<kbd>h</kbd> numbers &nbsp; <kbd>+</kbd>/<kbd>-</kbd> zoom</div>';

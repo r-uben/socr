@@ -357,19 +357,22 @@ def detect_native_structure_loss(page: fitz.Page, native_text: str) -> dict[str,
         return cues
     body_left = left_weight.most_common(1)[0][0]
 
-    # 1. List markers present in the source but no markdown list in the output.
-    if not _MD_LIST_RE.search(native_text):
-        cues["unrepresented_lists"] = sum(
-            1
-            for _s, _x0, _x1, text in spans
-            if text.strip() and text.strip()[0] in _LIST_MARKER_GLYPHS
-        )
+    # 1 and 2. Count the SHORTFALL, not presence-or-absence. An earlier revision
+    # suppressed every source cue as soon as the output contained one markdown list
+    # or one heading, so a page with three source bullets and one emitted list item
+    # reported zero loss for the two that vanished -- the partial case, which is the
+    # common one, was invisible.
+    source_lists = sum(
+        1 for _s, _x0, _x1, text in spans if text.strip() and text.strip()[0] in _LIST_MARKER_GLYPHS
+    )
+    cues["unrepresented_lists"] = max(0, source_lists - len(_MD_LIST_RE.findall(native_text)))
 
-    # 2. Text set larger than the body -- a heading -- with no heading in the output.
-    if not _MD_HEADING_RE.search(native_text):
-        cues["unrepresented_headings"] = sum(
-            1 for size, _x0, _x1, _t in spans if round(size, 1) > body_size
-        )
+    # Heading spans are counted per span, so a title broken across lines counts once
+    # per line; the emitted side is counted the same way for the comparison to hold.
+    source_headings = sum(1 for size, _x0, _x1, _t in spans if round(size, 1) > body_size)
+    cues["unrepresented_headings"] = max(
+        0, source_headings - len(_MD_HEADING_RE.findall(native_text))
+    )
 
     # 3. A digits-only span sitting entirely left of the body column: a marginal
     #    paragraph number. Flat text drops it into the prose, creating a number that

@@ -18,7 +18,6 @@ import pytest
 
 from socr.core.born_digital import detect_native_structure_loss
 
-
 # PyMuPDF's base-14 fonts silently substitute U+2022 with U+00B7, so a bullet
 # inserted with insert_text never reaches the text layer. The bundled "cjk" font
 # carries the glyph and ships with PyMuPDF, keeping these tests hermetic.
@@ -160,3 +159,44 @@ def test_detector_never_raises_on_an_unreadable_page() -> None:
         "unrepresented_headings": 0,
         "marginal_number_cues": 0,
     }
+
+
+@pytest.mark.parametrize("scale", [1.0, 1.6])
+def test_partially_represented_list_reports_the_shortfall(scale: float) -> None:
+    """Three bullets in the source, one in the output, is a loss of two.
+
+    Treating any markdown list as full representation hid the partial case, which is
+    the common one -- a lane that recovers some structure looked identical to one that
+    recovered all of it.
+    """
+
+    def build(page: fitz.Page, s: float) -> None:
+        _plain_body(page, s)
+        _write_bullets(page, s, 3)
+
+    partial = "body\n\n- list item 0\n"
+    cues = detect_native_structure_loss(_page(build, scale), partial)
+
+    assert cues["unrepresented_lists"] == 2
+
+
+@pytest.mark.parametrize("scale", [1.0, 1.6])
+def test_partially_represented_headings_report_the_shortfall(scale: float) -> None:
+    def build(page: fitz.Page, s: float) -> None:
+        page.insert_text((96 * s, 70 * s), "First Title", fontsize=16 * s)
+        page.insert_text((96 * s, 95 * s), "Second Title", fontsize=16 * s)
+        _plain_body(page, s)
+
+    cues = detect_native_structure_loss(_page(build, scale), "# First Title\n\nbody\n")
+
+    assert cues["unrepresented_headings"] == 1
+
+
+def test_more_markdown_than_source_never_reports_negative_loss() -> None:
+    """A lane that adds structure is not a loss; the count must floor at zero."""
+    cues = detect_native_structure_loss(
+        _page(_plain_body), "- a\n- b\n- c\n\n# h1\n\n## h2\n\nbody\n"
+    )
+
+    assert cues["unrepresented_lists"] == 0
+    assert cues["unrepresented_headings"] == 0

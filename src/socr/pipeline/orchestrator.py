@@ -141,9 +141,13 @@ def _socr_source_digest() -> str:
         _SOURCE_DIGEST_CACHE = digest.hexdigest()
     except OSError:
         # An unreadable tree must not silently degrade into "no code identity",
-        # which would re-open GH-214. A sentinel that never equals a real digest
-        # forces reprocessing instead.
-        _SOURCE_DIGEST_CACHE = "unreadable-source-tree"
+        # which would re-open GH-214. A FIXED sentinel is not enough: two runs from
+        # different unreadable checkouts would share it and resume each other's
+        # pages. Tagging it with a per-process value keeps one run internally
+        # consistent while guaranteeing the next process reprocesses.
+        import uuid
+
+        _SOURCE_DIGEST_CACHE = f"unreadable-source-tree:{uuid.uuid4().hex}"
     return _SOURCE_DIGEST_CACHE
 
 

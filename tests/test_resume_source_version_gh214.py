@@ -120,7 +120,7 @@ def test_real_digest_is_a_nonempty_hex_string() -> None:
     """Guard the sentinel path: a readable tree must produce a real digest."""
     value = orch._socr_source_digest()
 
-    assert value != "unreadable-source-tree"
+    assert not value.startswith("unreadable-source-tree")
     assert len(value) == 64
     assert int(value, 16) >= 0
 
