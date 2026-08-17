@@ -1,7 +1,7 @@
 # TODO
 
 Working list, ranked. Not a mirror of GitHub — the issue tracker holds all 55 open items;
-this holds the ones that should be picked up next and why. Updated 2026-08-16.
+this holds the ones that should be picked up next and why. Updated 2026-08-17.
 
 Ranking rule: **silent content loss first**, then cost of the fix. socr's stated invariant is
 that a wrong or dropped number is worse than a missing one, so a defect that ships bad output
@@ -39,6 +39,23 @@ while reporting `Success` outranks a defect that fails loudly.
 
 ## Then — routing correctness
 
+- [ ] **#221 · cascade-halt is unreachable; the probe tests the wrong layer.** Measured
+      2026-08-17: `probe_ollama_idle` is a `GET /api/tags`, which answers 200 in 0.03s while
+      the GPU is genuinely wedged, so `not probe_ollama_idle()` is always False and the halt
+      branch is dead code. A wedged local VLM therefore burns the per-page 300s on every
+      remaining page — ~3.75h of nothing on a 45-page document. Fix is a *functional* canary
+      (1-token generation on the same backend+model, which queues behind the jam: measured
+      0.2s healthy vs blocked-for-the-duration while busy). Amended design and the four
+      review holes are in the issue thread; **item 6 there — drop-rung vs halt on mixed
+      ladders — must be settled before any code**.
+- [ ] **#222 · the same guard false-halts healthy non-Ollama runs.** Mirror image of #221:
+      `probe_ollama_idle` is hardcoded to `localhost:11434` and the call site passes no host,
+      so on vLLM / HPC / remote-Ollama deployments it returns False forever on a healthy box.
+      The trigger is backend-agnostic (a *Gemini* timeout arms it) and matches the substring
+      `"timeout"` inside judge prose, so one slow cloud page can truncate a good document as
+      `PARTIAL_SAVE_VLM_TIMEOUT`. Unlike #221 this one destroys output. Fix together with
+      #221 — both dissolve into recording backend identity on the timeout attempt and probing
+      *that* backend at *its* host.
 - [ ] **#214 · resume fingerprint has no source-version component.** Fixing a bug does not
       invalidate already-cached pages, so correctness fixes are silently unapplied on resume.
       This one multiplies every other fix on this list and deserves to move up if any of the
@@ -70,7 +87,10 @@ while reporting `Success` outranks a defect that fails loudly.
       `origin/main` unreviewed (`ff7d817`, `44e1560`). Verified working on both backends against
       real hardware, but no diff review happened.
 - [ ] **Move `docs/log/2026-08-16_free-local-ocr-hpc.md`** off `docs/217-glyph-forgery-panel` —
-      it was committed there because a parallel session shares the checkout.
+      it was committed there because a parallel session shares the checkout. The 2026-08-17
+      TODO.md edits (#220 / #221 / #222) landed on the same branch for the same reason: a
+      parallel session was mid-commit there, and switching branches in a shared checkout would
+      have disrupted it. Move both together.
 - [ ] **Correct the `/hpc-bocconi` skill file**: A100s are 40 GB MIG slices not 80 GB cards;
       H100 (`gpunew`) and H200 (`gpuh200`) partitions exist and are undocumented; home quota is
       175/180 GB so weights belong on `/scratch`; `--hpc-sequential` runs DeepSeek-OCR, not Qwen.
@@ -78,6 +98,10 @@ while reporting `Success` outranks a defect that fails loudly.
 
 ## Architecture (not blocking anything)
 
+- [ ] **#220 · page-review viewer** — page image beside its extracted fragment, driven off the
+      `pages/NNN.md` + `NNN.json` artefacts that already exist. Not a feature so much as an
+      accelerator for the hand-judgement passes that gate #205 / #212 / #215; every one of
+      those so far has been done by eyeballing two windows.
 - [ ] **#155 · split the ~5.5k-LOC `pipeline/orchestrator.py` god-module.**
 - [ ] **#174 · make agentic the only first-class path**; quarantine the legacy backbone.
 - [ ] **#175 / #176 · package layering and the DocumentState blackboard.**
