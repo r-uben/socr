@@ -189,6 +189,16 @@ class TestUnknownKeys:
         with pytest.raises(ValueError, match=r"hpc\.gpu_typo"):
             PipelineConfig.from_file(_write(tmp_path, {"hpc": {"gpu_typo": "a100"}}))
 
+    def test_error_message_points_at_the_valid_names(self, tmp_path):
+        """The message must be actionable without reading the source."""
+        with pytest.raises(ValueError) as exc:
+            PipelineConfig.from_file(_write(tmp_path, {"cost_budgets": 0.5}))
+
+        message = str(exc.value)
+        assert "PipelineConfig" in message
+        assert "HPCConfig" in message
+        assert "config.py" in message
+
     def test_all_unknown_keys_are_reported_together(self, tmp_path):
         with pytest.raises(ValueError) as exc:
             PipelineConfig.from_file(_write(tmp_path, {"foo": 1, "bar": 2}))

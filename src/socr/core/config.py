@@ -369,7 +369,14 @@ class PipelineConfig:
         known = {f.name for f in dataclasses.fields(cls)} | _FROM_FILE_LEGACY_KEYS
         unknown = sorted(k for k in data if k not in known) + unknown_hpc
         if unknown:
-            raise ValueError(f"Unrecognised key(s) in config file {path}: {', '.join(unknown)}")
+            raise ValueError(
+                f"Unrecognised key(s) in config file {path}: {', '.join(unknown)}. "
+                "Valid top-level keys are the field names of PipelineConfig "
+                "(plus the legacy alias 'fallback_engine'); keys under 'hpc' are the "
+                "field names of HPCConfig — both defined in socr/core/config.py. "
+                "A key socr does not recognise is rejected rather than ignored, so a "
+                "typo cannot silently drop a setting."
+            )
 
         return config
 
