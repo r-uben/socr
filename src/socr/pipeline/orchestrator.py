@@ -61,15 +61,19 @@ def _page_blob_key(page_output_dict: dict) -> str:
     """Content-addressed key for a serialised PageOutput dict.
 
     Used in per-page sidecars as a lightweight ``page_fingerprint`` that
-    changes whenever the winning page text changes.  Mirrors the BlobStore
-    key derivation so PP-5 can cross-reference with the manifest without
-    opening the manifest file.
-    """
-    import hashlib
-    import json
+    changes whenever the winning page text changes.  Delegates to the
+    BlobStore's own ``blob_hash`` so the canonicalisation is identical BY
+    CONSTRUCTION and PP-5 can cross-reference with the manifest without
+    opening the manifest file.  A re-implementation here diverged on
+    ``ensure_ascii`` and disagreed with the store for every non-ASCII page
+    (#235) — hence the delegation rather than a copied helper.
 
-    payload = json.dumps(page_output_dict, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    The ``sha256:`` prefix is part of the sidecar's value shape and is NOT
+    part of the store's key; only the digest below it is shared.
+    """
+    from socr.core.cache import blob_hash
+
+    return "sha256:" + blob_hash(page_output_dict)
 
 
 # GH-214: process-lifetime cache for the source digest. Computed once, not per page.
