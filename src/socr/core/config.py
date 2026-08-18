@@ -362,12 +362,20 @@ class PipelineConfig:
             hpc_data = {k: v for k, v in data["hpc"].items() if k in allowed}
             config.hpc = HPCConfig(**hpc_data)
             unknown_hpc = sorted(f"hpc.{k}" for k in data["hpc"] if k not in allowed)
+        elif "hpc" in data:
+            # A non-mapping ``hpc:`` silently yielded the default HPCConfig, which is
+            # the same silent-drop failure this rule exists to prevent.
+            unknown_hpc = ["hpc (must be a mapping)"]
 
         # An unrecognised key is a typo or a stale setting. Dropping it silently is
         # exactly how a spend cap or a mode switch fails to take effect with no
         # signal at any level, so it fails the load instead (#240).
+        #
+        # Keys are stringified before sorting: YAML permits non-string keys, and a
+        # bare ``1:`` would otherwise crash on the sort/join while building the very
+        # message meant to explain the problem.
         known = {f.name for f in dataclasses.fields(cls)} | _FROM_FILE_LEGACY_KEYS
-        unknown = sorted(k for k in data if k not in known) + unknown_hpc
+        unknown = sorted(str(k) for k in data if k not in known) + unknown_hpc
         if unknown:
             raise ValueError(
                 f"Unrecognised key(s) in config file {path}: {', '.join(unknown)}. "

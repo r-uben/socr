@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from socr.core.config import EngineType, PipelineConfig
+from socr.core.config import EngineType, HPCConfig, PipelineConfig
 
 # Fields that cannot be probed by the generic scalar round-trip below, each for a
 # stated structural reason -- NOT because they are allowed to be unrestorable.
@@ -96,10 +96,28 @@ class TestFromFileCoverage:
                 unrestored.append(f"{name}: file said {written!r}, config has {got!r}")
         assert not unrestored, "fields silently dropped by from_file:\n" + "\n".join(unrestored)
 
-    def test_unproved_exception_list_is_exhaustive(self):
-        """UNPROBED_FIELDS must name only real PipelineConfig fields."""
+    def test_unprobed_exception_list_is_exhaustive(self):
+        """Both directions: the exception list names real fields, and nothing escapes it.
+
+        The subset check alone would let a newly added list-valued field slip past
+        the generic round-trip guard unnoticed. A field is unprobable here iff its
+        default is a container the generic probe cannot synthesise a value for --
+        a list, or the nested HPCConfig dataclass. Scalars, Paths and EngineTypes
+        are all probed generically.
+        """
         names = {f.name for f in dataclasses.fields(PipelineConfig)}
         assert UNPROBED_FIELDS <= names
+
+        defaults = PipelineConfig()
+        unprobable = {
+            f.name
+            for f in dataclasses.fields(PipelineConfig)
+            if isinstance(getattr(defaults, f.name), (list, HPCConfig))
+        }
+        assert unprobable == UNPROBED_FIELDS, (
+            "fields the generic probe cannot cover but which are not declared in "
+            f"UNPROBED_FIELDS (or vice versa): {unprobable ^ UNPROBED_FIELDS}"
+        )
 
     @pytest.mark.parametrize("name", PREVIOUSLY_DROPPED)
     def test_previously_dropped_field_round_trips(self, name, tmp_path):
@@ -205,6 +223,21 @@ class TestUnknownKeys:
 
         assert "bar" in str(exc.value)
         assert "foo" in str(exc.value)
+
+    def test_non_string_unknown_key_is_reported_not_crashed(self, tmp_path):
+        """YAML allows non-string keys; a bare ``1:`` must not crash the reporter.
+
+        Sorting and joining a mix of int and str raises TypeError while building
+        the very message meant to explain the problem, turning a clear config
+        error into an opaque stack trace.
+        """
+        with pytest.raises(ValueError, match="1"):
+            PipelineConfig.from_file(_write(tmp_path, {1: "oops"}))
+
+    def test_non_mapping_hpc_block_is_rejected(self, tmp_path):
+        """``hpc:`` given a scalar silently yielded the default HPCConfig."""
+        with pytest.raises(ValueError, match="hpc"):
+            PipelineConfig.from_file(_write(tmp_path, {"hpc": "not-a-mapping"}))
 
     def test_empty_file_loads_defaults(self, tmp_path):
         path = tmp_path / "empty.yaml"
