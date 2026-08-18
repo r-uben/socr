@@ -417,6 +417,11 @@ class UnifiedPipeline:
                 else (self._resolve_judge_model() or JUDGE_IDENTITY_HEURISTIC)
             ),
             "dual_pass_tables": cfg.dual_pass_tables,
+            # #229: ``auto_patch_tables`` rewrites table cells in the saved page
+            # (orchestrator table-patch lane). Toggling it changed the .md without
+            # changing the fingerprint, so a resumed run mixed patched and
+            # unpatched pages under one document status.
+            "auto_patch_tables": cfg.auto_patch_tables,
             "truncation_retries": cfg.truncation_retries,
             "max_retries": cfg.max_retries,
             # --- consensus ---
@@ -429,6 +434,13 @@ class UnifiedPipeline:
             # Both change the saved .md content, so both must invalidate the cache.
             "save_figures": cfg.save_figures,
             "describe_figures": cfg.describe_figures,
+            # --- corrupt-font math recovery (separate from GH-36) ---
+            # ``recover_corrupt_math`` re-renders equations through a VLM and
+            # replaces page text, so the flag AND the model identity change the
+            # saved bytes. The model is recorded only while the flag is on: an
+            # unused model default must not force a needless reprocess (#233).
+            "recover_corrupt_math": cfg.recover_corrupt_math,
+            "math_model": cfg.math_model if cfg.recover_corrupt_math else None,
             # --- GH-36a: equation region detection ---
             # ``detect_equations`` controls whether display-equation regions are
             # detected, cropped, and recorded in provenance (model-free, GH-36a).
@@ -440,7 +452,22 @@ class UnifiedPipeline:
             # 1A gate + 1C sidecar attachment.  Changing it changes the .md
             # content (sidecar blocks appear/disappear) so it invalidates cache.
             "recover_clean_equations": cfg.recover_clean_equations,
+            # #230: the model that produces those LaTeX sidecars. Swapping it
+            # changes the sidecar text, so it must invalidate. Recorded only
+            # while the lane is enabled, for the same reason as ``math_model``.
+            "clean_equation_model": (
+                cfg.clean_equation_model if cfg.recover_clean_equations else None
+            ),
             "figures_engine": cfg.figures_engine.value,
+            # #232: only the engine NAME was recorded. The figure-description
+            # engine need not appear in primary/local/fallback/multi/enabled, so
+            # under a custom ``enabled_engines`` its resolved model (e.g.
+            # ``gemini_model``) could change with no fingerprint movement and
+            # stale captions would survive resume. Recorded only while captions
+            # are actually produced, so the default never forces a reprocess.
+            "figures_engine_determinants": (
+                self._engine_determinants(cfg.figures_engine) if cfg.describe_figures else None
+            ),
             "figures_max_total": cfg.figures_max_total,
             "figures_max_per_page": cfg.figures_max_per_page,
             # --- output-semantics code versions (issue #38) ---
