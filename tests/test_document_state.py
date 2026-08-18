@@ -726,3 +726,33 @@ class TestApplyBornDigitalContentTypeVector:
         assert ps2.has_figures is False
         assert ps2.has_equations is False
         assert ps2.has_tables is False
+
+
+# ---------------------------------------------------------------------------
+# GH-234: pp2_halt_reason is a declared field, not a dynamic attribute
+# ---------------------------------------------------------------------------
+
+
+class TestPP2HaltReason:
+    """The cascade-halt reason must be a real field with a defined default.
+
+    It used to be created dynamically at the assignment site, so the read in
+    ``_phase_assemble`` needed a ``getattr`` fallback and had no default of
+    record. Any future ``slots=True`` on DocumentState would have broken it.
+    """
+
+    def test_declared_field_with_empty_default(self) -> None:
+        from dataclasses import fields
+
+        names = {f.name for f in fields(DocumentState)}
+        assert "pp2_halt_reason" in names, (
+            "pp2_halt_reason must be a declared dataclass field, not a dynamic attribute"
+        )
+
+        state = DocumentState(handle=_make_handle(2))
+        assert state.pp2_halt_reason == "", (
+            f"non-halted default must be empty; got {state.pp2_halt_reason!r}"
+        )
+        assert not state.pp2_halt_reason, (
+            "the empty default must be falsy (the read path gates on truthiness)"
+        )
