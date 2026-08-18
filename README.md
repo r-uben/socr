@@ -209,6 +209,14 @@ audit_enabled: true
 audit_min_words: 50
 ```
 
+Every `PipelineConfig` field can be set here (see `socr/core/config.py`); keys under
+`hpc:` are `HPCConfig` fields.
+
+An unrecognised key is a **hard error** — the load fails and names the offending key.
+This is deliberate: a silently-ignored config key is the bug this rule exists to prevent
+(#240), where a `cost_budget` spend cap set in a file simply never took effect and
+nothing said so.
+
 Or use profiles: `~/.config/socr/fast.yaml` → `socr paper.pdf --profile fast`
 
 ## Engine CLIs

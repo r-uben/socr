@@ -90,6 +90,28 @@ class HPCConfig:
             self.vllm_url = os.environ.get("VLLM_BASE_URL", f"http://localhost:{self.vllm_port}/v1")
 
 
+# Fields of PipelineConfig that ``from_file`` restores with bespoke logic
+# (enums, lists of enums, Path). Everything else is restored generically from
+# ``dataclasses.fields``, so a newly added field persists by default instead of
+# having to be opted in to a hand-maintained name list (#240). Keep this set in
+# sync with the explicit blocks in ``PipelineConfig.from_file``.
+_FROM_FILE_EXPLICIT_FIELDS: frozenset[str] = frozenset(
+    {
+        "primary_engine",
+        "local_engine",
+        "fallback_chain",
+        "figures_engine",
+        "enabled_engines",
+        "multi_engine",
+        "output_dir",
+        "hpc",
+    }
+)
+
+# Keys accepted in YAML that are not PipelineConfig fields (legacy aliases).
+_FROM_FILE_LEGACY_KEYS: frozenset[str] = frozenset({"fallback_engine"})
+
+
 @dataclass
 class PipelineConfig:
     """Single configuration for the socr pipeline.
@@ -323,62 +345,46 @@ class PipelineConfig:
         if "multi_engine" in data:
             config.multi_engine = [EngineType(e) for e in data["multi_engine"]]
 
-        # Scalar fields
-        scalar_fields = [
-            "native_first",
-            "native_only",
-            "tiered",
-            "recover_corrupt_math",
-            "math_model",
-            "detect_equations",
-            "recover_clean_equations",
-            "clean_equation_model",
-            "timeout",
-            "max_retries",
-            "truncation_retries",
-            "chunk_threshold",
-            "chunk_size",
-            "render_dpi",
-            "workers",
-            "save_figures",
-            "describe_figures",
-            "figures_max_total",
-            "figures_max_per_page",
-            "audit_enabled",
-            "audit_min_words",
-            "consensus_enabled",
-            "consensus_use_llm",
-            "consensus_ollama_model",
-            "reprocess",
-            "dry_run",
-            "quiet",
-            "verbose",
-            "deepseek_backend",
-            "deepseek_task",
-            "deepseek_vllm_url",
-            "glm_backend",
-            "glm_task",
-            "qwen_backend",
-            "qwen_model",
-            "qwen_model_pinned",
-            "nougat_model",
-            "marker_device",
-            "gemini_model",
-            "gemini_task",
-            "mistral_model",
-        ]
-        for key in scalar_fields:
-            if key in data:
-                setattr(config, key, data[key])
+        # Everything else: restored generically from the dataclass definition, so
+        # a field added to PipelineConfig persists through a config file without
+        # anyone remembering to add its name here (#240).
+        for f in dataclasses.fields(cls):
+            if f.name not in _FROM_FILE_EXPLICIT_FIELDS and f.name in data:
+                setattr(config, f.name, data[f.name])
 
         if "output_dir" in data:
             config.output_dir = Path(data["output_dir"])
 
         # HPC config -- only allow known fields to prevent injection
+        unknown_hpc: list[str] = []
         if "hpc" in data and isinstance(data["hpc"], dict):
             allowed = {f.name for f in dataclasses.fields(HPCConfig)}
             hpc_data = {k: v for k, v in data["hpc"].items() if k in allowed}
             config.hpc = HPCConfig(**hpc_data)
+            unknown_hpc = sorted(f"hpc.{k}" for k in data["hpc"] if k not in allowed)
+        elif "hpc" in data:
+            # A non-mapping ``hpc:`` silently yielded the default HPCConfig, which is
+            # the same silent-drop failure this rule exists to prevent.
+            unknown_hpc = ["hpc (must be a mapping)"]
+
+        # An unrecognised key is a typo or a stale setting. Dropping it silently is
+        # exactly how a spend cap or a mode switch fails to take effect with no
+        # signal at any level, so it fails the load instead (#240).
+        #
+        # Keys are stringified before sorting: YAML permits non-string keys, and a
+        # bare ``1:`` would otherwise crash on the sort/join while building the very
+        # message meant to explain the problem.
+        known = {f.name for f in dataclasses.fields(cls)} | _FROM_FILE_LEGACY_KEYS
+        unknown = sorted(str(k) for k in data if k not in known) + unknown_hpc
+        if unknown:
+            raise ValueError(
+                f"Unrecognised key(s) in config file {path}: {', '.join(unknown)}. "
+                "Valid top-level keys are the field names of PipelineConfig "
+                "(plus the legacy alias 'fallback_engine'); keys under 'hpc' are the "
+                "field names of HPCConfig — both defined in socr/core/config.py. "
+                "A key socr does not recognise is rejected rather than ignored, so a "
+                "typo cannot silently drop a setting."
+            )
 
         return config
 
