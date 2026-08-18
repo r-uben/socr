@@ -209,6 +209,9 @@ audit_enabled: true
 audit_min_words: 50
 ```
 
+Every `PipelineConfig` field can be set here. An unrecognised key is an error, not a
+silent no-op — a typo'd `cost_budget` must not read as "no budget set".
+
 Or use profiles: `~/.config/socr/fast.yaml` → `socr paper.pdf --profile fast`
 
 ## Engine CLIs
