@@ -41,7 +41,7 @@ counts before implementing.
 10. Boundary enforcement via a stdlib-`ast` test, not a new import-linter dependency.
 11. Issue LOC acceptance: < 1.5k hard gate retained (estimate ~950); < 800 reported as
     aspirational; any AC change (D4) needs owner approval.
-12. Fingerprint under-invalidation fixes (D1a-e), `_pp2_halt_reason` declaration (D2),
+12. Fingerprint under-invalidation fixes (D1a-e), `pp2_halt_reason` declaration (D2, DONE — #234/PR #236),
     and the blob-key canonicalization defect (D5) are separate tickets, never folded
     into extraction slices.
 

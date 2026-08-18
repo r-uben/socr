@@ -274,7 +274,7 @@ green before merging. Shared done-when for every slice, in addition to the ticke
   dead code) and `restore_terminal_page_state` (facade delegate KEPT: two tests call it
   directly). `route_page`/`probe_ollama_idle` become workflow globals.
   `provider_ladder` stays a function-local import (patched at source,
-  test_b2_routing.py:118). `state._pp2_halt_reason` write (:3029) and cascade-halt
+  test_b2_routing.py:118). `state.pp2_halt_reason` write (:3029) and cascade-halt
   latch (:2445,:2854-2878) move untouched. `AgenticDeps` carries every facade
   collaborator (`_run_engine_on_pages`, `_available_engines_for_agentic`, lane
   delegates, persistence delegates, `_build_page_judge`, predicates, `config`,
@@ -360,7 +360,8 @@ batch with structural slices, or the "bytes unchanged" evidence is destroyed.
 - **D1d** (#232) fingerprint `gemini_model` under custom `enabled_engines` excluding GEMINI
   (:5929-5930; defaults are covered via core/config.py:107)
 - **D1e** (#233) fingerprint `recover_corrupt_math` + `math_model` (:915,:1017,:1027-1031)
-- **D2** (#234) declare `DocumentState._pp2_halt_reason` (:3029 write, :5172 read)
+- **D2** (#234) ~~declare `DocumentState._pp2_halt_reason` (:3029 write, :5172 read)~~
+  **DONE** — merged as `DocumentState.pp2_halt_reason` (no leading underscore) in PR #236.
 - **D5** (#235) `_page_blob_key` canonicalization mismatch vs `core.cache.blob_hash`
   (:60-71 vs core/cache.py:24-37) + non-ASCII regression test
 
