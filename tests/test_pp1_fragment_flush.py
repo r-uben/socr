@@ -19,12 +19,14 @@ Covers the acceptance criteria from the PP-1 ticket:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import patch
 
 from ocr_output_contract import PAGE_MARKER_RE, assemble_pages, split_native_pages
 
+from socr.core.cache import BlobStore, blob_hash
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.result import PageOutput, PageStatus
@@ -402,3 +404,46 @@ class TestPageBlobKey:
     def test_sha256_prefix(self) -> None:
         key = _page_blob_key({"x": 1})
         assert key.startswith("sha256:")
+
+    def test_non_ascii_matches_blobstore_canonicalisation(self) -> None:
+        """GH-235: the sidecar key and the BlobStore key must agree on non-ASCII.
+
+        ``_page_blob_key`` used to serialise with ``ensure_ascii=True`` while
+        ``core.cache`` uses ``ensure_ascii=False``, so identical logical content
+        hashed to two different digests as soon as a page contained an accent, a
+        CJK glyph, or a typographic dash — i.e. most of the citation corpus.
+        The sidecar's ``sha256:`` prefix is a value-shape difference and is
+        stripped before comparing; the DIGEST is what must match.
+        """
+        payload = {
+            "page_num": 1,
+            "text": "Rendimiento anual — 中文 — Fernández-Fuertes, café ±0.5%",
+            "status": "success",
+        }
+        assert _page_blob_key(payload) == "sha256:" + blob_hash(payload)
+
+    def test_non_ascii_agrees_with_stored_blob(self) -> None:
+        """The digest must also address the bytes BlobStore actually wrote.
+
+        Guards the fix from the other side: matching ``blob_hash`` is only
+        useful if ``blob_hash`` is what the store keys by, so round-trip a
+        non-ASCII payload through a real store and compare.
+        """
+        import tempfile
+
+        payload = {"page_num": 2, "text": "café — 中文"}
+        with tempfile.TemporaryDirectory() as tmp:
+            stored = BlobStore(Path(tmp)).put(payload)
+        assert _page_blob_key(payload) == f"sha256:{stored}"
+
+    def test_ascii_payload_unchanged_by_the_fix(self) -> None:
+        """Pure-ASCII content is unaffected: ensure_ascii is a no-op there.
+
+        Pins the digest of an ASCII payload so the delegation cannot silently
+        change keys for the (overwhelming) ASCII majority of pages.
+        """
+        payload = {"page_num": 1, "text": "hello", "status": "success"}
+        expected = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        assert _page_blob_key(payload) == f"sha256:{expected}"
