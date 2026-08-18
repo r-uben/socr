@@ -150,6 +150,10 @@ class DocumentState:
     agentic_ladder: list[dict] = field(default_factory=list)
     # Judge model used for agentic routing (B3) — "" when heuristic judge was used.
     agentic_judge_model: str = ""
+    # PP-2 cascade halt: non-empty when the page loop stopped early because the
+    # backend went unresponsive (e.g. "PARTIAL_SAVE_VLM_TIMEOUT"). Set by
+    # _phase_agentic, read by _phase_assemble to propagate into EngineResult.error.
+    pp2_halt_reason: str = ""
 
     def __post_init__(self) -> None:
         for i in range(1, self.handle.page_count + 1):

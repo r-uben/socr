@@ -3026,7 +3026,7 @@ class UnifiedPipeline:
         # If we halted due to backend degradation, record it on the state so
         # _phase_assemble can propagate the reason into EngineResult.error.
         if halt_reason:
-            state._pp2_halt_reason = halt_reason  # type: ignore[attr-defined]
+            state.pp2_halt_reason = halt_reason
 
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
@@ -5169,7 +5169,7 @@ class UnifiedPipeline:
 
         # PP-2 cascade HALT: propagate the halt reason into the result error
         # so callers and tests can detect a partial-save due to a wedged backend.
-        _pp2_halt = getattr(state, "_pp2_halt_reason", None)
+        _pp2_halt = state.pp2_halt_reason
         if _pp2_halt:
             # Append to any existing per-page error rather than overwriting it.
             if final_result.error:
