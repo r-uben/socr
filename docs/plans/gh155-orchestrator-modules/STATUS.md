@@ -50,7 +50,7 @@ counts before implementing.
 - [x] Owner sign-off on the two tree deviations (2026-08-18): `modes/legacy/extraction.py`
       dropped, and `consensus.py` / `repair.py` / `reconciler.py` / `hpc_pipeline.py`
       named explicitly as unchanged siblings. Decisions 4, 7, 11 stand as written.
-- [ ] File the D1a-e / D2 / D5 issues on GitHub (bodies in TICKETS.md).
+- [x] Filed the D1a-e / D2 / D5 issues on GitHub (2026-08-18): #229-#235.
 - [ ] U2 (per-slice, empirical): triage test_orchestrator's 49 `get_engine` patches
       stays-vs-repoints during T10/T12 using the run-unrepointed-then-prove-non-vacuous
       protocol.

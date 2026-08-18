@@ -351,17 +351,17 @@ green before merging. Shared done-when for every slice, in addition to the ticke
 File as individual issues; each fingerprint ticket forces corpus reprocessing — never
 batch with structural slices, or the "bytes unchanged" evidence is destroyed.
 
-- **D1a** fingerprint `auto_patch_tables` (:3290)
-- **D1b** fingerprint `clean_equation_model` (:5829) + declare-or-delete
+- **D1a** (#229) fingerprint `auto_patch_tables` (:3290)
+- **D1b** (#230) fingerprint `clean_equation_model` (:5829) + declare-or-delete
   `math_model_host` (:5854-5855; not a `PipelineConfig` field)
-- **D1c** Qwen resolver: `resolved_model_version`/`fingerprint_determinants` via
+- **D1c** (#231) Qwen resolver: `resolved_model_version`/`fingerprint_determinants` via
   `resolve_qwen_intent` (engines/qwen.py:73-112; base.py:76-104 gap on
   vllm/sglang/api backends)
-- **D1d** fingerprint `gemini_model` under custom `enabled_engines` excluding GEMINI
+- **D1d** (#232) fingerprint `gemini_model` under custom `enabled_engines` excluding GEMINI
   (:5929-5930; defaults are covered via core/config.py:107)
-- **D1e** fingerprint `recover_corrupt_math` + `math_model` (:915,:1017,:1027-1031)
-- **D2** declare `DocumentState._pp2_halt_reason` (:3029 write, :5172 read)
-- **D5** `_page_blob_key` canonicalization mismatch vs `core.cache.blob_hash`
+- **D1e** (#233) fingerprint `recover_corrupt_math` + `math_model` (:915,:1017,:1027-1031)
+- **D2** (#234) declare `DocumentState._pp2_halt_reason` (:3029 write, :5172 read)
+- **D5** (#235) `_page_blob_key` canonicalization mismatch vs `core.cache.blob_hash`
   (:60-71 vs core/cache.py:24-37) + non-ASCII regression test
 
 ## Sequencing
