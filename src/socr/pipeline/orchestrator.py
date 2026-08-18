@@ -417,6 +417,14 @@ class UnifiedPipeline:
                 else (self._resolve_judge_model() or JUDGE_IDENTITY_HEURISTIC)
             ),
             "dual_pass_tables": cfg.dual_pass_tables,
+            # #229: ``auto_patch_tables`` rewrites table cells in the saved page.
+            # Toggling it changed the .md without changing the fingerprint, so a
+            # resumed run mixed patched and unpatched pages under one document
+            # status. It is read ONLY inside ``_reread_page_tables``, whose two
+            # callers both sit behind ``dual_pass_tables`` (the extractor at
+            # :2390 and ``_phase_dual_pass_tables`` at :593), so it cannot move
+            # output while dual-pass is off -- recorded only there.
+            "auto_patch_tables": cfg.auto_patch_tables if cfg.dual_pass_tables else None,
             "truncation_retries": cfg.truncation_retries,
             "max_retries": cfg.max_retries,
             # --- consensus ---
@@ -429,6 +437,13 @@ class UnifiedPipeline:
             # Both change the saved .md content, so both must invalidate the cache.
             "save_figures": cfg.save_figures,
             "describe_figures": cfg.describe_figures,
+            # --- corrupt-font math recovery (separate from GH-36) ---
+            # ``recover_corrupt_math`` re-renders equations through a VLM and
+            # replaces page text, so the flag AND the model identity change the
+            # saved bytes. The model is recorded only while the flag is on: an
+            # unused model default must not force a needless reprocess (#233).
+            "recover_corrupt_math": cfg.recover_corrupt_math,
+            "math_model": cfg.math_model if cfg.recover_corrupt_math else None,
             # --- GH-36a: equation region detection ---
             # ``detect_equations`` controls whether display-equation regions are
             # detected, cropped, and recorded in provenance (model-free, GH-36a).
@@ -440,7 +455,28 @@ class UnifiedPipeline:
             # 1A gate + 1C sidecar attachment.  Changing it changes the .md
             # content (sidecar blocks appear/disappear) so it invalidates cache.
             "recover_clean_equations": cfg.recover_clean_equations,
+            # #230: the model that produces those LaTeX sidecars. Swapping it
+            # changes the sidecar text, so it must invalidate. The lane runs iff
+            # BOTH flags are set (``recover_clean_equations and detect_equations``
+            # at :1120), so recording the model on the first flag alone would
+            # force a needless reprocess with detection off.
+            "clean_equation_model": (
+                cfg.clean_equation_model
+                if (cfg.recover_clean_equations and cfg.detect_equations)
+                else None
+            ),
             "figures_engine": cfg.figures_engine.value,
+            # #232: the caption model was invisible to the fingerprint. Note the
+            # trap: ``figures_engine`` above is NOT the caption engine -- nothing
+            # in src/ reads that field. Captions come from ``_get_vision_engine``
+            # (:5934), which builds a local Ollama figure engine with a per-call
+            # Gemini fallback constructed from ``gemini_model``. The Ollama model
+            # is a source-level default, already covered by ``socr_source_digest``;
+            # ``gemini_model`` is config, and under a custom ``enabled_engines``
+            # excluding GEMINI it reached the fingerprint through no other route,
+            # so a swap left stale captions resumable. Recorded only while
+            # captions are produced, so the default never forces a reprocess.
+            "figure_caption_fallback_model": (cfg.gemini_model if cfg.describe_figures else None),
             "figures_max_total": cfg.figures_max_total,
             "figures_max_per_page": cfg.figures_max_per_page,
             # --- output-semantics code versions (issue #38) ---
