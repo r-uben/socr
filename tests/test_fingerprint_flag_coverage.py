@@ -87,10 +87,14 @@ def test_figures_engine_model_invalidates_outside_enabled_engines() -> None:
         "describe_figures": True,
         "figures_engine": EngineType.GEMINI,
         "enabled_engines": [EngineType.QWEN],
-        # GEMINI must reach the fingerprint ONLY as the caption engine: it is the
-        # default ``fallback_chain`` member, which would otherwise cover the model
-        # through ``fallback_determinants`` and make this test pass vacuously.
+        # GEMINI must reach the fingerprint ONLY as the caption engine, or these
+        # tests are vacuous. Three other routes would otherwise cover
+        # ``gemini_model``: it is the default ``fallback_chain`` member, and
+        # ``primary_engine`` / ``local_engine`` default to AUTO -- which resolves
+        # to GEMINI on a machine with no local provider, i.e. exactly CI.
         "fallback_chain": [],
+        "primary_engine": EngineType.QWEN,
+        "local_engine": EngineType.QWEN,
     }
     assert _fingerprint(**common, gemini_model="gemini-a") != _fingerprint(
         **common, gemini_model="gemini-b"
@@ -104,6 +108,8 @@ def test_figures_engine_model_is_ignored_without_descriptions() -> None:
         "figures_engine": EngineType.GEMINI,
         "enabled_engines": [EngineType.QWEN],
         "fallback_chain": [],
+        "primary_engine": EngineType.QWEN,
+        "local_engine": EngineType.QWEN,
     }
     assert _fingerprint(**common, gemini_model="gemini-a") == _fingerprint(
         **common, gemini_model="gemini-b"
