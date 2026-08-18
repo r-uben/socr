@@ -123,6 +123,24 @@ class QwenEngine(BaseEngine):
     def cli_command(self) -> str:
         return "qwen-ocr"
 
+    def resolved_model_version(self, config: PipelineConfig) -> str:
+        """The model actually sent to qwen-ocr, not the raw config field (#231).
+
+        The base implementation reads ``config.qwen_model``, which for this
+        engine is a sentinel meaning "not user-pinned" and defaults to the
+        empty string. So on a default run the fingerprint recorded no model at
+        all, and on a vllm/sglang/api run it recorded the sentinel rather than
+        ``qwen_vllm_model`` -- the model the OpenAI-compatible server is
+        actually serving. Two runs on different backends could therefore share
+        a fingerprint and resume across each other's pages.
+
+        ``resolve_qwen_intent`` is the same call that builds the CLI's
+        ``--model`` argument, so reading it here keeps the fingerprint and the
+        invocation from drifting apart.
+        """
+        _backend, model = resolve_qwen_intent(config)
+        return model
+
     def is_available(self) -> bool:
         """CLI installed AND a usable backend.
 
