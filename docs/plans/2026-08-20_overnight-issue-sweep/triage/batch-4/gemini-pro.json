@@ -1,0 +1,359 @@
+{
+  "batch": "batch-4",
+  "vendor": "gemini-pro",
+  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+  "started_at": "2026-08-20T01:28:00+02:00",
+  "finished_at": "2026-08-20T01:34:00+02:00",
+  "grounding": {
+    "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-base/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-base",
+    "detect_equations_sha256_16": "c849ec91c38784ed"
+  },
+  "verdicts": [
+    {
+      "issue": 140,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "Pages with math fonts set has_equations=True but since has_corrupt_math is false, they are trusted natively. When recovery flags are off, there is no audit event emitted to track this silent math loss, unlike the PUA case.",
+      "citations": [
+        {
+          "path": "src/socr/core/born_digital.py",
+          "line": 1095,
+          "snippet": "needs_ocr_enhancement = has_corrupt_math"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with equations cluster: points out audit gap for math fonts.",
+      "blocked_by": null
+    },
+    {
+      "issue": 157,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "The _attach_equation_latex_sidecars method drops work and skips sidecar attachment if the page is missing from page_outputs, preventing region recovery on native-trusted pages.",
+      "citations": [
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 5903,
+          "snippet": "GH-36b: page %d has detected equations but no PageOutput"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with equations cluster: covers a skipped recovery edge case.",
+      "blocked_by": null
+    },
+    {
+      "issue": 164,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "When appending sidecars, _attach_equation_latex_sidecars fetches the full page's native_text. Each rejected equation region appends the entire page text into PageOutput.text, multiplying prose.",
+      "citations": [
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 5910,
+          "snippet": "native_text = state.pages[page_num].native_text or \"\""
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with equations cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 165,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "has_equations does not check has_unmapped_math_glyphs, causing PUA-only math pages to bypass region detection. Enabling recovery flags suppresses native_math_unrecovered globally even if nothing was recovered.",
+      "citations": [
+        {
+          "path": "src/socr/core/born_digital.py",
+          "line": 814,
+          "snippet": "has_equations = ("
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with equations cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 219,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "_MATH_FONT_RE uses a strict whitelist of TeX/STIX font families, missing Palatino fonts like PazoMath. These equations fail the ratio check, yielding no regions, so they are silently flattened.",
+      "citations": [
+        {
+          "path": "src/socr/core/born_digital.py",
+          "line": 38,
+          "snippet": "_MATH_FONT_RE = re.compile("
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with equations cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 158,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "model_version is left blank because rich per-page provenance is not populated by default. It's missing in manifests unless opt-in paths are used, which undermines replay identity.",
+      "citations": [
+        {
+          "path": "src/socr/core/manifest.py",
+          "line": 124,
+          "snippet": "model_version: str = \"\""
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with audit-provenance cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 169,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "_phase_agentic only retains the judge's rejection reason in att.output.skip_reason for empty outputs. Non-empty but rejected attempts silently drop the reason, breaking auditability.",
+      "citations": [
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 2766,
+          "snippet": "att.output.skip_reason = ("
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with audit-provenance cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 170,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "build_manifest freezes textual PageOutput blobs but fails to track content hashes for figures and equation image assets. Replay ignores whether these linked assets exist.",
+      "citations": [
+        {
+          "path": "src/socr/core/manifest.py",
+          "line": 535,
+          "snippet": "def build_manifest("
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with audit-provenance cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 171,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "_phase_assemble calls _flush_page_sidecar before figures are extracted. The sidecar writer reads engine_runs, so authoritative terminal sidecars are flushed without final figure refs.",
+      "citations": [
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 4457,
+          "snippet": "def _flush_page_sidecar("
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with audit-provenance cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 238,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "_run_fingerprint logs cfg.gemini_model as the caption model regardless of the engine that actually resolved (Ollama, Gemini, None), causing resume to trust stale captions.",
+      "citations": [
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 319,
+          "snippet": "def _run_fingerprint("
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with audit-provenance cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 39,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "Broad programme of work for route-by-quality metrics and ladder calibration, not a single actionable defect.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with umbrella cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 49,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "Outlines a general architecture vision (single-pass VLM + free native verification + agentic-on-signal) for extraction.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with umbrella cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 56,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "High-level tracker capturing multiple capabilities across CE OCR prior to full corpus rerun.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with umbrella cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 114,
+      "verdict": "BLOCKED-PROPOSAL",
+      "confidence": "high",
+      "rationale": "Proposal to split local OCR from cloud escalation via escalate was investigated and deemed unnecessary. Re-scoped but currently deprioritized.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with umbrella cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 156,
+      "verdict": "CHORE-PLAN",
+      "confidence": "high",
+      "rationale": "Addresses documentation drift where TODO.md and TICKETS.md do not reflect recently closed GitHub issues.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with umbrella cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 202,
+      "verdict": "BLOCKED-PROPOSAL",
+      "confidence": "high",
+      "rationale": "Proposes measuring Mistral OCR 4.1 against other models. Blocked on mistral-ocr-cli #23 persisting blocks sidecars.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with umbrella cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 203,
+      "verdict": "BLOCKED-PROPOSAL",
+      "confidence": "high",
+      "rationale": "Proposes consuming Mistral OCR 4.1 block labels as priors. Blocked on outcome of the measurement proposed in #202 and the mistral-ocr-cli fix.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with umbrella cluster.",
+      "blocked_by": 202
+    },
+    {
+      "issue": 155,
+      "verdict": "CHORE-PLAN",
+      "confidence": "high",
+      "rationale": "orchestrator.py is oversized. Breaking it into targeted modules is a housekeeping effort without altering runtime behavior.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with architecture cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 174,
+      "verdict": "CHORE-PLAN",
+      "confidence": "high",
+      "rationale": "Proposes removing or quarantining the legacy deterministic backbone to make agentic the single source of truth.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with architecture cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 175,
+      "verdict": "CHORE-PLAN",
+      "confidence": "high",
+      "rationale": "Circular imports exist between production components and benchmark tools. Plans to decouple them by moving shared primitives to a neutral module.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with architecture cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 176,
+      "verdict": "CHORE-PLAN",
+      "confidence": "high",
+      "rationale": "DocumentState has accumulated routing logic. Chore to restore its intended design and adopt canonical_page_texts.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with architecture cluster.",
+      "blocked_by": null
+    },
+    {
+      "issue": 178,
+      "verdict": "CHORE-PLAN",
+      "confidence": "high",
+      "rationale": "Records architectural decision to keep socr in Python for orchestration and policy, avoiding a Rust rewrite.",
+      "citations": [],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Consistent with architecture cluster.",
+      "blocked_by": null
+    }
+  ]
+}

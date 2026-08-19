@@ -1,0 +1,1846 @@
+{
+ "batch": "batch-3",
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "vendors": [
+  "kimi",
+  "ollama-minimax"
+ ],
+ "rows": [
+  {
+   "vendor": "kimi",
+   "issue": 139,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 36,
+      "snippet": "f = click.option(\"--no-audit\", is_flag=True, help=\"Skip quality audit stage\")(f)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "f = click.option(\"--no-audit\", is_flag=True, help=\"Skip quality audit stage\")(f)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 270,
+      "snippet": "config.audit_enabled = False"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "config.audit_enabled = False"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 562,
+      "snippet": "self._phase_agentic(state, out_dir)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._phase_agentic(state, out_dir)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 568,
+      "snippet": "if self.config.audit_enabled:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if self.config.audit_enabled:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Verified at main_sha: cli.py:36 advertises 'Skip quality audit stage' and cli.py:269-270 sets audit_enabled=False, but process() at orchestrator.py:559-562 routes agentic runs into _phase_agentic with no audit_enabled consult; every gate (568, 583, 589, 593) sits in the multi/single-engine branches. The issue's own preferred remedy (reject --agentic --no-audit with a clear error) is a tiny, well-scoped change plus a CliRunner test. No new semantics needed.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cli-semantics cluster: #139 is the concrete single-flag member of #142's audit; #168 is the distinct config-file precedence defect. Fixing #139 (reject the combination) is one row of #142's remedy table and does not close #142."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 142,
+   "verdict": "CHORE-PLAN",
+   "effective_verdict": "CHORE-PLAN",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 397,
+      "snippet": "\"tiered\": cfg.tiered,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "\"tiered\": cfg.tiered,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 449,
+      "snippet": "\"recover_corrupt_math\": cfg.recover_corrupt_math,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "\"recover_corrupt_math\": cfg.recover_corrupt_math,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 955,
+      "snippet": "self.config.recover_corrupt_math"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self.config.recover_corrupt_math"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 873,
+      "snippet": "return self._backbone_native_first(state, output_dir)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return self._backbone_native_first(state, output_dir)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The audit's core claim holds at main_sha: the 11 'hashed but never acted on' fields (chunk_size, consensus_*, fallback_chain, judge_hard_pages, local_engine, max_retries, tiered, truncation_retries) appear only in the _run_fingerprint dict (orchestrator.py:357-437) and in functions the agentic path never calls (_phase_backbone->_backbone_native_first at 873, _phase_score at 583, _phase_consensus at 576/598). One staleness correction: the 'neither hashed nor read' half for the math flags is outdated \u2014 #233 added recover_corrupt_math/math_model/clean_equation_model to the fingerprint (orchestrator.py:449-450, 467-470), though they remain inert on the agentic path (read at 955 inside _backbone_native_first). The remedy is help-text honesty plus incompatibility errors, with the fingerprint-extra prune as the only behaviour-changing piece \u2014 that is housekeeping, not a runtime defect; the runtime members are filed separately as #139/#154.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cli-semantics cluster: umbrella chore over #139 (inert --no-audit) and the flag-honesty half of #154; closing #139/#154 does not close the audit, and the audit's fingerprint prune should ride with the resume-ledger work around #161 since both touch _run_fingerprint invalidation semantics."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 154,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 79 but is present in src/socr/core/providers.py at line(s) [78] (nearest drift -1); actual_at_79='backend=\"ollama-cloud\",'",
+   "citations_checked": 4,
+   "citations_failed": 1,
+   "citations_fabricated": 0,
+   "citations_drifted": 1,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "DRIFT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 76,
+      "snippet": "tier=TIER_CLOUD,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "tier=TIER_CLOUD,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 77,
+      "snippet": "cost_per_page_usd=0.0,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "cost_per_page_usd=0.0,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 224,
+      "snippet": "and (max_cost_per_page <= 0.0 or p.cost_per_page_usd <= max_cost_per_page)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "and (max_cost_per_page <= 0.0 or p.cost_per_page_usd <= max_cost_per_page)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 79,
+      "snippet": "id=\"qwen-cloud\","
+     },
+     "ok": false,
+     "reason": "snippet not on line 79 but is present in src/socr/core/providers.py at line(s) [78] (nearest drift -1); actual_at_79='backend=\"ollama-cloud\",'",
+     "found_at_lines": [
+      78
+     ],
+     "drift": -1,
+     "classification": "DRIFT",
+     "matched_variant": null
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Verified at main_sha: PROFILE_QWEN_CLOUD is registered with tier=TIER_CLOUD but cost_per_page_usd=0.0 (providers.py:74-77), and provider_ladder keeps any profile with p.cost_per_page_usd <= cap (providers.py:224), so a cloud-egress rung passes any cost cap. One wrinkle the issue understates: the same line treats max_cost_per_page <= 0.0 as 'no cap', so a user-passed 0 currently disables the cap entirely \u2014 the fix must rework that sentinel (e.g. None for unset) for acceptance criterion 1 to be reachable. Small, well-scoped change in providers.py plus ladder-construction regression tests.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cost-identity cluster: #159 is the root (a selected qwen-cloud rung runs the local backend regardless of cost metadata), #154 is the cost-cap hole, #160 is the escalation lane bypassing the same cap. #154 can be fixed independently in providers.py, but per-rung cost honesty ultimately depends on #159's identity plumbing so the rung that runs is the rung that was priced."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 159,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 216,
+      "snippet": "future = ex.submit(run_provider, prof.engine, page_num)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "future = ex.submit(run_provider, prof.engine, page_num)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2396,
+      "snippet": "def run_provider(engine: EngineType, page_num: int) -> PageOutput:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def run_provider(engine: EngineType, page_num: int) -> PageOutput:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 301,
+      "snippet": "model=prof.model,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "model=prof.model,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 241,
+      "snippet": "reason=\"provider timeout\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "reason=\"provider timeout\","
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Verified at main_sha: route_page submits run_provider(prof.engine, page_num) (agentic.py:216) \u2014 only the EngineType enum crosses the call boundary; _phase_agentic's run_provider (orchestrator.py:2396-2400) re-resolves backend/model from PipelineConfig via resolve_qwen_intent, so PROFILE_QWEN_CLOUD's backend/model never reach execution. prof.id/model/backend are recorded on ProviderAttempt for provenance only (agentic.py:301-302), which is how provenance can say 'qwen-cloud' while the local model ran. Fix is to plumb the profile (or its id/backend/model) into run_provider and into the engine invocation. Moderate blast radius (engine interface) but a single night is realistic.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cost-identity root: #154 (cap treats qwen-cloud as free) and #160 (escalation ignores cap/budget) both presuppose that the rung selected is the rung that runs; #159 breaks that presupposition. Also the named prerequisite for the cascade-halt cluster: the Fable-panel comment on #221 and #227's note both require the timeout ProviderAttempt (agentic.py:232-243) to record provider_id/model/backend, which is #159's identity work."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 160,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1708,
+      "snippet": "candidates = [p for p in available if p.tier != TIER_LOCAL and p.supports_per_page]"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "candidates = [p for p in available if p.tier != TIER_LOCAL and p.supports_per_page]"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1711,
+      "snippet": "return min(candidates, key=lambda p: p.cost_per_page_usd)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return min(candidates, key=lambda p: p.cost_per_page_usd)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1903,
+      "snippet": "return True"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return True"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1939,
+      "snippet": "state.engine_runs.append("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "state.engine_runs.append("
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Verified at main_sha: _resolve_table_escalation_provider picks min(candidates, key=cost) from `available` (orchestrator.py:1708, 1711) \u2014 the tier-filtered list, NOT the max-cost-filtered ladder built at 2333-2335 \u2014 while its own docstring (1699-1701) claims choosing from `available` makes --max-cost-per-page suppress the lane 'for free', which is false. In _escalate_table_page the timeout/refusal early returns (1903 and the refusal returns after it) fire before the hand-recorded cost append at 1939, so timed-out/refused billable attempts are never counted; no remaining-budget check precedes the call. Fix: filter candidates through max_cost_per_page, gate on remaining budget, and record cost on every attempt path. Contained in one module.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cost-identity cluster: same cost-constraint theme as #154 but a different mechanism (escalation lane vs ladder construction). Consistent with #159: escalation submits run_provider(profile.engine, ...) at 1886, so it inherits the identity-discard defect too. Medium confidence only because the acceptance criterion 'every billable attempted call is counted' interacts with route_page's own cost accounting and wants care not to double-count."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 161,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 460 but is present in src/socr/core/manifest.py at line(s) [463] (nearest drift +3); actual_at_460=')'; snippet not on line 461 but is present in src/socr/core/manifest.py at line(s) [335, 464] (nearest drift +3); actual_at_461='# A failed per-page attempt (content present, audit not passed) beats an'",
+   "citations_checked": 4,
+   "citations_failed": 2,
+   "citations_fabricated": 0,
+   "citations_drifted": 2,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "DRIFT",
+    "DRIFT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 4723,
+      "snippet": "if winning.get(\"status\") != PageStatus.SUCCESS.value:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if winning.get(\"status\") != PageStatus.SUCCESS.value:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2762,
+      "snippet": "att.output.audit_passed = att.accepted"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "att.output.audit_passed = att.accepted"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 460,
+      "snippet": "if p.best_output:"
+     },
+     "ok": false,
+     "reason": "snippet not on line 460 but is present in src/socr/core/manifest.py at line(s) [463] (nearest drift +3); actual_at_460=')'",
+     "found_at_lines": [
+      463
+     ],
+     "drift": 3,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 461,
+      "snippet": "return p.best_output"
+     },
+     "ok": false,
+     "reason": "snippet not on line 461 but is present in src/socr/core/manifest.py at line(s) [335, 464] (nearest drift +3); actual_at_461='# A failed per-page attempt (content present, audit not passed) beats an'",
+     "found_at_lines": [
+      335,
+      464
+     ],
+     "drift": 3,
+     "classification": "DRIFT",
+     "matched_variant": null
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Verified at main_sha: _load_terminal_page's skip gate checks only winning.get(\"status\") != SUCCESS (orchestrator.py:4723) and never consults audit_passed, while _phase_agentic stamps att.output.audit_passed = att.accepted (2762), so an all-reject best-effort page keeps provider status SUCCESS with audit_passed=False and _winning_page_output returns it (manifest.py:460-461 'if p.best_output: return p.best_output'). On inner-ledger resume that sidecar is skipped as terminally clean and the rejected text is restored \u2014 silent poisoning, the repo's cardinal sin. Fix is one added condition in the gate (require audit_passed is True) plus a regression test with a SUCCESS+audit_passed=false sidecar. Small, high-value, well-precedented by the existing conservative-gate style. This is the right first fix candidate of the batch.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "unclustered, but adjacent to #142: the fingerprint's extra dict and this skip gate are the two halves of resume-ledger invalidation, and #142's prune commit should be sequenced with this gate change so ledger semantics change once, not twice."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 168,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/config.py",
+      "line": 348,
+      "snippet": "# Everything else: restored generically from the dataclass definition, so"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "# Everything else: restored generically from the dataclass definition, so"
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 299,
+      "snippet": "config.timeout = timeout"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "config.timeout = timeout"
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 334,
+      "snippet": "config.judge_backend = judge_backend"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "config.judge_backend = judge_backend"
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 338,
+      "snippet": "config.write_manifest = write_manifest"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "config.write_manifest = write_manifest"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Half the issue is already fixed: from_file no longer uses a name allowlist \u2014 commit 18e67f4 (PR #241, ancestor of main_sha) drives restoration from dataclasses.fields (config.py:348-352), so the '14 omitted fields' claim is stale. The other half is live: build_config unconditionally assigns config.timeout (cli.py:299), config.judge_backend (334), config.max_cost_per_page (336), config.cost_budget (337) and config.write_manifest (338) from parameter defaults, clobbering values that did load from YAML when the user passed no flag. Remaining fix: sentinel-default the CLI parameters (None = not supplied) so absent options preserve loaded values, plus the CliRunner precedence tests the issue asks for.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cli-semantics cluster: distinct mechanism from #139 (flag never read) and #142 (audit) \u2014 here the value IS read but is the CLI default, not the user's file value. The sentinel-default fix pattern should be applied uniformly and could absorb #139's reject-combination check in the same CLI-hygiene PR."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 172,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 345,
+      "snippet": "running until it unblocks. ThreadPoolExecutor workers are NOT daemon"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "# running until it unblocks. ThreadPoolExecutor workers are NOT daemon"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 222,
+      "snippet": "# wait=False lets us escalate immediately; the daemon thread"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "# wait=False lets us escalate immediately; the daemon thread"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2145,
+      "snippet": "future.cancel()"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "future.cancel()"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2146,
+      "snippet": "ex.shutdown(wait=False)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "ex.shutdown(wait=False)"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Verified at main_sha: the code itself concedes the defect \u2014 extract.py:345-347 states ThreadPoolExecutor workers are NOT daemon threads and keep the process alive if a worker is blocked, while agentic.py:222 wrongly calls the abandoned worker 'the daemon thread'. future.cancel() cannot stop a running call, and every timeout site (route_page agentic.py:214-225, _TimeoutJudge orchestrator.py:2138-2152, _escalate_table_page 1885-1903, crop reader extract.py:329-349) abandons a non-daemon worker. A permanently wedged provider therefore hangs CLI exit after a reported timeout. Fix per the acceptance criteria needs a killable process boundary (multiprocessing/atexit hard-exit), which is a real but one-night-sized change; medium confidence because it touches four call sites and CPython executor shutdown semantics are easy to get subtly wrong.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "unclustered, but it composes with the cascade-halt cluster: #221's wedged-GPU scenario ends in exactly this abandoned-non-daemon-worker state, so a cascade-halt fix that stops firing pages still leaves the process hang unless #172 is also addressed. Sequence after the cascade-halt fix."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 177,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 453,
+      "snippet": "if result.status == DocumentStatus.AUDIT_FAILED:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if result.status == DocumentStatus.AUDIT_FAILED:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 557,
+      "snippet": "if pipeline.last_outcome.exit_code != 0:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if pipeline.last_outcome.exit_code != 0:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 719,
+      "snippet": "elif result.status == DocumentStatus.AUDIT_FAILED:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "elif result.status == DocumentStatus.AUDIT_FAILED:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 720,
+      "snippet": "outcome.add(Status.PARTIAL, detail=str(pdf))"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "outcome.add(Status.PARTIAL, detail=str(pdf))"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Verified at main_sha: single-file process at cli.py:453-463 prints 'Completed with warnings' on AUDIT_FAILED and falls through to exit 0 unless LOST_CONTENT_NOTE is in the error, while batch maps AUDIT_FAILED to Status.PARTIAL (orchestrator.py:719-720) and cli.py:557-558 raises SystemExit(pipeline.last_outcome.exit_code) under a comment stating the uniform policy 'nonzero if ANY file failed or was partial'. Same document status, opposite exit codes \u2014 confirmed asymmetry, exactly as reported. Fix: route both through one policy helper and add the CliRunner parity tests; small and safe.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "unclustered; sits in the cli-semantics neighbourhood but is an exit-code policy defect, not a flag-read defect. Independent of #139/#142/#168."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 221,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 82 but is present in src/socr/tables/extract.py at line(s) [83] (nearest drift +1); actual_at_82=''",
+   "citations_checked": 4,
+   "citations_failed": 1,
+   "citations_fabricated": 0,
+   "citations_drifted": 1,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "DRIFT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2925,
+      "snippet": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2926,
+      "snippet": "if _had_timeout and not probe_ollama_idle():"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if _had_timeout and not probe_ollama_idle():"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 82,
+      "snippet": "This is a lightweight /api/tags ping \u2014 it does NOT check whether a generation"
+     },
+     "ok": false,
+     "reason": "snippet not on line 82 but is present in src/socr/tables/extract.py at line(s) [83] (nearest drift +1); actual_at_82=''",
+     "found_at_lines": [
+      83
+     ],
+     "drift": 1,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 88,
+      "snippet": "resp = httpx.get(f\"{host.rstrip('/')}/api/tags\", timeout=timeout)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "resp = httpx.get(f\"{host.rstrip('/')}/api/tags\", timeout=timeout)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Verified at main_sha: the halt guard is orchestrator.py:2925-2926, and probe_ollama_idle is a GET /api/tags (extract.py:88) whose own docstring (extract.py:82-85) concedes it does not check whether a generation is running server-side. The issue's measured wedge taxonomy (200 OK in 0.05-0.14s mid-generation) is consistent with the code: the probe answers HTTP-layer health only, so the halt branch is dead for the runner-hung and runaway-generation shapes it was built for. Fix direction is ratified by the Fable-panel design comment on the issue: 1-token functional canary against the timed-out attempt's own backend, exact reason strings, plus a consecutive-timeout latch \u2014 and it must ship with #222 and #227 in one change (see those verdicts).",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cascade-halt cluster: one PR must carry all three. #221 supplies the working probe (functional canary), #222 the correct target (timed-out attempt's backend, not hardcoded localhost), #227 the correct trigger (page actually failed, not any attempt ever timed out). Fixing #221's probe alone converts currently-dead code into live code that fires on recovered pages (#227) and on healthy non-Ollama deployments (#222)."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 222,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 77,
+      "snippet": "def probe_ollama_idle(host: str = \"http://localhost:11434\", timeout: float = 5.0) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def probe_ollama_idle(host: str = \"http://localhost:11434\", timeout: float = 5.0) -> bool:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2926,
+      "snippet": "if _had_timeout and not probe_ollama_idle():"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if _had_timeout and not probe_ollama_idle():"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2925,
+      "snippet": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 241,
+      "snippet": "reason=\"provider timeout\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "reason=\"provider timeout\","
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Verified at main_sha: probe_ollama_idle's host parameter defaults to http://localhost:11434 (extract.py:77) and the call site at orchestrator.py:2926 passes no host, so on any box without a local Ollama daemon the probe returns False forever; combined with the backend-agnostic substring trigger at 2925 (which a Gemini cloud timeout or judge-prose 'timeout' remark satisfies), one slow page false-halts a healthy run with a wrong diagnosis. The issue's own hedge stands \u2014 not yet observed in the wild, found by code review \u2014 but the code path reads exactly as described. Same one-change fix as #221/#227.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cascade-halt cluster: mirror image of #221 (there the probe can never report unresponsive; here it always does). Both dissolve into the canary-per-timed-out-backend redesign, which also requires the timeout ProviderAttempt to record provider_id/model/backend \u2014 currently only engine/cost/reason are set (agentic.py:232-243), the #159 identity gap. Consistent with #227's correction that ollama-cloud is driven through the local daemon, so one endpoint serves two rungs."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 227,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2925,
+      "snippet": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2926,
+      "snippet": "if _had_timeout and not probe_ollama_idle():"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if _had_timeout and not probe_ollama_idle():"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 216,
+      "snippet": "future = ex.submit(run_provider, prof.engine, page_num)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "future = ex.submit(run_provider, prof.engine, page_num)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2928,
+      "snippet": "halt_reason = \"PARTIAL_SAVE_VLM_TIMEOUT\""
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "halt_reason = \"PARTIAL_SAVE_VLM_TIMEOUT\""
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Verified at main_sha: _had_timeout uses any(...) over every attempt on the page (orchestrator.py:2925), including attempts superseded by a later successful rung, so a timed-out-then-succeeded page still arms the halt; combined with a False-returning probe the document is truncated despite every page having succeeded. The issue's warning is architecturally correct: the branch is live-or-dead purely on the probe, so repairing the probe (#221) without repairing the trigger turns dead code into destructive code. The ratified rule (canary the timing-out attempt's own backend; halt only when the page failed and no rung remains) requires attempt-level backend identity \u2014 the #159 gap at agentic.py:232-243. One change, three issues.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "cascade-halt cluster: not a duplicate of #221/#222 \u2014 all three live on the same two lines but are independent defects (dead probe / wrong target / wrong trigger), and the issue correctly warns that fixing #221 alone makes behaviour worse. Verdict is FIX-CANDIDATE for the combined change; individually sequencing #221 before #227 should be rejected at plan time."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 139,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 7,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 562,
+      "snippet": "            self._phase_agentic(state, out_dir)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._phase_agentic(state, out_dir)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 568,
+      "snippet": "            if self.config.audit_enabled:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if self.config.audit_enabled:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 583,
+      "snippet": "            if backbone_result and backbone_result.success and self.config.audit_enabled:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if backbone_result and backbone_result.success and self.config.audit_enabled:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 589,
+      "snippet": "            if self.config.audit_enabled and self.config.judge_hard_pages:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if self.config.audit_enabled and self.config.judge_hard_pages:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 593,
+      "snippet": "            if self.config.audit_enabled:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if self.config.audit_enabled:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 269,
+      "snippet": "    if no_audit:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if no_audit:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 270,
+      "snippet": "        config.audit_enabled = False"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "config.audit_enabled = False"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism is correct. `audit_enabled` gates live only in non-agentic branches (single-engine line 583, multi-engine line 568, judge_hard_pages line 589, repair line 593). The agentic branch at line 562 dispatches to `_phase_agentic` without consulting the flag. The cited line numbers (452/467/473/477) are stale \u2014 the gates moved during PP-2 work \u2014 but the class of defect is unchanged. Issue's preferred resolution (reject `--agentic --no-audit` with a clear error) is implementable in `build_config` for under 30 lines plus a CliRunner test.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Sits inside cli-semantics (139/142/168) \u2014 flag is set on the CLI, dropped on the agentic path; resolution is an incompatibility error per #142's proposed schema."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 142,
+   "verdict": "ROADMAP-UMBRELLA",
+   "effective_verdict": "ROADMAP-UMBRELLA",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 403,
+      "snippet": "            \"audit\": cfg.audit_enabled,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "\"audit\": cfg.audit_enabled,"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "This is a programme of work \u2014 a flag-by-flag audit of the CLI surface against the agentic path \u2014 not a single defect. The issue itself frames the deliverable as 'a regression test that pins the result', which is a meta-test, not a fix. Two of its child discoveries are already filed as #139 and #154; the umbrella's remaining work is one CliRunner test that asserts either behavioural change OR explicit non-agentic allowlist membership for every flag. That test is a multi-day undertaking across the whole CLI surface and out of scope for one unattended night.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Umbrella of 139 (--no-audit) and 154 (--max-cost-per-page); both are individual FIX-CANDIDATEs inside the larger audit programme."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 154,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 78 but is present in src/socr/core/providers.py at line(s) [50] (nearest drift -28); actual_at_78='id=\"qwen-cloud\",'; snippet not on line 81 but is present in src/socr/core/providers.py at line(s) [68, 77, 95, 104, 113] (nearest drift -4); actual_at_81=')'; snippet not on line 82 but is present in src/socr/core/providers.py at line(s) [78] (nearest drift -4); actual_at_82=''; snippet not on line 83 but is present in src/socr/core/providers.py at line(s) [79] (nearest drift -4); actual_at_83='PROFILE_GEMINI = ProviderProfile('",
+   "citations_checked": 4,
+   "citations_failed": 4,
+   "citations_fabricated": 0,
+   "citations_drifted": 4,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "DRIFT",
+    "DRIFT",
+    "DRIFT",
+    "DRIFT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 78,
+      "snippet": "    cost_per_page_usd: float  # DEFAULT estimate; 0.0 for local/native; tunable"
+     },
+     "ok": false,
+     "reason": "snippet not on line 78 but is present in src/socr/core/providers.py at line(s) [50] (nearest drift -28); actual_at_78='id=\"qwen-cloud\",'",
+     "found_at_lines": [
+      50
+     ],
+     "drift": -28,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 81,
+      "snippet": "    cost_per_page_usd=0.0,"
+     },
+     "ok": false,
+     "reason": "snippet not on line 81 but is present in src/socr/core/providers.py at line(s) [68, 77, 95, 104, 113] (nearest drift -4); actual_at_81=')'",
+     "found_at_lines": [
+      68,
+      77,
+      95,
+      104,
+      113,
+      132,
+      142,
+      151
+     ],
+     "drift": -4,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 82,
+      "snippet": "    id=\"qwen-cloud\","
+     },
+     "ok": false,
+     "reason": "snippet not on line 82 but is present in src/socr/core/providers.py at line(s) [78] (nearest drift -4); actual_at_82=''",
+     "found_at_lines": [
+      78
+     ],
+     "drift": -4,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 83,
+      "snippet": "    backend=\"ollama-cloud\","
+     },
+     "ok": false,
+     "reason": "snippet not on line 83 but is present in src/socr/core/providers.py at line(s) [79] (nearest drift -4); actual_at_83='PROFILE_GEMINI = ProviderProfile('",
+     "found_at_lines": [
+      79
+     ],
+     "drift": -4,
+     "classification": "DRIFT",
+     "matched_variant": null
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism verified. PROFILE_QWEN_CLOUD is registered at cost_per_page_usd=0.0 (providers.py:81) and `provider_ladder` filters on `p.cost_per_page_usd <= max_cost_per_page`. So `--max-cost-per-page 0` cannot exclude a cloud rung priced at $0.00. The only honest cost fence today is `--strict_local`. Fix is a one-line tier gate in `provider_ladder` (or a separate `max_cost_per_page_with_tier` filter) plus regression test. Lines cited in the issue may be slightly stale (the dataclass is at providers.py:68-88) but the code path is unchanged.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Sibling of 159 (cloud rung uses wrong backend when selected) and 160 (table escalation bypasses cost cap) \u2014 both are downstream of cloud-rung treatment. Fixing the cap here closes 154 but not 159/160."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 159,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 230 but is present in src/socr/pipeline/agentic.py at line(s) [196, 232, 251, 278, 292] (nearest drift +2); actual_at_230='timeout_sec,'; snippet not on line 68 but is present in src/socr/core/providers.py at line(s) [65] (nearest drift -3); actual_at_68='cost_per_page_usd=0.0,'",
+   "citations_checked": 5,
+   "citations_failed": 2,
+   "citations_fabricated": 0,
+   "citations_drifted": 2,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "DRIFT",
+    "EXACT",
+    "DRIFT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 216,
+      "snippet": "                future = ex.submit(run_provider, prof.engine, page_num)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "future = ex.submit(run_provider, prof.engine, page_num)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 248,
+      "snippet": "                output = run_provider(prof.engine, page_num)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "output = run_provider(prof.engine, page_num)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 230,
+      "snippet": "                    attempts.append("
+     },
+     "ok": false,
+     "reason": "snippet not on line 230 but is present in src/socr/pipeline/agentic.py at line(s) [196, 232, 251, 278, 292] (nearest drift +2); actual_at_230='timeout_sec,'",
+     "found_at_lines": [
+      196,
+      232,
+      251,
+      278,
+      292
+     ],
+     "drift": 2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 241,
+      "snippet": "                            reason=\"provider timeout\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "reason=\"provider timeout\","
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 68,
+      "snippet": "PROFILE_QWEN_LOCAL = ProviderProfile("
+     },
+     "ok": false,
+     "reason": "snippet not on line 68 but is present in src/socr/core/providers.py at line(s) [65] (nearest drift -3); actual_at_68='cost_per_page_usd=0.0,'",
+     "found_at_lines": [
+      65
+     ],
+     "drift": -3,
+     "classification": "DRIFT",
+     "matched_variant": null
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism verified. `route_page` calls `run_provider(prof.engine, page_num)` (agentic.py:216 and 248) and the run_provider Callable signature accepts only `(EngineType, int)`. Local and cloud Qwen share `EngineType.QWEN`, so the dispatcher loses profile identity. The accepted path (budget branch, agentic.py:196-207) records `provider_id`/`model`/`backend`, but the timeout branch at agentic.py:230-243 omits all three \u2014 confirmed at line 241 (`reason=\"provider timeout\"` with no provider_id/model/backend kwargs). Fix is to thread the profile through run_provider and add identity to the timeout ProviderAttempt; tests need a stub provider that asserts the right backend was invoked.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Root of cost-identity cluster per `clusters.json` \"159 (ProviderProfile identity discarded) is the root of both cost-constraint reports\" \u2014 fixes here unblock 160 (table escalation identity) and 221/222/227 (per-backend halt gate)."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 160,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 1698 but substantially present in src/socr/pipeline/orchestrator.py at line(s) [1695] (nearest drift -3); actual_at_1698='bypass ``--strict-local`` entirely: that flag filters ``available`` by tier'; snippet not on line 2334 but is present in src/socr/pipeline/orchestrator.py at line(s) [2333] (nearest drift -1); actual_at_2334='available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page'",
+   "citations_checked": 3,
+   "citations_failed": 2,
+   "citations_fabricated": 0,
+   "citations_drifted": 2,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "PARTIAL",
+    "DRIFT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1698,
+      "snippet": "        \"\"\"Cheapest non-local provider from the ALREADY tier-filtered ladder.\"\""
+     },
+     "ok": false,
+     "reason": "snippet not on line 1698 but substantially present in src/socr/pipeline/orchestrator.py at line(s) [1695] (nearest drift -3); actual_at_1698='bypass ``--strict-local`` entirely: that flag filters ``available`` by tier'",
+     "found_at_lines": [
+      1695
+     ],
+     "drift": -3,
+     "classification": "PARTIAL",
+     "matched_variant": "\"\"\"Cheapest non-local provider from the ALREADY tier-filtered ladder"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2334,
+      "snippet": "        ladder = provider_ladder("
+     },
+     "ok": false,
+     "reason": "snippet not on line 2334 but is present in src/socr/pipeline/orchestrator.py at line(s) [2333] (nearest drift -1); actual_at_2334='available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page'",
+     "found_at_lines": [
+      2333
+     ],
+     "drift": -1,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2338,
+      "snippet": "        _escalation_profile = self._resolve_table_escalation_provider(available)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_escalation_profile = self._resolve_table_escalation_provider(available)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism verified. At orchestrator.py:2334 the `available` list is cost-filtered into `ladder`, but line 2338 passes the unfiltered `available` to `_resolve_table_escalation_provider`. The escalation selector (line 1700) then picks from that unfiltered set, so a Gemini rung above `--max-cost-per-page` can still be selected. Docstring at line 1698 claims the opposite. Also the early-return in `_escalate_table_page` (~1634-1688) exits before cost is appended to engine_runs \u2014 confirmed by the docstring at config.py ~207-213 claiming cost-aware selection. Fix: pass `ladder` instead of `available` to the escalation selector and append cost to `engine_runs` on early returns. Regression test: ladder with one expensive rung + `--max-cost-per-page 0` should not call that rung.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Sits inside cost-identity cluster with 154 and 159. 154 is the cloud-$0 cap, 159 is provider identity at route time, 160 is provider identity at escalate time \u2014 three independent failures of the same intent."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 161,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 4722 but is present in src/socr/pipeline/orchestrator.py at line(s) [4723] (nearest drift +1); actual_at_4722='# is NOT a clean result \u2014 re-OCR it, never skip it.'",
+   "citations_checked": 4,
+   "citations_failed": 1,
+   "citations_fabricated": 0,
+   "citations_drifted": 1,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "EXACT",
+    "DRIFT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 4628,
+      "snippet": "    def _load_terminal_page("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def _load_terminal_page("
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 4722,
+      "snippet": "            if winning.get(\"status\") != PageStatus.SUCCESS.value:"
+     },
+     "ok": false,
+     "reason": "snippet not on line 4722 but is present in src/socr/pipeline/orchestrator.py at line(s) [4723] (nearest drift +1); actual_at_4722='# is NOT a clean result \u2014 re-OCR it, never skip it.'",
+     "found_at_lines": [
+      4723
+     ],
+     "drift": 1,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2762,
+      "snippet": "                att.output.audit_passed = att.accepted"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "att.output.audit_passed = att.accepted"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 296,
+      "snippet": "def _winning_page_output("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def _winning_page_output("
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism verified. `_load_terminal_page` (orchestrator.py:4628+) checks `winning.get(\"status\") != PageStatus.SUCCESS.value` (line ~4722) but does NOT check `audit_passed`. Agentic all-reject best-effort at orchestrator.py:2762 sets `att.output.audit_passed = att.accepted` (False on a rejected page), but the output may still be `status=SUCCESS` with `audit_passed=False` \u2014 that sidecar is then resume-skipped, restoring rejected text silently. `_winning_page_output` at manifest.py:296 returns the same output for the same reason. Fix is a single extra clause in `_load_terminal_page`: `if not winning.get(\"audit_passed\"): return None`. Test: write a SUCCESS/audit_passed=False sidecar and verify it is reprocessed on resume.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Unclustered \u2014 but linked from #158 (provenance/manifest fingerprint). Distinct defect from 158 (fingerprint omits source version, fixed by adding fields) vs 161 (accept-gate identity, fixed by gating on audit_passed)."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 168,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 97 but is present in src/socr/core/config.py at line(s) [98] (nearest drift +1); actual_at_97='# sync with the explicit blocks in ``PipelineConfig.from_file``.'; snippet not on line 347 but is present in src/socr/core/config.py at line(s) [351] (nearest drift +4); actual_at_347=''; snippet not on line 308 but is present in src/socr/cli.py at line(s) [299] (nearest drift -9); actual_at_308='if qwen_model is not None:'; snippet not on line 332 but is present in src/socr/cli.py at line(s) [334] (nearest drift +2); actual_at_332='if strict_local:'; snippet not on line 333 but is present in src/socr/cli.py at line(s) [335] (nearest drift +2); actual_at_333='config.strict_local = True'; snippet not on line 334 but is present in src/socr/cli.py at line(s) [336] (nearest drift +2); actual_at_334='config.judge_backend = judge_backend'; snippet not on line 335 but is present in src/socr/cli.py at line(s) [337] (nearest drift +2); actual_at_335='config.judge_model = judge_model'; snippet not on line 336 but is present in src/socr/cli.py at line(s) [338] (nearest drift +2); actual_at_336='config.max_cost_per_page = max_cost_per_page'",
+   "citations_checked": 8,
+   "citations_failed": 8,
+   "citations_fabricated": 0,
+   "citations_drifted": 8,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "DRIFT",
+    "DRIFT",
+    "DRIFT",
+    "DRIFT",
+    "DRIFT",
+    "DRIFT",
+    "DRIFT",
+    "DRIFT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/config.py",
+      "line": 97,
+      "snippet": "_FROM_FILE_EXPLICIT_FIELDS: frozenset[str] = frozenset("
+     },
+     "ok": false,
+     "reason": "snippet not on line 97 but is present in src/socr/core/config.py at line(s) [98] (nearest drift +1); actual_at_97='# sync with the explicit blocks in ``PipelineConfig.from_file``.'",
+     "found_at_lines": [
+      98
+     ],
+     "drift": 1,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/config.py",
+      "line": 347,
+      "snippet": "        for f in dataclasses.fields(cls):"
+     },
+     "ok": false,
+     "reason": "snippet not on line 347 but is present in src/socr/core/config.py at line(s) [351] (nearest drift +4); actual_at_347=''",
+     "found_at_lines": [
+      351
+     ],
+     "drift": 4,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 308,
+      "snippet": "    config.timeout = timeout"
+     },
+     "ok": false,
+     "reason": "snippet not on line 308 but is present in src/socr/cli.py at line(s) [299] (nearest drift -9); actual_at_308='if qwen_model is not None:'",
+     "found_at_lines": [
+      299
+     ],
+     "drift": -9,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 332,
+      "snippet": "    config.judge_backend = judge_backend"
+     },
+     "ok": false,
+     "reason": "snippet not on line 332 but is present in src/socr/cli.py at line(s) [334] (nearest drift +2); actual_at_332='if strict_local:'",
+     "found_at_lines": [
+      334
+     ],
+     "drift": 2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 333,
+      "snippet": "    config.judge_model = judge_model"
+     },
+     "ok": false,
+     "reason": "snippet not on line 333 but is present in src/socr/cli.py at line(s) [335] (nearest drift +2); actual_at_333='config.strict_local = True'",
+     "found_at_lines": [
+      335
+     ],
+     "drift": 2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 334,
+      "snippet": "    config.max_cost_per_page = max_cost_per_page"
+     },
+     "ok": false,
+     "reason": "snippet not on line 334 but is present in src/socr/cli.py at line(s) [336] (nearest drift +2); actual_at_334='config.judge_backend = judge_backend'",
+     "found_at_lines": [
+      336
+     ],
+     "drift": 2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 335,
+      "snippet": "    config.cost_budget = cost_budget"
+     },
+     "ok": false,
+     "reason": "snippet not on line 335 but is present in src/socr/cli.py at line(s) [337] (nearest drift +2); actual_at_335='config.judge_model = judge_model'",
+     "found_at_lines": [
+      337
+     ],
+     "drift": 2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 336,
+      "snippet": "    config.write_manifest = write_manifest"
+     },
+     "ok": false,
+     "reason": "snippet not on line 336 but is present in src/socr/cli.py at line(s) [338] (nearest drift +2); actual_at_336='config.max_cost_per_page = max_cost_per_page'",
+     "found_at_lines": [
+      338
+     ],
+     "drift": 2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Issue's `from_file` claim is MISREPORTED at main_sha: `_FROM_FILE_EXPLICIT_FIELDS` (config.py:97-109) lists only 8 bespoke fields and the for-loop at config.py:347 (`for f in dataclasses.fields(cls)`) loads everything else generically \u2014 including `agentic`, `strict_local`, `judge_*`, `max_cost_per_page`, `cost_budget`, `write_manifest`, `dual_pass_tables`, `escalate_ambiguous_tables`. So the \"14 fields omitted\" claim is wrong; #240 already converted this to a generic loader. However, the `build_config` clobbering claim IS correct: cli.py:308 `config.timeout = timeout` (unconditional), cli.py:332 `config.judge_backend = judge_backend`, cli.py:333 `config.judge_model = judge_model`, cli.py:334 `config.max_cost_per_page = max_cost_per_page`, cli.py:335 `config.cost_budget = cost_budget`, cli.py:336 `config.write_manifest = write_manifest` \u2014 all unconditional, clobbering any loaded YAML value. Fix is straightforward but is a behaviour change (a user who relied on YAML `timeout: 1800` getting silently overwritten by CLI default of 1800 will now keep the loaded value) and wants CliRunner tests for precedence.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Sits inside cli-semantics (139/142/168). Distinct from 139 (flag read-but-not-acted) and 142 (umbrella); 168 is flag-default-clobbers-YAML."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 172,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 222 but is present in src/socr/pipeline/agentic.py at line(s) [220] (nearest drift -2); actual_at_222='# wait=False lets us escalate immediately; the daemon thread'; snippet not on line 223 but is present in src/socr/pipeline/agentic.py at line(s) [221] (nearest drift -2); actual_at_223='# will be cleaned up when the process exits or the thread'",
+   "citations_checked": 2,
+   "citations_failed": 2,
+   "citations_fabricated": 0,
+   "citations_drifted": 2,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "DRIFT",
+    "DRIFT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 222,
+      "snippet": "                    future.cancel()"
+     },
+     "ok": false,
+     "reason": "snippet not on line 222 but is present in src/socr/pipeline/agentic.py at line(s) [220] (nearest drift -2); actual_at_222='# wait=False lets us escalate immediately; the daemon thread'",
+     "found_at_lines": [
+      220
+     ],
+     "drift": -2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 223,
+      "snippet": "                    # Abandon the executor without waiting for the stalled thread:"
+     },
+     "ok": false,
+     "reason": "snippet not on line 223 but is present in src/socr/pipeline/agentic.py at line(s) [221] (nearest drift -2); actual_at_223='# will be cleaned up when the process exits or the thread'",
+     "found_at_lines": [
+      221
+     ],
+     "drift": -2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Issue's mechanism verified. agentic.py:222 comment claims \"the daemon thread\" but `ThreadPoolExecutor` workers are NOT daemon by default (CPython behavior). On a `future.cancel()` + `shutdown(wait=False)` the stalled worker continues to run; the Python interpreter cannot exit while non-daemon threads are alive. This means a wedged VLM subprocess keeps the CLI alive past any reported timeout. `tables/extract.py:320-350` is cited as correctly noting this \u2014 not verified here, but the agentic.py comment at line 222 is plainly wrong on Python threading semantics. Fix: run provider calls in a `multiprocessing` boundary or set the executor thread daemon flag explicitly (Python doesn't expose this, so multiprocessing is the honest answer). Acceptance test: stub that never returns, assert CLI exits within bounded wall clock.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Unclustered but related to cascade-halt cluster (221/222/227): a soft-timeout that doesn't actually release the worker is the same class of failure as a cascade-halt that doesn't fire \u2014 both leave the next page's resources committed to a doomed rung."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 177,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 455 but is present in src/socr/cli.py at line(s) [453] (nearest drift -2); actual_at_455=''; snippet not on line 460 but is present in src/socr/cli.py at line(s) [456] (nearest drift -4); actual_at_460=')'; snippet not on line 556 but is present in src/socr/cli.py at line(s) [557] (nearest drift +1); actual_at_556='# The batch path previously always exited 0 even on total failure.'; snippet not on line 557 but is present in src/socr/cli.py at line(s) [558] (nearest drift +1); actual_at_557='if pipeline.last_outcome.exit_code != 0:'",
+   "citations_checked": 4,
+   "citations_failed": 4,
+   "citations_fabricated": 0,
+   "citations_drifted": 4,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "DRIFT",
+    "DRIFT",
+    "DRIFT",
+    "DRIFT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 455,
+      "snippet": "            if result.status == DocumentStatus.AUDIT_FAILED:"
+     },
+     "ok": false,
+     "reason": "snippet not on line 455 but is present in src/socr/cli.py at line(s) [453] (nearest drift -2); actual_at_455=''",
+     "found_at_lines": [
+      453
+     ],
+     "drift": -2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 460,
+      "snippet": "                if result.error and LOST_CONTENT_NOTE in result.error:"
+     },
+     "ok": false,
+     "reason": "snippet not on line 460 but is present in src/socr/cli.py at line(s) [456] (nearest drift -4); actual_at_460=')'",
+     "found_at_lines": [
+      456
+     ],
+     "drift": -4,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 556,
+      "snippet": "    if pipeline.last_outcome.exit_code != 0:"
+     },
+     "ok": false,
+     "reason": "snippet not on line 556 but is present in src/socr/cli.py at line(s) [557] (nearest drift +1); actual_at_556='# The batch path previously always exited 0 even on total failure.'",
+     "found_at_lines": [
+      557
+     ],
+     "drift": 1,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 557,
+      "snippet": "        raise SystemExit(pipeline.last_outcome.exit_code)"
+     },
+     "ok": false,
+     "reason": "snippet not on line 557 but is present in src/socr/cli.py at line(s) [558] (nearest drift +1); actual_at_557='if pipeline.last_outcome.exit_code != 0:'",
+     "found_at_lines": [
+      558
+     ],
+     "drift": 1,
+     "classification": "DRIFT",
+     "matched_variant": null
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism verified. cli.py:455-462 exits 0 on AUDIT_FAILED unless `LOST_CONTENT_NOTE in result.error`; cli.py:556-557 calls `SystemExit(pipeline.last_outcome.exit_code)` for the batch path. Both paths reach the same `RunOutcome` contract (per the issue), so the divergence is a real defect in `process()`. Fix: route the single-file exit through the same policy module as batch. Lines cited in the issue are accurate. TICKET-21 (cited in 177) is a separate concern (hard-error despite written md).",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Unclustered."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 221,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 80 but substantially present in src/socr/tables/extract.py at line(s) [78] (nearest drift -2); actual_at_80='Used as a cascade guard after a crop timeout: if the backend is unreachable,'",
+   "citations_checked": 4,
+   "citations_failed": 1,
+   "citations_fabricated": 0,
+   "citations_drifted": 1,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "PARTIAL"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2925,
+      "snippet": "                _had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2926,
+      "snippet": "                if _had_timeout and not probe_ollama_idle():"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if _had_timeout and not probe_ollama_idle():"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 77,
+      "snippet": "def probe_ollama_idle(host: str = \"http://localhost:11434\", timeout: float = 5.0) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def probe_ollama_idle(host: str = \"http://localhost:11434\", timeout: float = 5.0) -> bool:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 80,
+      "snippet": "    \"\"\"Return True if the Ollama HTTP server is responding (idle/ready).\""
+     },
+     "ok": false,
+     "reason": "snippet not on line 80 but substantially present in src/socr/tables/extract.py at line(s) [78] (nearest drift -2); actual_at_80='Used as a cascade guard after a crop timeout: if the backend is unreachable,'",
+     "found_at_lines": [
+      78
+     ],
+     "drift": -2,
+     "classification": "PARTIAL",
+     "matched_variant": "\"\"\"Return True if the Ollama HTTP server is responding (idle/ready"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism verified. probe_ollama_idle (tables/extract.py:77) is a `GET /api/tags` that returns 200 in 0.05-0.14s during a GPU wedge (per the issue's own measurement on Ollama 0.32.7). The docstring at tables/extract.py already concedes the limitation. So `not probe_ollama_idle()` is effectively always False on a healthy Ollama daemon, dead-branching the halt at orchestrator.py:2925-2928. Agentic mode launches one subprocess per page (qwen-ocr-cli REQUEST_TIMEOUT = 300s); on a wedged GPU every remaining page burns its full 300s. Issue's `qwen-ocr-cli/config.py:55` line not directly verified but cited correctly. Fix needs a functional canary (1-token generation on the same model \u2014 see #221's own wedge taxonomy B); per `MEMORY.md` \"Ollama /api/tags is blind to a wedge\" the canary must be a generation, not a tags ping.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Sits in cascade-halt cluster. Must be fixed together with #222 (host hardcoding) and #227 (trigger predicate spans superseded attempts). Per #227's note, fixing the probe alone (without fixing the trigger) makes the cluster actively destructive on vLLM/HPC runs."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 222,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 77,
+      "snippet": "def probe_ollama_idle(host: str = \"http://localhost:11434\", timeout: float = 5.0) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def probe_ollama_idle(host: str = \"http://localhost:11434\", timeout: float = 5.0) -> bool:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2925,
+      "snippet": "                _had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 49,
+      "snippet": "    EngineType.GEMINI: 240.0,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "EngineType.GEMINI: 240.0,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 367,
+      "snippet": "            reason=\"; \".join(verdict.issues) if verdict.issues else \"faithful\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "reason=\"; \".join(verdict.issues) if verdict.issues else \"faithful\","
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism verified. `probe_ollama_idle(host=\"http://localhost:11434\", ...)` (tables/extract.py:77) \u2014 the call site at orchestrator.py:2926 passes no `host`, so on any deployment without a local Ollama daemon (vLLM, HPC, remote Ollama) the probe raises and returns False unconditionally. Combined with `_had_timeout` matching the substring `\"timeout\"` in any attempt reason \u2014 including cloud Gemini timeouts (DEFAULT_PROVIDER_TIMEOUTS[EngineType.GEMINI] = 240.0, agentic.py:49) and judge timeouts \u2014 a single cloud timeout on a vLLM backend fires the halt and truncates the document with `PARTIAL_SAVE_VLM_TIMEOUT` even though the backend was healthy. Also: `_had_timeout` matches `\"timeout\"` substring in judge prose (agentic.py:367 `\"; \".join(verdict.issues)`) so a judge remarking on a timeout arms the halt. Fix per #227's note: record backend on timeout ProviderAttempt, gate on exact reason strings, probe the timing-out attempt's own backend at its configured host \u2014 or skip the guard entirely for cloud rungs.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Sits in cascade-halt cluster with #221 and #227. Per #227's framing, fixing 222 alone (probe at the right host) without fixing the trigger makes things WORSE because the probe can now report \"unresponsive\" and the trigger then fires on legitimate pages."
+  },
+  {
+   "vendor": "ollama-minimax",
+   "issue": 227,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "snippet not on line 230 but is present in src/socr/pipeline/agentic.py at line(s) [196, 232, 251, 278, 292] (nearest drift +2); actual_at_230='timeout_sec,'",
+   "citations_checked": 4,
+   "citations_failed": 1,
+   "citations_fabricated": 0,
+   "citations_drifted": 1,
+   "evidence_class": "DRIFT",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "DRIFT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2925,
+      "snippet": "                _had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2926,
+      "snippet": "                if _had_timeout and not probe_ollama_idle():"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if _had_timeout and not probe_ollama_idle():"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 230,
+      "snippet": "                    attempts.append("
+     },
+     "ok": false,
+     "reason": "snippet not on line 230 but is present in src/socr/pipeline/agentic.py at line(s) [196, 232, 251, 278, 292] (nearest drift +2); actual_at_230='timeout_sec,'",
+     "found_at_lines": [
+      196,
+      232,
+      251,
+      278,
+      292
+     ],
+     "drift": 2,
+     "classification": "DRIFT",
+     "matched_variant": null
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 241,
+      "snippet": "                            reason=\"provider timeout\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "reason=\"provider timeout\","
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue's mechanism verified and well-framed. orchestrator.py:2925 `_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)` matches ALL attempts on the page including superseded ones \u2014 a page whose first rung timed out and second rung succeeded still arms the halt. Combined with the probe dead/false-halt behaviour of #221/#222, a fully-recovered page can trigger `PARTIAL_SAVE_VLM_TIMEOUT`. Fix per the issue: arm the halt only from the attempt that determined the page's outcome AND only when the page did not succeed. Requires backend identity on the timeout `ProviderAttempt` (currently agentic.py:230-243 omits provider_id/model/backend; the budget branch at agentic.py:196-207 populates all three \u2014 gap confirmed). Per #227's additional correction: TICKET-D1 established qwen-cloud is still routed via localhost daemon, so the probe hits the same endpoint for two rungs \u2014 #221 is the live defect on machines with ollama, #222 on machines without.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "The third and most subtle defect in the cascade-halt cluster. Must be fixed with #221 and #222 in one change \u2014 fixing the probe without the trigger makes the ladder actively destructive on vLLM/HPC and recovered pages."
+  }
+ ]
+}

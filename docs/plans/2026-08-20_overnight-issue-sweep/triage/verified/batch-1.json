@@ -1,0 +1,851 @@
+{
+ "batch": "batch-1",
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "vendors": [
+  "grok"
+ ],
+ "rows": [
+  {
+   "vendor": "grok",
+   "issue": 144,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 169,
+      "snippet": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 173,
+      "snippet": "logger.warning("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "logger.warning("
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 377,
+      "snippet": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "A2 (d645b24) rejects a find_tables(strategy=text) grid that splits a bare numeric token and falls back to the word-geometry rowizer. The official GH-145 fixture test_no_table_value_is_lost now passes. The issue-comment synthetic (no notes/106 line) still loses 0.06/0.80/0.05/0.94 and emits `| 6M Treasury | yield | 0.85 |` \u2014 the fallback rowizer still places a lane inside a multi-word label. The destruction check itself is incomplete (#197 None-scope uses table.bbox; #198 skips decorated tokens) and the rejection is only logger.warning (#195).",
+   "duplicate_of": null,
+   "fixed_by_commit": "d645b24b7b8b4169d51e95a796de3147eaccd2ae",
+   "cluster_consistency": "table-destruction: A2 landed the check; #195/#197/#198 are leftover holes in that same check. #144 is not ALREADY-FIXED while those three (and the fallback-rowizer split) remain."
+  },
+  {
+   "vendor": "grok",
+   "issue": 146,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 572,
+      "snippet": "if not assume_header and _is_data_row(grid[0]):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not assume_header and _is_data_row(grid[0]):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 553,
+      "snippet": "def _grid_to_markdown(grid: list[list[str]], *, assume_header: bool = False) -> str:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def _grid_to_markdown(grid: list[list[str]], *, assume_header: bool = False) -> str:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "_grid_to_markdown no longer takes grid[0] unconditionally: a data row stays in the body under an empty header (356b727 / 807fec3 / e1d5d91). tests/test_table_header_gh146.py is 17 passed. The second half \u2014 grow the region up to include Nominal/Real/Inflation \u2014 only holds on reconstruct_table_regions' rejected-grid fallback (test_rejected_grid_fallback_populates_the_header). extract_structured on the issue synthetic still leaves the header band and the 3M data row as prose above an empty-header SE-only table.",
+   "duplicate_of": null,
+   "fixed_by_commit": "356b727d4afb8149d1c96771c8cb7bf7d12296ce",
+   "cluster_consistency": "table-destruction: schema/header-band, not numeric-token split. Immediate lossless emit is in; region-upward repair is not universal. Independent of #144 still losing values on the same synthetic."
+  },
+  {
+   "vendor": "grok",
+   "issue": 147,
+   "verdict": "ALREADY-FIXED",
+   "effective_verdict": "ALREADY-FIXED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1119,
+      "snippet": "if text_direction_is_rotated(direction):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if text_direction_is_rotated(direction):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 75,
+      "snippet": "def dominant_text_direction(blocks: list) -> tuple[float, float]:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def dominant_text_direction(blocks: list) -> tuple[float, float]:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The binding requirement was that a non-horizontal table page must not ship as trusted native text. GH-147 A2 (13033a3) refuses the native table lane when text_direction_is_rotated, keeps prose, sets needs_ocr_enhancement / native_table_lane_refused, and emits landscape_page_refused. Coordinate-rotation (candidate 2) was explicitly optional pending a corpus count and is not required to close the issue.",
+   "duplicate_of": null,
+   "fixed_by_commit": "13033a3f7affffd9b642f29e80ae2a63e7a4ce28",
+   "cluster_consistency": "unclustered. Orthogonal to table-destruction: this page never reaches reconstruct.py on the native lane anymore."
+  },
+  {
+   "vendor": "grok",
+   "issue": 151,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 223,
+      "snippet": "return any(r.ragged or r.detached_label_rows for r in reports)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return any(r.ragged or r.detached_label_rows for r in reports)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1155,
+      "snippet": "native_table_structure_defective = structure_check.structural_gate_fires(reports)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "native_table_structure_defective = structure_check.structural_gate_fires(reports)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The claim 'recall is the only gate' is stale. GH-151 B1 (11093ca) ships structural_gate_fires (ragged OR detached_label_rows) into born_digital and the native scorer short-circuit. That catches the p26-style label/values split. It does not catch a rectangular grid whose spanning headers, panel labels, or R2 row-binding are wrong \u2014 the rest of the original evidence. Header loss is #215/#245, not this ticket.",
+   "duplicate_of": null,
+   "fixed_by_commit": "11093ca4a24819ced0371e5c225cf0facbed5cb6",
+   "cluster_consistency": "table-destruction: #151 is structure-with-intact-multiset, the complement of #144's destroyed tokens. B1 covers ragged/detached only; TR-3/#205 is the numeric-mismatch sibling."
+  },
+  {
+   "vendor": "grok",
+   "issue": 152,
+   "verdict": "DEFERRED",
+   "effective_verdict": "DEFERRED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1435,
+      "snippet": "# Column-aware ordering (x-band then y) would be needed for multi-column"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "# Column-aware ordering (x-band then y) would be needed for multi-column"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Still valid: extract_structured still sorts regions by y0 only and still documents that x-band-then-y is required for multi-column layouts. Two side-by-side tables will still be rowized as one vertical stream. Fixing this is a layout-class change to the rowizer (clip per x-band, then rowize) with an easy single-column regression. Not a one-night unattended fix.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-region-detection: admission/segmentation of regions. Same y-across-full-width assumption that lets indexes and merged pairs in. Independent of the TR-3/#213 detector branch."
+  },
+  {
+   "vendor": "grok",
+   "issue": 162,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 418,
+      "snippet": "except Exception as exc:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "except Exception as exc:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 424,
+      "snippet": "return self._inner.assess(output, provider)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return self._inner.assess(output, provider)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 530,
+      "snippet": "except Exception as exc:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "except Exception as exc:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "SourceEvidenceTableJudge.assess still catches any exception and returns the inner judge's verdict \u2014 an accepting inner still ships an unverified table. NativeTableVerifierJudge now runs the string-only structural gate after the exception, but still delegates first and does not hard-reject or emit a verifier-exception audit event. All four acceptance boxes remain open.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-region-detection: verifier fail-open, not region admission. Same fail-closed contract as #163/#166."
+  },
+  {
+   "vendor": "grok",
+   "issue": 163,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/source_evidence.py",
+      "line": 77,
+      "snippet": "def page_has_native_words(page) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def page_has_native_words(page) -> bool:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/source_evidence.py",
+      "line": 308,
+      "snippet": "if page_has_native_words(page):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if page_has_native_words(page):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/source_evidence.py",
+      "line": 312,
+      "snippet": "reason=\"native words present; defer to native verifier\""
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "reason=\"native words present; defer to native verifier\","
+    }
+   ],
+   "confidence": "high",
+   "rationale": "verify_scanned_table still defers whenever page_has_native_words is true. That helper is still 'any non-empty word', with no born-digital / trusted-native test. A scanned page with a baked-in OCR layer still skips the raster/classical gate.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-region-detection: which evidence lane is selected. Complements #162 (fail-open on exception) \u2014 here the gate never runs."
+  },
+  {
+   "vendor": "grok",
+   "issue": 166,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 246,
+      "snippet": "A failed crop/read (non-timeout) drops that table (returns no entry for it)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "A failed crop/read (non-timeout) drops that table (returns no entry for it)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 3332,
+      "snippet": "kind=\"dualpass_crop_timeout\""
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "kind=\"dualpass_crop_timeout\","
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/tables_trust.py",
+      "line": 49,
+      "snippet": "TABLE_DISTRUST_KINDS: frozenset[str] = frozenset("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "TABLE_DISTRUST_KINDS: frozenset[str] = frozenset("
+    }
+   ],
+   "confidence": "high",
+   "rationale": "TableCropExtractor.extract still drops non-timeout failures with continue and no sentinel. dualpass_crop_timeout is emitted by _reread_page_tables but is absent from TABLE_DISTRUST_KINDS, so tables_trust.json can stay clean after incomplete verification.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-region-detection: verifier/reread fail-open. Same family as #162/#163."
+  },
+  {
+   "vendor": "grok",
+   "issue": 190,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 8,
+      "snippet": "Density (``empty_cell_ratio`` / the footprint-density derivation described on"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "Density (``empty_cell_ratio`` / the footprint-density derivation described on"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "structure_check still declares density diagnostic-only and never votes. An all-empty but well-piped grid is not a finding. native_verifier's multiset is empty-vs-empty so EXACT_PASS can still accept. The hole is latent (offending local builds were removed) but the invariant 'a grid with no populated data cell is never a successful extraction' is still unenforced. Placement is a one-night choice (structure_check finding, not a density threshold).",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-region-detection: content-blind validation, sibling of #151's 'shape is not enough'. Distinct from reconstruct.py destruction."
+  },
+  {
+   "vendor": "grok",
+   "issue": 195,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 55,
+      "snippet": "_SILENT_LOSS_FOLLOWUP_ISSUE = 195"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_SILENT_LOSS_FOLLOWUP_ISSUE = 195"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 173,
+      "snippet": "logger.warning("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "logger.warning("
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The A2 rejection still surfaces only via logger.warning. reconstruct.py names this ticket as _SILENT_LOSS_FOLLOWUP_ISSUE = 195. No page/document/CLI field records that a text-strategy grid was destroying numerals. Confirmed live: the #144 synthetic printed that warning and then continued.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-destruction: leftover of #144 A2. #144 can be PARTIALLY-IMPLEMENTED while #195 is still a night-sized surfacing ticket."
+  },
+  {
+   "vendor": "grok",
+   "issue": 197,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 169,
+      "snippet": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The None branch is still the review hole: when _numeric_row_bbox returns None, destruction is scoped to fitz.Rect(table.bbox). The existing test only covers the non-None scope. One-line skip (or refuse to use table.bbox) plus a hermetic None-scope fixture is a night's work.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-destruction: defect IN #144's check. Compatible with #144 PARTIALLY-IMPLEMENTED."
+  },
+  {
+   "vendor": "grok",
+   "issue": 198,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 377,
+      "snippet": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 78,
+      "snippet": "_NUM_TOKEN_RE = re.compile"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_NUM_TOKEN_RE = re.compile(r\"^[\\(\\[]?-?\\d[\\d.,]*[\\)\\]%]?$\")"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/native_verifier.py",
+      "line": 488,
+      "snippet": "def is_numeric_token(tok: str) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def is_numeric_token(tok: str) -> bool:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "_destroyed_numeric_tokens still filters candidates with anchored _NUM_TOKEN_RE, which rejects 0.67***, U+2212, $0.67. is_numeric_token (presentation-strip first) already exists in native_verifier and is what _is_data_row uses. Drive the candidate filter with that; keep verbatim survival on the original token.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-destruction: incomplete coverage of the same #144 check. Not a duplicate of #144."
+  },
+  {
+   "vendor": "grok",
+   "issue": 205,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 3961,
+      "snippet": "tr3_distrust = bool("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "tr3_distrust = bool("
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5012,
+      "snippet": "and p.native_table_structure_failed"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "and p.native_table_structure_failed"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "TR-3 is no longer 'surfaced nowhere'. It demotes under --native-only (tr3_distrust) and, conjoined with native_table_structure_failed, becomes a D3 floor + table_region_unverifiable event. It is still not emitted as an unconditional AuditEvent on every fire, which was step 1 of the proposed scope and is still unblocked. Escalation/status beyond that remains blocked on a hand-judged precision sample (step 2).",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-destruction: TR-3 is the verifier-side numeric-mismatch signal, not reconstruct.py's A2 check. #144 can still destroy values that TR-3 would see and that #205 would still not surface outside D3/native-only."
+  },
+  {
+   "vendor": "grok",
+   "issue": 213,
+   "verdict": "NEEDS-MEASUREMENT",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1260,
+      "snippet": "tables = page.find_tables()"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "tables = page.find_tables()"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1261,
+      "snippet": "if len(tables.tables) > 0:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if len(tables.tables) > 0:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 87,
+      "snippet": "_MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Index pages do reach table reconstruction (two independent hand-judged samples). The asserted mechanism (has_numeric_columns firing on a single page-number lane) is disproven by the 3-lanes \u00d7 3-rows gate. Remaining candidate is page.find_tables() returning True, which _detect_tables treats as decisive. The issue's first task \u2014 instrument a synthetic index page against find_tables vs has_numeric_columns \u2014 has not been done. Do not change the lane gate until that branch is identified.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-region-detection: upstream of reconstruction. Explains part of TR-3's false-positive mass in #205 without being the same defect as #152's side-by-side merge."
+  },
+  {
+   "vendor": "grok",
+   "issue": 215,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 287,
+      "snippet": "if words and rules:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if words and rules:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 292,
+      "snippet": "if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1170,
+      "snippet": "structure_check.table_output_defect(native_text, words)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "structure_check.table_output_defect(native_text, words)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The parked token-content term was replaced, not re-enabled: GH-212 (ec390d8) adds header_cut_verdict as term 2 of table_output_defect, HARD-only, when words AND rules are supplied. NativeTableVerifierJudge precomputes rules. born_digital's native-lane call is table_output_defect(native_text, words) with rules defaulting to None, so header_cut never runs on trusted-native extract. The --native-only e2e test is still strict xfail. Abstain-on-EXACT_PASS is #245.",
+   "duplicate_of": null,
+   "fixed_by_commit": "ec390d8f67f307950d4cc2501a4c28db0dcd46f7",
+   "cluster_consistency": "header-attribution: #215 is the term; #245 is what EXACT_PASS does when that term abstains. Both can be true at once: HARD-with-rules is in, native-lane and abstain are not."
+  },
+  {
+   "vendor": "grok",
+   "issue": 226,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 223,
+      "snippet": "return any(r.ragged or r.detached_label_rows for r in reports)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return any(r.ragged or r.detached_label_rows for r in reports)"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "No tables/pipeline guard rejects residual LaTeX table commands. A VLM header cell `\\multicolumn{6}{c|}{Forecast}` still parses as one markdown cell, so shape and recall pass while six year labels disappear. The cheap model-free fail (any leftover \\multicolumn/\\multirow/\\cline/\\hline) is a night's work. Flattening spanning headers at emission is the real repair and is larger; do the guard first.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "table-destruction: third wrong-header mechanism (#146 band demotion, #215 attribution, this LaTeX leak). Shape gate cannot see it because pipe count is consistent."
+  },
+  {
+   "vendor": "grok",
+   "issue": 245,
+   "verdict": "NEEDS-MEASUREMENT",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 608,
+      "snippet": "if vr.state == VerifierState.EXACT_PASS:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if vr.state == VerifierState.EXACT_PASS:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 624,
+      "snippet": "confidence=1.0,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "confidence=1.0,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 660,
+      "snippet": "if HeaderVerdict.UNVERIFIABLE in verdicts:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if HeaderVerdict.UNVERIFIABLE in verdicts:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/locate.py",
+      "line": 36,
+      "snippet": "_RULE_MIN_WIDTH_PT = 72.0  # >= ~1 inch wide to be a table rule, not an underline"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_RULE_MIN_WIDTH_PT = 72.0  # >= ~1 inch wide to be a table rule, not an underline"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "No longer blocked on #212: the HARD term exists. On EXACT_PASS the judge still builds accept=True, confidence=1.0, then _apply_structural_gate. If header_cut abstains, table_output_defect returns no defect; an advisory table_header_unverifiable event is emitted and the 1.0 accept is returned. Treating abstain as AMBIGUOUS\u2192VLMPageJudge is control-flow, not a fifth content rule, but the issue itself says the corpus cost of that change has not been measured. Do not flip EXACT_PASS overnight without that number.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "header-attribution: residual of #215. #215 PARTIALLY-IMPLEMENTED (HARD exists) and #245 still open (abstain ships) is the intended split."
+  }
+ ]
+}

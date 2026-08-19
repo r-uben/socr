@@ -1,0 +1,388 @@
+{
+  "batch": "batch-4",
+  "vendor": "grok",
+  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+  "started_at": "2026-08-19T23:28:19Z",
+  "finished_at": "2026-08-19T23:37:20Z",
+  "grounding": {
+    "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-base/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-base",
+    "detect_equations_sha256_16": "c849ec91c38784ed"
+  },
+  "verdicts": [
+    {
+      "issue": 39,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "Three-stage programme (benchmark gates, hand-verified GT, calibration.lock + ladder unification), not one defect. Owner comments say Stage 1 landed in 930e811/2647656/19864f7 while Stages 2–3 remain; the issue body checkboxes are still all open. A night agent cannot close hand-GT plus lock-file unification.",
+      "citations": [
+        {"path": "src/socr/core/config.py", "line": 253, "snippet": "agentic: bool = True  # per-page: try cheapest provider, judge escalates"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "umbrella-and-proposals: same class as #49/#56 — a programme that later table/routing tickets implement pieces of.",
+      "blocked_by": null
+    },
+    {
+      "issue": 49,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "Architecture decision (extract / verify / escalate) plus later implement-the-verifier work. Comments already sharpened it to region-not-page routing and native-prefer-when-trustworthy. That is the product method, not a one-night defect.",
+      "citations": [
+        {"path": "docs/ARCHITECTURE.md", "line": 9, "snippet": "### Deterministic (default — `socr paper.pdf`)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "umbrella-and-proposals: parent of much of the tables/figures backlog; #56 is the CE instance of the same method.",
+      "blocked_by": null
+    },
+    {
+      "issue": 56,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "CE corpus readiness (routing, figures-as-assets, dual-pass hang, recommended command). Owner later recorded #87 landing header-repair + crop-repair + figures, and listed remaining programme items (nested-column reconstructor, partial-doc completion, 27-doc reprocess). Still a programme, not a single remaining bug.",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 559, "snippet": "if self.config.agentic and not is_multi:"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "umbrella-and-proposals: CE-scoped instance of #49; do not pull remaining nested-table work into a one-night fix queue under this number.",
+      "blocked_by": null
+    },
+    {
+      "issue": 114,
+      "verdict": "BLOCKED-PROPOSAL",
+      "confidence": "high",
+      "rationale": "Proposed `socr escalate` so GPU OCR and cloud egress can be different machines. Owner later measured HPC compute egress reaches Gemini (403 = reached, no key) and asked to drop the HPC framing and re-scope to post-hoc corpus reprocessing. No escalate subcommand exists; the two hard parts (manifest/replay consistency, fingerprint of a later pass) are still design work. Owner ranked it below #49.",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 392, "snippet": "\"escalate_ambiguous_tables\": getattr(cfg, \"escalate_ambiguous_tables\", False),"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "umbrella-and-proposals: blocked proposal, not a live defect; #202/#203 are the same verdict class.",
+      "blocked_by": "Owner re-scope (corpus-reprocess, not HPC split) plus manifest/fingerprint design for a post-hoc pass."
+    },
+    {
+      "issue": 140,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "Math-font pages still do not request enhancement (`needs_ocr_enhancement = has_corrupt_math` only). Both recovery flags still default False. `native_math_unrecovered` fires only for PUA (`has_unmapped_math_glyphs`) when those flags are off — clean math-font pages still ship SUCCESS with no audit. This is not vacuous because the agentic loop now does call detect/attach when flags are on (3027–3041); the defect is default-off plus missing audit for the detected-but-unrecovered math-font class. The one-night honest fix is the mandatory audit event (option 2 in the issue); default-on / whole-page OCR remain policy.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 1095, "snippet": "needs_ocr_enhancement = has_corrupt_math"},
+        {"path": "src/socr/core/config.py", "line": 166, "snippet": "detect_equations: bool = False"},
+        {"path": "src/socr/core/config.py", "line": 180, "snippet": "recover_clean_equations: bool = False"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 2674, "snippet": "if getattr(ps, \"has_unmapped_math_glyphs\", False) and not ("},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 2682, "snippet": "kind=\"native_math_unrecovered\","},
+        {"path": "src/socr/core/born_digital.py", "line": 1274, "snippet": "PyMuPDF's text extraction silently mangles math typeset with Computer"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "equations: #140 is default-off + no audit when fonts ARE detected. #219 is the complementary miss (fonts never match). #165 is PUA omitted from has_equations and the same audit being silenced when flags are on. Agentic now invokes GH-36, so none of these are vacuous 'phases never run' reports.",
+      "blocked_by": null
+    },
+    {
+      "issue": 155,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "orchestrator.py is still 6117 lines; there is no lanes/ package and no preflight/agentic_loop/assemble split. Acceptance is a multi-PR extraction programme (facade <800 LOC, per-lane entrypoints, ARCHITECTURE section). Not a night-sized defect.",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 6117, "snippet": "console.print(f\"[dim]{result.error}[/dim]\")"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "architecture: parent split; #174/#175/#176/#178 are slices of the same programme.",
+      "blocked_by": null
+    },
+    {
+      "issue": 156,
+      "verdict": "CHORE-PLAN",
+      "confidence": "high",
+      "rationale": "Doc-tracker hygiene only. TODO.md still says Last updated 2026-06-10 and leads with the #157 bug as an unchecked Now/next bullet; TICKETS.md still marks TICKET-20 and TICKET-24 Status: open even though --native-only exists and #37/#33 are closed. No runtime behaviour.",
+      "citations": [
+        {"path": "TODO.md", "line": 4, "snippet": "Last updated: 2026-06-10."},
+        {"path": "TODO.md", "line": 16, "snippet": "**Bug: `--recover-clean-equations` (GH-36b) no-ops on native-trusted pages**"},
+        {"path": "TICKETS.md", "line": 419, "snippet": "### [TICKET-20] Born-digital pages over-classified as \"complex\""},
+        {"path": "TICKETS.md", "line": 470, "snippet": "### [TICKET-24] No native-only / enhancement-threshold CLI knob"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "umbrella-and-proposals: housekeeping, not a defect.",
+      "blocked_by": null
+    },
+    {
+      "issue": 157,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "medium",
+      "rationale": "The skip still exists as a quiet warning. But the original native-trusted failure mode is largely wired around: backbone builds page_outputs for prose_pages before detect/attach (1127/1135), and the agentic loop now constructs `bo` then calls detect+attach with `[bo]` (3038/3041). The memory that GH-36 never runs in agentic mode is stale at this SHA. Remaining gap: skip is still not a hard error, there is no regression test forbidding the log line, and a mis-wired call site would still ship crops without sidecars as SUCCESS.",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 5902, "snippet": "if po is None:"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 5905, "snippet": "GH-36b: page %d has detected equations but no PageOutput; skipping"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 3038, "snippet": "self._detect_and_crop_equations(state, [page_num], output_dir)"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 3041, "snippet": "self._attach_equation_latex_sidecars(state, [bo])"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 1135, "snippet": "self._attach_equation_latex_sidecars(state, page_outputs)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [
+        {"criterion": "Every equation_region_detected page has a mutable PageOutput before attach", "status": "met-on-primary-paths", "citation": {"path": "src/socr/pipeline/orchestrator.py", "line": 3041, "snippet": "self._attach_equation_latex_sidecars(state, [bo])"}},
+        {"criterion": "Skip becomes impossible or hard-errors", "status": "unmet", "citation": {"path": "src/socr/pipeline/orchestrator.py", "line": 5905, "snippet": "GH-36b: page %d has detected equations but no PageOutput; skipping"}},
+        {"criterion": "Regression test asserts no GH-36b no-PageOutput log", "status": "unmet", "citation": {"path": "src/socr/pipeline/orchestrator.py", "line": 5905, "snippet": "GH-36b: page %d has detected equations but no PageOutput; skipping"}},
+        {"criterion": "Agentic and legacy share one attach helper", "status": "met", "citation": {"path": "src/socr/pipeline/orchestrator.py", "line": 1135, "snippet": "self._attach_equation_latex_sidecars(state, page_outputs)"}}
+      ],
+      "reproducer": null,
+      "cluster_consistency": "equations: not already-fixed — the skip remains. Distinct from #140 (flags off) and #164 (wrong native_text on reject). Agentic invocation means this is no longer 'phases never run'.",
+      "blocked_by": null
+    },
+    {
+      "issue": 158,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "medium",
+      "rationale": "Resume identity has grown: `_run_fingerprint` now records resolved engine determinants, judge identity, and several model knobs. But `PageFingerprint.model_version` still defaults to empty string, and `build_manifest` still falls back to `model_versions.get(...)` which is empty when `engine_runs` have no version. Journal `model` is provider_model, not a guaranteed non-empty model_version. AC 'changing the model tag invalidates resume' is probably met for ladder engines; AC 'every page journal has non-empty model_version / native records model n/a' is not proven and the blank default remains.",
+      "citations": [
+        {"path": "src/socr/core/manifest.py", "line": 124, "snippet": "model_version: str = \"\""},
+        {"path": "src/socr/core/manifest.py", "line": 648, "snippet": "\"reason\": getattr(a, \"skip_reason\", \"\") or a.failure_mode.value,"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [
+        {"criterion": "Non-native pages write non-empty model/model_version", "status": "unmet-or-unproven", "citation": {"path": "src/socr/core/manifest.py", "line": 124, "snippet": "model_version: str = \"\""}},
+        {"criterion": "Changing only the model tag changes fingerprint / invalidates resume", "status": "likely-met-unproven", "citation": {"path": "src/socr/pipeline/orchestrator.py", "line": 483, "snippet": "\"figure_caption_fallback_model\": (cfg.gemini_model if cfg.describe_figures else None),"}},
+        {"criterion": "Native pages record engine=native, model n/a — not blank-as-unknown", "status": "unproven", "citation": {"path": "src/socr/core/manifest.py", "line": 124, "snippet": "model_version: str = \"\""}}
+      ],
+      "reproducer": null,
+      "cluster_consistency": "audit-provenance: #158 is the blank-identity umbrella; #169/#238 are specific reason/resolved-engine holes in the same journal/fingerprint.",
+      "blocked_by": null
+    },
+    {
+      "issue": 164,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "Attach still passes the full page `native_text` into every region. On 1A/engine failure `build_equation_sidecar` appends that whole string, and the orchestrator concatenates every sidecar onto a PageOutput that already holds the page — multiplying prose once per rejected region. No bbox crop. One-night fix: pass region-cropped native text and skip append when that text is already in `po.text`.",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 5910, "snippet": "native_text = state.pages[page_num].native_text or \"\""},
+        {"path": "src/socr/math/equation_latex.py", "line": 283, "snippet": "lines.append(native_text.strip())"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "equations: only reachable when detect found regions and recover ran — complementary to #157 (never attach) and #219 (never detect).",
+      "blocked_by": null
+    },
+    {
+      "issue": 165,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "`has_equations` is math-fonts OR literal-LaTeX OR corrupt-math — it still omits `has_unmapped_math_glyphs`. STIXGeneral is not in `_MATH_FONT_RE` (STIXMath/STIXSize/STIXNonUnicode only). Agentic recovery is gated on `has_equations`, so PUA-only pages never enter detect/attach. Separately, `native_math_unrecovered` is suppressed whenever both flags are on, with no check that a region was recovered — enabling the flags can silence the only PUA loss signal. Not vacuous: agentic now runs GH-36, which makes the suppress-without-recovery path more, not less, important.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 815, "snippet": "self._detect_math_fonts(page) or self._detect_equations(raw_text) or has_corrupt_math"},
+        {"path": "src/socr/core/born_digital.py", "line": 39, "snippet": "r\"(?i)(CMMI|CMSY|CMEX|MSAM|MSBM|\""},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 2675, "snippet": "self.config.detect_equations and self.config.recover_clean_equations"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 2682, "snippet": "kind=\"native_math_unrecovered\","}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "equations: PUA sibling of #140 (math-font audit gap). #219 is a different whitelist hole (Pazo/Palatino), not STIXGeneral/PUA.",
+      "blocked_by": null
+    },
+    {
+      "issue": 169,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "`route_page` still stores `AcceptDecision.reason` on `ProviderAttempt.reason`, but `_phase_agentic` copies it into `skip_reason` only when the rejected attempt is empty. `build_manifest` journals `skip_reason` or `failure_mode`, so a rejected non-empty attempt commonly becomes reason `none`/failure_mode. Mechanical, one-night: persist `att.reason` (and a JSON-safe raw_verdict) for every attempt.",
+      "citations": [
+        {"path": "src/socr/pipeline/agentic.py", "line": 77, "snippet": "reason: str = \"\""},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 2767, "snippet": "att.reason if not att.accepted and not att.output.text else \"\""},
+        {"path": "src/socr/core/manifest.py", "line": 648, "snippet": "\"reason\": getattr(a, \"skip_reason\", \"\") or a.failure_mode.value,"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "audit-provenance: specific journal-reason hole under #158's provenance programme; not a duplicate of #158.",
+      "blocked_by": null
+    },
+    {
+      "issue": 170,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "medium",
+      "rationale": "`replay` still only fetches page text blobs; `stale_pages` only checks those blob refs. Figure/chart/equation assets referenced from the reconstructed markdown are not hashed, not presence-checked, and not copied/rebased on replay-to-another-dir. Fail-closed missing-asset check is night-sized; full copy/rebase is larger but still one ticket.",
+      "citations": [
+        {"path": "src/socr/core/manifest.py", "line": 659, "snippet": "def replay(manifest: Manifest, blobs: BlobStore) -> str:"},
+        {"path": "src/socr/core/manifest.py", "line": 680, "snippet": "def stale_pages(manifest: Manifest, blobs: BlobStore) -> list[int]:"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "audit-provenance: asset half of replay; #171 is the sidecar/figure-timing sibling.",
+      "blocked_by": null
+    },
+    {
+      "issue": 171,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "`_phase_assemble` still flushes terminal `NNN.json` sidecars (4973) before `_describe_and_embed_figures` (5296). `_rewrite_all_fragments` later rewrites Markdown only. Sidecar `figure_refs` are collected from `state.engine_runs`, while figures are attached to the returned `EngineResult`. Terminal sidecars therefore lack final figure provenance. Fix: rewrite sidecars after the figure phase (same moment as fragment rewrite).",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 4973, "snippet": "self._flush_page_sidecar(state, pnum, output_dir)"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 5296, "snippet": "embedded_text = self._describe_and_embed_figures("},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 5325, "snippet": "self._rewrite_all_fragments(state, output_dir, final_text)"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 4543, "snippet": "for run in state.engine_runs:"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "audit-provenance: sidecar completeness vs #170's replay asset check; both are 'visual artefacts are not first-class in the ledger'.",
+      "blocked_by": null
+    },
+    {
+      "issue": 174,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "Agentic is already the config default and `--legacy-routing` exists, but `process()` still keeps the full backbone→score→judge→repair / multi-engine stack, and ARCHITECTURE.md still advertises deterministic as default. Quarantining or deleting that stack and collapsing dual implementations is a programme, not one defect. Docs lie alone would be CHORE-PLAN; the issue asks for path unification.",
+      "citations": [
+        {"path": "src/socr/core/config.py", "line": 253, "snippet": "agentic: bool = True  # per-page: try cheapest provider, judge escalates"},
+        {"path": "src/socr/cli.py", "line": 177, "snippet": "\"--legacy-routing\""},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 559, "snippet": "if self.config.agentic and not is_multi:"},
+        {"path": "docs/ARCHITECTURE.md", "line": 9, "snippet": "### Deterministic (default — `socr paper.pdf`)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "architecture: depends on #155's split; do not treat the ARCHITECTURE.md default-lie as a separate night ticket from this programme.",
+      "blocked_by": null
+    },
+    {
+      "issue": 175,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "The 2-cycle is still in the tree: tables.escalation_decision and tables.native_rows import socr.benchmark.*; born_digital imports private `_NUM_TOKEN_RE`. Intended work is extract a neutral module + import-linter DAG. Behavior-preserving layering programme, not a user-visible defect.",
+      "citations": [
+        {"path": "src/socr/tables/escalation_decision.py", "line": 72, "snippet": "from socr.benchmark.table_exactness import score_page"},
+        {"path": "src/socr/tables/native_rows.py", "line": 19, "snippet": "from socr.benchmark.scorer import BenchmarkScorer"},
+        {"path": "src/socr/core/born_digital.py", "line": 1640, "snippet": "from socr.tables.reconstruct import _NUM_TOKEN_RE, _NUMERIC_RE"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "architecture: layering slice of #155; no runtime bug claimed.",
+      "blocked_by": null
+    },
+    {
+      "issue": 176,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "`PageState.needs_repair` still encodes repair policy; `DocumentState.text` still joins with legacy `\\n\\n---\\n\\n` while production uses `canonical_page_texts`. Restoring a dumb blackboard and one selector is a refactor programme touching assemble/manifest/tests.",
+      "citations": [
+        {"path": "src/socr/core/state.py", "line": 73, "snippet": "def needs_repair(self) -> bool:"},
+        {"path": "src/socr/core/state.py", "line": 245, "snippet": "def text(self) -> str:"},
+        {"path": "src/socr/core/state.py", "line": 283, "snippet": "return \"\\n\\n---\\n\\n\".join(texts)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "architecture: state-cleanup slice of #155/#174.",
+      "blocked_by": null
+    },
+    {
+      "issue": 178,
+      "verdict": "CHORE-PLAN",
+      "confidence": "high",
+      "rationale": "Write an ADR: stay Python; optional native kernels only after profiling. No runtime change. The 2026-05-29 hybrid note is a different decision (don't replace socr with a Claude-agent rewrite) and does not record the stay-Python/no-Rust policy this issue asks for.",
+      "citations": [
+        {"path": "docs/ARCHITECTURE.md", "line": 9, "snippet": "### Deterministic (default — `socr paper.pdf`)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "architecture: docs-only constraint on #155; not a defect.",
+      "blocked_by": null
+    },
+    {
+      "issue": 202,
+      "verdict": "BLOCKED-PROPOSAL",
+      "confidence": "high",
+      "rationale": "Bake-off of Mistral OCR 4.1 before any routing change. Explicitly 'Do not start until someone names' the 3–5 PDFs; structured half blocked on mistral-ocr-cli#23. Cost docs are stale (`PROFILE_MISTRAL.cost_per_page_usd=0.001`, MODELS.md ~$0.001/pg) but that is a one-line chore inside a measurement proposal, not a reason to treat this as FIX-CANDIDATE.",
+      "citations": [
+        {"path": "src/socr/core/providers.py", "line": 122, "snippet": "cost_per_page_usd=0.001,"},
+        {"path": "docs/MODELS.md", "line": 31, "snippet": "~$0.001/pg"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "umbrella-and-proposals: #203 is explicitly blocked on this bake-off.",
+      "blocked_by": "Named 3–5 PDFs + paid measurement; blocks sidecar is mistral-ocr-cli#23."
+    },
+    {
+      "issue": 203,
+      "verdict": "BLOCKED-PROPOSAL",
+      "confidence": "high",
+      "rationale": "Consume Mistral OCR 4 `blocks[]` as a region prior. Issue says blocked on mistral-ocr-cli#23 and on #202; 'If the bake-off verdict is keep manual-only, close this.' No consumer until 4.1 uniquely wins a page type. Design placeholder, not a defect.",
+      "citations": [
+        {"path": "src/socr/core/providers.py", "line": 122, "snippet": "cost_per_page_usd=0.001,"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "umbrella-and-proposals: blocked on #202 as clusters.json relationship_notes say.",
+      "blocked_by": "Issue #202 bake-off verdict and mistral-ocr-cli#23."
+    },
+    {
+      "issue": 219,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "`_MATH_FONT_RE` still has no PazoMath/URWPalladioL/MathPazo. `detect_display_equations` imports that regex and drops any line below `DISPLAY_MIN_MATH_SPAN_RATIO = 0.50`, so Palatino-set display sums (ratio 0.00–0.04 in the issue's measurement) yield `regions: []`. Flags-on is then a no-op and the native flattened equation ships. Page-level detect can still fire on a stray CMSY10 glyph — detectors disagree, nobody flags. One-night: extend the whitelist and emit an audit when page-level math signal yields zero regions. Full glyph-identity rewrite is larger and not required to close the silent-loss hole.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 38, "snippet": "_MATH_FONT_RE = re.compile("},
+        {"path": "src/socr/core/born_digital.py", "line": 42, "snippet": "r\"Euler|rsfs)\""},
+        {"path": "src/socr/math/detect_equations.py", "line": 90, "snippet": "DISPLAY_MIN_MATH_SPAN_RATIO: float = 0.50"},
+        {"path": "src/socr/math/detect_equations.py", "line": 210, "snippet": "from socr.core.born_digital import _MATH_FONT_RE"},
+        {"path": "src/socr/math/detect_equations.py", "line": 297, "snippet": "if math_ratio < min_math_span_ratio:"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "equations: not a duplicate of #140. #140 assumes the font detector fired and recovery is off; #219 is the detector miss so recovery never sees a region even with flags on. Same silent-native-ship shape as the native-lane memory.",
+      "blocked_by": null
+    },
+    {
+      "issue": 238,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "`_run_fingerprint` still records `cfg.gemini_model` iff `describe_figures`, not which of LocalFirstFigureEngine / GeminiAPIEngine / None `_get_vision_engine` actually selected. Caption bytes differ across those three; resume on another machine reuses the wrong captions. Precedent already in-tree: `JUDGE_IDENTITY_HEURISTIC`. Design is 'record resolved identity or a none-sentinel', not a new architecture.",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 483, "snippet": "\"figure_caption_fallback_model\": (cfg.gemini_model if cfg.describe_figures else None),"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 5974, "snippet": "def _get_vision_engine(self):"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "audit-provenance: resolved-identity sibling of #158/#169; same family as #232/#231 (not in this batch).",
+      "blocked_by": null
+    }
+  ]
+}
