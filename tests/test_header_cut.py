@@ -191,3 +191,58 @@ class TestAbstains:
                 page.insert_text((x, y), v, fontsize=9)
         md = _md(["", "", "", ""], _body_md())
         assert _verdict(page, md) is HeaderVerdict.UNVERIFIABLE
+
+
+class TestWiredIntoTheShippingGate:
+    """``table_output_defect`` is what decides whether a table ships.
+
+    A predicate nothing calls is not a gate, so these assert the wiring itself,
+    including the deliberate abstain when a caller has no page to draw rules from.
+    """
+
+    def test_destroyed_header_becomes_a_shipping_defect(self):
+        from socr.tables.structure_check import DEFECT_HEADER_UNATTRIBUTED, table_output_defect
+
+        page = _page(["1997", "2002", "2007"])
+        md = _md(["", "", "", ""], _body_md())
+        defect = table_output_defect(md, page.get_text("words"), _horizontal_rules(page))
+        assert defect == DEFECT_HEADER_UNATTRIBUTED
+
+    def test_intact_header_is_not_a_defect(self):
+        from socr.tables.structure_check import DEFECT_NONE, table_output_defect
+
+        page = _page(["1997", "2002", "2007"])
+        md = _md(["", "1997", "2002", "2007"], _body_md())
+        defect = table_output_defect(md, page.get_text("words"), _horizontal_rules(page))
+        assert defect == DEFECT_NONE
+
+    def test_without_rules_the_header_term_abstains(self):
+        """Callers with no fitz page get the shape term alone, by design.
+
+        The verifier exception path and ``born_digital``'s native-lane check both
+        pass no rules. Abstaining there is intended -- but it must be visible in a
+        test, or a future caller silently loses the gate and nobody notices.
+        """
+        from socr.tables.structure_check import DEFECT_NONE, table_output_defect
+
+        page = _page(["1997", "2002", "2007"])
+        md = _md(["", "", "", ""], _body_md())
+        assert table_output_defect(md, page.get_text("words")) == DEFECT_NONE
+        assert table_output_defect(md, page.get_text("words"), None) == DEFECT_NONE
+
+    def test_shape_defect_still_takes_precedence(self):
+        """The cheap string-only term runs first and short-circuits."""
+        from socr.tables.structure_check import DEFECT_GRID_SHAPE, table_output_defect
+
+        page = _page(["1997", "2002", "2007"])
+        ragged = "\n".join(
+            [
+                "| | | | |",
+                "| --- | --- | --- | --- |",
+                "| Alpha | 0.12 | 0.34 | 0.56 |",
+                "| Beta | 1.20 | 3.40 |",
+                "| Gamma | 2.10 | 4.30 | 6.50 |",
+            ]
+        )
+        defect = table_output_defect(ragged, page.get_text("words"), _horizontal_rules(page))
+        assert defect == DEFECT_GRID_SHAPE
