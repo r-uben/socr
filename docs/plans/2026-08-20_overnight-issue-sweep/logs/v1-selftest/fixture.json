@@ -1,0 +1,16 @@
+{"batch":"batch-SELFTEST","vendor":"fixture","verdicts":[
+ {"issue":9001,"verdict":"FIX-CANDIDATE","citations":[
+   {"path":"src/socr/core/chunker.py","line":55,"snippet":"return len(doc) > threshold"}]},
+ {"issue":9002,"verdict":"FIX-CANDIDATE","citations":[
+   {"path":"src/socr/core/chunker.py","line":55,"snippet":"return len(doc) >= threshold"}]},
+ {"issue":9003,"verdict":"FIX-CANDIDATE","citations":[
+   {"path":"src/socr/core/chunker.py","line":99999,"snippet":"whatever"}]},
+ {"issue":9004,"verdict":"FIX-CANDIDATE","citations":[
+   {"path":"src/socr/core/imaginary_module.py","line":5,"snippet":"nope"}]},
+ {"issue":9005,"verdict":"ALREADY-FIXED","fixed_by_commit":"4a04533918dd80a9278d0915ad901134a2836580",
+   "citations":[{"path":"src/socr/core/chunker.py","line":55,"snippet":"return len(doc) > threshold"}]},
+ {"issue":9006,"verdict":"ALREADY-FIXED","fixed_by_commit":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+   "acceptance_criteria":[{"criterion":"x","status":"met"}],"reproducer":{"cmd":"y","output":"z"},
+   "citations":[{"path":"src/socr/core/chunker.py","line":55,"snippet":"return len(doc) > threshold"}]},
+ {"issue":9007,"verdict":"ROADMAP-UMBRELLA","citations":[]}
+]}
