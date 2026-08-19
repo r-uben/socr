@@ -221,6 +221,7 @@ class BaseEngine(ABC):
             List of PageOutput, one per page_num, in the same order.
         """
         import fitz
+        from socr.core.pdf import open_pdf
         from PIL import Image
 
         start_time = time.time()
@@ -232,7 +233,7 @@ class BaseEngine(ABC):
 
             # Render pages to numbered PNG images
             page_num_to_stem: dict[int, str] = {}
-            with fitz.open(pdf_path) as doc:
+            with open_pdf(pdf_path) as doc:
                 mat = fitz.Matrix(dpi / 72, dpi / 72)
                 for page_num in page_nums:
                     stem = f"page_{page_num:04d}"

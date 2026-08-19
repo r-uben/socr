@@ -42,9 +42,9 @@ class DocumentHandle:
 
     def _count_pages(self) -> int:
         """Count pages without rendering them."""
-        import fitz
+        from socr.core.pdf import open_pdf
 
-        with fitz.open(self.path) as pdf:
+        with open_pdf(self.path) as pdf:
             return len(pdf)
 
     def _compute_hash(self) -> str:
@@ -58,9 +58,10 @@ class DocumentHandle:
     def render_page(self, page_num: int, dpi: int = 200) -> "Image.Image":
         """Render a single page to PIL Image on demand (1-indexed)."""
         import fitz
+        from socr.core.pdf import open_pdf
         from PIL import Image
 
-        with fitz.open(self.path) as pdf:
+        with open_pdf(self.path) as pdf:
             page = pdf[page_num - 1]
             mat = fitz.Matrix(dpi / 72, dpi / 72)
             pix = page.get_pixmap(matrix=mat)
@@ -69,10 +70,11 @@ class DocumentHandle:
     def render_all_pages(self, dpi: int = 200) -> dict[int, "Image.Image"]:
         """Render all pages to PIL Images. Returns {page_num: Image}."""
         import fitz
+        from socr.core.pdf import open_pdf
         from PIL import Image
 
         images = {}
-        with fitz.open(self.path) as pdf:
+        with open_pdf(self.path) as pdf:
             mat = fitz.Matrix(dpi / 72, dpi / 72)
             for i in range(len(pdf)):
                 pix = pdf[i].get_pixmap(matrix=mat)

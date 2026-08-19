@@ -335,15 +335,30 @@ class TestDetectorSurfacing:
         assert not any(p.has_unrecovered_symbol_glyphs for p in pages)
 
     def test_failed_recovery_does_not_leave_a_stale_report(self, tmp_path, monkeypatch):
-        """A reused detector must not attribute the previous PDF's report here."""
-        import socr.core.born_digital as bd
+        """A reused detector must not attribute the previous PDF's report here.
+
+        Driven through the real path -- the underlying repair raises -- rather
+        than by stubbing the wrapper, so it holds whichever layer absorbs the
+        failure. What matters is that the previous document's report is gone,
+        not which value replaces it.
+        """
+        import socr.core.pdf as pdf_module
 
         detector, _ = self._detector_with(GlyphRepairReport(repaired_fonts=["previous"]))
         monkeypatch.setattr(
-            bd, "repair_symbol_font_text", lambda doc: (_ for _ in ()).throw(RuntimeError())
+            pdf_module,
+            "repair_symbol_font_text",
+            lambda doc: (_ for _ in ()).throw(RuntimeError("boom")),
         )
-        detector._recover_symbol_fonts(object(), tmp_path / "doc.pdf")
-        assert detector.last_glyph_repair is None
+        target = tmp_path / "doc.pdf"
+        target.write_bytes(b"%PDF-1.4\n")
+
+        detector._recover_symbol_fonts(object(), target)
+
+        stale = detector.last_glyph_repair
+        assert stale is None or stale.repaired_fonts == [], (
+            "the previous document's report survived a failed recovery"
+        )
 
 
 def _state():

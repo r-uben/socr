@@ -23,7 +23,8 @@ from pathlib import Path
 
 import fitz
 
-from socr.core.glyph_recovery import GlyphRepairReport, repair_symbol_font_text
+from socr.core.glyph_recovery import GlyphRepairReport
+from socr.core.pdf import apply_glyph_recovery, open_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -656,7 +657,9 @@ class BornDigitalDetector:
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
         pages: list[PageAssessment] = []
-        with fitz.open(pdf_path) as doc:
+        # repair=False: the report is needed here, so recovery is applied
+        # explicitly below rather than silently inside the open.
+        with open_pdf(pdf_path, repair=False) as doc:
             self._recover_symbol_fonts(doc, pdf_path)
             for page_idx in range(len(doc)):
                 assessment = self._assess_page(doc[page_idx], page_idx + 1)
@@ -680,7 +683,9 @@ class BornDigitalDetector:
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-        with fitz.open(pdf_path) as doc:
+        # repair=False: the report is needed here, so recovery is applied
+        # explicitly below rather than silently inside the open.
+        with open_pdf(pdf_path, repair=False) as doc:
             if page_num < 1 or page_num > len(doc):
                 raise ValueError(f"Page {page_num} out of range (document has {len(doc)} pages)")
             self._recover_symbol_fonts(doc, pdf_path)
@@ -714,7 +719,7 @@ class BornDigitalDetector:
         exactly as it was before this existed.
         """
         try:
-            report = repair_symbol_font_text(doc)
+            report = apply_glyph_recovery(doc, pdf_path)
         except Exception as exc:  # pragma: no cover - defensive
             # Cleared, not left stale: a reused detector would otherwise
             # attribute the previous document's report to this one.
