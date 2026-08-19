@@ -1,0 +1,21 @@
+{
+  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+  "main_sha_short": "53b0637",
+  "main_sha_subject": "fix(glyph): gate on the Monotype H<number> namespace, not table membership",
+  "main_sha_committed_at": "2026-08-20T00:14:01+02:00",
+  "created_at": "2026-08-19T23:23:11Z",
+  "gh_login": "r-uben",
+  "gh_auth_ok": true,
+  "repo": "r-uben/socr",
+  "forge": "github",
+  "remote": "git@github.com:r-uben/socr.git",
+  "open_issue_count_at_baseline": 62,
+  "base_worktree": "/Users/rubenffuertes/repos/.worktrees/socr-night-base",
+  "base_worktree_state": "detached at main_sha, clean",
+  "main_checkout": "/Users/rubenffuertes/repos/tools/socr",
+  "main_checkout_branch_at_start": "docs/163-reachability-evidence",
+  "main_checkout_policy": "read-only; owned by another session",
+  "plan_worktree": "/private/tmp/claude-501/-Users-rubenffuertes-repos-tools-socr/bae3cd33-3698-4e2f-999a-b6ed84289e24/scratchpad/planwt",
+  "isolation_canary": "docs/plans/2026-08-20_overnight-issue-sweep/bin/isolation_canary.sh",
+  "canary_proof": "logs/2026-08-20_A1-sentinel-transcript.md"
+}

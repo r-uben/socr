@@ -1,0 +1,12 @@
+{
+  "tracker_mode": "agent-gated",
+  "authorised_by": "owner, 2026-08-20",
+  "caps": {
+    "triage_vendor_wall_clock_s": 1800,
+    "adjudication_wall_clock_s": 1200,
+    "review_wall_clock_s": 900,
+    "ci_wait_wall_clock_s": 1800
+  },
+  "hard_prohibitions": ["gh pr merge", "git push --force", "writes to the main checkout", "acting on HELD-FOR-OWNER"],
+  "abort_latch": "state/ABORT"
+}
