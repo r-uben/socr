@@ -1,0 +1,483 @@
+{
+ "batch": "batch-3",
+ "adjudicator": "gemini-pro",
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "grounding": {
+  "canary": "CANARY FAIL: interpreter not found: /Users/rubenffuertes/venvs/socr/bin/python"
+ },
+ "clusters": [
+  {
+   "cluster": "cascade-halt",
+   "joint_reading": "The cascade-halt mechanism incorrectly checks Ollama daemon liveness via a HTTP GET /api/tags at a hardcoded localhost. If it times out or returns 200 during a GPU wedge, it incorrectly applies the halt logic. Furthermore, it triggers on any attempt that timed out, even if a subsequent attempt succeeded, making it destructive if just the liveness probe is fixed without fixing the trigger condition.",
+   "issues": [
+    221,
+    222,
+    227
+   ]
+  },
+  {
+   "cluster": "cost-identity",
+   "joint_reading": "The ProviderProfile identity (provider ID, model, cost) is not correctly passed down to `run_provider()`, meaning budget checks and ladder escalations assess cost logic against the wrong model profile. Issue 159 is the root cause, and 154 and 160 are consequences of it.",
+   "issues": [
+    154,
+    159,
+    160
+   ]
+  },
+  {
+   "cluster": "cli-semantics",
+   "joint_reading": "Various CLI flags are not respected on the agentic path: `--no-audit` is advertised but ignored, and config loaded from file is unconditionally overwritten by CLI parameter defaults.",
+   "issues": [
+    139,
+    142,
+    168
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "issue": 139,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: cli.py:36 advertises 'Skip quality audit stage' and cli.py:269-270 sets audit_enabled=False, but process() at orchestrator.py:559-562 routes agentic runs into _phase_agentic with no audit_enabled consult; every gate (568, 583, 589, 593) sits in the multi/single-engine branches. The issue's own preferred remedy (reject --agentic --no-audit with a clear error) is a tiny, well-scoped change plus a CliRunner test. No new semantics needed.",
+    "ollama-minimax": "Issue's mechanism is correct. `audit_enabled` gates live only in non-agentic branches (single-engine line 583, multi-engine line 568, judge_hard_pages line 589, repair line 593). The agentic branch at line 562 dispatches to `_phase_agentic` without consulting the flag. The cited line numbers (452/467/473/477) are stale \u2014 the gates moved during PP-2 work \u2014 but the class of defect is unchanged. Issue's preferred resolution (reject `--agentic --no-audit` with a clear error) is implementable in `build_config` for under 30 lines plus a CliRunner test."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Both vendors cleanly cited the defect where --no-audit is inert on the agentic path.",
+   "citations": [
+    {
+     "path": "src/socr/cli.py",
+     "line": 36,
+     "snippet": "f = click.option(\"--no-audit\", is_flag=True, help=\"Skip quality audit stage\")(f)"
+    },
+    {
+     "path": "src/socr/cli.py",
+     "line": 270,
+     "snippet": "config.audit_enabled = False"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 562,
+     "snippet": "self._phase_agentic(state, out_dir)"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 568,
+     "snippet": "if self.config.audit_enabled:"
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "We might break or clutter CLI handling if the flag is actually honored elsewhere."
+  },
+  {
+   "issue": 142,
+   "final_disposition": "CHORE-PLAN",
+   "agreement": "SPLIT",
+   "vendor_readings": {
+    "kimi": "The audit's core claim holds at main_sha: the 11 'hashed but never acted on' fields (chunk_size, consensus_*, fallback_chain, judge_hard_pages, local_engine, max_retries, tiered, truncation_retries) appear only in the _run_fingerprint dict (orchestrator.py:357-437) and in functions the agentic path never calls (_phase_backbone->_backbone_native_first at 873, _phase_score at 583, _phase_consensus at 576/598). One staleness correction: the 'neither hashed nor read' half for the math flags is outdated \u2014 #233 added recover_corrupt_math/math_model/clean_equation_model to the fingerprint (orchestrator.py:449-450, 467-470), though they remain inert on the agentic path (read at 955 inside _backbone_native_first). The remedy is help-text honesty plus incompatibility errors, with the fingerprint-extra prune as the only behaviour-changing piece \u2014 that is housekeeping, not a runtime defect; the runtime members are filed separately as #139/#154.",
+    "ollama-minimax": "This is a programme of work \u2014 a flag-by-flag audit of the CLI surface against the agentic path \u2014 not a single defect. The issue itself frames the deliverable as 'a regression test that pins the result', which is a meta-test, not a fix. Two of its child discoveries are already filed as #139 and #154; the umbrella's remaining work is one CliRunner test that asserts either behavioural change OR explicit non-agentic allowlist membership for every flag. That test is a multi-day undertaking across the whole CLI surface and out of scope for one unattended night."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Kimi and minimax split on the categorization (CHORE-PLAN vs ROADMAP-UMBRELLA). I side with Kimi that this is a housekeeping chore to prune inert flags from the fingerprint.",
+   "citations": [
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 397,
+     "snippet": "\"tiered\": cfg.tiered,"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 449,
+     "snippet": "\"recover_corrupt_math\": cfg.recover_corrupt_math,"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 955,
+     "snippet": "self.config.recover_corrupt_math"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 873,
+     "snippet": "return self._backbone_native_first(state, output_dir)"
+    }
+   ],
+   "action_recommended": "none",
+   "proposed_comment": "Valid chore, but should be sequenced with the resume-ledger invalidation semantics in #161.",
+   "risk_if_wrong": "Fingerprint pruning might accidentally invalidate cached pages prematurely if not sequenced correctly."
+  },
+  {
+   "issue": 154,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: PROFILE_QWEN_CLOUD is registered with tier=TIER_CLOUD but cost_per_page_usd=0.0 (providers.py:74-77), and provider_ladder keeps any profile with p.cost_per_page_usd <= cap (providers.py:224), so a cloud-egress rung passes any cost cap. One wrinkle the issue understates: the same line treats max_cost_per_page <= 0.0 as 'no cap', so a user-passed 0 currently disables the cap entirely \u2014 the fix must rework that sentinel (e.g. None for unset) for acceptance criterion 1 to be reachable. Small, well-scoped change in providers.py plus ladder-construction regression tests.",
+    "ollama-minimax": "Issue's mechanism verified. PROFILE_QWEN_CLOUD is registered at cost_per_page_usd=0.0 (providers.py:81) and `provider_ladder` filters on `p.cost_per_page_usd <= max_cost_per_page`. So `--max-cost-per-page 0` cannot exclude a cloud rung priced at $0.00. The only honest cost fence today is `--strict_local`. Fix is a one-line tier gate in `provider_ladder` (or a separate `max_cost_per_page_with_tier` filter) plus regression test. Lines cited in the issue may be slightly stale (the dataclass is at providers.py:68-88) but the code path is unchanged."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Minimax's reasoning is sound (cost cap treats qwen-cloud as free) but its citations drifted. Kimi's citations are clean. Issue 154 is a consequence of 159.",
+   "citations": [
+    {
+     "path": "src/socr/core/providers.py",
+     "line": 76,
+     "snippet": "tier=TIER_CLOUD,"
+    },
+    {
+     "path": "src/socr/core/providers.py",
+     "line": 77,
+     "snippet": "cost_per_page_usd=0.0,"
+    },
+    {
+     "path": "src/socr/core/providers.py",
+     "line": 224,
+     "snippet": "and (max_cost_per_page <= 0.0 or p.cost_per_page_usd <= max_cost_per_page)"
+    },
+    {
+     "path": "src/socr/core/providers.py",
+     "line": 78,
+     "snippet": "id=\"qwen-cloud\","
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "We might restrict valid cloud paths if cost accounting is misunderstood."
+  },
+  {
+   "issue": 159,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: route_page submits run_provider(prof.engine, page_num) (agentic.py:216) \u2014 only the EngineType enum crosses the call boundary; _phase_agentic's run_provider (orchestrator.py:2396-2400) re-resolves backend/model from PipelineConfig via resolve_qwen_intent, so PROFILE_QWEN_CLOUD's backend/model never reach execution. prof.id/model/backend are recorded on ProviderAttempt for provenance only (agentic.py:301-302), which is how provenance can say 'qwen-cloud' while the local model ran. Fix is to plumb the profile (or its id/backend/model) into run_provider and into the engine invocation. Moderate blast radius (engine interface) but a single night is realistic.",
+    "ollama-minimax": "Issue's mechanism verified. `route_page` calls `run_provider(prof.engine, page_num)` (agentic.py:216 and 248) and the run_provider Callable signature accepts only `(EngineType, int)`. Local and cloud Qwen share `EngineType.QWEN`, so the dispatcher loses profile identity. The accepted path (budget branch, agentic.py:196-207) records `provider_id`/`model`/`backend`, but the timeout branch at agentic.py:230-243 omits all three \u2014 confirmed at line 241 (`reason=\"provider timeout\"` with no provider_id/model/backend kwargs). Fix is to thread the profile through run_provider and add identity to the timeout ProviderAttempt; tests need a stub provider that asserts the right backend was invoked."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Minimax's reasoning is sound but citations drifted. Kimi cleanly proved that run_provider fails to receive the profile identity, establishing this as the root cause of the cluster.",
+   "citations": [
+    {
+     "path": "src/socr/pipeline/agentic.py",
+     "line": 216,
+     "snippet": "future = ex.submit(run_provider, prof.engine, page_num)"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2396,
+     "snippet": "def run_provider(engine: EngineType, page_num: int) -> PageOutput:"
+    },
+    {
+     "path": "src/socr/pipeline/agentic.py",
+     "line": 301,
+     "snippet": "model=prof.model,"
+    },
+    {
+     "path": "src/socr/pipeline/agentic.py",
+     "line": 241,
+     "snippet": "reason=\"provider timeout\","
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "Fixing the identity plumb could break other components expecting the local engine default."
+  },
+  {
+   "issue": 160,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: _resolve_table_escalation_provider picks min(candidates, key=cost) from `available` (orchestrator.py:1708, 1711) \u2014 the tier-filtered list, NOT the max-cost-filtered ladder built at 2333-2335 \u2014 while its own docstring (1699-1701) claims choosing from `available` makes --max-cost-per-page suppress the lane 'for free', which is false. In _escalate_table_page the timeout/refusal early returns (1903 and the refusal returns after it) fire before the hand-recorded cost append at 1939, so timed-out/refused billable attempts are never counted; no remaining-budget check precedes the call. Fix: filter candidates through max_cost_per_page, gate on remaining budget, and record cost on every attempt path. Contained in one module.",
+    "ollama-minimax": "Issue's mechanism verified. At orchestrator.py:2334 the `available` list is cost-filtered into `ladder`, but line 2338 passes the unfiltered `available` to `_resolve_table_escalation_provider`. The escalation selector (line 1700) then picks from that unfiltered set, so a Gemini rung above `--max-cost-per-page` can still be selected. Docstring at line 1698 claims the opposite. Also the early-return in `_escalate_table_page` (~1634-1688) exits before cost is appended to engine_runs \u2014 confirmed by the docstring at config.py ~207-213 claiming cost-aware selection. Fix: pass `ladder` instead of `available` to the escalation selector and append cost to `engine_runs` on early returns. Regression test: ladder with one expensive rung + `--max-cost-per-page 0` should not call that rung."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Minimax's reasoning is sound but citations drifted. Kimi clearly proved escalation ignores the cap and budget.",
+   "citations": [
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 1708,
+     "snippet": "candidates = [p for p in available if p.tier != TIER_LOCAL and p.supports_per_page]"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 1711,
+     "snippet": "return min(candidates, key=lambda p: p.cost_per_page_usd)"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 1903,
+     "snippet": "return True"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 1939,
+     "snippet": "state.engine_runs.append("
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "Could result in runaway billing if escalation ignores cost correctly but we incorrectly gate it."
+  },
+  {
+   "issue": 161,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: _load_terminal_page's skip gate checks only winning.get(\"status\") != SUCCESS (orchestrator.py:4723) and never consults audit_passed, while _phase_agentic stamps att.output.audit_passed = att.accepted (2762), so an all-reject best-effort page keeps provider status SUCCESS with audit_passed=False and _winning_page_output returns it (manifest.py:460-461 'if p.best_output: return p.best_output'). On inner-ledger resume that sidecar is skipped as terminally clean and the rejected text is restored \u2014 silent poisoning, the repo's cardinal sin. Fix is one added condition in the gate (require audit_passed is True) plus a regression test with a SUCCESS+audit_passed=false sidecar. Small, high-value, well-precedented by the existing conservative-gate style. This is the right first fix candidate of the batch.",
+    "ollama-minimax": "Issue's mechanism verified. `_load_terminal_page` (orchestrator.py:4628+) checks `winning.get(\"status\") != PageStatus.SUCCESS.value` (line ~4722) but does NOT check `audit_passed`. Agentic all-reject best-effort at orchestrator.py:2762 sets `att.output.audit_passed = att.accepted` (False on a rejected page), but the output may still be `status=SUCCESS` with `audit_passed=False` \u2014 that sidecar is then resume-skipped, restoring rejected text silently. `_winning_page_output` at manifest.py:296 returns the same output for the same reason. Fix is a single extra clause in `_load_terminal_page`: `if not winning.get(\"audit_passed\"): return None`. Test: write a SUCCESS/audit_passed=False sidecar and verify it is reprocessed on resume."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Repro confirms the behavioural defect at main_sha. The resume gate reads status and never the audit verdict, which restores judge-rejected text.",
+   "citations": [
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 4723,
+     "snippet": "if winning.get(\"status\") != PageStatus.SUCCESS.value:"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2762,
+     "snippet": "att.output.audit_passed = att.accepted"
+    },
+    {
+     "path": "src/socr/core/manifest.py",
+     "line": 463,
+     "snippet": "if p.best_output:"
+    },
+    {
+     "path": "src/socr/core/manifest.py",
+     "line": 464,
+     "snippet": "return p.best_output"
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "Adding audit_passed to the skip gate might cause excessive re-OCRs for pages that are legitimately clean."
+  },
+  {
+   "issue": 168,
+   "final_disposition": "PARTIALLY-IMPLEMENTED",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Half the issue is already fixed: from_file no longer uses a name allowlist \u2014 commit 18e67f4 (PR #241, ancestor of main_sha) drives restoration from dataclasses.fields (config.py:348-352), so the '14 omitted fields' claim is stale. The other half is live: build_config unconditionally assigns config.timeout (cli.py:299), config.judge_backend (334), config.max_cost_per_page (336), config.cost_budget (337) and config.write_manifest (338) from parameter defaults, clobbering values that did load from YAML when the user passed no flag. Remaining fix: sentinel-default the CLI parameters (None = not supplied) so absent options preserve loaded values, plus the CliRunner precedence tests the issue asks for.",
+    "ollama-minimax": "Issue's `from_file` claim is MISREPORTED at main_sha: `_FROM_FILE_EXPLICIT_FIELDS` (config.py:97-109) lists only 8 bespoke fields and the for-loop at config.py:347 (`for f in dataclasses.fields(cls)`) loads everything else generically \u2014 including `agentic`, `strict_local`, `judge_*`, `max_cost_per_page`, `cost_budget`, `write_manifest`, `dual_pass_tables`, `escalate_ambiguous_tables`. So the \"14 fields omitted\" claim is wrong; #240 already converted this to a generic loader. However, the `build_config` clobbering claim IS correct: cli.py:308 `config.timeout = timeout` (unconditional), cli.py:332 `config.judge_backend = judge_backend`, cli.py:333 `config.judge_model = judge_model`, cli.py:334 `config.max_cost_per_page = max_cost_per_page`, cli.py:335 `config.cost_budget = cost_budget`, cli.py:336 `config.write_manifest = write_manifest` \u2014 all unconditional, clobbering any loaded YAML value. Fix is straightforward but is a behaviour change (a user who relied on YAML `timeout: 1800` getting silently overwritten by CLI default of 1800 will now keep the loaded value) and wants CliRunner tests for precedence."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Kimi correctly identified that from_file allows arbitrary fields (fixed in 18e67f4), but build_config clobbering is still live. Minimax had drift.",
+   "citations": [
+    {
+     "path": "src/socr/core/config.py",
+     "line": 348,
+     "snippet": "# Everything else: restored generically from the dataclass definition, so"
+    },
+    {
+     "path": "src/socr/cli.py",
+     "line": 299,
+     "snippet": "config.timeout = timeout"
+    },
+    {
+     "path": "src/socr/cli.py",
+     "line": 334,
+     "snippet": "config.judge_backend = judge_backend"
+    },
+    {
+     "path": "src/socr/cli.py",
+     "line": 338,
+     "snippet": "config.write_manifest = write_manifest"
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": "from_file is fixed by 18e67f4, but the sentinel-default parameter clobbering is a live defect to be fixed.",
+   "risk_if_wrong": "Changing CLI parameter defaults to None could break scripts that omit flags assuming previous hardcoded defaults."
+  },
+  {
+   "issue": 172,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: the code itself concedes the defect \u2014 extract.py:345-347 states ThreadPoolExecutor workers are NOT daemon threads and keep the process alive if a worker is blocked, while agentic.py:222 wrongly calls the abandoned worker 'the daemon thread'. future.cancel() cannot stop a running call, and every timeout site (route_page agentic.py:214-225, _TimeoutJudge orchestrator.py:2138-2152, _escalate_table_page 1885-1903, crop reader extract.py:329-349) abandons a non-daemon worker. A permanently wedged provider therefore hangs CLI exit after a reported timeout. Fix per the acceptance criteria needs a killable process boundary (multiprocessing/atexit hard-exit), which is a real but one-night-sized change; medium confidence because it touches four call sites and CPython executor shutdown semantics are easy to get subtly wrong.",
+    "ollama-minimax": "Issue's mechanism verified. agentic.py:222 comment claims \"the daemon thread\" but `ThreadPoolExecutor` workers are NOT daemon by default (CPython behavior). On a `future.cancel()` + `shutdown(wait=False)` the stalled worker continues to run; the Python interpreter cannot exit while non-daemon threads are alive. This means a wedged VLM subprocess keeps the CLI alive past any reported timeout. `tables/extract.py:320-350` is cited as correctly noting this \u2014 not verified here, but the agentic.py comment at line 222 is plainly wrong on Python threading semantics. Fix: run provider calls in a `multiprocessing` boundary or set the executor thread daemon flag explicitly (Python doesn't expose this, so multiprocessing is the honest answer). Acceptance test: stub that never returns, assert CLI exits within bounded wall clock."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Minimax lost on drift but both agents accurately diagnosed that ThreadPoolExecutor workers are non-daemon and keep the process alive after timeout.",
+   "citations": [
+    {
+     "path": "src/socr/tables/extract.py",
+     "line": 345,
+     "snippet": "running until it unblocks. ThreadPoolExecutor workers are NOT daemon"
+    },
+    {
+     "path": "src/socr/pipeline/agentic.py",
+     "line": 222,
+     "snippet": "# wait=False lets us escalate immediately; the daemon thread"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2145,
+     "snippet": "future.cancel()"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2146,
+     "snippet": "ex.shutdown(wait=False)"
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "Implementing a hard-exit could mask cleanup logic in other threads."
+  },
+  {
+   "issue": 177,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: single-file process at cli.py:453-463 prints 'Completed with warnings' on AUDIT_FAILED and falls through to exit 0 unless LOST_CONTENT_NOTE is in the error, while batch maps AUDIT_FAILED to Status.PARTIAL (orchestrator.py:719-720) and cli.py:557-558 raises SystemExit(pipeline.last_outcome.exit_code) under a comment stating the uniform policy 'nonzero if ANY file failed or was partial'. Same document status, opposite exit codes \u2014 confirmed asymmetry, exactly as reported. Fix: route both through one policy helper and add the CliRunner parity tests; small and safe.",
+    "ollama-minimax": "Issue's mechanism verified. cli.py:455-462 exits 0 on AUDIT_FAILED unless `LOST_CONTENT_NOTE in result.error`; cli.py:556-557 calls `SystemExit(pipeline.last_outcome.exit_code)` for the batch path. Both paths reach the same `RunOutcome` contract (per the issue), so the divergence is a real defect in `process()`. Fix: route the single-file exit through the same policy module as batch. Lines cited in the issue are accurate. TICKET-21 (cited in 177) is a separate concern (hard-error despite written md)."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Minimax lost on drift but both accurately diagnosed the exit code asymmetry on AUDIT_FAILED.",
+   "citations": [
+    {
+     "path": "src/socr/cli.py",
+     "line": 453,
+     "snippet": "if result.status == DocumentStatus.AUDIT_FAILED:"
+    },
+    {
+     "path": "src/socr/cli.py",
+     "line": 557,
+     "snippet": "if pipeline.last_outcome.exit_code != 0:"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 719,
+     "snippet": "elif result.status == DocumentStatus.AUDIT_FAILED:"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 720,
+     "snippet": "outcome.add(Status.PARTIAL, detail=str(pdf))"
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "Unifying exit codes might break CI pipelines depending on the old batch behavior."
+  },
+  {
+   "issue": 221,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: the halt guard is orchestrator.py:2925-2926, and probe_ollama_idle is a GET /api/tags (extract.py:88) whose own docstring (extract.py:82-85) concedes it does not check whether a generation is running server-side. The issue's measured wedge taxonomy (200 OK in 0.05-0.14s mid-generation) is consistent with the code: the probe answers HTTP-layer health only, so the halt branch is dead for the runner-hung and runaway-generation shapes it was built for. Fix direction is ratified by the Fable-panel design comment on the issue: 1-token functional canary against the timed-out attempt's own backend, exact reason strings, plus a consecutive-timeout latch \u2014 and it must ship with #222 and #227 in one change (see those verdicts).",
+    "ollama-minimax": "Issue's mechanism verified. probe_ollama_idle (tables/extract.py:77) is a `GET /api/tags` that returns 200 in 0.05-0.14s during a GPU wedge (per the issue's own measurement on Ollama 0.32.7). The docstring at tables/extract.py already concedes the limitation. So `not probe_ollama_idle()` is effectively always False on a healthy Ollama daemon, dead-branching the halt at orchestrator.py:2925-2928. Agentic mode launches one subprocess per page (qwen-ocr-cli REQUEST_TIMEOUT = 300s); on a wedged GPU every remaining page burns its full 300s. Issue's `qwen-ocr-cli/config.py:55` line not directly verified but cited correctly. Fix needs a functional canary (1-token generation on the same model \u2014 see #221's own wedge taxonomy B); per `MEMORY.md` \"Ollama /api/tags is blind to a wedge\" the canary must be a generation, not a tags ping."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Minimax lost on drift but both accurately identify that probe_ollama_idle is an HTTP ping which is blind to GPU wedges.",
+   "citations": [
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2925,
+     "snippet": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2926,
+     "snippet": "if _had_timeout and not probe_ollama_idle():"
+    },
+    {
+     "path": "src/socr/tables/extract.py",
+     "line": 83,
+     "snippet": "This is a lightweight /api/tags ping \u2014 it does NOT check whether a generation"
+    },
+    {
+     "path": "src/socr/tables/extract.py",
+     "line": 88,
+     "snippet": "resp = httpx.get(f\"{host.rstrip('/')}/api/tags\", timeout=timeout)"
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "Changing the probe to a generation could incur cost or latency in the critical path."
+  },
+  {
+   "issue": 222,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: probe_ollama_idle's host parameter defaults to http://localhost:11434 (extract.py:77) and the call site at orchestrator.py:2926 passes no host, so on any box without a local Ollama daemon the probe returns False forever; combined with the backend-agnostic substring trigger at 2925 (which a Gemini cloud timeout or judge-prose 'timeout' remark satisfies), one slow page false-halts a healthy run with a wrong diagnosis. The issue's own hedge stands \u2014 not yet observed in the wild, found by code review \u2014 but the code path reads exactly as described. Same one-change fix as #221/#227.",
+    "ollama-minimax": "Issue's mechanism verified. `probe_ollama_idle(host=\"http://localhost:11434\", ...)` (tables/extract.py:77) \u2014 the call site at orchestrator.py:2926 passes no `host`, so on any deployment without a local Ollama daemon (vLLM, HPC, remote Ollama) the probe raises and returns False unconditionally. Combined with `_had_timeout` matching the substring `\"timeout\"` in any attempt reason \u2014 including cloud Gemini timeouts (DEFAULT_PROVIDER_TIMEOUTS[EngineType.GEMINI] = 240.0, agentic.py:49) and judge timeouts \u2014 a single cloud timeout on a vLLM backend fires the halt and truncates the document with `PARTIAL_SAVE_VLM_TIMEOUT` even though the backend was healthy. Also: `_had_timeout` matches `\"timeout\"` substring in judge prose (agentic.py:367 `\"; \".join(verdict.issues)`) so a judge remarking on a timeout arms the halt. Fix per #227's note: record backend on timeout ProviderAttempt, gate on exact reason strings, probe the timing-out attempt's own backend at its configured host \u2014 or skip the guard entirely for cloud rungs."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Both correctly confirm probe_ollama_idle uses a hardcoded localhost, causing false halts on cloud backends.",
+   "citations": [
+    {
+     "path": "src/socr/tables/extract.py",
+     "line": 77,
+     "snippet": "def probe_ollama_idle(host: str = \"http://localhost:11434\", timeout: float = 5.0) -> bool:"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2926,
+     "snippet": "if _had_timeout and not probe_ollama_idle():"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2925,
+     "snippet": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "path": "src/socr/pipeline/agentic.py",
+     "line": 241,
+     "snippet": "reason=\"provider timeout\","
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "Using a dynamic host might fail if network configurations block the probe ping."
+  },
+  {
+   "issue": 227,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "SINGLE-VENDOR",
+   "vendor_readings": {
+    "kimi": "Verified at main_sha: _had_timeout uses any(...) over every attempt on the page (orchestrator.py:2925), including attempts superseded by a later successful rung, so a timed-out-then-succeeded page still arms the halt; combined with a False-returning probe the document is truncated despite every page having succeeded. The issue's warning is architecturally correct: the branch is live-or-dead purely on the probe, so repairing the probe (#221) without repairing the trigger turns dead code into destructive code. The ratified rule (canary the timing-out attempt's own backend; halt only when the page failed and no rung remains) requires attempt-level backend identity \u2014 the #159 gap at agentic.py:232-243. One change, three issues.",
+    "ollama-minimax": "Issue's mechanism verified and well-framed. orchestrator.py:2925 `_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)` matches ALL attempts on the page including superseded ones \u2014 a page whose first rung timed out and second rung succeeded still arms the halt. Combined with the probe dead/false-halt behaviour of #221/#222, a fully-recovered page can trigger `PARTIAL_SAVE_VLM_TIMEOUT`. Fix per the issue: arm the halt only from the attempt that determined the page's outcome AND only when the page did not succeed. Requires backend identity on the timeout `ProviderAttempt` (currently agentic.py:230-243 omits provider_id/model/backend; the budget branch at agentic.py:196-207 populates all three \u2014 gap confirmed). Per #227's additional correction: TICKET-D1 established qwen-cloud is still routed via localhost daemon, so the probe hits the same endpoint for two rungs \u2014 #221 is the live defect on machines with ollama, #222 on machines without."
+   },
+   "evidence_verified": true,
+   "recoverable": true,
+   "basis": "Minimax lost on drift but both confirm that _had_timeout triggers on superseded attempts, which turns 221's fix into a destructive bug if not fixed together.",
+   "citations": [
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2925,
+     "snippet": "_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2926,
+     "snippet": "if _had_timeout and not probe_ollama_idle():"
+    },
+    {
+     "path": "src/socr/pipeline/agentic.py",
+     "line": 216,
+     "snippet": "future = ex.submit(run_provider, prof.engine, page_num)"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2928,
+     "snippet": "halt_reason = \"PARTIAL_SAVE_VLM_TIMEOUT\""
+    }
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "We might fail to halt a genuinely runaway process if the trigger is constrained too tightly."
+  }
+ ]
+}

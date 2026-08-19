@@ -1,0 +1,414 @@
+{
+ "batch": "batch-4",
+ "adjudicator": "deepseek",
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "grounding": {
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-base/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-base"
+ },
+ "clusters": [
+  {
+   "cluster": "equations",
+   "joint_reading": "At main_sha the agentic loop DOES invoke the GH-36 equation phases: orchestrator.py:3027-3041 calls _detect_and_crop_equations and _attach_equation_latex_sidecars when --detect-equations/--recover-clean-equations are on (the memory that 'GH-36 never runs in agentic mode' is STALE at this SHA). But both flags default OFF, so the DEFAULT path is the native lane silently trusting math-font pages. The five issues split into two shapes: (a) default-path silent loss that ships regardless of flags — #140 (math-font pages trusted natively with no audit event), #165 (has_equations omits has_unmapped_math_glyphs so PUA-only pages bypass detection), #219 (_MATH_FONT_RE whitelist misses Palatino/PazoMath so those equations never yield regions); and (b) opt-in-path defects reachable only when flags are on — #157 (the 'no PageOutput' skip remains a silent warning) and #164 (full page native_text appended per rejected region, multiplying prose). None is dead code; all five are real, but (a) ships by default and (b) ships only to flag users.",
+   "issues": [140, 157, 164, 165, 219]
+  },
+  {
+   "cluster": "architecture",
+   "joint_reading": "All five are refactoring/architecture programmes with no runtime-behaviour change, and none is a user-visible defect — none should enter a fix queue. They differ in scope: #155 (split the ~5.5k-LOC orchestrator god-module into preflight/agentic_loop/legacy_tiers/…) and #174 (quarantine the legacy deterministic backbone, collapse dual implementations) are multi-PR programmes; #175 (break the tables<->benchmark 2-cycle by extracting a neutral module) and #176 (restore a dumb DocumentState blackboard with one authoritative page-text selector) are bounded single-deliverable refactors; #178 is a docs-only ADR (stay Python, no Rust rewrite).",
+   "issues": [155, 174, 175, 176, 178]
+  },
+  {
+   "cluster": "audit-provenance",
+   "joint_reading": "These are the batch's real, testable defects in the fingerprint/manifest/replay provenance layer. #158 is the umbrella: model_version IS now populated in build_manifest from state.engine_runs and resolved_model_version (manifest.py:600-633), so the resume-invalidation half is largely done, but the 'default per-page provenance' half (rich journal fields written without opt-in manifest) is not. The four siblings are concrete holes: #169 drops the judge rejection reason for non-empty rejected attempts (orchestrator.py:2766-2767); #170 replay/stale_pages validate page text blobs but not figure/chart/equation assets (manifest.py:659-690); #171 terminal sidecars are flushed before _describe_and_embed_figures so they lack final figure_refs (orchestrator.py:4973 vs 5296); #238 the fingerprint records cfg.gemini_model, not which of the three _get_vision_engine producers actually ran (orchestrator.py:483, 5974).",
+   "issues": [158, 169, 170, 171, 238]
+  },
+  {
+   "cluster": "umbrella-and-proposals",
+   "joint_reading": "None is a single defect. #39 (route-by-quality-per-dollar ladder programme), #49 (extract/verify/escalate architecture vision), #56 (CE corpus readiness programme) are roadmap umbrellas whose pieces land in later table/routing tickets. #114 (socr escalate subcommand), #202 (Mistral OCR 4.1 bake-off), #203 (consume Mistral blocks as priors) are proposals blocked on measurement or an external CLI fix (mistral-ocr-cli#23). #156 is doc-tracker hygiene (TODO.md/TICKETS.md stale vs closed issues), a bounded chore not a defect.",
+   "issues": [39, 49, 56, 114, 202, 203, 156]
+  }
+ ],
+ "rows": [
+  {
+   "issue": 39,
+   "final_disposition": "ROADMAP-UMBRELLA",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Three-stage programme (benchmark gates, hand-verified GT, calibration.lock + ladder unification), not one defect. Stage 1 landed in 930e811/2647656/19864f7; Stages 2-3 remain; issue checkboxes still open.",
+    "gemini-pro": "Broad programme of work for route-by-quality metrics and ladder calibration, not a single actionable defect."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Both vendors read it as a multi-stage programme, and the issue body (P1 route-by-quality, calibrated ladders, gate calibration) confirms it. Not a defect; do not drag into a fix queue.",
+   "citations": [{"path": "src/socr/core/config.py", "line": 253, "snippet": "agentic: bool = True  # per-page: try cheapest provider, judge escalates"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If this were actually a single shippable defect, leaving it as an umbrella would hide a real bug behind a roadmap label."
+  },
+  {
+   "issue": 49,
+   "final_disposition": "ROADMAP-UMBRELLA",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Architecture decision (extract/verify/escalate) plus later implement-the-verifier work. Comments already sharpened it to region-not-page routing and native-prefer-when-trustworthy. Product method, not a one-night defect.",
+    "gemini-pro": "Outlines a general architecture vision (single-pass VLM + free native verification + agentic-on-signal) for extraction."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "The issue is the three-layer method (ADR + ARCHITECTURE.md + later verifier tickets), a vision not a defect. Unanimous and correct.",
+   "citations": [{"path": "docs/ARCHITECTURE.md", "line": 9, "snippet": "### Deterministic (default — `socr paper.pdf`)"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the verifier work were already scoped as a concrete ticket, treating it as an umbrella would stall a ready fix."
+  },
+  {
+   "issue": 56,
+   "final_disposition": "ROADMAP-UMBRELLA",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "CE corpus readiness (routing, figures-as-assets, dual-pass hang, recommended command). #87 landed header-repair + crop-repair + figures; remaining programme items (nested-column reconstructor, partial-doc completion, 27-doc reprocess) still open. Programme, not a single bug.",
+    "gemini-pro": "High-level tracker capturing multiple capabilities across CE OCR prior to full corpus rerun."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "CE-scoped instance of #49's method; remaining items are a programme. Unanimous and correct.",
+   "citations": [{"path": "src/socr/pipeline/orchestrator.py", "line": 559, "snippet": "if self.config.agentic and not is_multi:"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If a single remaining CE bug were hiding under this umbrella, it would be deferred past the corpus rerun."
+  },
+  {
+   "issue": 114,
+   "final_disposition": "BLOCKED-PROPOSAL",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Proposed `socr escalate` so GPU OCR and cloud egress can be different machines. Owner measured HPC egress reaches Gemini and asked to re-scope to post-hoc corpus reprocessing. No escalate subcommand exists; the two hard parts (manifest/replay consistency, fingerprint of a later pass) are still design work. Ranked below #49.",
+    "gemini-pro": "Proposal to split local OCR from cloud escalation via escalate was investigated and deemed unnecessary. Re-scoped but currently deprioritized."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "A proposal the owner re-scoped and deprioritized, not a live defect. Unanimous and correct.",
+   "citations": [{"path": "src/socr/pipeline/orchestrator.py", "line": 392, "snippet": "\"escalate_ambiguous_tables\": getattr(cfg, \"escalate_ambiguous_tables\", False),"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the escalate subcommand were actually needed for the HPC split, deferring it would block that workflow."
+  },
+  {
+   "issue": 140,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Math-font pages still do not request enhancement (needs_ocr_enhancement = has_corrupt_math only). Both recovery flags default False. native_math_unrecovered fires only for PUA when flags are off — clean math-font pages still ship SUCCESS with no audit. Honest one-night fix is the mandatory audit event (option 2); default-on / whole-page OCR remain policy.",
+    "gemini-pro": "Pages with math fonts set has_equations=True but has_corrupt_math is false, so they are trusted natively. When recovery flags are off, no audit event is emitted to track this silent math loss, unlike the PUA case."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Verified: born_digital.py:1095 sets needs_ocr_enhancement = has_corrupt_math, so math-font pages (has_equations=True, has_corrupt_math=False) are trusted natively with no audit event when flags are off. This is a default-path silent-content-loss defect, not a category error — it ships regardless of flags. The honest fix is the mandatory audit event, not default-on recovery.",
+   "citations": [
+    {"path": "src/socr/core/born_digital.py", "line": 1095, "snippet": "needs_ocr_enhancement = has_corrupt_math"},
+    {"path": "src/socr/core/config.py", "line": 166, "snippet": "detect_equations: bool = False"}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the math-font pages are actually recovered elsewhere, adding an audit event would be noise; but the code shows they are trusted natively with no trace."
+  },
+  {
+   "issue": 155,
+   "final_disposition": "ROADMAP-UMBRELLA",
+   "agreement": "SPLIT",
+   "vendor_readings": {
+    "grok": "orchestrator.py is still 6117 lines; no lanes/ package, no preflight/agentic_loop/assemble split. Acceptance is a multi-PR extraction programme (facade <800 LOC, per-lane entrypoints, ARCHITECTURE section). Not a night-sized defect.",
+    "gemini-pro": "orchestrator.py is oversized. Breaking it into targeted modules is a housekeeping effort without altering runtime behavior."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Both agree it is not a defect (no runtime change). The split is label granularity: gemini says CHORE-PLAN (single housekeeping task), grok says ROADMAP-UMBRELLA (multi-PR programme). The issue body's proposed split table (preflight/agentic_loop/legacy_tiers/…) and acceptance (facade <800 LOC, per-lane entrypoints) describe a multi-PR programme, so ROADMAP-UMBRELLA is the more accurate label. Either way it must not enter a fix queue.",
+   "citations": [{"path": "src/socr/pipeline/orchestrator.py", "line": 6117, "snippet": "console.print(f\"[dim]{result.error}[/dim]\")"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If this were a single bounded extraction, labeling it a programme would over-defer a tractable refactor."
+  },
+  {
+   "issue": 156,
+   "final_disposition": "CHORE-PLAN",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Doc-tracker hygiene only. TODO.md still says Last updated 2026-06-10 and leads with the #157 bug as an unchecked bullet; TICKETS.md still marks TICKET-20 and TICKET-24 open though --native-only exists and #37/#33 are closed. No runtime behaviour.",
+    "gemini-pro": "Addresses documentation drift where TODO.md and TICKETS.md do not reflect recently closed GitHub issues."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "A bounded doc-hygiene chore, not a defect. Unanimous and correct. Note it is a real, small fix the owner can do (update TODO.md/TICKETS.md), but it is not a code defect.",
+   "citations": [{"path": "TODO.md", "line": 4, "snippet": "Last updated: 2026-06-10."}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the stale docs were actively misleading routing decisions, deferring the cleanup would propagate wrong guidance."
+  },
+  {
+   "issue": 157,
+   "final_disposition": "PARTIALLY-IMPLEMENTED",
+   "agreement": "SPLIT",
+   "vendor_readings": {
+    "grok": "The skip still exists as a quiet warning. But the original native-trusted failure mode is largely wired around: backbone builds page_outputs for prose_pages before detect/attach (1127/1135), and the agentic loop constructs bo then calls detect+attach with [bo] (3038/3041). Remaining gap: skip is still not a hard error, no regression test forbidding the log line, and a mis-wired call site would still ship crops without sidecars as SUCCESS.",
+    "gemini-pro": "FIX-CANDIDATE (forced NEEDS-MEASUREMENT by a +2 line drift on the citation): _attach_equation_latex_sidecars drops work and skips sidecar attachment if the page is missing from page_outputs, preventing region recovery on native-trusted pages."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "The issue body itself concedes 'even if some call sites now build PageOutput before attach (deterministic prose loop; agentic [bo]), the skip remains a silent success path.' I verified the agentic loop at orchestrator.py:3027-3041 does call _detect_and_crop_equations and _attach_equation_latex_sidecars with [bo], and the backbone builds page_outputs before attach (1127/1135). So the primary 'no-ops on native-trusted pages' failure is wired around, but the skip (orchestrator.py:5902-5907) remains a warning-only path with no hard error and no regression test. grok's PARTIALLY-IMPLEMENTED is the accurate reading; gemini's FIX-CANDIDATE overstates the gap and its citation drifted. Not ALREADY-FIXED: the skip remains.",
+   "citations": [
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 3038, "snippet": "self._detect_and_crop_equations(state, [page_num], output_dir)"},
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 5905, "snippet": "\"GH-36b: page %d has detected equations but no PageOutput; skipping\","}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the skip is actually still reachable in the common native-trusted path, leaving it as a warning would keep shipping crops without sidecars as SUCCESS."
+  },
+  {
+   "issue": 158,
+   "final_disposition": "PARTIALLY-IMPLEMENTED",
+   "agreement": "SPLIT",
+   "vendor_readings": {
+    "grok": "Resume identity has grown: _run_fingerprint now records resolved engine determinants, judge identity, and several model knobs. But PageFingerprint.model_version still defaults to empty string, and build_manifest falls back to model_versions.get(...) which is empty when engine_runs have no version. AC 'changing the model tag invalidates resume' is probably met for ladder engines; AC 'every page journal has non-empty model_version / native records model n/a' is not proven and the blank default remains.",
+    "gemini-pro": "FIX-CANDIDATE: model_version is left blank because rich per-page provenance is not populated by default. It's missing in manifests unless opt-in paths are used, which undermines replay identity."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "I verified manifest.py:600-633: model_version IS populated in build_manifest from state.engine_runs (model_versions = {r.engine: r.model_version ...}) and from fingerprint_inputs determinants, and orchestrator.py:312/922/3754/3848 call engine.resolved_model_version(self.config). So gemini's 'model_version is left blank' is inaccurate — the resume-invalidation half is largely done. But the issue's second half (default per-page provenance: rich journal fields written without opt-in manifest, native pages recording engine=native) is not done, and PageFingerprint.model_version still defaults to \"\". grok's PARTIALLY-IMPLEMENTED is the accurate reading.",
+   "citations": [
+    {"path": "src/socr/core/manifest.py", "line": 600, "snippet": "model_versions = {r.engine: r.model_version for r in state.engine_runs if r.model_version}"},
+    {"path": "src/socr/core/manifest.py", "line": 124, "snippet": "model_version: str = \"\""}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If model_version were actually still blank everywhere, resume would silently reuse stale output across a model swap — the exact silent-loss class this issue guards."
+  },
+  {
+   "issue": 164,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Attach still passes the full page native_text into every region. On 1A/engine failure build_equation_sidecar appends that whole string, and the orchestrator concatenates every sidecar onto a PageOutput that already holds the page — multiplying prose once per rejected region. No bbox crop. One-night fix: pass region-cropped native text and skip append when already in po.text.",
+    "gemini-pro": "When appending sidecars, _attach_equation_latex_sidecars fetches the full page's native_text. Each rejected equation region appends the entire page text into PageOutput.text, multiplying prose."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Verified: orchestrator.py:5910 passes state.pages[page_num].native_text (full page) into every region, and equation_latex.py:283 appends native_text.strip() on rejection. Real defect in the opt-in recover path (flags on). Unanimous and correct.",
+   "citations": [
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 5910, "snippet": "native_text = state.pages[page_num].native_text or \"\""},
+    {"path": "src/socr/math/equation_latex.py", "line": 283, "snippet": "lines.append(native_text.strip())"}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the prose were already deduplicated downstream, the fix would be cosmetic; but the code concatenates sidecars onto a PageOutput that already holds the page text."
+  },
+  {
+   "issue": 165,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "has_equations is math-fonts OR literal-LaTeX OR corrupt-math — it still omits has_unmapped_math_glyphs. STIXGeneral is not in _MATH_FONT_RE. Agentic recovery is gated on has_equations, so PUA-only pages never enter detect/attach. Separately, native_math_unrecovered is suppressed whenever both flags are on, with no check that a region was recovered — enabling the flags can silence the only PUA loss signal.",
+    "gemini-pro": "has_equations does not check has_unmapped_math_glyphs, causing PUA-only math pages to bypass region detection. Enabling recovery flags suppresses native_math_unrecovered globally even if nothing was recovered."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Verified: born_digital.py:814-816 sets has_equations = _detect_math_fonts or _detect_equations or has_corrupt_math, omitting has_unmapped_math_glyphs. PUA-only pages bypass detection, and native_math_unrecovered is suppressed when flags are on without checking recovery happened. Real defect. Unanimous and correct.",
+   "citations": [
+    {"path": "src/socr/core/born_digital.py", "line": 815, "snippet": "self._detect_math_fonts(page) or self._detect_equations(raw_text) or has_corrupt_math"},
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 2682, "snippet": "kind=\"native_math_unrecovered\","}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If PUA-only pages were already covered by another signal, the fix would be redundant; but has_equations is the sole gate into detect/attach."
+  },
+  {
+   "issue": 169,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "route_page still stores AcceptDecision.reason on ProviderAttempt.reason, but _phase_agentic copies it into skip_reason only when the rejected attempt is empty. build_manifest journals skip_reason or failure_mode, so a rejected non-empty attempt commonly becomes reason none/failure_mode. Mechanical, one-night: persist att.reason (and a JSON-safe raw_verdict) for every attempt.",
+    "gemini-pro": "_phase_agentic only retains the judge's rejection reason in att.output.skip_reason for empty outputs. Non-empty but rejected attempts silently drop the reason, breaking auditability."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Verified: orchestrator.py:2766-2767 sets skip_reason = att.reason if not att.accepted and not att.output.text else \"\". A rejected non-empty attempt drops the reason, and manifest.py:648 journals skip_reason or failure_mode. Real auditability hole. Unanimous and correct.",
+   "citations": [
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 2767, "snippet": "att.reason if not att.accepted and not att.output.text else \"\""},
+    {"path": "src/socr/core/manifest.py", "line": 648, "snippet": "\"reason\": getattr(a, \"skip_reason\", \"\") or a.failure_mode.value,"}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the reason were already recoverable from raw_verdict elsewhere, the fix would be redundant; but the journal only reads skip_reason/failure_mode."
+  },
+  {
+   "issue": 170,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "replay still only fetches page text blobs; stale_pages only checks those blob refs. Figure/chart/equation assets referenced from the reconstructed markdown are not hashed, not presence-checked, and not copied/rebased on replay-to-another-dir. Fail-closed missing-asset check is night-sized; full copy/rebase is larger but still one ticket.",
+    "gemini-pro": "build_manifest freezes textual PageOutput blobs but fails to track content hashes for figures and equation image assets. Replay ignores whether these linked assets exist."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Verified: manifest.py:659-690 — replay only fetches page text blobs and stale_pages only checks blob refs; no figure/chart/equation asset hashing or presence check. Real defect. Unanimous and correct.",
+   "citations": [
+    {"path": "src/socr/core/manifest.py", "line": 659, "snippet": "def replay(manifest: Manifest, blobs: BlobStore) -> str:"},
+    {"path": "src/socr/core/manifest.py", "line": 680, "snippet": "def stale_pages(manifest: Manifest, blobs: BlobStore) -> list[int]:"}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If replay already failed on missing assets via a different path, the fix would be redundant; but replay only raises on missing page blobs, not assets."
+  },
+  {
+   "issue": 171,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "_phase_assemble still flushes terminal NNN.json sidecars (4973) before _describe_and_embed_figures (5296). _rewrite_all_fragments later rewrites Markdown only. Sidecar figure_refs are collected from state.engine_runs, while figures are attached to the returned EngineResult. Terminal sidecars therefore lack final figure provenance. Fix: rewrite sidecars after the figure phase.",
+    "gemini-pro": "_phase_assemble calls _flush_page_sidecar before figures are extracted. The sidecar writer reads engine_runs, so authoritative terminal sidecars are flushed without final figure refs."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Verified: orchestrator.py:4973 flushes _flush_page_sidecar in the PP-1 block, before _describe_and_embed_figures at 5296; _flush_page_sidecar reads state.engine_runs (4543) while figures attach to the returned EngineResult. Terminal sidecars lack final figure_refs. Real provenance gap. Unanimous and correct.",
+   "citations": [
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 4973, "snippet": "self._flush_page_sidecar(state, pnum, output_dir)"},
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 5296, "snippet": "embedded_text = self._describe_and_embed_figures("}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If sidecars were rewritten later by _rewrite_all_fragments, the gap would be closed; but that path rewrites Markdown only, not the JSON sidecars."
+  },
+  {
+   "issue": 174,
+   "final_disposition": "ROADMAP-UMBRELLA",
+   "agreement": "SPLIT",
+   "vendor_readings": {
+    "grok": "Agentic is already the config default and --legacy-routing exists, but process() still keeps the full backbone->score->judge->repair / multi-engine stack, and ARCHITECTURE.md still advertises deterministic as default. Quarantining or deleting that stack and collapsing dual implementations is a programme, not one defect.",
+    "gemini-pro": "Proposes removing or quarantining the legacy deterministic backbone to make agentic the single source of truth."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Both agree it is not a defect. The issue body's acceptance (delete/quarantine legacy stack, collapse dual implementations, CI fails if agentic-only flags are only wired in legacy branches) describes a multi-PR programme, so ROADMAP-UMBRELLA is more accurate than CHORE-PLAN. Must not enter a fix queue.",
+   "citations": [{"path": "src/socr/core/config.py", "line": 253, "snippet": "agentic: bool = True  # per-page: try cheapest provider, judge escalates"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the legacy stack were already dead code, quarantining it would be a bounded chore rather than a programme."
+  },
+  {
+   "issue": 175,
+   "final_disposition": "CHORE-PLAN",
+   "agreement": "SPLIT",
+   "vendor_readings": {
+    "grok": "The 2-cycle is still in the tree: tables.escalation_decision and tables.native_rows import socr.benchmark.*; born_digital imports private _NUM_TOKEN_RE. Intended work is extract a neutral module + import-linter DAG. Behavior-preserving layering programme, not a user-visible defect.",
+    "gemini-pro": "Circular imports exist between production components and benchmark tools. Plans to decouple them by moving shared primitives to a neutral module."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Both agree it is not a user-visible defect. Unlike #155/#174, this is a bounded single-deliverable refactor (extract a neutral module + add an import-linter DAG), so CHORE-PLAN is the more accurate label than grok's ROADMAP-UMBRELLA. The 2-cycle is real (verified imports) but behavior-preserving.",
+   "citations": [{"path": "src/socr/tables/escalation_decision.py", "line": 72, "snippet": "from socr.benchmark.table_exactness import score_page"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the 2-cycle were causing a runtime import failure, it would be a defect not a chore; but the imports resolve and only block packaging."
+  },
+  {
+   "issue": 176,
+   "final_disposition": "CHORE-PLAN",
+   "agreement": "SPLIT",
+   "vendor_readings": {
+    "grok": "PageState.needs_repair still encodes repair policy; DocumentState.text still joins with legacy \\n\\n---\\n\\n while production uses canonical_page_texts. Restoring a dumb blackboard and one selector is a refactor programme touching assemble/manifest/tests.",
+    "gemini-pro": "DocumentState has accumulated routing logic. Chore to restore its intended design and adopt canonical_page_texts."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Both agree it is not a defect. This is a bounded refactor (one authoritative page-text selector, move repair policy out of PageState), so CHORE-PLAN is the more accurate label than grok's ROADMAP-UMBRELLA. The legacy DocumentState.text join is real but test-pinned archaeology, not a runtime bug.",
+   "citations": [{"path": "src/socr/core/state.py", "line": 73, "snippet": "def needs_repair(self) -> bool:"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If DocumentState.text were still used in production assembly, the legacy join would be a live bug; but production uses canonical_page_texts."
+  },
+  {
+   "issue": 178,
+   "final_disposition": "CHORE-PLAN",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Write an ADR: stay Python; optional native kernels only after profiling. No runtime change. The 2026-05-29 hybrid note is a different decision and does not record the stay-Python/no-Rust policy this issue asks for.",
+    "gemini-pro": "Records architectural decision to keep socr in Python for orchestration and policy, avoiding a Rust rewrite."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "A docs-only ADR, no runtime change. Unanimous and correct.",
+   "citations": [{"path": "docs/ARCHITECTURE.md", "line": 9, "snippet": "### Deterministic (default — `socr paper.pdf`)"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the stay-Python decision were already recorded elsewhere, the ADR would be redundant; but the issue notes the existing note is a different decision."
+  },
+  {
+   "issue": 202,
+   "final_disposition": "BLOCKED-PROPOSAL",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Bake-off of Mistral OCR 4.1 before any routing change. Explicitly 'Do not start until someone names' the 3-5 PDFs; structured half blocked on mistral-ocr-cli#23. Cost docs are stale but that is a one-line chore inside a measurement proposal, not a reason to treat this as FIX-CANDIDATE.",
+    "gemini-pro": "Proposes measuring Mistral OCR 4.1 against other models. Blocked on mistral-ocr-cli #23 persisting blocks sidecars."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "A measurement proposal blocked on an external CLI fix and on naming test PDFs. Not a defect. Unanimous and correct.",
+   "citations": [{"path": "src/socr/core/providers.py", "line": 122, "snippet": "cost_per_page_usd=0.001,"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the bake-off were unblocked and ready, deferring it would stall a routing decision."
+  },
+  {
+   "issue": 203,
+   "final_disposition": "BLOCKED-PROPOSAL",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "Consume Mistral OCR 4 blocks[] as a region prior. Issue says blocked on mistral-ocr-cli#23 and on #202; 'If the bake-off verdict is keep manual-only, close this.' No consumer until 4.1 uniquely wins a page type. Design placeholder, not a defect.",
+    "gemini-pro": "Proposes consuming Mistral OCR 4.1 block labels as priors. Blocked on outcome of the measurement proposed in #202 and the mistral-ocr-cli fix."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "A design placeholder blocked on #202's bake-off and mistral-ocr-cli#23. Not a defect. Unanimous and correct.",
+   "citations": [{"path": "src/socr/core/providers.py", "line": 122, "snippet": "cost_per_page_usd=0.001,"}],
+   "action_recommended": "none",
+   "proposed_comment": null,
+   "risk_if_wrong": "If Mistral 4.1 already uniquely won a page type, deferring the consumer would leave a known win unimplemented."
+  },
+  {
+   "issue": 219,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "_MATH_FONT_RE still has no PazoMath/URWPalladioL/MathPazo. detect_display_equations imports that regex and drops any line below DISPLAY_MIN_MATH_SPAN_RATIO = 0.50, so Palatino-set display sums yield regions: []. Flags-on is then a no-op and the native flattened equation ships. One-night: extend the whitelist and emit an audit when page-level math signal yields zero regions.",
+    "gemini-pro": "_MATH_FONT_RE uses a strict whitelist of TeX/STIX font families, missing Palatino fonts like PazoMath. These equations fail the ratio check, yielding no regions, so they are silently flattened."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Verified: born_digital.py:38-42 _MATH_FONT_RE has no PazoMath/URWPalladioL/MathPazo, and detect_equations.py:297 drops lines below the 0.50 ratio. Palatino-set display math yields no regions and ships flattened with no flag. Real default-path silent loss. Unanimous and correct.",
+   "citations": [
+    {"path": "src/socr/core/born_digital.py", "line": 38, "snippet": "_MATH_FONT_RE = re.compile("},
+    {"path": "src/socr/math/detect_equations.py", "line": 297, "snippet": "if math_ratio < min_math_span_ratio:"}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If Palatino math were already caught by the literal-LaTeX detector, the whitelist gap would be cosmetic; but the issue's measurement shows ratio 0.00-0.04 with no regions."
+  },
+  {
+   "issue": 238,
+   "final_disposition": "FIX-CANDIDATE",
+   "agreement": "UNANIMOUS",
+   "vendor_readings": {
+    "grok": "_run_fingerprint still records cfg.gemini_model iff describe_figures, not which of LocalFirstFigureEngine / GeminiAPIEngine / None _get_vision_engine actually selected. Caption bytes differ across those three; resume on another machine reuses the wrong captions. Precedent already in-tree: JUDGE_IDENTITY_HEURISTIC. Design is 'record resolved identity or a none-sentinel'.",
+    "gemini-pro": "_run_fingerprint logs cfg.gemini_model as the caption model regardless of the engine that actually resolved (Ollama, Gemini, None), causing resume to trust stale captions."
+   },
+   "evidence_verified": true,
+   "recoverable": false,
+   "basis": "Verified: orchestrator.py:483 records figure_caption_fallback_model = cfg.gemini_model if describe_figures else None, while _get_vision_engine (5974) returns one of three observably different producers. The fingerprint is blind to which ran, so resume reuses captions from a different model. Real identity gap. Unanimous and correct.",
+   "citations": [
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 483, "snippet": "\"figure_caption_fallback_model\": (cfg.gemini_model if cfg.describe_figures else None),"},
+    {"path": "src/socr/pipeline/orchestrator.py", "line": 5974, "snippet": "def _get_vision_engine(self):"}
+   ],
+   "action_recommended": "fix",
+   "proposed_comment": null,
+   "risk_if_wrong": "If the resolved engine were already covered by socr_source_digest, the gap would be closed; but the Ollama model is a source default while the resolved producer is a runtime fact."
+  }
+ ]
+}

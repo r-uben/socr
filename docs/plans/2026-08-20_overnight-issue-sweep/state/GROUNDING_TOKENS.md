@@ -27,3 +27,22 @@ properly quoted command confirms.
 
 Always write `git show "${SHA}:<path>"`. The canary caught the orchestrator's own
 error before it could be used to reject an honest agent.
+
+## Sandbox finding — some vendor subagents cannot reach the venv
+
+`adjudicate-b3` (gemini-pro) reported, honestly rather than faking it:
+
+    CANARY FAIL: interpreter not found: /Users/rubenffuertes/venvs/socr/bin/python
+
+The interpreter exists and is executable from the orchestrator's shell, so this is
+a per-agent sandbox restriction, not a broken path. The same agent's `git show`
+calls worked — it read code fine.
+
+Consequence, applied 2026-08-20: `isolation_canary.sh` grew a `--read-only` mode
+that proves the worktree is the pinned one and is not the main checkout, without
+touching Python. Read-only agents (triage, adjudication, review board) should use
+it. **Anyone who runs tests still needs full mode** — import isolation is the whole
+point there.
+
+Practical rule for the review board: the access proof that matters is a `git show`
+of a cited line, not the canary. A reviewer that cannot produce that must reject.
