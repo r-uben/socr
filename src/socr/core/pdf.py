@@ -34,13 +34,23 @@ from pathlib import Path
 
 import fitz
 
-from socr.core.glyph_recovery import GlyphRepairReport, repair_symbol_font_text
+from socr.core.glyph_recovery import (
+    GlyphRepairReport,
+    repair_symbol_font_text,
+    replay_cmaps,
+)
 
 logger = logging.getLogger(__name__)
 
 #: Files observed to need no glyph recovery, keyed by (path, size, mtime_ns).
-#: Negative results only — see the module docstring.
 _NO_REPAIR_NEEDED: set[tuple[str, int, int]] = set()
+
+#: Files that DO need recovery, keyed the same way, holding the derived plan.
+#: Deriving a plan walks every page's text; replaying it is a few object writes.
+#: Caching only the negative result meant an affected document paid the full walk
+#: on every open, and the agentic loop opens each document several times per page
+#: — one 60 s scan became hours (#246).
+_REPAIR_PLAN: dict[tuple[str, int, int], GlyphRepairReport] = {}
 
 
 def _identity(path: Path) -> tuple[str, int, int] | None:
@@ -54,6 +64,7 @@ def _identity(path: Path) -> tuple[str, int, int] | None:
 def reset_repair_cache() -> None:
     """Forget which files were found clean. For tests, and after rewriting a PDF."""
     _NO_REPAIR_NEEDED.clear()
+    _REPAIR_PLAN.clear()
 
 
 def apply_glyph_recovery(doc: fitz.Document, path: Path | str) -> GlyphRepairReport:
@@ -64,8 +75,15 @@ def apply_glyph_recovery(doc: fitz.Document, path: Path | str) -> GlyphRepairRep
     """
     path = Path(path)
     identity = _identity(path)
-    if identity is not None and identity in _NO_REPAIR_NEEDED:
-        return GlyphRepairReport()
+    if identity is not None:
+        if identity in _NO_REPAIR_NEEDED:
+            return GlyphRepairReport()
+        cached = _REPAIR_PLAN.get(identity)
+        if cached is not None:
+            # Same bytes, so the same object xrefs and the same plan. Replay it
+            # rather than re-deriving: this is the whole point of the cache.
+            replay_cmaps(doc, cached.cmaps)
+            return cached
 
     try:
         report = repair_symbol_font_text(doc)
@@ -73,8 +91,16 @@ def apply_glyph_recovery(doc: fitz.Document, path: Path | str) -> GlyphRepairRep
         logger.warning("[glyph] %s: recovery failed (%s)", path.name, exc)
         return GlyphRepairReport()
 
-    if identity is not None and not report.repaired and not report.needs_attention:
-        _NO_REPAIR_NEEDED.add(identity)
+    if identity is not None:
+        if report.repaired:
+            _REPAIR_PLAN[identity] = report
+        elif not report.needs_attention:
+            _NO_REPAIR_NEEDED.add(identity)
+        # Neither repaired nor cacheable-clean: the document has drawn glyphs
+        # this module cannot recover. Deliberately not cached — the scan is the
+        # only thing that produces that warning, and the case is now rare enough
+        # (an affected font whose glyphs are genuinely unknown) that paying for
+        # it is preferable to remembering a stale verdict.
     return report
 
 

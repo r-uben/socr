@@ -404,3 +404,91 @@ class TestStatePropagation:
         state.apply_born_digital(DocumentAssessment(path="x.pdf", pages=[page]))
 
         assert not state.pages[1].has_unrecovered_symbol_glyphs
+
+
+# An ordinary text font with no ToUnicode: standard Adobe glyph names, which the
+# extractor already decodes correctly. Nothing here is broken (#246).
+ORDINARY_TYPE1 = b"""
+/Encoding 256 array
+dup 32 /space put
+dup 65 /A put
+dup 66 /B put
+dup 38 /ampersand put
+dup 91 /bracketleft put
+dup 196 /Adieresis put
+readonly def
+"""
+
+
+class TestAffectedFontGate:
+    """A font missing its ToUnicode is not automatically the broken class (#246).
+
+    Treating "absent from GLYPH_UNICODE" as "unrecoverable" reported ordinary
+    papers as damaged and, because such a document is never cached, made every
+    one of them rescan on every open.
+    """
+
+    def test_ordinary_glyph_names_are_not_the_broken_class(self):
+        from socr.core.glyph_recovery import _is_affected_font
+
+        assert not _is_affected_font(_parse_type1_encoding(ORDINARY_TYPE1))
+
+    def test_the_monotype_scheme_is_the_broken_class(self):
+        from socr.core.glyph_recovery import _is_affected_font
+
+        assert _is_affected_font(_parse_type1_encoding(SYNTHETIC_TYPE1))
+
+    def test_an_ordinary_font_is_left_completely_alone(self):
+        """Not repaired, and — the false alarm — not reported either."""
+        doc = StubDoc(
+            fonts=[(212, "pfa", "Type1", "ABCDEF+Some-Text-Font", "F1", "")],
+            chars_by_font={"Some-Text-Font": "AB&["},
+            tounicode={212: False},
+            buffers={212: ORDINARY_TYPE1},
+        )
+        report = repair_symbol_font_text(doc)
+
+        assert not report.repaired
+        assert report.unmapped_glyphs == [], "ordinary letters reported as unrecoverable"
+        assert not report.needs_attention
+        assert not doc.attached
+
+    def test_an_ordinary_font_does_not_trigger_the_page_walk(self, monkeypatch):
+        """The gate reads glyph names only; the expensive pass must not run."""
+        import socr.core.glyph_recovery as gr
+
+        walked = []
+        monkeypatch.setattr(gr, "_used_codes_by_font", lambda doc: (walked.append(doc), {})[1])
+        doc = StubDoc(
+            fonts=[(212, "pfa", "Type1", "ABCDEF+Some-Text-Font", "F1", "")],
+            chars_by_font={"Some-Text-Font": "AB"},
+            tounicode={212: False},
+            buffers={212: ORDINARY_TYPE1},
+        )
+        repair_symbol_font_text(doc)
+
+        assert walked == []
+
+
+class TestReplay:
+    def test_replay_attaches_the_cached_cmap(self):
+        from socr.core.glyph_recovery import replay_cmaps
+
+        doc = _doc(drawn="2")
+        replay_cmaps(doc, {212: b"CACHED-CMAP"})
+        assert b"CACHED-CMAP" in doc.attached.values()
+        assert doc.activated.get(212) is not None
+
+    def test_replay_skips_a_font_that_already_has_a_map(self):
+        """Replaying onto an already-repaired document must not double-attach."""
+        from socr.core.glyph_recovery import replay_cmaps
+
+        doc = _doc(drawn="2", has_map=True)
+        replay_cmaps(doc, {212: b"CACHED-CMAP"})
+        assert not doc.attached
+
+    def test_a_repair_records_its_plan_for_replay(self):
+        doc = _doc(drawn="2")
+        report = repair_symbol_font_text(doc)
+        assert report.cmaps, "no plan recorded, so later opens must re-derive"
+        assert 212 in report.cmaps
