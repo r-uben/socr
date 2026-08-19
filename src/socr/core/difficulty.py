@@ -21,6 +21,8 @@ from enum import Enum
 
 import fitz
 
+from socr.core.pdf import open_pdf
+
 logger = logging.getLogger(__name__)
 
 
@@ -183,7 +185,7 @@ def classify_pages(
     """
     hints = page_hints or {}
     results: dict[int, DifficultyAssessment] = {}
-    with fitz.open(pdf_path) as doc:
+    with open_pdf(pdf_path) as doc:
         for page_num in page_nums:
             if page_num < 1 or page_num > len(doc):
                 continue

@@ -198,7 +198,7 @@ class FigureExtractor:
         is logged so the operator knows later figures were silently dropped.
         Callers should additionally record this in the durable audit log.
         """
-        import fitz
+        from socr.core.pdf import open_pdf
 
         if self.save_dir:
             self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -211,7 +211,7 @@ class FigureExtractor:
             logger.info(f"Figure extraction skipping {len(skip_pages)} page(s) of {pdf_path.name}")
 
         try:
-            with fitz.open(pdf_path) as pdf:
+            with open_pdf(pdf_path) as pdf:
                 total_pages = len(pdf)
                 for page_index in range(total_pages):
                     if counter > self.max_total:

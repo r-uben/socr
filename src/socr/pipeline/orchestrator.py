@@ -1045,9 +1045,9 @@ class UnifiedPipeline:
         math_doc = None
         if math_recovery_pages:
             try:
-                import fitz
+                from socr.core.pdf import open_pdf
 
-                math_doc = fitz.open(state.handle.path)
+                math_doc = open_pdf(state.handle.path)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("math recovery disabled (cannot open PDF): %s", exc)
                 math_recovery_pages = set()
@@ -1442,9 +1442,9 @@ class UnifiedPipeline:
             return False
         # Open the PDF page and run the vector detector.
         try:
-            import fitz
+            from socr.core.pdf import open_pdf
 
-            with fitz.open(pdf_path) as doc:
+            with open_pdf(pdf_path) as doc:
                 page = doc[page_num - 1]
                 return has_chart_marks(page)
         except Exception as exc:
@@ -1477,9 +1477,10 @@ class UnifiedPipeline:
         figures_dir.mkdir(parents=True, exist_ok=True)
         try:
             import fitz
+            from socr.core.pdf import open_pdf
             from PIL import Image
 
-            with fitz.open(pdf_path) as doc:
+            with open_pdf(pdf_path) as doc:
                 page = doc[page_num - 1]
                 mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
                 pix = page.get_pixmap(matrix=mat)
@@ -1536,13 +1537,14 @@ class UnifiedPipeline:
 
         try:
             import fitz
+            from socr.core.pdf import open_pdf
 
             from socr.figures.extractor import RENDER_DPI
             from socr.tables.reconstruct import chart_region_bboxes
 
             figures_dir.mkdir(parents=True, exist_ok=True)
 
-            with fitz.open(str(pdf_path)) as _doc:
+            with open_pdf(str(pdf_path)) as _doc:
                 _page = _doc[page_num - 1]
                 bboxes = chart_region_bboxes(_page)
 
@@ -1555,7 +1557,7 @@ class UnifiedPipeline:
                 fname = f"chart_region_p{page_num}_{region_idx}.png"
                 out_path = figures_dir / fname
                 try:
-                    with fitz.open(str(pdf_path)) as _doc:
+                    with open_pdf(str(pdf_path)) as _doc:
                         _page = _doc[page_num - 1]
                         mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
                         pix = _page.get_pixmap(matrix=mat, clip=bbox)
@@ -1830,9 +1832,9 @@ class UnifiedPipeline:
         is why TICKET-B1 was needed — so the not-scorable surface keeps them.
         """
         try:
-            import fitz
+            from socr.core.pdf import open_pdf
 
-            with fitz.open(state.handle.path) as doc:
+            with open_pdf(state.handle.path) as doc:
                 page = doc[page_num - 1]
                 self._table_page_needs_escalation(state, page_num, page, ps, bo)
         except Exception as exc:
@@ -1866,9 +1868,9 @@ class UnifiedPipeline:
         from socr.tables.escalation_decision import decide_escalation
 
         try:
-            import fitz
+            from socr.core.pdf import open_pdf
 
-            with fitz.open(pdf_path) as doc:
+            with open_pdf(pdf_path) as doc:
                 page = doc[page_num - 1]
                 if not self._table_page_needs_escalation(state, page_num, page, ps, bo):
                     return False
@@ -2770,11 +2772,11 @@ class UnifiedPipeline:
                 # GH-56: deterministic header repair for collapsed multi-band tables.
                 if ps.best_output and ps.best_output.text and self._page_has_tables(page_num, ps):
                     try:
-                        import fitz
+                        from socr.core.pdf import open_pdf
 
                         from socr.tables.header_repair import repair_table_headers_on_page
 
-                        with fitz.open(state.handle.path) as _hdr_doc:
+                        with open_pdf(state.handle.path) as _hdr_doc:
                             _repaired_text, _hdr_n = repair_table_headers_on_page(
                                 _hdr_doc[page_num - 1],
                                 ps.best_output.text,
@@ -2966,11 +2968,11 @@ class UnifiedPipeline:
                 and bo.engine != "chart_asset"
             ):
                 try:
-                    import fitz
+                    from socr.core.pdf import open_pdf
 
                     from socr.tables import locate_tables
 
-                    with fitz.open(state.handle.path) as _doc:
+                    with open_pdf(state.handle.path) as _doc:
                         _boxes = locate_tables(_doc[page_num - 1])
                     if _boxes:
                         _raw_crops = _table_extractor.extract(
@@ -3396,9 +3398,9 @@ class UnifiedPipeline:
             )
 
         try:
-            import fitz
+            from socr.core.pdf import open_pdf
 
-            with fitz.open(state.handle.path) as _crop_doc:
+            with open_pdf(state.handle.path) as _crop_doc:
                 result = _reconcile_with_optional_fallback(_crop_doc[page_num - 1])
         except Exception as exc:
             try:
@@ -3535,7 +3537,7 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print(f"\n[cyan]Phase 4c:[/cyan] dual-pass table extraction [{model}]")
 
-        import fitz
+        from socr.core.pdf import open_pdf
 
         pdf_path = state.handle.path
         scanned = patched = flagged = 0
@@ -3554,7 +3556,7 @@ class UnifiedPipeline:
             # and audit-event emission run OUTSIDE this catch via
             # _reread_page_tables, matching the pre-refactor boundary exactly.
             try:
-                with fitz.open(pdf_path) as doc:
+                with open_pdf(pdf_path) as doc:
                     boxes = locate_tables(doc[page_num - 1])
                 if not boxes:
                     continue
@@ -3671,7 +3673,7 @@ class UnifiedPipeline:
         _fitz_doc_cache: list = []
 
         def get_fitz_page(page_num: int):
-            import fitz
+            from socr.core.pdf import open_pdf
 
             # Close and evict any previously cached doc before opening a new one
             # so we hold at most one open handle at a time.
@@ -3681,7 +3683,7 @@ class UnifiedPipeline:
                 except Exception:
                     pass
                 _fitz_doc_cache.clear()
-            doc = fitz.open(pdf_path)
+            doc = open_pdf(pdf_path)
             _fitz_doc_cache.append(doc)
             # PyMuPDF pages are 0-indexed; socr page numbers are 1-indexed.
             return doc[page_num - 1]
@@ -5702,7 +5704,7 @@ class UnifiedPipeline:
         This method is a no-op (logs a debug line and returns) on any error, to ensure
         the describe-path cannot be disrupted by a label-recovery failure.
         """
-        import fitz
+        from socr.core.pdf import open_pdf
 
         from socr.core.audit_log import AuditEvent
 
@@ -5711,7 +5713,7 @@ class UnifiedPipeline:
 
         x0, y0, x1, y1 = fig_info.bbox
         try:
-            with fitz.open(state.handle.path) as pdf:
+            with open_pdf(state.handle.path) as pdf:
                 page_index = fig_info.page_num - 1  # page_num is 1-indexed
                 if page_index < 0 or page_index >= len(pdf):
                     return
@@ -5775,7 +5777,7 @@ class UnifiedPipeline:
         No text is modified, no model is called.  This is DETECTION + EVIDENCE
         only; the engine/validation/splice layer is GH-36b.
         """
-        import fitz
+        from socr.core.pdf import open_pdf
         from ocr_output_contract import doc_dir_for, relative_key
 
         from socr.core.audit_log import AuditEvent
@@ -5791,7 +5793,7 @@ class UnifiedPipeline:
 
         total_regions = 0
         try:
-            pdf = fitz.open(state.handle.path)
+            pdf = open_pdf(state.handle.path)
         except Exception as exc:
             logger.warning("equation detection: cannot open PDF: %s", exc)
             return

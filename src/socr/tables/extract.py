@@ -247,7 +247,7 @@ class TableCropExtractor:
         rather than aborting the page — the reconciler then sees a count mismatch
         and flags rather than patches, which is the safe outcome.
         """
-        import fitz
+        from socr.core.pdf import open_pdf
 
         # Resolve the per-crop wall-clock deadline.
         if deadline is None:
@@ -258,7 +258,7 @@ class TableCropExtractor:
 
         out: list[CropTable] = []
         try:
-            doc = fitz.open(pdf_path)
+            doc = open_pdf(pdf_path)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("dual-pass: cannot open %s (%s)", pdf_path, exc)
             return out

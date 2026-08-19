@@ -162,6 +162,7 @@ def _render_page_image(pdf: Any, index: int, scale: float, quality: int) -> tupl
     """Return (base64 jpeg, error). Never raises -- a failed render must be visible."""
     try:
         import fitz
+        from socr.core.pdf import open_pdf
 
         pixmap = pdf.load_page(index).get_pixmap(matrix=fitz.Matrix(scale, scale))
         return base64.b64encode(pixmap.tobytes("jpeg", jpg_quality=quality)).decode(), ""
@@ -177,13 +178,13 @@ def collect_pages(
     quality: int = JPEG_QUALITY,
 ) -> ReviewReport:
     """Gather per-page evidence. The PDF defines the page universe, not ``pages/``."""
-    import fitz
+    from socr.core.pdf import open_pdf
 
     metadata = _read_json(doc_dir / "metadata.json")
     trust = _read_json(doc_dir / "tables_trust.json")
     untrusted = set(_untrusted_page_numbers(trust))
 
-    pdf = fitz.open(str(pdf_path))
+    pdf = open_pdf(str(pdf_path))
     pages_dir = doc_dir / "pages"
     records: list[PageRecord] = []
 

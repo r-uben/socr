@@ -20,7 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import fitz
+
+from socr.core.pdf import open_pdf
 
 from socr.core.born_digital import BornDigitalDetector, count_digit_corruption
 
@@ -98,7 +99,7 @@ class GroundTruthExtractor:
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
         pages: list[PageGroundTruth] = []
-        with fitz.open(pdf_path) as doc:
+        with open_pdf(pdf_path) as doc:
             for page_idx in range(len(doc)):
                 text = doc[page_idx].get_text("text").strip()
                 usable, reason = self._assess_usability(text)
