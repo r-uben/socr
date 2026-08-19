@@ -8,6 +8,8 @@ used. That keeps them hermetic -- no corpus, no network, no provider.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from socr.core.glyph_recovery import (
@@ -42,6 +44,10 @@ class StubDoc:
         self._buffers = buffers or {}
         self.page_count = 1
         self.attached: dict[int, bytes] = {}
+        #: font xref -> the CMap stream xref it was actually pointed at. A map
+        #: that is written but never linked has no effect, so the two are
+        #: tracked separately, exactly as the PDF does it.
+        self.activated: dict[int, int] = {}
         self._next_xref = 900
 
     # -- font discovery -------------------------------------------------
@@ -60,12 +66,47 @@ class StubDoc:
     def __getitem__(self, page_num):
         return self
 
+    def _decode(self, code: int) -> str:
+        """Apply an attached ToUnicode map the way a real extractor would.
+
+        Without this the stub would return the raw byte no matter what the
+        module did, so a regression that skipped ``xref_set_key`` -- the step
+        that actually makes the map take effect -- would pass every test while
+        the sign flip stayed broken.
+
+        A code absent from the map falls back to the raw byte, which is the real
+        PyMuPDF behaviour (verified against the source PDF: omitting the minus
+        from the table leaves ``20.12`` extracting as ``20.12``, unchanged).
+        """
+        for stream_xref in self.activated.values():
+            data = self.attached.get(stream_xref)
+            if data is None:
+                continue
+            mapped = self._cmap_entries(data)
+            if code in mapped:
+                return mapped[code]
+        return chr(code)
+
+    @staticmethod
+    def _cmap_entries(cmap: bytes) -> dict[int, str]:
+        """Parse ``<code> <utf16be>`` pairs back out of an attached CMap."""
+        body = cmap.decode("latin-1")
+        pairs = re.findall(r"<([0-9A-F]{2})>\s*<([0-9A-F]{4,})>", body)
+        return {
+            int(code, 16): "".join(chr(int(value[i : i + 4], 16)) for i in range(0, len(value), 4))
+            for code, value in pairs
+        }
+
     def get_text(self, kind):
         spans = [
-            {"font": name, "chars": [{"c": c} for c in drawn]}
+            {"font": name, "chars": [{"c": self._decode(ord(c))} for c in drawn]}
             for name, drawn in self._chars.items()
         ]
         return {"blocks": [{"lines": [{"spans": spans}]}]}
+
+    def extracted_text(self) -> str:
+        """What a reader would now get for the drawn characters."""
+        return "".join(self._decode(ord(c)) for drawn in self._chars.values() for c in drawn)
 
     # -- mutation -------------------------------------------------------
     def get_new_xref(self):
@@ -79,7 +120,10 @@ class StubDoc:
         self.attached[xref] = data
 
     def xref_set_key(self, xref, key, value):
+        if key != "ToUnicode":
+            return
         self._tounicode[xref] = True
+        self.activated[xref] = int(str(value).split()[0])
 
 
 def _doc(drawn="2p", has_map=False):
@@ -165,6 +209,28 @@ class TestRepair:
         cmap = next(iter(doc.attached.values())).decode("latin-1")
         assert "<32> <2212>" in cmap
 
+    def test_extracted_text_is_actually_corrected(self):
+        """The outcome, not the mechanism: '2' must read as a minus afterwards.
+
+        This is the defect in one line -- '-0.12' shipping as '20.12'. Asserting
+        only that a CMap stream was attached would still pass if the map were
+        never made to take effect.
+        """
+        doc = _doc(drawn="2p")
+        assert doc.extracted_text() == "2p"
+        repair_symbol_font_text(doc)
+        assert doc.extracted_text() == "−π"
+
+    def test_forgetting_to_activate_the_map_is_caught(self):
+        """Attaching the stream but never pointing the font at it must fail.
+
+        Guards the one step that makes PyMuPDF honour the map.
+        """
+        doc = _doc(drawn="2")
+        doc.xref_set_key = lambda *a, **k: None  # attach, but never activate
+        repair_symbol_font_text(doc)
+        assert doc.extracted_text() == "2", "map took effect without being activated"
+
     def test_font_with_its_own_tounicode_is_left_alone(self):
         """The publisher's own map wins; this recovery is only for its absence."""
         doc = _doc(has_map=True)
@@ -193,6 +259,30 @@ class TestRepair:
         cmap = next(iter(doc.attached.values())).decode("latin-1")
         assert "<C8>" not in cmap
 
+    def test_unknown_glyph_survives_a_partial_repair_unchanged(self):
+        """A partial CMap must not disturb the codes it omits.
+
+        Verified against the source PDF as well: deleting the minus entry from
+        the table leaves ``20.12`` extracting as ``20.12``, byte for byte.
+        """
+        doc = _doc(drawn="2" + chr(200))
+        repair_symbol_font_text(doc)
+        text = doc.extracted_text()
+        assert text[0] == "−", "the mapped glyph was not corrected"
+        assert text[1] == chr(200), "the unmapped glyph was altered"
+
+    def test_all_drawn_glyphs_unmapped_still_reports(self):
+        """The worst case must not be the silent one.
+
+        When nothing drawn is in the table no CMap is attached, so an early
+        return keyed on 'was anything repaired' would skip the warning on the
+        most corrupted documents there are.
+        """
+        doc = _doc(drawn=chr(200))
+        report = repair_symbol_font_text(doc)
+        assert report.unmapped_glyphs == ["H99999"]
+        assert report.needs_attention
+
     def test_space_is_not_reported_as_unmapped(self):
         doc = _doc(drawn="2 ")
         report = repair_symbol_font_text(doc)
@@ -209,3 +299,48 @@ class TestReport:
     def test_complete_is_false_when_nothing_was_repaired(self):
         """A document with no broken font is not 'completely repaired'."""
         assert not GlyphRepairReport().complete
+
+
+class TestDetectorSurfacing:
+    """The report must reach something that ships, not only the log (#217).
+
+    A warning in a log file is not a signal a caller can act on -- the same gap
+    #136 was filed for.
+    """
+
+    def _detector_with(self, report):
+        from socr.core.born_digital import BornDigitalDetector, PageAssessment
+
+        detector = BornDigitalDetector()
+        detector.last_glyph_repair = report
+        page = dict(is_born_digital=True, native_text="x", confidence=1.0)
+        return detector, [PageAssessment(page_num=1, **page), PageAssessment(page_num=2, **page)]
+
+    def test_unrecovered_glyphs_mark_every_page(self):
+        """The missing map is a font property, so no page of it is clean."""
+        report = GlyphRepairReport(repaired_fonts=["F"], unmapped_glyphs=["H99999"])
+        detector, pages = self._detector_with(report)
+        detector._mark_unrecovered_glyphs(pages)
+        assert all(p.has_unrecovered_symbol_glyphs for p in pages)
+
+    def test_a_fully_recovered_document_marks_nothing(self):
+        report = GlyphRepairReport(repaired_fonts=["F"], mapped_glyph_count=3)
+        detector, pages = self._detector_with(report)
+        detector._mark_unrecovered_glyphs(pages)
+        assert not any(p.has_unrecovered_symbol_glyphs for p in pages)
+
+    def test_missing_report_marks_nothing(self):
+        detector, pages = self._detector_with(None)
+        detector._mark_unrecovered_glyphs(pages)
+        assert not any(p.has_unrecovered_symbol_glyphs for p in pages)
+
+    def test_failed_recovery_does_not_leave_a_stale_report(self, tmp_path, monkeypatch):
+        """A reused detector must not attribute the previous PDF's report here."""
+        import socr.core.born_digital as bd
+
+        detector, _ = self._detector_with(GlyphRepairReport(repaired_fonts=["previous"]))
+        monkeypatch.setattr(
+            bd, "repair_symbol_font_text", lambda doc: (_ for _ in ()).throw(RuntimeError())
+        )
+        detector._recover_symbol_fonts(object(), tmp_path / "doc.pdf")
+        assert detector.last_glyph_repair is None

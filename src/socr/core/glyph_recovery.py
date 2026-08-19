@@ -139,6 +139,17 @@ class GlyphRepairReport:
         """True when every glyph in every repaired font was covered by the table."""
         return self.repaired and not self.unmapped_glyphs
 
+    @property
+    def needs_attention(self) -> bool:
+        """True when some drawn glyph is still the wrong character.
+
+        Deliberately independent of :attr:`repaired`. If *nothing* drawn is in
+        the table, no CMap is attached and ``repaired`` is False -- yet that is
+        the most corrupted document there is. Gating the alarm on "did we attach
+        something" would keep the worst case silent.
+        """
+        return bool(self.unmapped_glyphs)
+
 
 def _parse_type1_encoding(font_buffer: bytes) -> dict[int, str]:
     """Character code -> glyph name, read from an embedded Type1 font program."""
@@ -289,6 +300,9 @@ def repair_symbol_font_text(doc: fitz.Document) -> GlyphRepairReport:
                     continue
                 mapping[code] = replacement
             if not mapping:
+                # Nothing in this font is recoverable. Not a repair -- but the
+                # unmapped glyphs collected above are still reported, so the
+                # most corrupted case is not the quietest one.
                 continue
 
             try:

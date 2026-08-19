@@ -406,6 +406,13 @@ class PageAssessment:
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
+    #: #217: the page's symbol font had no ToUnicode map and at least one glyph
+    #: it draws is not in the verified recovery table, so those characters are
+    #: still whatever the extractor produced. Set for every page of an affected
+    #: document -- the missing map is a document-level font property, so a page
+    #: cannot be clean while its font is not. A log line alone reaches nothing
+    #: that ships, which is the same gap #136 was filed for.
+    has_unrecovered_symbol_glyphs: bool = False
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
     #: #136: mid-band encoding corruption of the COSMETIC class (lost spaces, fused
     #: words) — the page is trustworthy for content but its text layer is suspect.
@@ -655,6 +662,8 @@ class BornDigitalDetector:
                 assessment = self._assess_page(doc[page_idx], page_idx + 1)
                 pages.append(assessment)
 
+            self._mark_unrecovered_glyphs(pages)
+
         return DocumentAssessment(path=pdf_path, pages=pages)
 
     def detect_page(self, pdf_path: Path | str, page_num: int) -> PageAssessment:
@@ -675,7 +684,22 @@ class BornDigitalDetector:
             if page_num < 1 or page_num > len(doc):
                 raise ValueError(f"Page {page_num} out of range (document has {len(doc)} pages)")
             self._recover_symbol_fonts(doc, pdf_path)
-            return self._assess_page(doc[page_num - 1], page_num)
+            assessment = self._assess_page(doc[page_num - 1], page_num)
+            self._mark_unrecovered_glyphs([assessment])
+            return assessment
+
+    def _mark_unrecovered_glyphs(self, pages: list[PageAssessment]) -> None:
+        """Propagate the recovery report onto the pages so it can reach output.
+
+        The report is document-level because the missing ToUnicode map is a
+        property of the font, not of any one page: a document is either clean or
+        comprehensively affected.
+        """
+        report = self.last_glyph_repair
+        if report is None or not report.needs_attention:
+            return
+        for page in pages:
+            page.has_unrecovered_symbol_glyphs = True
 
     def _recover_symbol_fonts(self, doc: fitz.Document, pdf_path: Path) -> None:
         """Rebuild missing ToUnicode maps before any text is read (#217).
@@ -692,19 +716,24 @@ class BornDigitalDetector:
         try:
             report = repair_symbol_font_text(doc)
         except Exception as exc:  # pragma: no cover - defensive
+            # Cleared, not left stale: a reused detector would otherwise
+            # attribute the previous document's report to this one.
+            self.last_glyph_repair = None
             logger.warning("[glyph] %s: recovery failed (%s)", pdf_path.name, exc)
             return
 
         self.last_glyph_repair = report
-        if not report.repaired:
-            return
-        logger.info(
-            "[glyph] %s: rebuilt ToUnicode for %d font(s), %d glyph(s)",
-            pdf_path.name,
-            len(report.repaired_fonts),
-            report.mapped_glyph_count,
-        )
-        if report.unmapped_glyphs:
+        if report.repaired:
+            logger.info(
+                "[glyph] %s: rebuilt ToUnicode for %d font(s), %d glyph(s)",
+                pdf_path.name,
+                len(report.repaired_fonts),
+                report.mapped_glyph_count,
+            )
+        # Checked independently of ``repaired``: a document where NOTHING was
+        # recoverable attaches no CMap at all, and that is the worst case, not
+        # a quiet one.
+        if report.needs_attention:
             # Surfaced, not swallowed: these characters are still whatever the
             # extractor produced, so the page is not trustworthy.
             logger.warning(
