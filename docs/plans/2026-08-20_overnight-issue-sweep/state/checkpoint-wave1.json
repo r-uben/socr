@@ -1,0 +1,76 @@
+{
+ "wave": "1 + 1.5",
+ "closed_at": "2026-08-19T23:46:52Z",
+ "tickets": {
+  "B1": "DONE",
+  "B2": "DONE",
+  "B3": "DONE",
+  "B4": "DONE",
+  "V1": "DONE"
+ },
+ "coverage": {
+  "batch-1": {
+   "seats": {
+    "grok": 17,
+    "ollama-minimax": 17
+   },
+   "issues_covered": 17,
+   "issues_expected": 17
+  },
+  "batch-2": {
+   "seats": {
+    "gemini-flash": 11,
+    "ollama-deepseek": 11
+   },
+   "issues_covered": 11,
+   "issues_expected": 11
+  },
+  "batch-3": {
+   "seats": {
+    "kimi": 12,
+    "ollama-minimax": 12
+   },
+   "issues_covered": 12,
+   "issues_expected": 12
+  },
+  "batch-4": {
+   "seats": {
+    "gemini-pro": 22,
+    "grok": 22
+   },
+   "issues_covered": 22,
+   "issues_expected": 22
+  }
+ },
+ "every_issue_has_two_seats": true,
+ "vendors_recorded_MISSING": [
+  {
+   "vendor": "grok",
+   "batch": "batch-1",
+   "note": "recovered \u2014 delivered 17/17 after a status ping, 35 min past first write"
+  },
+  {
+   "vendor": "kimi",
+   "batch": "batch-1",
+   "note": "never delivered on batch-1; replaced by claude+minimax seats"
+  },
+  {
+   "vendor": "gemini-pro",
+   "batch": "batch-2",
+   "note": "never delivered; replaced by gemini-flash seat"
+  }
+ ],
+ "third_seats_still_running": [
+  "triage-b1-claude",
+  "triage-b3-deepseek",
+  "triage-b4-claude"
+ ],
+ "evidence": {
+  "verdicts_checked": 124,
+  "evidence_verified": 112,
+  "fabricated_citations": 0,
+  "note": "no dispatched agent invented evidence; all 26 failures are line drift"
+ },
+ "abort_latch_set": false,
+ "next": "wave 2 \u2014 C1..C4 dispatched (kimi/grok/gemini-pro/deepseek), then D0"
+}

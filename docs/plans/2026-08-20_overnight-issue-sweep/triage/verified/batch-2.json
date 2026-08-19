@@ -2,9 +2,540 @@
  "batch": "batch-2",
  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
  "vendors": [
+  "gemini-flash",
   "ollama-deepseek"
  ],
  "rows": [
+  {
+   "vendor": "gemini-flash",
+   "issue": 64,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1268,
+      "snippet": "return has_numeric_columns(page)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return has_numeric_columns(page)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Born-digital pages with tabular appearance (such as 2-column whitespace-aligned borderless tables) that fall to native text after PP-6 narrowed has_numeric_columns currently do so without any audit trace. Emitting a durable warning audit event (possible_table_structure_not_reconstructed) without altering routing behavior is a self-contained, low-risk fix.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Unclustered follow-up to PP-6 routing narrowing; warning signal only."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 127,
+   "verdict": "ROADMAP-UMBRELLA",
+   "effective_verdict": "ROADMAP-UMBRELLA",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 307,
+      "snippet": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1495,
+      "snippet": "text = \"\".join(s.get(\"text\", \"\") for s in line.get(\"spans\", []) or [])"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "text = \"\".join(s.get(\"text\", \"\") for s in line.get(\"spans\", []) or [])"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Proposes a comprehensive overhaul of native born-digital extraction to reconstruct heading tiers, font styles (bold/italic), lists, and hyperlink annotations from PDF geometry and font stats. This represents a large programme of work requiring widespread regeneration of golden tests; moreover, issue #223 demonstrates that heading loss is a pipeline-wide problem not restricted to the native lane.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Overlaps with #223; #127 assumes a native-lane defect while #223 proves heading loss spans both native and VLM lanes."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 150,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/figures/extractor.py",
+      "line": 960,
+      "snippet": "def has_chart_marks(page) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def has_chart_marks(page) -> bool:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1418,
+      "snippet": "page from this check (GH-150 TICKET-B1), because a mixed chart+table page must"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "page from this check (GH-150 TICKET-B1), because a mixed chart+table page must"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Parts of GH-150 landed in A1 (framed thin-stroke cluster detection in has_chart_marks) and B1 (removing whole-page table pre-exclusion in _is_chart_asset_page). However, unframed thin-stroke vector charts still fail has_chart_marks, mixed pages arbitrated to tables still suffer phantom-grid verifier rejections (#249), and accepted ladder outputs drop chart regions (#189).",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Parent issue of the chart-arbitration cluster; spawned #167, #181, #189, #248, and #249."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 167,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/figures/extractor.py",
+      "line": 1004,
+      "snippet": "if raster_images:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if raster_images:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/figures/extractor.py",
+      "line": 1010,
+      "snippet": "return True"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return True"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "has_chart_marks in src/socr/figures/extractor.py unconditionally returns True upon encountering any embedded raster image via page.get_images(). This erroneously routes non-table trusted-native pages containing small logos, decorative icons, signatures, or author photos to the full-page chart_asset PNG lane. Adding a size, area, and dimension filter is self-contained and testable in one night.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Sibling defect to #150 in chart-arbitration; covers over-eager raster fast-path whereas #150 covers vector under-detection."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 181,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/figures/extractor.py",
+      "line": 690,
+      "snippet": "def find(x: int) -> int:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def find(x: int) -> int:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1450,
+      "snippet": "except Exception as exc:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "except Exception as exc:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The union-find implementation in _cluster_drawings uses recursive find() with path compression, hitting Python's RecursionError on pages with ~1000+ drawings. In _is_chart_asset_page, a blanket except Exception catches this error and silently returns False, misrouting vector-dense chart pages to the table lane without any logged error or audit trace. Replacing recursive find() with an iterative loop is an isolated, robust fix.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Solves vector drawing clustering crash in the chart detection pipeline used by #150 and #189."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 189,
+   "verdict": "BLOCKED-PROPOSAL",
+   "effective_verdict": "BLOCKED-PROPOSAL",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2864,
+      "snippet": "if not decision.accepted and self._page_has_tables(page_num, ps):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not decision.accepted and self._page_has_tables(page_num, ps):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2873,
+      "snippet": "ps.native_text = self._render_chart_region_pngs("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "ps.native_text = self._render_chart_region_pngs("
+    }
+   ],
+   "confidence": "high",
+   "rationale": "On mixed chart+table pages, _render_chart_region_pngs is guarded by if not decision.accepted. When a model rung is accepted, the ladder output text is shipped and the chart placeholder remains unrendered, causing the chart image to be silently stripped. How to combine accepted VLM table text with local chart crops is an architectural design decision (splicing vs re-routing vs rejecting).",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Identifies the accepted-branch failure mode of the mixed chart+table arbitration introduced in #150 B1."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 220,
+   "verdict": "ALREADY-FIXED",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "0c5bbd11 is an ancestor but never touched any cited line range",
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/cli.py",
+      "line": 1037,
+      "snippet": "def review("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def review("
+    },
+    {
+     "citation": {
+      "path": "src/socr/review/html.py",
+      "line": 48,
+      "snippet": "_BOOL_SIGNAL_KEYS = ("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_BOOL_SIGNAL_KEYS = ("
+    },
+    {
+     "citation": {
+      "path": "src/socr/review/html.py",
+      "line": 246,
+      "snippet": "def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "socr review <doc_dir> was fully implemented in PR #224 (commits 1216f2e, a0c220b, 0c5bbd1), an ancestor of main_sha. It builds a self-contained side-by-side HTML viewer pairing rendered PDF page images with extracted markdown fragments, complete with sidecar metadata headers, navigation rail, warning signal filters, and strict read-only execution. All 17 regression tests pass cleanly.",
+   "duplicate_of": null,
+   "fixed_by_commit": "0c5bbd11007d1aa038f040242c006a64d1a4483c",
+   "cluster_consistency": "Unclustered tooling instrument used to discover #223 and #225."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 223,
+   "verdict": "BLOCKED-PROPOSAL",
+   "effective_verdict": "BLOCKED-PROPOSAL",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 307,
+      "snippet": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 353,
+      "snippet": "weight_by_size[round(size, 1)] += len(text.strip())"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "weight_by_size[round(size, 1)] += len(text.strip())"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Issue #223 provides measurement evidence that VLM models also drop heading structure (36 unrepresented headings across 44 flagged pages in EFO-Nov-2022), falsifying the assumption in #127 that model escalation resolves heading loss. It poses the architectural design question of whether heading recovery belongs in a post-extraction structure pass across all lanes versus within lane-specific extractors or prompts.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Overlaps with #127; refines the structure-loss diagnosis by demonstrating that heading loss is a pipeline-wide defect rather than a native-lane limitation."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 225,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/normalizer.py",
+      "line": 226,
+      "snippet": "# Absolute URLs are never phantom (external images)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "# Absolute URLs are never phantom (external images)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/normalizer.py",
+      "line": 227,
+      "snippet": "if path_str.startswith((\"http://\", \"https://\", \"data:\")):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if path_str.startswith((\"http://\", \"https://\", \"data:\")):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/normalizer.py",
+      "line": 228,
+      "snippet": "return False"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return False"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "strip_phantom_images in src/socr/core/normalizer.py explicitly skips stripping for URLs starting with http:// or https:// on the assumption that external URLs are never phantom. When VLMs hallucinate external image links (such as Imgur placeholders), they ship as page content under status: success with zero audit events. A deterministic validation gate checking external URLs against source PDF links and local assets can be implemented in one night.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Unclustered fabrication defect; distinct from loss-related issues in the backlog."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 248,
+   "verdict": "NEEDS-MEASUREMENT",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 432,
+      "snippet": "def has_numeric_columns(page) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def has_numeric_columns(page) -> bool:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 462,
+      "snippet": "grid_rows = sum(1 for ls in row_lanes.values() if len(ls) >= _MIN_LANES_PER_ROW)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "grid_rows = sum(1 for ls in row_lanes.values() if len(ls) >= _MIN_LANES_PER_ROW)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "has_numeric_columns in src/socr/tables/reconstruct.py clusters numeric tokens into x-lanes to detect borderless tables, but on corrupt OCR text layers with scattered numbers, prose pages falsely trigger table detection. A proposed lane-reuse ratio would separate corrupt noise from true borderless tables, but setting and validating this heuristic requires corpus-wide measurement to ensure real borderless tables are not lost.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Part of the chart/table routing predicate cluster; shares the has_numeric_columns gate with #64 and #249."
+  },
+  {
+   "vendor": "gemini-flash",
+   "issue": 249,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1765,
+      "snippet": "if not rows_establish_grid(gt_rows):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not rows_establish_grid(gt_rows):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 1769,
+      "snippet": "kind=\"table_not_scorable\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "kind=\"table_not_scorable\","
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2278,
+      "snippet": "kind=\"chart_table_arbitration\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "kind=\"chart_table_arbitration\","
+    }
+   ],
+   "confidence": "high",
+   "rationale": "On chart pages that contain axis tick numbers, has_numeric_columns fires and causes arbitration to route them as table pages. The table verifier then grades model outputs against the native text layer (which is only axis numbers), rejecting all rungs for row-count mismatch and shipping the raw axis dump as native fallback. Abstaining from table scoring when native text does not form a grid (table_not_scorable) or routing chart tick pages to chart_asset resolves this in one night.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Explains the mechanism behind #150's figure-as-table degradation; interacts with #248's table detection gate."
+  },
   {
    "vendor": "ollama-deepseek",
    "issue": 64,

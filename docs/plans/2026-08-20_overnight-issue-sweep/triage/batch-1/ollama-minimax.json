@@ -1,0 +1,333 @@
+{
+  "batch": "batch-1",
+  "vendor": "ollama-minimax",
+  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+  "started_at": "2026-08-19T23:40:00Z",
+  "finished_at": "2026-08-19T23:43:38Z",
+  "grounding": {
+    "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-base/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-base",
+    "reconstruct_sha256_16": "96e86cc412fa0fcc"
+  },
+  "verdicts": [
+    {
+      "issue": 144,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "high",
+      "rationale": "A2's destruction check fires on the #144 synthetic (logger.warning emits 'destroyed 2 numeric token(s) [0.85, 1.00] ... GH-195'). However the fallback word-geometry rowizer does not produce a lossless emit on this same synthetic — the 3M Treasury yield + 0.67/0.61/0.06 row sits in prose above an empty-header grid that contains only the (0.67) parenthetical, the 6M row, and the 1Y row. So 3M Treasury yield / 0.67 / 0.61 / 0.06 survive in prose but the FIRST DATA ROW is missing from the grid entirely. The check exists and rejects the bad text-strategy grid; the fallback is still partial.",
+      "citations": [
+        {"path": "src/socr/tables/reconstruct.py", "line": 165, "snippet": "destroyed = _destroyed_numeric_tokens("},
+        {"path": "src/socr/tables/reconstruct.py", "line": 169, "snippet": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),"},
+        {"path": "src/socr/tables/reconstruct.py", "line": 173, "snippet": "logger.warning("},
+        {"path": "src/socr/tables/reconstruct.py", "line": 180, "snippet": "table.bbox,"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": "d645b24b7b8b4169d51e95a796de3147eaccd2ae",
+      "acceptance_criteria": [
+        {"criterion": "text-strategy grid that splits a bare numeral is rejected", "status": "met", "citation": {"path": "src/socr/tables/reconstruct.py", "line": 173, "snippet": "logger.warning("}},
+        {"criterion": "no numeric value destroyed on the issue synthetic", "status": "unmet", "note": "reproducer below: 3M Treasury yield + 0.67/0.61/0.06 stay in prose; only (0.67) parenthetical + 6M + 1Y rows are in the grid"},
+        {"criterion": "fallback rowizer produces a lossless grid for the synthetic", "status": "unmet", "note": "first data row absent from the emitted table"}
+      ],
+      "reproducer": "PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-night-base/src. Ran the synthetic from issue body (insert_text Nominal/Real/Infl + 3×(label, a, b, c) at y=104,116,128). Emitted: warning 'destroyed 2 numeric token(s) [0.85, 1.00]'; emitted grid contains only (0.67), 6M row, 1Y row. 3M Treasury yield row is in prose above the grid.",
+      "cluster_consistency": "table-destruction: A2 check fires but the fallback rowizer is incomplete on the same synthetic. #195 is the surfacing leftover; #197 is the None-scope hole; #198 is the decorated-token hole.",
+      "blocked_by": null
+    },
+    {
+      "issue": 146,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "high",
+      "rationale": "The empty-header safeguard works: when grid[0] is a data row, _grid_to_markdown now emits '|  |  |  |' and keeps row 0 in the body (agentic on #144/#146 synthetic confirms). But the header band 'Nominal Real Inflation' above the data rows is NEVER in the grid — extract_structured still emits it as prose. My #146 synthetic reproduces this: prose contains the band and the 3M Treasury yield row; the grid below has only (0.67), 6M, 1Y rows under an empty header. The 'grow the region upward' half is unimplemented in the rowizer path.",
+      "citations": [
+        {"path": "src/socr/tables/reconstruct.py", "line": 553, "snippet": "def _grid_to_markdown(grid: list[list[str]], *, assume_header: bool = False) -> str:"},
+        {"path": "src/socr/tables/reconstruct.py", "line": 572, "snippet": "if not assume_header and _is_data_row(grid[0]):"},
+        {"path": "src/socr/core/born_digital.py", "line": 1435, "snippet": "# Column-aware ordering (x-band then y) would be needed for multi-column"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": "356b727d4afb8149d1c96771c8cb7bf7d12296ce",
+      "acceptance_criteria": [
+        {"criterion": "never promote a data row to the markdown header", "status": "met", "citation": {"path": "src/socr/tables/reconstruct.py", "line": 572, "snippet": "if not assume_header and _is_data_row(grid[0]):"}},
+        {"criterion": "include the real header band in the reconstructed grid", "status": "unmet", "note": "extract_structured synthetic: Nominal/Real/Infl still in prose; grid starts at empty header"}
+      ],
+      "reproducer": "PYTHONPATH=.../socr-night-base/src. Synthetic: insert_text 'Nominal      Real      Inflation' at y=80, then 3 rows of 'label a b c' + '      (a) (b) (c)' at y=110..158. Output: warning fires (destroyed 2 numeric tokens), then prose 'Nominal Real Inflation\\n3M Treasury yield ...\\n', then '|  |  |  |\\n| --- | --- | --- |\\n| (0.67) ...'. Header band still prose.",
+      "cluster_consistency": "table-destruction: schema/header-band, not numeric-token split. Distinct from #144 which destroys values via column-boundary placement.",
+      "blocked_by": null
+    },
+    {
+      "issue": 147,
+      "verdict": "ALREADY-FIXED",
+      "confidence": "high",
+      "rationale": "A2 (PR #193, 13033a3) refuses the native table lane when dominant_text_direction is rotated, keeps the prose, and routes the page to OCR via needs_ocr_enhancement. The binding requirement (rotated page must not ship as trusted native text) is met. dominant_text_direction exists at born_digital.py:75 and returns (0, -1) for landscape pages. The landscape_refusal test file and landscape_detection test file both pass (run: 20/20). The coordinate-rotation fix (candidate 2 in the issue) was explicitly optional pending corpus measurement; not required for closure.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 75, "snippet": "def dominant_text_direction(blocks: list) -> tuple[float, float]:"},
+        {"path": "src/socr/core/born_digital.py", "line": 1119, "snippet": "if text_direction_is_rotated(direction):"},
+        {"path": "src/socr/core/born_digital.py", "line": 1115, "snippet": "native_table_lane_refused = False"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": "13033a3f7affffd9b642f29e80ae2a63e7a4ce28",
+      "acceptance_criteria": [
+        {"criterion": "detect non-horizontal dominant text direction", "status": "met", "citation": {"path": "src/socr/core/born_digital.py", "line": 75, "snippet": "def dominant_text_direction(blocks: list) -> tuple[float, float]:"}},
+        {"criterion": "refuse native table reconstruction on rotated pages", "status": "met", "citation": {"path": "src/socr/core/born_digital.py", "line": 1119, "snippet": "if text_direction_is_rotated(direction):"}},
+        {"criterion": "page does not ship transposed grid as trusted native", "status": "met", "note": "tests/test_landscape_refusal_a2_gh147.py + tests/test_landscape_detection_gh147.py: 20 passed in 0.65s"}
+      ],
+      "reproducer": "PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-night-base/src ~/venvs/socr/bin/pytest tests/test_landscape_refusal_a2_gh147.py tests/test_landscape_detection_gh147.py -q → 20 passed in 0.65s.",
+      "cluster_consistency": "unclustered. Distinct from table-destruction: rotated page never reaches reconstruct.py on the native lane anymore.",
+      "blocked_by": null
+    },
+    {
+      "issue": 151,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "high",
+      "rationale": "B1 (11093ca) added structural_gate_fires (ragged OR detached_label_rows) to born_digital.py. That catches the p26 label/values split case but is still content-blind for the rectangular-but-wrong case (spanning headers over column groups, panel-label-as-data, R2-on-another-row). The hand-judgement log mentioned in #215 comments (4 damaged, 1 not-a-table, 0 fine) is evidence the gate is not over-firing, but it is also evidence a SECOND term (the header-attribution term, addressed in #215) was needed for the dominant defect. The binding check candidate in the issue body is not implemented.",
+      "citations": [
+        {"path": "src/socr/tables/structure_check.py", "line": 8, "snippet": "Density (``empty_cell_ratio`` / the footprint-density derivation described on"},
+        {"path": "src/socr/tables/structure_check.py", "line": 223, "snippet": "return any(r.ragged or r.detached_label_rows for r in reports)"},
+        {"path": "src/socr/core/born_digital.py", "line": 1155, "snippet": "native_table_structure_defective = structure_check.structural_gate_fires(reports)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": "11093ca4a24819ced0371e5c225cf0facbed5cb6",
+      "acceptance_criteria": [
+        {"criterion": "a second free gate besides word recall", "status": "met", "citation": {"path": "src/socr/tables/structure_check.py", "line": 223, "snippet": "return any(r.ragged or r.detached_label_rows for r in reports)"}},
+        {"criterion": "rectangular wrong-structure (spanning headers / R2 on another row) is detected", "status": "unmet", "note": "the header-attribution term (#215) closes the dominant header-loss case; spanning headers in column groups still slip through"}
+      ],
+      "reproducer": null,
+      "cluster_consistency": "table-destruction: structural-loss, not numeric-token-destruction. TR-3 is the verifier-side numeric-mismatch signal; this is the gate that uses structural shape only.",
+      "blocked_by": null
+    },
+    {
+      "issue": 152,
+      "verdict": "DEFERRED",
+      "confidence": "high",
+      "rationale": "extract_structured still sorts regions by y0 only and the comment at line 1435 explicitly acknowledges 'Column-aware ordering (x-band then y) would be needed for multi-column layouts'. Two side-by-side tables at the same vertical extent will still be merged into one region. Fixing this is a layout-class change to the rowizer — not a one-night unattended fix. The fix path is described in the issue (segment into x-bands first, rowize each band), and the same change probably wants to be made together with #146's region-upward fix (both are boundary-from-content changes), but they are independent.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 1435, "snippet": "# Column-aware ordering (x-band then y) would be needed for multi-column"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "table-region-detection: admission/segmentation of regions. Independent of #213 (index-page detection) and #190 (empty-grid validation). The 'y-only sort' assumption lets indexes (#213) and merged pairs (#152) both in.",
+      "blocked_by": null
+    },
+    {
+      "issue": 162,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "high",
+      "rationale": "NativeTableVerifierJudge.assess on the verifier-exception path now calls _apply_structural_gate(decision, output, page_num, words=None) before returning — so a ragged grid is still rejected even when the geometry failed. That is a real improvement (the string-only structural gate now runs on the exception path). But SourceEvidenceTableJudge.assess at agentic.py:418-424 still does pure `return self._inner.assess(output, provider)` on the exception path with NO structural gate. The header-attribution term cannot run on the NativeTable exception path either (words=None), so header loss + verifier exception still ships. Acceptance boxes 1-4 remain open in their full form; partial progress on box 1 only for the NativeTable case.",
+      "citations": [
+        {"path": "src/socr/pipeline/agentic.py", "line": 418, "snippet": "except Exception as exc:"},
+        {"path": "src/socr/pipeline/agentic.py", "line": 424, "snippet": "return self._inner.assess(output, provider)"},
+        {"path": "src/socr/pipeline/agentic.py", "line": 530, "snippet": "except Exception as exc:"},
+        {"path": "src/socr/pipeline/agentic.py", "line": 542, "snippet": "return self._apply_structural_gate(decision, output, page_num, words=None)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [
+        {"criterion": "verifier exception on NativeTableVerifierJudge does not produce accepted verdict", "status": "partially met", "note": "string-only structural gate now runs on the exception path; header term cannot run (words=None)"},
+        {"criterion": "verifier exception on SourceEvidenceTableJudge does not produce accepted verdict", "status": "unmet", "note": "exception path is pure inner.assess with no gate"},
+        {"criterion": "durable audit event records verifier type and failure reason", "status": "unmet"},
+        {"criterion": "regression with accepting inner judge + raising verifier", "status": "unmet"}
+      ],
+      "reproducer": null,
+      "cluster_consistency": "table-region-detection: verifier fail-open family, but specifically the exception path. #163 (deferred path) and #166 (crop reread) are siblings with different fail-open shapes.",
+      "blocked_by": null
+    },
+    {
+      "issue": 163,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "verify_scanned_table still defers whenever page_has_native_words returns True. The helper at source_evidence.py:77 returns True on any non-empty word from page.get_text('words') — no born-digital / trusted-native classification. A scanned page with a baked-in OCR layer therefore skips the raster/classical gate and can ship a hallucinated markdown against the same untrusted layer. The acceptance boxes (use trusted-native classification; scanned pages with untrusted OCR layers still run raster/classical; regression with non-empty untrusted OCR + hallucinated table) are all open.",
+      "citations": [
+        {"path": "src/socr/tables/source_evidence.py", "line": 77, "snippet": "def page_has_native_words(page) -> bool:"},
+        {"path": "src/socr/tables/source_evidence.py", "line": 308, "snippet": "if page_has_native_words(page):"},
+        {"path": "src/socr/tables/source_evidence.py", "line": 312, "snippet": "reason=\"native words present; defer to native verifier\""}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [
+        {"criterion": "use trusted-native classification, not mere word presence", "status": "unmet"},
+        {"criterion": "scanned pages with rejected/untrusted OCR layers still run raster/classical verification", "status": "unmet"},
+        {"criterion": "regression: non-empty untrusted OCR words + hallucinated markdown table hard-rejects", "status": "unmet"}
+      ],
+      "reproducer": null,
+      "cluster_consistency": "table-region-detection: which evidence lane is selected. Complements #162 (fail-open on exception); here the gate never runs at all.",
+      "blocked_by": null
+    },
+    {
+      "issue": 166,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "TableCropExtractor.extract drops non-timeout render/read/empty failures with `continue` and no sentinel — those tables disappear from the returned list with no audit signal. The audit log emits kind='dualpass_crop_timeout' for the timeout case (orchestrator.py:3332), but TABLE_DISTRUST_KINDS at tables_trust.py:49 does not include 'dualpass_crop_timeout', so tables_trust.json can stay clean after incomplete verification. All four acceptance boxes are open: typed failure sentinel per crop, page-level distrust on all-failed, dualpass_crop_timeout as a distrust kind, orchestration tests for the four failure shapes.",
+      "citations": [
+        {"path": "src/socr/tables/extract.py", "line": 246, "snippet": "A failed crop/read (non-timeout) drops that table (returns no entry for it)"},
+        {"path": "src/socr/tables/extract.py", "line": 310, "snippet": "logger.warning(\"dual-pass: crop read failed p%d (%s)\", page_num, exc)"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 3332, "snippet": "kind=\"dualpass_crop_timeout\""},
+        {"path": "src/socr/core/tables_trust.py", "line": 49, "snippet": "TABLE_DISTRUST_KINDS: frozenset[str] = frozenset("}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [
+        {"criterion": "every located crop yields success or a typed failure sentinel", "status": "unmet"},
+        {"criterion": "all-failed reread emits page-level distrust in tables_trust.json", "status": "unmet"},
+        {"criterion": "dualpass_crop_timeout is a distrust kind", "status": "unmet", "note": "kind is not a member of TABLE_DISTRUST_KINDS"},
+        {"criterion": "orchestration tests for render-error / reader-error / empty-response / all-timeout", "status": "unmet"}
+      ],
+      "reproducer": null,
+      "cluster_consistency": "table-region-detection: verifier/reread fail-open. Same family as #162 (exception fail-open) and #163 (deferred fail-open).",
+      "blocked_by": null
+    },
+    {
+      "issue": 190,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "medium",
+      "rationale": "structure_check module docstring at structure_check.py:8 explicitly states 'Density can never contribute a finding or make a grid defective — sparse tables are common and legitimate ... Density never votes.' So an all-empty but well-piped grid passes validation everywhere. The hole is latent (offending local builds were removed) but the cheap invariant 'a grid with no populated data cell is never a successful extraction' is still unenforced. Placement is the design call (structure_check finding vs trust index vs per-page audit) — the issue itself does not pick. Density thresholds are forbidden by CLAUDE.md, but a whole-grid emptiness test ('zero populated data cells') is threshold-free, so it is safe.",
+      "citations": [
+        {"path": "src/socr/tables/structure_check.py", "line": 8, "snippet": "Density (``empty_cell_ratio`` / the footprint-density derivation described on"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "table-region-detection: content-blind validation, sibling of #151's 'shape is not enough'. Distinct from reconstruct.py destruction — this is verifier-side blindness.",
+      "blocked_by": null
+    },
+    {
+      "issue": 195,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "The A2 rejection still surfaces only via logger.warning at reconstruct.py:173. _SILENT_LOSS_FOLLOWUP_ISSUE = 195 at reconstruct.py:55 explicitly tracks this as a follow-up. No page/document/CLI field records that a text-strategy grid was destroying numerals. Live confirmation: the #144 reproducer emitted the warning and continued — nothing in the page status or document metadata recorded the event. Acceptance: thread the destroyed-record summary up through extract_structured, surface at WARNING-visible in CLI/document summary.",
+      "citations": [
+        {"path": "src/socr/tables/reconstruct.py", "line": 55, "snippet": "_SILENT_LOSS_FOLLOWUP_ISSUE = 195"},
+        {"path": "src/socr/tables/reconstruct.py", "line": 173, "snippet": "logger.warning("}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": "extract_structured on the issue synthetic logged: 'reconstruct_table_regions: text-strategy grid destroyed 2 numeric token(s) [\\'0.85\\', \\'1.00\\'] ... (follow-up: GH-195 tracks surfacing this at page/document/CLI level)' — and continued with a partial grid. No page.status / document status field captured the event.",
+      "cluster_consistency": "table-destruction: surfacing leftover of #144 A2. #144 PARTIALLY-IMPLEMENTED and #195 still-open are the intended split.",
+      "blocked_by": null
+    },
+    {
+      "issue": 197,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "When _numeric_row_bbox returns None, the destruction check is still scoped to fitz.Rect(table.bbox) at reconstruct.py:170 — exactly the overrun scope PR #192 review finding 2 asked to stop using. A text-strategy grid whose only numerics sit in the bbox overrun (notes, ticks, page numbers) can be rejected as 'destroyed' even though no numeric row was ever in the table proper. The fix direction is in the issue: skip destruction when numeric_scope is None, or refuse to use table.bbox. _looks_tabular's numeric-fraction gate makes the None branch uncommon, but the existing test only covers the non-None scope, so the hole is unguarded.",
+      "citations": [
+        {"path": "src/socr/tables/reconstruct.py", "line": 164, "snippet": "numeric_scope = _numeric_row_bbox(table, grid, words)"},
+        {"path": "src/socr/tables/reconstruct.py", "line": 169, "snippet": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "table-destruction: defect IN #144's check. Compatible with #144 PARTIALLY-IMPLEMENTED.",
+      "blocked_by": null
+    },
+    {
+      "issue": 198,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "_destroyed_numeric_tokens at reconstruct.py:377 filters candidates with anchored _NUM_TOKEN_RE.match(text) AND _NUMERIC_RE.search(text). That anchored regex rejects 0.67***, U+2212, $0.67, (0.14) — exactly the decorated numerics this repo already accepts elsewhere via native_verifier.is_numeric_token at native_verifier.py:488, which strips presentation first. If the text-strategy grid splits '0.67***' the same way it split '0.67', A2 never fires and a silent wrong number ships. Fix: drive the candidate filter with is_numeric_token (presentation-strip first). Survival predicate stays exact-string 'text in raw_cell' on the original token.",
+      "citations": [
+        {"path": "src/socr/tables/reconstruct.py", "line": 78, "snippet": "_NUM_TOKEN_RE = re.compile"},
+        {"path": "src/socr/tables/reconstruct.py", "line": 377, "snippet": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"},
+        {"path": "src/socr/tables/native_verifier.py", "line": 488, "snippet": "def is_numeric_token(tok: str) -> bool:"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "table-destruction: incomplete coverage of the same #144 check. Not a duplicate of #144 — different mechanism (regex anchoring vs None-scope).",
+      "blocked_by": null
+    },
+    {
+      "issue": 205,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "high",
+      "rationale": "TR-3 is no longer 'surfaced nowhere'. Per orchestrator.py:3961 it demotes a page under --native-only when native_table_unverifiable is true; combined with native_table_structure_failed at orchestrator.py:5012 it becomes a D3 floor (rendering png to the d3 floor) plus the table_region_unverifiable AuditEvent. Step 1 of the proposed scope (unconditional AuditEvent on every TR-3 fire) is NOT yet shipped — the event still depends on the native-only / D3 conjunction. Step 2 (hand-judged sample of firing pages to establish precision) is explicitly still pending per the issue's own status. The reconciled measurement (13.4-25.3% range, two small differently-drawn samples) is in the comments but the precision gate is open.",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 3961, "snippet": "tr3_distrust = bool("},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 5012, "snippet": "and p.native_table_structure_failed"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [
+        {"criterion": "unconditional AuditEvent on every TR-3 fire", "status": "unmet", "note": "event currently tied to --native-only + structure_failed conjunction"},
+        {"criterion": "hand-judge a stated sample of firing pages", "status": "unmet", "note": "explicitly blocked on this per issue status"},
+        {"criterion": "D3 / --native-only consumption of the flag", "status": "met", "citation": {"path": "src/socr/pipeline/orchestrator.py", "line": 3961, "snippet": "tr3_distrust = bool("}}
+      ],
+      "reproducer": null,
+      "cluster_consistency": "table-destruction: TR-3 is the verifier-side numeric-mismatch signal, not reconstruct.py's A2 destruction check. #144 can still destroy values that TR-3 would see and #205 would still not surface outside D3/native-only.",
+      "blocked_by": "hand-judgement of TR-3 precision (issue step 2/3). Step 1 (AuditEvent) is not blocked."
+    },
+    {
+      "issue": 213,
+      "verdict": "NEEDS-MEASUREMENT",
+      "confidence": "high",
+      "rationale": "Index pages DO reach table reconstruction (a second independent sample, p798, was corroborated in the comments). The asserted mechanism (has_numeric_columns firing on a single page-number lane) is disproven by the 3-lanes-x-3-rows gate at reconstruct.py:87. The remaining candidate is page.find_tables() returning True (the early-return at born_digital.py:1261), which _detect_tables treats as decisive. The first task in the issue — instrument an index page against find_tables vs has_numeric_columns — has not been done. Cannot change the lane gate until that branch is identified.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 1260, "snippet": "tables = page.find_tables()"},
+        {"path": "src/socr/core/born_digital.py", "line": 1261, "snippet": "if len(tables.tables) > 0:"},
+        {"path": "src/socr/tables/reconstruct.py", "line": 87, "snippet": "_MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "table-region-detection: upstream of reconstruction. Likely a contributor to TR-3's false-positive mass in #205, but not the same defect as #152 (which is about side-by-side merge).",
+      "blocked_by": "instrument which _detect_tables branch fires on an index-shaped page (issue task 1)"
+    },
+    {
+      "issue": 215,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "high",
+      "rationale": "The parked token-content term was replaced (not re-enabled) by GH-212 (ec390d8, #247): header_cut_verdict is now term 2 of table_output_defect, HARD-only, and runs only when the caller supplied both words and rules (structure_check.py:287-291). NativeTableVerifierJudge precomputes rules via _horizontal_rules(fitz_page). But born_digital's native-lane call at born_digital.py:1170 is structure_check.table_output_defect(native_text, words) with rules defaulting to None — so header_cut never runs on the trusted-native extract. The end-to-end test test_native_only_records_header_defect_without_rerouting is still strict xfail. Abstain-on-EXACT_PASS is the #245 split.",
+      "citations": [
+        {"path": "src/socr/tables/structure_check.py", "line": 287, "snippet": "if words and rules:"},
+        {"path": "src/socr/tables/structure_check.py", "line": 292, "snippet": "if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"},
+        {"path": "src/socr/core/born_digital.py", "line": 1170, "snippet": "structure_check.table_output_defect(native_text, words)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": "ec390d8f67f307950d4cc2501a4c28db0dcd46f7",
+      "acceptance_criteria": [
+        {"criterion": "a header-attribution HARD term exists and can reject", "status": "met", "citation": {"path": "src/socr/tables/structure_check.py", "line": 292, "snippet": "if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"}},
+        {"criterion": "destroyed header bands are detected on the native extract / --native-only path", "status": "unmet", "note": "test_native_only_records_header_defect_without_rerouting still xfailed; rules=None abstains"},
+        {"criterion": "abstain does not silently accept", "status": "unmet", "note": "split to #245"}
+      ],
+      "reproducer": "PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-night-base/src ~/venvs/socr/bin/pytest tests/test_header_cut.py → 14 passed. pytest tests/test_structural_gate_b1_gh151.py::TestHeaderAttributionEndToEnd::test_native_only_records_header_defect_without_rerouting → XFAIL ([100%]).",
+      "cluster_consistency": "header-attribution: #215 is the term; #245 is what EXACT_PASS does when that term abstains. Both can be true at once: HARD-with-rules is in, native-lane and abstain are not.",
+      "blocked_by": null
+    },
+    {
+      "issue": 226,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "medium",
+      "rationale": "No tables/pipeline guard rejects residual LaTeX table commands in emitted markdown. A VLM cell '\\multicolumn{6}{c|}{Forecast}' parses as one markdown cell with consistent pipe count, so the rowizer's shape gate and TR-3's numeric multiset both pass while six year labels are replaced by a literal LaTeX command string. Pages 51 and 63 (TICKET-D2 evidence) ship status: success with three-cell headers in place of the intended eight. The cheap model-free guard (any residual \\multicolumn/\\multirow/\\cline/\\hline → fail page) is a night's work. Flattening spanning headers at emission is the real repair and is larger; do the guard first.",
+      "citations": [
+        {"path": "src/socr/tables/structure_check.py", "line": 223, "snippet": "return any(r.ragged or r.detached_label_rows for r in reports)"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "table-destruction: third wrong-header mechanism (#146 band demotion, #215 attribution, this LaTeX leak). Shape gate cannot see it because pipe count is consistent.",
+      "blocked_by": null
+    },
+    {
+      "issue": 245,
+      "verdict": "NEEDS-MEASUREMENT",
+      "confidence": "high",
+      "rationale": "On EXACT_PASS at agentic.py:608 the judge builds accept=True, confidence=1.0 (line 624) and returns to _apply_structural_gate. If header_cut abstains (UNVERIFIABLE), table_output_defect returns no defect; an advisory table_header_unverifiable event is emitted at agentic.py:660 and the 1.0 accept is returned unchanged. Treating abstain as AMBIGUOUS → VLMPageJudge is control-flow, not a fifth content rule — but the issue itself flags that the corpus cost (every borderless-table page now pays a VLM judge) has not been measured. Do not flip EXACT_PASS overnight without that number.",
+      "citations": [
+        {"path": "src/socr/pipeline/agentic.py", "line": 608, "snippet": "if vr.state == VerifierState.EXACT_PASS:"},
+        {"path": "src/socr/pipeline/agentic.py", "line": 624, "snippet": "confidence=1.0,"},
+        {"path": "src/socr/pipeline/agentic.py", "line": 660, "snippet": "if HeaderVerdict.UNVERIFIABLE in verdicts:"},
+        {"path": "src/socr/tables/locate.py", "line": 36, "snippet": "_RULE_MIN_WIDTH_PT = 72.0  # >= ~1 inch wide to be a table rule, not an underline"}
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "header-attribution: residual of #215. #215 PARTIALLY-IMPLEMENTED (HARD exists) and #245 still open (abstain ships) is the intended split.",
+      "blocked_by": "corpus measurement of how many EXACT_PASS pages would newly pay a VLM judge if abstain became AMBIGUOUS"
+    }
+  ]
+}

@@ -150,19 +150,19 @@
    "vendor": "kimi",
    "issue": 154,
    "verdict": "FIX-CANDIDATE",
-   "effective_verdict": "NEEDS-MEASUREMENT",
-   "evidence_verified": false,
-   "reason": "snippet not on line 79 but is present in src/socr/core/providers.py at line(s) [78] (nearest drift -1); actual_at_79='backend=\"ollama-cloud\",'",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
    "citations_checked": 4,
-   "citations_failed": 1,
+   "citations_failed": 0,
    "citations_fabricated": 0,
-   "citations_drifted": 1,
-   "evidence_class": "DRIFT",
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
    "citation_classes": [
     "EXACT",
     "EXACT",
     "EXACT",
-    "DRIFT"
+    "EXACT"
    ],
    "citation_detail": [
     {
@@ -201,17 +201,13 @@
     {
      "citation": {
       "path": "src/socr/core/providers.py",
-      "line": 79,
+      "line": 78,
       "snippet": "id=\"qwen-cloud\","
      },
-     "ok": false,
-     "reason": "snippet not on line 79 but is present in src/socr/core/providers.py at line(s) [78] (nearest drift -1); actual_at_79='backend=\"ollama-cloud\",'",
-     "found_at_lines": [
-      78
-     ],
-     "drift": -1,
-     "classification": "DRIFT",
-     "matched_variant": null
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "id=\"qwen-cloud\","
     }
    ],
    "confidence": "high",
@@ -364,19 +360,19 @@
    "vendor": "kimi",
    "issue": 161,
    "verdict": "FIX-CANDIDATE",
-   "effective_verdict": "NEEDS-MEASUREMENT",
-   "evidence_verified": false,
-   "reason": "snippet not on line 460 but is present in src/socr/core/manifest.py at line(s) [463] (nearest drift +3); actual_at_460=')'; snippet not on line 461 but is present in src/socr/core/manifest.py at line(s) [335, 464] (nearest drift +3); actual_at_461='# A failed per-page attempt (content present, audit not passed) beats an'",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
    "citations_checked": 4,
-   "citations_failed": 2,
+   "citations_failed": 0,
    "citations_fabricated": 0,
-   "citations_drifted": 2,
-   "evidence_class": "DRIFT",
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
    "citation_classes": [
     "EXACT",
     "EXACT",
-    "DRIFT",
-    "DRIFT"
+    "EXACT",
+    "EXACT"
    ],
    "citation_detail": [
     {
@@ -404,33 +400,24 @@
     {
      "citation": {
       "path": "src/socr/core/manifest.py",
-      "line": 460,
+      "line": 463,
       "snippet": "if p.best_output:"
      },
-     "ok": false,
-     "reason": "snippet not on line 460 but is present in src/socr/core/manifest.py at line(s) [463] (nearest drift +3); actual_at_460=')'",
-     "found_at_lines": [
-      463
-     ],
-     "drift": 3,
-     "classification": "DRIFT",
-     "matched_variant": null
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if p.best_output:"
     },
     {
      "citation": {
       "path": "src/socr/core/manifest.py",
-      "line": 461,
+      "line": 464,
       "snippet": "return p.best_output"
      },
-     "ok": false,
-     "reason": "snippet not on line 461 but is present in src/socr/core/manifest.py at line(s) [335, 464] (nearest drift +3); actual_at_461='# A failed per-page attempt (content present, audit not passed) beats an'",
-     "found_at_lines": [
-      335,
-      464
-     ],
-     "drift": 3,
-     "classification": "DRIFT",
-     "matched_variant": null
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return p.best_output"
     }
    ],
    "confidence": "high",
@@ -653,18 +640,18 @@
    "vendor": "kimi",
    "issue": 221,
    "verdict": "FIX-CANDIDATE",
-   "effective_verdict": "NEEDS-MEASUREMENT",
-   "evidence_verified": false,
-   "reason": "snippet not on line 82 but is present in src/socr/tables/extract.py at line(s) [83] (nearest drift +1); actual_at_82=''",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
    "citations_checked": 4,
-   "citations_failed": 1,
+   "citations_failed": 0,
    "citations_fabricated": 0,
-   "citations_drifted": 1,
-   "evidence_class": "DRIFT",
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
    "citation_classes": [
     "EXACT",
     "EXACT",
-    "DRIFT",
+    "EXACT",
     "EXACT"
    ],
    "citation_detail": [
@@ -693,17 +680,13 @@
     {
      "citation": {
       "path": "src/socr/tables/extract.py",
-      "line": 82,
+      "line": 83,
       "snippet": "This is a lightweight /api/tags ping \u2014 it does NOT check whether a generation"
      },
-     "ok": false,
-     "reason": "snippet not on line 82 but is present in src/socr/tables/extract.py at line(s) [83] (nearest drift +1); actual_at_82=''",
-     "found_at_lines": [
-      83
-     ],
-     "drift": 1,
-     "classification": "DRIFT",
-     "matched_variant": null
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "This is a lightweight /api/tags ping \u2014 it does NOT check whether a generation"
     },
     {
      "citation": {

@@ -1,0 +1,370 @@
+{
+  "batch": "batch-2",
+  "vendor": "gemini-flash",
+  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+  "started_at": "2026-08-20T01:40:00+02:00",
+  "finished_at": "2026-08-20T01:45:00+02:00",
+  "grounding": {
+    "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-base/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-base",
+    "orchestrator_sha256_16": "023fce53432dc5aa"
+  },
+  "verdicts": [
+    {
+      "issue": 64,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "Born-digital pages with tabular appearance (such as 2-column whitespace-aligned borderless tables) that fall to native text after PP-6 narrowed has_numeric_columns currently do so without any audit trace. Emitting a durable warning audit event (possible_table_structure_not_reconstructed) without altering routing behavior is a self-contained, low-risk fix.",
+      "citations": [
+        {
+          "path": "src/socr/core/born_digital.py",
+          "line": 1268,
+          "snippet": "return has_numeric_columns(page)"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Unclustered follow-up to PP-6 routing narrowing; warning signal only.",
+      "blocked_by": null
+    },
+    {
+      "issue": 127,
+      "verdict": "ROADMAP-UMBRELLA",
+      "confidence": "high",
+      "rationale": "Proposes a comprehensive overhaul of native born-digital extraction to reconstruct heading tiers, font styles (bold/italic), lists, and hyperlink annotations from PDF geometry and font stats. This represents a large programme of work requiring widespread regeneration of golden tests; moreover, issue #223 demonstrates that heading loss is a pipeline-wide problem not restricted to the native lane.",
+      "citations": [
+        {
+          "path": "src/socr/core/born_digital.py",
+          "line": 307,
+          "snippet": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"
+        },
+        {
+          "path": "src/socr/core/born_digital.py",
+          "line": 1495,
+          "snippet": "text = \"\".join(s.get(\"text\", \"\") for s in line.get(\"spans\", []) or [])"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Overlaps with #223; #127 assumes a native-lane defect while #223 proves heading loss spans both native and VLM lanes.",
+      "blocked_by": null
+    },
+    {
+      "issue": 150,
+      "verdict": "PARTIALLY-IMPLEMENTED",
+      "confidence": "high",
+      "rationale": "Parts of GH-150 landed in A1 (framed thin-stroke cluster detection in has_chart_marks) and B1 (removing whole-page table pre-exclusion in _is_chart_asset_page). However, unframed thin-stroke vector charts still fail has_chart_marks, mixed pages arbitrated to tables still suffer phantom-grid verifier rejections (#249), and accepted ladder outputs drop chart regions (#189).",
+      "citations": [
+        {
+          "path": "src/socr/figures/extractor.py",
+          "line": 960,
+          "snippet": "def has_chart_marks(page) -> bool:"
+        },
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 1418,
+          "snippet": "page from this check (GH-150 TICKET-B1), because a mixed chart+table page must"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [
+        {
+          "criterion": "Framed thin-stroke vector chart detection added to has_chart_marks (GH-150 A1)",
+          "met": true,
+          "citation": {
+            "path": "src/socr/figures/extractor.py",
+            "line": 960,
+            "snippet": "def has_chart_marks(page) -> bool:"
+          }
+        },
+        {
+          "criterion": "Chart-only pages route to chart_asset_page without table pre-exclusion (GH-150 B1)",
+          "met": true,
+          "citation": {
+            "path": "src/socr/pipeline/orchestrator.py",
+            "line": 1418,
+            "snippet": "page from this check (GH-150 TICKET-B1), because a mixed chart+table page must"
+          }
+        },
+        {
+          "criterion": "Unframed thin-stroke vector charts (e.g., Ramey shocks figure) detected as chart marks",
+          "met": false,
+          "citation": {
+            "path": "src/socr/figures/extractor.py",
+            "line": 1004,
+            "snippet": "if raster_images:"
+          }
+        },
+        {
+          "criterion": "Arbitration between chart and table signals does not degrade chart pages to bare axis dumps",
+          "met": false,
+          "citation": {
+            "path": "src/socr/pipeline/orchestrator.py",
+            "line": 2278,
+            "snippet": "kind=\"chart_table_arbitration\","
+          }
+        }
+      ],
+      "reproducer": null,
+      "cluster_consistency": "Parent issue of the chart-arbitration cluster; spawned #167, #181, #189, #248, and #249.",
+      "blocked_by": null
+    },
+    {
+      "issue": 167,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "has_chart_marks in src/socr/figures/extractor.py unconditionally returns True upon encountering any embedded raster image via page.get_images(). This erroneously routes non-table trusted-native pages containing small logos, decorative icons, signatures, or author photos to the full-page chart_asset PNG lane. Adding a size, area, and dimension filter is self-contained and testable in one night.",
+      "citations": [
+        {
+          "path": "src/socr/figures/extractor.py",
+          "line": 1004,
+          "snippet": "if raster_images:"
+        },
+        {
+          "path": "src/socr/figures/extractor.py",
+          "line": 1010,
+          "snippet": "return True"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Sibling defect to #150 in chart-arbitration; covers over-eager raster fast-path whereas #150 covers vector under-detection.",
+      "blocked_by": null
+    },
+    {
+      "issue": 181,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "The union-find implementation in _cluster_drawings uses recursive find() with path compression, hitting Python's RecursionError on pages with ~1000+ drawings. In _is_chart_asset_page, a blanket except Exception catches this error and silently returns False, misrouting vector-dense chart pages to the table lane without any logged error or audit trace. Replacing recursive find() with an iterative loop is an isolated, robust fix.",
+      "citations": [
+        {
+          "path": "src/socr/figures/extractor.py",
+          "line": 690,
+          "snippet": "def find(x: int) -> int:"
+        },
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 1450,
+          "snippet": "except Exception as exc:"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Solves vector drawing clustering crash in the chart detection pipeline used by #150 and #189.",
+      "blocked_by": null
+    },
+    {
+      "issue": 189,
+      "verdict": "BLOCKED-PROPOSAL",
+      "confidence": "high",
+      "rationale": "On mixed chart+table pages, _render_chart_region_pngs is guarded by if not decision.accepted. When a model rung is accepted, the ladder output text is shipped and the chart placeholder remains unrendered, causing the chart image to be silently stripped. How to combine accepted VLM table text with local chart crops is an architectural design decision (splicing vs re-routing vs rejecting).",
+      "citations": [
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 2864,
+          "snippet": "if not decision.accepted and self._page_has_tables(page_num, ps):"
+        },
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 2873,
+          "snippet": "ps.native_text = self._render_chart_region_pngs("
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Identifies the accepted-branch failure mode of the mixed chart+table arbitration introduced in #150 B1.",
+      "blocked_by": null
+    },
+    {
+      "issue": 220,
+      "verdict": "ALREADY-FIXED",
+      "confidence": "high",
+      "rationale": "socr review <doc_dir> was fully implemented in PR #224 (commits 1216f2e, a0c220b, 0c5bbd1), an ancestor of main_sha. It builds a self-contained side-by-side HTML viewer pairing rendered PDF page images with extracted markdown fragments, complete with sidecar metadata headers, navigation rail, warning signal filters, and strict read-only execution. All 17 regression tests pass cleanly.",
+      "citations": [
+        {
+          "path": "src/socr/cli.py",
+          "line": 1037,
+          "snippet": "def review("
+        },
+        {
+          "path": "src/socr/review/html.py",
+          "line": 48,
+          "snippet": "_BOOL_SIGNAL_KEYS = ("
+        },
+        {
+          "path": "src/socr/review/html.py",
+          "line": 246,
+          "snippet": "def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": "0c5bbd11007d1aa038f040242c006a64d1a4483c",
+      "acceptance_criteria": [
+        {
+          "criterion": "socr review CLI command accepting doc_dir and source PDF",
+          "met": true,
+          "citation": {
+            "path": "src/socr/cli.py",
+            "line": 1037,
+            "snippet": "def review("
+          }
+        },
+        {
+          "criterion": "Side-by-side view with rendered PDF page image left and extracted markdown right",
+          "met": true,
+          "citation": {
+            "path": "src/socr/review/html.py",
+            "line": 246,
+            "snippet": "def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:"
+          }
+        },
+        {
+          "criterion": "Header showing page status, engine, model/provider, and recorded audit signals",
+          "met": true,
+          "citation": {
+            "path": "src/socr/review/html.py",
+            "line": 48,
+            "snippet": "_BOOL_SIGNAL_KEYS = ("
+          }
+        },
+        {
+          "criterion": "Navigation rail with jump-to-page and keyboard navigation",
+          "met": true,
+          "citation": {
+            "path": "src/socr/review/html.py",
+            "line": 246,
+            "snippet": "def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:"
+          }
+        },
+        {
+          "criterion": "Read-only inspection of existing disk artifacts without modifying fragments or ledger",
+          "met": true,
+          "citation": {
+            "path": "src/socr/cli.py",
+            "line": 1037,
+            "snippet": "def review("
+          }
+        }
+      ],
+      "reproducer": "PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-night-base/src /Users/rubenffuertes/venvs/socr/bin/pytest tests/test_review_viewer_gh220.py -q\n17 passed, 5 warnings in 1.82s",
+      "cluster_consistency": "Unclustered tooling instrument used to discover #223 and #225.",
+      "blocked_by": null
+    },
+    {
+      "issue": 223,
+      "verdict": "BLOCKED-PROPOSAL",
+      "confidence": "high",
+      "rationale": "Issue #223 provides measurement evidence that VLM models also drop heading structure (36 unrepresented headings across 44 flagged pages in EFO-Nov-2022), falsifying the assumption in #127 that model escalation resolves heading loss. It poses the architectural design question of whether heading recovery belongs in a post-extraction structure pass across all lanes versus within lane-specific extractors or prompts.",
+      "citations": [
+        {
+          "path": "src/socr/core/born_digital.py",
+          "line": 307,
+          "snippet": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"
+        },
+        {
+          "path": "src/socr/core/born_digital.py",
+          "line": 353,
+          "snippet": "weight_by_size[round(size, 1)] += len(text.strip())"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Overlaps with #127; refines the structure-loss diagnosis by demonstrating that heading loss is a pipeline-wide defect rather than a native-lane limitation.",
+      "blocked_by": null
+    },
+    {
+      "issue": 225,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "strip_phantom_images in src/socr/core/normalizer.py explicitly skips stripping for URLs starting with http:// or https:// on the assumption that external URLs are never phantom. When VLMs hallucinate external image links (such as Imgur placeholders), they ship as page content under status: success with zero audit events. A deterministic validation gate checking external URLs against source PDF links and local assets can be implemented in one night.",
+      "citations": [
+        {
+          "path": "src/socr/core/normalizer.py",
+          "line": 226,
+          "snippet": "# Absolute URLs are never phantom (external images)"
+        },
+        {
+          "path": "src/socr/core/normalizer.py",
+          "line": 227,
+          "snippet": "if path_str.startswith((\"http://\", \"https://\", \"data:\")):"
+        },
+        {
+          "path": "src/socr/core/normalizer.py",
+          "line": 228,
+          "snippet": "return False"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Unclustered fabrication defect; distinct from loss-related issues in the backlog.",
+      "blocked_by": null
+    },
+    {
+      "issue": 248,
+      "verdict": "NEEDS-MEASUREMENT",
+      "confidence": "high",
+      "rationale": "has_numeric_columns in src/socr/tables/reconstruct.py clusters numeric tokens into x-lanes to detect borderless tables, but on corrupt OCR text layers with scattered numbers, prose pages falsely trigger table detection. A proposed lane-reuse ratio would separate corrupt noise from true borderless tables, but setting and validating this heuristic requires corpus-wide measurement to ensure real borderless tables are not lost.",
+      "citations": [
+        {
+          "path": "src/socr/tables/reconstruct.py",
+          "line": 432,
+          "snippet": "def has_numeric_columns(page) -> bool:"
+        },
+        {
+          "path": "src/socr/tables/reconstruct.py",
+          "line": 462,
+          "snippet": "grid_rows = sum(1 for ls in row_lanes.values() if len(ls) >= _MIN_LANES_PER_ROW)"
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Part of the chart/table routing predicate cluster; shares the has_numeric_columns gate with #64 and #249.",
+      "blocked_by": null
+    },
+    {
+      "issue": 249,
+      "verdict": "FIX-CANDIDATE",
+      "confidence": "high",
+      "rationale": "On chart pages that contain axis tick numbers, has_numeric_columns fires and causes arbitration to route them as table pages. The table verifier then grades model outputs against the native text layer (which is only axis numbers), rejecting all rungs for row-count mismatch and shipping the raw axis dump as native fallback. Abstaining from table scoring when native text does not form a grid (table_not_scorable) or routing chart tick pages to chart_asset resolves this in one night.",
+      "citations": [
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 1765,
+          "snippet": "if not rows_establish_grid(gt_rows):"
+        },
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 1769,
+          "snippet": "kind=\"table_not_scorable\","
+        },
+        {
+          "path": "src/socr/pipeline/orchestrator.py",
+          "line": 2278,
+          "snippet": "kind=\"chart_table_arbitration\","
+        }
+      ],
+      "duplicate_of": null,
+      "fixed_by_commit": null,
+      "acceptance_criteria": [],
+      "reproducer": null,
+      "cluster_consistency": "Explains the mechanism behind #150's figure-as-table degradation; interacts with #248's table detection gate.",
+      "blocked_by": null
+    }
+  ]
+}
