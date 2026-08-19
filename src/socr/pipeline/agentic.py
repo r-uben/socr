@@ -520,6 +520,11 @@ class NativeTableVerifierJudge:
         try:
             fitz_page = self._get_fitz_page(page_num)
             words = fitz_page.get_text("words") if fitz_page is not None else None
+            # GH-212: the header term needs the page's drawn rules. Precompute
+            # them here so structure_check stays pure and never sees a page.
+            from socr.tables.locate import _horizontal_rules
+
+            rules = _horizontal_rules(fitz_page) if fitz_page is not None else None
             vr = verify_native_table(fitz_page, output.text)
             vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
         except Exception as exc:
@@ -598,7 +603,7 @@ class NativeTableVerifierJudge:
             )
             # Defer to the inner judge — do NOT escalate here
             decision = self._inner.assess(output, provider)
-            return self._apply_structural_gate(decision, output, page_num, words)
+            return self._apply_structural_gate(decision, output, page_num, words, rules)
 
         if vr.state == VerifierState.EXACT_PASS:
             # EXACT_PASS: ship immediately — no model needed
@@ -618,11 +623,11 @@ class NativeTableVerifierJudge:
                 reason="native_table_verifier: EXACT_PASS",
                 confidence=1.0,
             )
-            return self._apply_structural_gate(decision, output, page_num, words)
+            return self._apply_structural_gate(decision, output, page_num, words, rules)
 
         # No issue detected → delegate to inner judge
         decision = self._inner.assess(output, provider)
-        return self._apply_structural_gate(decision, output, page_num, words)
+        return self._apply_structural_gate(decision, output, page_num, words, rules)
 
     def _apply_structural_gate(
         self,
@@ -630,6 +635,7 @@ class NativeTableVerifierJudge:
         output: PageOutput,
         page_num: int,
         words: list | None,
+        rules: list[tuple[float, float, float]] | None = None,
     ) -> AcceptDecision:
         """GH-200: the winner-side structural/header check on whatever is ABOUT TO SHIP.
 
@@ -648,7 +654,7 @@ class NativeTableVerifierJudge:
         from socr.tables.header_attribution import HeaderVerdict
         from socr.tables.structure_check import table_header_verdicts, table_output_defect
 
-        defect = table_output_defect(output.text, words)
+        defect = table_output_defect(output.text, words, rules)
         if not defect and words:
             verdicts = table_header_verdicts(output.text, words)
             if HeaderVerdict.UNVERIFIABLE in verdicts:

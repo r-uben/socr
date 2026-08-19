@@ -231,41 +231,67 @@ DEFECT_GRID_SHAPE = "grid_shape"
 DEFECT_HEADER_UNATTRIBUTED = "header_unattributed"
 
 
-def table_output_defect(output_md: str, words: list | None) -> str:
+def table_output_defect(
+    output_md: str,
+    words: list | None,
+    rules: list[tuple[float, float, float]] | None = None,
+) -> str:
     """Whether *output_md* (the text about to ship) has a structural defect.
 
-    GH-200. Currently a single term:
+    GH-200, extended by GH-212. A disjunction in cost order:
 
     1. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
        ragged OR detached_label_rows, unchanged -- see ``structural_gate_fires``
        docstring). String-only, no I/O.
+    2. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only
+       when the shape term did not already fire, and only when the caller
+       supplied both native words and the page's drawn horizontal rules.
 
-    **The header-attribution disjunct is deliberately NOT evaluated here.**
-    Four independent implementations of it (GH-151 T3's token-pattern rule,
+    **On term 2 and the four reverts that precede it.** Earlier implementations
+    of a header-attribution disjunct (GH-151 T3's token-pattern rule,
     ``062bdef``'s year-band rule, the positional rule, and the normalized
-    comparison) each failed in one of two directions: either abstaining on the
+    comparison) each failed in one of two directions: abstaining on the
     hand-judged 4-of-4 header-loss case, or returning HARD on *byte-perfect
-    correct* tables -- demonstrated on tables carrying significance-star rows
-    and ``n.a.`` cells, both ubiquitous in this corpus. A false HARD is not a
-    missed catch; it REJECTS correct output and can drive it to the fail-closed
-    marker. Until the predicate is sound, shipping it as a reject term trades a
-    known-incomplete gate for an actively destructive one.
+    correct* tables carrying significance-star rows and ``n.a.`` cells, both
+    ubiquitous in this corpus. A false HARD is not a missed catch; it REJECTS
+    correct output and can drive it to the fail-closed marker.
 
-    ``header_attribution`` itself, ``table_header_verdicts`` below, and the
-    whole ``native_table_header_unattributed`` plumbing are intentionally kept:
-    the verdicts remain observable for measurement, resume still restores the
-    flag from older sidecars, and re-enabling the disjunct is a one-line change
-    once a sound predicate exists.
+    All four recovered header ROLE from token content. ``header_cut`` does not:
+    it cuts the page at the drawn rule above the numeric anchor and owes only
+    what lies above it, so star and ``n.a.`` rows are excluded geometrically
+    rather than by vocabulary, and its tokens are never inspected. Every step
+    abstains rather than guessing. See
+    ``docs/log/2026-08-19_212-header-attribution-design.md``.
+
+    ``header_attribution`` and ``table_header_verdicts`` below are retained
+    unchanged: they still produce the advisory SOFT signal and the abstain rate
+    that ``header_cut`` deliberately does not report.
+
+    **rules=None abstains.** A caller with no ``fitz`` page (the verifier
+    exception path, and ``born_digital``'s native-lane check, which flags the
+    native text layer rather than a model-emitted table) passes nothing and gets
+    the shape term alone. That is the intended behaviour for those callers, not
+    an oversight.
 
     Deliberately NOT nested with TR-3 (``native_verifier.verify_native_table``)
     -- TR-3 is evaluated by the caller as a separate disjunct. Measured in
     ``docs/log/2026-08-14_gh151-b1-predicate-design.md``: the two signals do
     not subsume each other (TR-3 misses 31/66 shape-gate pages; the shape gate
-    misses 27 pages TR-3 catches). Pure; no mutation, no model calls.
+    misses 27 pages TR-3 catches). Pure; no mutation, no model calls -- the
+    caller precomputes ``rules``, so this never touches a page object.
     """
     reports = check_markdown(output_md)
     if structural_gate_fires(reports):
         return DEFECT_GRID_SHAPE
+
+    if words and rules:
+        from socr.tables.header_attribution import HeaderVerdict
+        from socr.tables.header_cut import header_cut_verdict
+
+        for block in find_table_blocks(output_md):
+            if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:
+                return DEFECT_HEADER_UNATTRIBUTED
+
     return DEFECT_NONE
 
 
