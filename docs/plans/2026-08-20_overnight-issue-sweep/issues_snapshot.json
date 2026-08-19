@@ -1,0 +1,635 @@
+{
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "snapshot_at": "2026-08-19T23:23:37Z",
+ "count": 62,
+ "issues": [
+  {
+   "number": 39,
+   "title": "P1: route engines by measured quality-per-dollar (benchmark fix, calibrated per-page-type ladders, uncapped escalation, gate calibration)",
+   "updated_at": "2026-08-01T11:20:21Z",
+   "created_at": "2026-06-09T21:58:31Z",
+   "labels": [],
+   "body_hash": "1af36c98084e735f",
+   "body_chars": 2339,
+   "url": "https://github.com/r-uben/socr/issues/39"
+  },
+  {
+   "number": 49,
+   "title": "General extraction method: single-pass VLM + free native verification + agentic-on-signal",
+   "updated_at": "2026-08-11T15:37:32Z",
+   "created_at": "2026-06-14T19:37:42Z",
+   "labels": [],
+   "body_hash": "462a80ab6324d585",
+   "body_chars": 2697,
+   "url": "https://github.com/r-uben/socr/issues/49"
+  },
+  {
+   "number": 56,
+   "title": "CE OCR is not solved: prioritize reliable tables and figures",
+   "updated_at": "2026-06-21T11:23:47Z",
+   "created_at": "2026-06-15T17:20:23Z",
+   "labels": [],
+   "body_hash": "e73bc7ff09fb5e71",
+   "body_chars": 4156,
+   "url": "https://github.com/r-uben/socr/issues/56"
+  },
+  {
+   "number": 64,
+   "title": "Audit-flag tabular-looking born-digital pages that fall to native (PP-6 follow-up)",
+   "updated_at": "2026-06-16T07:41:55Z",
+   "created_at": "2026-06-16T07:41:55Z",
+   "labels": [],
+   "body_hash": "3dd9de747542e69d",
+   "body_chars": 1486,
+   "url": "https://github.com/r-uben/socr/issues/64"
+  },
+  {
+   "number": 114,
+   "title": "proposal: socr escalate \u2014 post-hoc escalation pass so local GPU and cloud egress can be different machines",
+   "updated_at": "2026-07-31T23:40:33Z",
+   "created_at": "2026-07-31T20:00:19Z",
+   "labels": [],
+   "body_hash": "07ab719d2c949438",
+   "body_chars": 3388,
+   "url": "https://github.com/r-uben/socr/issues/114"
+  },
+  {
+   "number": 127,
+   "title": "feat(born-digital): native path discards heading, emphasis, list, and link structure",
+   "updated_at": "2026-08-09T17:24:41Z",
+   "created_at": "2026-08-09T17:24:41Z",
+   "labels": [],
+   "body_hash": "36504b45463ef977",
+   "body_chars": 2751,
+   "url": "https://github.com/r-uben/socr/issues/127"
+  },
+  {
+   "number": 139,
+   "title": "bug(cli): --no-audit is silently inert on the default agentic path",
+   "updated_at": "2026-08-10T23:44:52Z",
+   "created_at": "2026-08-10T23:44:52Z",
+   "labels": [],
+   "body_hash": "ce5ce2f82bc9c997",
+   "body_chars": 2206,
+   "url": "https://github.com/r-uben/socr/issues/139"
+  },
+  {
+   "number": 140,
+   "title": "bug(born-digital): math-font pages trusted as native with recovery default-off and no audit event",
+   "updated_at": "2026-08-10T23:45:12Z",
+   "created_at": "2026-08-10T23:45:12Z",
+   "labels": [],
+   "body_hash": "299dc91af992c45c",
+   "body_chars": 2647,
+   "url": "https://github.com/r-uben/socr/issues/140"
+  },
+  {
+   "number": 142,
+   "title": "chore(cli): audit every flag against the agentic path \u2014 two are known to lie",
+   "updated_at": "2026-08-11T00:29:59Z",
+   "created_at": "2026-08-11T00:08:11Z",
+   "labels": [],
+   "body_hash": "8bcbc777db782e96",
+   "body_chars": 3130,
+   "url": "https://github.com/r-uben/socr/issues/142"
+  },
+  {
+   "number": 144,
+   "title": "bug(tables): word-geometry rowizer drops numeric values \u2014 49 of 152 on one page, shipped as SUCCESS",
+   "updated_at": "2026-08-11T14:34:51Z",
+   "created_at": "2026-08-11T14:31:01Z",
+   "labels": [],
+   "body_hash": "c5b6d27c86f68ebf",
+   "body_chars": 3809,
+   "url": "https://github.com/r-uben/socr/issues/144"
+  },
+  {
+   "number": 146,
+   "title": "bug(tables): first data row is emitted as the table header, and the real header band is excluded",
+   "updated_at": "2026-08-11T14:39:41Z",
+   "created_at": "2026-08-11T14:39:41Z",
+   "labels": [],
+   "body_hash": "b14076e7d751082a",
+   "body_chars": 2752,
+   "url": "https://github.com/r-uben/socr/issues/146"
+  },
+  {
+   "number": 147,
+   "title": "bug(tables): landscape pages are rowized along the wrong axis and ship transposed nonsense",
+   "updated_at": "2026-08-11T14:46:00Z",
+   "created_at": "2026-08-11T14:46:00Z",
+   "labels": [],
+   "body_hash": "53d68e06a4c51e3d",
+   "body_chars": 2948,
+   "url": "https://github.com/r-uben/socr/issues/147"
+  },
+  {
+   "number": 150,
+   "title": "bug(figures): figures are extracted as tables \u2014 the two worst pages in the corpus are charts",
+   "updated_at": "2026-08-15T11:00:54Z",
+   "created_at": "2026-08-11T16:34:05Z",
+   "labels": [],
+   "body_hash": "29f924f2f08d4ac0",
+   "body_chars": 2893,
+   "url": "https://github.com/r-uben/socr/issues/150"
+  },
+  {
+   "number": 151,
+   "title": "bug(tables): a table can ship at 100% word recall with its structure destroyed \u2014 recall is not a sufficient gate",
+   "updated_at": "2026-08-11T16:34:37Z",
+   "created_at": "2026-08-11T16:34:37Z",
+   "labels": [],
+   "body_hash": "e647b949cd5a9367",
+   "body_chars": 2903,
+   "url": "https://github.com/r-uben/socr/issues/151"
+  },
+  {
+   "number": 152,
+   "title": "bug(tables): two side-by-side tables are merged into one region and flattened",
+   "updated_at": "2026-08-11T16:35:01Z",
+   "created_at": "2026-08-11T16:35:01Z",
+   "labels": [],
+   "body_hash": "5cd40e408f6908ac",
+   "body_chars": 2522,
+   "url": "https://github.com/r-uben/socr/issues/152"
+  },
+  {
+   "number": 154,
+   "title": "bug(routing): --max-cost-per-page does not constrain qwen-cloud (priced $0.00)",
+   "updated_at": "2026-08-12T00:01:58Z",
+   "created_at": "2026-08-12T00:01:58Z",
+   "labels": [],
+   "body_hash": "febc70b1b791c3c9",
+   "body_chars": 2031,
+   "url": "https://github.com/r-uben/socr/issues/154"
+  },
+  {
+   "number": 155,
+   "title": "chore(arch): split pipeline/orchestrator.py god-module (~5.5k LOC)",
+   "updated_at": "2026-08-12T00:02:04Z",
+   "created_at": "2026-08-12T00:02:04Z",
+   "labels": [],
+   "body_hash": "a84e12e03aafd957",
+   "body_chars": 2680,
+   "url": "https://github.com/r-uben/socr/issues/155"
+  },
+  {
+   "number": 156,
+   "title": "chore(docs): TODO.md / TICKETS.md drift vs closed GitHub issues",
+   "updated_at": "2026-08-12T00:02:07Z",
+   "created_at": "2026-08-12T00:02:07Z",
+   "labels": [],
+   "body_hash": "f6ee5c0e69e2a5e6",
+   "body_chars": 1301,
+   "url": "https://github.com/r-uben/socr/issues/156"
+  },
+  {
+   "number": 157,
+   "title": "bug(equations): --recover-clean-equations can skip pages with detected crops (no PageOutput)",
+   "updated_at": "2026-08-12T00:02:19Z",
+   "created_at": "2026-08-12T00:02:19Z",
+   "labels": [],
+   "body_hash": "bbe57bfb80d9322a",
+   "body_chars": 2363,
+   "url": "https://github.com/r-uben/socr/issues/157"
+  },
+  {
+   "number": 158,
+   "title": "chore(audit): populate model_version in fingerprints / default per-page provenance",
+   "updated_at": "2026-08-12T00:02:25Z",
+   "created_at": "2026-08-12T00:02:25Z",
+   "labels": [],
+   "body_hash": "8a9b53335a1e277a",
+   "body_chars": 1540,
+   "url": "https://github.com/r-uben/socr/issues/158"
+  },
+  {
+   "number": 159,
+   "title": "bug(routing): ProviderProfile identity discarded \u2014 qwen-cloud rung runs the local backend",
+   "updated_at": "2026-08-12T00:12:57Z",
+   "created_at": "2026-08-12T00:12:57Z",
+   "labels": [],
+   "body_hash": "848b08ab6826cbb9",
+   "body_chars": 1181,
+   "url": "https://github.com/r-uben/socr/issues/159"
+  },
+  {
+   "number": 160,
+   "title": "bug(routing): post-route table escalation ignores --max-cost-per-page and remaining --cost-budget",
+   "updated_at": "2026-08-12T00:13:00Z",
+   "created_at": "2026-08-12T00:13:00Z",
+   "labels": [],
+   "body_hash": "6878a59804469811",
+   "body_chars": 1115,
+   "url": "https://github.com/r-uben/socr/issues/160"
+  },
+  {
+   "number": 161,
+   "title": "bug(routing): resume ledger treats judge-rejected SUCCESS pages as terminally clean",
+   "updated_at": "2026-08-12T00:13:03Z",
+   "created_at": "2026-08-12T00:13:03Z",
+   "labels": [],
+   "body_hash": "18f08b8e19394867",
+   "body_chars": 987,
+   "url": "https://github.com/r-uben/socr/issues/161"
+  },
+  {
+   "number": 162,
+   "title": "bug(audit): table verifier exceptions fail open into the accepting inner judge",
+   "updated_at": "2026-08-12T00:13:06Z",
+   "created_at": "2026-08-12T00:13:06Z",
+   "labels": [],
+   "body_hash": "c0f4116be870f38f",
+   "body_chars": 908,
+   "url": "https://github.com/r-uben/socr/issues/162"
+  },
+  {
+   "number": 163,
+   "title": "bug(tables): any OCR text-layer word defers the scanned source-evidence gate",
+   "updated_at": "2026-08-12T00:13:13Z",
+   "created_at": "2026-08-12T00:13:13Z",
+   "labels": [],
+   "body_hash": "96c5f422c9ce0ed4",
+   "body_chars": 866,
+   "url": "https://github.com/r-uben/socr/issues/163"
+  },
+  {
+   "number": 164,
+   "title": "bug(equations): rejected recovery appends the entire page native text per region",
+   "updated_at": "2026-08-12T00:13:15Z",
+   "created_at": "2026-08-12T00:13:15Z",
+   "labels": [],
+   "body_hash": "8850ad51adcb7bdf",
+   "body_chars": 818,
+   "url": "https://github.com/r-uben/socr/issues/164"
+  },
+  {
+   "number": 165,
+   "title": "bug(equations): PUA-only math pages skip recovery routing and can suppress unrecovered audits",
+   "updated_at": "2026-08-12T00:13:19Z",
+   "created_at": "2026-08-12T00:13:19Z",
+   "labels": [],
+   "body_hash": "77feedba0be50213",
+   "body_chars": 1171,
+   "url": "https://github.com/r-uben/socr/issues/165"
+  },
+  {
+   "number": 166,
+   "title": "bug(tables): all-failed crop rereads look clean; crop timeouts missing from tables_trust",
+   "updated_at": "2026-08-12T00:13:22Z",
+   "created_at": "2026-08-12T00:13:22Z",
+   "labels": [],
+   "body_hash": "745417981d88a0da",
+   "body_chars": 977,
+   "url": "https://github.com/r-uben/socr/issues/166"
+  },
+  {
+   "number": 167,
+   "title": "bug(figures): any embedded raster routes a trusted-native page into the chart-asset lane",
+   "updated_at": "2026-08-12T00:13:28Z",
+   "created_at": "2026-08-12T00:13:28Z",
+   "labels": [],
+   "body_hash": "53fc4ffe2a152857",
+   "body_chars": 935,
+   "url": "https://github.com/r-uben/socr/issues/167"
+  },
+  {
+   "number": 168,
+   "title": "bug(cli): --config/--profile values are silently dropped or overwritten by CLI defaults",
+   "updated_at": "2026-08-12T00:13:31Z",
+   "created_at": "2026-08-12T00:13:31Z",
+   "labels": [],
+   "body_hash": "36760d806d24d300",
+   "body_chars": 1040,
+   "url": "https://github.com/r-uben/socr/issues/168"
+  },
+  {
+   "number": 169,
+   "title": "bug(audit): agentic manifests drop judge rejection reasons for non-empty attempts",
+   "updated_at": "2026-08-12T00:13:34Z",
+   "created_at": "2026-08-12T00:13:34Z",
+   "labels": [],
+   "body_hash": "192bb90a69e16e71",
+   "body_chars": 994,
+   "url": "https://github.com/r-uben/socr/issues/169"
+  },
+  {
+   "number": 170,
+   "title": "bug(audit): replay validates page blobs but not figure/chart/equation assets",
+   "updated_at": "2026-08-12T00:13:36Z",
+   "created_at": "2026-08-12T00:13:36Z",
+   "labels": [],
+   "body_hash": "29594058d007ecc5",
+   "body_chars": 780,
+   "url": "https://github.com/r-uben/socr/issues/170"
+  },
+  {
+   "number": 171,
+   "title": "bug(audit): terminal page sidecars finalized before figure provenance exists",
+   "updated_at": "2026-08-12T00:13:42Z",
+   "created_at": "2026-08-12T00:13:42Z",
+   "labels": [],
+   "body_hash": "02fd5cb3a228e6b3",
+   "body_chars": 1005,
+   "url": "https://github.com/r-uben/socr/issues/171"
+  },
+  {
+   "number": 172,
+   "title": "bug(routing): soft timeouts abandon non-daemon workers that can prevent CLI exit",
+   "updated_at": "2026-08-12T00:13:45Z",
+   "created_at": "2026-08-12T00:13:45Z",
+   "labels": [],
+   "body_hash": "2b2dc21832c09137",
+   "body_chars": 1000,
+   "url": "https://github.com/r-uben/socr/issues/172"
+  },
+  {
+   "number": 174,
+   "title": "chore(arch): make agentic the only first-class path; quarantine legacy backbone",
+   "updated_at": "2026-08-12T00:13:51Z",
+   "created_at": "2026-08-12T00:13:51Z",
+   "labels": [],
+   "body_hash": "63d98912dd4bc6bd",
+   "body_chars": 1256,
+   "url": "https://github.com/r-uben/socr/issues/174"
+  },
+  {
+   "number": 175,
+   "title": "chore(arch): break inverted package layering (tables\u2194benchmark, core\u2192tables)",
+   "updated_at": "2026-08-12T00:13:59Z",
+   "created_at": "2026-08-12T00:13:59Z",
+   "labels": [],
+   "body_hash": "d7c7ff043a5670d9",
+   "body_chars": 1092,
+   "url": "https://github.com/r-uben/socr/issues/175"
+  },
+  {
+   "number": 176,
+   "title": "chore(arch): restore dumb DocumentState blackboard + one authoritative page-text selector",
+   "updated_at": "2026-08-12T00:14:02Z",
+   "created_at": "2026-08-12T00:14:02Z",
+   "labels": [],
+   "body_hash": "969d27618b825542",
+   "body_chars": 1208,
+   "url": "https://github.com/r-uben/socr/issues/176"
+  },
+  {
+   "number": 177,
+   "title": "bug(cli): single-file exit codes disagree with RunOutcome partial=nonzero policy",
+   "updated_at": "2026-08-12T00:14:05Z",
+   "created_at": "2026-08-12T00:14:05Z",
+   "labels": [],
+   "body_hash": "1670f9c393007508",
+   "body_chars": 1010,
+   "url": "https://github.com/r-uben/socr/issues/177"
+  },
+  {
+   "number": 178,
+   "title": "chore(arch): ADR \u2014 stay Python; optional native kernels only after profiling (no Rust rewrite)",
+   "updated_at": "2026-08-12T00:14:09Z",
+   "created_at": "2026-08-12T00:14:09Z",
+   "labels": [],
+   "body_hash": "0833c7732cb621aa",
+   "body_chars": 1166,
+   "url": "https://github.com/r-uben/socr/issues/178"
+  },
+  {
+   "number": 181,
+   "title": "bug(figures): recursive find() in _cluster_drawings blows the stack past ~1000 same-cluster drawings, swallowed to False by _is_chart_asset_page",
+   "updated_at": "2026-08-12T12:57:12Z",
+   "created_at": "2026-08-12T12:57:12Z",
+   "labels": [],
+   "body_hash": "a963e92e14628aee",
+   "body_chars": 1316,
+   "url": "https://github.com/r-uben/socr/issues/181"
+  },
+  {
+   "number": 189,
+   "title": "bug(pipeline): chart silently dropped on a mixed chart+table page when the judge accepts a ladder rung",
+   "updated_at": "2026-08-12T22:11:05Z",
+   "created_at": "2026-08-12T22:11:05Z",
+   "labels": [],
+   "body_hash": "b04b4760ea3d85ac",
+   "body_chars": 3033,
+   "url": "https://github.com/r-uben/socr/issues/189"
+  },
+  {
+   "number": 190,
+   "title": "bug(tables): an all-empty but structurally-valid table passes validation \u2014 shape-only checks cannot see content loss",
+   "updated_at": "2026-08-12T22:11:42Z",
+   "created_at": "2026-08-12T22:11:42Z",
+   "labels": [],
+   "body_hash": "213ffd94160f1918",
+   "body_chars": 2876,
+   "url": "https://github.com/r-uben/socr/issues/190"
+  },
+  {
+   "number": 195,
+   "title": "bug(tables): GH-144's text-strategy grid rejection ships as a quiet WARNING, not a page/document/CLI-visible status",
+   "updated_at": "2026-08-13T00:53:11Z",
+   "created_at": "2026-08-13T00:53:11Z",
+   "labels": [],
+   "body_hash": "ecff341c14c1858a",
+   "body_chars": 3442,
+   "url": "https://github.com/r-uben/socr/issues/195"
+  },
+  {
+   "number": 197,
+   "title": "bug(tables): GH-144 destruction check still uses table.bbox when _numeric_row_bbox is None",
+   "updated_at": "2026-08-13T12:07:43Z",
+   "created_at": "2026-08-13T12:07:43Z",
+   "labels": [
+    "bug"
+   ],
+   "body_hash": "967536181dba0933",
+   "body_chars": 1790,
+   "url": "https://github.com/r-uben/socr/issues/197"
+  },
+  {
+   "number": 198,
+   "title": "bug(tables): GH-144 destruction check skips decorated numerics (0.67***, unicode minus, currency)",
+   "updated_at": "2026-08-13T12:10:27Z",
+   "created_at": "2026-08-13T12:10:27Z",
+   "labels": [
+    "bug"
+   ],
+   "body_hash": "7d4883bb1ba35d53",
+   "body_chars": 1795,
+   "url": "https://github.com/r-uben/socr/issues/198"
+  },
+  {
+   "number": 202,
+   "title": "proposal: measure Mistral OCR 4.1 before any routing change",
+   "updated_at": "2026-08-14T18:46:39Z",
+   "created_at": "2026-08-13T22:24:10Z",
+   "labels": [
+    "enhancement"
+   ],
+   "body_hash": "ef5d2bea855df89c",
+   "body_chars": 2941,
+   "url": "https://github.com/r-uben/socr/issues/202"
+  },
+  {
+   "number": 203,
+   "title": "proposal: consume Mistral OCR 4 block labels (blocked)",
+   "updated_at": "2026-08-13T22:24:10Z",
+   "created_at": "2026-08-13T22:24:10Z",
+   "labels": [
+    "enhancement"
+   ],
+   "body_hash": "df29bb7b6ac630a2",
+   "body_chars": 2533,
+   "url": "https://github.com/r-uben/socr/issues/203"
+  },
+  {
+   "number": 205,
+   "title": "bug(tables): TR-3 geometry hard-fail is detected on 62/245 table pages and surfaced nowhere",
+   "updated_at": "2026-08-14T12:15:12Z",
+   "created_at": "2026-08-14T11:33:25Z",
+   "labels": [],
+   "body_hash": "ac5ad4bf2656b961",
+   "body_chars": 3008,
+   "url": "https://github.com/r-uben/socr/issues/205"
+  },
+  {
+   "number": 213,
+   "title": "bug(tables): book indexes are routed to table reconstruction",
+   "updated_at": "2026-08-15T19:48:13Z",
+   "created_at": "2026-08-15T01:17:15Z",
+   "labels": [],
+   "body_hash": "fdc5f3fdd7b41a17",
+   "body_chars": 3554,
+   "url": "https://github.com/r-uben/socr/issues/213"
+  },
+  {
+   "number": 215,
+   "title": "bug(tables): header-attribution reject term is parked \u2014 destroyed header bands ship undetected",
+   "updated_at": "2026-08-15T19:48:05Z",
+   "created_at": "2026-08-15T18:26:04Z",
+   "labels": [],
+   "body_hash": "497f53e1ba08a18d",
+   "body_chars": 3290,
+   "url": "https://github.com/r-uben/socr/issues/215"
+  },
+  {
+   "number": 219,
+   "title": "bug(equations): Palatino/Pazo math fonts miss `_MATH_FONT_RE`, so display equations ship flattened with no flag and no recovery",
+   "updated_at": "2026-08-16T21:05:01Z",
+   "created_at": "2026-08-16T21:05:01Z",
+   "labels": [],
+   "body_hash": "e0e4d3cb33c5e753",
+   "body_chars": 3798,
+   "url": "https://github.com/r-uben/socr/issues/219"
+  },
+  {
+   "number": 220,
+   "title": "feat(review): side-by-side page-image \u2194 extracted-markdown viewer for hand judgement",
+   "updated_at": "2026-08-16T21:18:20Z",
+   "created_at": "2026-08-16T21:18:20Z",
+   "labels": [],
+   "body_hash": "bdf1e31410df2128",
+   "body_chars": 1906,
+   "url": "https://github.com/r-uben/socr/issues/220"
+  },
+  {
+   "number": 221,
+   "title": "bug(routing): cascade-halt cannot fire \u2014 probe_ollama_idle stays 200 OK while the GPU is wedged",
+   "updated_at": "2026-08-16T23:37:50Z",
+   "created_at": "2026-08-16T22:32:12Z",
+   "labels": [],
+   "body_hash": "d9ec5608d9d5f10e",
+   "body_chars": 3251,
+   "url": "https://github.com/r-uben/socr/issues/221"
+  },
+  {
+   "number": 222,
+   "title": "bug(routing): probe_ollama_idle is hardcoded to localhost \u2014 non-Ollama backends false-halt a healthy document",
+   "updated_at": "2026-08-17T04:57:41Z",
+   "created_at": "2026-08-17T04:57:41Z",
+   "labels": [],
+   "body_hash": "6770aea18eae8d43",
+   "body_chars": 3290,
+   "url": "https://github.com/r-uben/socr/issues/222"
+  },
+  {
+   "number": 223,
+   "title": "bug(structure): heading loss is not native-lane-specific \u2014 the VLM lane ships 36 unrepresented headings",
+   "updated_at": "2026-08-17T12:09:29Z",
+   "created_at": "2026-08-17T11:51:04Z",
+   "labels": [],
+   "body_hash": "708533e32bdd9fa1",
+   "body_chars": 3260,
+   "url": "https://github.com/r-uben/socr/issues/223"
+  },
+  {
+   "number": 225,
+   "title": "bug(fabrication): VLM invents image URLs and they ship as page content under SUCCESS with no signal",
+   "updated_at": "2026-08-17T14:08:52Z",
+   "created_at": "2026-08-17T14:08:52Z",
+   "labels": [],
+   "body_hash": "59407183259e5e47",
+   "body_chars": 2824,
+   "url": "https://github.com/r-uben/socr/issues/225"
+  },
+  {
+   "number": 226,
+   "title": "bug(tables): LaTeX \\multicolumn leaks into markdown headers, collapsing the emitted column count",
+   "updated_at": "2026-08-17T14:09:52Z",
+   "created_at": "2026-08-17T14:09:52Z",
+   "labels": [],
+   "body_hash": "c3f85ad8fa345bfc",
+   "body_chars": 2567,
+   "url": "https://github.com/r-uben/socr/issues/226"
+  },
+  {
+   "number": 227,
+   "title": "bug(routing): cascade-halt fires on a page that timed out and then SUCCEEDED on a later rung",
+   "updated_at": "2026-08-17T14:09:53Z",
+   "created_at": "2026-08-17T14:09:53Z",
+   "labels": [],
+   "body_hash": "b0a57fbb8c49c7e1",
+   "body_chars": 3159,
+   "url": "https://github.com/r-uben/socr/issues/227"
+  },
+  {
+   "number": 238,
+   "title": "Caption lane: fingerprint records the configured model, not the engine that actually ran",
+   "updated_at": "2026-08-18T16:20:07Z",
+   "created_at": "2026-08-18T16:20:07Z",
+   "labels": [],
+   "body_hash": "e5e99d8ef8b1377d",
+   "body_chars": 1997,
+   "url": "https://github.com/r-uben/socr/issues/238"
+  },
+  {
+   "number": 245,
+   "title": "bug(agentic): when the header-attribution term abstains, EXACT_PASS still ships the page at confidence 1.0",
+   "updated_at": "2026-08-19T12:18:10Z",
+   "created_at": "2026-08-19T12:18:10Z",
+   "labels": [],
+   "body_hash": "0a2b43ecbf70eb5f",
+   "body_chars": 1975,
+   "url": "https://github.com/r-uben/socr/issues/245"
+  },
+  {
+   "number": 248,
+   "title": "bug(tables): a corrupt text layer makes prose pages look like borderless tables, inflating has_tables",
+   "updated_at": "2026-08-19T18:34:21Z",
+   "created_at": "2026-08-19T18:34:21Z",
+   "labels": [],
+   "body_hash": "245fa04a2e6e8798",
+   "body_chars": 3495,
+   "url": "https://github.com/r-uben/socr/issues/248"
+  },
+  {
+   "number": 249,
+   "title": "bug(agentic): chart pages are graded against a phantom table of axis tick labels, so every rung is rejected and the tick labels ship",
+   "updated_at": "2026-08-19T22:34:42Z",
+   "created_at": "2026-08-19T18:34:36Z",
+   "labels": [],
+   "body_hash": "56fcb1cd3a29f908",
+   "body_chars": 5785,
+   "url": "https://github.com/r-uben/socr/issues/249"
+  }
+ ]
+}

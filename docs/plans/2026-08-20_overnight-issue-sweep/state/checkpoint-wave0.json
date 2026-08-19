@@ -1,0 +1,62 @@
+{
+ "wave": "0",
+ "closed_at": "2026-08-19T23:25:40Z",
+ "tickets": {
+  "A1": "DONE",
+  "A2": "DONE"
+ },
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "snapshot_count": 62,
+ "batch_union_count": 62,
+ "reconciles": true,
+ "discrepancies": [],
+ "abort_latch_set": false,
+ "next": "wave 1 \u2014 B1..B4 triage, two vendors each",
+ "vendor_matrix": {
+  "batch-1": {
+   "triage": [
+    "grok",
+    "kimi"
+   ],
+   "adjudicate": "gemini-pro",
+   "review": [
+    "ollama-deepseek",
+    "ollama-minimax"
+   ]
+  },
+  "batch-2": {
+   "triage": [
+    "gemini-pro",
+    "ollama-deepseek"
+   ],
+   "adjudicate": "grok",
+   "review": [
+    "kimi",
+    "ollama-minimax"
+   ]
+  },
+  "batch-3": {
+   "triage": [
+    "kimi",
+    "ollama-minimax"
+   ],
+   "adjudicate": "gemini-pro",
+   "review": [
+    "grok",
+    "ollama-deepseek"
+   ]
+  },
+  "batch-4": {
+   "triage": [
+    "grok",
+    "gemini-pro"
+   ],
+   "adjudicate": "kimi",
+   "review": [
+    "ollama-minimax",
+    "ollama-deepseek"
+   ]
+  }
+ },
+ "vendor_matrix_invariant": "adjudicator not in triagers; reviewers not in triagers+adjudicator, per batch \u2014 verified"
+}

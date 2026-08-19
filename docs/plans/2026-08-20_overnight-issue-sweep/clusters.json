@@ -1,0 +1,155 @@
+{
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "clusters": {
+  "header-attribution": {
+   "issues": [
+    215,
+    245
+   ],
+   "mechanism": "the header-attribution reject term and what EXACT_PASS does when it abstains",
+   "batch": "batch-1"
+  },
+  "table-destruction": {
+   "issues": [
+    144,
+    146,
+    151,
+    195,
+    197,
+    198,
+    205,
+    226
+   ],
+   "mechanism": "reconstruct.py numeric-token destruction check, its grid rejection, and how a destroyed table is surfaced",
+   "batch": "batch-1"
+  },
+  "chart-arbitration": {
+   "issues": [
+    150,
+    167,
+    181,
+    189,
+    248,
+    249
+   ],
+   "mechanism": "chart vs table arbitration and the chart-asset lane",
+   "batch": "batch-2"
+  },
+  "cascade-halt": {
+   "issues": [
+    221,
+    222,
+    227
+   ],
+   "mechanism": "probe_ollama_idle and the cascade-halt latch",
+   "batch": "batch-3"
+  },
+  "structure-loss": {
+   "issues": [
+    127,
+    223
+   ],
+   "mechanism": "heading/emphasis/list structure loss, native lane AND VLM lane",
+   "batch": "batch-2"
+  },
+  "cli-semantics": {
+   "issues": [
+    139,
+    142,
+    168
+   ],
+   "mechanism": "CLI flags that are inert or overwritten on the agentic path",
+   "batch": "batch-3"
+  },
+  "cost-identity": {
+   "issues": [
+    154,
+    159,
+    160
+   ],
+   "mechanism": "ProviderProfile identity and per-page cost constraint",
+   "batch": "batch-3"
+  },
+  "equations": {
+   "issues": [
+    140,
+    157,
+    164,
+    165,
+    219
+   ],
+   "mechanism": "math-font detection and equation recovery routing",
+   "batch": "batch-4"
+  },
+  "architecture": {
+   "issues": [
+    155,
+    174,
+    175,
+    176,
+    178
+   ],
+   "mechanism": "orchestrator god-module / package layering programme",
+   "batch": "batch-4"
+  },
+  "table-region-detection": {
+   "issues": [
+    152,
+    213,
+    190,
+    163,
+    166,
+    162
+   ],
+   "mechanism": "what is admitted as a table region and what the verifier does on failure",
+   "batch": "batch-1",
+   "added_at": "A2"
+  },
+  "audit-provenance": {
+   "issues": [
+    158,
+    169,
+    170,
+    171,
+    238
+   ],
+   "mechanism": "fingerprint/manifest provenance and asset replay",
+   "batch": "batch-4",
+   "added_at": "A2"
+  },
+  "umbrella-and-proposals": {
+   "issues": [
+    39,
+    49,
+    56,
+    114,
+    202,
+    203,
+    156
+   ],
+   "mechanism": "roadmap umbrellas, blocked proposals and tracker/doc drift \u2014 none is a single defect",
+   "batch": "batch-4",
+   "added_at": "A2"
+  }
+ },
+ "unclustered": {
+  "147": "batch-1",
+  "64": "batch-2",
+  "220": "batch-2",
+  "225": "batch-2",
+  "161": "batch-3",
+  "172": "batch-3",
+  "177": "batch-3"
+ },
+ "relationship_notes": {
+  "144->195,197,198": "supersedes/refines \u2014 195/197/198 are defects IN GH-144's own destruction check",
+  "215<->245": "must_adjudicate_together \u2014 245 is what happens when 215's term abstains",
+  "221<->227": "must_adjudicate_together \u2014 227 warns that fixing 221's probe alone makes behaviour worse",
+  "222->221": "222 (probe hardcoded to localhost) is the enabling defect under 221",
+  "248,249->150,167": "overlaps \u2014 all four are chart/table arbitration on the same predicate",
+  "159->154,160": "159 (ProviderProfile identity discarded) is the root of both cost-constraint reports",
+  "127<->223": "overlaps \u2014 223 asserts 127's framing is lane-specific and wrong",
+  "39,49,56": "umbrella_of much of the tables/figures backlog; not single defects",
+  "202,203": "blocked proposals \u2014 203 explicitly blocked on 202"
+ }
+}
