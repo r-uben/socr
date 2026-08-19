@@ -95,22 +95,51 @@ class TestRepairCache:
 
         assert len(calls) == 1, "a clean file was rescanned on every open"
 
-    def test_affected_file_is_repaired_every_time(self, tmp_path, monkeypatch):
-        """The repair applies to a fresh Document, so it cannot be cached away."""
-        calls = []
+    def test_affected_file_is_derived_once_but_applied_every_time(self, tmp_path, monkeypatch):
+        """The two halves are separable, and conflating them was the #246 defect.
+
+        DERIVING the plan walks every page's text and is expensive. APPLYING it
+        is a few object writes and must happen on every open, because each open
+        is a fresh Document that has not been touched. Caching only the "clean"
+        answer meant an affected document re-derived on every open, and the
+        agentic loop opens each document several times per page.
+        """
+        derived, replayed = [], []
 
         def fake_repair(doc):
-            calls.append(doc)
-            return GlyphRepairReport(repaired_fonts=["F"], mapped_glyph_count=3)
+            derived.append(doc)
+            return GlyphRepairReport(repaired_fonts=["F"], mapped_glyph_count=3, cmaps={7: b"CMAP"})
 
         monkeypatch.setattr(pdf_module, "repair_symbol_font_text", fake_repair)
+        monkeypatch.setattr(pdf_module, "replay_cmaps", lambda doc, cmaps: replayed.append(cmaps))
         target = tmp_path / "affected.pdf"
         target.write_bytes(b"%PDF-1.4\n")
 
+        first = apply_glyph_recovery(object(), target)
         apply_glyph_recovery(object(), target)
         apply_glyph_recovery(object(), target)
 
-        assert len(calls) == 2
+        assert len(derived) == 1, "the expensive derivation was repeated"
+        assert replayed == [{7: b"CMAP"}, {7: b"CMAP"}], "later opens went unrepaired"
+        assert first.repaired
+
+    def test_a_modified_affected_file_is_rederived(self, tmp_path, monkeypatch):
+        """A cached plan holds object xrefs, so it is only valid for the same bytes."""
+        derived = []
+        monkeypatch.setattr(
+            pdf_module,
+            "repair_symbol_font_text",
+            lambda doc: (derived.append(doc), GlyphRepairReport(repaired_fonts=["F"]))[1],
+        )
+        monkeypatch.setattr(pdf_module, "replay_cmaps", lambda doc, cmaps: None)
+        target = tmp_path / "affected.pdf"
+        target.write_bytes(b"%PDF-1.4\n")
+        apply_glyph_recovery(object(), target)
+
+        target.write_bytes(b"%PDF-1.4\n% different bytes\n")
+        apply_glyph_recovery(object(), target)
+
+        assert len(derived) == 2
 
     def test_a_file_needing_attention_is_not_cached_as_clean(self, tmp_path, monkeypatch):
         """Nothing repaired but glyphs unmapped is the worst case, not a clean one."""

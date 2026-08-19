@@ -129,6 +129,13 @@ class GlyphRepairReport:
     #: substitution would be fabrication -- and are reported so the page can be
     #: treated as suspect.
     unmapped_glyphs: list[str] = field(default_factory=list)
+    #: font xref -> the CMap bytes attached to it. Kept so the same plan can be
+    #: replayed onto a later, freshly-opened copy of the same file without
+    #: re-deriving it: the derivation walks every page's text and is the
+    #: expensive half, while replaying is a handful of object writes (#246).
+    #: Object xrefs are a property of the file's bytes, so a plan is only valid
+    #: for a file whose identity is unchanged -- see ``socr.core.pdf``.
+    cmaps: dict[int, bytes] = field(default_factory=dict)
 
     @property
     def repaired(self) -> bool:
@@ -158,6 +165,29 @@ def _parse_type1_encoding(font_buffer: bytes) -> dict[int, str]:
     except Exception:  # pragma: no cover - decode with 'replace' does not raise
         return {}
     return {int(code): name for code, name in _ENCODING_ENTRY.findall(text)}
+
+
+def _is_affected_font(encoding: dict[int, str]) -> bool:
+    """Whether this font is the broken class at all, from its glyph names alone.
+
+    A font with no ToUnicode is NOT automatically broken. Plenty of ordinary text
+    fonts ship without one and encode perfectly standard glyph names — ``A``,
+    ``ampersand``, ``bracketleft``, ``Adieresis`` — which the extractor already
+    decodes correctly through the standard encoding. Nothing there needs
+    recovering and nothing there is at risk.
+
+    Treating "absent from GLYPH_UNICODE" as "unrecoverable" conflated the two and
+    was wrong twice over: it reported ~7% of an ordinary paper library as
+    containing unrecoverable characters when those papers were fine, and because
+    a document needing attention is never cached, it made every one of them
+    rescan on every open (#246).
+
+    The defect this module exists for is specific and recognisable: Monotype's
+    ``H<number>`` symbol fonts, whose names mean nothing to a standard decoder. A
+    font is affected iff at least one glyph it encodes is one this module knows
+    how to recover. Everything else is left entirely alone.
+    """
+    return any(name in GLYPH_UNICODE for name in encoding.values())
 
 
 def _build_tounicode_cmap(mapping: dict[int, str]) -> bytes:
@@ -232,6 +262,29 @@ def _font_has_tounicode(doc: fitz.Document, xref: int) -> bool:
     return kind != "null"
 
 
+def _attach_cmap(doc: fitz.Document, font_xref: int, cmap: bytes) -> None:
+    """Point *font_xref* at a new stream holding *cmap*."""
+    stream_xref = doc.get_new_xref()
+    doc.update_object(stream_xref, "<<>>")
+    doc.update_stream(stream_xref, cmap)
+    doc.xref_set_key(font_xref, "ToUnicode", f"{stream_xref} 0 R")
+
+
+def replay_cmaps(doc: fitz.Document, cmaps: dict[int, bytes]) -> None:
+    """Re-apply an already-derived plan to a freshly-opened copy of the file.
+
+    Skips any font that already carries a ToUnicode, so replaying onto a
+    document that was somehow repaired already cannot double-attach.
+    """
+    for font_xref, cmap in cmaps.items():
+        try:
+            if _font_has_tounicode(doc, font_xref):
+                continue
+            _attach_cmap(doc, font_xref, cmap)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[glyph] replay onto xref %d failed (%s)", font_xref, exc)
+
+
 def repair_symbol_font_text(doc: fitz.Document) -> GlyphRepairReport:
     """Give every embedded font that lacks a ToUnicode map the one it should have.
 
@@ -275,6 +328,12 @@ def repair_symbol_font_text(doc: fitz.Document) -> GlyphRepairReport:
             if not encoding:
                 continue
 
+            # Cheap gate, from glyph names only — no page text is read. An
+            # ordinary font that merely lacks a ToUnicode is not this defect and
+            # is neither repaired nor reported (#246).
+            if not _is_affected_font(encoding):
+                continue
+
             # Measured lazily and once: only a document that actually has a
             # broken font pays for the usage pass.
             if used_by_font is None:
@@ -306,16 +365,15 @@ def repair_symbol_font_text(doc: fitz.Document) -> GlyphRepairReport:
                 continue
 
             try:
-                stream_xref = doc.get_new_xref()
-                doc.update_object(stream_xref, "<<>>")
-                doc.update_stream(stream_xref, _build_tounicode_cmap(mapping))
-                doc.xref_set_key(xref, "ToUnicode", f"{stream_xref} 0 R")
+                cmap = _build_tounicode_cmap(mapping)
+                _attach_cmap(doc, xref, cmap)
             except Exception as exc:
                 logger.warning("[glyph] %s: could not attach ToUnicode (%s)", basefont, exc)
                 continue
 
             report.repaired_fonts.append(basefont)
             report.mapped_glyph_count += len(mapping)
+            report.cmaps[xref] = cmap
             logger.info(
                 "[glyph] %s: recovered %d glyph(s) from the embedded encoding vector",
                 basefont,
