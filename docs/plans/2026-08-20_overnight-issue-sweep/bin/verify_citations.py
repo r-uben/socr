@@ -172,10 +172,30 @@ def check_already_fixed(v: dict, cites: list[dict]) -> tuple[bool, list[str]]:
     ac = v.get("acceptance_criteria") or []
     if not ac:
         fails.append("acceptance_criteria not enumerated")
-    elif not all(isinstance(a, dict) and a.get("status") for a in ac):
-        fails.append("acceptance_criteria present but not each marked met/unmet")
-    elif any(str(a.get("status", "")).lower().startswith("unmet") for a in ac):
-        fails.append("an acceptance criterion is marked unmet — cannot be ALREADY-FIXED")
+    else:
+        # Be tolerant of SHAPE, strict about MEANING. Agents write {"status":"met"}
+        # or {"met": true} interchangeably, and voiding a well-evidenced verdict
+        # over which key it chose is how a schema nit silently discards real work.
+        def _state(a: dict) -> str | None:
+            if not isinstance(a, dict):
+                return None
+            if isinstance(a.get("met"), bool):
+                return "met" if a["met"] else "unmet"
+            raw = str(a.get("status", "")).strip().lower()
+            if raw.startswith("met") or raw in {"yes", "true", "satisfied", "pass"}:
+                return "met"
+            if raw.startswith("unmet") or raw in {"no", "false", "fail", "not met"}:
+                return "unmet"
+            return None
+
+        states = [_state(a) for a in ac]
+        if any(st is None for st in states):
+            fails.append(
+                "acceptance_criteria present but not every criterion is explicitly "
+                "marked met/unmet (accepted forms: status=met|unmet, or met=true|false)"
+            )
+        elif "unmet" in states:
+            fails.append("an acceptance criterion is marked unmet — cannot be ALREADY-FIXED")
 
     r = v.get("reproducer")
     if not r:
