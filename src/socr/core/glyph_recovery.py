@@ -112,6 +112,10 @@ _ENCODING_ENTRY = re.compile(r"dup\s+(\d+)\s*/([A-Za-z0-9._]+)\s+put")
 # unmapped. ``.notdef`` is the Type1 placeholder for "no glyph".
 _NON_TEXT_GLYPHS = frozenset({"space", ".notdef"})
 
+# Monotype's symbol-font naming scheme (``H11002``, ``H9266``): the namespace of
+# the broken class, whether or not GLYPH_UNICODE covers the particular glyph.
+_MONOTYPE_SYMBOL_NAME = re.compile(r"H\d+")
+
 
 @dataclass
 class GlyphRepairReport:
@@ -184,10 +188,14 @@ def _is_affected_font(encoding: dict[int, str]) -> bool:
 
     The defect this module exists for is specific and recognisable: Monotype's
     ``H<number>`` symbol fonts, whose names mean nothing to a standard decoder. A
-    font is affected iff at least one glyph it encodes is one this module knows
-    how to recover. Everything else is left entirely alone.
+    font is affected iff at least one glyph it encodes carries such a name.
+    Membership in GLYPH_UNICODE is deliberately NOT the test: a subsetted symbol
+    font can draw only glyphs the table does not cover yet be exactly as
+    corrupted, and gating on "can we recover something" would make the most
+    corrupted document the quietest one. Such a font is repaired where the table
+    allows and its drawn unknowns are reported, never silently skipped.
     """
-    return any(name in GLYPH_UNICODE for name in encoding.values())
+    return any(_MONOTYPE_SYMBOL_NAME.fullmatch(name) for name in encoding.values())
 
 
 def _build_tounicode_cmap(mapping: dict[int, str]) -> bytes:
