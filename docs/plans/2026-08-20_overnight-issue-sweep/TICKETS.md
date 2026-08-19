@@ -7,11 +7,13 @@ skipped predecessor must never freeze a lane overnight.
 Every agent receives `CONTRACT.md` verbatim. Every ticket writes its output to a
 named path; a ticket that cannot produce that path exits and records why.
 
-**Run mode switch** — `state/config.json`:
-`tracker_mode: "staged" | "direct"`. `staged` (default) writes every close and
-comment into `actions/tracker_actions.json` plus `bin/apply_tracker_actions.sh`
-for a one-command morning apply. `direct` executes them overnight. Nothing else
-in the graph changes. Owner sets this before launch.
+**Run mode** — `state/config.json`: `tracker_mode: "agent-gated"` (owner's
+decision, 2026-08-20). Every tracker mutation is staged into
+`actions/tracker_actions.json` first and nothing executes on a triager's word.
+An independent two-agent review board then approves or rejects each staged
+action, and approved ones execute overnight. Rejected or split actions do not
+execute — they go to the morning report as the owner's decision queue. The
+owner is not the reviewer; agents revise and decide.
 
 ---
 
@@ -127,23 +129,40 @@ touched it while we worked, so we do not act on it.
 comment; the apply script is executable and idempotent (it re-reads live state
 and skips any action whose marker comment already exists).
 
-### TICKET-D1 — Closes · TODO · depends-on: D0 · wave 3
-**Do:** `ALREADY-FIXED` only, and only rows that survived D0's freshness check.
-Requires a second approval from an agent that was not a triager on that issue.
-In `staged` mode, write only; in `direct` mode, execute, then read back the issue
-and confirm the state actually changed.
+### TICKET-DR — Review board: agents approve or reject each staged action · TODO · depends-on: D0 · wave 3
+**Problem:** A staged action is only as safe as its reviewer, and the owner is
+asleep. All three panel critics independently warned that a unanimous triage
+verdict can still be category-wrong — a closure that reads as well-evidenced and
+is simply about the wrong thing. So the gate is agents, and it is deliberately
+adversarial rather than confirmatory.
+**Do:** Two reviewers per staged action, on different vendors, **neither of which
+triaged or adjudicated that issue**. Each is prompted to REFUTE the action: for a
+close, to find any acceptance criterion the `fixed_by_commit` does not actually
+satisfy; for a correction or a new issue, to find the claim that is not
+supported by its evidence. A reviewer that cannot open the cited code must
+reject. Decision rule: **both approve → `APPROVED`**; anything else →
+`HELD-FOR-OWNER`, with both readings recorded verbatim.
+**Files:** `actions/review/<action_id>.json`, `actions/decisions.json`
+**Done when:** every staged action carries exactly one of `APPROVED` or
+`HELD-FOR-OWNER`; no reviewer appears as a triager or adjudicator of the same
+issue; every `HELD-FOR-OWNER` records why, in a sentence a human can act on.
+
+### TICKET-D1 — Execute approved closes · TODO · depends-on: DR · wave 3
+**Do:** `ALREADY-FIXED` actions that are `APPROVED` by the review board and
+survived D0's freshness check. Execute serially, then read the issue back and
+confirm the state actually changed. Never close a `HELD-FOR-OWNER` action.
 **Done when:** every closed issue carries a comment naming `fixed_by_commit`, the
 acceptance criteria it satisfies, and the reproducer result — and the action
 ledger records the returned URL and post-write verified state. Zero closes is a
 valid outcome, recorded as such.
 
-### TICKET-D2 — Corrections in place · TODO · depends-on: D0 · wave 3
+### TICKET-D2 — Corrections in place · TODO · depends-on: DR · wave 3
 **Problem:** #249 is the template — a wrong report gets corrected, not closed.
 **Done when:** each `MISREPORTED` issue has a comment stating what the original
 claimed, what is actually true, and the measurement behind it; the issue remains
 open; nothing was closed by this ticket.
 
-### TICKET-D3 — File genuinely new defects · TODO · depends-on: D0 · wave 3
+### TICKET-D3 — File genuinely new defects · TODO · depends-on: DR · wave 3
 **Problem:** Nothing in B or C produces new defects, so without an explicit input
 this ticket either does nothing or invents duplicates.
 **Do:** Its input is `discoveries/*.json` — candidates recorded by B/C/E agents
@@ -251,7 +270,10 @@ snapshot, with every discrepancy named.
 `Baseline` (pinned SHA, live drift since) ·
 `Coverage reconciliation` (one row per snapshot issue → exactly one final
 disposition; totals reconcile to the starting count plus newly filed) ·
-`Autonomous mutations` (proposed vs executed, with URLs and reopen targets) ·
+`Autonomous mutations` (staged vs approved vs executed, with URLs and reopen
+targets) ·
+`Held for you` (every action the review board refused to approve, with both
+reviewers' readings and a one-line ask) ·
 `PR decision queue` (per PR: head SHA, CI conclusion, reviewer verdict,
 non-vacuity proof, stack position) ·
 `Deferred measurements` (what needs the corpus, and the exact command to run) ·

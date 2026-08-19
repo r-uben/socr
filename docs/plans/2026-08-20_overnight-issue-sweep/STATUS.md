@@ -10,7 +10,7 @@ gating-safety, GPT on coverage, Gemini on ticket-size and trust) attacked the
 first draft; their raw output is in `logs/panel-raw/` and what was taken or
 rejected is in `logs/2026-08-20_panel-synthesis.md`.
 
-One decision is outstanding before launch: `tracker_mode` (see below).
+All decisions are settled. Ready to launch.
 
 ## Base state (clean before tickets)
 
@@ -22,10 +22,7 @@ One decision is outstanding before launch: `tracker_mode` (see below).
 
 ## Outstanding decision
 
-**`tracker_mode`** — `staged` (default) or `direct`, set in `state/config.json`.
-All three critics independently argued against unattended issue closure; the
-owner has granted it. Staged keeps the grant intact but routes closes through a
-one-command morning apply. Nothing else in the graph changes either way.
+Settled — see above.
 
 ## Ticket board
 
@@ -37,7 +34,8 @@ one-command morning apply. Nothing else in the graph changes either way.
 | V1 | evidence check | TODO | B1–B4 | 1.5 |
 | C1–C4 | adjudication | TODO | V1 | 2 |
 | D0 | tracker manifest | TODO | C1–C4,A1 | 3 |
-| D1–D3 | tracker actions | TODO | D0 | 3 |
+| DR | review board (2 agents, refute-first) | TODO | D0 | 3 |
+| D1–D3 | tracker actions | TODO | DR | 3 |
 | E0 | fix scheduling | TODO | C1–C4 | 4 |
 | E1–E7 | fixes (one owner, stacked) | TODO | E0 + predecessor | 4 |
 | W1–W5 | coordinator | TODO | per wave | — |
@@ -49,10 +47,10 @@ one-command morning apply. Nothing else in the graph changes either way.
 - Wave 1: B1–B4 in parallel, two vendors each, wall-clock capped
 - Wave 1.5: V1 (deterministic script, no model)
 - Wave 2: C1–C4 in parallel, adjudicator ≠ triager, cluster-colocated
-- Wave 3: D0 → D1,D2,D3 (serial writer)
+- Wave 3: D0 → DR (review board) → D1,D2,D3 (serial writer; approved only)
 - Wave 4: E0 → E1…E7 (single code owner, stacked branches)
 - Wave 5: F1
 
 ## Next action
 
-Owner sets `tracker_mode`, then dispatch wave 0 (A1).
+Dispatch wave 0 (A1).
