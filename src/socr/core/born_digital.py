@@ -23,6 +23,8 @@ from pathlib import Path
 
 import fitz
 
+from socr.core.glyph_recovery import GlyphRepairReport, repair_symbol_font_text
+
 logger = logging.getLogger(__name__)
 
 # Font families used exclusively for typeset mathematics in LaTeX/LuaTeX/XeTeX.
@@ -629,6 +631,9 @@ class BornDigitalDetector:
             self.MIN_WORDS_PER_PAGE = min_words
         if max_garbage_ratio is not None:
             self.MAX_GARBAGE_RATIO = max_garbage_ratio
+        #: Report from the most recent symbol-font recovery (#217). ``None``
+        #: until a document has been assessed.
+        self.last_glyph_repair: GlyphRepairReport | None = None
 
     def detect(self, pdf_path: Path | str) -> DocumentAssessment:
         """Analyze all pages of a PDF for born-digital content.
@@ -645,6 +650,7 @@ class BornDigitalDetector:
 
         pages: list[PageAssessment] = []
         with fitz.open(pdf_path) as doc:
+            self._recover_symbol_fonts(doc, pdf_path)
             for page_idx in range(len(doc)):
                 assessment = self._assess_page(doc[page_idx], page_idx + 1)
                 pages.append(assessment)
@@ -668,7 +674,46 @@ class BornDigitalDetector:
         with fitz.open(pdf_path) as doc:
             if page_num < 1 or page_num > len(doc):
                 raise ValueError(f"Page {page_num} out of range (document has {len(doc)} pages)")
+            self._recover_symbol_fonts(doc, pdf_path)
             return self._assess_page(doc[page_num - 1], page_num)
+
+    def _recover_symbol_fonts(self, doc: fitz.Document, pdf_path: Path) -> None:
+        """Rebuild missing ToUnicode maps before any text is read (#217).
+
+        Must run before the first ``get_text`` on *doc*: an embedded symbol font
+        with no ToUnicode makes the text layer hand back the raw byte, so a minus
+        sign extracts as ``2`` and ``-0.12`` ships as ``20.12``. Repairing the
+        document here fixes every reader downstream at once rather than each
+        call site patching text after the fact.
+
+        Never raises: a document that cannot be repaired must still be assessed
+        exactly as it was before this existed.
+        """
+        try:
+            report = repair_symbol_font_text(doc)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[glyph] %s: recovery failed (%s)", pdf_path.name, exc)
+            return
+
+        self.last_glyph_repair = report
+        if not report.repaired:
+            return
+        logger.info(
+            "[glyph] %s: rebuilt ToUnicode for %d font(s), %d glyph(s)",
+            pdf_path.name,
+            len(report.repaired_fonts),
+            report.mapped_glyph_count,
+        )
+        if report.unmapped_glyphs:
+            # Surfaced, not swallowed: these characters are still whatever the
+            # extractor produced, so the page is not trustworthy.
+            logger.warning(
+                "[glyph] %s: %d drawn glyph(s) have no verified mapping and were "
+                "left unchanged: %s",
+                pdf_path.name,
+                len(report.unmapped_glyphs),
+                ", ".join(report.unmapped_glyphs),
+            )
 
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
         """Assess a page and stamp its dominant text direction onto the result.
