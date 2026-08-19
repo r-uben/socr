@@ -344,3 +344,48 @@ class TestDetectorSurfacing:
         )
         detector._recover_symbol_fonts(object(), tmp_path / "doc.pdf")
         assert detector.last_glyph_repair is None
+
+
+def _state():
+    """A minimal DocumentState, bypassing the handle's filesystem probe."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=Path("/tmp/paper.pdf"), page_count=1)
+    return DocumentState(handle=handle)
+
+
+class TestStatePropagation:
+    """The flag must survive the hop into PageState and reach the audit trail.
+
+    Marking only the transient PageAssessment is the same half-fix this class of
+    bug keeps recurring as: the mark exists, and nothing that ships can see it.
+    """
+
+    def test_flag_reaches_page_state(self):
+        from socr.core.born_digital import DocumentAssessment, PageAssessment
+
+        page = PageAssessment(
+            page_num=1,
+            is_born_digital=True,
+            native_text="x",
+            confidence=1.0,
+            has_unrecovered_symbol_glyphs=True,
+        )
+        state = _state()
+        state.apply_born_digital(DocumentAssessment(path="x.pdf", pages=[page]))
+
+        assert state.pages[1].has_unrecovered_symbol_glyphs
+
+    def test_clean_page_does_not_set_the_flag(self):
+        from socr.core.born_digital import DocumentAssessment, PageAssessment
+
+        page = PageAssessment(page_num=1, is_born_digital=True, native_text="x", confidence=1.0)
+        state = _state()
+        state.apply_born_digital(DocumentAssessment(path="x.pdf", pages=[page]))
+
+        assert not state.pages[1].has_unrecovered_symbol_glyphs

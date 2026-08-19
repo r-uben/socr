@@ -39,6 +39,12 @@ class PageState:
     #: is never *silently* relied on. Digit corruption never sets this — that class
     #: is routed to OCR at detection.
     has_encoding_hygiene_suspect: bool = False
+    #: #217: the page's symbol font shipped no ToUnicode map and at least one
+    #: glyph it draws has no verified recovery, so those characters are still
+    #: whatever the extractor produced. Unlike the cosmetic class above this one
+    #: CAN be a digit or an operator -- an unrecovered minus is a sign flip -- so
+    #: the page must never be silently trusted.
+    has_unrecovered_symbol_glyphs: bool = False
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
@@ -207,6 +213,9 @@ class DocumentState:
                 ps.has_equations = pa.has_equations
                 ps.has_unmapped_math_glyphs = getattr(pa, "has_unmapped_math_glyphs", False)
                 ps.has_encoding_hygiene_suspect = getattr(pa, "has_encoding_hygiene_suspect", False)
+                ps.has_unrecovered_symbol_glyphs = getattr(
+                    pa, "has_unrecovered_symbol_glyphs", False
+                )
                 if pa.is_born_digital:
                     ps.native_text = pa.native_text
                     ps.needs_ocr_enhancement = pa.needs_ocr_enhancement

@@ -2716,6 +2716,31 @@ class UnifiedPipeline:
                             data={"class": "hygiene"},
                         )
                     )
+
+                # #217: the page's symbol font had no ToUnicode map and at least
+                # one glyph it draws has no verified recovery, so those
+                # characters are still the wrong ones. Unlike the hygiene class
+                # above, this class CAN corrupt a digit or an operator -- an
+                # unrecovered minus is a sign flip, a negative coefficient
+                # shipping as a large positive one -- so it must be visible on
+                # the page's own audit trail and not only in a log line.
+                if getattr(ps, "has_unrecovered_symbol_glyphs", False):
+                    from socr.core.audit_log import AuditEvent
+
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="native_unrecovered_symbol_glyphs",
+                            engine="native",
+                            detail=(
+                                "born-digital native text shipped from a symbol font with no "
+                                "ToUnicode map; some drawn glyphs have no verified recovery "
+                                "and remain whatever the extractor produced (a minus can read "
+                                "as a digit, flipping a coefficient's sign)"
+                            ),
+                            data={"class": "symbol_glyph"},
+                        )
+                    )
             else:
                 # Route OCR page through the cost ladder.
                 remaining = None
