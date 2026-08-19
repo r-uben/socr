@@ -419,6 +419,19 @@ dup 196 /Adieresis put
 readonly def
 """
 
+# The same Monotype namespace, but a subset whose glyphs are ALL outside the
+# table — e.g. a paper drawing only glyphs GLYPH_UNICODE does not cover yet.
+# Nothing here is recoverable, and that is the MOST corrupted case, not a
+# skippable one: subsetted fonts embed only the glyphs the paper uses, so zero
+# overlap with the table needs nothing exotic.
+ALL_UNKNOWN_MONOTYPE_TYPE1 = b"""
+/Encoding 256 array
+dup 115 /H9268 put
+dup 60 /H11021 put
+dup 165 /H11033 put
+readonly def
+"""
+
 
 class TestAffectedFontGate:
     """A font missing its ToUnicode is not automatically the broken class (#246).
@@ -437,6 +450,38 @@ class TestAffectedFontGate:
         from socr.core.glyph_recovery import _is_affected_font
 
         assert _is_affected_font(_parse_type1_encoding(SYNTHETIC_TYPE1))
+
+    def test_a_monotype_font_with_no_recoverable_glyph_is_still_the_broken_class(self):
+        """The gate keys on the H<number> namespace, not on table membership.
+
+        A gate of "at least one glyph is in GLYPH_UNICODE" silently skipped a
+        subsetted symbol font whose drawn glyphs all fall outside the table —
+        reintroducing the #217 failure with no warning, and (worse) caching the
+        file as clean.
+        """
+        from socr.core.glyph_recovery import _is_affected_font
+
+        assert _is_affected_font(_parse_type1_encoding(ALL_UNKNOWN_MONOTYPE_TYPE1))
+
+    def test_the_worst_case_font_is_reported_not_skipped(self):
+        """All drawn glyphs outside the table must still raise the alarm.
+
+        Gating on "can we recover something" would make the most corrupted
+        document the quietest one — the exact inversion ``needs_attention``'s
+        docstring forbids.
+        """
+        doc = StubDoc(
+            fonts=[(212, "pfa", "Type1", "ABCDEF+Universal-GreekwithMathPi", "F1", "")],
+            chars_by_font={"Universal-GreekwithMathP": "s<" + chr(165)},
+            tounicode={212: False},
+            buffers={212: ALL_UNKNOWN_MONOTYPE_TYPE1},
+        )
+        report = repair_symbol_font_text(doc)
+
+        assert not report.repaired
+        assert report.unmapped_glyphs == ["H11021", "H11033", "H9268"]
+        assert report.needs_attention
+        assert not doc.attached
 
     def test_an_ordinary_font_is_left_completely_alone(self):
         """Not repaired, and — the false alarm — not reported either."""
