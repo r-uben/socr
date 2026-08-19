@@ -21,3 +21,38 @@ through; git does not.
 Case 9005 is the second: ancestry and a touching commit are NOT enough for
 ALREADY-FIXED. Without enumerated acceptance criteria and a reproducer that ran,
 the verdict is forced to NEEDS-MEASUREMENT.
+
+## Second self-test, after the classifier was extended (same run, later)
+
+The first real triage output made the flat pass/fail useless: 9 of 12 verdicts in
+one batch failed the strict check, and the failures were indistinguishable from
+each other. Two were labelled FABRICATED. Both turned out to be **real docstrings
+with a stray trailing quote** — the model had closed a docstring the source line
+leaves open. Calling that fabrication would have slandered an honest agent and
+thrown away a correct verdict.
+
+So `check_citation` now returns four classes. `evidence_verified` stays exactly as
+CONTRACT specifies (true only for EXACT); the class is extra information for the
+adjudicator, not a relaxation.
+
+| class | meaning | evidence_verified |
+|---|---|---|
+| `EXACT` | snippet is on the cited line | true |
+| `DRIFT` | snippet is in the file, different line | false |
+| `PARTIAL` | substantial prefix present; transcription noise | false |
+| `FABRICATED` | nothing resembling it anywhere in the file | false |
+
+Re-tested with two added adversarial cases:
+
+| issue | case | class |
+|---|---|---|
+| 9008 | a plausible invented line placed in a real file | `FABRICATED` |
+| 9009 | a real line copied from a *different* file into this one | `FABRICATED` |
+
+Both are caught. The weakened matching does not open a door for invention: the
+prefix fallback has a 25-character floor, so `return len(doc) >= threshold` cited
+against `return len(doc) > threshold` is still `FABRICATED`, not excused as noise.
+
+**Result on the real corpus: 0 fabricated citations across all four batches.**
+No dispatched agent invented evidence. The failures are line drift, which the
+adjudicator can weigh.

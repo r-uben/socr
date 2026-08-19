@@ -48,29 +48,91 @@ def git(*args: str) -> tuple[int, str]:
     return p.returncode, p.stdout
 
 
+def _norm(t: str) -> str:
+    return " ".join(t.split())
+
+
+def _variants(snippet: str) -> list[str]:
+    """Progressively weaker forms of the claimed snippet.
+
+    Models transcribe code with small artifacts — most often closing a docstring
+    that is left open on the source line. Those are grounded citations with noise,
+    not inventions, and calling them FABRICATED would be a serious slander of an
+    honest agent. So before we reach for that label we retry with the trailing
+    punctuation stripped and then with a substantial prefix.
+    """
+    base = _norm(snippet)
+    out = [base]
+    trimmed = base.rstrip("\"'`,;:.()[]{} ")
+    if trimmed and trimmed != base:
+        out.append(trimmed)
+    for frac in (0.8, 0.6):
+        n = int(len(base) * frac)
+        if n >= 25:
+            out.append(base[:n].rstrip())
+    return [v for i, v in enumerate(out) if v and v not in out[:i]]
+
+
 def check_citation(c: dict) -> dict:
-    """Resolve one {path,line,snippet} at MAIN_SHA. Never trusts the model's text."""
+    """Resolve one {path,line,snippet} at MAIN_SHA. Never trusts the model's text.
+
+    Four outcomes, and the distinction between the last two is the whole point:
+      EXACT      - snippet is on the claimed line. evidence_verified can be true.
+      DRIFT      - snippet is in the file, on a different line. The agent read the
+                   code; the line number moved.
+      PARTIAL    - a substantial prefix of the snippet is in the file, with
+                   transcription noise (a stray closing quote, a truncation).
+      FABRICATED - nothing resembling the snippet is anywhere in the file. This is
+                   the silent-fabrication failure mode the sweep exists to catch.
+    Only EXACT sets ok=True: CONTRACT is explicit that the snippet must be on the
+    cited line. The other three are recorded so the adjudicator can tell a sloppy
+    citation from an invented one instead of being handed one flat "void".
+    """
     out = {"citation": c, "ok": False, "reason": None}
     path, line, snippet = c.get("path"), c.get("line"), c.get("snippet")
     if not path or not isinstance(line, int) or not snippet:
         out["reason"] = "malformed citation (needs path, integer line, snippet)"
+        out["classification"] = "MALFORMED"
         return out
     rc, blob = git("show", f"{MAIN_SHA}:{path}")
     if rc != 0:
         out["reason"] = f"path does not exist at main_sha: {path}"
+        out["classification"] = "FABRICATED"
         return out
     lines = blob.splitlines()
     if not (1 <= line <= len(lines)):
-        out["reason"] = f"line {line} out of range (file has {len(lines)} lines)"
+        out["reason"] = f"line {line} out of range ({path} has {len(lines)} lines)"
+        out["classification"] = "OUT-OF-RANGE"
         return out
+
     actual = lines[line - 1]
-    if snippet.strip() not in actual:
+    if _norm(snippet) in _norm(actual):
+        out.update(ok=True, classification="EXACT", actual_line=actual.strip())
+        return out
+
+    normed = [_norm(x) for x in lines]
+    for depth, var in enumerate(_variants(snippet)):
+        hits = [i + 1 for i, l in enumerate(normed) if var in l]
+        if not hits:
+            continue
+        nearest = min(hits, key=lambda h: abs(h - line))
+        out["found_at_lines"] = hits[:8]
+        out["drift"] = nearest - line
+        exact_form = depth == 0
+        out["classification"] = "DRIFT" if exact_form else "PARTIAL"
+        out["matched_variant"] = var if not exact_form else None
         out["reason"] = (
-            f"snippet not on line {line}. claimed={snippet.strip()!r} actual={actual.strip()!r}"
+            f"snippet not on line {line} but {'is' if exact_form else 'substantially'} "
+            f"present in {path} at line(s) {hits[:5]} (nearest drift {nearest - line:+d}); "
+            f"actual_at_{line}={actual.strip()!r}"
         )
         return out
-    out["ok"] = True
-    out["actual_line"] = actual.strip()
+
+    out["classification"] = "FABRICATED"
+    out["reason"] = (
+        f"FABRICATED: nothing resembling this snippet is anywhere in {path} at "
+        f"main_sha. claimed={snippet.strip()!r} actual_at_{line}={actual.strip()!r}"
+    )
     return out
 
 
@@ -134,7 +196,8 @@ def main() -> int:
 
     (PLAN / "triage" / "verified").mkdir(parents=True, exist_ok=True)
     bad_already_fixed = 0
-    grand = {"checked": 0, "verified": 0, "void": 0}
+    grand = {"checked": 0, "verified": 0, "void": 0,
+             "fabricated_citations": 0, "drifted_citations": 0}
 
     for batch, files in sorted(batch_files.items()):
         rows = []
@@ -177,6 +240,11 @@ def main() -> int:
                         bad_already_fixed += 1
 
                 grand["verified" if ok else "void"] += 1
+                classes = [r.get("classification") for r in results]
+                n_fab = sum(1 for c in classes if c == "FABRICATED")
+                n_drift = sum(1 for c in classes if c in ("DRIFT", "PARTIAL"))
+                grand["fabricated_citations"] += n_fab
+                grand["drifted_citations"] += n_drift
                 rows.append(
                     {
                         "vendor": vendor,
@@ -188,6 +256,16 @@ def main() -> int:
                         "reason": None if ok else "; ".join(reasons),
                         "citations_checked": len(cites),
                         "citations_failed": len(bad),
+                        "citations_fabricated": n_fab,
+                        "citations_drifted": n_drift,
+                        # a verdict whose evidence merely drifted is recoverable by
+                        # the adjudicator; one carrying a fabricated snippet is not
+                        "evidence_class": (
+                            "FABRICATED" if n_fab
+                            else "DRIFT" if n_drift
+                            else "CLEAN"
+                        ),
+                        "citation_classes": classes,
                         "citation_detail": results,
                         "confidence": v.get("confidence"),
                         "rationale": v.get("rationale"),
@@ -214,6 +292,10 @@ def main() -> int:
 
     print(
         f"\nTOTAL checked={grand['checked']} verified={grand['verified']} void={grand['void']}"
+    )
+    print(
+        f"citations: {grand['drifted_citations']} drifted/partial (grounded, wrong line), "
+        f"{grand['fabricated_citations']} FABRICATED (snippet absent from the file)"
     )
     if bad_already_fixed:
         print(
