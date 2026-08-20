@@ -1,0 +1,94 @@
+{
+  "issue": 262,
+  "round": "5-or-design",
+  "written_before_any_code": true,
+  "recommendation": "DESIGN PASS FOR THE OWNER -- do not ship a fifth predicate.",
+  "one_line": "The failure class is not syntax, it is provenance: the three new phantoms are REAL grids that are not readings of the page, and no amount of markdown shape-checking can see that, because the shape is genuinely there.",
+  "findings_reproduced": [
+    {
+      "id": 1,
+      "case": "prose line with one pipe acts as the header",
+      "input": "noise | a\\n| --- | --- |\\n| --- | --- |\\n| 1 | 2 |",
+      "has_strict_table_grid": true,
+      "reviewer_correct": true,
+      "note": "Also true of the 3-line variant 'noise | a / | --- | --- | / | 1 | 2 |'."
+    },
+    {
+      "id": 2,
+      "case": "4-space indented code block leaks",
+      "input": "Example:\\n\\n    | a | b |\\n    |---|---|\\n    | 1 | 2 |",
+      "has_strict_table_grid": true,
+      "reviewer_correct": true,
+      "note": "_PIPE_LINE allows leading whitespace and _split_row strips it, so an indented code block is read as table structure."
+    },
+    {
+      "id": 3,
+      "case": "HTML comment not stripped",
+      "input": "<!--\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n-->",
+      "has_strict_table_grid": true,
+      "reviewer_correct": true,
+      "note": "The single-line variant '<!-- | a | b | ... -->' is already rejected, so the hole is block comments specifically."
+    }
+  ],
+  "reviewer_correction_accepted": "MiniMax is right that my 'two of three were live at page level' claim collapsed two orderings. Round 3 accepted the 'Table 4.' ordering, so mid-block-separator was not live for that ordering and WAS live for the reverse. fixes/262-round4.json adversarial_cases[10] states one verdict for what is really two cases and should be read as corrected by this file.",
+  "framing_i_retract": {
+    "claim": "Round 4's 'returns False by default, so a case nobody anticipated fails closed'.",
+    "status": "FALSIFIED, and I am dropping it.",
+    "why_it_was_wrong_in_kind_not_degree": "The shape check does fail closed on SHAPE violations. All three new phantoms are not shape violations -- each contains a syntactically perfect GitHub-markdown table. They are CONTEXT violations: the table is inside a code fence, inside an indented code block, inside an HTML comment, or headed by a prose fragment. A predicate that validates markdown syntax cannot reject them, because by markdown syntax they are correct. I was hardening a parser against a failure class that is not parseable."
+  },
+  "two_measurements_that_settle_it": [
+    {
+      "what": "The MERGED #259 predicate has the IDENTICAL hole, on main, today.",
+      "method": "Drove flagged_model_page_output (src/socr/core/manifest.py, merged at 653728a) with a fenced code sample and with pipe-bearing prose as the model attempt.",
+      "result": "Both KEEP -- the phantom is accepted and a model page substitutes for the native reading.",
+      "implication": "Every phantom found in rounds 3 and 4 is live in merged code that no one has reviewed for it. This is not a defect in my predicate; it is a property of re-deriving 'did an attempt author a grid' from text at each call site. Two call sites already exist and both are wrong the same way."
+    },
+    {
+      "what": "MiniMax's own remedy for finding 1 does not close finding 1.",
+      "method": "Applied the proposed header definition ('cells not all separators and not all blank') to the finding's own input.",
+      "result": "header cells ['noise', 'a'] -- not all separators, not all blank -> the remedy ACCEPTS it.",
+      "implication": "A fifth patch built from this list would ship believing it fixed a case it does not fix. That is the 'confident wrong measurement' failure the CONTRACT names, and it is the fourth consecutive time a bound looked exhaustive and was not."
+    }
+  ],
+  "answer_to_the_question_asked": {
+    "question": "Should this predicate be re-deriving 'did an attempt author a grid?' from TEXT at assemble time at all?",
+    "answer": "No. But the naive version of the remedy does NOT work, and this is the part that needs the owner rather than an implementer.",
+    "why_naive_persistence_fails": "The extraction side does not currently hold a phantom-proof notion of 'authored a grid' either. It holds THREE text-only parsers, all with the same blind spot: reconcile.find_table_blocks (loose by design and documented as such), native_verifier._parse_output_col_count (its own scanner, src/socr/tables/native_verifier.py:335), and structure_check.check_markdown, which explicitly delegates to find_table_blocks and whose docstring already concedes an inherited blind spot. Recording 'find_table_blocks was non-empty' at extraction time would persist the same phantom with a longer paper trail.",
+    "what_does_work": "Persist a GROUNDED fact, not a parse. Upstream holds exactly one thing assemble does not: the page's own word geometry. verify_native_table already computes output_col_count against native_lane_count derived from real word positions. A code fence, an HTML comment, an indented code sample and a pipe-bearing prose header all share the property that their columns correspond to NO native lanes on the page. Geometry is the discriminator the text cannot supply, and it is already computed and already thrown away -- the same information-loss shape as #259, answered the same way #260 answered it.",
+    "so_the_lead_diagnosis_is": "Right in mechanism, and right that #260 is the precedent. Incomplete only in that the fact to persist must be the geometry-corroborated verdict, not the parse result."
+  },
+  "rough_cost": {
+    "shape": "Comparable to #260 (which added PageOutput.rejection_class): a small schema addition, one write site, two read sites, serialization, resume compatibility.",
+    "write_site": "NativeTableVerifierJudge.assess in src/socr/pipeline/agentic.py, where vr (output_col_count, native_lane_count, state) and words are both in scope -- the same place rejection_class is already written.",
+    "read_sites": "manifest.d3_floor_kept_model_output (#262) AND manifest.flagged_model_page_output (#259). Both, or the fix is half-applied.",
+    "serialization": "PageOutput.to_dict/from_dict, plus the pages/NNN.json sidecar. Absent field defaults to 'not grounded' -> marker, which is fail-closed and correct.",
+    "estimate": "roughly 150-250 lines of src plus tests, one implementer, plus review rounds. The engineering is not the hard part.",
+    "what_is_actually_hard": "Deciding what counts as grounded, which is a judgement about the corpus and not something an implementer should invent."
+  },
+  "decisions_the_owner_has_to_make": [
+    "What counts as a GROUNDED grid? Candidate: output_col_count >= 2 AND the verifier ran with native words in scope. Needs a rule for pages where the verifier legitimately bypasses (scans, no words) -- on those, is the marker or the grid correct?",
+    "Is #259 in scope? Its predicate has the same hole in merged code. Fixing only #262 leaves a known live defect in main; fixing both changes behaviour on a ruling the owner already made.",
+    "Resume interaction. Terminal sidecars written before the field exists carry no grounding, so they default to the marker and the page re-OCRs. Fail-closed is right, but it changes resume cost on an existing corpus -- and per the known gap, the run fingerprint has no source-version component, so correctness fixes are not otherwise reapplied to terminal pages.",
+    "STRICT_GRID_REQUIRES_UNIFORM_BODY, still unanswered. If grounding replaces syntax as the gate, the equal-width question may dissolve rather than need answering -- a ragged grid corroborated by page geometry is real content, which is what #259's flag-and-keep ruling already says."
+  ],
+  "what_i_recommend_happens_to_pr_264": {
+    "position": "Do not merge as the answer to #262, and do not close it either.",
+    "reasoning": "Everything below the grid predicate has now been verified independently by four models and holds: the allowlist over rejection_class, the call site reached exactly once, audit_passed never flipped, source attempts unmutated, non-table content preserved, four-surface reporting, the reverse guards, find_table_blocks byte-identical, no multiset oracle. That work is sound and should not be thrown away with the predicate.",
+    "options_for_the_owner": [
+      "(a) Park #264 behind the design pass and land it once the grounded fact exists, swapping has_strict_table_grid for a read of the recorded verdict -- a small diff on top of what is already reviewed.",
+      "(b) Land #264 as-is with the predicate's limits stated in the code, accepting that four phantom classes still suppress the marker, on the argument that it is strictly better than main (where the marker suppresses a faithful extraction unconditionally). I do not recommend this without the owner saying so explicitly, because it trades a known-loud failure for a quieter one.",
+      "(c) Narrow #262 to the half that needs no grid predicate at all -- see below."
+    ],
+    "option_c_detail": "The non-table-content half of #262 -- 'the page's prose and equations must survive a table verdict' -- does not depend on deciding whether an attempt authored a grid. It is currently entangled with that decision only because I implemented both through one predicate. Splitting it would deliver the part of the issue that is not blocked, on evidence nobody has contested, while the grid question goes to design."
+  },
+  "my_judgement_in_one_paragraph": "Four rounds, four rejections, all on the same predicate, and the newest remedy list does not close its own first finding. That is the signature of a bound that cannot be reached by enumeration. The reason is now legible: I have been asking a syntax question ('is this markdown a table?') of a provenance problem ('is this text a reading of the page?'). Those come apart exactly where it matters, because a model echoing a template, quoting a prompt, or writing prose around a stray separator produces syntactically perfect tables that describe nothing on the page. Geometry is the only signal that separates them, it exists upstream, it is already computed, and it is discarded before assemble sees it. That is a design pass, and the fact that the same hole is sitting unreviewed in merged #259 code is the strongest argument that it should be taken as one rather than patched a fifth time.",
+  "state": {
+    "pr": 264,
+    "head": "f9f16b9228b86aafe3c817678fb6cf04f6614fbc",
+    "ci": "success",
+    "mergeable": "MERGEABLE",
+    "code_written_this_round": "none",
+    "equal_width_switch": "untouched, still with the owner",
+    "worktree": "/Users/rubenffuertes/repos/.worktrees/socr-262 clean at f9f16b9"
+  }
+}

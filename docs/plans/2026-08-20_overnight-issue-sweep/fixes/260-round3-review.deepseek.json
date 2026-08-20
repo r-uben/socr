@@ -1,0 +1,36 @@
+{
+  "pr": 260,
+  "head": "e4bd5b4",
+  "round": 3,
+  "reviewer": "ollama-deepseek",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-259 show \"e4bd5b4:src/socr/core/manifest.py\" | sed -n '419p'",
+    "output": "    if getattr(bo, \"rejection_class\", \"\") != REJECTION_AMBIGUOUS_DEFERRED:"
+  },
+  "verdict": "APPROVE",
+  "drift_reaches_all_four_surfaces": true,
+  "offending_values_named": true,
+  "flag_visible_in_shipped_output": true,
+  "asymmetry_defensible": true,
+  "empty_output_still_falls_back": true,
+  "floors_still_win": true,
+  "audit_passed_never_flipped": true,
+  "non_vacuity_confirmed": true,
+  "resume_safe": true,
+  "reran_baseline_myself": true,
+  "findings": [
+    {
+      "severity": "major",
+      "what": "For a CLEAN kept table (the reference #259 case — spanning headers, no drift, no grid defect), the assembled .md and pages/NNN.md body carry NO visible flag. The demotion (status=WARNING, failure_mode=MODEL_OUTPUT_FLAGGED) lives only in the sidecar JSON, manifest, metadata (partial) and CLI line. The ruling says 'carry the flag visibly on the page', and the reference case is precisely the 'good table' the ruling is about — yet a human reading the .md sees a clean table with no indication it was flagged.",
+      "where": "src/socr/core/manifest.py:204-217 (kept_table_flag_note returns '' when there is no drift event and no grid defect, so no note is appended)",
+      "why": "kept_table_flag_note only emits a note for a table_value_drift_unadjudicated event or a kept_table_grid_defect. A clean kept table has neither, so the .md body is the model table with no marker. The flag is NOT silent — it reaches sidecar (status=warning, failure_mode=model_output_flagged), manifest journal (accepted=false), metadata (partial), tables_trust.json, audit_log (flagged_model_table_kept) and the CLI ('shipped the model's FLAGGED reading') — but the one surface a human cites from (the .md) is bare. The author's test_a_clean_kept_table_carries_no_noise asserts this is intended (note only for specific problems, to avoid flag wallpaper). Defensible, but the owner should confirm: does a clean kept table need a note in the .md body, or is status/failure_mode/CLI sufficient? One-line change if the former."
+    },
+    {
+      "severity": "minor",
+      "what": "The GH-90 scanned source-evidence floor (scanned_table_evidence_failed) is checked in flagged_model_page_output but has no dedicated reverse-regression test. The D3 floor is tested (test_d3_fail_closed_floor_still_wins_over_a_flagged_model_table), the GH-90 floor is not.",
+      "where": "src/socr/core/manifest.py:135-136 (the scanned_table_evidence_failed early return)",
+      "why": "The PR body claims 'The GH-90 scanned source-evidence floor and the TR-3 D3 floor ship an explicit failed-table marker' and both are checked before the keep branch, but only the D3 floor has a new test proving it still wins. The GH-90 floor's precedence is asserted by code, not by a test, so a future edit could silently reorder it."
+    }
+  ],
+  "what_i_tried_to_break": "1) Constructed my OWN drift case (native 12.34/56.78/90.12, model writes 99.99 for 56.78 plus an extra row) and ran it end-to-end through the real judge and full pipeline: the drift reaches the .md body, pages/NNN.md, document (AUDIT_FAILED), metadata (partial), tables_trust.json, audit_log.json and CLI, and describe_drift names both values ('model wrote 99.99 where the page reads 56.78'). 2) Verified the demotion reaches the sidecar (winning_output.status=warning, failure_mode=model_output_flagged) with a proper born-digital table fixture. 3) Confirmed the source best_output is unmutated through canonical_page_texts (status stays success, audit_passed stays False, text unchanged) — the demotion is a dataclasses.replace copy. 4) Re-ran the test file at base ed4fb05 myself: 11 failed / 8 passed, grep -cE '^E +(ImportError|AttributeError|TypeError)' = 0, and the 8 passing tests are exactly the reverse guards. 5) Ran the two existing test files the PR body names (test_pp5_resume_ledger.py, test_table_repair_parity.py): 47 passed, 1 xfailed — no existing test weakened. 6) Traced the asymmetry (inner-ACCEPT -> gate rejects -> native; inner-REFUSE -> ambiguous deferral -> kept+flagged) and confirmed both directions are tested and the fork is determined by whether the ladder accepted a rung (which decides whether native is trusted), not by randomness."
+}

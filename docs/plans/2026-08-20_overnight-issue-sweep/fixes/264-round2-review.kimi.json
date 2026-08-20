@@ -1,0 +1,42 @@
+{
+  "pr": 264,
+  "head": "1d87a5a",
+  "round": 2,
+  "reviewer": "kimi",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-night-base show \"53b0637b928c486e9ff3023fa9527905fec017b2:src/socr/pipeline/agentic.py\" | sed -n '649p'",
+    "output": "        there is nothing to gate on a page that is not shipping anyway."
+  },
+  "verdict": "APPROVE",
+  "d3_floor_still_holds": true,
+  "certain_fail_now_blocked": true,
+  "judge_only_is_genuinely_soft": true,
+  "mark_cannot_survive_a_later_gate_rejection": true,
+  "changed_fixture_legitimate": true,
+  "png_ref_and_flag_note_present": true,
+  "audit_passed_never_flipped": true,
+  "non_vacuity_confirmed": true,
+  "no_multiset_oracle": true,
+  "reran_baseline_myself": true,
+  "findings": [
+    {
+      "severity": "minor",
+      "what": "The judge_only stamp is also written when the verifier had nothing to check against, not only when it 'found no issue'. Probe: a page whose native words contain zero numeric tokens, model outputs a numbered grid, inner judge refuses -> rejection_class='judge_only', and the grid qualifies to supersede the floor. The agentic.py comment ('The verifier found nothing to refute') overstates the guarantee; the accurate statement is 'no deterministic refutation was recorded'. Mitigations: the D3 conjunction (native_table_structure_failed AND unverifiable/header_unattributed) requires a native table region that failed, which is near-contradictory with a numeric-free native layer; the shipment is loudly flagged at all four levels; the alternative is a zero-content marker.",
+      "where": "src/socr/pipeline/agentic.py:677-688",
+      "why": "Semantics broader than the docstring; same softness class as merged #260's ambiguous_deferred, so not blocking, but the comment should not claim more than the stamp proves."
+    },
+    {
+      "severity": "minor",
+      "what": "A judge-refused grid is never evaluated by the structural gate (_apply_structural_gate returns rejecting decisions unchanged), so a structurally ragged grid refused by the judge ships flagged over the floor without the deterministic shape check ever running. Identical property exists in merged #260's ambiguous_deferred path (stamp set before the gate, gate no-ops), so this is a disclosed, precedented trade-off, not a regression.",
+      "where": "src/socr/pipeline/agentic.py:707-710",
+      "why": "The value guard (the deterministic NUMERIC refutation, the actual D3 nightmare) always ran before the stamp; the gate's shape check is the only check skipped, and only on readings a quality judge already refused."
+    },
+    {
+      "severity": "minor",
+      "what": "d3_floor_kept_model_output does not reproduce _winning_page_output's best_output.audit_passed early-return guard, so in the known contradiction states (GH-151 B1 late flag, #214 resume restore) _phase_assemble could count a page in d3_model_table_pages (AUDIT_FAILED + audit event + CLI line) while the manifest shipped an accepted winner early. The author's own invariant ('exclusion predicate must match EXACTLY what the manifest ships') is bent in that case. Direction is safe (over-surfacing, never silent loss) and it requires an already-broken page state.",
+      "where": "src/socr/pipeline/orchestrator.py:5507-5509",
+      "why": "On all reachable non-contradictory states the predicates agree: an accepted rung has an empty rejection_class and the D3 flags are only set when the ladder failed."
+    }
+  ],
+  "what_i_tried_to_break": "Read every rejection_class writer/reader at head (exactly two writers: agentic.py:652 ambiguous_deferred, agentic.py:687 judge_only). Enumerated the verifier state machine (EXACT_PASS/CERTAIN_FAIL/AMBIGUOUS only) and every assess() exit: CERTAIN_FAIL hard-returns before the inner judge and writes nothing (confirmed against the REAL NativeTableVerifierJudge by the author's test and my reading); exception path, non-table page, non-SUCCESS output, and None fitz handle all delegate without stamping (probed C and D: stamp stays ''). Probed a CERTAIN_FAIL-shaped best_output (SUCCESS/NONE/empty rejection_class, grid of 99.99/88.88) alongside an earlier judge_only grid: the refuted winner is skipped, the soft grid ships WARNING + MODEL_TABLE_OVER_FAILED_FLOOR, stored attempts untouched, PNG ref and in-body note retained. Probed a numeric-free native page: stamp IS written (minor finding 1). Confirmed _apply_structural_gate short-circuits on rejecting decisions, so the soft mark can never coincide with a gate rejection (the #260 round-2 ordering bug shape). Confirmed the gh259 fixture change was forced: its _state defaults rejection_class='ambiguous_deferred', so a grid-bearing fixture now supersedes BY DESIGN; the renamed test still pins marker+ERROR+native-suppressed, and gh205 is byte-identical to 8ad92e1 (empty git diff). Reran tests/test_gh262_d3_marker_over_cached_grid.py at base 8ad92e1 in a detached worktree (canary: socr.__file__ inside that tree): 14 failed on behaviour, 12 passed, zero ImportError/AttributeError/TypeError — matches the author's claim exactly; worktree removed after. At head: 87 passed across the new file plus gh259/gh205/gh95. CI green on 1d87a5a (test 3.11, typecheck). canonical_page_texts traced through _winning_page_output; the early return on best_output.audit_passed means any reached attempt already has audit_passed=False, so the replace() copy flips nothing. No multiset or decimal-count oracle anywhere in the change or tests; assertions are text containment, status, and identity."
+}

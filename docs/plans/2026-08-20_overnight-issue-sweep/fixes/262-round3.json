@@ -1,0 +1,109 @@
+{
+  "issue": 262,
+  "round": 3,
+  "verdict": "FIXED",
+  "pr": {
+    "number": 264,
+    "url": "https://github.com/r-uben/socr/pull/264",
+    "branch": "fix/262-d3-marker-over-cached-grid",
+    "head": "1a377898a4e79d4d6ebca4e7cf32f6b582496bb2",
+    "round2_head": "1d87a5a08339184fb08920321e9068dfe81fec44",
+    "round1_head": "aec09162734a675cdd82367e05760ebf17a860ba",
+    "base": "main @ 4c18ef2 (merged in, NOT rebased; no force-push at any point)",
+    "mergeable": "MERGEABLE"
+  },
+  "owner_finding_verified_at_origin_main": {
+    "site": "src/socr/tables/reconcile.py:87 find_table_blocks",
+    "requirement": ">= 2 consecutive pipe-bearing lines plus a non-empty _parse_grid. No separator row, no equal widths, no minimum column count, no body row.",
+    "docstring_states_rather_than_checks": "Prose almost never produces consecutive pipe lines, so this is robust without a heuristic cutoff.",
+    "measured_blocks_returned": {
+      "prose with pipes on two adjacent lines": 1,
+      "header+separator, no body": 1,
+      "two-dash separator": 1,
+      "single column": 1,
+      "ragged widths": 1,
+      "real grid": 1
+    }
+  },
+  "reproduction_as_a_live_defect": {
+    "note": "The required regression passes TRIVIALLY at origin/main -- there is no D3 keep path there, the marker always fires, and the assertion is vacuous. The code that HAS the defect is this branch's own round-2 head, so that is where it was measured.",
+    "measured_at": "1d87a5a",
+    "observed": "Four sentences of prose shipped in place of the D3 marker, under a flag note claiming a table was kept, on a page with nothing usable on it.",
+    "failure_lines": [
+      ">       assert \"failed: unverifiable table\" in winner.text, winner.text\nE       AssertionError: The Fama-Bliss regressions are reported in Table 4.\nE         Estimates for the constrained | unconstrained pair are discussed above.\nE         The spread coefficient | and its standard error | are reported in the text.\nE         The unconstrained estimates reject the expectations hypothesis.\nE         [page 1: unverifiable table — kept a model reading over the failed-table marker; ...]",
+      ">       assert \"failed: unverifiable table\" in winner.text, winner.text\nE       AssertionError: The Fama-Bliss regressions are reported in Table 4.\nE         | | const. | spread | $R^2$ | $\\chi^2$ |\nE         |---|---|---|---|---|",
+      ">       assert strict is not None, \"the fix must add a strict grid predicate\"\nE       AssertionError: the fix must add a strict grid predicate\nE       assert None is not None"
+    ],
+    "counts": {
+      "at_4c18ef2_full_file": "16 failed, 16 passed",
+      "at_1d87a5a_full_file": "3 failed, 29 passed",
+      "on_branch": "32 passed"
+    }
+  },
+  "strict_predicate": {
+    "name": "socr.tables.reconcile.has_strict_table_grid",
+    "helper": "_block_is_strict_grid, plus _STRICT_SEP_CELL = re.compile(r'^:?-{3,}:?$') and _STRICT_MIN_COLUMNS = 2",
+    "conditions": [
+      "a real separator row is present, every cell matching :?-{3,}:?",
+      "every row in the block has the same cell count",
+      "at least 2 columns",
+      "at least one body row AFTER the separator"
+    ],
+    "callers": "one -- the #262 D3 keep predicate in manifest.d3_floor_kept_model_output",
+    "find_table_blocks_unchanged": true,
+    "find_table_blocks_unchanged_evidence": "src/socr/tables/reconcile.py:find_table_blocks is byte-identical to origin/main; the strict check is additive, and tests/test_gh262_d3_marker_over_cached_grid.py::test_find_table_blocks_itself_is_unchanged pins that the loose helper still returns 1 block for bare prose, a half grid and a single column."
+  },
+  "three_required_assertions": [
+    {
+      "direction": "prose with pipes is NOT an authored grid; the marker still fires",
+      "test": "test_prose_containing_pipes_does_not_count_as_an_authored_grid",
+      "fixture_note": "PROSE_WITH_PIPES has two CONSECUTIVE pipe-bearing lines by construction, so it genuinely exercises the loose parser rather than passing for the wrong reason."
+    },
+    {
+      "direction": "a half-emitted grid (header + separator, no body) is NOT an authored grid",
+      "test": "test_a_half_emitted_grid_does_not_count_as_an_authored_grid"
+    },
+    {
+      "direction": "a real grid STILL supersedes the marker -- the tightening must not make the fix inert",
+      "test": "test_a_real_grid_still_supersedes_the_marker"
+    }
+  ],
+  "supporting_tests": [
+    {
+      "test": "test_the_loose_parser_really_does_accept_these_fixtures",
+      "why": "Grounding. Asserts find_table_blocks returns >=1 block for the prose and half-grid fixtures. Without it, a fixture that quietly stopped having two adjacent pipe lines would make both negative guards pass for the wrong reason."
+    },
+    {
+      "test": "test_the_strict_predicate_on_its_own_terms",
+      "why": "Each of the four conditions separately, so a failure names which one broke. Reached via getattr on the module so the baseline fails behaviourally, not with ImportError."
+    },
+    {
+      "test": "test_find_table_blocks_itself_is_unchanged",
+      "why": "Scope guard on the loose/strict split."
+    }
+  ],
+  "merge_required_adjustments": [
+    "The keep predicate excludes _NATIVE_TEXT_LANES rather than the 'native' prefix -- #265's review finding applies verbatim, since the chart lane (PP-7) ships native_text and native text is exactly what this floor distrusts.",
+    "The predicate declines outright on native_rotated_text_shredded, leaving #263's fail-closed floor untouched. Conservative: the keep-a-soft-refused-grid argument may apply there too, but that is #263's call."
+  ],
+  "flagged_to_owner": {
+    "ragged_grids": "'Equal row widths' means a RAGGED but genuine grid no longer supersedes the marker, so such a page ships zero content -- where #259's precedent (kept_table_grid_defect) flags and keeps it. A content-loss trade in the opposite direction from the one this ticket opened. Built to the stated spec and flagged, not silently traded.",
+    "commit_hygiene": "The merge commit also carries the round-3 change; they landed together by mistake and the commit message says so explicitly. Splitting after the fact would have meant re-resolving the merge by hand, the riskier operation on a third round."
+  },
+  "existing_tests_changed": "NONE in round 3. The two carried from earlier rounds are unchanged: tests/test_gh95_tables_trust.py (regex widened to see a digit) and tests/test_gh259_flagged_model_table_wins.py (D3 reverse guard amended to the scope where it holds). tests/test_gh205_tr3_unconditional_event.py remains reverted to main.",
+  "verification": {
+    "suite": "1970 passed, 3 xfailed, 5 warnings in 105.95s",
+    "lint": "uvx ruff@0.16.0 format --check . -> 332 files already formatted",
+    "ruff_check_advisory": "107 on branch, 107 at base 4c18ef2 -- none added",
+    "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-262/src/socr/__init__.py",
+    "ci": {
+      "workflow": "CI",
+      "headSha": "1a377898a4e79d4d6ebca4e7cf32f6b582496bb2",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    "abort_latch": "not set",
+    "force_push": "never",
+    "merged_by_me": "never"
+  }
+}

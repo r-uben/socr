@@ -1,0 +1,80 @@
+{
+  "issue": 263,
+  "round": 2,
+  "verdict": "BLOCKING FINDING CLOSED",
+  "pr": 265,
+  "pr_url": "https://github.com/r-uben/socr/pull/265",
+  "review_comment": "https://github.com/r-uben/socr/pull/265#issuecomment-5360724821",
+  "branch": "fix/263-rotation-refusal-without-tables",
+  "head": "8be326ed282a550a4d10cd68eddb43758b239385",
+  "previous_head_used_as_round2_baseline": "220e00dae93c57e7fff94b792abf45c6d2540caa",
+  "blocking_finding": {
+    "reported_at": "manifest.py:475",
+    "reproduced": true,
+    "mechanism": "orchestrator.py:1514-1518 -- _is_native_eligible_without_ocr returns True unconditionally under config.native_only, BEFORE the needs_ocr_enhancement check. The page therefore entered the PP-7 chart-asset lane, whose winner carries engine='chart_asset'. The contradiction guard at the top of _winning_page_output was keyed on (engine or '').startswith('native'), so the chart winner returned immediately and the round-1 fail-closed floor never ran: confetti shipped under SUCCESS."
+  },
+  "lane_enumeration": {
+    "method": "drove process() over the full pipeline-config matrix on three fixtures (shredded rotated figure page / clean rotated chart page / upright page), recording shipped engine, page status, count of <=2-char lines in the shipped text, and document status. A lane 'LEAKS' iff document status is success AND the shipped text contains confetti.",
+    "configurations": 20,
+    "axes": [
+      "agentic default (native_first=True, native_only=False)",
+      "agentic --native-only",
+      "agentic --no-native-first",
+      "deterministic (agentic=False) default",
+      "deterministic --native-only",
+      "+/- save_figures",
+      "with raster (chart marks present) vs no raster (chart lane cannot intercept)",
+      "single run vs resumed run (second process() restores the terminal ledger entry -- the #214 shape)"
+    ],
+    "before_fix": {
+      "leaking": [
+        "agentic --native-only            -> engine=chart_asset status=success confetti=15 doc=success",
+        "agentic --native-only + save_figures -> engine=chart_asset status=success confetti=15 doc=success (same lane)",
+        "resume x2 agentic --native-only  -> engine=chart_asset status=success confetti=15 (same lane, restored winner)"
+      ],
+      "already_safe": [
+        "agentic default                  -> engine=native status=error confetti=0",
+        "agentic --no-native-first        -> engine=native status=error confetti=0",
+        "deterministic --native-only      -> engine=native confetti=0 doc=error",
+        "deterministic default            -> engine=native confetti=0 doc=error",
+        "no-raster variants, all three agentic modes -> engine=native status=error confetti=0"
+      ]
+    },
+    "conclusion": "chart_asset is the ONLY leaking lane. There is no third lane. The plain native bypass under --native-only and every deterministic path already reached the floor because their winner is engine='native', which the existing guard caught.",
+    "after_fix": "every SHRED row reads engine=native status=error confetti=0 doc=error; every CLEAN and UPRIGHT row is byte-for-byte unchanged from before the fix."
+  },
+  "fix": {
+    "root_cause_site": "src/socr/core/manifest.py::_winning_page_output, the passing-winner early return",
+    "change": "new module constant _NATIVE_TEXT_LANES = ('native', 'chart_asset') -- the engines whose winning text IS PageState.native_text (the chart lane appends a PNG ref to it). The shred term of the contradiction guard is scoped to those lanes via startswith(_NATIVE_TEXT_LANES) instead of the bare 'native' prefix. The TABLE flags deliberately keep the narrower 'native' scope: they concern a native table reconstruction, which only the native lane performs.",
+    "png_preservation": "the chart lane hands the PNG it ALREADY rendered to ps.rotated_shred_png_ref, so the floor ships marker + image rather than a bare marker and nothing is rendered twice. The ref is written to the page sidecar and restored on resume next to d3_floor_png_ref, so a resumed run does not silently degrade to a bare marker.",
+    "routing_deliberately_unchanged": "_is_chart_asset_page was NOT narrowed. On a chart page the image is the content and the page is still a chart page; only its text half is refused. Narrowing the predicate would discard the PNG on every flagged page for no gain, and would enlarge the blast radius on good chart pages -- the stated failure mode of this change."
+  },
+  "reverse_guards_round2": [
+    "test_clean_rotated_chart_page_keeps_the_chart_asset_lane -- a rotated chart page that is NOT shredded still takes the lane (engine == 'chart_asset'), still ships SUCCESS, still carries '![Chart page 1](...)', caption intact. PASSES at 220e00d and on 8be326e.",
+    "test_upright_chart_page_keeps_the_chart_asset_lane -- unrotated chart page untouched, chart_asset SUCCESS with its PNG. PASSES at 220e00d and on 8be326e.",
+    "plus every CLEAN and UPRIGHT row of the 20-configuration sweep, unchanged before and after the fix."
+  ],
+  "non_vacuity": {
+    "baseline": "220e00dae93c57e7fff94b792abf45c6d2540caa (this PR's own previous head)",
+    "raw_output_at_baseline": ">       assert sidecar[\"status\"] != PageStatus.SUCCESS.value, (\nE       AssertionError: the chart-asset lane must not ship rotated confetti as success; shipped 'Figur\\ne\\n 4: Co\\nnt\\nribution\\n \\nof th\\ne t\\nhree po\\nl\\nicy i\\nn\\nstrume\\nnt\\ns to the\\n \\nhigh-\\nfre\\nquency \\nc\\nhange\\ns\\n in yi\\nel\\nds aroun\\nd\\n FOMC\\n an\\nnouncem\\ne\\nnts. \\nT\\nhe uni\\nts\\n are bas\\ni\\ns poi\\nnts\\n.\\n\\n![Chart page 1](figures/chart_page_1.png)'\nE       assert 'success' != 'success'\nE        +  where 'success' = <PageStatus.SUCCESS: 'success'>.value\nE        +    where <PageStatus.SUCCESS: 'success'> = PageStatus.SUCCESS\nE       AssertionError: Figur\nE         e\nE          4: Co\nE         nt\nE         ribution\nE          \nE         of th\nE         e t\nE         hree po\nE         l\nE         icy i\nE         n\nE         strume\nE         nt\nE         s to the\nE          \nE         high-\nE         fre\nE         quency \nE         c\nE         hange\nE         s\nE          in yi\nE         el\nE         ds aroun\nE         d\nE          FOMC\nE          an\nE         nouncem\nE         e\nE         nts. \nE         T\nE         he uni\nE         ts\nE          are bas\nE         i\nE         s poi\nE         nts\nE         .\nE         \nE         ![Chart page 1](figures/chart_page_1.png)\nE       assert 'success' != 'success'\nE        +  where 'success' = <PageStatus.SUCCESS: 'success'>.value\nE        +    where <PageStatus.SUCCESS: 'success'> = PageStatus.SUCCESS\nFAILED tests/test_rotated_shredded_native_263.py::TestChartAssetLaneCannotShipShreddedText::test_native_only_chart_lane_does_not_ship_success_or_confetti\nFAILED tests/test_rotated_shredded_native_263.py::TestChartAssetLaneCannotShipShreddedText::test_resumed_native_only_run_does_not_re_stamp_success\n2 failed, 2 passed in 0.62s\n",
+    "raw_output_on_branch": "tests/test_rotated_shredded_native_263.py::TestChartAssetLaneCannotShipShreddedText::test_native_only_chart_lane_does_not_ship_success_or_confetti PASSED [ 25%]\ntests/test_rotated_shredded_native_263.py::TestChartAssetLaneCannotShipShreddedText::test_resumed_native_only_run_does_not_re_stamp_success PASSED [ 50%]\ntests/test_rotated_shredded_native_263.py::TestChartAssetLaneCannotShipShreddedText::test_clean_rotated_chart_page_keeps_the_chart_asset_lane PASSED [ 75%]\ntests/test_rotated_shredded_native_263.py::TestChartAssetLaneCannotShipShreddedText::test_upright_chart_page_keeps_the_chart_asset_lane PASSED [100%]\n============================== 4 passed in 0.64s ===============================\n",
+    "argument": "Both baseline failures assert on the sidecar's 'status', which exists at 220e00d. No AttributeError/TypeError/ImportError. The other two tests in the new class PASS at the baseline -- they are the reverse guards. New PageState attributes are reached with getattr(..., default)."
+  },
+  "existing_tests": "No existing test weakened, edited or deleted. tests/test_landscape_refusal_a2_gh147.py still passes in full. No numeric-multiset or decimal-count oracle anywhere.",
+  "suite": "1938 passed, 3 xfailed in 204.12s",
+  "lint": "uvx ruff@0.16.0 format --check . -> '331 files already formatted'. uvx ruff@0.16.0 check: no new findings (same 8 pre-existing in src/; the test file is E402-only, the repo's established pytest.importorskip('fitz') pattern).",
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-263/src/socr/__init__.py",
+  "ci": {
+    "command": "gh run list --repo r-uben/socr --branch fix/263-rotation-refusal-without-tables --workflow CI --json status,conclusion,headSha",
+    "status": "completed",
+    "conclusion": "success",
+    "headSha": "8be326ed282a550a4d10cd68eddb43758b239385"
+  },
+  "files_changed_this_round": [
+    "src/socr/core/manifest.py",
+    "src/socr/pipeline/orchestrator.py",
+    "tests/test_rotated_shredded_native_263.py",
+    "docs/log/2026-08-20_263-rotated-shredded-native.md"
+  ],
+  "housekeeping": "Normal push to the same branch, no force, no merge. Abort latch checked before the push and absent. No worktree other than socr-263 touched."
+}

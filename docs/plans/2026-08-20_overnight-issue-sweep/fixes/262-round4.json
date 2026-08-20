@@ -1,0 +1,246 @@
+{
+  "issue": 262,
+  "round": 4,
+  "verdict": "FIXED",
+  "pr": {
+    "number": 264,
+    "url": "https://github.com/r-uben/socr/pull/264",
+    "branch": "fix/262-d3-marker-over-cached-grid",
+    "head": "f9f16b9228b86aafe3c817678fb6cf04f6614fbc",
+    "round3_head": "1a377898a4e79d4d6ebca4e7cf32f6b582496bb2",
+    "round2_head": "1d87a5a08339184fb08920321e9068dfe81fec44",
+    "round1_head": "aec09162734a675cdd82367e05760ebf17a860ba",
+    "base": "main @ 4c18ef2 (merged, never rebased; no force-push at any point)",
+    "mergeable": "MERGEABLE"
+  },
+  "why_structural_not_another_condition": "Rounds 1-3 each bounded the predicate by enumerating what to refuse and each list was incomplete -- the shape that took #259/#260 through three rejections. A fourth condition would not have converged. Unlike that problem this one is BOUNDED: a GitHub-markdown table has a defined shape, so the predicate asserts the shape and returns False for everything else. Every exit in _grid_starts_at is False; the only True is the end.",
+  "structural_predicate": {
+    "entry_point": "socr.tables.reconcile.has_strict_table_grid",
+    "helpers": [
+      "_strip_fenced_regions",
+      "_run_contains_grid",
+      "_grid_starts_at",
+      "_is_body_row (nested)"
+    ],
+    "shape": {
+      "rows[i]": "header, N cells, N >= 2",
+      "rows[i+1]": "separator, N cells, EVERY cell matching :?-{3,}:?",
+      "rows[i+2:]": "body, at least one CONTENT row -- N cells, not blank, and not itself a separator"
+    },
+    "separator_position": "i+1 specifically, never merely 'somewhere' in the block",
+    "body_position": "strictly from i+2, so a separator can never be counted as the body row after itself",
+    "offset_rationale": "A run may open with pipe-bearing prose above the real table. Each candidate offset must satisfy the WHOLE shape, so this is not laxity; it keeps a genuine grid from being lost to a stray sentence above it.",
+    "fence_awareness": "_strip_fenced_regions runs FIRST and blanks fenced content AND the fence lines, so a grid opening immediately after a fence with no blank line cannot inherit the fence's row. Only a fence of the same character (` or ~) closes one. An UNCLOSED fence swallows the rest of the document on purpose: the document is malformed and this predicate suppresses a fail-closed marker, so the honest answer under malformation is 'no grid here'.",
+    "default": "False -- a case nobody anticipated fails closed, pinned by test_the_predicate_fails_closed_on_a_shape_nobody_enumerated"
+  },
+  "fourth_phantom_found_by_self_testing": {
+    "case": "separator-as-body",
+    "why_the_first_structural_attempt_missed_it": "The body check required 'at least one non-empty cell', and a separator cell (---) IS non-empty text.",
+    "structural_remedy": "A body row must be CONTENT: right width, not blank, AND not itself a separator. Structure is not a reading.",
+    "note": "Found by running the enumeration, not by re-reading the diff."
+  },
+  "adversarial_cases": [
+    {
+      "case": "real grid",
+      "verdict": true,
+      "why": "the shape, minimal"
+    },
+    {
+      "case": "no leading or trailing pipes",
+      "verdict": true,
+      "why": "legitimate spelling"
+    },
+    {
+      "case": "leading pipe only",
+      "verdict": true,
+      "why": "legitimate spelling"
+    },
+    {
+      "case": "trailing pipe only",
+      "verdict": true,
+      "why": "legitimate spelling"
+    },
+    {
+      "case": "alignment colons in the separator (:---:, ---:)",
+      "verdict": true,
+      "why": "legitimate spelling"
+    },
+    {
+      "case": "spaces inside the separator",
+      "verdict": true,
+      "why": "legitimate spelling"
+    },
+    {
+      "case": "REVIEW: table inside a backtick fence",
+      "verdict": false,
+      "why": "code sample, not page structure"
+    },
+    {
+      "case": "REVIEW: fence with an info string (```markdown)",
+      "verdict": false,
+      "why": "same, info string must not defeat the scan"
+    },
+    {
+      "case": "REVIEW: table inside a tilde fence",
+      "verdict": false,
+      "why": "same, ~~~ is also a fence"
+    },
+    {
+      "case": "REVIEW: separator in the middle",
+      "verdict": false,
+      "why": "no valid header/sep/body triple at any offset"
+    },
+    {
+      "case": "REVIEW: separator-as-body",
+      "verdict": false,
+      "why": "a separator is structure, not content"
+    },
+    {
+      "case": "indented fence (up to 3 spaces)",
+      "verdict": false,
+      "why": "CommonMark allows the indent"
+    },
+    {
+      "case": "tilde fence nested in a backtick fence",
+      "verdict": false,
+      "why": "only the same char closes a fence"
+    },
+    {
+      "case": "backtick fence nested in a tilde fence",
+      "verdict": false,
+      "why": "same, other direction"
+    },
+    {
+      "case": "unclosed fence swallows the rest",
+      "verdict": false,
+      "why": "malformed document fails closed on purpose"
+    },
+    {
+      "case": "grid immediately after a fence, no blank line",
+      "verdict": true,
+      "why": "fence LINES are blanked too, so no row is inherited"
+    },
+    {
+      "case": "prose with pipes after a closed fence",
+      "verdict": false,
+      "why": "fence state correctly reset, prose still refused"
+    },
+    {
+      "case": "separator, separator, then a real body row",
+      "verdict": true,
+      "why": "a real content row exists below the separator"
+    },
+    {
+      "case": "empty body row, then a real one",
+      "verdict": true,
+      "why": "at least one content row is enough"
+    },
+    {
+      "case": "two grids separated by prose",
+      "verdict": true,
+      "why": "prose breaks the run; the second run is a grid"
+    },
+    {
+      "case": "pipe-bearing prose above a real grid",
+      "verdict": true,
+      "why": "the offset finds the real grid below the prose"
+    },
+    {
+      "case": "separator wider than the header",
+      "verdict": false,
+      "why": "separator width must equal header width"
+    },
+    {
+      "case": "a later row is ragged",
+      "verdict": false,
+      "why": "uniform-body condition, PENDING the owner"
+    },
+    {
+      "case": "rows of empty cells only (||)",
+      "verdict": false,
+      "why": "no header of width >= 2 with content"
+    },
+    {
+      "case": "empty text",
+      "verdict": false,
+      "why": "nothing to match"
+    },
+    {
+      "case": "prose with pipes",
+      "verdict": false,
+      "why": "the original round-3 finding"
+    },
+    {
+      "case": "one-column pipe list",
+      "verdict": false,
+      "why": "a list is not a table"
+    },
+    {
+      "case": "single-dash separator (|-|)",
+      "verdict": false,
+      "why": "below the :?-{3,}:? bar"
+    },
+    {
+      "case": "two-dash separator (|--|)",
+      "verdict": false,
+      "why": "below the :?-{3,}:? bar"
+    },
+    {
+      "case": "header and separator, no body",
+      "verdict": false,
+      "why": "half-emitted grid"
+    },
+    {
+      "case": "body row of empty cells only",
+      "verdict": false,
+      "why": "punctuation, not a reading"
+    },
+    {
+      "case": "ragged body (3-col header, 2-col body)",
+      "verdict": false,
+      "why": "spec's uniform-body condition; CONTESTED, see #259"
+    }
+  ],
+  "adversarial_case_count": 32,
+  "page_level_coverage": "The three reviewer phantoms are ALSO asserted through _winning_page_output (test_the_reviewers_phantoms_do_not_suppress_the_marker), so they fail if the strict check is ever bypassed at the call site rather than weakened inside the helper.",
+  "non_vacuity": {
+    "meaningful_baseline": "round 3 head 1a37789 -- the code that carries these phantoms. origin/main has no D3 keep path at all, so most of its failures are about the feature's absence rather than this round's finding.",
+    "at_round3_1a37789": "13 failed, 55 passed",
+    "at_origin_main_4c18ef2": "49 failed, 19 passed",
+    "on_branch": "68 passed",
+    "honest_note": "Of the three reviewer cases, only TWO were live defects at PAGE level against round 3 -- 'separator in the middle' was already rejected there because round 3 looked for a separator anywhere in the block and then required a body after it. All three were live in the predicate itself.",
+    "failure_lines": [
+      ">       assert \"failed: unverifiable table\" in winner.text, f\"{label}: {winner.text!r}\"\nE       AssertionError: fenced code block: 'Here is the layout:\\n\\n```\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n```\\n\\n[page 1: unverifiable table — kept a model reading over the failed-table marker; ...]'",
+      ">       assert \"failed: unverifiable table\" in winner.text, f\"{label}: {winner.text!r}\"\nE       AssertionError: separator-as-body: 'Table 4.\\n\\n| a | b |\\n|---|---|\\n|---|---|\\n\\n[page 1: unverifiable table — kept a model reading over the failed-table marker; ...]'",
+      ">       assert strict(text) is expected, f\"{label}: {text!r}\"\nE       AssertionError: REVIEW: table inside a backtick fence: '```\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n```\\n'\nE       assert True is False",
+      ">       assert strict(text) is expected, f\"{label}: {text!r}\"\nE       AssertionError: REVIEW: separator-as-body: '| a | b |\\n|---|---|\\n|---|---|\\n'\nE       assert True is False",
+      ">       assert strict(text) is expected, f\"{label}: {text!r}\"\nE       AssertionError: unclosed fence swallows the rest: '```\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n'\nE       assert True is False",
+      ">       assert flag is True, \"the contested condition must stay named and discoverable\"\nE       AssertionError: the contested condition must stay named and discoverable\nE       assert None is True"
+    ],
+    "no_new_symbol_errors": "has_strict_table_grid and STRICT_GRID_REQUIRES_UNIFORM_BODY are reached via getattr on the module; no import of a name the fix adds."
+  },
+  "left_to_the_owner": {
+    "switch": "STRICT_GRID_REQUIRES_UNIFORM_BODY (src/socr/tables/reconcile.py), currently True per spec",
+    "tension": "Equal widths rejects a RAGGED but genuine grid, so that page ships the zero-content marker -- contradicting #259's merged ruling to flag-and-keep a structurally defective grid (kept_table_grid_defect). NOT resolved here, as instructed.",
+    "flippable_in_one_line": true,
+    "pinned_by": "test_the_uniform_body_switch_is_one_named_line"
+  },
+  "find_table_blocks_unchanged": true,
+  "existing_tests_changed_in_round4": "NONE. The two carried from earlier rounds are unchanged: test_gh95_tables_trust.py (regex widened to see a digit in a kind name) and test_gh259_flagged_model_table_wins.py (D3 reverse guard amended to the scope where it holds). test_gh205_tr3_unconditional_event.py remains reverted to main.",
+  "verification": {
+    "suite": "2006 passed, 3 xfailed, 5 warnings in 110.84s",
+    "lint": "uvx ruff@0.16.0 format --check . -> 332 files already formatted",
+    "ruff_check_advisory": "107 on branch, 107 at base 4c18ef2 -- none added",
+    "warning_fixed": "an invalid '\\\\`' escape sequence in a docstring, introduced by me in round 3",
+    "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-262/src/socr/__init__.py",
+    "ci": {
+      "workflow": "CI",
+      "headSha": "f9f16b9228b86aafe3c817678fb6cf04f6614fbc",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    "abort_latch": "not set",
+    "force_push": "never",
+    "merged_by_me": "never"
+  }
+}

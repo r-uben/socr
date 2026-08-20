@@ -1,0 +1,80 @@
+{
+  "issue": 263,
+  "verdict": "FIXED",
+  "pr": 265,
+  "pr_url": "https://github.com/r-uben/socr/pull/265",
+  "branch": "fix/263-rotation-refusal-without-tables",
+  "head": "220e00dae93c57e7fff94b792abf45c6d2540caa",
+  "base": "8ad92e1",
+  "worktree": "/Users/rubenffuertes/repos/.worktrees/socr-263",
+  "measured_mechanism": {
+    "gate": {
+      "path": "src/socr/core/born_digital.py",
+      "line_at_base": 1127,
+      "snippet": "if has_tables:",
+      "explanation": "the GH-147 rotation refusal at born_digital.py:1128 (`if text_direction_is_rotated(direction):`) is nested inside `if has_tables:` at 1127, so text_direction_is_rotated was never consulted on a rotated page with no detected table; that page fell to the `else:` branch at 1183 which does `native_text = raw_text.strip()` unconditionally."
+    },
+    "reproduced_on_real_page": {
+      "pdf": "/Users/rubenffuertes/Dropbox/Backups/Projects/job_market_paper/references/2021__kaminska_mumtaz_sustek__monetary_policy_surprises_transmision_through_term_premia_and_expected_interest_rates__BoE.pdf",
+      "page": 38,
+      "at_base": "bd=True tables=False figs=True rot=True dir=(0.0,-1.0) needs_ocr=False chars=177; 47 non-empty lines, 32 of <=2 chars: ['MC','O','F','round','a','ields','y','n','i','anges','h','c','requency','f','high-','he','t','o','t','s','trument','ns','i','olicy','ts.','in','o','p','p','three',...]",
+      "after_fix": "needs_ocr_enhancement=True, native_rotated_text_shredded=True"
+    },
+    "why_it_shreds": "read off page 38's own get_text('dict'): every fragment is its own PyMuPDF line, dir=(0.0,-1.0), all with x-extent 491.8..503.7 (one column), y-extents butting against each other (94.5..113.7, 113.7..122.8, 122.5..130.1, 135.3..165.1). PyMuPDF starts a new line whenever the next glyph run is not ahead of the current one along the writing direction; this caption's runs are placed behind each other, so it is cut at every run boundary and emitted in y-order, i.e. reversed."
+  },
+  "shred_test_derivation": {
+    "function": "rotated_text_is_shredded(blocks, direction) in src/socr/core/born_digital.py",
+    "page_derived_quantities": [
+      "perpendicular overlap of two lines' bboxes = 'same baseline column' (from the page's own line geometry)",
+      "separation along the text direction between two lines (from the page's own line geometry)",
+      "the thinner line's own perpendicular extent = that line's glyph height ON THIS PAGE, used as the largest separation that can still be an inter-word space rather than a line break"
+    ],
+    "verdict": "spurious > genuine -- a comparison between two counts the page itself produces. No numeric threshold, nothing calibrated against a corpus. <2 comparable lines returns False (#145 absence-of-evidence rule).",
+    "rejected_alternative": "the issue's suggested 'fraction of one-/two-character lines'. Measured over the 11 rotated born-digital pages of the 27-paper reference corpus it cannot separate the defect from a chart: pflueger_rinaldi p37 has 67 short lines out of 95 and is perfectly sound (axis tick labels '0 5 10 15 20', caption reads back verbatim); p38 57/106; p39 65/111. The geometric test fires on 1 of the 11, and on exactly 1 page across all 27 papers.",
+    "corpus_sweep_after_fix": "pages flagged across the 27-paper reference corpus: [('kaminska_mumtaz_sustek', 38)]"
+  },
+  "remedy": {
+    "detector": "born_digital.py else-branch now consults text_direction_is_rotated AND rotated_text_is_shredded; sets needs_ocr_enhancement=True and PageAssessment.native_rotated_text_shredded=True",
+    "propagation": "state.py PageState.native_rotated_text_shredded, set once in apply_born_digital, never re-derived",
+    "ship_surface": "manifest.py::_winning_page_output fail-closed floor: ships '[page N failed: rotated text extraction shredded — see image]' + full-page PNG ref, status ERROR, engine native, audit_passed False, FailureMode.NATIVE_TEXT_SHREDDED. NOT gated on bool(p.attempts) (GH-195 precedent) so --native-only pages cannot ship confetti as SUCCESS.",
+    "contradiction_guard": "the flag is added to native_distrusted at the top of _winning_page_output so a passing native best_output cannot short-circuit past it",
+    "surfacing": "page status ERROR; document status (not success); 'rotated_text_shredded' audit event at analyze time (rank 4 in audit_log.py); 'native_rotated_text_shredded' in the page sidecar; CLI failure marker via is_page_failed_marker",
+    "png": "orchestrator._render_d3_floor_png parameterised with stem/label so the #263 floor writes shredded_rotated_page_pN.png and cannot overwrite the TR-3 table floor's PNG"
+  },
+  "disagreement_with_brief": "The shred check runs on the no-table branch only. This is NOT a re-narrowing to has_tables: rotation is now consulted on both branches, and on a rotated page WITH a table the GH-147 branch already refuses unconditionally, which is strictly stronger. It is also the honest limit of the predicate -- a rotated table's cells legitimately tile along the reading axis, the exact geometry the shred test reads as damage. Measured on the existing _rotated_ruled_grid_pdf fixture: spurious 9, genuine 5, i.e. it would fire. Running it there would convert that page's existing WARNING-with-prose into an ERROR floor, a behaviour change #263 does not ask for and that test_landscape_refusal_a2_gh147.py correctly pins against.",
+  "test": {
+    "path": "tests/test_rotated_shredded_native_263.py",
+    "hermetic": true,
+    "notes": "real fitz geometry, no model. process() tests patch _available_engines_for_agentic -> [PROFILE_QWEN_LOCAL], route_page, probe_ollama_idle.",
+    "fixture_integrity": "TestFixtureIntegrity asserts every word bbox lies inside the page rect for BOTH fixtures (the clipped-fixture trap) and that the control's character stream round-trips verbatim.",
+    "no_multiset_oracle": true,
+    "raw_output_at_base_8ad92e1": ">       assert assessment.needs_ocr_enhancement is True, (\nE       AssertionError: a rotated page whose native layer is shredded confetti must be routed to OCR; notes were ['born-digital: clean text layer detected', 'complex content detected (figures)', 'rotated text direction (0.0, -1.0)']\nE       assert False is True\nE        +  where False = PageAssessment(page_num=1, is_born_digital=True, native_text='Figur\\ne\\n 4: Co\\nnt\\nribution\\n \\nof th\\ne t\\nhree po\\n...'born-digital: clean text layer detected', 'complex content detected (figures)', 'rotated text direction (0.0, -1.0)']).needs_ocr_enhancement\n>       assert sidecar[\"status\"] != PageStatus.SUCCESS.value, (\nE       AssertionError: a page whose shipped text is rotated confetti must not report success; shipped 'Figur\\ne\\n 4: Co\\nnt\\nribution\\n \\nof th\\ne t\\nhree po\\nl\\nicy i\\nn\\nstrume\\nnt\\ns to the\\n \\nhigh-\\nfre\\nquency \\nc\\nhange\\ns\\n in yi\\nel\\nds aroun\\nd\\n FOMC\\n an\\nnouncem\\ne\\nnts. \\nT\\nhe uni\\nts\\n are bas\\ni\\ns poi\\nnts\\n.\\n\\n![Chart page 1](figures/chart_page_1.png)'\nE       assert 'success' != 'success'\nE        +  where 'success' = <PageStatus.SUCCESS: 'success'>.value\nE        +    where <PageStatus.SUCCESS: 'success'> = PageStatus.SUCCESS\nFAILED tests/test_rotated_shredded_native_263.py::TestDetectorConsultsRotationWithoutTables::test_shredded_rotated_figure_page_is_not_trusted_native\nFAILED tests/test_rotated_shredded_native_263.py::TestShippedOutput::test_shredded_page_does_not_ship_success_or_confetti\n2 failed, 8 passed in 0.62s\n",
+    "raw_output_on_branch": "tests/test_rotated_shredded_native_263.py::TestFixtureIntegrity::test_every_glyph_box_lies_inside_the_page[True] PASSED [ 10%]\ntests/test_rotated_shredded_native_263.py::TestFixtureIntegrity::test_every_glyph_box_lies_inside_the_page[False] PASSED [ 20%]\ntests/test_rotated_shredded_native_263.py::TestFixtureIntegrity::test_control_reads_the_caption_back_verbatim PASSED [ 30%]\ntests/test_rotated_shredded_native_263.py::TestFixtureIntegrity::test_shredded_fixture_reproduces_the_reference_signature PASSED [ 40%]\ntests/test_rotated_shredded_native_263.py::TestDetectorConsultsRotationWithoutTables::test_shredded_rotated_figure_page_is_not_trusted_native PASSED [ 50%]\ntests/test_rotated_shredded_native_263.py::TestDetectorConsultsRotationWithoutTables::test_rotated_clean_caption_page_still_ships_native_for_free PASSED [ 60%]\ntests/test_rotated_shredded_native_263.py::TestDetectorConsultsRotationWithoutTables::test_upright_page_is_untouched PASSED [ 70%]\ntests/test_rotated_shredded_native_263.py::TestShippedOutput::test_shredded_page_does_not_ship_success_or_confetti PASSED [ 80%]\ntests/test_rotated_shredded_native_263.py::TestShippedOutput::test_rotated_clean_page_still_ships_native_success PASSED [ 90%]\ntests/test_rotated_shredded_native_263.py::TestShippedOutput::test_upright_page_still_ships_native_success PASSED [100%]\n============================== 10 passed in 0.58s ==============================\n",
+    "non_vacuity": "Both base failures assert on attributes that already exist at 8ad92e1 -- PageAssessment.needs_ocr_enhancement and the sidecar's 'status'. No AttributeError/TypeError/ImportError. New symbols are reached with getattr(..., default) in the guards. The other 8 tests PASS at base: they are the reverse guards."
+  },
+  "reverse_guards": [
+    "ROTATED + CLEAN prose must still ship native for free: test_rotated_clean_caption_page_still_ships_native_for_free (needs_ocr_enhancement is False, native_rotated_text_shredded is False) and test_rotated_clean_page_still_ships_native_success (through process(): status == success, caption intact, no confetti, no rotated_text_shredded audit event). Passes at base AND on branch.",
+    "UNROTATED must be untouched: test_upright_page_is_untouched and test_upright_page_still_ships_native_success. Passes at base AND on branch."
+  ],
+  "existing_tests": "No existing test weakened, edited or deleted. tests/test_landscape_refusal_a2_gh147.py::test_rotated_prose_only_page_does_not_set_needs_ocr_enhancement passes unchanged.",
+  "suite": "1934 passed, 3 xfailed in 128.61s (~/venvs/socr/bin/pytest -q, PYTHONPATH=<worktree>/src)",
+  "lint": "uvx ruff@0.16.0 format --check . -> '331 files already formatted'. uvx ruff@0.16.0 check (advisory) on the touched src/ files: identical finding set to base, 8 pre-existing, 0 new. New test file carries only E402, same pattern as test_landscape_refusal_a2_gh147.py.",
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-263/src/socr/__init__.py ; worktree = /Users/rubenffuertes/repos/.worktrees/socr-263",
+  "ci": {
+    "command": "gh run list --repo r-uben/socr --branch fix/263-rotation-refusal-without-tables --workflow CI --json status,conclusion,headSha",
+    "status": "completed",
+    "conclusion": "success",
+    "headSha": "220e00dae93c57e7fff94b792abf45c6d2540caa"
+  },
+  "files_changed": [
+    "src/socr/core/born_digital.py",
+    "src/socr/core/state.py",
+    "src/socr/core/result.py",
+    "src/socr/core/manifest.py",
+    "src/socr/core/audit_log.py",
+    "src/socr/pipeline/orchestrator.py",
+    "tests/test_rotated_shredded_native_263.py",
+    "docs/log/2026-08-20_263-rotated-shredded-native.md"
+  ],
+  "housekeeping": "Temporary base worktree /Users/rubenffuertes/repos/.worktrees/socr-263-base created at 8ad92e1 for the non-vacuity run and left clean (0 porcelain entries); removed at the end. socr-night-base never touched. Nothing merged, nothing force-pushed."
+}

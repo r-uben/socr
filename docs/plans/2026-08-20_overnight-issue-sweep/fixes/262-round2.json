@@ -1,0 +1,114 @@
+{
+  "issue": 262,
+  "round": 2,
+  "verdict": "FIXED",
+  "pr": {
+    "number": 264,
+    "url": "https://github.com/r-uben/socr/pull/264",
+    "branch": "fix/262-d3-marker-over-cached-grid",
+    "head": "1d87a5a08339184fb08920321e9068dfe81fec44",
+    "round1_head": "aec09162734a675cdd82367e05760ebf17a860ba",
+    "base": "main @ 8ad92e1",
+    "mergeable": "MERGEABLE",
+    "pushed": "normal push, no force"
+  },
+  "root_cause_of_round1": "Round 1 decided 'keep the grid' on the ABSENCE of a bad signal rather than the PRESENCE of a good one. Both blocking findings follow from that single error.",
+  "findings": [
+    {
+      "id": "BLOCKING 1",
+      "status": "FIXED",
+      "site": "src/socr/pipeline/agentic.py:593-616 (vr.hard_fail)",
+      "measured": "CERTAIN_FAIL returns AcceptDecision(accept=False) and mutates NOTHING on the PageOutput -- status stays SUCCESS, failure_mode stays NONE, rejection_class stays empty. Every round-1 keep rule was a denylist and could not match a disposition that was never written, so a grid the value guard positively refuted shipped over a fail-closed floor.",
+      "fix": "manifest.D3_SUPERSEDING_REJECTIONS -- an ALLOWLIST of positively-identified soft dispositions. Empty rejection_class keeps the marker. No denylist extended.",
+      "test": "test_a_certain_fail_grid_never_supersedes_the_floor, test_an_unrecognised_disposition_never_supersedes_the_floor"
+    },
+    {
+      "id": "BLOCKING 2",
+      "status": "FIXED",
+      "quote": "most escalated is not best",
+      "fix": "Selection is no longer keyed on ladder position for safety. best_output wins when it qualifies (_best_effort already judged it most trustworthy -- a judgement, unlike an index); ladder order is only a tie-break when the winner was cleared, as it was in the measured run.",
+      "test": "test_a_refuted_grid_does_not_displace_an_earlier_soft_one, test_best_output_is_preferred_over_ladder_position"
+    },
+    {
+      "id": "MAJOR 3",
+      "status": "FIXED by full revert",
+      "action": "tests/test_gh205_tr3_unconditional_event.py reverted to origin/main byte for byte (git checkout origin/main --). The exhaustive table_region_unverifiable pin is restored unchanged and passes (17 passed).",
+      "evidence": "That fixture's OCR stub produces a PageOutput with an empty rejection_class, so under the allowlist its page no longer qualifies to supersede, the D3 floor fires, and the disposition is emitted exactly once. The round-1 widening was a symptom of the round-1 defect, not a consequence of the feature.",
+      "concession": "The reviewer was right and my round-1 'not weakened' label was wrong: accepting either disposition IS the weakening."
+    },
+    {
+      "id": "MAJOR 4",
+      "status": "FIXED",
+      "fix": "Kept text = model reading (unedited, leading) + in-body flag note in #259's shape + the same d3_floor_png_ref the floor would have shipped. Byte-equality with model_grid_text is gone by design; tests assert containment PLUS position, that the note never matches is_page_failed_marker, and that a failed PNG render degrades to note-only exactly as the floor degraded to marker-only.",
+      "test": "test_the_kept_page_carries_the_flag_note_and_the_page_image, test_a_page_with_no_rendered_png_still_ships_the_note"
+    }
+  ],
+  "scope_extension_flagged_for_review": {
+    "what": "Added REJECTION_JUDGE_ONLY ('judge_only') in result.py and set it at ONE site in agentic.py -- the 'verifier found no issue, inner judge alone refused' path -- before _apply_structural_gate runs, exactly as REJECTION_AMBIGUOUS_DEFERRED is.",
+    "why": "#260 only ever needed soft-vs-hard on the AMBIGUOUS branch, so it writes one value on one path. #262 needs the same call on every branch, and the branch the reference page most plausibly took writes nothing at all. Reading 'nothing' as soft is the round-1 bug; reading it as hard makes the fix INERT on the page it exists for.",
+    "unmeasurable": "I cannot determine which path Cochrane-Piazzesi p15 actually took -- the issue records the flags and the cached text, not the disposition. That uncertainty is exactly why I widened the SOURCE (record the disposition) rather than the READER (loosen the allowlist).",
+    "safety": "Still an allowlist, still fail-safe on empty. Set before the structural gate, which returns a rejecting decision unchanged and never touches the field, so a deterministic gate rejection can never be mislabelled.",
+    "scope_guard": "flagged_model_page_output (#259) deliberately does NOT accept the new value -- its fallback is a complete native reading, so it can afford the narrower one-value list. Pinned by test_gh259_allowlist_is_not_widened_by_the_new_disposition."
+  },
+  "measured_judge_behaviour": {
+    "method": "Three tests drive the REAL NativeTableVerifierJudge, not a stub.",
+    "verifier_no_issue_inner_judge_refused": "rejection_class == 'judge_only'",
+    "vr_hard_fail_certain_fail": "rejection_class == '' (nothing written) -- the fact the allowlist exists for",
+    "accepted_reading": "rejection_class == ''"
+  },
+  "non_vacuity": {
+    "base_sha": "8ad92e1",
+    "result": "14 failed on behaviour, 12 passed (round 1: 8/7)",
+    "no_new_symbol_errors": "No ImportError/AttributeError/TypeError. The only grep hit for those words is the string 'AttributeError' inside a docstring. REJECTION_JUDGE_ONLY is reached only as the literal 'judge_only'; the new failure mode only via getattr.",
+    "key_failure_lines": [
+      ">       assert getattr(output, \"rejection_class\", \"\") == SOFT_JUDGE_ONLY, output\nE       assert '' == 'judge_only'",
+      ">       assert \"verify against the page image before citing\" in winner.text, winner.text\nE       AssertionError: [page 1 failed: unverifiable table — see image]",
+      ">       assert MODEL_PAGE.strip() in winner.text, winner.text\nE       AssertionError: [page 1 failed: unverifiable table — see image]"
+    ],
+    "branch": "26 passed",
+    "note_on_the_12": "The 12 passing at base are reverse guards, including the two new allowlist ones, which pass at base for the trivial reason that the marker ships there unconditionally. They earn their keep on the branch, where the floor is no longer unconditional."
+  },
+  "existing_tests_changed_final": [
+    {
+      "file": "tests/test_gh95_tables_trust.py",
+      "change": "watched-kinds scanner regex [a-z_]+ -> [a-z0-9_]+",
+      "why": "it could not see a digit in a kind name. Assertion untouched; not challenged by the reviewer.",
+      "weakened": false
+    },
+    {
+      "file": "tests/test_gh259_flagged_model_table_wins.py",
+      "change": "D3 reverse guard's fixture changed from a grid-bearing attempt to prose; renamed to ..._when_no_attempt_authored_a_grid",
+      "why": "as written it asserted the behaviour #262 measures as a defect. Amended, not deleted, plus a new assertion that native stays suppressed.",
+      "weakened": false
+    },
+    {
+      "file": "tests/test_gh205_tr3_unconditional_event.py",
+      "change": "NONE -- reverted to origin/main in round 2",
+      "weakened": false
+    }
+  ],
+  "verification": {
+    "suite": "1950 passed, 3 xfailed, 5 warnings in 111.16s",
+    "lint": "uvx ruff@0.16.0 format --check . -> 330 files already formatted",
+    "ruff_check_advisory": "102 on branch, 102 at base 8ad92e1 -- none added",
+    "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-262/src/socr/__init__.py",
+    "ci": {
+      "workflow": "CI",
+      "headSha": "1d87a5a08339184fb08920321e9068dfe81fec44",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    "abort_latch": "not set"
+  },
+  "files_changed": [
+    "src/socr/core/manifest.py",
+    "src/socr/core/result.py",
+    "src/socr/core/audit_log.py",
+    "src/socr/core/tables_trust.py",
+    "src/socr/pipeline/agentic.py",
+    "src/socr/pipeline/orchestrator.py",
+    "tests/test_gh262_d3_marker_over_cached_grid.py (new)",
+    "tests/test_gh95_tables_trust.py",
+    "tests/test_gh259_flagged_model_table_wins.py"
+  ]
+}

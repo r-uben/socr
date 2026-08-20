@@ -1,0 +1,36 @@
+{
+  "pr": 265,
+  "head": "8be326e",
+  "round": 2,
+  "reviewer": "ollama-deepseek",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-263 show '8be326e:src/socr/core/manifest.py' | sed -n '450p'",
+    "output": "_NATIVE_TEXT_LANES = (\"native\", \"chart_asset\")"
+  },
+  "verdict": "APPROVE",
+  "leak_closed_on_all_lanes": true,
+  "found_a_missed_lane": false,
+  "clean_rotated_chart_page_unharmed": true,
+  "table_flag_scoping_sound": true,
+  "png_ref_present_in_floor_output": true,
+  "non_vacuity_confirmed": true,
+  "round1_guards_still_hold": true,
+  "no_magic_threshold": true,
+  "no_multiset_oracle": true,
+  "reran_baseline_myself": true,
+  "findings": [
+    {
+      "severity": "minor",
+      "what": "The reverse guard test_clean_rotated_chart_page_keeps_the_chart_asset_lane exercises a clean rotated CAPTION fixture, not a chart page with axis tick labels. The tick-label false-positive case (Pflueger-Rinaldi p37, 67/95 short lines, sound) is covered only by the author's 27-paper corpus sweep, which is not reproducible from the repo without the reference PDFs.",
+      "where": "tests/test_rotated_shredded_native_263.py:407",
+      "why": "The false-positive risk the brief flags is specifically a rotated CHART page whose tick labels the geometric predicate might read as shredding. The unit test does not construct that geometry; it relies on the corpus sweep. I independently built a rotated chart page with tick labels spaced 40pt apart and confirmed rotated_text_is_shredded returns False, so the predicate is sound on that geometry, but the regression suite does not pin it."
+    },
+    {
+      "severity": "minor",
+      "what": "On the chart lane, the floor ships the chart lane's own PNG ref, which is labelled '![Chart page 1](...)' while the floor marker reads 'rotated text extraction shredded — see image'. The image is the full page (rendered by _render_chart_page_png), so a human can still read the caption, but the label is slightly misleading for a page whose text half was refused.",
+      "where": "src/socr/pipeline/orchestrator.py:2956",
+      "why": "Cosmetic only; the image content is correct (full page). Not a correctness or surfacing defect."
+    }
+  ],
+  "what_i_tried_to_break": "1) Enumerated every engine label literal in src/ that can be a passing best_output shipping native_text: 'native', 'native+math', 'chart_asset'. All three are caught by startswith(('native','chart_asset')) — 'native+math' via the 'native' prefix. 'chart_region' and 'llm-merged' are audit-event/consensus labels, never a native-text winner. No fourth lane. 2) Drove the deterministic (agentic=False) path on the shredded fixture with and without --native-only: both ship doc status 'failed'/'error', zero confetti — the floor is reached, not bypassed. 3) Re-ran the new test file at the round-1 head 220e00d (2 chart-lane tests fail, 12 pass) and at the true base 8ad92e1 (4 fail, 10 pass), confirming non-vacuity on both rounds and that the reverse guards pass on both sides. 4) Built a rotated chart page with axis tick labels and confirmed rotated_text_is_shredded returns False (no false positive on tick geometry). 5) Confirmed the resume asymmetry is sound: native_rotated_text_shredded is re-derived by apply_born_digital in _phase_analyze on every process() call, while rotated_shred_png_ref (a loop side-effect) is restored in _restore_terminal_page_state. 6) Verified no multiset/Counter oracle in the fix and no numeric threshold in rotated_text_is_shredded (glyph height and separation are page-derived). 7) Confirmed test_landscape_refusal_a2_gh147.py passes in full (8 passed) and is not in the changed-files list."
+}

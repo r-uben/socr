@@ -1,0 +1,46 @@
+{
+  "pr": 264,
+  "head": "aec0916",
+  "reviewer": "grok",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-night-base show \"53b0637b928c486e9ff3023fa9527905fec017b2:src/socr/core/manifest.py\" | sed -n '385p'",
+    "output": "            d3_marker = f\"[page {page_num} failed: unverifiable table — see image]\""
+  },
+  "verdict": "REQUEST-CHANGES",
+  "d3_floor_still_holds": false,
+  "hallucinated_grid_still_blocked": false,
+  "edited_tests_not_weakened": false,
+  "non_table_content_preserved": true,
+  "png_ref_loss_acceptable": false,
+  "audit_passed_never_flipped": true,
+  "non_vacuity_confirmed": true,
+  "no_multiset_oracle": true,
+  "reran_baseline_myself": true,
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "A CERTAIN_FAIL model grid (status SUCCESS, failure_mode NONE, empty rejection_class) ships instead of the D3 marker. That is the fluent-wrong-table case D3 exists to stop. The keep denylist only skips ERROR and HALLUCINATION; the verifier's hard-reject mutates neither.",
+      "where": "src/socr/core/manifest.py:516",
+      "why": "flagged_model_page_output already documents this exact stamp at manifest.py:409-419 and therefore allowlists REJECTION_AMBIGUOUS_DEFERRED. d3_floor_kept_model_output uses the denylist that comment says cannot tell a table the value guard proved wrong from a soft deferral. I constructed PageOutput(engine='qwen', status=SUCCESS, failure_mode=NONE, audit_passed=False, rejection_class='') with a parseable grid of 99.99/88.88: d3_floor_kept_model_output returned it and _winning_page_output shipped it under MODEL_TABLE_OVER_FAILED_FLOOR, with the PNG ref dropped. agentic.py:594-616 is the stamp: vr.hard_fail returns AcceptDecision(accept=False) and leaves the PageOutput untouched."
+    },
+    {
+      "severity": "blocking",
+      "what": "Last-qualifying-in-ladder-order overwrites an earlier unmarked grid with a later CERTAIN_FAIL grid. 'Most escalated' is not 'best'.",
+      "where": "src/socr/core/manifest.py:507-520",
+      "why": "Same probe: attempts=[native, qwen-good-grid, gemini-CERTAIN_FAIL-grid] shipped the gemini 99.99 table and dropped the earlier good rung. The measured Cochrane-Piazzesi page happened to have the good reading last; the rule does not generalise."
+    },
+    {
+      "severity": "major",
+      "what": "test_d3_page_carries_detection_and_disposition_once_each no longer pins table_region_unverifiable. Accepting either disposition is how an exhaustive assertion is quietly loosened.",
+      "where": "tests/test_gh205_tr3_unconditional_event.py:380",
+      "why": "At 8ad92e1 the test asserted kinds.count(DISPOSITION_KIND)==1. After this PR, a provider-ladder run of that fixture is the superseded path, so the old pin would fail. The author is honest that no fixture edit preserved the old outcome. Combined with amending the #259 reverse guard that used to pass a grid and assert the marker, the only remaining 'bad grid still floors' pins are HALLUCINATION and ERROR — which is not how CERTAIN_FAIL is stamped. gh95's regex widen [a-z_]+ → [a-z0-9_]+ is strictly more capable and is not this finding."
+    },
+    {
+      "severity": "major",
+      "what": "On a superseded page the D3 PNG image ref is dropped, so a reader loses the visual backstop at the same moment a refused model table is allowed to ship.",
+      "where": "src/socr/core/manifest.py:622-627",
+      "why": "replace(kept_model, ...) ships kept_model.text byte-for-byte. The marker branch at 637-639 is the only site that appends d3_floor_png_ref. Byte-equality with the issue's assertion is a real constraint; dropping the PNG without a sidecar/CLI image pointer is not required by it. Unacceptable while the keep bar still admits CERTAIN_FAIL grids."
+    }
+  ],
+  "what_i_tried_to_break": "Reran tests/test_gh262_d3_marker_over_cached_grid.py at base 8ad92e1 via PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-263-base/src (socr.__file__ confirmed in that tree; FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR absent): 8 failed on behaviour (marker still ships, including winner.text == MODEL_PAGE and the assemble/CLI surfaces), 7 reverse guards passed; no ImportError/AttributeError/TypeError. Same file at head aec0916: 15 passed. Constructed a CERTAIN_FAIL-stamped parseable grid (SUCCESS/NONE/empty rejection_class): it ships, PNG gone. Constructed earlier-good + later-CERTAIN_FAIL: later wins. Confirmed replace() does not mutate stored audit_passed/status. Confirmed canonical_page_texts goes through _winning_page_output. No numeric-multiset oracle in the change or new tests. gh95 assertion unknown==set() untouched. Reverse guards still hold for empty/ERROR/HALLUCINATION/native/no-grid/GH-90/scanned-flag — they do not cover the stamp the pipeline actually writes on a hard-reject."
+}
