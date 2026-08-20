@@ -1,0 +1,28 @@
+{
+  "pr": 260,
+  "head": "9b95d37",
+  "round": 2,
+  "reviewer": "grok",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-259 show \"9b95d37:src/socr/pipeline/agentic.py\" | sed -n '616,619p'",
+    "output": "            # a gate rejection below can never be mistaken for this one.\n            if not decision.accept:\n                output.rejection_class = REJECTION_AMBIGUOUS_DEFERRED\n            return self._apply_structural_gate(decision, output, page_num, words, rules)"
+  },
+  "verdict": "REQUEST-CHANGES",
+  "round1_finding_closed": true,
+  "allowlist_exhaustive_safe_direction": false,
+  "mark_cannot_survive_a_hard_rejection": false,
+  "resume_cannot_change_lanes": true,
+  "audit_passed_never_flipped": true,
+  "non_vacuity_confirmed": true,
+  "reproduced_round1_failure_myself": true,
+  "no_existing_test_edited": true,
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "A vr.warn page whose inner judge already refused still ships a structurally defective model grid. The soft mark is written on the refusing inner decision, then _apply_structural_gate returns that decision unchanged, so the gate never inspects a table the keep path will now ship.",
+      "where": "src/socr/pipeline/agentic.py:616-665",
+      "why": "Round 2's disjointness argument is true and insufficient: the gate only rejects ACCEPTING inner decisions, therefore a ragged table that is ALSO an ambiguous deferral is never gate-rejected and carries ambiguous_deferred. Reproduced at 9b95d37 with a 4-col ragged grid vs 2 native lanes: vr.warn=True, inner accept=False, rejection_class='ambiguous_deferred', flagged_model_page_output returns the model output, _winning_page_output ships engine='qwen' including the truncated '| 5 | 6 |' row. Same silent-corruption class as round 1; CERTAIN_FAIL and accept-then-gate-reject are closed, this third path is not. The gate docstring still says there is nothing to gate on a page that is not shipping \u2014 that assumption is now false because #259 ships inner-refused tables."
+    }
+  ],
+  "what_i_tried_to_break": "1) Ordering: mark is set only on vr.warn + not decision.accept, then gate is called; CERTAIN_FAIL returns before the mark; accept-then-gate-reject leaves rejection_class empty. 2) Reproduced round-1 reverse guards myself: both FAIL at 7c16dd7 with assert 'qwen'=='native' and PASS at 9b95d37 (PYTHONPATH-isolated scratch worktrees, isolation_canary OK). 3) Non-vacuity at ed4fb05: 5 failed / 8 passed; the two reverse guards are among the 8 that pass; the two new-behaviour failures are getattr-default AssertionError ''=='ambiguous_deferred', not ImportError/TypeError; test file imports the constant nowhere and uses setattr. 4) Resume: from_dict defaults rejection_class to '' \u2014 older caches stay on native, the safe direction. 5) audit_passed: demotion is dataclasses.replace on a copy; source best_output unmutated. 6) Accepting deferral is unmarked (test + probe). 7) The remaining hole: inner-refuse + ragged 4-col table still ships. 8) No existing test edited (only tests/test_gh259_flagged_model_table_wins.py added). 9) Cardinal four levels present; e2e patches _available_engines_for_agentic/route_page/probe_ollama_idle; reverse guards drive the real NativeTableVerifierJudge, not a stub; MagicMock is only the inner AcceptDecision return_value, not a vacuous != mock."
+}

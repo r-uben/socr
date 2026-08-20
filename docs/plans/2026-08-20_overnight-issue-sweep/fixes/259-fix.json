@@ -1,0 +1,116 @@
+{
+  "issue": 259,
+  "branch": "fix/259-flagged-vlm-loses-to-native",
+  "base": "ed4fb05",
+  "head": "7c16dd7b78402c5e4d1148d3c6eafd8b492932ae",
+  "pr": 260,
+  "pr_url": "https://github.com/r-uben/socr/pull/260",
+  "verdict": "FIXED",
+  "lead_reading_was_right": true,
+  "lead_reading_corrections": [
+    "audit_passed=False on the qwen winner comes from orchestrator.py:3084 (att.output.audit_passed = att.accepted) ALONE. Not :3148/:3151 -- that branch emits a table_structure_failed audit event with site=post_route_recheck and the page's 8 audit events contain no such event. Not :3180 -- gated on `not ps.is_born_digital`. Not :3580 -- _phase_repair, phase-major only.",
+    "ps.native_table_structure_failed=True was set at orchestrator.py:3187 (`if not decision.accepted and self._page_has_tables(...)`), not at :3151.",
+    "The judge DID reject, on all five rungs. manifest.json's journal records qwen-local, qwen-cloud, nougat, marker and gemini all with accepted:false. `judge_rejected: false` is a NON-SIGNAL in agentic mode: that field is written in exactly one place, orchestrator.py:3598, inside the phase-major repair judge, which an agentic run never reaches. So the issue's point 1 ('the judge did not reject either') is unsupported."
+  ],
+  "issue_cited_line_is_wrong": {
+    "cited": "orchestrator.py:1322 (`if po.status != PageStatus.SUCCESS and po.page_num in enhancement_pages`)",
+    "actual_location_at_ed4fb05": "orchestrator.py:1451",
+    "why_not_it": "It lives in _run_engine_on_pages, the PHASE-MAJOR path; the repro ran --agentic. And the qwen attempt's status is `success`, so the guard's own predicate is false for it. Same defect SHAPE, did not fire here, left untouched for want of a measured case."
+  },
+  "measured_chain": [
+    {
+      "step": 1,
+      "site": "src/socr/pipeline/agentic.py:309",
+      "what": "ladder exhausted with nothing accepted -> PageDecision(accepted=False); _best_effort keeps the qwen output as final_output",
+      "evidence": "manifest.json journal: 5 attempts, accepted:false on all 5"
+    },
+    {
+      "step": 2,
+      "site": "src/socr/pipeline/orchestrator.py:3084",
+      "what": "att.output.audit_passed = att.accepted -> False on the winner",
+      "evidence": "cache/e1572dc....json engine=qwen status=success audit_passed=false"
+    },
+    {
+      "step": 3,
+      "site": "src/socr/pipeline/orchestrator.py:3092",
+      "what": "ps.best_output = decision.final_output (the qwen table)"
+    },
+    {
+      "step": 4,
+      "site": "src/socr/pipeline/orchestrator.py:3187",
+      "what": "not decision.accepted and _page_has_tables -> ps.native_table_structure_failed = True",
+      "evidence": "pages/00001.json native_table_structure_failed=true, and no table_structure_failed audit event (which :3151 would have emitted)"
+    },
+    {
+      "step": 5,
+      "site": "src/socr/core/manifest.py:314",
+      "what": "`if p.best_output and p.best_output.audit_passed:` False -> falls through. THE DEFECT."
+    },
+    {
+      "step": 6,
+      "site": "src/socr/core/manifest.py:355 -> 410",
+      "what": "D3 floor does not fire (unverifiable/header_unattributed both false); native_is_fallback true via the table-defect union -> synthetic NATIVE PageOutput, WARNING, native_table_structure_failed",
+      "evidence": "pages/00001.json winning_output.engine=native, status=warning, failure_mode=native_table_structure_failed"
+    },
+    {
+      "step": 7,
+      "site": "src/socr/core/manifest.py:531",
+      "what": "canonical_page_texts -> the shipped .md (19 flat rows, 112 decimals)"
+    }
+  ],
+  "no_native_first_answer": {
+    "verdict": "SAME DEFECT, not a second one",
+    "evidence": "native_first is read in exactly one decision, orchestrator.py:1491 (_is_trusted_native_without_ocr) -- whether the page is sent to OCR at all. It did that: the page WAS routed and five providers ran on it (manifest.json journal). Nothing downstream of routing reads the flag; _winning_page_output never has. The symptom disappears with this fix.",
+    "residue": "Documentation only: cli.py:52 help text ('Disable native-first: run VLM on all pages') does not say the flag governs routing only, which is why it reads as broken. No follow-up issue filed."
+  },
+  "fix": {
+    "new_predicate": "src/socr/core/manifest.py::flagged_model_page_output",
+    "call_site": "src/socr/core/manifest.py::_winning_page_output, placed AFTER the TR-3 D3 floor and BEFORE the native fallback",
+    "demotion": "dataclasses.replace on a COPY: status=WARNING, failure_mode=MODEL_OUTPUT_FLAGGED (new FailureMode member). audit_passed is NEVER flipped -- it is the winner-SELECTION flag (#252 round-1 trap).",
+    "bounds": [
+      "GH-90 scanned source-evidence floor and TR-3 D3 floor checked first and still win",
+      "empty text -> native fallback unchanged",
+      "native-engine best_output -> unchanged",
+      "status ERROR or failure_mode HALLUCINATION -> unchanged",
+      "model output containing NO markdown grid on a table page -> unchanged. This bound is load-bearing: native_table_structure_failed is set at :3187 as a CONSEQUENCE of the ladder failing, not as a measurement of the native text, so it cannot alone justify preferring the model.",
+      "pages demoted only by needs_ocr_enhancement (deficient native prose) -> unchanged"
+    ],
+    "never_uses_native_as_ground_truth": true
+  },
+  "surfacing": {
+    "page": "winner status=WARNING, failure_mode=model_output_flagged, in the manifest entry and pages/NNN.json sidecar",
+    "audit": "new kind flagged_model_table_kept, ranked in audit_log.build_run_audit; page excluded from native_fallback_pages (that wording would be false)",
+    "document": "own pages_ok term -> DocumentStatus.AUDIT_FAILED",
+    "metadata": "AUDIT_FAILED -> metadata sidecar status: partial",
+    "cli": "own summary line alongside the other three buckets",
+    "all_four_levels_covered": true,
+    "not_added_to_TABLE_DISTRUST_KINDS": "reaching this branch requires a table-distrust flag, so tables_trust.json already lists the page; the new kind is a disposition, and adding it would double-count"
+  },
+  "tests": {
+    "file": "tests/test_gh259_flagged_model_table_wins.py",
+    "hermetic": "manifest-level tests drive _winning_page_output / canonical_page_texts directly; the end-to-end test patches _available_engines_for_agentic, route_page and probe_ollama_idle. No ollama, no provider.",
+    "baseline_raw": "FF....F                                                                  [100%]\n=================================== FAILURES ===================================\n____________ test_flagged_model_table_ships_instead_of_flat_native _____________\n\ntmp_path = PosixPath('/private/var/folders/yw/16p_3zbx0yzdytt7lrs04pr40000gn/T/pytest-of-rubenffuertes/pytest-1122/test_flagged_model_table_ships0')\n\n    def test_flagged_model_table_ships_instead_of_flat_native(tmp_path: Path) -> None:\n        \"\"\"The defect, on the behaviour that exists at the baseline.\n    \n        Asserted on ``canonical_page_texts`` as well as the winner, because that\n        is what reaches the saved ``.md`` and ``pages/NNN.md``.\n        \"\"\"\n        state = _state(_born_digital_pdf(tmp_path), model_text=MODEL_TABLE)\n    \n        winner = _winning_page_output(state, 1)\n>       assert winner.engine == \"qwen\", (\n            f\"the model produced a present, flagged table but the winner is \"\n            f\"{winner.engine!r}; text={winner.text!r}\"\n        )\nE       AssertionError: the model produced a present, flagged table but the winner is 'native'; text='Table 1. Regressions of 1-year excess returns on all forward rates\\n\\n|  |  | y(1) | (1\u21922) | R2 |\\n| --- | --- | --- | --- | --- |\\n| n | const. |  | f |  |\\n| 2 | \u22121.96 | \u22120.94 | 0.74 | 0.34 |\\n|  | (0.64) | (0.18) | (0.43) |  |\\n|  | (0.81) | (0.30) | (0.50) |  |\\n\\nLarge T\\nSmall T\\nEH\\n'\nE       assert 'native' == 'qwen'\nE         \nE         - qwen\nE         + native\n\ntests/test_gh259_flagged_model_table_wins.py:123: AssertionError\n____________ test_kept_model_table_is_demoted_and_carries_its_flag _____________\n\ntmp_path = PosixPath('/private/var/folders/yw/16p_3zbx0yzdytt7lrs04pr40000gn/T/pytest-of-rubenffuertes/pytest-1122/test_kept_model_table_is_demot0')\n\n    def test_kept_model_table_is_demoted_and_carries_its_flag(tmp_path: Path) -> None:\n        \"\"\"Kept, but never as a clean pass: the page still says it was flagged.\"\"\"\n        state = _state(_born_digital_pdf(tmp_path), model_text=MODEL_TABLE)\n    \n        winner = _winning_page_output(state, 1)\n>       assert winner.engine == \"qwen\", winner.engine\nE       AssertionError: native\nE       assert 'native' == 'qwen'\nE         \nE         - qwen\nE         + native\n\ntests/test_gh259_flagged_model_table_wins.py:141: AssertionError\n________ test_document_status_audit_event_and_cli_surface_the_kept_page ________\n\ntmp_path = PosixPath('/private/var/folders/yw/16p_3zbx0yzdytt7lrs04pr40000gn/T/pytest-of-rubenffuertes/pytest-1122/test_document_status_audit_eve0')\n\n    def test_document_status_audit_event_and_cli_surface_the_kept_page(tmp_path: Path) -> None:\n        \"\"\"End to end: the flag reaches page, document, metadata and CLI.\n    \n        Hermetic exactly like ``test_agentic_parity_on_ce_like_fixture``:\n        ``_available_engines_for_agentic`` and ``route_page`` are patched, so no\n        ollama and no provider are needed.\n        \"\"\"\n        from unittest.mock import patch\n    \n        from socr.core.config import EngineType, PipelineConfig\n        from socr.core.providers import PROFILE_QWEN_LOCAL\n        from socr.core.result import DocumentStatus\n        from socr.pipeline.agentic import PageDecision, ProviderAttempt\n        from socr.pipeline.orchestrator import UnifiedPipeline\n    \n        fitz = pytest.importorskip(\"fitz\")\n        pdf_path = tmp_path / \"table_page.pdf\"\n        doc = fitz.open()\n        page = doc.new_page()\n        y = 72\n        for line in NATIVE_TABLE.splitlines():\n            page.insert_text((54, y), line or \" \")\n            y += 14\n        doc.save(str(pdf_path))\n        doc.close()\n    \n        pipeline = UnifiedPipeline(\n            PipelineConfig(\n                primary_engine=EngineType.QWEN,\n                agentic=True,\n                judge_backend=\"heuristic\",\n                enabled_engines=[EngineType.QWEN],\n                quiet=True,\n                audit_enabled=True,\n                save_figures=False,\n                write_manifest=False,\n            )\n        )\n    \n        def _rejecting_route(page_num, ladder, run_provider, judge, **kwargs):\n            out = PageOutput(\n                page_num=page_num,\n                text=MODEL_TABLE,\n                status=PageStatus.SUCCESS,\n                engine=\"qwen\",\n                audit_passed=False,\n            )\n            prof = ladder[0]\n            att = ProviderAttempt(\n                engine=prof.engine,\n                output=out,\n                cost_usd=0.0,\n                accepted=False,\n                reason=\"native_table_verifier: ambiguous_lane_count_mismatch\",\n                provider_id=prof.id,\n                model=prof.model,\n                backend=prof.backend,\n            )\n            return PageDecision(page_num=page_num, final_output=out, attempts=[att])\n    \n        with (\n            patch.object(pipeline, \"_available_engines_for_agentic\", return_value=[PROFILE_QWEN_LOCAL]),\n            patch(\"socr.pipeline.orchestrator.route_page\", side_effect=_rejecting_route),\n            patch(\"socr.pipeline.orchestrator.probe_ollama_idle\", return_value=True),\n        ):\n            result = pipeline.process(pdf_path, tmp_path / \"out\")\n    \n        # Page level: the model's reading is what shipped.\n>       assert \"$f^{(1\\\\to2)}$\" in result.markdown, result.markdown\nE       AssertionError: ## Page 1\nE         \nE         Table 1. Regressions of 1-year excess returns on all forward rates\nE         |  |  | y(1) | (1\u00b72) | R2 |\nE         | --- | --- | --- | --- | --- |\nE         | n | const. |  | f |  |\nE         | 2 | \u00b71.96 | \u00b70.94 | 0.74 | 0.34 |\nE         |  | (0.64) | (0.18) | (0.43) |  |\nE         |  | (0.81) | (0.30) | (0.50) |  |\nE         Large T\nE         Small T\nE         EH\nE         \nE         | \\| \\| | \\| y(1) | \\| (1\u00b72) | \\| R2 \\| |  |\nE         | --- | --- | --- | --- | --- |\nE         | \\| --- | \\| --- | \\| --- \\| --- | \\| --- \\| |  |\nE         | \\| n | \\| const. | \\| \\| f | \\| \\| |  |\nE         | \\| 2 | \\| \u00b71.96 | \\| \u00b70.94 | \\| 0.74 | \\| 0.34 |\nE         | \\| \\| | (0.64) | \\| (0.18) | \\| (0.43) | \\| \\| |\nE         | \\| \\| | (0.81) | \\| (0.30) | \\| (0.50) | \\| \\| |\nE         \nE       assert '$f^{(1\\\\to2)}$' in '## Page 1\\n\\nTable 1. Regressions of 1-year excess returns on all forward rates\\n|  |  | y(1) | (1\u00b72) | R2 |\\n| --- |...\\n| \\\\| \\\\| | (0.64) | \\\\| (0.18) | \\\\| (0.43) | \\\\| \\\\| |\\n| \\\\| \\\\| | (0.81) | \\\\| (0.30) | \\\\| (0.50) | \\\\| \\\\| |\\n'\nE        +  where '## Page 1\\n\\nTable 1. Regressions of 1-year excess returns on all forward rates\\n|  |  | y(1) | (1\u00b72) | R2 |\\n| --- |...\\n| \\\\| \\\\| | (0.64) | \\\\| (0.18) | \\\\| (0.43) | \\\\| \\\\| |\\n| \\\\| \\\\| | (0.81) | \\\\| (0.30) | \\\\| (0.50) | \\\\| \\\\| |\\n' = EngineResult(document_path=PosixPath('/private/var/folders/yw/16p_3zbx0yzdytt7lrs04pr40000gn/T/pytest-of-rubenffuertes...ror='untrusted tables on 1 page(s), 2 flag(s) (see tables_trust.json)', figures=[], audit_passed=False, audit_notes=[]).markdown\n\ntests/test_gh259_flagged_model_table_wins.py:279: AssertionError\n----------------------------- Captured stdout call -----------------------------\nConsider using the pymupdf_layout package for a greatly improved page layout analysis.\n\n\n\n=========================== short test summary info ============================\nFAILED tests/test_gh259_flagged_model_table_wins.py::test_flagged_model_table_ships_instead_of_flat_native\nFAILED tests/test_gh259_flagged_model_table_wins.py::test_kept_model_table_is_demoted_and_carries_its_flag\nFAILED tests/test_gh259_flagged_model_table_wins.py::test_document_status_audit_event_and_cli_surface_the_kept_page\n3 failed, 4 passed, 5 warnings in 0.41s\n",
+    "branch_raw": ".......                                                                  [100%]\n\n\n\n7 passed, 5 warnings in 0.39s\n",
+    "non_vacuity": "3 behavioural AssertionErrors at ed4fb05 ('winner is native'), 4 reverse-regression guards PASS at baseline. No AttributeError/TypeError/ImportError for anything this PR adds.",
+    "reverse_regressions": [
+      "empty model output -> native still ships",
+      "TR-3 D3 floor still ships the failed-table marker",
+      "model output with no grid on a table page -> native still ships",
+      "native-engine winner untouched"
+    ],
+    "existing_tests_edited": "NONE. Two existing tests (test_pp5_resume_ledger::test_flagged_native_fallback_sidecar_records_winner_not_attempt and test_table_repair_parity::test_agentic_parity_on_ce_like_fixture) broke under a first, blanket 'always prefer the model' version -- both were passing BECAUSE of the substitution. The model-must-have-emitted-a-grid bound resolves both on the merits, so neither was edited, weakened or deleted."
+  },
+  "suite": "1911 passed, 3 xfailed (baseline 1907 passed, 3 xfailed) -- PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-259/src ~/venvs/socr/bin/pytest -q -p no:randomly",
+  "lint": "uvx ruff@0.16.0 format --check . -> 329 files already formatted",
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-259/src/socr/__init__.py",
+  "ci": {
+    "run_id": 32385956685,
+    "head_sha": "7c16dd7b78402c5e4d1148d3c6eafd8b492932ae",
+    "conclusion": "GREEN (success)",
+    "mergeable": "MERGEABLE (no conflict with base; a real CI run exists for this exact head)"
+  },
+  "left_for_owner": [
+    "The agentic ladder's rejection reasons are never persisted: manifest.py:662 records `skip_reason or failure_mode.value`, and skip_reason is only set when the output is empty -- hence all five journal rows read reason:'none'. judge_rejected is written only on the phase-major path (orchestrator.py:3598). An agentic run therefore cannot say WHY a rung was refused, which is what sent this issue's own diagnosis to the wrong line. Deserves its own ticket.",
+    "orchestrator.py:1451 (the line the issue cited) has the same shape -- `status != SUCCESS` collapses 'errored' with 'flagged' -- but did not fire here and was left alone for want of a measured case."
+  ]
+}

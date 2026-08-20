@@ -1,0 +1,60 @@
+{
+  "round": 3,
+  "issue": 259,
+  "pr": 260,
+  "head_unchanged": "9b95d3746361e70a4918d80e5226109df176df5b",
+  "outcome": "STOPPED \u2014 design pass requested, no round-3 code pushed",
+  "converging_question": {
+    "answer": "NO, not on the current evidence.",
+    "reasoning": [
+      "The reviewer's hole (A: ragged grid + ambiguous deferral) is real and I reproduced it at 9b95d37. It is closable exactly as instructed, by running the structural predicate at the keep site.",
+      "But while checking the premise round 2 rests on -- that an AMBIGUOUS verdict means the verifier deferred rather than refuted -- I found a THIRD hole (B) that the requested fix does not close, and that is strictly worse because it is about VALUES, not structure.",
+      "B: native_verifier.py:862-880 downgrades a multiset mismatch to AMBIGUOUS when a row-count discrepancy makes the row pairing unreliable. `_value_guard` DETECTS the wrong number and returns it; `verify_native_table` then discards it (drifted_rows is populated only on the hard_fail branch, line ~1031). So vr.warn=True, my round-2 mark is written, and the keep path ships a table with a DETECTED invented/shifted number in place of native. The structural gate cannot see it -- the gate is string-only and is documented as blind to values by construction ('TR-3 proves the numbers are right; it is blind to header loss...'). The division of labour is the other way round: TR-3 owns values, the gate owns structure, and on this path TR-3's finding is thrown away.",
+      "Three rounds, three holes. I found the third myself, in about fifteen minutes of reading a file two review rounds had already passed over. That is evidence the search is not exhausted, not evidence that the next patch closes it.",
+      "The structural reason: the keep site is reconstructing, at ASSEMBLE time, a quality judgement that lives in ROUTING-time components which do not persist their evidence. Round 2 had to add `rejection_class` to PageOutput to see one discarded fact; round 3 would have to propagate `drifted_rows` to see another. Each round discovers one more thrown-away datum. The bound is not tightening toward a limit; it is chasing an information-loss problem upstream of it.",
+      "And the design fork underneath: socr ALREADY has a settled answer for 'both candidates are suspect on a born-digital table page' -- the TR-3 D3 fail-closed floor: ship neither, emit an explicit failed-table marker, route the region to the image-asset lane. My keep path is a SECOND, different answer to the same question, governed by a growing conjunction, reachable on pages that differ from D3 pages only in which flags happened to be set. Which of the two dispositions is right for this page class is the owner's call, not something to converge on by patching."
+    ]
+  },
+  "holes_reproduced_at_9b95d37": {
+    "A_reviewers_hole": {
+      "source": "fixes/260-round2-review.grok.json, reproduced independently",
+      "fixture": "native = one row, 2 numeric lanes at x=100,160; model output = 4-column ragged grid (last row has 2 cells, not 4)",
+      "measured": "vr.warn=True (lane gap >= 2), inner judge accept=False, rejection_class='ambiguous_deferred', flagged_model_page_output returns the model -> ships a ragged grid over native",
+      "mechanism": "_apply_structural_gate returns a REJECTING inner decision unchanged, so a candidate that is both structurally defective AND an ambiguous deferral is never gate-inspected. My round-2 disjointness argument was true and insufficient.",
+      "closable_as_instructed": true
+    },
+    "B_new_hole_found_this_round": {
+      "fixture": "native = 3 rows x 3 numeric lanes (1.10/2.20/3.30, 4.40/5.50/6.60, 7.70/8.80/9.90); model output = 6 columns, 4 numeric rows, with 9.99 substituted for 6.60",
+      "measured_raw": "_value_guard   hard_fail=False  drift DETECTED=1  row_count_warn=True\n               output numeric tokens {'4.40': 1, '5.50': 1, '9.99': 1} != native {'4.40': 1, '5.50': 1, '6.60': 1}\nVerifierResult state=AMBIGUOUS  warn=True  drifted_rows SURFACED=0",
+      "end_to_end": "rejection_class='ambiguous_deferred', flagged_model_page_output returns the model -> ships a table containing a DETECTED wrong number in place of native",
+      "closed_by_the_requested_fix": false,
+      "why_not": "The structural gate is string-only grid shape. Values are TR-3's department, and TR-3's finding is discarded before it reaches any consumer."
+    }
+  },
+  "independent_bug_worth_its_own_issue": {
+    "summary": "Detected numeric drift is silently discarded on the AMBIGUOUS path. `_value_guard` returns `drifted` non-empty; `verify_native_table` assigns `result.drifted_rows` only inside the hard_fail branch, so on the row-count-discrepancy downgrade the finding reaches NO audit event, NO page status, NO metadata, NO CLI.",
+    "site": "src/socr/tables/native_verifier.py, the `if row_count_warn_info is not None: return False, \"\", drifted, row_count_warn_info` branch (~line 880) vs the assignment at ~line 1031",
+    "why_it_matters": "This is a cardinal-rule violation on main, independent of #259 and independent of whether #260 ever lands: socr detects a possibly-wrong number in a table and tells nobody. On the reference page drifted_rows was empty, so #259's own case is unaffected -- but the class is live.",
+    "cheap_remedy": "Populate result.drifted_rows on the ambiguous path too, and emit the existing distrust event with the AMBIGUOUS qualifier. Detection already works; only the surfacing is missing."
+  },
+  "pr_260_status": {
+    "head": "9b95d3746361e70a4918d80e5226109df176df5b",
+    "ci": "GREEN (run 32387851923) \u2014 and green is misleading here",
+    "recommendation": "DO NOT MERGE. Rounds 1 and 2 are real improvements to the diagnosis and to the plumbing, but the shipped predicate has two open holes (A and B), both of which cause silent content corruption. A green CI on this branch means the suite does not cover them, not that they are absent.",
+    "salvageable_independent_of_the_design_call": [
+      "The measured chain and the correction to the issue's cited line (orchestrator.py:1451, phase-major, and the qwen attempt's status is `success`).",
+      "The judge_rejected finding: that field is written only at orchestrator.py:3598, phase-major repair, so it is a non-signal in agentic mode. The issue's premise was wrong.",
+      "The --no-native-first answer: same defect, routing did what it says (five providers ran); nothing downstream of routing reads the flag.",
+      "PageOutput.rejection_class as provenance, which is useful whatever disposition is chosen."
+    ]
+  },
+  "design_question_for_the_owner": {
+    "framing": "On a born-digital table page where the ladder accepted no rung and the native reading also carries a table-distrust flag, socr has two candidates and neither is trusted. It already answers this exact question one way (TR-3 D3: fail closed, ship a marker, route to the image lane). #259 asks it to answer the same question a different way (keep the model's reading, flagged). Which disposition governs, and on what evidence?",
+    "sub_questions": [
+      "If keep-with-flag is right, what is the CLOSED set of conditions that make keeping safe -- stated once, up front, rather than discovered one review round at a time? My current list is: model output present and containing a grid; verifier deferred rather than refuted; no drift detected even on the downgraded path; grid structurally well-formed by the gate's own predicate; neither fail-closed floor applies. I cannot show that list is complete, and that is the whole problem.",
+      "Should the evidence be persisted at ROUTING time (a disposition record on the attempt, populated by the components that own each check) rather than reconstructed at assemble time from whatever flags survived? Both remaining holes are information-loss bugs, not logic bugs.",
+      "Is 'ship neither, surface both' -- the D3 shape, extended to this flag combination -- the honest answer for a citation corpus, given the owner's own rule that a missing number beats a wrong one?"
+    ]
+  },
+  "rules_observed": "No code pushed this round. No force-push, no merge, nothing touched in the main checkout, worktree clean at 9b95d37."
+}

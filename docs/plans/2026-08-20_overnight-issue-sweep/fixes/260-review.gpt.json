@@ -1,0 +1,27 @@
+{
+  "pr": 260,
+  "head": "7c16dd7",
+  "reviewer": "gpt-sol",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-259 show '7c16dd7:src/socr/core/manifest.py' | sed -n '359p'",
+    "output": "    if bo.status is PageStatus.ERROR or bo.failure_mode is FailureMode.HALLUCINATION:"
+  },
+  "verdict": "REQUEST-CHANGES",
+  "audit_passed_never_flipped": true,
+  "no_page_loses_content": false,
+  "empty_model_output_still_falls_back": true,
+  "predicate_not_overbroad": false,
+  "non_vacuity_confirmed": true,
+  "judge_rejected_claim_verified": true,
+  "surfacing_claims_accurate": true,
+  "reran_baseline_myself": true,
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "The predicate treats every non-empty model grid as merely flagged unless its PageOutput is ERROR/HALLUCINATION, but agentic judge rejection reasons are not propagated into PageOutput. A candidate explicitly CERTAIN_FAIL-rejected for numeric multiset/label-binding mismatch, or rejected by the structural gate, normally remains status SUCCESS/failure_mode NONE; after ladder exhaustion this branch can therefore replace native text with a model table the verifier positively proved wrong.",
+      "where": "src/socr/core/manifest.py:359",
+      "why": "NativeTableVerifierJudge returns accept=False for hard_fail at src/socr/pipeline/agentic.py:584-588 and the structural gate rejects at :681-684 without mutating the output. orchestrator.py:3084 stores only accepted into audit_passed and :3187 sets native_table_structure_failed for every rejected table ladder. Thus the new predicate cannot distinguish the reference page's ambiguous/flagged rejection from a hard rejection, defeating its documented bound and introducing silent content corruption. Carry and inspect the rejection disposition/reason, or restrict the keep path to proven soft/ambiguous rejection events. Add reverse tests for verifier hard_fail and table_structure_failed, not only empty/no-grid/D3/native-engine cases."
+    }
+  ],
+  "what_i_tried_to_break": "Traced canonical_page_texts through _winning_page_output; verified the returned object is a dataclasses.replace copy and the source best_output is not mutated; exercised the PR's empty, D3, no-grid and native-engine bounds; reran all seven PR tests at head (7 passed); independently archived base ed4fb05, copied only the test file, and reran it with PYTHONPATH pinned (3 behavioural AssertionErrors, 4 passing reverse guards). Inspected the owner manifest journal and confirmed five accepted:false entries and that judge_rejected is written only in phase-major repair. Then traced positive rejection paths and found CERTAIN_FAIL and structural-gate rejection leave PageOutput SUCCESS/NONE, which slips through the new predicate."
+}
