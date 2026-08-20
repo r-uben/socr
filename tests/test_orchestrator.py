@@ -2375,7 +2375,25 @@ class TestNativeFirstPipeline:
             return [
                 PageOutput(
                     page_num=pn,
-                    text=_good_text(),
+                    # S1 (C1/C2): page 2 is the "complex" (has_tables=True,
+                    # structure-class) page in this fixture, so its mocked
+                    # VLM reading must actually author a grid -- otherwise
+                    # this end-to-end smoke test collides with the exact
+                    # defect S1 exists to catch (a structure-class page with
+                    # a real model rung that authored no usable table),
+                    # which now correctly flips the document to
+                    # AUDIT_FAILED. Plain boilerplate prose was never a
+                    # faithful stand-in for "the VLM successfully OCR'd a
+                    # table"; giving it one keeps this test's actual intent
+                    # (native-first routes complex pages to the VLM and the
+                    # pipeline completes cleanly) while being compatible
+                    # with S1.
+                    text=(
+                        _good_text() + "\n\n| Variable | Coef | SE |\n|---|---|---|\n"
+                        "| Output gap | 0.42 | 0.11 |\n"
+                    )
+                    if pn == 2
+                    else _good_text(),
                     status=PageStatus.SUCCESS,
                     engine="gemini",
                     audit_passed=True,

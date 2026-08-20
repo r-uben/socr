@@ -91,6 +91,20 @@ class PageState:
     rotated_shred_png_ref: str = ""
     chart_asset_render_failed: bool = False  # PP-7: chart-lane PNG render failed
 
+    def is_structure_class(self) -> bool:
+        """C2: pages whose native branch may never author a GRID.
+
+        Backed by the exact fields ``apply_born_digital`` propagates
+        (``has_tables``, ``has_equations``), so the orchestrator's
+        OCR-bypass routing (``_page_is_structure_class`` /
+        ``_page_has_tables``) and the manifest's winner selection
+        (``_winning_page_output``) read the same source and cannot diverge
+        on what counts as structure-class. Equation pages are included
+        (R3): the model-rung guarantee and the never-author-a-grid rule
+        both need to reach them, not just table pages.
+        """
+        return bool(self.has_tables or self.has_equations)
+
     @property
     def needs_repair(self) -> bool:
         """Whether this page still needs (re)processing.

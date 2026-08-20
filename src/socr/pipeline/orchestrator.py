@@ -1501,6 +1501,20 @@ class UnifiedPipeline:
         pa = self._assessment_for_page(page_num)
         return bool(pa and pa.has_tables)
 
+    def _page_is_structure_class(self, page_num: int, ps: PageState | None = None) -> bool:
+        """C2/R3: tables OR equations -- the model-rung guarantee applies to both.
+
+        Same source ``_page_has_tables`` reads (``ps.has_tables`` first, the
+        assessment as a fallback for callers before ``apply_born_digital``
+        has run) plus ``has_equations``, via ``PageState.is_structure_class``
+        so the manifest's winner selection cannot diverge from this routing
+        gate on what counts as structure-class.
+        """
+        if ps is not None and ps.is_structure_class():
+            return True
+        pa = self._assessment_for_page(page_num)
+        return bool(pa and (pa.has_tables or pa.has_equations))
+
     def _is_native_eligible_without_ocr(self, page_num: int, ps: PageState) -> bool:
         """Whether a page is native-eligible, WITHOUT the table exclusion.
 
@@ -1535,6 +1549,17 @@ class UnifiedPipeline:
         ``--native-only`` must not bypass OCR for it either. Horizontal table
         pages and rotated table-less pages are unaffected and still take the
         unconditional ``native_only`` short-circuit.
+
+        R3 (the model-rung guarantee): outside ``--native-only`` the bypass
+        also excludes equation pages, not only table pages. "Native may never
+        author a GRID on a structure-class page" (C1) is meaningless unless a
+        model attempt actually runs to author one -- an equation-only page
+        that never entered the OCR ladder has no alternative candidate for
+        ``_winning_page_output`` to choose, and ships exactly the untrusted
+        native reading again. ``--native-only``'s own bypass is left on its
+        narrower table-only check deliberately (see the "Open" question in
+        the S1 build spec): forcing a model rung under an explicit
+        native-only run is a separate, unresolved policy call.
         """
         if not self._is_native_eligible_without_ocr(page_num, ps):
             return False
@@ -1543,7 +1568,7 @@ class UnifiedPipeline:
             rotated = bool(pa and pa.text_is_rotated)
             if not (rotated and self._page_has_tables(page_num, ps)):
                 return True
-        return not self._page_has_tables(page_num, ps)
+        return not self._page_is_structure_class(page_num, ps)
 
     def _is_agentic_trusted_native(self, page_num: int, ps: PageState) -> bool:
         """Backward-compatible alias for the agentic native-bypass predicate."""
@@ -5514,6 +5539,8 @@ class UnifiedPipeline:
             flagged_model_page_output,
             is_page_failed_marker,
             kept_table_grid_defect,
+            structure_class_grid_winner,
+            structure_class_native_fallback_applies,
         )
 
         page_texts = canonical_page_texts(state)
@@ -5606,6 +5633,31 @@ class UnifiedPipeline:
             n for n, p in sorted(state.pages.items()) if flagged_model_page_output(p) is not None
         ]
 
+        # S1: the general structure-class case (C2 -- tables or equations).
+        # ``_winning_page_output`` ships the grid-authoring model attempt
+        # instead of native whenever one exists, regardless of whether any
+        # native-distrust flag ever fired (the 2026-08-20 measurement: 7 of 8
+        # losing pages set none). Must match the manifest's winner EXACTLY --
+        # same predicate, same function -- or this list and the shipped page
+        # disagree, exactly the failure mode the other bucket exclusions above
+        # already guard against.
+        structure_class_model_pages = [
+            n for n, p in sorted(state.pages.items()) if structure_class_grid_winner(p) is not None
+        ]
+
+        # S1 case (iii): the same branch, resolved the OTHER way -- a real
+        # rung ran but authored no usable grid, so native's PROSE ships
+        # (C1), demoted to WARNING/audit_passed=False. Nothing upstream in
+        # ``_score_per_page`` ever flips ``p.best_output.audit_passed`` for
+        # this shape (a clean-looking native table is exactly what that
+        # scorer is blind to), so this needs its OWN bucket -- folding it
+        # into ``native_fallback_pages`` above would silently miss every
+        # page here, since that list's final clause reads
+        # ``p.best_output.audit_passed`` and this branch never touches it.
+        structure_class_native_fallback_pages = [
+            n for n, p in sorted(state.pages.items()) if structure_class_native_fallback_applies(p)
+        ]
+
         # #259 round 3: pages where the value guard DETECTED a numeric multiset
         # mismatch but declined to call it certain (row-count discrepancy →
         # unreliable pairing). The owner's ruling keeps the flagged table, so
@@ -5639,6 +5691,7 @@ class UnifiedPipeline:
                 or getattr(p, "native_table_structure_defective", False)
                 or getattr(p, "native_table_header_unattributed", False)  # GH-200
                 or p.chart_asset_render_failed  # PP-7: render failure surfaces at doc level
+                or p.is_structure_class()  # S1: C2 -- tables or equations
             )
             # TR-3: D3 floor pages (see d3_floor_pages below --
             # ``native_table_structure_failed AND native_table_unverifiable``)
@@ -5683,7 +5736,13 @@ class UnifiedPipeline:
             and n not in native_only_distrust_pages
             # #259: the model's table ships on these; native did not.
             and n not in flagged_model_pages
-            and p.attempts
+            # S1: the model's grid ships on these; native did not.
+            and n not in structure_class_model_pages
+            # S1 case (iii): a structure-class page ships native WARNING even
+            # with ZERO attempts (R3's guarantee found nothing to run, or
+            # --native-only never ran a rung at all) -- ``p.attempts`` alone
+            # would silently drop those from this list.
+            and (p.attempts or p.is_structure_class())
             and not (p.best_output and p.best_output.audit_passed)
         ]
 
@@ -5741,6 +5800,14 @@ class UnifiedPipeline:
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
         # ships the better of the two readings, nothing was lost.
         pages_ok = pages_ok and not flagged_model_pages
+        # S1: the general structure-class case (C2). Same reasoning as #259 --
+        # the page ships the kept model reading over native, so it is not a
+        # page failure, but the document cannot report a clean SUCCESS either.
+        pages_ok = pages_ok and not structure_class_model_pages
+        # S1 case (iii): native's PROSE ships (there is no better reading),
+        # but it is never SUCCESS -- the grid it carries is exactly what
+        # this branch could not vouch for (no rung authored one).
+        pages_ok = pages_ok and not structure_class_native_fallback_pages
         # NOT a page failure -- the owner was explicit that the page is not failed
         # and the table is kept. AUDIT_FAILED at the document level is the
         # "completed with warnings, output written" path, which is the honest
@@ -5772,6 +5839,8 @@ class UnifiedPipeline:
             or d3_floor_pages
             or native_only_distrust_pages
             or flagged_model_pages
+            or structure_class_model_pages
+            or structure_class_native_fallback_pages
             or value_drift_pages
         ):
             from socr.core.audit_log import AuditEvent
@@ -5863,6 +5932,50 @@ class UnifiedPipeline:
                         data={"d3_floor": True},
                     )
                 )
+            # S1: the general structure-class case (C2). Distinct from #259's
+            # ``flagged_model_table_kept`` (which only fires once an OLD
+            # native-distrust flag is set) and from #262's D3 supersession
+            # (which requires the TR-3 hard-fail conjunction): this fires on
+            # ANY structure-class page whose native branch may not author the
+            # grid, flag or no flag -- the 2026-08-20 measurement's actual bug.
+            for n in structure_class_model_pages:
+                _kept_sc = structure_class_grid_winner(state.pages[n])
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="structure_class_model_table_kept",
+                        engine=(_kept_sc.engine if _kept_sc else ""),
+                        detail=(
+                            "structure-class page (table or equation); native may not"
+                            " author the grid (C1), and a model attempt did -- the"
+                            " model's reading ships instead of native, flagged per its"
+                            " own status"
+                        ),
+                        data={"structure_class_model_kept": True},
+                    )
+                )
+            # S1 case (iii): the same structure-class branch resolved the other
+            # way -- a real model rung ran (R3) but authored no usable grid,
+            # so native's PROSE ships (C1 permits prose, never a grid),
+            # demoted to WARNING/audit_passed=False. Recorded on its own
+            # bucket because ``p.best_output.audit_passed`` is never mutated
+            # for this case (the non-negotiable audit_passed rule), so
+            # nothing keyed off that flag alone would ever see it.
+            for n in structure_class_native_fallback_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="structure_class_native_fallback",
+                        engine="native",
+                        detail=(
+                            "structure-class page (table or equation); a model rung ran"
+                            " but authored no usable grid, and native may not author one"
+                            " either (C1) -- native's prose ships instead, flagged"
+                            " WARNING rather than SUCCESS"
+                        ),
+                        data={"structure_class_native_fallback": True},
+                    )
+                )
             if not self.config.quiet:
                 if failed_pages:
                     console.print(
@@ -5885,6 +5998,18 @@ class UnifiedPipeline:
                         f"  [yellow]{len(flagged_model_pages)} table page(s) shipped the "
                         f"model's FLAGGED reading (no rung accepted; native table "
                         f"distrusted): {flagged_model_pages}[/yellow]"
+                    )
+                if structure_class_model_pages:
+                    console.print(
+                        f"  [yellow]{len(structure_class_model_pages)} structure-class page(s) "
+                        f"shipped the model's grid reading over native (native may not author "
+                        f"a grid): {structure_class_model_pages}[/yellow]"
+                    )
+                if structure_class_native_fallback_pages:
+                    console.print(
+                        f"  [yellow]{len(structure_class_native_fallback_pages)} structure-class "
+                        f"page(s) shipped native's prose flagged (a model rung ran but authored "
+                        f"no usable grid): {structure_class_native_fallback_pages}[/yellow]"
                     )
                 if value_drift_pages:
                     from socr.tables.native_verifier import describe_drift
