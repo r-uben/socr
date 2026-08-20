@@ -1,0 +1,331 @@
+[
+ {
+  "doc": "2002__cochrane_piazzesi__bond_risk_premia__WP",
+  "page": 7,
+  "kind": "table",
+  "shipped_engine": "gemini",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "gemini"
+  ],
+  "decimals": {
+   "gemini": 112
+  }
+ },
+ {
+  "doc": "2002__cochrane_piazzesi__bond_risk_premia__WP",
+  "page": 10,
+  "kind": "table",
+  "shipped_engine": "native",
+  "page_status": "warning",
+  "flags": [
+   "native_table_structure_failed"
+  ],
+  "candidates": [
+   "gemini",
+   "native"
+  ],
+  "decimals": {
+   "native": 50,
+   "gemini": 50
+  }
+ },
+ {
+  "doc": "2002__cochrane_piazzesi__bond_risk_premia__WP",
+  "page": 12,
+  "kind": "table",
+  "shipped_engine": "native",
+  "page_status": "warning",
+  "flags": [
+   "native_table_structure_failed"
+  ],
+  "candidates": [
+   "gemini",
+   "native"
+  ],
+  "decimals": {
+   "gemini": 57,
+   "native": 57
+  }
+ },
+ {
+  "doc": "2002__cochrane_piazzesi__bond_risk_premia__WP",
+  "page": 15,
+  "kind": "table",
+  "shipped_engine": "native",
+  "page_status": "error",
+  "flags": [
+   "native_table_structure_failed",
+   "native_table_unverifiable"
+  ],
+  "candidates": [
+   "gemini",
+   "native"
+  ],
+  "decimals": {
+   "gemini": 36,
+   "native": 0
+  }
+ },
+ {
+  "doc": "2015__gertler_karadi__monetary_policy_surprises__credit_co",
+  "page": 14,
+  "kind": "table",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [
+   "native_table_structure_defective"
+  ],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 66
+  }
+ },
+ {
+  "doc": "2015__gertler_karadi__monetary_policy_surprises__credit_co",
+  "page": 15,
+  "kind": "table",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [
+   "native_table_structure_defective"
+  ],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 60
+  }
+ },
+ {
+  "doc": "2015__gertler_karadi__monetary_policy_surprises__credit_co",
+  "page": 16,
+  "kind": "table",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 60
+  }
+ },
+ {
+  "doc": "2018__nakamura_steinsson__high_frequency_identification_of",
+  "page": 42,
+  "kind": "table",
+  "shipped_engine": "native",
+  "page_status": "warning",
+  "flags": [
+   "native_table_structure_failed"
+  ],
+  "candidates": [
+   "gemini",
+   "native"
+  ],
+  "decimals": {
+   "native": 152,
+   "gemini": 152
+  }
+ },
+ {
+  "doc": "2018__nakamura_steinsson__high_frequency_identification_of",
+  "page": 13,
+  "kind": "table",
+  "shipped_engine": "native",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "gemini",
+   "native"
+  ],
+  "decimals": {
+   "native": 54,
+   "gemini": 54
+  }
+ },
+ {
+  "doc": "2018__nakamura_steinsson__high_frequency_identification_of",
+  "page": 43,
+  "kind": "table",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 54
+  }
+ },
+ {
+  "doc": "2018__nakamura_steinsson__high_frequency_identification_of",
+  "page": 44,
+  "kind": "table",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [
+   "native_table_unverifiable"
+  ],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 54
+  }
+ },
+ {
+  "doc": "2020__pflueger_rinaldi__fed_moves_market__WP",
+  "page": 34,
+  "kind": "table",
+  "shipped_engine": "native",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "gemini",
+   "native"
+  ],
+  "decimals": {
+   "gemini": 29,
+   "native": 29
+  }
+ },
+ {
+  "doc": "2020__pflueger_rinaldi__fed_moves_market__WP",
+  "page": 43,
+  "kind": "equation",
+  "shipped_engine": "native",
+  "page_status": "warning",
+  "flags": [],
+  "candidates": [
+   "gemini",
+   "native"
+  ],
+  "decimals": {
+   "native": 0,
+   "gemini": 0
+  }
+ },
+ {
+  "doc": "2021__kaminska_mumtaz_sustek__monetary_policy_surprises_tr",
+  "page": 39,
+  "kind": "table",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 20
+  }
+ },
+ {
+  "doc": "2021__kaminska_mumtaz_sustek__monetary_policy_surprises_tr",
+  "page": 33,
+  "kind": "figure",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 19
+  }
+ },
+ {
+  "doc": "2021__kaminska_mumtaz_sustek__monetary_policy_surprises_tr",
+  "page": 34,
+  "kind": "figure",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 24
+  }
+ },
+ {
+  "doc": "2021__kaminska_mumtaz_sustek__monetary_policy_surprises_tr",
+  "page": 38,
+  "kind": "figure",
+  "shipped_engine": "native",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "native",
+   "qwen"
+  ],
+  "decimals": {
+   "native": 0,
+   "qwen": 0
+  }
+ },
+ {
+  "doc": "2022__bauer_swanson__reassessment_monetary_policy_surprise",
+  "page": 21,
+  "kind": "table",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [
+   "native_table_structure_defective"
+  ],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 53
+  }
+ },
+ {
+  "doc": "2022__kekre_lenel__monetary_policy_redistribution__Econome",
+  "page": 20,
+  "kind": "equation",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 3
+  }
+ },
+ {
+  "doc": "2023__bauer_swanson__reassessment_of_monetary_policy_surpr",
+  "page": 20,
+  "kind": "table",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [
+   "native_table_structure_defective"
+  ],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 52
+  }
+ },
+ {
+  "doc": "2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP",
+  "page": 34,
+  "kind": "figure",
+  "shipped_engine": "qwen",
+  "page_status": "success",
+  "flags": [],
+  "candidates": [
+   "qwen"
+  ],
+  "decimals": {
+   "qwen": 0
+  }
+ }
+]
