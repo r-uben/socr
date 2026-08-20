@@ -4657,6 +4657,10 @@ class UnifiedPipeline:
           * The winning output's status is exactly ``SUCCESS`` and the body is
             NOT a page-failure marker (a timed-out / ERROR / lossy-fallback page
             written terminal at assemble must be RE-OCR'd, never skipped).
+          * The winning output's ``audit_passed`` is exactly ``True`` (GH-161).
+            Status says the extraction succeeded as an OPERATION; only the audit
+            verdict says the CONTENT was accepted.  A judge-rejected scanned page
+            keeps status SUCCESS with ``audit_passed=False`` and must be re-OCR'd.
           * ``pages/NNN.md`` exists and is readable.
           * The serialised ``winning_output`` is present and rebuilds into a
             ``PageOutput`` without error.
@@ -4723,6 +4727,24 @@ class UnifiedPipeline:
             if winning.get("status") != PageStatus.SUCCESS.value:
                 return None
 
+            # GH-161: the audit verdict MUST be an explicit pass.  Status alone is
+            # not a quality signal — it says the extraction SUCCEEDED as an
+            # operation, not that the content was accepted.  Agentic best-effort
+            # (``_best_effort`` in pipeline/agentic.py, reached when the judge
+            # accepted nothing) keeps the most trustworthy attempt with its
+            # provider status still SUCCESS while ``att.output.audit_passed =
+            # att.accepted`` makes it False; on a SCANNED page no native fallback
+            # exists to demote that winner, so ``_winning_page_output`` returns it
+            # verbatim and the sidecar records status="success" beside
+            # audit_passed=false.  Skipping there restores text that EVERY judge
+            # rejected — silent corpus poisoning on resume, and the one gate
+            # condition that the born-digital sibling of this shape (demoted to
+            # WARNING) never needed.  Exactly ``True``, mirroring ``terminal``: a
+            # missing key or a non-bool is doubt, and doubt re-OCRs.
+            if winning.get("audit_passed") is not True:
+                self._record_ledger_audit_reject(state, page_num, winning)
+                return None
+
             # Read the authoritative body fragment.
             try:
                 body = frag_path.read_text(encoding="utf-8")
@@ -4747,6 +4769,65 @@ class UnifiedPipeline:
         except Exception as exc:  # never let the ledger read break a run
             logger.debug("PP-5 ledger read failed for p%d (%s); reprocessing", page_num, exc)
             return None
+
+    def _record_ledger_audit_reject(
+        self, state: DocumentState, page_num: int, winning: dict
+    ) -> None:
+        """GH-161: make a refused resume of a judge-rejected page VISIBLE.
+
+        Every other condition in ``_load_terminal_page`` refuses silently, and for
+        those that is defensible: a missing sidecar or a fingerprint change is
+        bookkeeping, not a quality verdict.  This one is a quality verdict — the
+        ledger holds a page whose content every judge rejected — so refusing it
+        silently would trade one silent failure (restoring rejected text) for
+        another (reprocessing it with no record that the ledger was poisoned).
+
+        The event reaches three surfaces without any new plumbing: the page's
+        ``pages/NNN.json`` sidecar (``page_events``, filtered by ``page_num``),
+        the run's ``audit_log.json`` (``_write_audit_log`` reads
+        ``state.events``), and — via that writer's summary line plus the console
+        line below — the CLI.  Document status is deliberately untouched: the page
+        is about to be re-OCR'd, so the document's outcome must reflect the FRESH
+        result, not a stale verdict that no longer describes what shipped.
+
+        Idempotent: the gate runs twice for an OCR page (the pre-pass over
+        ``ocr_pages`` and again in the main loop), so a duplicate event for the
+        same page is suppressed rather than double-counted in the audit summary.
+        """
+        try:
+            from socr.core.audit_log import AuditEvent
+
+            kind = "resume_ledger_audit_reject"
+            if any(
+                getattr(ev, "page_num", None) == page_num and getattr(ev, "kind", "") == kind
+                for ev in state.events
+            ):
+                return
+            engine = str(winning.get("engine", "") or "")
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=kind,
+                    engine=engine,
+                    detail=(
+                        "terminal ledger entry was SUCCESS but audit_passed=False "
+                        "(judge-rejected content); refusing the resume skip and "
+                        "re-OCRing the page"
+                    ),
+                    data={
+                        "status": str(winning.get("status", "")),
+                        "audit_passed": winning.get("audit_passed"),
+                        "skip_reason": str(winning.get("skip_reason", "") or ""),
+                    },
+                )
+            )
+            if not self.config.quiet:
+                console.print(
+                    f"  [yellow]p{page_num}: ledger entry judge-rejected "
+                    f"(audit_passed=false) — re-OCRing[/yellow]"
+                )
+        except Exception as exc:  # surfacing must never break a run
+            logger.debug("GH-161: could not record ledger audit reject for p%d (%s)", page_num, exc)
 
     def _restore_terminal_page_state(
         self, state: DocumentState, page_num: int, page_out: PageOutput, output_dir: Path
