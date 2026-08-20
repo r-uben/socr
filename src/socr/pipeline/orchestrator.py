@@ -5476,6 +5476,15 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
         pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
+        # GH-195: a page whose table grid was actively destroying values and had
+        # to be rejected and rebuilt must not leave the run reporting a clean
+        # SUCCESS. AUDIT_FAILED, not ERROR: the rebuild is lossless, so the page
+        # ships correct values and the CLI's "completed with warnings, output
+        # written" path is the honest one.
+        text_grid_rejected_pages = sorted(
+            n for n, p in state.pages.items() if getattr(p, "text_grid_rejected", False)
+        )
+        pages_ok = pages_ok and not text_grid_rejected_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS

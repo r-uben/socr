@@ -23,6 +23,7 @@ import pytest
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
+from socr.core.result import PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.reconstruct import (
@@ -322,3 +323,174 @@ def test_clean_page_emits_no_rejection_event(tmp_path) -> None:
     pipeline._phase_analyze(state)
 
     assert not [e for e in state.events if e.kind == "text_grid_rejected"], state.events
+
+
+def test_corrupted_grid_with_no_numeric_cell_is_still_checked(table_page, monkeypatch):
+    """PR #254 review, blocking: the `None` path must NOT skip detection.
+
+    The first version of the #197 fix skipped `_destroyed_numeric_tokens` whenever
+    `_numeric_row_bbox` returned `None`, reasoning that no numeric-bearing row
+    means no numeric value to destroy. That inference is backwards.
+    `_numeric_row_bbox` reads the ALREADY-CORRUPTED extracted grid: `None` means
+    no cell's pieces are all numeric-token-shaped, and corruption is one of the
+    things that makes a cell stop looking numeric.
+
+    Here every native value (`0.67`, `0.12`, `1.10`, `0.14`) was mangled into a
+    cell like `0.6x`. `_looks_tabular` still admits the grid on its embedded
+    digits, and `_numeric_row_bbox` returns `None` *because* of the damage. The
+    skip therefore blinded the check on exactly the pages it exists to catch.
+    """
+    grid = [
+        ["Firm", "Coef", "SE"],
+        ["Alpha", "0.6x", "0.1x"],
+        ["Beta", "1.1y", "0.1y"],
+        ["Gamma", "2.3z", "0.1z"],
+    ]
+
+    def _row(y0, y1):
+        return _FakeRow(
+            (0.0, y0, 150.0, y1),
+            [(0.0, y0, 50.0, y1), (50.0, y0, 100.0, y1), (100.0, y0, 150.0, y1)],
+        )
+
+    rows = [_row(0.0, 10.0), _row(10.0, 20.0), _row(20.0, 30.0), _row(30.0, 40.0)]
+    table = _FakeTable((0.0, 0.0, 150.0, 40.0), grid, rows)
+    words = [
+        (10.0, 2.0, 40.0, 8.0, "Firm", 0, 0, 0),
+        (55.0, 2.0, 90.0, 8.0, "Coef", 0, 0, 1),
+        (105.0, 2.0, 140.0, 8.0, "SE", 0, 0, 2),
+        (10.0, 12.0, 40.0, 18.0, "Alpha", 0, 1, 0),
+        (55.0, 12.0, 90.0, 18.0, "0.67", 0, 1, 1),
+        (105.0, 12.0, 140.0, 18.0, "0.12", 0, 1, 2),
+        (10.0, 22.0, 40.0, 28.0, "Beta", 0, 2, 0),
+        (55.0, 22.0, 90.0, 28.0, "1.10", 0, 2, 1),
+        (105.0, 22.0, 140.0, 28.0, "0.14", 0, 2, 2),
+    ]
+    assert _numeric_row_bbox(table, grid, words) is None, "setup: no numeric-shaped cell"
+
+    with fitz.open(table_page) as doc:
+        page = doc[0]
+        monkeypatch.setattr(page, "get_text", lambda *a, **k: words)
+        monkeypatch.setattr(page, "find_tables", lambda *a, **k: _FakeResult([table]))
+        monkeypatch.setattr("socr.tables.reconstruct.has_numeric_columns", lambda _page: True)
+
+        # Called WITHOUT the `rejections=` keyword on purpose: that keyword is
+        # part of the #195 change, and using it here would make this test fail
+        # on a signature error rather than on behaviour wherever it does not
+        # exist. The assertion below is about what SHIPS, which is evaluable at
+        # any revision.
+        out = reconstruct_table_regions(page)
+
+    emitted = " ".join(md for _, md in out)
+    assert "0.6x" not in emitted, (
+        "the corrupted text-strategy grid was kept and shipped — the None path "
+        f"skipped the destruction check entirely:\n{emitted}"
+    )
+
+
+def test_rejection_demotes_page_and_document_status(table_page) -> None:
+    """PR #254 review, blocking: #195 requires PAGE and DOCUMENT status too.
+
+    The first version surfaced the rejection only as an AuditEvent and a console
+    line and argued that the lossless rebuild made a status demotion wrong. The
+    reviewer did not accept that, and the issue is explicit: a failure must reach
+    page status, document status, metadata AND CLI.
+
+    Status-only demotion — the page keeps the lossless rebuilt text. This is not
+    the #252 mistake of flipping ``audit_passed`` on ``best_output`` (the
+    winner-SELECTION flag); here the synthetic native output is already the
+    selected winner.
+    """
+    from pathlib import Path as _P
+
+    from socr.core.manifest import _winning_page_output
+
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            agentic=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+            primary_engine=EngineType.DEEPSEEK,
+            save_figures=False,
+            dual_pass_tables=False,
+            detect_equations=False,
+            recover_clean_equations=False,
+            quiet=True,
+            audit_enabled=False,
+            write_manifest=False,
+        )
+    )
+    state = DocumentState(handle=DocumentHandle(path=_P(str(table_page)), page_count=1))
+    pipeline._phase_analyze(state)
+
+    # PAGE status first, and stated in terms that exist at the base commit, so a
+    # revert fails HERE on behaviour rather than on a missing attribute.
+    winner = _winning_page_output(state, 1, None)
+    assert winner.status == PageStatus.WARNING, (
+        "the rejected-and-rebuilt page still ships as SUCCESS — #195 requires the "
+        f"rejection to reach page status: {winner}"
+    )
+    assert winner.audit_passed is False
+    assert winner.text.strip(), "the demotion must not empty the page"
+
+    # DOCUMENT status: the term that feeds pages_ok is set for this page.
+    rejected_pages = sorted(
+        n for n, p in state.pages.items() if getattr(p, "text_grid_rejected", False)
+    )
+    assert rejected_pages == [1], rejected_pages
+
+
+def test_clean_page_is_not_demoted(tmp_path) -> None:
+    """Reverse regression: an upright ruled table stays SUCCESS.
+
+    Without this, a demotion bug would mark every born-digital page WARNING and
+    every document AUDIT_FAILED, which is its own kind of silent uselessness.
+    """
+    from pathlib import Path as _P
+
+    from socr.core.manifest import _winning_page_output
+
+    pdf_path = tmp_path / "ruled.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    x0, y0, cw, rh, cols, rows_n = 100, 100, 60, 20, 3, 4
+    for r in range(rows_n + 1):
+        page.draw_line((x0, y0 + r * rh), (x0 + cols * cw, y0 + r * rh))
+    for c in range(cols + 1):
+        page.draw_line((x0 + c * cw, y0), (x0 + c * cw, y0 + rows_n * rh))
+    for r in range(rows_n):
+        for c in range(cols):
+            page.insert_text((x0 + c * cw + 5, y0 + r * rh + 15), f"{r}.{c}", fontsize=8)
+    # Enough real prose that the page classifies as born-digital at all — a bare
+    # grid of six tokens does not, and would ship the page-failure marker.
+    y = 320
+    for line in [
+        "This appendix reports the estimated coefficients for the baseline",
+        "specification described in section four of the paper above, with",
+        "robust standard errors clustered at the industry level throughout",
+        "and the full sample of firms retained for every reported column.",
+    ]:
+        page.insert_text((60, y), line, fontsize=10)
+        y += 16
+    doc.save(str(pdf_path))
+    doc.close()
+
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            agentic=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.GEMINI],
+            primary_engine=EngineType.DEEPSEEK,
+            save_figures=False,
+            quiet=True,
+            audit_enabled=False,
+            write_manifest=False,
+        )
+    )
+    state = DocumentState(handle=DocumentHandle(path=_P(str(pdf_path)), page_count=1))
+    pipeline._phase_analyze(state)
+
+    assert getattr(state.pages[1], "text_grid_rejected", False) is False
+    winner = _winning_page_output(state, 1, None)
+    assert winner.status == PageStatus.SUCCESS, winner
+    assert winner.audit_passed is True

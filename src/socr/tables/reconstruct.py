@@ -176,27 +176,40 @@ def reconstruct_table_regions(
         # counted "destroyed" and reject an otherwise-good grid.
         numeric_scope = _numeric_row_bbox(table, grid, words)
         if numeric_scope is None:
-            # GH-197: the `None` path used to fall back to `fitz.Rect(table.bbox)`
-            # — the exact loose, whitespace-inferred rectangle the tight scope was
-            # introduced to stop using. A note, an axis tick or a page number
-            # sitting in that overrun has no containing cell, counts as
-            # "no-cell" destroyed, and rejects a perfectly good grid.
+            # GH-197, corrected after review of PR #254.
             #
-            # Skipping the check outright is not a weakening: `_numeric_row_bbox`
-            # returned None because this table has NO numeric-bearing row, so
-            # there is no numeric value here that a lane boundary could have
-            # destroyed. Every hit the old code could have found in that state was
-            # by construction from the overrun, i.e. a false positive.
+            # The first version of this fix SKIPPED the destruction check here,
+            # reasoning that `None` means the table has no numeric value, so
+            # nothing could have been destroyed. That inference is backwards.
+            # `_numeric_row_bbox` derives `None` from the ALREADY-CORRUPTED
+            # extracted grid — it means no cell's whitespace pieces are all
+            # numeric-token-shaped — and corruption is one of the things that
+            # makes a cell stop looking numeric. A native `0.67` whose cell came
+            # back `0.6x` yields `None` PRECISELY BECAUSE it was destroyed, while
+            # `_looks_tabular` still admits the grid on its embedded digits. The
+            # skip therefore blinded the check on exactly the pages it exists to
+            # catch: measured on that shape, four destroyed tokens
+            # (0.67, 0.12, 1.10, 0.14) went undetected.
+            #
+            # What #197 actually asks for is narrower: do not scope the check to
+            # `table.bbox`. So scope it to the union of the table's own ROW
+            # rects instead. That excludes the whitespace-inferred OVERRUN below
+            # the last row — the note / axis tick / page number that produced
+            # #197's false positive — by construction, while still covering every
+            # real row, so a corrupted grid is still inspected.
+            numeric_scope = _row_union_bbox(table)
+            if numeric_scope is None:
+                # No rows at all: nothing to scope to, and nothing to check.
+                md = _grid_to_markdown(cleaned)
+                if md:
+                    out.append((fitz.Rect(table.bbox), md))
+                continue
             logger.debug(
-                "reconstruct_table_regions: no numeric-bearing row in region %s — "
-                "skipping the destruction check (nothing numeric to destroy) and "
-                "keeping the text-strategy grid",
+                "reconstruct_table_regions: no numeric-bearing CELL in region %s "
+                "(the grid may itself be the corruption) — checking destruction "
+                "against the union of the table's own rows, not table.bbox",
                 table.bbox,
             )
-            md = _grid_to_markdown(cleaned)
-            if md:
-                out.append((fitz.Rect(table.bbox), md))
-            continue
         destroyed = _destroyed_numeric_tokens(words, table, grid, numeric_scope)
         if destroyed:
             values = [rec["value"] for rec in destroyed]
@@ -281,6 +294,33 @@ def _cell_has_numeric_token(cell) -> bool:
         return False
     toks = str(cell).split()
     return bool(toks) and all(_NUM_TOKEN_RE.match(tok) for tok in toks)
+
+
+def _row_union_bbox(table):
+    """Union of a table's own row rects, or ``None`` when it has no rows (GH-197).
+
+    The fallback destruction scope when no cell looks numeric. Deliberately NOT
+    ``table.bbox``: that rectangle is whitespace-inferred by ``find_tables`` and
+    routinely overruns past the last real row into the notes paragraph beneath
+    it, and a numeral caught in that overrun has no containing cell and would be
+    miscounted as destroyed. The row union stops at the last row, so the overrun
+    is excluded by construction while every real row is still inspected.
+    """
+    try:
+        import fitz
+    except ImportError:  # pragma: no cover
+        return None
+    rects = [
+        fitz.Rect(row.bbox)
+        for row in (getattr(table, "rows", []) or [])
+        if getattr(row, "bbox", None) is not None
+    ]
+    if not rects:
+        return None
+    union = rects[0]
+    for r in rects[1:]:
+        union = union | r
+    return union
 
 
 def _numeric_row_bbox(table, grid: list[list], words: list):
