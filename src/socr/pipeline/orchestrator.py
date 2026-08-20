@@ -829,6 +829,65 @@ class UnifiedPipeline:
                 )
             )
 
+        # GH-195: surface a rejected text-strategy grid. GH-144 A2 rejects a
+        # find_tables(strategy="text") grid when a lane boundary split a native
+        # numeric token (0.67 -> "0" + ".67") and rebuilds the table with the
+        # word-geometry rowizer. That is a real content-loss event on the
+        # original rendering path — before A2 existed the page shipped the wrong
+        # numbers as a silent SUCCESS — and until now it was visible only as a
+        # logger.warning inside reconstruct.py. A log line is not a surface.
+        #
+        # This IS a demotion, at page and document level (round 2 of the #254
+        # review). An earlier version of this comment argued the opposite — that
+        # the fallback rowizer being lossless in isolation (GH-144 A1 §2 control)
+        # meant the page must not be flagged — and the review did not accept it:
+        # #195 requires the rejection to reach page status and document status,
+        # not only metadata and the CLI.
+        #
+        # The demotion is STATUS-ONLY and the page keeps its rebuilt text. What
+        # it says is "this page's layout is adversarial to the text strategy and
+        # a grid had to be thrown away and rebuilt" — worth spot-checking, and
+        # operationally different from a clean first-pass render. See
+        # ``_winning_page_output``'s ``grid_rejected`` term for the page surface
+        # and ``text_grid_rejected_pages`` in ``_phase_assemble`` for the
+        # document one.
+        for pa in assessment.pages:
+            rejections = getattr(pa, "text_grid_rejections", None) or []
+            if not rejections:
+                continue
+            destroyed_total = sum(int(r.get("destroyed_count", 0)) for r in rejections)
+            values: list[str] = []
+            for rec in rejections:
+                values.extend(str(v) for v in rec.get("values", []))
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="text_grid_rejected",
+                    engine="native",
+                    detail=(
+                        f"{len(rejections)} text-strategy table grid(s) rejected: a lane "
+                        f"boundary split {destroyed_total} native numeric token(s) "
+                        f"({', '.join(values)}). Rebuilt with the lossless word-geometry "
+                        "rowizer — the shipped values are correct, but this page's layout "
+                        "is adversarial to find_tables(strategy='text')."
+                    ),
+                    data={
+                        "rejected_grids": len(rejections),
+                        "destroyed_tokens": destroyed_total,
+                        "values": values,
+                    },
+                )
+            )
+        _rejected_pages = sorted(
+            pa.page_num for pa in assessment.pages if getattr(pa, "text_grid_rejections", None)
+        )
+        if _rejected_pages and not self.config.quiet:
+            console.print(
+                f"  [yellow]{len(_rejected_pages)} page(s) had a text-strategy table grid "
+                f"rejected for numeric-token destruction and rebuilt losslessly: "
+                f"{_rejected_pages}[/yellow]"
+            )
+
         bd_count = assessment.born_digital_count
         if not self.config.quiet:
             if bd_count:
@@ -5425,6 +5484,15 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
         pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
+        # GH-195: a page whose table grid was actively destroying values and had
+        # to be rejected and rebuilt must not leave the run reporting a clean
+        # SUCCESS. AUDIT_FAILED, not ERROR: the rebuild is lossless, so the page
+        # ships correct values and the CLI's "completed with warnings, output
+        # written" path is the honest one.
+        text_grid_rejected_pages = sorted(
+            n for n, p in state.pages.items() if getattr(p, "text_grid_rejected", False)
+        )
+        pages_ok = pages_ok and not text_grid_rejected_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS

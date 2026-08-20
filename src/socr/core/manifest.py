@@ -412,6 +412,20 @@ def _winning_page_output(
             or native_table_defect
             or p.chart_asset_render_failed  # PP-7: render failure must stay WARNING
         ) and bool(p.attempts)
+        # GH-195: a text-strategy grid that had to be REJECTED for destroying a
+        # native numeric token demotes the page too. Deliberately NOT gated on
+        # ``p.attempts``: the rejection happens during native extraction, on a
+        # page that may never reach the OCR ladder at all, so the existing
+        # conjunction would leave exactly those pages stamped SUCCESS.
+        #
+        # This is a status-only demotion of an output that is ALREADY the
+        # selected winner — the text is the lossless word-geometry rebuild and is
+        # unchanged. It is not the #252 mistake of flipping ``audit_passed`` on
+        # ``best_output``, which is the winner-SELECTION flag and would discard a
+        # page; by this point selection is settled and this synthetic output is
+        # what ships either way.
+        grid_rejected = bool(getattr(p, "text_grid_rejected", False))
+        native_demoted = native_is_fallback or grid_rejected
         # GH-211 MAJOR-1: never ship the frozen ``p.native_text`` snapshot when a
         # native attempt carries content appended after extraction (GH-36b's
         # equation sidecar). See ``_native_text_with_appends``: it reads from
@@ -424,9 +438,9 @@ def _winning_page_output(
         return PageOutput(
             page_num=page_num,
             text=fallback_text,
-            status=PageStatus.WARNING if native_is_fallback else PageStatus.SUCCESS,
+            status=PageStatus.WARNING if native_demoted else PageStatus.SUCCESS,
             engine="native",
-            audit_passed=not native_is_fallback,
+            audit_passed=not native_demoted,
             # GH-151 B1: the attempt-level PageOutput this synthetic page
             # replaces already carries FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
             # (set at ``_score_per_page`` / the native ship sites) -- but that
