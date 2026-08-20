@@ -50,11 +50,6 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 
 DETECTION_KIND = "table_region_geometry_hard_fail"
 DISPOSITION_KIND = "table_region_unverifiable"
-# #262: the third TR-3 kind -- the D3 floor was SUPERSEDED because a ladder
-# attempt authored a grid, so the page ships that reading FLAGGED rather than
-# the failed-table marker. A disposition like ``DISPOSITION_KIND``, and mutually
-# exclusive with it on any one page.
-SUPERSEDED_KIND = "d3_floor_model_table_kept"
 
 # CI has no ollama and no provider; a developer machine has both. Parametrising
 # over the agentic ladder covers the second axis, and pinning the judge to the
@@ -368,25 +363,14 @@ def test_d3_page_carries_detection_and_disposition_once_each(tmp_path: Path, lad
 
     kinds = [e.kind for e in state.events if e.page_num == 1]
     assert kinds.count(DETECTION_KIND) == 1, kinds
-    # #262: WHICH disposition depends on whether the ladder authored a grid,
-    # and on this fixture that is not a free variable -- ``native_table_
-    # structure_failed`` is set BY the structural gate firing on the model's
-    # grid, so a grid-free ladder output leaves the page with no hard fail and
-    # no disposition at all (measured). With a provider the grid exists, so the
-    # floor is superseded and the page ships the model's flagged reading; with
-    # the empty CI ladder nothing was produced and the floor fires. Either way
-    # the guarantee this test exists for is unchanged: EXACTLY ONE disposition,
-    # ranked after the detection, and never one kind counted twice.
-    dispositions = [k for k in kinds if k in (DISPOSITION_KIND, SUPERSEDED_KIND)]
-    assert len(dispositions) == 1, kinds
-    disposition = dispositions[0]
+    assert kinds.count(DISPOSITION_KIND) == 1, kinds
 
     audit = json.loads(_only(output_dir, "audit_log.json").read_text(encoding="utf-8"))
     assert audit["counts"].get(DETECTION_KIND) == 1, audit["counts"]
-    assert audit["counts"].get(disposition) == 1, audit["counts"]
+    assert audit["counts"].get(DISPOSITION_KIND) == 1, audit["counts"]
     # Ranked detection-before-disposition, so the page's story reads in order.
     page_kinds = [e["kind"] for e in audit["events"] if e["page_num"] == 1]
-    assert page_kinds.index(DETECTION_KIND) < page_kinds.index(disposition), page_kinds
+    assert page_kinds.index(DETECTION_KIND) < page_kinds.index(DISPOSITION_KIND), page_kinds
 
 
 # ----------------------------------------------------------------------

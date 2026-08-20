@@ -42,6 +42,7 @@ from socr.core.cache import BlobStore
 from socr.core.document import DocumentHandle
 from socr.core.result import (
     REJECTION_AMBIGUOUS_DEFERRED,
+    REJECTION_JUDGE_ONLY,
     FailureMode,
     PageOutput,
     PageStatus,
@@ -439,6 +440,31 @@ def flagged_model_page_output(p) -> PageOutput | None:
     return bo
 
 
+#: #262: the dispositions on which an attempt may supersede the D3 fail-closed
+#: floor. An ALLOWLIST of positively-identified SOFT refusals -- the reading was
+#: refused by a judge, not refuted by a deterministic gate. Anything else,
+#: including an empty ``rejection_class``, keeps the failed-table marker.
+D3_SUPERSEDING_REJECTIONS: frozenset[str] = frozenset(
+    {REJECTION_AMBIGUOUS_DEFERRED, REJECTION_JUDGE_ONLY}
+)
+
+
+def d3_superseded_note(page_num: int) -> str:
+    """The in-body flag a superseded D3 page carries, in the #259 note's shape.
+
+    The page ships a table every rung of the ladder refused, in place of a
+    marker that said so in the document itself. Status and audit surfaces carry
+    that, but a reader holding only the ``.md`` sees neither, so the flag has to
+    be in the body as well. Phrased so it can never match
+    ``is_page_failed_marker`` -- this page did not fail, it shipped flagged.
+    """
+    return (
+        f"[page {page_num}: unverifiable table — kept a model reading over the "
+        "failed-table marker; the native table region failed verification and no "
+        "OCR rung was accepted — verify against the page image before citing]"
+    )
+
+
 def d3_floor_kept_model_output(p) -> PageOutput | None:
     """#262: the model attempt that must ship instead of the D3 marker.
 
@@ -447,8 +473,46 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
     model reading, prose, and equations along with the native table.
 
     Returns the output to keep, or ``None`` to leave the floor firing. The
-    caller demotes a copy; this predicate never mutates ``audit_passed``, which
-    remains the winner-selection flag.
+    caller demotes a COPY; this predicate never mutates anything, and in
+    particular never touches ``audit_passed``, which is the winner-SELECTION
+    flag and not a page-quality flag (flipping it discards the page's content —
+    the #252 round-1 defect).
+
+    ALLOWLIST, never a denylist. Round 1 of this fix reasoned that because the
+    alternative here is a marker with zero content rather than #259's complete
+    native reading, "we do not know why this rung was refused" was good enough
+    to keep. It is not, and the counterexample is exact: the verifier's
+    CERTAIN_FAIL path (``agentic.py``, ``vr.hard_fail``) returns
+    ``accept=False`` and mutates NOTHING on the ``PageOutput`` -- status stays
+    SUCCESS, ``failure_mode`` stays NONE -- so a grid the value guard
+    POSITIVELY REFUTED for a numeric-multiset or label-binding mismatch passed
+    every one of those rules and would have shipped over a fail-closed floor.
+    A denylist of bad dispositions cannot see a disposition that was never
+    written; only an allowlist of good ones is fail-safe. An empty
+    ``rejection_class`` means "socr cannot say why this was refused" and keeps
+    the marker.
+
+    The allowlist is the two dispositions on which socr can positively say the
+    refusal was SOFT -- no deterministic gate refuted the reading, a judge did:
+    ``REJECTION_AMBIGUOUS_DEFERRED`` (#259: the verifier reached AMBIGUOUS and
+    deferred) and ``REJECTION_JUDGE_ONLY`` (#262: the verifier found nothing to
+    refute and the inner judge alone refused). Both are written before the
+    structural gate runs, so a gate rejection is never mistaken for either.
+    ``flagged_model_page_output`` deliberately keeps the narrower one-value
+    allowlist: its fallback is a real native reading, so it can afford to.
+
+    Selecting among qualifying candidates is then a choice between readings
+    socr has NO evidence to rank -- ladder position is not quality, and the
+    most escalated rung is not the best one. So ``best_output`` wins when it
+    qualifies: ``_best_effort`` already picked it as the most trustworthy
+    attempt, which is a judgement rather than an ordering. Only when the winner
+    was cleared or does not qualify does ladder order break the tie, and the
+    audit event records that the choice was unranked.
+
+    Also excluded, on either list: an ERROR output, a HALLUCINATION verdict,
+    empty text, a native-lane reading (native is precisely what the floor
+    distrusts), and text that is itself a failure marker (the GH-90 floor
+    overwrites ``best_output.text`` in place).
     """
     if not (
         p.is_born_digital
@@ -469,27 +533,26 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
 
     from socr.tables.reconcile import find_table_blocks
 
-    # Ladder order, then ``best_output`` last: ``attempts`` is appended rung by
-    # rung as the router escalates, so the last qualifying candidate is the most
-    # escalated reading. ``best_output`` is the tie-break when the winner was
-    # never appended, not a separate source of truth.
-    candidates = list(p.attempts)
-    if p.best_output is not None:
-        candidates.append(p.best_output)
-
-    kept: PageOutput | None = None
-    for out in candidates:
+    def _qualifies(out: PageOutput) -> bool:
+        if out is None:
+            return False
+        if getattr(out, "rejection_class", "") not in D3_SUPERSEDING_REJECTIONS:
+            return False
         if (out.engine or "").startswith("native"):
-            continue
+            return False
         text = (out.text or "").strip()
         if not text or is_page_failed_marker(text):
-            continue
+            return False
         if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
-            continue
-        if not find_table_blocks(text):
-            continue
-        kept = out
-    return kept
+            return False
+        return bool(find_table_blocks(text))
+
+    if _qualifies(p.best_output):
+        return p.best_output
+    for out in reversed(list(p.attempts)):
+        if _qualifies(out):
+            return out
+    return None
 
 
 #: #263 round 2: the engines whose winning text IS (or embeds) the page's
@@ -814,8 +877,20 @@ def _winning_page_output(
             # latter's reachability predicate mirrors this precondition order.
             kept_model = d3_floor_kept_model_output(p)
             if kept_model is not None:
+                # The marker carried a PNG of the page so a human could SEE the
+                # table it refused to transcribe. That backstop matters MORE
+                # here, not less: what ships in the marker's place is a grid
+                # every rung refused, and the image is the only way a reader can
+                # check it. Kept text = model reading + in-body flag + the same
+                # image ref the floor would have shipped.
+                kept_text = kept_model.text.rstrip()
+                kept_text = f"{kept_text}\n\n{d3_superseded_note(page_num)}\n"
+                png_ref = getattr(p, "d3_floor_png_ref", "")
+                if png_ref:
+                    kept_text = f"{kept_text}\n{png_ref}\n"
                 return replace(
                     kept_model,
+                    text=kept_text,
                     status=PageStatus.WARNING,
                     audit_passed=False,
                     failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,

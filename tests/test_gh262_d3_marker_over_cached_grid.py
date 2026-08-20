@@ -32,13 +32,28 @@ from pathlib import Path
 import pytest
 
 from socr.core.document import DocumentHandle
-from socr.core.manifest import _winning_page_output, canonical_page_texts
+from socr.core.manifest import (
+    _winning_page_output,
+    canonical_page_texts,
+    is_page_failed_marker,
+)
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 
 # The cached reading: prose, an equation, and a grid. Trimmed from the shape of
 # the measured page (two regression panels), not copied value for value -- the
 # assertions below are about WHICH text ships, never about what is in it.
+# The two provably-soft dispositions, written as LITERALS. Importing the
+# constants would make this file fail at the baseline with an ImportError
+# instead of on behaviour -- and ``judge_only`` does not exist there at all.
+SOFT_AMBIGUOUS = "ambiguous_deferred"
+SOFT_JUDGE_ONLY = "judge_only"
+# What a CERTAIN_FAIL leaves behind: nothing. ``vr.hard_fail`` returns
+# accept=False and mutates no field on the PageOutput, so the reading the value
+# guard positively refuted is indistinguishable from one nobody explained --
+# which is exactly why the allowlist, not a denylist, is the fail-safe shape.
+HARD_REFUTED = ""
+
 MODEL_PAGE = (
     "The Fama-Bliss regressions are reported in Table 4. The one-year forward\n"
     "spread forecasts the one-year excess return.\n\n"
@@ -76,6 +91,7 @@ def _state(
     header_unattributed: bool = False,
     scanned_evidence_failed: bool = False,
     is_born_digital: bool = True,
+    rejection_class: str = SOFT_JUDGE_ONLY,
 ) -> DocumentState:
     """The page state the measured run produced, rebuilt field by field."""
     state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
@@ -106,6 +122,9 @@ def _state(
         audit_passed=False,
         failure_mode=model_failure_mode,
     )
+    # setattr, not a constructor kwarg: a kwarg the baseline does not know
+    # would raise TypeError there and make every assertion below vacuous.
+    setattr(model_attempt, "rejection_class", rejection_class)
     ps.attempts.extend([native_attempt, model_attempt])
     # The measured run's ladder rejected every rung, so ``_score_per_page``
     # cleared the winner. The grid has to be found in ``attempts``.
@@ -124,7 +143,15 @@ def test_cached_grid_ships_instead_of_the_d3_marker(tmp_path: Path) -> None:
 
     winner = _winning_page_output(state, 1)
     assert "failed: unverifiable table" not in winner.text, winner.text
-    assert winner.text == MODEL_PAGE, winner.text
+    # The issue writes this as ``winner.text == model_grid_text``. Byte equality
+    # is relaxed to containment on purpose and on review instruction: the kept
+    # page also carries an in-body flag note and the D3 page image, because a
+    # reader holding only the .md would otherwise see a refused table with
+    # nothing saying so and no way to check it. The substantive half of the
+    # assertion -- the model's reading is what ships, whole and unedited -- is
+    # asserted exactly.
+    assert MODEL_PAGE.strip() in winner.text, winner.text
+    assert winner.text.startswith(MODEL_PAGE.strip()), winner.text
     assert winner.status != PageStatus.SUCCESS, winner.status
 
 
@@ -175,7 +202,7 @@ def test_header_only_defect_takes_the_same_path(tmp_path: Path) -> None:
     state = _state(_born_digital_pdf(tmp_path), unverifiable=False, header_unattributed=True)
 
     winner = _winning_page_output(state, 1)
-    assert winner.text == MODEL_PAGE, winner.text
+    assert MODEL_PAGE.strip() in winner.text, winner.text
 
 
 def test_best_output_winner_is_not_mutated(tmp_path: Path) -> None:
@@ -190,10 +217,140 @@ def test_best_output_winner_is_not_mutated(tmp_path: Path) -> None:
     stored = ps.attempts[1]
 
     winner = _winning_page_output(state, 1)
-    assert winner.text == MODEL_PAGE, winner.text
+    assert MODEL_PAGE.strip() in winner.text, winner.text
     assert winner is not stored
     assert stored.status is PageStatus.SUCCESS, stored.status
     assert stored.failure_mode is FailureMode.NONE, stored.failure_mode
+
+
+def test_the_kept_page_carries_the_flag_note_and_the_page_image(tmp_path: Path) -> None:
+    """The marker's visual backstop is not lost when the marker is superseded.
+
+    What ships in its place is a grid every rung of the ladder refused, so the
+    page image is the only way a reader can check it -- the backstop matters
+    more here, not less. And a reader holding only the ``.md`` sees neither the
+    page status nor the audit log, so the flag has to be in the body too.
+    """
+    state = _state(_born_digital_pdf(tmp_path))
+
+    winner = _winning_page_output(state, 1)
+    assert "verify against the page image before citing" in winner.text, winner.text
+    assert "![p1](figures/p001.png)" in winner.text, winner.text
+    # The note must never read as a failed page: this page shipped content.
+    assert not is_page_failed_marker(winner.text), winner.text
+    assert winner.text.index(MODEL_PAGE.strip()) < winner.text.index("verify against"), winner.text
+
+
+def test_a_page_with_no_rendered_png_still_ships_the_note(tmp_path: Path) -> None:
+    """Render failure degrades to note-only, exactly as the floor degraded to
+    marker-only. The flag is never conditional on the image."""
+    state = _state(_born_digital_pdf(tmp_path))
+    state.pages[1].d3_floor_png_ref = ""
+
+    winner = _winning_page_output(state, 1)
+    assert "verify against the page image before citing" in winner.text, winner.text
+    assert "figures/" not in winner.text, winner.text
+
+
+# ---------------------------------------------------------------------------
+# The allowlist. THE round-2 finding: a grid the value guard positively refuted
+# leaves no trace on the PageOutput, so only an allowlist of soft dispositions
+# is fail-safe.
+# ---------------------------------------------------------------------------
+
+
+def test_a_certain_fail_grid_never_supersedes_the_floor(tmp_path: Path) -> None:
+    """``vr.hard_fail``: the value guard proved this grid wrong and mutated nothing.
+
+    Status stays SUCCESS, ``failure_mode`` stays NONE, ``rejection_class`` stays
+    empty. Round 1 of this fix kept exactly this page and shipped a refuted
+    table over a fail-closed floor.
+    """
+    state = _state(_born_digital_pdf(tmp_path), rejection_class=HARD_REFUTED)
+
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" in winner.text, winner.text
+    assert "Fama-Bliss regressions are reported" not in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+
+
+def test_an_unrecognised_disposition_never_supersedes_the_floor(tmp_path: Path) -> None:
+    """Allowlist, not denylist: a disposition nobody taught this code keeps the
+    marker rather than defaulting to keep."""
+    state = _state(_born_digital_pdf(tmp_path), rejection_class="some_future_kind")
+
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" in winner.text, winner.text
+
+
+def test_the_ambiguous_deferred_disposition_also_qualifies(tmp_path: Path) -> None:
+    """#259's disposition is soft by the same definition and is on the list."""
+    state = _state(_born_digital_pdf(tmp_path), rejection_class=SOFT_AMBIGUOUS)
+
+    winner = _winning_page_output(state, 1)
+    assert MODEL_PAGE.strip() in winner.text, winner.text
+
+
+def test_a_refuted_grid_does_not_displace_an_earlier_soft_one(tmp_path: Path) -> None:
+    """ "Most escalated" is not "best".
+
+    Ladder position carries no quality information, so a later CERTAIN_FAIL rung
+    must not overwrite an earlier reading whose refusal was provably soft.
+    """
+    state = _state(_born_digital_pdf(tmp_path), rejection_class=SOFT_JUDGE_ONLY)
+    late = PageOutput(
+        page_num=1,
+        text="| WRONG | WRONG |\n|---|---|\n| 9.99 | 9.99 |\n",
+        status=PageStatus.SUCCESS,
+        engine="gemini-escalated",
+        audit_passed=False,
+    )
+    setattr(late, "rejection_class", HARD_REFUTED)
+    state.pages[1].attempts.append(late)
+
+    winner = _winning_page_output(state, 1)
+    assert "WRONG" not in winner.text, winner.text
+    assert MODEL_PAGE.strip() in winner.text, winner.text
+
+
+def test_best_output_is_preferred_over_ladder_position(tmp_path: Path) -> None:
+    """When both qualify, the pipeline's own selection wins over the later rung.
+
+    ``_best_effort`` picked ``best_output`` as the most trustworthy attempt.
+    That is a judgement; ladder order is not.
+    """
+    state = _state(_born_digital_pdf(tmp_path), rejection_class=SOFT_JUDGE_ONLY)
+    ps = state.pages[1]
+    ps.best_output = ps.attempts[1]
+    later = PageOutput(
+        page_num=1,
+        text="| LATER | LATER |\n|---|---|\n| 1.11 | 1.11 |\n",
+        status=PageStatus.SUCCESS,
+        engine="gemini-escalated",
+        audit_passed=False,
+    )
+    setattr(later, "rejection_class", SOFT_JUDGE_ONLY)
+    ps.attempts.append(later)
+
+    winner = _winning_page_output(state, 1)
+    assert "LATER" not in winner.text, winner.text
+    assert MODEL_PAGE.strip() in winner.text, winner.text
+
+
+def test_gh259_allowlist_is_not_widened_by_the_new_disposition(tmp_path: Path) -> None:
+    """Scope guard. ``REJECTION_JUDGE_ONLY`` is for the D3 floor only.
+
+    #259's fallback is a COMPLETE native reading, not a marker, so it can afford
+    the narrower one-value allowlist and deliberately keeps it. If someone later
+    folds the new disposition into ``flagged_model_page_output``, this fails.
+    """
+    from socr.core.manifest import flagged_model_page_output
+
+    state = _state(_born_digital_pdf(tmp_path), unverifiable=False)
+    ps = state.pages[1]
+    # Not a D3 page: only the structure flag, which is #259's territory.
+    ps.best_output = ps.attempts[1]
+    assert flagged_model_page_output(ps) is None, "judge_only must not qualify for #259"
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +431,89 @@ def test_born_digital_page_carrying_the_scanned_flag_is_not_rescued(tmp_path: Pa
 
     winner = _winning_page_output(state, 1)
     assert "failed: unverifiable table" in winner.text, winner.text
+
+
+# ---------------------------------------------------------------------------
+# The allowlist is only worth anything if the disposition is really written.
+# These drive the REAL ``NativeTableVerifierJudge``, not a stub, so they prove
+# the paths genuinely do and do not set it -- rather than proving that the test
+# author remembered to.
+# ---------------------------------------------------------------------------
+
+
+def _fitz_page(rows: list[list[tuple[float, str]]]):
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    page = doc.new_page(width=700, height=900)
+    for row_idx, cells in enumerate(rows):
+        for x, word in cells:
+            page.insert_text((x, 100.0 + row_idx * 30), word, fontsize=9)
+    return page
+
+
+def _assess(fitz_page, text: str, *, inner_accepts: bool):
+    from unittest.mock import MagicMock
+
+    from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
+
+    inner = MagicMock()
+    inner.assess.return_value = AcceptDecision(accept=inner_accepts, reason="inner judge")
+    output = PageOutput(
+        page_num=1, text=text, status=PageStatus.SUCCESS, engine="qwen", confidence=0.9
+    )
+    judge = NativeTableVerifierJudge(
+        inner=inner,
+        get_fitz_page=lambda pn: fitz_page,
+        is_table_page=lambda pn: True,
+        record_event=None,
+    )
+    return judge.assess(output, MagicMock()), output
+
+
+def test_the_judge_only_disposition_is_actually_written(tmp_path: Path) -> None:
+    """The verifier found nothing to refute and the inner judge alone refused.
+
+    Without this the allowlist would be inert in production: every real refusal
+    on this branch would read as "we cannot say why" and keep the marker.
+    """
+    decision, output = _assess(
+        _fitz_page([]),
+        "The estimates are reported below.\n\n| a | b |\n|---|---|\n| 1.0 | 2.0 |\n",
+        inner_accepts=False,
+    )
+    assert decision.accept is False, decision
+    assert getattr(output, "rejection_class", "") == SOFT_JUDGE_ONLY, output
+
+
+def test_a_certain_fail_leaves_no_disposition_behind(tmp_path: Path) -> None:
+    """The measured fact the allowlist exists for.
+
+    ``vr.hard_fail`` returns accept=False and mutates NOTHING -- so an empty
+    ``rejection_class`` genuinely cannot be read as "soft", and a denylist of
+    bad dispositions has nothing to match on.
+    """
+    gap = 60.0
+    decision, output = _assess(
+        _fitz_page([[(100.0, "0.1"), (100.0 + gap, "0.2"), (100.0 + 2 * gap, "0.3")]]),
+        "| label | vals |\n|---|---|\n| row1 | 0.1 |\n",
+        inner_accepts=True,
+    )
+    assert decision.accept is False, decision
+    assert "native_table_verifier" in decision.reason, decision.reason
+    assert getattr(output, "rejection_class", "") == HARD_REFUTED, output
+    assert output.status is PageStatus.SUCCESS
+    assert output.failure_mode.value == "none"
+
+
+def test_an_accepted_reading_carries_no_disposition(tmp_path: Path) -> None:
+    """Reverse guard: the marker is only ever set on a refusal."""
+    decision, output = _assess(
+        _fitz_page([[(100.0, "1.0"), (160.0, "2.0")]]),
+        "| a | b |\n|---|---|\n| 1.0 | 2.0 |\n",
+        inner_accepts=True,
+    )
+    assert decision.accept is True, decision
+    assert getattr(output, "rejection_class", "") == "", output
 
 
 # ---------------------------------------------------------------------------
