@@ -1,0 +1,30 @@
+{
+  "pr": 253,
+  "head": "cf9eb80",
+  "round": 2,
+  "reviewer": "grok",
+  "access_proof": {
+    "cmd": "bash /private/tmp/claude-501/-Users-rubenffuertes-repos-tools-socr/bae3cd33-3698-4e2f-999a-b6ed84289e24/scratchpad/planwt/docs/plans/2026-08-20_overnight-issue-sweep/bin/isolation_canary.sh --read-only /Users/rubenffuertes/repos/.worktrees/socr-night-base && git -C /Users/rubenffuertes/repos/.worktrees/socr-night-base show \"53b0637b928c486e9ff3023fa9527905fec017b2:src/socr/core/tables_trust.py\" | sed -n '50,70p'",
+    "output": "CANARY OK (read-only mode): worktree = /Users/rubenffuertes/repos/.worktrees/socr-night-base\n           HEAD          = 53b0637b928c486e9ff3023fa9527905fec017b2\n           note: interpreter NOT checked; this proves the tree, not import isolation.\n           Anyone running tests must use full mode instead.\n    {\n        \"dualpass_flagged\",\n        \"native_table_verifier_warn\",\n        \"native_table_verifier_hard_fail\",\n        \"value_guard_row_count_warning\",\n        \"table_region_unverifiable\",\n        \"source_evidence_table_reject\",\n        \"table_row_repetition_truncated\",\n        # GH-96: an escalation that was refused or timed out leaves the SUSPECT\n        # table shipping, so the page stays untrusted. An ACCEPTED escalation is\n        # deliberately absent, by the same rule that excludes dualpass_patched:\n        # the disagreement was resolved and the shipped table is the better one.\n        \"table_escalation_refused\",\n        \"table_escalation_timeout\",\n        # #123 TICKET-C1: two more shapes of the same no-silent-content-loss rule.\n        # \"table_unexplained_lanes\" — the native layer supports a column the\n        # emitted table has no home for; a threshold-free fact once B2's lane\n        # alignment exists (zero versus non-zero, not a tuned gap).\n        # \"table_not_scorable\" — B1's grid gate (no usable ground truth) used to\n        # make a page silently disappear from measurement; routed through the\n        # same mechanism rather than a second one, per the B1 review finding."
+  },
+  "verdict": "APPROVE",
+  "new_kind_fully_wired": true,
+  "double_count_gone": true,
+  "magic_numbers_removed": true,
+  "scope_guard_actually_covers_status_and_routing": true,
+  "binding_scope_held_no_consequences": true,
+  "gh211_assertion_not_weakened": true,
+  "non_vacuity_confirmed": true,
+  "reran_baseline_myself": true,
+  "baseline_sha_used": "3a01cb5",
+  "honest_parent": "7696719",
+  "findings": [],
+  "retracted": [
+    {
+      "severity": "minor",
+      "what": "I treated the GitHub PR base 3a01cb5 as the honest without-this-change SHA and flagged the pin at tests/test_gh205_tr3_unconditional_event.py:322 (7696719) as a footgun. That was wrong. #253 was cut from 7696719 and never rebased; 3a01cb5 is #252 round-3, not this branch's parent. The author named 7696719 in 253-round2.json. Retracted.",
+      "why": "Dispatch prompt said 3a01cb5. The five GH-205 AssertionErrors I saw at 3a01cb5 match the author's 7696719 transcript byte-for-byte (empty events; kind not in TABLE_DISTRUST_KINDS; judge_reject+native_fallback; native_table_verifier_hard_fail+page_failed+table_region_unverifiable; detection count 0). Extra GH-211 failures were from me also copying the updated GH-211 file onto 3a01cb5; the author ran only the new test file at 7696719 (5 failed, 5 passed)."
+    }
+  ],
+  "what_i_tried_to_break": "Opened cf9eb80 and (mistakenly, per dispatch) 3a01cb5 in scratch worktrees; never the main checkout. Traced table_region_geometry_hard_fail through TABLE_DISTRUST_KINDS (tables_trust.py:63), audit_log.rank (audit_log.py:126), the analyze emitter (orchestrator.py:868) and the unchanged D3 producer (orchestrator.py:5501). Confirmed pages_ok / native_fallback / D3 / agentic routing still key native_table_unverifiable and native_table_structure_failed, never the new kind. Trust-sidecar membership is the intended surface: EngineResult.success is only DocumentStatus.SUCCESS, and trust_note only appends metadata.error. Grepped src/ and tests/ at HEAD for 62/245/25.3%/13.8% — gone from runtime source. Scope guard drives process() for agentic x flagged, patches _available_engines_for_agentic, pins page status/audit_passed/failure_mode/doc status and ocr_calls==[((1,),'qwen')]. Residual hole (not blocking): flagged cells are already document-demoted by pre-existing native_fallback/D3, so a redundant pages_ok term on the new kind would not move the pin — I read pages_ok; it does not consult events. GH-211 reasons list is still exhaustive equality, grew by one true kind. PYTHONPATH-isolated canary-OK run at 3a01cb5: 7 failed / 7 passed, all AssertionError. The 5 GH-205 failures match the author's 7696719 transcript; the extra 2 are GH-211 from copying that updated test. Scope-guard cells and the quiet-run guard passed at base, as they must. MagicMock is only the analyze-time detector stub. HEAD: 15 passed (gh205 + GH-211 + test_watched_kinds_are_real_emitted_kinds). Scratch worktrees /tmp/socr-253-r2-{head,base} removed. After reading 253-round2.json, retracted the 7696719-vs-3a01cb5 nit — 7696719 is the honest parent."
+}

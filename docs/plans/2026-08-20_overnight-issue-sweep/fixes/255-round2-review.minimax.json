@@ -1,0 +1,67 @@
+{"pr":255,"head":"2b6c0af","round":2,"reviewer":"ollama-minimax",
+ "access_proof":{"cmd":"PYTHONPATH=/private/tmp/socr-255-r2-head/src ~/venvs/socr/bin/pytest /private/tmp/socr-255-r2-head/tests/test_gh222_probe_host.py -q --no-header","output":"32 passed, 5 warnings in 0.26s"},
+ "verdict":"APPROVE",
+ "blocking_fixed_on_real_path":true,
+ "probe_and_reader_cannot_drift":true,
+ "auto_backend_limit_acceptable":true,
+ "invalidurl_claim_verified":true,
+ "indirection_preserved":true,
+ "non_vacuity_accounting_honest":true,
+ "reran_baseline_myself":true,
+ "findings":[
+   {
+     "severity":"blocking",
+     "what":"Round 1's blocking finding is genuinely fixed on the CLI construction path.",
+     "where":"src/socr/pipeline/orchestrator.py:5175-5176 and src/socr/tables/extract.py:327",
+     "why":"_probe_backend_idle now branches on _local_backend_is_openai_compatible() which uses the SAME OPENAI_COMPATIBLE_BACKENDS frozenset (src/socr/tables/extract.py:91) that make_table_reader uses (src/socr/tables/extract.py:327). I verified both predicates import the same symbol — they cannot drift. With qwen_backend='vllm' the probe now goes to probe_openai_server_idle(self.config.qwen_vllm_url) which hits /v1/models, and the round-1 test_configured_vllm_backend_is_not_probed_at_ollama_localhost passes on 2b6c0af and fails at a157f76 with 'the probe asked the wrong machine (or the wrong endpoint): [\\'http://localhost:11434/api/tags\\']'."
+   },
+   {
+     "severity":"minor",
+     "what":"The 'auto' deliberate limit is correctly defended: probe and reader must agree, and they do for 'auto' because make_table_reader routes 'auto' to Ollama.",
+     "where":"src/socr/tables/extract.py:327 and src/socr/pipeline/orchestrator.py:5180-5182",
+     "why":"The author says auto probes Ollama because make_table_reader also sends auto to OllamaTableReader. Verified: make_table_reader checks `if backend in OPENAI_COMPATIBLE_BACKENDS` (auto is NOT in the set), so auto always becomes OllamaTableReader. Inducing 'vLLM' from a non-default qwen_vllm_url alone would make the probe disagree with the reader — which is the exact class of bug being fixed. The round-1 reviewer's repro set only qwen_vllm_url (incoherent config); the real deployment defect is qwen_backend='vllm' + qwen_vllm_url, and that IS fixed. The PR body states this explicitly. test_default_local_deployment_is_unchanged and test_probe_and_crop_reader_agree_on_which_server_to_ask walk all six backend spellings."
+   },
+   {
+     "severity":"minor",
+     "what":"The InvalidURL-escape claim is verified: at a157f76, OLLAMA_HOST=::1 made probe_ollama_idle raise httpx.InvalidURL out of the cascade guard.",
+     "where":"src/socr/tables/extract.py:71 (a157f76) vs :70-75 (2b6c0af)",
+     "why":"Live probe confirmed: httpx.InvalidURL's MRO is (InvalidURL, Exception, BaseException, object) — it is NOT an httpx.HTTPError. The round-1 except clause was `(httpx.HTTPError, OSError)`, which would NOT catch InvalidURL. Round 2 introduces _PROBE_ERRORS = (httpx.HTTPError, httpx.InvalidURL, OSError) and uses it in both probe_ollama_idle and probe_openai_server_idle. test_an_unparseable_host_fails_the_probe_instead_of_raising and the parametrised IPv6 table prove the fix on the real function. This is a genuine content-loss bug found in passing — surfaced correctly in the PR body and round-2 JSON."
+   },
+   {
+     "severity":"minor",
+     "what":"Non-vacuity accounting is honest and I re-verified it myself.",
+     "where":"tests/test_gh222_probe_host.py and the scratch worktree runs",
+     "why":"Re-ran the new test file against a157f76 in /private/tmp/socr-255-r2-base: 9 failed, 23 passed. The 9 failures split as the author claims: 1 ImportError for OPENAI_COMPATIBLE_BACKENDS (a symbol this PR introduces — structural anti-drift guard, cannot behave at a commit where the mechanism does not exist) and 8 behavioural assertions. The blocking finding is proved by test_configured_vllm_backend_is_not_probed_at_ollama_localhost and test_vllm_probe_uses_an_endpoint_a_vllm_server_actually_serves — BOTH name nothing this PR adds; they only call _probe_backend_idle which already existed at a157f76. They fail because the BEHAVIOUR was wrong, not because a missing symbol prevented collection. The author's non-vacuity argument is sound. Scratch worktrees removed after."
+   },
+   {
+     "severity":"minor",
+     "what":"The module-level probe_ollama_idle indirection is preserved.",
+     "where":"src/socr/pipeline/orchestrator.py:49 and :5176",
+     "why":"probe_ollama_idle is still imported at module scope (orchestrator.py:49) and _probe_backend_idle still calls it via that name (orchestrator.py:5176). The new probe_openai_server_idle is a separate name — five existing test files that patch socr.pipeline.orchestrator.probe_ollama_idle keep reaching the probe. test_existing_module_level_patches_still_reach_the_probe will fail loudly if anyone routes around it. (The author claims all five test files re-run green: 171 passed, 2 xfailed — I did not re-run them, but the indirection's presence is verified by inspection and the guard test passes on HEAD.)"
+   },
+   {
+     "severity":"minor",
+     "what":"_had_timeout is byte-identical between a157f76 and 2b6c0af.",
+     "where":"src/socr/pipeline/orchestrator.py:3223 in both commits",
+     "why":"Round-1 commit 3223: '_had_timeout = any(\"timeout\" in (att.reason or \"\") for att in decision.attempts)'. Round-2 commit 3223: identical. test_trigger_predicate_unchanged pins the spelling; test_probe_is_consulted_only_after_a_timeout drives the real process() path and asserts the probe fires iff an attempt reason contains 'timeout' — i.e. it pins behaviour, not just text. _had_timeout's all-attempts scan and bare-substring match (defects 2 and 3) are deliberately untouched; #222 should stay open for those."
+   },
+   {
+     "severity":"minor",
+     "what":"Cardinal-rule honesty is correct: this is a liveness probe on a failure path, so it touches document + CLI and leaves page + metadata by design.",
+     "where":"src/socr/pipeline/orchestrator.py:3218-3233 (cascade-halt)",
+     "why":"A false 'backend dead' produced PARTIAL_SAVE_VLM_TIMEOUT (document error) and a CLI red line — both are the same halt line and both stop being raised spuriously. No page status, no per-page routing, no metadata.json field is touched. The PR body says this explicitly rather than claiming all four levels. The one genuine content-loss element is the InvalidURL escape — now caught. The level claim is honest."
+   },
+   {
+     "severity":"minor",
+     "what":"No magic thresholds, no hardcoded host lists beyond the backend-name predicate.",
+     "where":"src/socr/tables/extract.py:91, src/socr/pipeline/orchestrator.py:5180-5182",
+     "why":"The only 'set' is OPENAI_COMPATIBLE_BACKENDS = frozenset({'vllm', 'sglang', 'openai', 'api'}) — a named backend-predicate frozenset, not a host list and not a threshold. _CROP_DEADLINE_FLOOR_S, _CROP_WALL_CLOCK_MULTIPLIER and DEFAULT_CROP_DPI were already in place before this PR; not introduced here. The new probe_openai_server_idle has a timeout parameter (5.0s default), not a hardcoded latency threshold. The probe target URL is derived from config, not hardcoded. MagicMock vacuity not at risk: tests stub httpx.get to a _Resp class with a real raise_for_status method, and the assertions check recorded URLs against literal expected values."
+   },
+   {
+     "severity":"minor",
+     "what":"Crop-timeout probe in extract.py also fixed.",
+     "where":"src/socr/tables/extract.py:332-341",
+     "why":"_probe_reader_idle picks the endpoint from the reader type (VllmTableReader -> /v1/models via probe_openai_server_idle; else /api/tags via probe_ollama_idle). VllmTableReader.host is the /v1 base URL — it was being asked for /api/tags, which a vLLM server 404s, reading as dead. The fix is in scope (#222 is about 'which machine is asked'). This is the kind of thing an inattentive reviewer could miss; it does not introduce any new bug class."
+   }
+ ],
+ "what_i_tried_to_break":"1. Read _probe_backend_idle and make_table_reader at 2b6c0af, confirmed the shared OPENAI_COMPATIBLE_BACKENDS frozenset (same symbol, same module, same set). 2. Re-ran tests/test_gh222_probe_host.py in scratch worktrees against 2b6c0af (32 passed) and against a157f76 (9 failed, 23 passed), then removed the scratch worktrees. 3. Inspected each of the 9 failures: 1 ImportError for OPENAI_COMPATIBLE_BACKENDS, 8 behavioural assertions against probe_ollama_idle and resolve_ollama_host — all 8 names exist at a157f76. 4. Live-probed httpx.InvalidURL's MRO to confirm it is not an httpx.HTTPError subclass (the round-1 except clause would have leaked it). 5. Verified _had_timeout is byte-identical between a157f76:3223 and 2b6c0af:3223. 6. Confirmed the module-level probe_ollama_idle name is still imported (orchestrator.py:49) and called (orchestrator.py:5176); indirection preserved. 7. Walked all six backend spellings in test_probe_and_crop_reader_agree_on_which_server_to_ask to confirm 'auto' routes to OllamaTableReader, not VllmTableReader — i.e. the probe and the reader agree on 'auto'. 8. Read the 390-line test file end-to-end and confirmed test_an_unparseable_host_fails_the_probe_instead_of_raising pins 'OLLAMA_HOST=::1:11434' as the lost-document case (the InvalidURL escape). 9. Ran the two meta-tests on HEAD (test_every_config_field_is_classified, test_every_field_is_restorable) — both pass. I did not re-run the five existing test files that patch socr.pipeline.orchestrator.probe_ollama_idle — the author's claim of 171 passed, 2 xfailed rests on inspection of the indirection, which is present. I did not run the full 1881-test suite — author's claim is not re-verified."}

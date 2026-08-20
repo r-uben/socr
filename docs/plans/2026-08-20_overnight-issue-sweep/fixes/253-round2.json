@@ -4,7 +4,7 @@
   "new_head": "cf9eb80",
   "previous_head": "83924e9",
   "base_used_for_proof": "7696719a9fd62c601715a53f5f0b16c9d12a118e",
-  "base_rationale": "The branch's parent commit — the pipeline immediately without this change. socr-night-base (main_sha 53b0637) was NOT used as the proof base because this branch is stacked on #252 and #254 heads that main does not contain; the parent is the honest 'without this change' state. socr-night-base was never touched.",
+  "base_rationale": "The branch's parent commit \u2014 the pipeline immediately without this change. socr-night-base (main_sha 53b0637) was NOT used as the proof base because this branch is stacked on #252 and #254 heads that main does not contain; the parent is the honest 'without this change' state. socr-night-base was never touched.",
   "rebased": false,
   "force_pushed": false,
   "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-e/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-e",
@@ -28,7 +28,7 @@
       "severity": "major",
       "summary": "Scope guard only drove _phase_analyze, but status is decided in _phase_assemble and routing in _phase_agentic, so it cannot catch the creep it exists to prevent.",
       "disposition": "FIXED",
-      "how": "Renamed to test_surfacing_does_not_key_page_status_or_routing_scope_guard and widened to the whole of process(), parametrized over four cells (agentic x flagged). Pins page status, audit_passed, failure mode, document status and the OCR call list to values MEASURED at base 7696719. Patches _available_engines_for_agentic to [PROFILE_QWEN_LOCAL] for CI hermeticity. Pinning rather than flagged-vs-clean equality because the TR-3 flag already influences some of those outcomes through pre-existing paths (D3 floor, native_fallback) that #205 does not touch — an equality test would assert something untrue. This is stated explicitly in the test comment and the PR body."
+      "how": "Renamed to test_surfacing_does_not_key_page_status_or_routing_scope_guard and widened to the whole of process(), parametrized over four cells (agentic x flagged). Pins page status, audit_passed, failure mode, document status and the OCR call list to values MEASURED at base 7696719. Patches _available_engines_for_agentic to [PROFILE_QWEN_LOCAL] for CI hermeticity. Pinning rather than flagged-vs-clean equality because the TR-3 flag already influences some of those outcomes through pre-existing paths (D3 floor, native_fallback) that #205 does not touch \u2014 an equality test would assert something untrue. This is stated explicitly in the test comment and the PR body."
     }
   ],
   "existing_test_edit": "tests/test_native_only_table_status_gh211.py exhaustive reasons list moved a second time, from [table_region_unverifiable, table_structure_failed] to [table_region_geometry_hard_fail, table_structure_failed], purely as a consequence of the kind rename. Nothing relaxed: same single untrusted page, same WARNING, same audit_passed=False, table_structure_failed still present, every other assertion unchanged. Not re-litigated per instruction.",
@@ -85,5 +85,7 @@
     "src/socr/pipeline/orchestrator.py",
     "tests/test_gh205_tr3_unconditional_event.py",
     "tests/test_native_only_table_status_gh211.py"
-  ]
+  ],
+  "pr_body_addendum": "Added a dedicated section 'A finding about #205 itself, not about this PR' carrying the four-cell measurement table taken at base 7696719 and stating the partial correction to #205's framing: document status is ALREADY keyed on the TR-3 flag through the D3 floor and native_fallback, so 'is surfaced nowhere' and 'do not key status on it' are true of the analyze-time detection but not of the flag in general. Suggests #205's steps 2/3 be reworded to 'reaches no surface on pages where no conjunction holds'.",
+  "vacuity_trap_check": "Re-verified: every failure in the 253 base run at 7696719 is an AssertionError on existing behaviour. No AttributeError, no ImportError, no TypeError for anything this change adds."
 }

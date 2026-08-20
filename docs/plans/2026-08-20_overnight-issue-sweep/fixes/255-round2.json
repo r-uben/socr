@@ -1,0 +1,104 @@
+{
+  "pr": 255,
+  "branch": "fix/222-probe-interface",
+  "new_head": "2b6c0af",
+  "previous_head": "a157f76",
+  "base_used_for_proof": "a157f76ab7d6f75869ac0e256e7205ded9d07edc",
+  "base_rationale": "The branch's PREVIOUS HEAD, i.e. the code the round-2 review was written against. The branch parent df4b24a is the wrong base for this round: the round-1 commit introduced resolve_ollama_host, so the new tests collect with an ImportError there and prove nothing. Verified that df4b24a produces exactly that ImportError before switching.",
+  "rebased": false,
+  "force_pushed": false,
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-e/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-e",
+  "reproduced_before_fixing": "Yes, both findings, on the real CLI construction path. PipelineConfig(qwen_backend='vllm', qwen_vllm_url='http://gpu-node.cluster:8000/v1') -> UnifiedPipeline(cfg)._probe_backend_idle() called probe_ollama_idle('http://localhost:11434'). resolve_ollama_host('::1') -> 'http://::1'.",
+  "findings": [
+    {
+      "id": "E6-1",
+      "severity": "blocking",
+      "summary": "A configured vLLM backend is still probed at Ollama localhost on the real CLI path; qwen_vllm_url ignored and the CLI never assigns backend_probe.",
+      "disposition": "FIXED",
+      "how": "Which server is asked now follows qwen_backend through a new OPENAI_COMPATIBLE_BACKENDS frozenset in socr/tables/extract.py — the SAME predicate make_table_reader already uses to pick the crop reader, shared rather than duplicated so probe and reader cannot drift into asking about different machines. vLLM/SGLang is probed at {qwen_vllm_url}/models via a new probe_openai_server_idle; /api/tags is Ollama's and a vLLM server 404s it, which reads as dead, so fixing the host without the endpoint would have relocated the defect. backend_probe stays as an override seam but the default path no longer depends on a caller assigning it. New test test_probe_and_crop_reader_agree_on_which_server_to_ask walks all six backend spellings.",
+      "deliberate_limit": "qwen_backend='auto' still probes Ollama. Everywhere else in this codebase auto resolves to a local Ollama daemon (make_table_reader sends its crops there), so that is the correct answer for auto; inferring vLLM from a non-default qwen_vllm_url alone would make the probe disagree with the reader, which is the class of bug being fixed. The reviewer's repro snippet set only qwen_vllm_url; the real defect is the qwen_backend='vllm' deployment and that is what is fixed. Stated explicitly in the PR body."
+    },
+    {
+      "id": "E6-2",
+      "severity": "major",
+      "summary": "A bare unbracketed IPv6 host resolves to the invalid http://::1.",
+      "disposition": "FIXED",
+      "severity_escalated": true,
+      "how": "_bracket_bare_ipv6 brackets a host token holding more than one colon and not already bracketed (one colon is a port), applied BEFORE the port default. Measured that this was worse than reported: at a157f76, OLLAMA_HOST=::1 made probe_ollama_idle RAISE httpx.InvalidURL ('Invalid port: :1') — InvalidURL is NOT an httpx.HTTPError, it is raised while building the request — straight out of the cascade-halt guard, losing the document over a typo in an env var. Both probes now catch it via a named _PROBE_ERRORS tuple and answer 'not idle'. Verified: same command returns False on the branch. All the other shapes the reviewer asked for are a parametrised table: explicit port, scheme present, trailing slash, blank/whitespace, bracketed and unbracketed IPv6, an IPv6 zone id, and the bare-host case whose port default must not regress (it did not)."
+    },
+    {
+      "id": "E6-3",
+      "severity": "minor",
+      "summary": "test_trigger_predicate_unchanged pins source text, not trigger behaviour; a second condition bypassing the predicate would still pass.",
+      "disposition": "FIXED",
+      "how": "Kept the spelling pin as a cheap tripwire and added test_probe_is_consulted_only_after_a_timeout, which drives the real process() cascade-halt path and asserts the probe is consulted AND the PARTIAL_SAVE_VLM_TIMEOUT halt fires iff an attempt's reason contains 'timeout'. Reuses PP-2's existing cascade-halt fixture rather than building a second one that could drift; patches _available_engines_for_agentic for CI hermeticity. _had_timeout itself is untouched."
+    },
+    {
+      "id": "E6-extra",
+      "severity": "found-while-fixing",
+      "summary": "The crop-timeout cascade probe in extract.py had the same defect in miniature: VllmTableReader.host is its /v1 base URL and was being asked for /api/tags.",
+      "disposition": "FIXED",
+      "how": "New _probe_reader_idle picks the endpoint from the reader type. The result only enriches a log line (degradation there is unconditional), but a log line naming a hardware failure that never happened is what #222 was filed about. Small and in #222's scope ('which machine is asked')."
+    }
+  ],
+  "not_touched_on_purpose": [
+    "_had_timeout — its all-attempts scan and bare-substring 'timeout' match are #222's defects 2 and 3, deferred to #221/#227. test_trigger_predicate_unchanged still pins it.",
+    "The module-level probe_ollama_idle indirection in _probe_backend_idle. Five test files patch socr.pipeline.orchestrator.probe_ollama_idle; routing around it would leave those patches silently ineffective. Added test_existing_module_level_patches_still_reach_the_probe so a future cleanup fails loudly. All five files re-run green: 171 passed, 2 xfailed."
+  ],
+  "closes_222": false,
+  "closes_222_note": "Stated in the PR body: this fixes which machine is asked, not what the probe can detect. A /api/tags or /models ping still answers while the GPU is wedged; that is #221/#227.",
+  "non_vacuity": {
+    "base_run": {
+      "commit": "a157f76",
+      "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-e6base/src/socr/__init__.py",
+      "result": "9 failed, 23 passed, 5 warnings in 0.22s",
+      "behavioural_failures": 8,
+      "non_behavioural_failures": 1,
+      "non_behavioural_note": "test_probe_and_crop_reader_agree_on_which_server_to_ask fails with ImportError for OPENAI_COMPATIBLE_BACKENDS, a symbol this change introduces. It is a structural anti-drift guard for the new mechanism and cannot behave at a commit where the mechanism does not exist. NOT counted as proof; the blocking finding is proved by the two tests above it, which name nothing new.",
+      "raw": [
+        "E   AssertionError: the probe asked the wrong machine (or the wrong endpoint): ['http://localhost:11434/api/tags']",
+        "E   AssertionError: ['http://localhost:11434/api/tags']",
+        "E   ImportError: cannot import name 'OPENAI_COMPATIBLE_BACKENDS' from 'socr.tables.extract'",
+        "E   AssertionError: assert 'http://::1' == 'http://[::1]:11434'",
+        "E   AssertionError: assert 'http://::1' == 'http://[::1]:11434'",
+        "E   AssertionError: assert 'http://2001:db8::1' == 'http://[2001:db8::1]:11434'",
+        "E   AssertionError: assert 'http://fe80::1%eth0' == 'http://[fe80::1%eth0]:11434'",
+        "E   AssertionError: ['http://::1/api/tags']",
+        "E   AssertionError: assert 'http://::1:11434' == 'http://[::1:11434]'",
+        "FAILED tests/test_gh222_probe_host.py::test_configured_vllm_backend_is_not_probed_at_ollama_localhost",
+        "FAILED tests/test_gh222_probe_host.py::test_vllm_probe_uses_an_endpoint_a_vllm_server_actually_serves",
+        "FAILED tests/test_gh222_probe_host.py::test_probe_and_crop_reader_agree_on_which_server_to_ask",
+        "FAILED tests/test_gh222_probe_host.py::test_host_shapes_resolve_to_a_usable_url[::1-http://[::1]:11434]",
+        "FAILED tests/test_gh222_probe_host.py::test_host_shapes_resolve_to_a_usable_url[http://::1-http://[::1]:11434]",
+        "FAILED tests/test_gh222_probe_host.py::test_host_shapes_resolve_to_a_usable_url[2001:db8::1-http://[2001:db8::1]:11434]",
+        "FAILED tests/test_gh222_probe_host.py::test_host_shapes_resolve_to_a_usable_url[fe80::1%eth0-http://[fe80::1%eth0]:11434]",
+        "FAILED tests/test_gh222_probe_host.py::test_bare_ipv6_actually_reaches_the_probe_as_a_valid_url",
+        "FAILED tests/test_gh222_probe_host.py::test_an_unparseable_host_fails_the_probe_instead_of_raising",
+        "9 failed, 23 passed, 5 warnings in 0.22s"
+      ],
+      "extra_measurement": "OLLAMA_HOST=::1 probe_ollama_idle() at a157f76 -> 'base RAISED: InvalidURL Invalid port: :1'; on branch 2b6c0af -> 'branch result: False'."
+    },
+    "branch_run": {
+      "commit": "2b6c0af",
+      "result": "32 passed, 5 warnings in 0.24s"
+    }
+  },
+  "suite": "1881 passed, 3 xfailed, 5 warnings in 82.67s. No pre-existing failures.",
+  "lint": {
+    "format_gate": "uvx ruff@0.16.0 format --check . -> 328 files already formatted"
+  },
+  "cardinal_rule_levels": {
+    "document": "covered — a false 'backend dead' produced a PARTIAL_SAVE_VLM_TIMEOUT document error naming a hardware failure that never happened; the new behavioural guard asserts the halt marker fires only on a real timeout",
+    "cli": "covered — same halt line",
+    "page": "unchanged by design; no page status, routing or content is touched",
+    "metadata": "unchanged; the halt already surfaces through result.error into metadata.json, this only stops it being raised spuriously",
+    "honest_note": "This is a liveness probe on a failure path, so the levels it touches are narrower than a content-loss fix and the PR body says so rather than overclaiming. The one genuine content-loss element is the httpx.InvalidURL escape, now caught."
+  },
+  "ci": "NO-CHECKS by construction: ci.yml triggers only on push/pull_request into main and this branch is stacked. Stated in the PR body.",
+  "housekeeping": "Temporary base worktree socr-e6base created at df4b24a then a157f76, restored to a clean checkout and removed. socr-night-base never touched.",
+  "files_changed": [
+    "src/socr/pipeline/orchestrator.py",
+    "src/socr/tables/extract.py",
+    "tests/test_gh222_probe_host.py"
+  ]
+}

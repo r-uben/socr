@@ -1,0 +1,68 @@
+{
+  "pr": 252,
+  "branch": "fix/225-phantom-image-urls",
+  "new_head": "3b7cbe8",
+  "previous_head": "3a01cb5",
+  "round": 4,
+  "kind": "evidence repair — no production code changed",
+  "base_used_for_proof": "dc0f13f553ca947e88455c09c5db86b7e702f45a",
+  "rebased": false,
+  "force_pushed": false,
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-e2base/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-e2base",
+  "findings": [
+    {
+      "id": "E2-r3-1",
+      "severity": "major",
+      "reviewer": "kimi",
+      "summary": "The baseline proof is misreported for the one test that pins the round-2 fix. test_phase_major_document_status_is_demoted_by_the_sweep named state.pages[1].fabricated_image_refs — an attribute this PR adds — in its SETUP assert, so at dc0f13f it raised AttributeError before _phase_assemble was ever called. Counts (5 failed / 5 passed) were right; the claim that all five failures were behavioural was false, and the 'still finished SUCCESS' string quoted in the round-3 comment could only have come from the 7696719 run.",
+      "disposition": "FIXED",
+      "reviewer_was_right": true,
+      "how": "One line in the setup assert: getattr(state.pages[1], 'fabricated_image_refs', 0) == 0, with a comment naming the trap so it is not reintroduced a fourth time. Same defence the round-2 guards already use. Nothing else touched."
+    }
+  ],
+  "production_code_changed": false,
+  "production_code_note": "Confirmed by the reviewer and not re-litigated: at head the test drives the real _phase_assemble and genuinely pins the ordering, and the behavioural failure was separately reproduced against 7696719. Only the baseline proof was void.",
+  "non_vacuity": {
+    "base_run": {
+      "commit": "dc0f13f",
+      "result": "5 failed, 5 passed, 5 warnings in 0.27s",
+      "counts_unchanged_from_round_3": true,
+      "all_failures_behavioural": true,
+      "raw": [
+        "E   AssertionError: ## Public finances",
+        "tests/test_gh225_fabricated_image_urls.py:122: AssertionError: ## Public finances",
+        "E   AssertionError: Before",
+        "tests/test_gh225_fabricated_image_urls.py:245: AssertionError: Before",
+        "E   AssertionError: ## Table 2.3 Public finances",
+        "tests/test_gh225_fabricated_image_urls.py:288: AssertionError: ## Table 2.3 Public finances",
+        "E   AssertionError: Before",
+        "tests/test_gh225_fabricated_image_urls.py:342: AssertionError: Before",
+        "E   AssertionError: a document whose only defect is a fabricated image ref still finished SUCCESS: DocumentStatus.SUCCESS, error=None",
+        "     +  where <DocumentStatus.SUCCESS: 'success'> = EngineResult(..., error=None, figures=[], audit_passed=True, audit_notes=[]).status",
+        "tests/test_gh225_fabricated_image_urls.py:382: AssertionError: a document whose only defect is a fabricated image ref still finished SUCCESS: DocumentStatus.SUCCESS, error=None",
+        "FAILED tests/test_gh225_fabricated_image_urls.py::test_fabricated_image_url_is_removed_demoted_and_surfaced",
+        "FAILED tests/test_gh225_fabricated_image_urls.py::test_data_uri_image_is_fabricated",
+        "FAILED tests/test_gh225_fabricated_image_urls.py::test_born_digital_page_keeps_its_ocr_table_after_redaction",
+        "FAILED tests/test_gh225_fabricated_image_urls.py::test_fabricated_url_with_a_title_is_still_caught",
+        "FAILED tests/test_gh225_fabricated_image_urls.py::test_phase_major_document_status_is_demoted_by_the_sweep",
+        "5 failed, 5 passed, 5 warnings in 0.27s"
+      ],
+      "fifth_failure_note": "The ordering test now produces, for real at dc0f13f, the failure the round-3 comment had quoted: the sweep runs after pages_ok and status are frozen, so the document finishes DocumentStatus.SUCCESS with error=None and audit_passed=True despite carrying a fabricated image reference."
+    },
+    "branch_run": {
+      "commit": "3b7cbe8",
+      "result": "10 passed, 5 warnings in 0.29s"
+    }
+  },
+  "suite": "1840 passed, 3 xfailed, 5 warnings in 135.83s. No pre-existing failures.",
+  "lint": {
+    "format_gate": "uvx ruff@0.16.0 format --check . -> 325 files already formatted"
+  },
+  "pr_updated": [
+    "Round-4 comment posted with the correction stated plainly and the corrected raw baseline output.",
+    "PR body prefixed with a SUPERSEDED banner pointing at the round-4 comment, so the stale proof section is not read as current."
+  ],
+  "ci": "This branch is based on main, so CI does run. At push time: typecheck pass, CodeRabbit skipped, test (3.11) and cubic pending.",
+  "housekeeping": "Temporary base worktree socr-e2base created at dc0f13f, left clean (0 porcelain entries) and removed. socr-night-base untouched.",
+  "files_changed": ["tests/test_gh225_fabricated_image_urls.py"]
+}

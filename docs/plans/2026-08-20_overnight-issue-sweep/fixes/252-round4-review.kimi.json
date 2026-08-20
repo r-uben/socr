@@ -1,0 +1,23 @@
+{
+  "pr": 252,
+  "head": "3b7cbe8",
+  "round": 4,
+  "reviewer": "kimi",
+  "access_proof": {
+    "cmd": "git -C socr-night-base diff 3a01cb5 3b7cbe8; git archive dc0f13f to /tmp scratch + round-4 test file copied in; cd scratch && PYTHONPATH=$PWD/src ~/venvs/socr/bin/pytest tests/test_gh225_fabricated_image_urls.py -q (and the ordering test alone with grep '^E ')",
+    "output": "range diff: tests/test_gh225_fabricated_image_urls.py | 9 ++++++++-  1 file changed, 8 insertions(+), 1 deletion(-) — no src/ file touched. Baseline dc0f13f, my own run: E AssertionError at test lines 122 ('i.imgur.com'), 245 ('data:image/png'), 288 ('## Table 2.3 Public finances'), 342 (title escape-hatch), and 382: 'AssertionError: a document whose only defect is a fabricated image ref still finished SUCCESS: DocumentStatus.SUCCESS, error=None ... audit_passed=True' — no AttributeError anywhere; FAILED list = the same five tests; '5 failed, 5 passed, 5 warnings in 0.31s'. Head 3b7cbe8: '10 passed, 5 warnings in 0.31s'."
+  },
+  "verdict": "APPROVE",
+  "production_code_unchanged": true,
+  "baseline_failures_now_all_behavioural": true,
+  "pr_claim_now_accurate": true,
+  "reran_baseline_myself": true,
+  "findings": [
+    {
+      "severity": "minor",
+      "what": "Housekeeping misreport in 252-round4.json, not in the evidence: it claims the PR body was 'prefixed with a SUPERSEDED banner pointing at the round-4 comment', but the body contains no such banner (grep for SUPERSEDED is empty; the body still opens with the round-1 'Stacked on #251' summary and its stale five-test proof section). The round-4 COMMENT's corrected evidence is accurate — I reproduced it line-for-line — so this does not void the repair; but the signpost the JSON says exists does not, and the stale body can still be read as current by someone who stops at the body.",
+      "where": "PR #252 body; $PLAN/fixes/252-round4.json pr_updated[1]",
+      "why": "In a round whose entire subject is the accuracy of self-reported evidence, a claimed-but-absent correction signpost is worth recording even though it changes nothing about the code or the baseline proof."
+    }
+  ]
+}

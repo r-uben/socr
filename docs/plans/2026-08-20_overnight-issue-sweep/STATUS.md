@@ -34,21 +34,20 @@ closed**, **5 PRs open and unmerged**, 2 actions held for the owner.
 | W1–W3 | DONE | `state/checkpoint-wave{0,1,3}.json` |
 | F1 | DONE | `MORNING-REPORT.md` |
 
-## Late addition — GPT review round
+## Round 2 — complete
 
-All four previously-unreviewed PRs were reviewed by independent GPT agents after the
-main run. **#252, #253, #254 and #255 all returned REQUEST-CHANGES with blocking
-findings.** #251 is the only PR that is ready. See `MORNING-REPORT.md` §6b.
+#251 merged. All four remaining PRs were rejected by a GPT review round (§6b), fixed,
+and re-reviewed by a FRESH vendor each. **All four now APPROVE** (§6c):
+#252 Kimi, #253 Grok, #254 DeepSeek, #255 MiniMax. Stack rebased onto the new main,
+ancestry verified, 1893 passed on the top of stack, #252's CI green.
+
+Nothing is merged. All four await the owner.
 
 ## Open threads for the owner
 
-0. **`#252` round 2 is unreviewed.** Its reviewer found the original fix caused
-   silent content loss on born-digital pages; the code owner reproduced it,
-   root-caused it (`audit_passed` is the winner-selection flag, not a page flag) and
-   fixed it at head `4243212`. Nobody has reviewed that fix. **And #253/#254/#255
-   were branched before it, so they do not contain it** — merge strictly bottom-up
-   (#251 → #252 → #253 → #254 → #255) or the defect ships in the descendants.
-   First thing to look at.
+0. **Merge bottom-up: #252 → #253 → #254 → #255.** Ancestry is verified and each
+   merge retargets the next PR's base, so CI runs on each in turn. Out of order is
+   the only way to get this wrong now.
 1. `#147` — design call: narrow the closing Note to table pages, or accept the work.
 2. `#151` — one disputed sentence in a held correction comment.
 3. `ci.yml` — stacked PRs run no tests at all; one-line fix available.

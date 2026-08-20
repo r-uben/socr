@@ -11,7 +11,7 @@
 - **Nothing was closed.** 62 issues open at the start, 62 open now.
 - **6 correction comments posted**, every issue verified still open afterwards.
 - **2 actions held for you**, including the run's only close.
-- **5 PRs open, none merged**: #251–#255. **#251 is the only one ready.** A late GPT review round (§6b) returned `REQUEST-CHANGES` on #252, #253, #254 and #255 — every one with a blocking defect.
+- **#251 merged. 4 PRs open, none merged, all four now APPROVED** by fresh independent reviewers after a round of fixes (§6c). A GPT round had rejected all four with blocking defects (§6b); every finding was addressed or declined with reasons a reviewer then upheld.
 - **Zero fabricated citations** across 192 machine-checked verdicts.
 
 The single most valuable thing that happened tonight was a fix **not** being
@@ -417,6 +417,63 @@ unreviewed PRs contained problems comparable to the one reviewed PR. That was ri
 and if anything understated: the base rate is now five reviews, five substantive
 rejections, zero clean passes. The implementation seat outran the review seat all
 night, and the review seat is where the value was.
+
+---
+
+## 6c. Round 2 — all four fixed, all four now approved
+
+The owner merged #251 and sent the rest back. Every PR was fixed, re-reviewed by a
+**fresh** vendor that had seen neither the code nor the earlier review, and all four now
+carry an APPROVE.
+
+| PR | issue(s) | final head | fresh reviewer | verdict | CI |
+|---|---|---|---|---|---|
+| [#252](https://github.com/r-uben/socr/pull/252) | #225 fabricated image URLs | `3b7cbe8` | Kimi | **APPROVE** (r4) | **test + typecheck PASS** |
+| [#253](https://github.com/r-uben/socr/pull/253) | #205 TR-3 surfacing | `fe0707e` | Grok | **APPROVE** | NO-CHECKS (stacked) |
+| [#254](https://github.com/r-uben/socr/pull/254) | #195+#197+#198 | `1f10d5c` | DeepSeek | **APPROVE** | NO-CHECKS (stacked) |
+| [#255](https://github.com/r-uben/socr/pull/255) | #222 probe host | `515c680` | MiniMax | **APPROVE** | NO-CHECKS (stacked) |
+
+Stack: `main → #252 → #253 → #254 → #255`, ancestry verified — each PR contains all its
+predecessors, and the bottom contains `main`. Suite on the rebased top of stack:
+**1893 passed, 3 xfailed, 0 failed.** Lint clean.
+
+### What round 2 actually found
+
+- **#254's deleted detection path was worse than the review said.** The author's premise
+  was inverted: `numeric_scope is None` does not mean "no numeric value exists", it means
+  the extracted grid has no wholly numeric-shaped cell — **and corruption is one of the
+  causes of that**, so the pages the check exists for were the ones bypassing it. The
+  author reproduced the counterexample (four destroyed tokens invisible) before changing
+  anything, then scoped the `None` path to the table's own row rects rather than skipping.
+- **#252's author reversed itself on evidence.** It had argued an ERROR page status would
+  delete the cleaned text. Checked under review, that turned out false — winner selection
+  keys on `audit_passed`, and `failed_pages` on a body marker, not on status. It said
+  "I was wrong, reviewer right" and implemented #225's literal criterion.
+- **#255 found a content-loss bug nobody was looking for.** At the previous head,
+  `OLLAMA_HOST=::1` made the probe raise `httpx.InvalidURL` **out of the cascade-halt
+  guard** — `InvalidURL` is not an `httpx.HTTPError`, so the existing `except` never saw
+  it. A typo in an environment variable would have lost the document. Now caught.
+- **#253 corrected #205's own framing** — see §8; document status is already keyed on the
+  TR-3 flag through older paths, so "surfaced nowhere" is true only of the detection.
+
+### Two judgement calls, both settled by an independent reviewer rather than by me
+
+- **#254, significance stars.** The author declined to treat a dropped `***` as
+  destruction, because the check discards the *whole grid* and starred coefficients are
+  the common case — trading a table for a marker. DeepSeek judged the refusal sound.
+  Follow-up noted on the PR: star loss wants its own detector with its own remedy.
+- **#255, `qwen_backend="auto"`.** The author left `auto` probing Ollama, arguing that
+  `auto` means local everywhere else and `make_table_reader` sends crops there, so
+  inferring vLLM from a URL alone would recreate the bug class. MiniMax independently
+  ruled the limit acceptable: probe and reader must agree, and for `auto` they do.
+
+### The one conflict, and how it was resolved
+
+Rebasing #254 onto the new #253 hit a genuine semantic conflict in
+`orchestrator.py`'s `pages_ok` guard — both sides add a different term. Resolved by
+keeping **both** (`doc_fabrication` from #252, `text_grid_rejected_pages` from #254);
+verified in the final tree and by the full suite. This is precisely the collision the
+one-owner-stacked-branches decision existed to keep visible rather than silent.
 
 ---
 
