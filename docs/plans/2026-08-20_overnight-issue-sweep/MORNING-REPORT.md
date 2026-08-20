@@ -376,11 +376,17 @@ drive-by rejections. Each posted its findings as a comment on its PR.
 
 The three worst, in the order I would read them:
 
-- **#254 — a real detection path was deleted.** `reconstruct.py:178`: the new
-  None-scope early return removes a *reachable* real-detection path on an invalid
-  inference. This was the single edit I flagged to the reviewer as the most dangerous
-  in the stack, and it did not survive contact. #254 also fails #195's explicit
-  page-status and document-status requirement.
+- **#254 — a real detection path was deleted, and the inference behind it is
+  backwards.** `reconstruct.py:178`. The author reasoned: `numeric_scope is None`
+  means no numeric value exists, so nothing could have been destroyed. The reviewer's
+  correction is sharper and worse — **`None` only means the extracted grid has no
+  wholly numeric-shaped cell, and corruption is itself a cause of that.** So the
+  exact pages the check exists to catch are the ones that now bypass it. This was the
+  single edit I flagged as most dangerous in the stack, and it did not survive
+  contact. Second blocking finding: `orchestrator.py:889` deliberately provides
+  neither page nor document status, which #195 explicitly requires.
+  The reviewer cleared #198's filter widening as symmetric and non-vacuous, and
+  reproduced the baseline exactly (5 failed / 3 passed).
 - **#252 — the document sweep runs too late.** `orchestrator.py:5505`: the phase-major
   sweep happens *after* overall status is computed, so a document whose only defect is
   a fabricated ref can still finish clean. Round 2 fixed the content loss; it did not
@@ -391,8 +397,16 @@ The three worst, in the order I would read them:
   reach the default path.
 
 **#253** is the mildest but still blocking: reusing the `table_region_unverifiable`
-event kind gives it two meanings, and its scope guard only exercises `_phase_analyze`,
-so it could not catch scope creep in `process`/`assemble`.
+event kind conflates detection-only with the established D3 fail-closed / image-asset
+meaning **and double-counts D3 pages**; its scope guard stops at `_phase_analyze`, so
+it cannot catch scope creep in `process`/`assemble`. It also hardcodes the empirical
+62/245 sample numbers into runtime source, which #205 itself disclaims as "the" rate —
+a magic-number violation in a repo whose rule forbids exactly that.
+
+Worth recording as exoneration: the one thing the author self-flagged as the possible
+#250 shape — editing the existing GH-211 test's exhaustive reasons list — **the
+reviewer independently judged legitimate.** Flagging it was right; it was not the
+problem.
 
 **What this means for the merge order.** Nothing in the stack is ready. #251 remains
 the only PR that is both CI-verified and approved by its reviewer — it is still
