@@ -1,76 +1,46 @@
 # STATUS — overnight autonomous issue sweep
 
-Last updated: 2026-08-20 ~02:15 (night orchestrator, run in progress)
+Last updated: 2026-08-20 05:10 (night orchestrator, run complete)
 
-## Stage
+**Read `MORNING-REPORT.md` first.** This file is the board; that file is the answer.
 
-**Wave 0 DONE. Wave 1 in progress** (triage), wave 1.5 verifier built and
-self-tested, wave 2+ briefs written and staged.
+## Outcome in one line
 
-## Base state
-
-- `main_sha` pinned at `53b0637`; `baseline.json` written; `gh` alive as `r-uben`.
-- Base worktree (detached, clean, reference tree):
-  `/Users/rubenffuertes/repos/.worktrees/socr-night-base`.
-- 62 open issues snapshotted with `body_hash` for D0 freshness checks.
-- Abort latch NOT set.
+62 issues triaged and adjudicated, 6 correction comments posted, **0 issues
+closed**, 3 PRs open and unmerged, 2 actions held for the owner.
 
 ## Ticket board
 
 | Ticket | Status | Note |
 |---|---|---|
-| A1 | **DONE** | canary proven in 3 states; sentinel break/restore transcript in `logs/` |
-| A2 | **DONE** | 62 issues, 12 clusters, 4 batches; union == snapshot exactly |
-| W1 | **DONE** | `state/checkpoint-wave0.json` reconciles 62 == 62 |
-| B1–B4 | **WIP** | see coverage below |
-| V1 | **DONE (re-runnable)** | `bin/verify_citations.py`, self-tested on 9 adversarial fixtures |
-| C1–C4 | TODO | briefs written (`state/ADJUDICATION_BRIEF.md`) |
-| D0/DR/D1–D3 | TODO | `bin/apply_tracker_actions.sh` written; `state/REVIEW_BOARD_BRIEF.md` written |
-| E0–E7 | TODO | `state/CODE_OWNER_BRIEF.md` written; #161 reproducer being measured |
-| F1 | TODO | |
+| A1 | DONE | canary proven in 3 states + sentinel break/restore |
+| A2 | DONE | 62 issues, 12 clusters, 4 batches; union == snapshot |
+| B1–B4 | DONE | 11 vendor seats, 192 verdicts, 0 fabricated citations |
+| V1 | DONE | `bin/verify_citations.py`, self-tested on 9 adversarial fixtures |
+| C1–C4 | DONE | each batch adjudicated by a vendor that did not triage it |
+| D0 | DONE | 8 actions staged; close refused unless 3 proofs survived |
+| DR | DONE | 6 APPROVED, 2 HELD-FOR-OWNER |
+| D1 | DONE | **zero closes** — valid outcome, recorded as such |
+| D2 | DONE | 6 corrections posted, all issues verified still OPEN |
+| D3 | DONE | no discoveries filed by any agent; nothing to file |
+| E0 | DONE | `fixes/queue.json` |
+| E1 | DONE | PR #251, CI green, reviewer APPROVE |
+| E2 | DONE | PR #252, NO-CHECKS (stacked), local suite green |
+| E3 | DONE | PR #253, NO-CHECKS (stacked), surfacing only |
+| E4 | DONE — no PR | `DOES-NOT-REPRODUCE`; became a design question for the owner |
+| E5–E7 | IN FLIGHT at cutoff | see `fixes/E5-result.json` etc. E7 expected SKIPPED (gated on #159) |
+| W1–W3 | DONE | `state/checkpoint-wave{0,1,3}.json` |
+| F1 | DONE | `MORNING-REPORT.md` |
 
-## Triage coverage
+## Open threads for the owner
 
-| batch | seats delivered | evidence |
-|---|---|---|
-| batch-1 (17) | grok | 17/17 verdicts, **17 clean citations** |
-| batch-2 (11) | deepseek | 11/11 verdicts, 10 verified |
-| batch-3 (12) | kimi, minimax | 24 verdicts, 12 verified (minimax lost 9 to line drift) |
-| batch-4 (22) | grok, gemini-pro | 44 verdicts, 43 verified |
+1. `#147` — design call: narrow the closing Note to table pages, or accept the work.
+2. `#151` — one disputed sentence in a held correction comment.
+3. `ci.yml` — stacked PRs run no tests at all; one-line fix available.
+4. 32 live FIX-CANDIDATE issues. The backlog was not stale.
 
-**96 verdicts checked, 0 fabricated citations.** No dispatched agent invented
-evidence. The 30 failures are line drift — real code, wrong line number.
+## Do not
 
-Second/third seats still running: claude+minimax (b1), gemini-flash (b2),
-deepseek (b3), claude (b4).
-
-## Findings worth the owner's attention
-
-1. **The backlog is not stale.** The premise that #243/#246/#247/#250 obsoleted
-   much of it does not survive contact: of 96 verdicts so far, exactly one
-   `ALREADY-FIXED` was claimed, and the machine check rejected it. Expect very few
-   closes tonight.
-2. **#220 is `PARTIALLY-IMPLEMENTED`, not fixed** — 4 of 5 acceptance criteria met;
-   the "filter to pages a given gate fired on" criterion is unmet. The triager
-   supplied the evidence that defeated its own verdict.
-3. **CONTRACT fact 1 was imprecise** and is corrected in `state/CONTRACT.md`:
-   `pytest` already isolates via `pythonpath=["src"]` resolved against rootdir. The
-   editable-install trap still bites the `socr` CLI, `python -c` and reproducer
-   scripts, so the mandate is unchanged.
-4. **zsh silently corrupts `git show $SHA:path`** when unquoted (`:s` history
-   modifier). It returns a wrong blob without erroring. This produced a wrong
-   grounding token in my own first table — the canary caught the orchestrator, not
-   the agent. See `state/GROUNDING_TOKENS.md`.
-
-## Vendor reality
-
-grok and kimi were slow, not dead — both delivered after a status ping, and grok's
-citations were the cleanest in the run (39/39 exact). Owner's 02:10 note adds
-cursor as a fifth vendor, which removes a real defect in the plan: with four
-houses the five distinct roles per batch could not be staffed without an
-independence overlap. GPT returns ~08:15 and is reserved as the escalation seat.
-Full assignment in `state/VENDOR_MATRIX.md`.
-
-## Next action
-
-Close wave 1 when the remaining seats land, re-run V1, then dispatch C1–C4.
+- Merge anything on the sweep's behalf; all three PRs are proposals.
+- Re-run `bin/apply_tracker_actions.sh` expecting new writes — it is idempotent.
+- Treat `E5`–`E7` status here as final; read their result files.
