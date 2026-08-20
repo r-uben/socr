@@ -38,10 +38,14 @@ closed**, **5 PRs open and unmerged**, 2 actions held for the owner.
 
 #251 merged. All four remaining PRs were rejected by a GPT review round (§6b), fixed,
 and re-reviewed by a FRESH vendor each. **All four now APPROVE** (§6c):
-#252 Kimi, #253 Grok, #254 DeepSeek, #255 MiniMax. Stack rebased onto the new main,
-ancestry verified, 1893 passed on the top of stack, #252's CI green.
+#252 Kimi (r4), #253 Grok, #254 DeepSeek, #255 MiniMax (r3, superseding its own r2
+ruling after the author measured and retracted the premise it had accepted).
 
-Nothing is merged. All four await the owner.
+Stack rebased onto the new main, ancestry verified end to end, #252's CI green.
+Nothing is merged by the sweep. All four await the owner.
+
+Tracker: 61 open (was 62). The single change is #161, auto-closed by the owner's own
+merge of #251 at 09:28:58. The sweep closed nothing, all night.
 
 ## Open threads for the owner
 

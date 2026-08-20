@@ -1,0 +1,66 @@
+{"pr":255,"head":"86329c1","round":3,"reviewer":"ollama-minimax",
+ "supersedes":"255-round2-review.minimax.json",
+ "auto_gap_now_closed":true,
+ "access_proof":{"cmd":"PYTHONPATH=/private/tmp/socr-255-r3-head/src ~/venvs/socr/bin/pytest /private/tmp/socr-255-r3-head/tests/test_gh222_probe_host.py -q --no-header","output":"36 passed, 5 warnings in 0.25s"},
+ "verdict":"APPROVE",
+ "blocking_fixed_on_real_path":true,
+ "probe_and_reader_cannot_drift":true,
+ "auto_backend_limit_acceptable":true,
+ "auto_gap_now_closed":true,
+ "asymmetry_documented_and_pinned":true,
+ "invalidurl_claim_verified":true,
+ "indirection_preserved":true,
+ "non_vacuity_accounting_honest":true,
+ "reran_baseline_myself":true,
+ "hostile_env_hazard_verified":true,
+ "findings":[
+   {
+     "severity":"blocking",
+     "what":"Round-2's auto gap IS closed: the probe now follows the same gate QwenEngine.is_available already uses for auto + VLLM_BASE_URL.",
+     "where":"src/socr/pipeline/orchestrator.py (HEAD 86329c1, _local_backend_is_openai_compatible)",
+     "why":"At round-2 head 2b6c0af the predicate was just `backend in OPENAI_COMPATIBLE_BACKENDS` — so `auto` + `VLLM_BASE_URL` went to Ollama. HEAD 86329c1 adds a second clause: `backend == 'auto' and bool(os.environ.get('VLLM_BASE_URL'))`. I verified: QwenEngine.is_available (engines/qwen.py:154) short-circuits True on VLLM_BASE_URL alone (HPC deployment comment confirmed), and PipelineConfig.__post_init__ (config.py:318-320) adopts VLLM_BASE_URL into qwen_vllm_url when the default is unmodified. So a user reaches vLLM by exporting ONE env var, and the cascade-halt probe now goes there with it. #222's named scenario — HPC, --strict-local, one timeout truncating the run — is no longer reachable through the configuration that triggers it."
+   },
+   {
+     "severity":"major",
+     "what":"All four cells of the new predicate are measured and pinned.",
+     "where":"tests/test_gh222_probe_host.py lines 264, 380, 397, 407",
+     "why":"Re-ran the new test file in scratch worktrees against HEAD (36 passed) and against 515c680 (2 failed, 34 passed). The 2 failures match the author's report exactly: test_auto_backend_with_vllm_base_url_is_probed_at_the_vllm_server (assertion on the URL the probe hit) and test_auto_plus_vllm_base_url_is_a_known_documented_asymmetry (assertion on _local_backend_is_openai_compatible returning False instead of True). Both are behavioural AssertionErrors on _probe_backend_idle and _local_backend_is_openai_compatible — methods that exist at 515c680 — no ImportError, no AttributeError. The four cells: auto+VLLM_BASE_URL → vllm models (380), ollama+VLLM_BASE_URL → localhost/api/tags (397, the reverse-regression guard), vllm alone → vllm models (264), auto alone → localhost/api/tags (407). Explicit backend wins in both directions because the vllm/ollama branch is checked BEFORE the auto+env clause."
+   },
+   {
+     "severity":"minor",
+     "what":"My earlier 'auto limit is defensible' ruling was wrong, and the author measuring it is the right shape of correction.",
+     "where":"255-round2-review.minimax.json (previous) and the round-3 PR body",
+     "why":"Round 2's argument was: `auto` resolves to Ollama everywhere else in this codebase, so `make_table_reader` and the probe agree there. That holds for `make_table_reader` and `resolve_qwen_intent`. It does NOT hold for `is_available` at `engines/qwen.py:154`, which short-circuits True on `VLLM_BASE_URL` alone with the explicit comment 'vLLM path (e.g. HPC, where Ollama is forbidden on server GPUs)'. A user can reach a vLLM deployment by exporting ONE env var and never touching a flag, so the probe and `is_available` were disagreeing for the exact configuration the issue is named after. My round-2 ruling is now RETRACTED in favour of round 3. The probe_and_reader_cannot_drift invariant I accepted still holds, but only when VLLM_BASE_URL is unset — which is now stated in the rescoped test_probe_and_crop_reader_agree_on_which_server_to_ask."
+   },
+   {
+     "severity":"minor",
+     "what":"The asymmetry (auto + VLLM_BASE_URL → probe vLLM, reader Ollama) is stated plainly and pinned by a test that fails loud if closed.",
+     "where":"tests/test_gh222_probe_host.py:410 test_auto_plus_vllm_base_url_is_a_known_documented_asymmetry, and the PR body section 'The asymmetry this leaves, stated plainly'",
+     "why":"On this configuration the cascade-halt probe goes to vLLM but make_table_reader still returns OllamaTableReader — so dual-pass table crops on HPC still hit an Ollama daemon that doesn't exist. The author deliberately does NOT fix it because: (a) the cascade-halt guards the whole-page qwen-ocr CLI path which DOES serve via vLLM, (b) changing the crop reader is a behavioural change to the dual-pass lane distinct from #222's scope, (c) the consequence is honest about being a real latent bug deserving its own issue. The test asserts isinstance(reader, OllamaTableReader) and says in its comment 'if this now returns a VllmTableReader the asymmetry has been closed — good, but delete this test and the PR-body note that describes it'. Closing the gap is now a deliberate act, not an accident."
+   },
+   {
+     "severity":"minor",
+     "what":"The hostile-env hazard (VLLM_BASE_URL exported bypasses probe_ollama_idle patches) is closed, verified by running four probe-patching test files under VLLM_BASE_URL=http://gpu-node.cluster:8000/v1.",
+     "where":"tests/test_gh222_probe_host.py fixture recorded_urls (clears VLLM_BASE_URL) plus the two new tests test_auto_backend_with_vllm_base_url_is_probed_at_the_vllm_server and test_auto_plus_vllm_base_url_is_a_known_documented_asymmetry that patch the probe by name.",
+     "why":"Re-ran with VLLM_BASE_URL=http://gpu-node.cluster:8000/v1 exported: 69 passed, 2 xfailed on the four probe-patching files (test_table_repair_parity, test_pp2_agentic_fuse, test_structural_gate_b1_gh151, test_landscape_refusal_a2_gh147) and 36 passed on the new test file. If the patches were silently routing past the probe, the url-asserting tests would fail or, worse, the patches-to-probe tests would pass for the wrong reason. They did not. The recorded_urls fixture monkeypatch.delenv('VLLM_BASE_URL', raising=False) keeps the new file hermetic; the two named-patch tests use monkeypatch.setattr so they don't depend on env. The author also noted all 5 files re-run green; I verified 4 of the 5 myself (the 5th is test_gh222_probe_host.py which I also ran)."
+   },
+   {
+     "severity":"minor",
+     "what":"Non-vacuity accounting for the delta is honest: 2 failed at 515c680, both behavioural, on methods that already exist there.",
+     "where":"test_gh222_probe_host.py:380 and :431",
+     "why":"I re-ran the round-3 test file against 515c680 (the round-2 head, the right base to prove the auto gap specifically): 'AssertionError: an auto-backend HPC run was probed at the wrong machine' at :380 and 'assert False is True … _local_backend_is_openai_compatible' at :431. Both are AssertionErrors on _local_backend_is_openai_compatible — a method that exists at 515c680. No ImportError, no AttributeError, no signature error. HEAD 86329c1: 36 passed. Non-vacuity is sound."
+   },
+   {
+     "severity":"minor",
+     "what":"Module-level probe_ollama_idle indirection preserved in the delta.",
+     "where":"src/socr/pipeline/orchestrator.py:49 (import) and :5176 (call site)",
+     "why":"The delta only changes the predicate (orchestrator.py:5180-5210) and adds the VLLM_BASE_URL clause. _probe_backend_idle still calls probe_ollama_idle via the module-level name. test_existing_module_level_patches_still_reach_the_probe still passes (verified as part of the 36-pass run). All four probe-patching files run green under hostile env. No patch-silently-effected regression."
+   },
+   {
+     "severity":"minor",
+     "what":"InvalidURL escape fix from round 2 survives the delta (untouched). _had_timeout untouched. Cardinal-rule levels honest.",
+     "where":"src/socr/tables/extract.py and src/socr/pipeline/orchestrator.py:3223",
+     "why":"_PROBE_ERRORS = (httpx.HTTPError, httpx.InvalidURL, OSError) and the parametrised IPv6 tests are unchanged between 2b6c0af and 86329c1. _had_timeout = any('timeout' in ... ) at orchestrator.py:3223 is byte-identical. The PR body still scopes to a liveness probe on a failure path (document + CLI; page + metadata untouched by design). Round 3 does not change scope; it changes only the predicate used to pick the probe target."
+   }
+ ],
+ "what_i_tried_to_break":"1. Read the new predicate at HEAD 86329c1 — verified it adds the second clause (`backend == 'auto' and bool(os.environ.get('VLLM_BASE_URL'))`) AND the explicit-backend-wins invariant (the `if backend in OPENAI_COMPATIBLE_BACKENDS: return True` short-circuits before the auto+env check). 2. Read QwenEngine.is_available at engines/qwen.py:154 to confirm the VLLM_BASE_URL short-circuit and its HPC comment. 3. Read PipelineConfig.__post_init__ at config.py:318-320 to confirm VLLM_BASE_URL adoption into qwen_vllm_url. 4. Re-ran tests/test_gh222_probe_host.py in scratch worktrees against HEAD (36 passed) and against 515c680 (2 failed, 34 passed), and inspected both failure messages: both AssertionErrors on _local_backend_is_openai_compatible (a method that exists at 515c680). 5. Inspected the four cells of the new predicate — found tests at lines 264, 380, 397, 407 covering each. The explicit-ollama-outranks-environment reverse regression is at line 397. 6. Ran the four probe-patching files (test_table_repair_parity, test_pp2_agentic_fuse, test_structural_gate_b1_gh151, test_landscape_refusal_a2_gh147) with VLLM_BASE_URL=http://gpu-node.cluster:8000/v1 exported — 69 passed, 2 xfailed. 7. Ran the new test_gh222_probe_host.py under the same hostile env — 36 passed (the recorded_urls fixture clears the variable). 8. Read the asymmetry test (line 410) and the rescoped drift test (line 324) to confirm: drift test now deletes VLLM_BASE_URL from env; asymmetry test asserts OllamaTableReader is the deliberate target and says so in its docstring. 9. Both scratch worktrees removed cleanly. I did NOT re-run the full 1881-test suite; author claims 1897 passed at HEAD. 10. I did NOT measure QwenEngine.is_available calling pattern for qwen_backend='vllm' under no-VLLM_BASE_URL — the existing predates-this-PR test_vllm_probe_uses_an_endpoint_a_vllm_server_actually_serves covers that and still passes."}

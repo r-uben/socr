@@ -431,7 +431,7 @@ carry an APPROVE.
 | [#252](https://github.com/r-uben/socr/pull/252) | #225 fabricated image URLs | `3b7cbe8` | Kimi | **APPROVE** (r4) | **test + typecheck PASS** |
 | [#253](https://github.com/r-uben/socr/pull/253) | #205 TR-3 surfacing | `fe0707e` | Grok | **APPROVE** | NO-CHECKS (stacked) |
 | [#254](https://github.com/r-uben/socr/pull/254) | #195+#197+#198 | `1f10d5c` | DeepSeek | **APPROVE** | NO-CHECKS (stacked) |
-| [#255](https://github.com/r-uben/socr/pull/255) | #222 probe host | `515c680` | MiniMax | **APPROVE** | NO-CHECKS (stacked) |
+| [#255](https://github.com/r-uben/socr/pull/255) | #222 probe host | `86329c1` | MiniMax (round 3) | **APPROVE** | NO-CHECKS (stacked) |
 
 Stack: `main → #252 → #253 → #254 → #255`, ancestry verified — each PR contains all its
 predecessors, and the bottom contains `main`. Suite on the rebased top of stack:
@@ -462,10 +462,28 @@ predecessors, and the bottom contains `main`. Suite on the rebased top of stack:
   destruction, because the check discards the *whole grid* and starred coefficients are
   the common case — trading a table for a marker. DeepSeek judged the refusal sound.
   Follow-up noted on the PR: star loss wants its own detector with its own remedy.
-- **#255, `qwen_backend="auto"`.** The author left `auto` probing Ollama, arguing that
-  `auto` means local everywhere else and `make_table_reader` sends crops there, so
-  inferring vLLM from a URL alone would recreate the bug class. MiniMax independently
-  ruled the limit acceptable: probe and reader must agree, and for `auto` they do.
+- **#255, `qwen_backend="auto"` — and this one was decided the other way, after the
+  ruling.** The author left `auto` probing Ollama, and MiniMax ruled the limit
+  acceptable. Then the author went back and **measured** its own argument, and retracted
+  it: `PipelineConfig.__post_init__` adopts `VLLM_BASE_URL` into `qwen_vllm_url` and
+  leaves `qwen_backend` at `auto`, so a user reaches that config by setting **one
+  environment variable** — and `QwenEngine.is_available()` already treats
+  `VLLM_BASE_URL` alone as a vLLM deployment (the HPC path where Ollama is forbidden on
+  server GPUs). Measured at the approved head: `auto` + a remote vLLM URL still probed
+  `localhost:11434`. **#222's own named scenario was still live inside the PR that
+  claims to fix it.**
+
+  I did not let the approval stand on a retracted premise. A measurement outranks a
+  reviewer's ruling — that is the principle the whole run used — so the gap was closed
+  (`515c680` → `86329c1`), and MiniMax re-reviewed and **superseded its own ruling**:
+  `auto_gap_now_closed: true`. Its round-3 record notes plainly that its earlier ruling
+  was wrong and that the author measuring it is the right shape of correction.
+
+  One asymmetry lands with it, deliberately and documented: for that config the probe is
+  now correct while `make_table_reader` still returns `OllamaTableReader`. The author
+  refused to fix the crop reader as out of scope and pinned the disagreement with a test
+  that fails loudly if anyone closes it silently. **That wants its own issue — yours to
+  file.**
 
 ### The one conflict, and how it was resolved
 
