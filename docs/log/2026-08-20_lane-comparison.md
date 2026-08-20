@@ -54,10 +54,22 @@ binding between numbers and their rows and columns. A flattened regression table
 every one of its 152 decimals and tells you nothing about which coefficient belongs to
 which specification.
 
-Therefore: **a scrambled table has an identical numeric multiset to a correct one.** Every
-automated check in this codebase compared multisets. The oracle was blind to the only
-thing that was broken, which is why months of CI, tests and review never caught it and a
-person looking at one page caught it in a minute.
+Therefore: **a scrambled table has an identical numeric multiset to a correct one.**
+
+Stated precisely, after a peer review corrected an earlier overstatement in this file: it
+is **the winner-side verification chain** that was multiset-blind — `native_verifier`,
+`source_evidence`, the header anchors — plus the old benchmark scorer, which falls back to
+a numeric multiset on shape mismatch (`benchmark/scorer.py:462-498`). It is **not** true
+that every check in the codebase compared multisets.
+
+`benchmark/table_exactness.py` already does the right thing and has since #123: row-label
+paths, native lanes, and a global monotone injective lane-to-column map (lines 222-412),
+explicitly built because "that fallback is blind to the failure". Anyone implementing the
+binding oracle should read it first — the prior art is in this repo and was not referenced
+when the replacement was designed.
+
+The blindness was in the chain that decides what ships. That is why months of CI, tests
+and review never caught it, and a person looking at one page caught it in a minute.
 
 The `decimals` counts in the verdict file are descriptive statistics. **They are not an
 oracle and must not be used as one.** That is the point of the whole exercise.
