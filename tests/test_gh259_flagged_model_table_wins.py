@@ -34,7 +34,7 @@ import pytest
 
 from socr.core.document import DocumentHandle
 from socr.core.manifest import _winning_page_output, canonical_page_texts
-from socr.core.result import PageOutput, PageStatus
+from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 
 # Two readings of the same table. Both carry every value; only the structure
@@ -743,3 +743,53 @@ def test_drift_reaches_document_metadata_and_cli(tmp_path: Path, capsys) -> None
     cli = capsys.readouterr().out
     assert "DISPUTED" in cli, cli
     assert "9.99" in cli, cli
+
+
+def test_gh90_scanned_evidence_floor_still_wins_over_a_flagged_model_table(
+    tmp_path: Path,
+) -> None:
+    """Reverse regression: the OTHER fail-closed floor keeps its precedence.
+
+    ``_winning_page_output`` checks the GH-90 scanned source-evidence floor
+    before the #259 keep branch, so a scan whose VLM table the evidence gate
+    rejected still ships the explicit failed-table marker rather than the
+    model's fluent hallucination. Until now that ordering was asserted by the
+    source alone — its sibling, the TR-3 D3 floor, has
+    ``test_d3_fail_closed_floor_still_wins_over_a_flagged_model_table`` and this
+    one had nothing, so a future reorder of the branches would have been caught
+    on one floor and gone silent on the other.
+
+    Every ingredient of the keep path is present and correct here: a non-empty
+    model grid, a soft rejection disposition, no drift. Only ``is_born_digital``
+    and ``scanned_table_evidence_failed`` differ — so if the floor ever stopped
+    coming first, this page would ship MODEL_TABLE and the assertions below
+    would fail rather than quietly passing for the wrong reason.
+    """
+    state = DocumentState(handle=DocumentHandle.from_path(_born_digital_pdf(tmp_path)))
+    ps = state.pages[1]
+    ps.is_born_digital = False  # a scan — the floor's own precondition
+    ps.has_tables = True
+    ps.scanned_table_evidence_failed = True
+
+    model_attempt = PageOutput(
+        page_num=1,
+        text=MODEL_TABLE,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+    )
+    setattr(model_attempt, "rejection_class", SOFT_REJECTION)
+    ps.attempts.append(model_attempt)
+    ps.best_output = model_attempt
+
+    winner = _winning_page_output(state, 1)
+
+    # The floor's marker ships, not the model's table.
+    assert "failed: unverifiable table" in winner.text, winner.text
+    assert "$f^{(1\\to2)}$" not in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+    assert winner.failure_mode is FailureMode.HALLUCINATION, winner.failure_mode
+    # ...and the same is true of what actually reaches the .md.
+    body = "\n\n".join(canonical_page_texts(state))
+    assert "failed: unverifiable table" in body, body
+    assert "$f^{(1\\to2)}$" not in body, body
