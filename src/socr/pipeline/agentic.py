@@ -506,7 +506,11 @@ class NativeTableVerifierJudge:
         self._record_event = record_event
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
-        from socr.tables.native_verifier import VerifierState, verify_native_table
+        from socr.tables.native_verifier import (
+            VerifierState,
+            describe_drift,
+            verify_native_table,
+        )
 
         page_num = output.page_num
 
@@ -540,6 +544,31 @@ class NativeTableVerifierJudge:
             # delegation to the inner judge.
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, words=None)
+
+        # #259 round 3: the value guard found a numeric multiset mismatch but a
+        # row-count discrepancy made the pairing unreliable, so it is AMBIGUOUS
+        # rather than CERTAIN_FAIL. Under the owner's ruling the flagged table
+        # is KEPT, which makes surfacing this mandatory rather than optional: a
+        # kept table that socr privately believes contains a wrong number is
+        # silent content corruption. Emitted before the tri-state dispatch so it
+        # fires on every exit -- warn, row-count-warn-only, accept alike -- and
+        # exactly once per assess.
+        if getattr(vr, "unadjudicated_drift", None):
+            self._emit_event(
+                page_num=page_num,
+                kind="table_value_drift_unadjudicated",
+                engine=output.engine or "",
+                detail=(
+                    "numeric multiset mismatch detected but NOT adjudicated: the "
+                    "row-count discrepancy makes per-row pairing unreliable, so it "
+                    "is not a certain fail. " + describe_drift(vr.unadjudicated_drift)
+                ),
+                data={
+                    "drifted_rows": vr.unadjudicated_drift,
+                    "adjudicated": False,
+                    "verifier_state": vr.state,
+                },
+            )
 
         # TR-6 tri-state dispatch based on vr.state:
         #   EXACT_PASS   → ship immediately (no inner judge needed)

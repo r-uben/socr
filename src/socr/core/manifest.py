@@ -298,6 +298,57 @@ def _native_text_with_appends(p) -> str:
     return base
 
 
+def kept_table_grid_defect(text: str) -> str:
+    """The structural gate's own predicate, run for SURFACING, never for gating.
+
+    #259 round 3. Round 2's blind spot was that a candidate which is both
+    structurally defective and an ambiguous deferral is never gate-inspected --
+    ``_apply_structural_gate`` returns a rejecting inner decision unchanged. The
+    owner's ruling settles what to DO about that: a ragged grid is a thing to
+    flag, not a reason to hand the page back to an ungridded native. So the
+    predicate runs here, and its answer decorates the page instead of deciding
+    it. String-only (no geometry, no page object), like the post-route recheck
+    in ``orchestrator._phase_agentic``.
+    """
+    try:
+        from socr.tables.structure_check import table_output_defect
+
+        return table_output_defect(text, None, None) or ""
+    except Exception:  # surfacing must never be able to break assembly
+        return ""
+
+
+def kept_table_flag_note(state, page_num: int, text: str) -> str:
+    """The visible, greppable flag carried on a kept-but-flagged table.
+
+    The owner's ruling is "keep the model version, carry the flag visibly".
+    Status fields and audit JSON are not visible to someone reading the ``.md``,
+    and this corpus is read by humans who cite from it -- so the doubt goes in
+    the body, naming the disputed values, and says what to do about it.
+    """
+    reasons: list[str] = []
+    for event in getattr(state, "events", []) or []:
+        if getattr(event, "page_num", None) != page_num:
+            continue
+        if getattr(event, "kind", "") != "table_value_drift_unadjudicated":
+            continue
+        from socr.tables.native_verifier import describe_drift
+
+        drifted = (getattr(event, "data", None) or {}).get("drifted_rows") or []
+        described = describe_drift(drifted) if drifted else ""
+        reasons.append(f"value drift ({described})" if described else "value drift")
+    defect = kept_table_grid_defect(text)
+    if defect:
+        reasons.append(f"grid shape: {defect}")
+    if not reasons:
+        return ""
+    return (
+        f"[page {page_num}: flagged table kept — "
+        + "; ".join(reasons)
+        + " — verify against the source before citing]"
+    )
+
+
 def flagged_model_page_output(p) -> PageOutput | None:
     """#259: the model output a flagged table page must ship instead of native.
 
@@ -497,8 +548,13 @@ def _winning_page_output(
         # the resume ledger re-OCRing the page exactly as the native fallback did.
         flagged_model = flagged_model_page_output(p)
         if flagged_model is not None:
+            kept_text = flagged_model.text
+            note = kept_table_flag_note(state, page_num, kept_text)
+            if note:
+                kept_text = f"{kept_text.rstrip()}\n\n{note}\n"
             return replace(
                 flagged_model,
+                text=kept_text,
                 status=PageStatus.WARNING,
                 audit_passed=False,
                 failure_mode=(

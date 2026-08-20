@@ -466,3 +466,280 @@ def test_the_literal_matches_the_shipped_constant() -> None:
     import socr.core.result as _result
 
     assert getattr(_result, "REJECTION_AMBIGUOUS_DEFERRED", SOFT_REJECTION) == SOFT_REJECTION
+
+
+# ---------------------------------------------------------------------------
+# Round 3: the owner's ruling — keep the flagged table, carry the flag VISIBLY.
+#
+# Hole A (a ragged grid that is also an ambiguous deferral) is DISSOLVED by the
+# ruling, not closed: shipping a flagged model table over an ungridded native is
+# the intended behaviour, so a ragged grid is surfaced rather than gated on.
+#
+# Hole B is NOT dissolved and is closed here. `_value_guard` detects a numeric
+# multiset mismatch and `verify_native_table` used to discard it whenever a
+# row-count discrepancy made the pairing unreliable — so socr knew the model had
+# written 9.99 where the page reads 6.60, kept the table, and told nobody. That
+# is not the uncertainty the ruling is about; it is a named wrong value.
+# ---------------------------------------------------------------------------
+
+
+def _drift_fixture():
+    """Native 3x3 numerics; the model substitutes 9.99 for 6.60 and adds a row.
+
+    The extra row is what forces the row-count discrepancy that makes the value
+    guard downgrade a CERTAIN_FAIL to AMBIGUOUS — which is the whole point.
+    """
+    pg = _fitz_page_with_numeric_rows(
+        [
+            [(100.0, "1.10"), (160.0, "2.20"), (220.0, "3.30")],
+            [(100.0, "4.40"), (160.0, "5.50"), (220.0, "6.60")],
+            [(100.0, "7.70"), (160.0, "8.80"), (220.0, "9.90")],
+        ]
+    )
+    text = (
+        "| a | b | c | d | e | f |\n| --- | --- | --- | --- | --- | --- |\n"
+        "| 1.10 | 2.20 | 3.30 | | | |\n"
+        "| 4.40 | 5.50 | 9.99 | | | |\n"
+        "| 7.70 | 8.80 | 9.90 | | | |\n"
+        "| 0.01 | 0.02 | 0.03 | | | |\n"
+    )
+    return pg, text
+
+
+def test_detected_drift_is_no_longer_discarded_by_the_verifier() -> None:
+    """The information-loss bug: detection worked, propagation did not."""
+    from socr.tables.native_verifier import _value_guard, verify_native_table
+
+    pg, text = _drift_fixture()
+
+    # The value guard really does catch it — else this test proves nothing.
+    hard, _reason, detected, row_count_warn = _value_guard(pg.get_text("words"), text, "page")
+    assert hard is False, "fixture must be the DOWNGRADED path, not a certain fail"
+    assert row_count_warn is not None, "fixture must carry the row-count discrepancy"
+    assert len(detected) == 1, detected
+
+    vr = verify_native_table(pg, text)
+    assert vr.state == "AMBIGUOUS", vr.state
+    # The finding now survives the call.
+    assert len(getattr(vr, "unadjudicated_drift", [])) == 1, vr
+    # ...without changing what drifted_rows means (crop_repair keys on it).
+    assert vr.drifted_rows == [], vr.drifted_rows
+
+
+def test_drift_names_the_disagreeing_values() -> None:
+    """ "A number may be wrong" is not actionable; naming the cells is."""
+    import socr.tables.native_verifier as nv
+
+    pg, text = _drift_fixture()
+    # Attribute access with a fallback, never a bare import: importing a symbol
+    # this fix adds turns the baseline run into an ImportError and the guard
+    # into a vacuous one.
+    describe = getattr(nv, "describe_drift", lambda rows, **kw: "")
+    described = describe(getattr(nv.verify_native_table(pg, text), "unadjudicated_drift", []))
+    assert "9.99" in described, described
+    assert "6.60" in described, described
+
+
+def test_drift_is_surfaced_and_the_table_is_still_kept(tmp_path: Path) -> None:
+    """The ruling and the cardinal rule together: keep it, and shout about it.
+
+    Page level, through the real judge — the kept body must name the disputed
+    values, and the page must still be the model's reading, not native.
+    """
+    pg, text = _drift_fixture()
+    events: list = []
+
+    from unittest.mock import MagicMock
+
+    from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
+
+    inner = MagicMock()
+    inner.assess.return_value = AcceptDecision(accept=False, reason="inner refused")
+    out = PageOutput(
+        page_num=1, text=text, status=PageStatus.SUCCESS, engine="qwen", confidence=0.9
+    )
+    NativeTableVerifierJudge(
+        inner=inner,
+        get_fitz_page=lambda pn: pg,
+        is_table_page=lambda pn: True,
+        record_event=events.append,
+    ).assess(out, MagicMock())
+    out.audit_passed = False
+
+    kinds = [e.kind for e in events]
+    assert "table_value_drift_unadjudicated" in kinds, kinds
+    drift_event = next(e for e in events if e.kind == "table_value_drift_unadjudicated")
+    assert "9.99" in drift_event.detail and "6.60" in drift_event.detail, drift_event.detail
+    assert drift_event.data["adjudicated"] is False
+
+    state = _state_with(_born_digital_pdf(tmp_path), out)
+    state.events.extend(events)
+    winner = _winning_page_output(state, 1)
+
+    # Kept — the ruling.
+    assert winner.engine == "qwen", winner.engine
+    assert "9.99" in winner.text
+    # ...and the doubt is impossible to miss in the shipped body.
+    assert "flagged table kept" in winner.text, winner.text
+    assert "value drift" in winner.text, winner.text
+    assert "6.60" in winner.text, winner.text
+    # NOT failed — the owner was explicit.
+    assert winner.status is PageStatus.WARNING, winner.status
+    assert "[page 1 failed" not in winner.text
+
+
+def test_ragged_kept_grid_is_flagged_not_handed_back_to_native(tmp_path: Path) -> None:
+    """Hole A under the ruling: surface the defect, keep the table.
+
+    The round-2 review asked for a structural GATE here. The owner overruled the
+    premise — an ungridded native is not a better home for this page — so the
+    same predicate runs for surfacing only.
+    """
+    from socr.tables.structure_check import table_output_defect
+
+    pg = _fitz_page_with_numeric_rows([[(100.0, "1.1"), (160.0, "2.2")]])
+    ragged = (
+        "| a | b | c | d |\n| --- | --- | --- | --- |\n| 1.1 | 2.2 | 3.3 | 4.4 |\n| 5.5 | 6.6 |\n"
+    )
+    # Checked with the predicate that exists at the BASELINE too, so this setup
+    # assert can never be what fails there. The new surfacing helper is
+    # exercised through the shipped body below instead of being imported here.
+    assert table_output_defect(ragged, None, None), "fixture is not structurally defective"
+
+    decision, output = _assess_with_real_verifier(pg, ragged, inner_accepts=False)
+    assert decision.accept is False
+    assert getattr(output, "rejection_class", "") == SOFT_REJECTION
+
+    winner = _winning_page_output(_state_with(_born_digital_pdf(tmp_path), output), 1)
+    assert winner.engine == "qwen", winner.engine
+    assert "flagged table kept" in winner.text, winner.text
+    assert "grid shape" in winner.text, winner.text
+
+
+def test_a_clean_kept_table_carries_no_noise(tmp_path: Path) -> None:
+    """Reverse regression: the marker appears only when there is something to say.
+
+    Without this the flag becomes wallpaper and stops being read.
+    """
+    state = _state(_born_digital_pdf(tmp_path), model_text=MODEL_TABLE)
+    winner = _winning_page_output(state, 1)
+    assert winner.engine == "qwen", winner.engine
+    assert "flagged table kept" not in winner.text, winner.text
+
+
+def test_drift_reaches_document_metadata_and_cli(tmp_path: Path, capsys) -> None:
+    """Document, metadata and CLI, end to end and hermetic.
+
+    The page is NOT failed and the table IS shipped; the document still refuses
+    to report a clean SUCCESS, and the CLI names the disputed values.
+    """
+    from unittest.mock import patch
+
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import DocumentStatus
+    from socr.pipeline.agentic import PageDecision, ProviderAttempt
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    fitz = pytest.importorskip("fitz")
+    _pg, model_text = _drift_fixture()
+    pdf_path = tmp_path / "drift.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    # Enough prose for the born-digital detector to classify the page, so the
+    # run goes through the keep path rather than around it.
+    y = 72
+    for line in (
+        "Table 2. Estimated coefficients by specification and sample period",
+        "The table reports point estimates for each specification described above.",
+        "Standard errors are reported in parentheses beneath each coefficient.",
+    ):
+        page.insert_text((72, y), line)
+        y += 18
+    y += 12
+    for row in (("1.10", "2.20", "3.30"), ("4.40", "5.50", "6.60"), ("7.70", "8.80", "9.90")):
+        x = 72
+        for token in row:
+            page.insert_text((x, y), token)
+            x += 60
+        y += 30
+    doc.save(str(pdf_path))
+    doc.close()
+
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            agentic=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.QWEN],
+            quiet=False,
+            audit_enabled=True,
+            save_figures=False,
+            write_manifest=False,
+        )
+    )
+
+    def _route(page_num, ladder, run_provider, judge, **kwargs):
+        out = PageOutput(
+            page_num=page_num,
+            text=model_text,
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=False,
+        )
+        prof = ladder[0]
+        # Drive the REAL judge the orchestrator built and handed to route_page —
+        # including its record_event wiring into state.events. Only the provider
+        # call is stubbed, so the drift event and rejection_class below are
+        # produced by production code, not by the fixture.
+        decision = judge.assess(out, prof)
+        out.audit_passed = decision.accept
+        return PageDecision(
+            page_num=page_num,
+            final_output=out,
+            attempts=[
+                ProviderAttempt(
+                    engine=prof.engine,
+                    output=out,
+                    cost_usd=0.0,
+                    accepted=decision.accept,
+                    reason=decision.reason,
+                    provider_id=prof.id,
+                    model=prof.model,
+                    backend=prof.backend,
+                )
+            ],
+        )
+
+    out_dir = tmp_path / "out"
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
+        patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
+    ):
+        result = pipeline.process(pdf_path, out_dir)
+
+    # Content shipped, page not failed, and the doubt is in the body.
+    assert "9.99" in result.markdown, result.markdown
+    assert "failed:" not in result.markdown
+    assert "flagged table kept" in result.markdown, result.markdown
+    assert "6.60" in result.markdown, result.markdown
+    # Document status.
+    assert result.status is not DocumentStatus.SUCCESS, result.status
+    # Metadata sidecar.
+    metas = [json.loads(f.read_text()) for f in out_dir.rglob("metadata.json")]
+    doc_meta = next(m for m in metas if "status" in m)  # not the top-level index
+    assert doc_meta["status"] != "success", doc_meta
+    assert "untrusted tables" in doc_meta["error"], doc_meta
+    # Audit log, with the values named.
+    audit = json.loads(next(out_dir.rglob("audit_log.json")).read_text())
+    drift = [e for e in audit["events"] if e.get("kind") == "table_value_drift_unadjudicated"]
+    assert drift, [e.get("kind") for e in audit["events"]]
+    assert "9.99" in drift[0]["detail"], drift[0]["detail"]
+    # tables_trust names the page as untrusted.
+    trust = json.loads(next(out_dir.rglob("tables_trust.json")).read_text())
+    assert "table_value_drift_unadjudicated" in trust["pages"]["1"]["reasons"], trust
+    # CLI.
+    cli = capsys.readouterr().out
+    assert "DISPUTED" in cli, cli
+    assert "9.99" in cli, cli

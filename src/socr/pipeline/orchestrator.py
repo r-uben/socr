@@ -5451,6 +5451,7 @@ class UnifiedPipeline:
             canonical_page_texts,
             flagged_model_page_output,
             is_page_failed_marker,
+            kept_table_grid_defect,
         )
 
         page_texts = canonical_page_texts(state)
@@ -5542,6 +5543,28 @@ class UnifiedPipeline:
         flagged_model_pages = [
             n for n, p in sorted(state.pages.items()) if flagged_model_page_output(p) is not None
         ]
+
+        # #259 round 3: pages where the value guard DETECTED a numeric multiset
+        # mismatch but declined to call it certain (row-count discrepancy →
+        # unreliable pairing). The owner's ruling keeps the flagged table, so
+        # this is not a reason to fail the page -- but socr privately believing
+        # one of its numbers is wrong and saying nothing is the cardinal rule,
+        # so it must reach the document, the metadata and the CLI as well as the
+        # page body. Derived from the audit log because the verifier judge has
+        # no PageState to mark, exactly like ``doc_fabrication`` below.
+        def _kept_defect(page_num: int) -> str:
+            ps_ = state.pages.get(page_num)
+            bo_ = ps_.best_output if ps_ else None
+            return kept_table_grid_defect(bo_.text) if bo_ and bo_.text else ""
+
+        value_drift_pages = sorted(
+            {
+                getattr(e, "page_num", 0)
+                for e in state.events
+                if getattr(e, "kind", "") == "table_value_drift_unadjudicated"
+                and getattr(e, "page_num", 0)
+            }
+        )
         native_fallback_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -5656,6 +5679,11 @@ class UnifiedPipeline:
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
         # ships the better of the two readings, nothing was lost.
         pages_ok = pages_ok and not flagged_model_pages
+        # NOT a page failure -- the owner was explicit that the page is not failed
+        # and the table is kept. AUDIT_FAILED at the document level is the
+        # "completed with warnings, output written" path, which is the honest
+        # one: content shipped, and a named value on it is disputed.
+        pages_ok = pages_ok and not value_drift_pages
         pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
         # GH-195: a page whose table grid was actively destroying values and had
         # to be rejected and rebuilt must not leave the run reporting a clean
@@ -5682,6 +5710,7 @@ class UnifiedPipeline:
             or d3_floor_pages
             or native_only_distrust_pages
             or flagged_model_pages
+            or value_drift_pages
         ):
             from socr.core.audit_log import AuditEvent
 
@@ -5738,8 +5767,20 @@ class UnifiedPipeline:
                             "no OCR rung was accepted, but the model produced a table and"
                             " the native layer carries a table-distrust flag; the model's"
                             " reading ships FLAGGED rather than being replaced by native"
+                            + (
+                                f"; kept grid is structurally defective ({_kept_defect(n)})"
+                                if _kept_defect(n)
+                                else ""
+                            )
                         ),
-                        data={"flagged_model_kept": True},
+                        # #259 round 3: a ragged kept grid is a thing to FLAG, not a
+                        # reason to fall back to an ungridded native — so the
+                        # structural predicate's answer is recorded here rather than
+                        # gating the keep.
+                        data={
+                            "flagged_model_kept": True,
+                            "grid_defect": _kept_defect(n),
+                        },
                     )
                 )
             # TR-3: distinct audit event for D3 floor pages — do NOT record
@@ -5783,6 +5824,19 @@ class UnifiedPipeline:
                         f"model's FLAGGED reading (no rung accepted; native table "
                         f"distrusted): {flagged_model_pages}[/yellow]"
                     )
+                if value_drift_pages:
+                    from socr.tables.native_verifier import describe_drift
+
+                    console.print(
+                        f"  [red]{len(value_drift_pages)} kept table(s) carry a DISPUTED "
+                        f"value (detected, not adjudicated): {value_drift_pages}[/red]"
+                    )
+                    for _e in state.events:
+                        if getattr(_e, "kind", "") != "table_value_drift_unadjudicated":
+                            continue
+                        _rows = (getattr(_e, "data", None) or {}).get("drifted_rows") or []
+                        if _rows:
+                            console.print(f"    [red]p{_e.page_num}: {describe_drift(_rows)}[/red]")
                 if d3_floor_pages:
                     console.print(
                         f"  [red]{len(d3_floor_pages)} table page(s) hit the D3 fail-closed"
