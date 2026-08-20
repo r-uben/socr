@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Run every selected page through BOTH lanes and keep both answers.
+"""Force the model on every selected page so a discarded attempt can survive.
 
 One socr run per document with --no-native-first, so the model is forced on every
-page. socr caches each engine's attempt, so the native answer and the model answer
-for the same page both survive even when one of them is discarded — which is the
-whole point: #259 is about a correct model answer being thrown away.
+page and an attempt that loses the winner-selection fight can still be recovered
+from socr's cache. That is the point: #259 is about a correct model answer being
+thrown away, so the thrown-away answer had to be recoverable.
+
+It does NOT guarantee two candidates per page. In the 2026-08-20 run, 13 of the 21
+pages yielded only one surviving cached attempt; whether the other lane produced
+nothing, or produced something that was not cached, is not established by this run.
 
 Per-document subprocess timeout, because socr can hang before it ever reaches the
 model (observed: 12 minutes elapsed, 1.96s CPU, no output directory).

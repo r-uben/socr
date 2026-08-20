@@ -1,8 +1,14 @@
 # Native vs model: what socr actually ships when it has a choice
 
-2026-08-20. 21 pages, 9 economics papers, both lanes captured. This is the measurement
-that produced issues #259, #262 and #263, and the reason multiset comparison was
-abandoned as a verification oracle.
+2026-08-20. 21 pages across 9 economics papers, run so that a discarded attempt could
+survive in socr's cache. On 8 of them two candidates survived and socr had to choose — see
+"Not every page yielded two candidates" below before quoting that as coverage.
+
+This is the measurement that produced issues #259, #262 and #263, and the case for
+replacing multiset comparison as the winner-side verification oracle. **That replacement
+has not landed.** `main` still verifies by multiset today; the binding oracle (#266) and
+the selection change (#269) are both unmerged. Read this record as the argument, not as a
+description of current behaviour.
 
 **The page content is not here and cannot be.** The corpus is copyrighted and this repo
 is public. What is committed is the method, the per-page routing verdicts, and the
@@ -107,9 +113,15 @@ only the text scaffolding around a figure. That is a gap in both.
 ## Re-running it
 
 The runner needs a local corpus and a working Ollama with
-`qwen3-vl:30b-a3b-instruct`. Point `manifest.json` at your own PDFs; the selection
-heuristics are in the runner and are deterministic. Budget roughly 14 minutes per dense
-table page on a local 30B model — the wall-clock, not the money, is the cost.
+`qwen3-vl:30b-a3b-instruct`. Build the manifest with
+`2026-08-20_lane-comparison-select.py` (pass it a glob of your PDFs), then point
+`LANE_CAMPAIGN_DIR` at the directory holding it and run
+`2026-08-20_lane-comparison-runner.py`.
+
+`select.py` holds the selection heuristics and is deterministic; the runner consumes the
+manifest and contains no selection code. Budget roughly 14 minutes per dense table page on
+a local 30B model — a session observation on one machine, not a benchmark. The wall-clock,
+not the money, is the cost.
 
 ## What in this record cannot be checked from the repo
 
@@ -126,8 +138,19 @@ Also session record rather than repo-checkable: the 176-character shredded outpu
 `1.11`-for-`1.10` slip, the row-label shift, the judges' 7-of-8 agreement, and the hang
 observed at 12 minutes elapsed against 1.96 s of CPU.
 
+Four more claims in this file are assertion rather than evidence. Marked here rather than
+softened away, because a reader deserves to know which is which:
+
+- **"the ratified replacement"** for multiset comparison — the ratification happened in a
+  working session. No record of it exists in this repo, and the work is unmerged.
+- **"multiset comparison was abandoned"** — it has NOT been, and the opening now says so.
+  `main` verifies by multiset today. The replacement is proposed, partly built, unmerged.
+- **"months of CI, tests and review never caught it"** — rhetorically true, historically
+  uncheckable from the repo.
+- **"roughly 14 minutes per dense table page"** — one machine, one session, not a benchmark.
+
 Everything else — the arithmetic, the per-page dispositions, the flags, the decimal counts,
-the method — is in the committed files.
+the selection code, the method — is in the committed files.
 
 ## Fields in the verdict file
 
