@@ -517,43 +517,79 @@ _G = "| a | b |\n|---|---|\n| 1 | 2 |\n"
 STRICT_GRID_CASES: list[tuple[str, str, bool]] = [
     # --- the shape, in its legitimate spellings -------------------------
     ("real grid", _G, True),
-    ("no leading or trailing pipes", "a | b\n--- | ---\n1 | 2\n", True),
-    ("leading pipe only", "| a | b\n| --- | ---\n| 1 | 2\n", True),
-    ("trailing pipe only", "a | b |\n--- | --- |\n1 | 2 |\n", True),
+    ("unbordered spelling throughout", "a | b\n--- | ---\n1 | 2\n", True),
+    ("leading pipe only, consistently", "| a | b\n| --- | ---\n| 1 | 2\n", True),
+    ("trailing pipe only, consistently", "a | b |\n--- | --- |\n1 | 2 |\n", True),
     ("alignment colons in the separator", "| a | b |\n|:---:|---:|\n| 1 | 2 |\n", True),
     ("spaces inside the separator", "| a | b |\n| --- | --- |\n| 1 | 2 |\n", True),
-    # --- reviewer's three phantoms --------------------------------------
-    ("REVIEW: table inside a backtick fence", "```\n" + _G + "```\n", False),
-    ("REVIEW: fence with an info string", "```markdown\n" + _G + "```\n", False),
-    ("REVIEW: table inside a tilde fence", "~~~\n" + _G + "~~~\n", False),
-    ("REVIEW: separator in the middle", "| a | b |\n| 1 | 2 |\n|---|---|\n", False),
-    ("REVIEW: separator-as-body", "| a | b |\n|---|---|\n|---|---|\n", False),
-    # --- found by adversarially testing this predicate ------------------
+    ("windows CRLF line endings", _G.replace("\n", "\r\n"), True),
+    ("grid after a paragraph", "Some prose here.\n\n" + _G, True),
+    ("grid immediately after a fence, no blank line", "```\ncode\n```\n" + _G, True),
+    ("two grids separated by prose", _G + "\nprose\n\n" + _G, True),
+    ("empty body row, then a real one", "| a | b |\n|---|---|\n|  |  |\n| 1 | 2 |\n", True),
+    # A dash-only HEADER cell is odd but the body is real content and there is
+    # exactly one separator. Refusing it would reject legitimate tables, so it
+    # is accepted -- my round-5 expectation was wrong here, not the predicate.
+    ("header cell that is literally --- text", "| --- | b |\n|---|---|\n| 1 | 2 |\n", True),
+    # --- round-5 review phantoms (MiniMax) ------------------------------
+    (
+        "MM: prose header with a doubled separator",
+        "noise | a\n| --- | --- |\n| --- | --- |\n| 1 | 2 |\n",
+        False,
+    ),
+    ("MM: prose header, single separator", "noise | a\n| --- | --- |\n| 1 | 2 |\n", False),
+    (
+        "MM: 4-space indented code block",
+        "Example:\n\n    | a | b |\n    |---|---|\n    | 1 | 2 |\n",
+        False,
+    ),
+    ("MM: tab-indented code block", "Example:\n\n\t| a | b |\n\t|---|---|\n\t| 1 | 2 |\n", False),
+    ("MM: grid inside an HTML comment", "<!--\n" + _G + "-->\n", False),
+    ("MM: single-line HTML comment", "<!-- | a | b |\n|---|---|\n| 1 | 2 | -->\n", False),
+    ("MM: unclosed HTML comment", "<!--\n" + _G, False),
+    ("MM: escaped pipes in cells", "| a \\| x | b |\n|---|---|\n| 1 | 2 |\n", False),
+    ("MM: unicode en-dash separator", "| a | b |\n|–––|–––|\n| 1 | 2 |\n", False),
+    ("MM: unicode em-dash separator", "| a | b |\n|———|———|\n| 1 | 2 |\n", False),
+    ("MM: blank lines split the grid", "| a | b |\n\n|---|---|\n\n| 1 | 2 |\n", False),
+    (
+        "MM: fence opened inside a table region",
+        "| a | b |\n|---|---|\n```\n| 1 | 2 |\n```\n",
+        False,
+    ),
+    ("MM: header without outer pipes, bordered separator", "a | b\n|---|---|\n| 1 | 2 |\n", False),
+    ("MM: separator narrower than the header", "| a | b | c |\n|---|---|\n| 1 | 2 | 3 |\n", False),
+    ("MM: blank header row", "|  |  |\n|---|---|\n| 1 | 2 |\n", False),
+    # --- round-3/4 phantoms, still refused ------------------------------
+    ("table inside a backtick fence", "```\n" + _G + "```\n", False),
+    ("fence with an info string", "```markdown\n" + _G + "```\n", False),
+    ("table inside a tilde fence", "~~~\n" + _G + "~~~\n", False),
     ("indented fence", "  ```\n" + _G + "  ```\n", False),
     ("tilde fence nested in a backtick fence", "```\n~~~\n" + _G + "~~~\n```\n", False),
     ("backtick fence nested in a tilde fence", "~~~\n```\n" + _G + "```\n~~~\n", False),
+    ("HTML comment containing a fence", "<!--\n```\n" + _G + "```\n-->\n", False),
     ("unclosed fence swallows the rest", "```\n" + _G, False),
-    ("grid immediately after a fence, no blank line", "```\ncode\n```\n" + _G, True),
     ("prose with pipes after a closed fence", "```\n" + _G + "```\nx | y\nz | w\n", False),
-    (
-        "separator, separator, then a real body row",
-        "| a | b |\n|---|---|\n|---|---|\n| 1 | 2 |\n",
-        True,
-    ),
-    ("empty body row, then a real one", "| a | b |\n|---|---|\n|  |  |\n| 1 | 2 |\n", True),
-    ("two grids separated by prose", _G + "\nsome prose\n\n" + _G, True),
-    ("pipe-bearing prose above a real grid", "x | y\nz | w\n" + _G, True),
+    ("separator in the middle", "| a | b |\n| 1 | 2 |\n|---|---|\n", False),
+    ("separator-as-body", "| a | b |\n|---|---|\n|---|---|\n", False),
     ("separator wider than the header", "| a | b |\n|---|---|---|\n| 1 | 2 |\n", False),
     ("a later row is ragged", "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 | 5 |\n", False),
-    ("rows of empty cells only", "||\n||\n", False),
-    ("empty text", "", False),
-    # --- the round-3 conditions, still holding --------------------------
     ("prose with pipes", "x | y is here\nz | w also\n", False),
     ("one-column pipe list", "| a |\n|---|\n| 1 |\n", False),
     ("single-dash separator", "| a | b |\n|-|-|\n| 1 | 2 |\n", False),
     ("two-dash separator", "| a | b |\n|--|--|\n| 1 | 2 |\n", False),
     ("header and separator, no body", "| a | b |\n|---|---|\n", False),
     ("body row of empty cells only", "| a | b |\n|---|---|\n|  |  |\n", False),
+    ("rows of empty cells only", "||\n||\n", False),
+    ("empty text", "", False),
+    # --- TIGHTENED IN ROUND 5, deliberately. Both returned True at f9f16b9.
+    # --- The interim is fail-closed, so ambiguity now costs the marker
+    # --- (today's behaviour) rather than risking a phantom.
+    (
+        "r5 TIGHTENED: separator, separator, then a real body row",
+        "| a | b |\n|---|---|\n|---|---|\n| 1 | 2 |\n",
+        False,
+    ),
+    ("r5 TIGHTENED: pipe-bearing prose directly above a grid", "x | y\nz | w\n" + _G, False),
     # --- pending the owner's ruling, see STRICT_GRID_REQUIRES_UNIFORM_BODY
     ("ragged body (spec; contested, see #259)", "| a | b | c |\n|---|---|---|\n| 1 | 2 |\n", False),
 ]
@@ -565,6 +601,17 @@ STRICT_GRID_CASES: list[tuple[str, str, bool]] = [
         ("fenced code block", "Here is the layout:\n\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n"),
         ("separator in the middle", "Table 4.\n\n| a | b |\n| 1 | 2 |\n|---|---|\n"),
         ("separator-as-body", "Table 4.\n\n| a | b |\n|---|---|\n|---|---|\n"),
+        # Round 5 (MiniMax). Each of these shipped WARNING with the marker
+        # fully suppressed at f9f16b9, driven through this same path.
+        (
+            "prose line as header",
+            "Table 4.\n\nnoise | a\n| --- | --- |\n| --- | --- |\n| 1 | 2 |\n",
+        ),
+        (
+            "4-space indented code block",
+            "Example:\n\n    | a | b |\n    |---|---|\n    | 1 | 2 |\n",
+        ),
+        ("grid inside an HTML comment", "Table 4.\n\n<!--\n| a | b |\n|---|---|\n| 1 | 2 |\n-->\n"),
     ],
 )
 def test_the_reviewers_phantoms_do_not_suppress_the_marker(
@@ -606,13 +653,22 @@ def test_the_strict_predicate_on_its_own_terms(label: str, text: str, expected: 
     assert strict(text) is expected, f"{label}: {text!r}"
 
 
-def test_the_predicate_fails_closed_on_a_shape_nobody_enumerated() -> None:
-    """The property the table above cannot express: DEFAULT IS FALSE.
+def test_junk_carrying_pipes_is_refused() -> None:
+    """A handful of malformed inputs, refused.
 
-    Rounds 1-3 each bounded this by listing what to refuse, and each list was
-    incomplete. The structural version asserts a shape instead, so an input
-    nobody thought of is refused rather than accepted. Garbage that happens to
-    carry pipes stands in for "a case nobody enumerated".
+    NAMED HONESTLY, after round 5. This was called
+    ``test_the_predicate_fails_closed_on_a_shape_nobody_enumerated`` and was
+    cited as evidence that anything unanticipated fails closed. That claim was
+    FALSE and a reviewer demonstrated it: the three round-5 phantoms are not in
+    this list and did not return False. Seven passing junk cases cannot
+    establish a universal, and this test is no longer offered as if they could.
+    What it actually does is pin these seven inputs. That is worth having and
+    it is all it is.
+
+    The predicate cannot be made sound by text alone -- see the module
+    docstring and ``fixes/262-round5-or-design.json``. It is a deliberately
+    conservative interim whose refusals cost the marker, which is the
+    behaviour that ships today.
     """
     import socr.tables.reconcile as reconcile
 

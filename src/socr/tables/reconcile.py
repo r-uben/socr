@@ -141,6 +141,39 @@ _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 STRICT_GRID_REQUIRES_UNIFORM_BODY = True
 
 
+#: An HTML comment, possibly spanning lines. A grid inside one is commented-out
+#: content, not a reading of the page.
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+#: CommonMark's OTHER code construct: four spaces (or a tab) of indentation.
+#: ``_PIPE_LINE`` allows leading whitespace and ``_split_row`` strips it, so
+#: without this an indented code sample reads as table structure.
+_INDENTED_CODE = re.compile(r"^(?: {4,}|\t)")
+
+
+def _strip_html_comments(markdown: str) -> str:
+    """Blank out HTML comments, keeping line count so nothing shifts.
+
+    An UNCLOSED ``<!--`` swallows the rest of the document, by the same
+    fail-closed reasoning as an unclosed fence.
+    """
+    text = _HTML_COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), markdown)
+    head, sep, _ = text.partition("<!--")
+    return head if sep else text
+
+
+def _row_border(line: str) -> tuple[bool, bool]:
+    """Whether a row is written with a leading / trailing pipe.
+
+    A real table is written consistently by whatever emitted it, so its header
+    and its separator share a border style. A prose sentence that happens to
+    sit above a separator generally does not -- which is what separates
+    ``noise | a`` from a header.
+    """
+    stripped = line.strip()
+    return stripped.startswith("|"), stripped.endswith("|")
+
+
 def _strip_fenced_regions(lines: list[str]) -> list[str]:
     """Blank out fenced code content so it is never read as markdown structure.
 
@@ -188,7 +221,29 @@ def has_strict_table_grid(markdown: str) -> bool:
     inverts the ticket's own intent: the marker must yield to a real
     extraction, never to a phantom one.
 
-    WHY THIS IS A SHAPE CHECK AND NOT A LIST OF REJECTIONS. Rounds 1-3 each
+    WHAT THIS IS, STATED PLAINLY (round 5). It is a deliberately CONSERVATIVE
+    INTERIM, not a sound decision procedure, and it is not claimed to be one.
+    Round 4 claimed "a case nobody anticipated fails closed"; a reviewer
+    falsified that within the hour with three inputs -- a grid inside an
+    indented code block, a grid inside an HTML comment, and a prose line acting
+    as a header. None of those are shape violations. Each contains a
+    syntactically perfect GitHub-markdown table. They are PROVENANCE failures:
+    the text is a real grid that is not a reading of the page. No markdown
+    predicate can see that, because by markdown the input is correct.
+
+    The sound fix is to record, at extraction time, that an attempt authored a
+    grid CORROBORATED BY PAGE GEOMETRY -- the verifier already computes it and
+    it is discarded before assemble runs. That is issue #268, and it must serve
+    both this caller and ``flagged_model_page_output`` (#259), which has the
+    same hole in merged code today.
+
+    Until then the operative rule is FAIL CLOSED: where the answer is unclear,
+    return False and let the failed-table marker ship. Refusing a real grid
+    costs the marker, which is exactly what ships today; accepting a phantom
+    silently replaces a page with text that describes nothing. Those costs are
+    not symmetric, so neither is this predicate.
+
+    WHY THE POSITIVE SHAPE CHECK, AND NOT A LIST OF REJECTIONS. Rounds 1-3 each
     bounded this by enumerating what to refuse, and each list turned out to be
     incomplete -- the failure shape that took #259/#260 through three
     rejections. A denylist grown one reviewer at a time does not converge. But
@@ -219,7 +274,13 @@ def has_strict_table_grid(markdown: str) -> bool:
     depend on its looseness, and tightening it globally would be a silent
     behaviour change across the codebase. This is additive, with one caller.
     """
-    lines = _strip_fenced_regions(markdown.splitlines())
+    # Order matters: comments first (they can contain fence markers), then
+    # fences, then indented code (a fence's CONTENT may be indented, and is
+    # already blanked by then). CRLF is normalised so a trailing \r cannot
+    # make a separator cell fail to match.
+    text = _strip_html_comments(markdown.replace("\r\n", "\n").replace("\r", "\n"))
+    lines = _strip_fenced_regions(text.splitlines())
+    lines = ["" if _INDENTED_CODE.match(line) else line for line in lines]
     i, n = 0, len(lines)
     while i < n:
         if not _is_table_line(lines[i]):
@@ -228,19 +289,50 @@ def has_strict_table_grid(markdown: str) -> bool:
         j = i
         while j < n and _is_table_line(lines[j]):
             j += 1
-        if _run_contains_grid([_split_row(line) for line in lines[i:j]]):
+        block = lines[i:j]
+        if _run_contains_grid(
+            [_split_row(line) for line in block], [_row_border(line) for line in block]
+        ):
             return True
         i = j
     return False
 
 
-def _run_contains_grid(rows: list[list[str]]) -> bool:
-    """True iff the header/separator/body shape holds at some offset in ``rows``."""
-    return any(_grid_starts_at(rows, i) for i in range(len(rows)))
+def _run_contains_grid(rows: list[list[str]], borders: list[tuple[bool, bool]]) -> bool:
+    """True iff the header/separator/body shape holds at some offset in ``rows``.
+
+    FAIL-CLOSED RULE, and the reason it lives here rather than inside the
+    per-offset check: a block containing MORE THAN ONE separator row is
+    ambiguous about where its table starts, so it is refused outright. That is
+    what closes the reviewer's ``noise | a`` phantom, whose block carries a
+    doubled separator -- and note the remedy proposed with that finding (a
+    header whose cells are "not all separators and not all blank") does NOT
+    close it: ``['noise', 'a']`` is neither, so it would have been accepted.
+    Measured before choosing this rule instead.
+    """
+    separators = sum(1 for cells in rows if _is_separator_row(cells))
+    if separators != 1:
+        return False
+    # FAIL-CLOSED: the header is the run's FIRST line, not "some offset in it".
+    # Round 4 scanned every offset so a genuine grid would not be lost to a
+    # stray pipe-bearing sentence directly above it. That flexibility is
+    # exactly the room the reviewer's prose-as-header phantom lived in, and the
+    # cost of removing it is a marker on a real grid whose run happens to open
+    # with prose and no blank line between -- which is today's behaviour, not a
+    # new loss. A blank line still separates runs, so a grid after a paragraph
+    # is unaffected.
+    return _grid_starts_at(rows, 0, borders)
 
 
-def _grid_starts_at(rows: list[list[str]], i: int) -> bool:
-    """The shape, anchored at ``i``. Every exit is False; the only True is the end."""
+def _is_separator_row(cells: list[str]) -> bool:
+    return bool(cells) and all(_STRICT_SEP_CELL.match(cell.strip()) for cell in cells)
+
+
+def _grid_starts_at(rows: list[list[str]], i: int, borders: list[tuple[bool, bool]]) -> bool:
+    """The shape, anchored at ``i`` (always 0 -- see ``_run_contains_grid``).
+
+    Every exit is False; the only True is the end.
+    """
     if i + 2 >= len(rows) + 1:  # need a header and a separator at minimum
         return False
     if i + 1 >= len(rows):
@@ -251,7 +343,20 @@ def _grid_starts_at(rows: list[list[str]], i: int) -> bool:
         return False
     if len(separator) != width:
         return False
-    if not all(_STRICT_SEP_CELL.match(cell.strip()) for cell in separator):
+    if not _is_separator_row(separator):
+        return False
+    # FAIL-CLOSED: the header must be written in the SAME border style as the
+    # separator. A table is emitted consistently by whatever wrote it; a prose
+    # line that happens to precede a separator generally is not. This is what
+    # separates ``noise | a`` (no outer pipes) from the ``| --- | --- |`` under
+    # it, while leaving the legitimate all-bordered and all-unbordered
+    # spellings alone. A heuristic, deliberately: under a fail-closed interim
+    # the cost of refusing a real grid is the marker, which is today's
+    # behaviour, and the cost of accepting a phantom is silent content loss.
+    if borders[i] != borders[i + 1]:
+        return False
+    # A header may not itself be a separator, nor be entirely blank.
+    if _is_separator_row(header) or not any(cell.strip() for cell in header):
         return False
     body = rows[i + 2 :]
     if not body:
