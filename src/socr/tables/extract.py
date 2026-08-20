@@ -74,7 +74,51 @@ def crop_wall_clock_deadline(reader_timeout_s: float) -> float:
     return max(_CROP_DEADLINE_FLOOR_S, reader_timeout_s * _CROP_WALL_CLOCK_MULTIPLIER)
 
 
-def probe_ollama_idle(host: str = "http://localhost:11434", timeout: float = 5.0) -> bool:
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+
+
+def resolve_ollama_host(host: str | None = None) -> str:
+    """The Ollama base URL this deployment actually uses (GH-222).
+
+    Resolution order, most specific first: an explicit argument, then the
+    ``OLLAMA_HOST`` environment variable, then the localhost default. The env
+    var is the one the Ollama daemon and its official client already read, so
+    a deployment that has pointed those at a remote or non-default host has
+    already said where its backend lives — socr should not need to be told a
+    second time, and must not silently disagree.
+
+    Accepts the daemon's own bare ``host`` / ``host:port`` spelling as well as a
+    full URL; a value with no scheme is read as ``http://``.  A blank or
+    whitespace-only env var is treated as unset rather than as an empty host.
+
+    The port is filled in when the value omits it, because ``OLLAMA_HOST`` is
+    very commonly spelled bare (``127.0.0.1``, ``gpu-node``) and the daemon
+    itself supplies 11434 in that case.  Reading it literally would resolve to
+    ``http://127.0.0.1`` — port 80 — and turn honouring the variable into a NEW
+    way to probe the wrong place, which is the defect this function exists to
+    remove rather than relocate.
+    """
+    import os
+    from urllib.parse import urlsplit, urlunsplit
+
+    candidate = (host or os.environ.get("OLLAMA_HOST") or "").strip()
+    if not candidate:
+        return DEFAULT_OLLAMA_HOST
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+    parts = urlsplit(candidate)
+    try:
+        has_port = parts.port is not None
+    except ValueError:  # malformed port — leave the value exactly as given
+        return candidate
+    if not has_port and parts.hostname:
+        default_port = urlsplit(DEFAULT_OLLAMA_HOST).port
+        parts = parts._replace(netloc=f"{parts.netloc}:{default_port}")
+        candidate = urlunsplit(parts)
+    return candidate
+
+
+def probe_ollama_idle(host: str | None = None, timeout: float = 5.0) -> bool:
     """Return True if the Ollama HTTP server is responding (idle/ready).
 
     Used as a cascade guard after a crop timeout: if the backend is unreachable,
@@ -83,9 +127,18 @@ def probe_ollama_idle(host: str = "http://localhost:11434", timeout: float = 5.0
     This is a lightweight /api/tags ping — it does NOT check whether a generation
     is still running server-side (Ollama does not expose that). It only tells us
     whether the HTTP layer is healthy.
+
+    GH-222: ``host`` used to default to a hardcoded ``http://localhost:11434``,
+    and the cascade call site passed nothing. On any deployment without a local
+    Ollama daemon — vLLM, HPC, a remote Ollama host — this returned False
+    unconditionally, forever, on a perfectly healthy machine, and a single
+    timeout anywhere in the ladder truncated the document with a
+    ``PARTIAL_SAVE_VLM_TIMEOUT`` that named a cause which never happened.
+    ``None`` now means "resolve it" rather than "assume localhost".
     """
+    resolved = resolve_ollama_host(host)
     try:
-        resp = httpx.get(f"{host.rstrip('/')}/api/tags", timeout=timeout)
+        resp = httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout)
         resp.raise_for_status()
         return True
     except (httpx.HTTPError, OSError):

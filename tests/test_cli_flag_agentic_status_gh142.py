@@ -116,6 +116,11 @@ _UNEXERCISED = {
     # running the tests happens to have one pulled.
     "auto_patch_tables",
     "qwen_vllm_url",
+    # GH-222: read by `_probe_backend_idle`, which the cascade-halt guard calls
+    # only after an attempt times out. This fixture produces no timeout, so the
+    # field is genuinely unexercised here rather than dead — the probe is
+    # covered directly by tests/test_gh222_probe_host.py.
+    "ollama_host",
     "describe_figures",  # read by the figure-description lane, not reached here
     # Per-engine model/task settings. Read by the engine when it actually runs;
     # `_run_engine_on_pages` is stubbed here, so no engine subprocess is ever

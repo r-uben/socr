@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from rich.console import Console
@@ -213,6 +214,11 @@ class UnifiedPipeline:
         self.scorer = FailureModeScorer(checker=self.heuristics)
         self.repair_router = RepairRouter(config)
         self.bd_detector = BornDigitalDetector()
+        # GH-222: swappable liveness probe for the local VLM backend. ``None``
+        # means "use the resolved-host Ollama probe" (see ``_probe_backend_idle``);
+        # assign a zero-argument callable to substitute a different backend's
+        # health check without touching the cascade-halt logic.
+        self.backend_probe: Callable[[], bool] | None = None
         self._last_assessment: DocumentAssessment | None = None
         # Directory the current input was discovered under (batch input dir or
         # the file's parent). Threaded into every contract key so per-doc output
@@ -3120,7 +3126,7 @@ class UnifiedPipeline:
                 # A judge timeout is encoded as reason="judge timeout" on the
                 # last attempt; a provider timeout is encoded similarly.
                 _had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)
-                if _had_timeout and not probe_ollama_idle():
+                if _had_timeout and not self._probe_backend_idle():
                     backend_degraded = True
                     halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
                     from socr.core.audit_log import AuditEvent
@@ -5025,6 +5031,47 @@ class UnifiedPipeline:
                 )
         except Exception as exc:  # surfacing must never break a run
             logger.debug("GH-161: could not record ledger audit reject for p%d (%s)", page_num, exc)
+
+    def _probe_backend_idle(self) -> bool:
+        """Liveness probe for the local VLM backend, behind a swappable seam.
+
+        GH-222: the cascade-halt guard used to call ``probe_ollama_idle()`` with
+        no arguments, and that function defaulted to a hardcoded
+        ``http://localhost:11434``.  On any deployment that does not run an
+        Ollama daemon there — vLLM, HPC, a remote Ollama host — the probe
+        reported the backend dead for a perfectly healthy machine, so a single
+        timeout anywhere in the ladder truncated the document and blamed a
+        hardware failure that never happened.  ``--strict-local`` on a vLLM
+        backend is the worst case: the ladder is local-only, so one slow page
+        ends the run.
+
+        Two things change.  The host is RESOLVED (``resolve_ollama_host``:
+        explicit config, then ``OLLAMA_HOST``, then the localhost default)
+        rather than assumed, and the probe itself is a seam — assign
+        ``pipeline.backend_probe`` to a zero-argument callable to substitute a
+        different backend's health check entirely.
+
+        Deliberately unchanged here: WHICH attempts arm the guard.  ``_had_timeout``
+        still scans every attempt and still matches the bare substring
+        ``"timeout"``, so a cloud-provider timeout or a judge's free-prose remark
+        can still arm it.  Narrowing that needs the timed-out attempt to carry
+        its backend identity (#159), which is #221/#227's dependency, not this
+        one's — and #227 warns that fixing half of that pair makes behaviour
+        worse.  This change only stops the probe asking the wrong machine.
+        """
+        probe = getattr(self, "backend_probe", None)
+        if probe is not None:
+            return bool(probe())
+        # Module-level name on purpose: the existing tests patch
+        # ``socr.pipeline.orchestrator.probe_ollama_idle``, and routing around
+        # that name would silently neuter every one of those patches.
+        return probe_ollama_idle(self._local_backend_host())
+
+    def _local_backend_host(self) -> str:
+        """Where this run's local VLM backend actually listens (GH-222)."""
+        from socr.tables.extract import resolve_ollama_host
+
+        return resolve_ollama_host(getattr(self.config, "ollama_host", None))
 
     def _restore_terminal_page_state(
         self, state: DocumentState, page_num: int, page_out: PageOutput, output_dir: Path

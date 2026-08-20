@@ -53,6 +53,13 @@ def _probe_value(name: str, default: object) -> object:
         return default + 7
     if isinstance(default, float):
         return default + 1.5
+    if default is None:
+        # An optional scalar (``str | None``). ``None`` is a real default meaning
+        # "unset / resolve it", so the field still has to round-trip: a config
+        # file that names it must not be silently dropped, which is this whole
+        # module's invariant. A string probe is representable in YAML and
+        # differs from the default by construction.
+        return f"probe-{name}"
     if isinstance(default, EngineType):
         return EngineType.NOUGAT.value if default != EngineType.NOUGAT else EngineType.GLM.value
     if isinstance(default, Path):
