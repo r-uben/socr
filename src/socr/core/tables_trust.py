@@ -52,15 +52,6 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         "native_table_verifier_warn",
         "native_table_verifier_hard_fail",
         "value_guard_row_count_warning",
-        # GH-205: TR-3's ANALYZE-time detection. The per-region geometry
-        # verifier hard-failed on this page's native table and nothing acted on
-        # it -- no page status, no document status, no routing -- so the native
-        # text may ship as the winner and a consumer must be told to distrust
-        # its digits. Kept distinct from ``table_region_unverifiable`` below,
-        # which is the D3 fail-closed DISPOSITION of the same detection (OCR
-        # ladder also failed, region routed to the image-asset lane). A D3 page
-        # carries both; the pair says "detected here, acted on there".
-        "table_region_geometry_hard_fail",
         "table_region_unverifiable",
         "source_evidence_table_reject",
         "table_row_repetition_truncated",
