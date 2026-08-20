@@ -368,7 +368,14 @@ def test_phase_major_document_status_is_demoted_by_the_sweep(tmp_path: Path) -> 
     # A page whose winner carries a fabricated ref but which the per-page seam
     # never touched — the phase-major shape.
     state, _out = _state_for(pdf_path, f"Real prose that must survive.\n\n{FABRICATED_REF}\n")
-    assert state.pages[1].fabricated_image_refs == 0, "setup: per-page seam not involved"
+    # ``getattr`` with a default on purpose: ``fabricated_image_refs`` is an
+    # attribute THIS PR adds, so naming it directly makes this setup assert raise
+    # AttributeError at the baseline, before ``_phase_assemble`` is ever called —
+    # which converts the baseline proof for this test from behavioural into
+    # vacuous. Same defence as the round-2 guards.
+    assert getattr(state.pages[1], "fabricated_image_refs", 0) == 0, (
+        "setup: per-page seam not involved"
+    )
 
     result = pipeline._phase_assemble(state, out_dir)
 
