@@ -100,20 +100,33 @@ def build_run_audit(state) -> RunAudit:
     events.extend(_derive_escalations(state))
 
     # Stable order: by page, then a coarse phase rank so a page's story reads
-    # top-to-bottom (engine escalation -> judge -> dual-pass -> D3 floor).
-    # ``table_region_unverifiable`` is TR-3's distinct event: a born-digital
-    # table region that hard-failed per-region geometry verification and was
-    # routed to the image-asset lane (failed-table marker + PNG ref) rather
-    # than shipping as a plausible-but-wrong collapsed or ragged table.
+    # top-to-bottom (engine escalation -> judge -> dual-pass -> TR-3 detection
+    # -> D3 floor).
+    #
+    # The two TR-3 kinds are deliberately separate, and the distinction is what
+    # a consumer of ``tables_trust.json`` reads to tell detection from
+    # disposition:
+    #   - ``table_region_geometry_hard_fail`` (GH-205) is emitted at ANALYZE
+    #     time on every page whose native table region hard-failed per-region
+    #     geometry verification. It records the detection and nothing else: no
+    #     page status, no document status and no routing is keyed on it, so the
+    #     page's native text may still ship as the winner.
+    #   - ``table_region_unverifiable`` is the D3 fail-closed DISPOSITION: the
+    #     same geometry hard-fail, but the OCR ladder also failed, so the region
+    #     was routed to the image-asset lane (failed-table marker + PNG ref)
+    #     rather than shipping a plausible-but-wrong collapsed or ragged table.
+    # A D3 page therefore carries both, in that order, and the pair reads as
+    # "detected here, acted on there" rather than as one kind counted twice.
     rank = {
         "recitation_escalation": 0,
         "escalation": 1,
         "judge_reject": 2,
         "dualpass_patch": 3,
         "dualpass_flag": 3,
-        "table_region_unverifiable": 4,
-        "native_fallback": 5,
-        "page_failed": 6,
+        "table_region_geometry_hard_fail": 4,
+        "table_region_unverifiable": 5,
+        "native_fallback": 6,
+        "page_failed": 7,
     }
     events.sort(key=lambda e: (e.page_num, rank.get(e.kind, 9)))
     return RunAudit(pdf_filename=state.handle.filename, events=events)
