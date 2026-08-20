@@ -62,6 +62,17 @@ class FailureMode(str, Enum):
     MODEL_OUTPUT_FLAGGED = "model_output_flagged"
 
 
+#: #259 round 2: the ONE rejection disposition a page may be kept on. The
+#: agentic ladder records only ``accepted`` (a bool), so a candidate the native
+#: table verifier CERTAIN_FAIL-rejected for a numeric multiset or label-binding
+#: mismatch is otherwise indistinguishable from one the verifier could not
+#: adjudicate at all. This value is written on exactly one path -- the verifier
+#: reached AMBIGUOUS, deferred to the inner judge, and the inner judge alone
+#: refused -- and read as an ALLOWLIST: an empty ``rejection_class`` means "we
+#: do not know why this was refused", which must behave as it always has.
+REJECTION_AMBIGUOUS_DEFERRED = "ambiguous_deferred"
+
+
 @dataclass
 class FigureInfo:
     """Metadata for a detected figure.
@@ -142,6 +153,9 @@ class PageOutput:
     provider_model: str = ""  # resolved model name (e.g. qwen3-vl:30b-a3b-instruct)
     provider_backend: str = ""  # backend (e.g. ollama, gemini-api)
     skip_reason: str = ""  # why the rung was not tried (e.g. budget exceeded)
+    #: #259: how this output was refused, when socr can say. Empty means
+    #: unknown -- see ``REJECTION_AMBIGUOUS_DEFERRED``, the only value written.
+    rejection_class: str = ""
 
     @property
     def word_count(self) -> int:
@@ -172,6 +186,7 @@ class PageOutput:
             "provider_model": self.provider_model,
             "provider_backend": self.provider_backend,
             "skip_reason": self.skip_reason,
+            "rejection_class": self.rejection_class,
         }
 
     @classmethod
@@ -194,6 +209,7 @@ class PageOutput:
             provider_model=d.get("provider_model", ""),
             provider_backend=d.get("provider_backend", ""),
             skip_reason=d.get("skip_reason", ""),
+            rejection_class=d.get("rejection_class", ""),
         )
 
 

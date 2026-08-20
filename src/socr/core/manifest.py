@@ -40,7 +40,12 @@ from ocr_output_contract import (
 
 from socr.core.cache import BlobStore
 from socr.core.document import DocumentHandle
-from socr.core.result import FailureMode, PageOutput, PageStatus
+from socr.core.result import (
+    REJECTION_AMBIGUOUS_DEFERRED,
+    FailureMode,
+    PageOutput,
+    PageStatus,
+)
 from socr.core.state import DocumentState
 
 logger = logging.getLogger(__name__)
@@ -349,6 +354,18 @@ def flagged_model_page_output(p) -> PageOutput | None:
     if bo is None or bo.audit_passed:
         return None
     if (bo.engine or "").startswith("native"):
+        return None
+    # ALLOWLIST, deliberately not a denylist of bad dispositions. A hard
+    # rejection mutates nothing on the PageOutput -- the verifier's CERTAIN_FAIL
+    # (``agentic.py``, ``vr.hard_fail``) and the winner-side structural gate both
+    # return ``accept=False`` and leave status SUCCESS / failure_mode NONE, and
+    # the orchestrator stores only ``accepted`` into ``audit_passed``. So a
+    # "not ERROR and not HALLUCINATION" test cannot tell a table the value guard
+    # positively proved wrong from the reference page's ambiguous
+    # "paired/spanning headers — deferring to VLM". Keeping the former would
+    # replace native with a table socr knows is corrupt. Unless the refusal was
+    # positively identified as the soft kind, behave exactly as before.
+    if getattr(bo, "rejection_class", "") != REJECTION_AMBIGUOUS_DEFERRED:
         return None
     # "The model produced nothing" — the case that must still fall back.
     if not (bo.text or "").strip():

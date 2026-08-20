@@ -30,7 +30,7 @@ from typing import Protocol
 
 from socr.core.config import EngineType
 from socr.core.providers import ProviderProfile
-from socr.core.result import PageOutput, PageStatus
+from socr.core.result import REJECTION_AMBIGUOUS_DEFERRED, PageOutput, PageStatus
 
 logger = logging.getLogger(__name__)
 
@@ -603,6 +603,19 @@ class NativeTableVerifierJudge:
             )
             # Defer to the inner judge — do NOT escalate here
             decision = self._inner.assess(output, provider)
+            # #259 round 2: record the DISPOSITION, not just the bool.
+            # ``ProviderAttempt.accepted`` is all that survives into
+            # ``PageOutput`` (orchestrator: ``att.output.audit_passed =
+            # att.accepted``), so downstream a CERTAIN_FAIL rejection above and
+            # this ambiguous deferral look identical -- and keeping a candidate
+            # the value guard positively proved wrong would corrupt the page.
+            # This is the one path on which socr can say the refusal was soft:
+            # the verifier reached AMBIGUOUS ("paired/spanning headers possible
+            # — deferring to VLM") and the inner judge, not a deterministic
+            # gate, is what refused. Marked BEFORE the structural gate runs, so
+            # a gate rejection below can never be mistaken for this one.
+            if not decision.accept:
+                output.rejection_class = REJECTION_AMBIGUOUS_DEFERRED
             return self._apply_structural_gate(decision, output, page_num, words, rules)
 
         if vr.state == VerifierState.EXACT_PASS:

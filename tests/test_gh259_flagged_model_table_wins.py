@@ -40,6 +40,11 @@ from socr.core.state import DocumentState
 # Two readings of the same table. Both carry every value; only the structure
 # differs. The model keeps the spanning header band as a paired row; native
 # flattens it into one lane per printed column.
+# The one rejection disposition the fix keeps a page on. Written as a LITERAL,
+# not imported: importing the constant would make every test in this file fail
+# at the baseline with an ImportError instead of a behavioural assertion.
+SOFT_REJECTION = "ambiguous_deferred"
+
 MODEL_TABLE = (
     "Table 1. Regressions of 1-year excess returns on all forward rates\n\n"
     "| $n$ | const. | $y^{(1)}$ | $f^{(1\\to2)}$ | $R^2$ |\n"
@@ -79,6 +84,7 @@ def _state(
     model_engine: str = "qwen",
     structure_failed: bool = True,
     unverifiable: bool = False,
+    rejection_class: str = SOFT_REJECTION,
 ) -> DocumentState:
     """The page state the cached run produced, rebuilt field by field."""
     state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
@@ -105,6 +111,9 @@ def _state(
         # accepted nothing.
         audit_passed=False,
     )
+    # setattr, not a constructor kwarg: a kwarg the baseline does not know
+    # raises TypeError there and makes every assertion below vacuous.
+    setattr(model_attempt, "rejection_class", rejection_class)
     ps.attempts.extend([native_attempt, model_attempt])
     # _best_effort keeps the most trustworthy attempt as the winner.
     ps.best_output = model_attempt
@@ -255,6 +264,7 @@ def test_document_status_audit_event_and_cli_surface_the_kept_page(tmp_path: Pat
             engine="qwen",
             audit_passed=False,
         )
+        setattr(out, "rejection_class", SOFT_REJECTION)
         prof = ladder[0]
         att = ProviderAttempt(
             engine=prof.engine,
@@ -284,3 +294,175 @@ def test_document_status_audit_event_and_cli_surface_the_kept_page(tmp_path: Pat
     kinds = [e.get("kind", "") for e in json.loads(audit_path.read_text())["events"]]
     assert "flagged_model_table_kept" in kinds, kinds
     assert "native_fallback" not in kinds, kinds
+
+
+# ---------------------------------------------------------------------------
+# Round 2: a HARD rejection is not a flag.
+#
+# ``ProviderAttempt.accepted`` is a bool, and ``orchestrator.py`` stores only
+# that (``att.output.audit_passed = att.accepted``). The verifier's CERTAIN_FAIL
+# and the winner-side structural gate both return ``accept=False`` and mutate
+# NOTHING on the PageOutput -- status stays SUCCESS, failure_mode stays NONE. So
+# a table the value guard positively proved wrong was, in round 1, kept and
+# shipped in place of native: silent content corruption, the inverse of what
+# this fix exists to do.
+#
+# These drive the REAL ``NativeTableVerifierJudge``, not a stub, so they prove
+# the hard paths genuinely leave the disposition unset rather than proving that
+# the test author remembered not to set it.
+# ---------------------------------------------------------------------------
+
+_PHYS_COL_GAP = 60.0
+
+
+def _fitz_page_with_numeric_rows(rows: list[list[tuple[float, str]]]):
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    page = doc.new_page(width=700, height=900)
+    for row_idx, cells in enumerate(rows):
+        y = 100.0 + row_idx * 30
+        for x, word in cells:
+            page.insert_text((x, y), word, fontsize=9)
+    return page
+
+
+def _md(headers: list[str], rows: list[list[str]]) -> str:
+    out = ["| " + " | ".join(headers) + " |", "| " + " | ".join("---" for _ in headers) + " |"]
+    out.extend("| " + " | ".join(r) + " |" for r in rows)
+    return "\n".join(out)
+
+
+def _assess_with_real_verifier(fitz_page, output_text: str, *, inner_accepts: bool):
+    """Run the real judge and hand back the PageOutput it decided on."""
+    from unittest.mock import MagicMock
+
+    from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
+
+    inner = MagicMock()
+    inner.assess.return_value = AcceptDecision(accept=inner_accepts, reason="inner judge")
+    output = PageOutput(
+        page_num=1, text=output_text, status=PageStatus.SUCCESS, engine="qwen", confidence=0.9
+    )
+    judge = NativeTableVerifierJudge(
+        inner=inner,
+        get_fitz_page=lambda pn: fitz_page,
+        is_table_page=lambda pn: True,
+        record_event=None,
+    )
+    decision = judge.assess(output, MagicMock())
+    # What orchestrator.py:3084 does with the verdict, and ALL it does with it:
+    # a bool. Reproduced here so the fixture is the real post-route shape.
+    output.audit_passed = decision.accept
+    return decision, output
+
+
+def _state_with(pdf_path: Path, model_output: PageOutput) -> DocumentState:
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    ps = state.pages[1]
+    ps.is_born_digital = True
+    ps.has_tables = True
+    ps.native_text = NATIVE_TABLE
+    ps.native_table_structure_failed = True
+    ps.attempts.append(model_output)
+    ps.best_output = model_output
+    return state
+
+
+def test_verifier_hard_fail_still_falls_back_to_native(tmp_path: Path) -> None:
+    """CERTAIN_FAIL: a numeric-lane collapse the value guard positively caught.
+
+    The inner judge is never consulted; nothing on the output is mutated. This
+    must NOT be kept — shipping it would replace native with a table socr has
+    proved wrong.
+    """
+    fitz_page = _fitz_page_with_numeric_rows(
+        [
+            [
+                (100.0, "0.1"),
+                (100.0 + _PHYS_COL_GAP, "0.2"),
+                (100.0 + 2 * _PHYS_COL_GAP, "0.3"),
+            ]
+        ]
+    )
+    # 3 native lanes collapsed into 2 populated cells.
+    decision, output = _assess_with_real_verifier(
+        fitz_page, _md(["label", "vals"], [["row1", "0.1"]]), inner_accepts=True
+    )
+    assert decision.accept is False, decision
+    assert "native_table_verifier" in decision.reason, decision.reason
+    # The hard path leaves no disposition behind — the fact that makes a
+    # denylist ("not ERROR, not HALLUCINATION") unable to see it.
+    assert getattr(output, "rejection_class", "") == "", output
+    assert output.status is PageStatus.SUCCESS
+    assert output.failure_mode.value == "none"
+
+    winner = _winning_page_output(_state_with(_born_digital_pdf(tmp_path), output), 1)
+    assert winner.engine == "native", winner.engine
+    assert "Large T" in winner.text, winner.text
+
+
+def test_structural_gate_rejection_still_falls_back_to_native(tmp_path: Path) -> None:
+    """The winner-side structural gate is a deterministic reject, not a flag.
+
+    It fires on an ACCEPTING inner decision, so the ambiguous-deferral marking
+    must not be reachable from it.
+    """
+    from socr.tables.structure_check import table_output_defect
+
+    # A ragged grid: the gate's own predicate must see a defect, else this test
+    # would silently be testing nothing.
+    ragged = "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n| 4 | 5 |\n"
+    assert table_output_defect(ragged, None, None), "fixture does not trip the gate"
+
+    fitz_page = _fitz_page_with_numeric_rows([[(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")]])
+    decision, output = _assess_with_real_verifier(fitz_page, ragged, inner_accepts=True)
+    assert decision.accept is False, decision
+    assert getattr(output, "rejection_class", "") == "", output
+
+    winner = _winning_page_output(_state_with(_born_digital_pdf(tmp_path), output), 1)
+    assert winner.engine == "native", winner.engine
+
+
+def test_ambiguous_deferral_refused_by_the_inner_judge_is_marked_soft() -> None:
+    """The one path the fix keeps: AMBIGUOUS, deferred, inner judge refused.
+
+    This is the reference page's disposition — the verifier said
+    "paired/spanning headers possible — deferring to VLM" and then the judge,
+    not a deterministic gate, said no.
+    """
+    fitz_page = _fitz_page_with_numeric_rows([[(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")]])
+    output_text = _md(["label", "c1", "c2", "c3"], [["row1", "1.1", "2.2", ""]])
+
+    decision, output = _assess_with_real_verifier(fitz_page, output_text, inner_accepts=False)
+    assert decision.accept is False, decision
+    assert getattr(output, "rejection_class", "") == SOFT_REJECTION, output
+
+    # And the same deferral that the inner judge ACCEPTS is never marked.
+    _, accepted_output = _assess_with_real_verifier(fitz_page, output_text, inner_accepts=True)
+    assert getattr(accepted_output, "rejection_class", "") == "", accepted_output
+
+
+def test_unknown_disposition_behaves_exactly_as_before(tmp_path: Path) -> None:
+    """Fail-safe direction: the allowlist, not a denylist.
+
+    Any refusal socr cannot positively classify — including every rung of a
+    ladder whose judge is not the table verifier — keeps today's behaviour.
+    """
+    state = _state(_born_digital_pdf(tmp_path), model_text=MODEL_TABLE, rejection_class="")
+    winner = _winning_page_output(state, 1)
+    assert winner.engine == "native", winner.engine
+
+
+def test_soft_disposition_survives_the_cache_round_trip() -> None:
+    """A resumed page must not silently lose the disposition and flip lanes."""
+    out = PageOutput(page_num=1, text=MODEL_TABLE, status=PageStatus.SUCCESS, engine="qwen")
+    setattr(out, "rejection_class", SOFT_REJECTION)
+    revived = PageOutput.from_dict(out.to_dict())
+    assert getattr(revived, "rejection_class", "") == SOFT_REJECTION, revived
+
+
+def test_the_literal_matches_the_shipped_constant() -> None:
+    """Drift guard: the literal used above must be the constant socr writes."""
+    import socr.core.result as _result
+
+    assert getattr(_result, "REJECTION_AMBIGUOUS_DEFERRED", SOFT_REJECTION) == SOFT_REJECTION
