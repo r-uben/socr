@@ -250,8 +250,8 @@ class TestDetectorConsultsRotationWithoutTables:
 # ---------------------------------------------------------------------------
 
 
-def _config() -> PipelineConfig:
-    return PipelineConfig(
+def _config(**overrides) -> PipelineConfig:
+    kwargs = dict(
         primary_engine=EngineType.DEEPSEEK,
         agentic=True,
         judge_backend="heuristic",
@@ -261,6 +261,8 @@ def _config() -> PipelineConfig:
         save_figures=False,
         write_manifest=False,
     )
+    kwargs.update(overrides)
+    return PipelineConfig(**kwargs)
 
 
 def _rejecting_router(page_num: int, ladder, run_provider, judge, **kwargs):
@@ -288,14 +290,17 @@ def _rejecting_router(page_num: int, ladder, run_provider, judge, **kwargs):
     return PageDecision(page_num=page_num, final_output=rejected, attempts=[att], accepted=False)
 
 
-def _run(pdf_path: Path, out_dir: Path, *, router=_rejecting_router):
-    pipeline = UnifiedPipeline(_config())
-    with (
-        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
-        patch("socr.pipeline.orchestrator.route_page", side_effect=router),
-        patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
-    ):
-        result = pipeline.process(pdf_path, out_dir)
+def _run(pdf_path: Path, out_dir: Path, *, router=_rejecting_router, runs=1, **overrides):
+    for _ in range(runs):
+        pipeline = UnifiedPipeline(_config(**overrides))
+        with (
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch("socr.pipeline.orchestrator.route_page", side_effect=router),
+            patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
+        ):
+            result = pipeline.process(pdf_path, out_dir)
     sidecar = json.loads((out_dir / pdf_path.stem / "pages" / "00001.json").read_text())
     return result, sidecar
 
@@ -358,3 +363,91 @@ class TestShippedOutput:
         assert sidecar["status"] == PageStatus.SUCCESS.value
         assert _confetti_lines(shipped_text) == []
         assert "Figure 4" in shipped_text
+
+
+# ---------------------------------------------------------------------------
+# Round 2: the chart-asset lane
+# ---------------------------------------------------------------------------
+
+
+class TestChartAssetLaneCannotShipShreddedText:
+    """#265 review: ``--native-only`` routed the page down the chart-asset lane,
+    whose winner carries ``engine="chart_asset"``. The contradiction guard at the
+    top of ``_winning_page_output`` only reconsidered a winner whose engine
+    starts with ``native``, so the chart winner returned immediately and the
+    fail-closed floor never ran -- the page shipped confetti under SUCCESS.
+
+    Both lanes build their text from ``PageState.native_text``; only the engine
+    label differs. A lane enumeration over 12 pipeline configurations
+    (agentic/deterministic x native_first/native_only/no-native-first x
+    with/without a raster, plus a resumed run) found this to be the ONLY lane
+    that leaked -- the plain native bypass and every deterministic path already
+    reached the floor.
+    """
+
+    def test_native_only_chart_lane_does_not_ship_success_or_confetti(self, tmp_path: Path) -> None:
+        pdf_path = tmp_path / "rot_shredded.pdf"
+        _rotated_caption_pdf(pdf_path, shredded=True)
+
+        result, sidecar = _run(pdf_path, tmp_path, native_only=True)
+        shipped_text = sidecar["winning_output"].get("text", "")
+
+        assert sidecar["status"] != PageStatus.SUCCESS.value, (
+            f"the chart-asset lane must not ship rotated confetti as success; "
+            f"shipped {shipped_text!r}"
+        )
+        assert _confetti_lines(shipped_text) == [], (
+            f"chart-asset lane still shipped the confetti: {shipped_text!r}"
+        )
+        assert result.status.value != "success"
+        # The chart PNG is real content and must survive the refusal: the page
+        # ships the marker plus the image the chart lane already rendered, not
+        # a bare marker.
+        assert shipped_text.startswith("[page 1 failed:"), shipped_text
+        assert "](" in shipped_text and ".png)" in shipped_text, (
+            f"the page image was lost when the text was refused: {shipped_text!r}"
+        )
+
+    def test_resumed_native_only_run_does_not_re_stamp_success(self, tmp_path: Path) -> None:
+        """The #214 shape: a terminal ledger entry restored on the second run
+        must not carry the page back to SUCCESS past the flag."""
+        pdf_path = tmp_path / "rot_shredded.pdf"
+        _rotated_caption_pdf(pdf_path, shredded=True)
+
+        _result, sidecar = _run(pdf_path, tmp_path, native_only=True, runs=2)
+        shipped_text = sidecar["winning_output"].get("text", "")
+
+        assert sidecar["status"] != PageStatus.SUCCESS.value, shipped_text
+        assert _confetti_lines(shipped_text) == [], shipped_text
+
+    def test_clean_rotated_chart_page_keeps_the_chart_asset_lane(self, tmp_path: Path) -> None:
+        """Reverse guard, and the failure mode of this change: a genuine chart
+        page that is rotated but NOT shredded must still take the chart lane and
+        still ship SUCCESS with its PNG."""
+        pdf_path = tmp_path / "rot_clean.pdf"
+        _rotated_caption_pdf(pdf_path, shredded=False)
+
+        _result, sidecar = _run(pdf_path, tmp_path, native_only=True)
+        shipped_text = sidecar["winning_output"].get("text", "")
+
+        assert sidecar["engine"] == "chart_asset", (
+            f"the clean rotated chart page must keep its lane; got {sidecar['engine']!r}"
+        )
+        assert sidecar["status"] == PageStatus.SUCCESS.value, shipped_text
+        assert _confetti_lines(shipped_text) == []
+        assert "".join(_CAPTION.split()) in "".join(shipped_text.split())
+        assert "![Chart page 1](" in shipped_text, shipped_text
+
+    def test_upright_chart_page_keeps_the_chart_asset_lane(self, tmp_path: Path) -> None:
+        """Reverse guard: an unrotated chart page is not in scope at all."""
+        pdf_path = tmp_path / "upright.pdf"
+        _upright_caption_pdf(pdf_path)
+
+        _result, sidecar = _run(pdf_path, tmp_path, native_only=True)
+        shipped_text = sidecar["winning_output"].get("text", "")
+
+        assert sidecar["engine"] == "chart_asset"
+        assert sidecar["status"] == PageStatus.SUCCESS.value
+        assert _confetti_lines(shipped_text) == []
+        assert "Figure 4" in shipped_text
+        assert "![Chart page 1](" in shipped_text

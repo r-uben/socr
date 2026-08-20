@@ -2955,6 +2955,16 @@ class UnifiedPipeline:
                 if chart_render_failed:
                     ps.chart_asset_render_failed = True
 
+                # #263 round 2: this page's native half is confetti, so
+                # _winning_page_output will refuse ``chart_body`` and ship the
+                # failure marker instead. The PNG is the half that IS good --
+                # on a chart page the image is the content -- so hand the ref
+                # to the floor rather than re-rendering the same page. The
+                # chart lane's own behaviour is untouched for every page that
+                # is not flagged.
+                if getattr(ps, "native_rotated_text_shredded", False) and chart_png_ref:
+                    ps.rotated_shred_png_ref = chart_png_ref
+
                 chart_status = PageStatus.WARNING if chart_render_failed else PageStatus.SUCCESS
                 chart_out = PageOutput(
                     page_num=page_num,
@@ -4960,10 +4970,12 @@ class UnifiedPipeline:
             "native_table_structure_failed": (
                 bool(ps.native_table_structure_failed) if ps else False
             ),
-            # #263: rotated page whose native layer was refused as shredded.
+            # #263: rotated page whose native layer was refused as shredded,
+            # and the image ref its floor ships in place of the fragments.
             "native_rotated_text_shredded": (
                 bool(getattr(ps, "native_rotated_text_shredded", False)) if ps else False
             ),
+            "rotated_shred_png_ref": (str(getattr(ps, "rotated_shred_png_ref", "")) if ps else ""),
             # GH-151 TICKET-B1: grid-shape defect found at extraction time.
             "native_table_structure_defective": (
                 bool(getattr(ps, "native_table_structure_defective", False)) if ps else False
@@ -5341,6 +5353,10 @@ class UnifiedPipeline:
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
+            # #263: restore the shredded-page image ref too, so a resumed run's
+            # floor ships marker + image exactly as the first run did instead of
+            # silently degrading to a bare marker.
+            ps.rotated_shred_png_ref = str(meta.get("rotated_shred_png_ref", ""))
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
             ps.judge_rejected = bool(meta.get("judge_rejected", False))
         except Exception as exc:

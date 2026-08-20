@@ -56,3 +56,43 @@ GH-147 branch already refuses unconditionally, which is strictly stronger. It is
 also the honest limit of the predicate — a rotated table's cells legitimately
 tile along the reading axis, the exact geometry the shred test reads as damage
 (measured on `_rotated_ruled_grid_pdf`: spurious 9, genuine 5).
+
+## Round 2 — the chart-asset lane (PR #265 review)
+
+`--native-only` made `_is_native_eligible_without_ocr` return True before the
+`needs_ocr_enhancement` check (`orchestrator.py`), so the page entered the PP-7
+chart-asset lane, whose winner carries `engine="chart_asset"`. The contradiction
+guard at the top of `_winning_page_output` only reconsidered a winner whose
+engine starts with `native`, so the chart winner returned immediately and the
+fail-closed floor never ran — confetti shipped under SUCCESS again.
+
+### Lane enumeration, not a spot-check
+
+Drove `process()` over 20 configurations on three fixtures (shredded / clean
+rotated / upright) × (agentic default, `--native-only`, `--no-native-first`,
+deterministic default, deterministic `--native-only`, ± `save_figures`), plus a
+no-raster variant so the chart lane could not intercept, plus a resumed run.
+
+Exactly one lane leaked: `chart_asset` (both directly and via resume). The plain
+native bypass under `--native-only` and every deterministic path already reached
+the floor, because their winner is `engine="native"` and the existing guard
+caught it.
+
+### Fix
+
+`manifest.py` gains `_NATIVE_TEXT_LANES = ("native", "chart_asset")` — the
+engines whose winning text *is* `PageState.native_text` (the chart lane appends a
+PNG ref to it). The shred term of the contradiction guard is scoped to those
+lanes instead of the `native` prefix. The table flags keep the narrower `native`
+scope: they are about a native *table reconstruction*, which only the native lane
+performs.
+
+The chart lane keeps the PNG it already rendered by handing the ref to
+`ps.rotated_shred_png_ref`, so the floor ships marker + image rather than a bare
+marker and nothing is rendered twice. The ref is written to the sidecar and
+restored on resume, next to `d3_floor_png_ref`.
+
+Chart-lane routing is deliberately **not** narrowed: on a chart page the image is
+the content, and the page is still a chart page. Only its text half is refused. A
+rotated chart page that is not shredded keeps the lane and keeps SUCCESS —
+asserted, because destroying good chart pages is this change's failure mode.
