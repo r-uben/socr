@@ -148,6 +148,10 @@ softened away, because a reader deserves to know which is which:
 - **"months of CI, tests and review never caught it"** — rhetorically true, historically
   uncheckable from the repo.
 - **"roughly 14 minutes per dense table page"** — one machine, one session, not a benchmark.
+- **"Neither lane captured any plotted chart data — axes, dates, series values"** — a
+  content-level observation from reading the page images. The images are not committed, so
+  a reader cannot confirm it here. Found on the third fact-check pass of this file, after
+  two earlier passes claimed completeness.
 
 Everything else — the arithmetic, the per-page dispositions, the flags, the decimal counts,
 the selection code, the method — is in the committed files.
