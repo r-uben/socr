@@ -829,6 +829,57 @@ class UnifiedPipeline:
                 )
             )
 
+        # GH-195: surface a rejected text-strategy grid. GH-144 A2 rejects a
+        # find_tables(strategy="text") grid when a lane boundary split a native
+        # numeric token (0.67 -> "0" + ".67") and rebuilds the table with the
+        # word-geometry rowizer. That is a real content-loss event on the
+        # original rendering path — before A2 existed the page shipped the wrong
+        # numbers as a silent SUCCESS — and until now it was visible only as a
+        # logger.warning inside reconstruct.py. A log line is not a surface.
+        #
+        # NOT a demotion. The fallback rowizer is proven lossless in isolation
+        # (GH-144 A1 §2 control), so the page ships correct numbers and must not
+        # be flagged as damaged. What the run needs to know is that this page's
+        # layout is ADVERSARIAL to the text strategy and is worth spot-checking —
+        # a different statement from "this page is wrong", and the issue asks for
+        # exactly the first one.
+        for pa in assessment.pages:
+            rejections = getattr(pa, "text_grid_rejections", None) or []
+            if not rejections:
+                continue
+            destroyed_total = sum(int(r.get("destroyed_count", 0)) for r in rejections)
+            values: list[str] = []
+            for rec in rejections:
+                values.extend(str(v) for v in rec.get("values", []))
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="text_grid_rejected",
+                    engine="native",
+                    detail=(
+                        f"{len(rejections)} text-strategy table grid(s) rejected: a lane "
+                        f"boundary split {destroyed_total} native numeric token(s) "
+                        f"({', '.join(values)}). Rebuilt with the lossless word-geometry "
+                        "rowizer — the shipped values are correct, but this page's layout "
+                        "is adversarial to find_tables(strategy='text')."
+                    ),
+                    data={
+                        "rejected_grids": len(rejections),
+                        "destroyed_tokens": destroyed_total,
+                        "values": values,
+                    },
+                )
+            )
+        _rejected_pages = sorted(
+            pa.page_num for pa in assessment.pages if getattr(pa, "text_grid_rejections", None)
+        )
+        if _rejected_pages and not self.config.quiet:
+            console.print(
+                f"  [yellow]{len(_rejected_pages)} page(s) had a text-strategy table grid "
+                f"rejected for numeric-token destruction and rebuilt losslessly: "
+                f"{_rejected_pages}[/yellow]"
+            )
+
         bd_count = assessment.born_digital_count
         if not self.config.quiet:
             if bd_count:

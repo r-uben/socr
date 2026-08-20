@@ -97,7 +97,9 @@ _RUNHEAD_RE = re.compile(
 )
 
 
-def reconstruct_table_regions(page) -> list[tuple[object, str]]:
+def reconstruct_table_regions(
+    page, *, rejections: list[dict] | None = None
+) -> list[tuple[object, str]]:
     """Return ``(rect, markdown)`` pairs for text-aligned tables on ``page``.
 
     Same shape as the lines-strategy path in ``extract_structured`` so the caller
@@ -123,6 +125,17 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
     the unclipped full page merges the table with that same trailing text
     because the table-to-notes gap can be smaller than the rowizer's own
     y-gap split threshold. Scoping to the numeric rows' own union avoids both.
+
+    GH-195: pass a list as ``rejections`` to receive one record per rejected
+    table (``{"bbox", "destroyed_count", "values"}``). The rejection was
+    previously visible only as a ``logger.warning`` inside this function, so a
+    corpus run could not distinguish "every table rendered cleanly on the first
+    strategy" from "a grid was actively destroying values and had to be rejected
+    and rebuilt" — the house rule requires the second to surface at page,
+    document, metadata and CLI level, not only in a log. An out-parameter rather
+    than a changed return type: every caller of this function unpacks
+    ``(rect, markdown)`` pairs, and widening the tuple would touch all of them
+    for a signal only one caller wants.
     """
     try:
         import fitz
@@ -162,14 +175,39 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
         # containing cell (an axis tick, a page number) would otherwise be
         # counted "destroyed" and reject an otherwise-good grid.
         numeric_scope = _numeric_row_bbox(table, grid, words)
-        destroyed = _destroyed_numeric_tokens(
-            words,
-            table,
-            grid,
-            numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),
-        )
+        if numeric_scope is None:
+            # GH-197: the `None` path used to fall back to `fitz.Rect(table.bbox)`
+            # — the exact loose, whitespace-inferred rectangle the tight scope was
+            # introduced to stop using. A note, an axis tick or a page number
+            # sitting in that overrun has no containing cell, counts as
+            # "no-cell" destroyed, and rejects a perfectly good grid.
+            #
+            # Skipping the check outright is not a weakening: `_numeric_row_bbox`
+            # returned None because this table has NO numeric-bearing row, so
+            # there is no numeric value here that a lane boundary could have
+            # destroyed. Every hit the old code could have found in that state was
+            # by construction from the overrun, i.e. a false positive.
+            logger.debug(
+                "reconstruct_table_regions: no numeric-bearing row in region %s — "
+                "skipping the destruction check (nothing numeric to destroy) and "
+                "keeping the text-strategy grid",
+                table.bbox,
+            )
+            md = _grid_to_markdown(cleaned)
+            if md:
+                out.append((fitz.Rect(table.bbox), md))
+            continue
+        destroyed = _destroyed_numeric_tokens(words, table, grid, numeric_scope)
         if destroyed:
             values = [rec["value"] for rec in destroyed]
+            if rejections is not None:
+                rejections.append(
+                    {
+                        "bbox": tuple(fitz.Rect(table.bbox)),
+                        "destroyed_count": len(destroyed),
+                        "values": values,
+                    }
+                )
             logger.warning(
                 "reconstruct_table_regions: text-strategy grid destroyed %d numeric "
                 "token(s) %s in region %s — rejecting the text-strategy grid, falling "
@@ -189,27 +227,18 @@ def reconstruct_table_regions(page) -> list[tuple[object, str]]:
             # the union of only the rows that contain at least one numeric
             # cell: a data-driven boundary, not a tuned constant, and it is
             # exactly the rows a numeric table owns.
-            if numeric_scope is None:
-                # No numeric-bearing row at all — `_looks_tabular`'s numeric-
-                # fraction gate makes this unlikely to reach here, but if it
-                # does there is no tight scope to compute; broadening to the
-                # full page is exactly the notes-merge risk the tight scope
-                # exists to avoid, so it is never done silently.
-                logger.warning(
-                    "reconstruct_table_regions: no numeric-bearing row found for "
-                    "region %s — broadening the fallback rowizer to the full page "
-                    "word list instead of a tight scope",
-                    table.bbox,
-                )
-                scoped_words = words
-            else:
-                # GH-144 A2b: a header band carries no numeric cell, so the
-                # tight numeric-row scope by construction excludes it —
-                # extend it to also cover a preceding lane-snapping header
-                # band, or `_prepend_header_band` downstream has nothing to
-                # prepend (review finding 3).
-                tight = _extend_scope_for_header(numeric_scope, words)
-                scoped_words = [w for w in words if tight.contains(fitz.Point(w[0], w[1]))]
+            # GH-144 A2b: a header band carries no numeric cell, so the tight
+            # numeric-row scope by construction excludes it — extend it to also
+            # cover a preceding lane-snapping header band, or
+            # `_prepend_header_band` downstream has nothing to prepend (review
+            # finding 3).
+            #
+            # GH-197: `numeric_scope is None` can no longer reach here — that case
+            # returns above without ever computing `destroyed` — so the former
+            # "broaden to the full page word list" branch is gone rather than left
+            # as unreachable code behind a warning that can never fire.
+            tight = _extend_scope_for_header(numeric_scope, words)
+            scoped_words = [w for w in words if tight.contains(fitz.Point(w[0], w[1]))]
             rowized = rowize_from_word_list(scoped_words)
             if rowized:
                 out.extend(rowized)
@@ -371,10 +400,25 @@ def _destroyed_numeric_tokens(words: list, table, grid: list[list], scope_bbox) 
         cell is None for row in rows for cell in (getattr(row, "cells", None) or [])
     )
 
+    # GH-198: imported lazily, the same way `_is_data_row` does it — native_verifier
+    # imports `_NUM_TOKEN_RE` from THIS module, so a top-level import is a cycle.
+    from socr.tables.native_verifier import is_numeric_token, strip_presentation
+
     records: list[dict] = []
     for w in words:
         text = w[4]
-        if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):
+        # GH-198: the bare anchored `_NUM_TOKEN_RE` skips the decorated forms this
+        # repo already treats as values everywhere else — `0.67***`, unicode minus
+        # `−0.253`, `$0.67`, `.034`. A text-strategy grid that splits `0.67***` the
+        # same way it splits `0.67` would never be rejected, and the page would ship
+        # a silent wrong number: the ORIGINAL GH-144 defect, just wearing a
+        # significance star. `is_numeric_token` strips presentation first (GH-103 /
+        # GH-206) and is the predicate the rest of the pipeline already uses.
+        #
+        # Kept as a UNION with the old predicate rather than a swap. A swap would be
+        # a behaviour change in both directions; this one only ever ADDS candidates,
+        # so no token that was checked before can stop being checked now.
+        if not (is_numeric_token(text) or (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text))):
             continue
         x0, y0, x1, y1 = w[0], w[1], w[2], w[3]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -407,7 +451,19 @@ def _destroyed_numeric_tokens(words: list, table, grid: list[list], scope_bbox) 
             records.append({"value": text, "bbox": (x0, y0, x1, y1), "boundary": "grid-none"})
             continue
 
-        if text not in raw_cell:
+        # GH-198: survival is widened on the SAME axis as the candidate filter, or
+        # the widening would manufacture false rejections. A grid may legally drop
+        # decoration the native layer carries (the star typeset separately, the
+        # currency symbol living in the caption), so a token counts as surviving if
+        # either its exact string is present OR its presentation-stripped form
+        # survives in the presentation-stripped cell. The VALUE is what must not be
+        # destroyed; the star is not the value.
+        survives = text in raw_cell or (
+            strip_presentation(text) in strip_presentation(raw_cell)
+            if strip_presentation(text)
+            else False
+        )
+        if not survives:
             cell_x0, _cell_y0, cell_x1, _cell_y1 = containing
             edge_inside = None
             if cell_x0 > x0 and cell_x0 < x1:
