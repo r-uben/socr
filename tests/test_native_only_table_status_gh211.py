@@ -148,13 +148,13 @@ def test_native_only_unverifiable_table_is_flagged_without_rerouting(
 
     trust = json.loads(_only(output_dir, "tables_trust.json").read_text(encoding="utf-8"))
     assert trust["untrusted_pages"] == [1]
-    # GH-205 added an unconditional ``table_region_unverifiable`` detection event
-    # for every TR-3 geometry hard-fail, so this page now carries a SECOND, true
-    # reason alongside the demotion event. Nothing here was relaxed: the page is
-    # still the only untrusted one, still WARNING, still audit_passed=False, and
+    # GH-205 added an unconditional ``table_region_geometry_hard_fail`` detection
+    # event for every TR-3 geometry hard-fail, so this page now carries a SECOND,
+    # true reason alongside the demotion event. Nothing here was relaxed: the page
+    # is still the only untrusted one, still WARNING, still audit_passed=False, and
     # ``table_structure_failed`` is still present. Only the exhaustive list grew.
     assert trust["pages"]["1"]["reasons"] == [
-        "table_region_unverifiable",
+        "table_region_geometry_hard_fail",
         "table_structure_failed",
     ]
 
