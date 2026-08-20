@@ -46,7 +46,7 @@ from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_
 from socr.pipeline.agentic import route_page
 from socr.pipeline.consensus import ConsensusEngine
 from socr.pipeline.repair import RepairRouter
-from socr.tables.extract import probe_ollama_idle
+from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -5033,7 +5033,7 @@ class UnifiedPipeline:
             logger.debug("GH-161: could not record ledger audit reject for p%d (%s)", page_num, exc)
 
     def _probe_backend_idle(self) -> bool:
-        """Liveness probe for the local VLM backend, behind a swappable seam.
+        """Liveness probe for THIS RUN's VLM backend, behind a swappable seam.
 
         GH-222: the cascade-halt guard used to call ``probe_ollama_idle()`` with
         no arguments, and that function defaulted to a hardcoded
@@ -5045,11 +5045,21 @@ class UnifiedPipeline:
         backend is the worst case: the ladder is local-only, so one slow page
         ends the run.
 
-        Two things change.  The host is RESOLVED (``resolve_ollama_host``:
-        explicit config, then ``OLLAMA_HOST``, then the localhost default)
-        rather than assumed, and the probe itself is a seam — assign
-        ``pipeline.backend_probe`` to a zero-argument callable to substitute a
-        different backend's health check entirely.
+        Which server is asked follows ``qwen_backend`` through
+        ``OPENAI_COMPATIBLE_BACKENDS`` — the SAME predicate ``make_table_reader``
+        uses to decide which server to send crops to, so the probe and the reader
+        can never end up asking about different machines.  A vLLM/SGLang backend
+        is probed at ``qwen_vllm_url``; anything else is an Ollama daemon, whose
+        host is RESOLVED (explicit config, then ``OLLAMA_HOST``, then the
+        localhost default) rather than assumed.  ``auto`` resolves to a local
+        Ollama daemon everywhere else in this codebase, so it probes Ollama here
+        too; deriving "vLLM" from a non-default ``qwen_vllm_url`` alone would
+        make the probe disagree with the crop reader, which is the class of bug
+        this is fixing.
+
+        ``backend_probe`` remains as an override seam for a backend socr does not
+        model, but the default path no longer depends on a caller knowing to
+        assign it.
 
         Deliberately unchanged here: WHICH attempts arm the guard.  ``_had_timeout``
         still scans every attempt and still matches the bare substring
@@ -5057,18 +5067,27 @@ class UnifiedPipeline:
         can still arm it.  Narrowing that needs the timed-out attempt to carry
         its backend identity (#159), which is #221/#227's dependency, not this
         one's — and #227 warns that fixing half of that pair makes behaviour
-        worse.  This change only stops the probe asking the wrong machine.
+        worse.  This change only stops the probe asking the wrong machine; it
+        does not change what the probe can detect.
         """
         probe = getattr(self, "backend_probe", None)
         if probe is not None:
             return bool(probe())
-        # Module-level name on purpose: the existing tests patch
+        # Module-level names on purpose: existing tests patch
         # ``socr.pipeline.orchestrator.probe_ollama_idle``, and routing around
         # that name would silently neuter every one of those patches.
+        if self._local_backend_is_openai_compatible():
+            return probe_openai_server_idle(self.config.qwen_vllm_url)
         return probe_ollama_idle(self._local_backend_host())
 
+    def _local_backend_is_openai_compatible(self) -> bool:
+        """True when this run's local VLM is served over an OpenAI-compatible API."""
+        from socr.tables.extract import OPENAI_COMPATIBLE_BACKENDS
+
+        return getattr(self.config, "qwen_backend", "") in OPENAI_COMPATIBLE_BACKENDS
+
     def _local_backend_host(self) -> str:
-        """Where this run's local VLM backend actually listens (GH-222)."""
+        """Where this run's local Ollama daemon actually listens (GH-222)."""
         from socr.tables.extract import resolve_ollama_host
 
         return resolve_ollama_host(getattr(self.config, "ollama_host", None))
