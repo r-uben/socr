@@ -21,15 +21,25 @@ is actually exercised.
 
 ## Method
 
-`2026-08-20_lane-comparison-runner.py`, and the page selection in
+`2026-08-20_lane-comparison-select.py` builds the manifest;
+`2026-08-20_lane-comparison-runner.py` consumes it. The manifest itself is committed as
 `2026-08-20_lane-comparison-manifest.json`.
+
+The selection script is committed because this record claims the pages were chosen
+deterministically rather than by eye, and that claim was previously unverifiable — the
+runner takes the manifest as input and contains no selection code at all.
 
 - Pages chosen deterministically, not by eye: parenthesised-standard-error density for
   tables, math-glyph density for equations, image presence with low text for figures.
 - Each document excerpted to its own PDF, then `socr process --agentic --no-native-first`
-  so the model is forced on every page and **both lanes' attempts land in socr's own
-  cache** — including the one that gets discarded. That is the whole trick: #259 is about
-  a correct model answer being thrown away, so the thrown-away answer had to survive.
+  so the model is forced on every page and a discarded attempt can still survive in socr's
+  own cache. That is the whole trick: #259 is about a correct model answer being thrown
+  away, so the thrown-away answer had to be recoverable.
+- **Not every page yielded two candidates.** 13 of the 21 have only one surviving cached
+  attempt — either the other lane produced nothing cacheable, or it produced something that
+  was not cached. Which of the two is not established by this record. The 8 pages with two
+  or more candidates are the contested set, and they are the only pages where the routing
+  decision was actually exercised. Do not read this as "both lanes captured on every page".
 - The cache is then mined per `(page_num, engine)`. Cache entries carry `page_num`; an
   earlier version of this runner mined document-wide and attributed one document's output
   to every page in it. That bug is why the runner is committed rather than described.
@@ -100,6 +110,24 @@ The runner needs a local corpus and a working Ollama with
 `qwen3-vl:30b-a3b-instruct`. Point `manifest.json` at your own PDFs; the selection
 heuristics are in the runner and are deterministic. Budget roughly 14 minutes per dense
 table page on a local 30B model — the wall-clock, not the money, is the cost.
+
+## What in this record cannot be checked from the repo
+
+Marked explicitly, because a durable record should not contain claims a future reader
+cannot confirm.
+
+The **7-worse / 1-tie / 0-native-win** split is the central number and it is **not in the
+verdict JSON** — that file records which engine shipped, not which output was better. The
+8-page contested denominator IS derivable (count the rows with two or more candidates).
+The quality judgement on those 8 exists only as prose here, because it came from two model
+judges reading page images that cannot be committed.
+
+Also session record rather than repo-checkable: the 176-character shredded output, the
+`1.11`-for-`1.10` slip, the row-label shift, the judges' 7-of-8 agreement, and the hang
+observed at 12 minutes elapsed against 1.96 s of CPU.
+
+Everything else — the arithmetic, the per-page dispositions, the flags, the decimal counts,
+the method — is in the committed files.
 
 ## Fields in the verdict file
 

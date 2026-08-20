@@ -21,8 +21,10 @@ import time
 
 import fitz
 
-SP = "/private/tmp/claude-501/-Users-rubenffuertes-repos-tools-socr/bae3cd33-3698-4e2f-999a-b6ed84289e24/scratchpad"
-CAMP = f"{SP}/campaign"
+# Set both before running. SOCR_SRC is only needed for a source checkout;
+# CAMP is the working directory holding manifest.json and receiving output.
+SOCR_SRC = os.environ.get("SOCR_SRC", "")
+CAMP = os.environ.get("LANE_CAMPAIGN_DIR", os.path.dirname(os.path.abspath(__file__)))
 NUM = re.compile(r"-?\d+\.\d+")
 PER_PAGE_BUDGET_S = 1080  # measured: ~14 min/page on dense tables (dual-pass + table rereads)
 
@@ -60,7 +62,7 @@ def run_doc(entry, idx):
             timeout=budget,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            env={**os.environ, "PYTHONPATH": f"{SP}/ciwt/src"},
+            env={**os.environ, **({"PYTHONPATH": SOCR_SRC} if SOCR_SRC else {})},
         )
     except subprocess.TimeoutExpired:
         status = "TIMEOUT"
