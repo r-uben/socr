@@ -39,8 +39,10 @@ closed**, **5 PRs open and unmerged**, 2 actions held for the owner.
 0. **`#252` round 2 is unreviewed.** Its reviewer found the original fix caused
    silent content loss on born-digital pages; the code owner reproduced it,
    root-caused it (`audit_passed` is the winner-selection flag, not a page flag) and
-   fixed it at head `4243212`. Nobody has reviewed that fix, and #253/#254/#255 are
-   stacked on it. First thing to look at.
+   fixed it at head `4243212`. Nobody has reviewed that fix. **And #253/#254/#255
+   were branched before it, so they do not contain it** — merge strictly bottom-up
+   (#251 → #252 → #253 → #254 → #255) or the defect ships in the descendants.
+   First thing to look at.
 1. `#147` — design call: narrow the closing Note to table pages, or accept the work.
 2. `#151` — one disputed sentence in a held correction comment.
 3. `ci.yml` — stacked PRs run no tests at all; one-line fix available.

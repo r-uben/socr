@@ -299,7 +299,19 @@ pointer already removed, inverting the cardinal rule. The run no longer looks cl
 the content survives. I think that argument is right, but it is a deliberate
 departure from the issue's literal wording and it is flagged, not hidden.
 
-**Caveat: round 2 was not re-reviewed.** `4243212` has had no independent reviewer.
+**Caveat 1: round 2 was not re-reviewed.** `4243212` has had no independent reviewer.
+
+**Caveat 2 — the fix is NOT in the three PRs above it.** #253, #254 and #255 were
+branched off `4200171`, before the fix. Verified just now:
+
+    fix/205-tr3-auditevent           MISSING the fix
+    fix/195-197-198-destruction-check MISSING the fix
+    fix/222-probe-interface           MISSING the fix
+
+Nothing was rebased or force-pushed, deliberately. **So whoever merges must carry
+`4243212` up the stack, or the content-loss defect ships in the descendants.**
+Merging strictly bottom-up (#251, then #252, then #253…) handles this automatically,
+because each merge retargets the next PR's base. Merging out of order does not.
 
 **#252 is the base of #253 and #254, so all three inherit this.** Merging bottom-up
 means #251 first, then **stopping** until #252 is fixed.
