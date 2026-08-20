@@ -95,3 +95,55 @@ premise that the signal is inert. It is not entirely inert, and the hand-judgeme
 
 Same lesson as the rest of this file: the framing in an issue — including an issue the
 owner wrote carefully and revised — is a claim, and a claim is not a measurement.
+
+---
+
+## Correction to the addendum, and the sixth trap: a pin measured in one environment
+
+The addendum above states, as a finding, that document status is already keyed on the
+TR-3 flag in all four cells. **A second reviewer, building its own fixture and stubs,
+could not reproduce that in the non-agentic cells** — it saw the move in both agentic
+cells (`ERROR` vs `AUDIT_FAILED`) but `SUCCESS`/`SUCCESS` non-agentic, where the original
+fixture yielded `AUDIT_FAILED`/`SUCCESS`.
+
+So the claim is **fixture-dependent**, and I recorded it more firmly than the evidence
+supports. It is true that the flag *can* already move document status; it is not
+established that it does so universally. The design conclusion drawn from it — write the
+guard differentially rather than as flagged-vs-clean equality — survives either way, and
+is if anything better supported: a claim that changes with the fixture is exactly the
+kind you must not pin.
+
+### What this cost
+
+PR #253 was merged and **reverted from main**. Its scope guard pinned an absolute outcome
+tuple measured locally, where a provider exists. In CI, which has neither ollama nor a
+provider, the provider-dependent machinery (the D3 floor, `native_fallback`) never fires,
+nothing moved, and the pin — which asserted movement — failed. It passed locally on 1850
+tests and went red in CI. The merge happened while that check was red.
+
+This is the same family as the five above, in a new costume: **evidence that is true in
+the environment where it was gathered and false in the one that matters.** A symbol-
+absence failure looks like a behavioural failure; a locally-measured status pin looks
+like a behavioural invariant. Both are red at the baseline, both read as proof.
+
+### The fix, and the fault
+
+The redo (#258) was told the implementation was at fault. It measured instead: it ran
+`process()` over a flagged page twice, with the emission enabled and disabled, across all
+four (agentic × provider) cells, and found the outcome tuple, the event list and the OCR
+calls identical. **The implementation was already inert. The test was wrong.** A fresh
+reviewer confirmed that independently, on its own fixture, in its own worktrees, having
+found the author's tree mid-merge and therefore refused to trust anything from it.
+
+The guard is now differential — two runs differing only in the flag, or only in whether
+the emission happens — with no absolute outcome tuple pinned anywhere, parametrised over
+both provider states. It is green in CI, the environment that killed its predecessor.
+
+### The rule this adds
+
+Never pin an absolute outcome measured in one environment. Pin a **difference** measured
+in whatever environment the test happens to run in, and parametrise over the axis that
+differs between local and CI — here, the provider. And the standing rule from the top of
+this file applies to me as well as to the agents: I wrote that addendum from one agent's
+measurement without a second fixture, which is the same "a claim about evidence is not
+evidence" error, one level up.

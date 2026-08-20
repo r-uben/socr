@@ -1,0 +1,34 @@
+{
+  "pr": 258,
+  "head": "90863b8",
+  "reviewer": "kimi",
+  "note_on_head": "Head moved to 013c1b2 (merge of main@49e491b into the branch) while this review ran. All branch-side verification was re-executed at 013c1b2: 21 passed (new file + GH-211 file), my own inertness harness INERT in all four cells, full suite 1904 passed / 3 xfailed, CI green (test 3.11 + typecheck).",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-night-base show \"f5b1d2a:src/socr/core/tables_trust.py\" | sed -n '52p'",
+    "output": "        \"native_table_verifier_warn\","
+  },
+  "verdict": "APPROVE",
+  "fault_attribution_confirmed": "TEST",
+  "emission_is_inert_all_four_cells": true,
+  "guard_is_environment_independent": true,
+  "passes_with_and_without_provider": true,
+  "non_vacuity_confirmed": true,
+  "no_kind_collision": true,
+  "reran_baseline_myself": true,
+  "findings": [
+    {
+      "severity": "minor",
+      "what": "The carried-forward claim 'flipping the flag already moves the document status in all four cells' is fixture-dependent. In my own independent harness (my own fixture, my own stubs) the move reproduced in both agentic cells (ERROR vs AUDIT_FAILED) but NOT in the non-agentic cells (SUCCESS/SUCCESS with my fixture; the author's fixture yields AUDIT_FAILED/SUCCESS). The design conclusion drawn from it — exclude document status from the flag-differential guard B and cover it under guard A — is still correct, because a single cell where the status moves suffices to make the equality assertion false. But the docstring/PR-body phrasing 'in all four cells' overstates generality: it is a property of the fixture's audit outcome, not of the flag universally.",
+      "where": "tests/test_gh205_tr3_unconditional_event.py docstring of test_flagging_a_page_moves_no_page_status_and_no_route; PR body table",
+      "why": "Not blocking: the guard split is justified regardless, and guard A covers document status with the flag held constant, which my own measurement confirms is the right invariant (inert in all four cells at both 90863b8 and 013c1b2)."
+    },
+    {
+      "severity": "minor",
+      "what": "The author's own worktree /Users/rubenffuertes/repos/.worktrees/socr-253-redo was mid-merge (UU on orchestrator.py, multiple modified files) when inspected. Its recorded canary/suite outputs could not have come from that tree in that state; I therefore trusted nothing from it and built my own detached worktrees at 90863b8 / 013c1b2 / f5b1d2a / 49e491b.",
+      "where": "/Users/rubenffuertes/repos/.worktrees/socr-253-redo (git status --porcelain)",
+      "why": "Process hygiene only — every load-bearing number in this review was reproduced in my own trees."
+    }
+  ],
+  "what_i_tried_to_break": "1) INERTNESS: wrote my own measurement harness (/tmp/kimi-258-inertness.py, my own fixture and stubs, not the author's test) that runs process() over a TR-3-flagged native-table page with the emission on vs off in all four (agentic x provider) cells, comparing (page status, audit_passed, failure_mode, document status), the FULL event-kind list sans the detection kind, and the OCR call list. Result at 90863b8 and again at 013c1b2: identical in all four cells, and the detection event is the sole difference (non-trivial equality). 2) ENVIRONMENT-INDEPENDENCE: grepped the new test file for absolute status pins — the only PageStatus/DocumentStatus literal is inside the OCR stub's return value, never in an assertion; guards are two-run differentials; CI (no ollama, no provider — the exact environment that killed #253) is green on test+typecheck at the merge head. Read _phase_judge_hard_pages/_resolve_judge_model at head and confirmed the author's ambient-dependency story: the phase builds an OllamaVisionJudge and posts for real regardless of judge_backend, and returns early only when no judge model resolves — which is exactly what the old absolute pin tripped over. 3) NON-VACUITY: ran the new test file myself against f5b1d2a AND against the new merge base 49e491b in my own detached worktrees: 16 failed / 1 passed both times; grep of failure output for AttributeError|TypeError|ImportError|NameError = 0 hits; every failure is a behavioural assertion on the missing event. 4) KIND COLLISION: confirmed table_region_unverifiable emission is untouched, both kinds registered in TABLE_DISTRUST_KINDS and audit_log.rank (detection rank 4 before disposition rank 5), and the D3-pair test (detection once, disposition once, detection first) passes in both provider states. 5) SCOPE: the src diff is exactly three files — one AuditEvent append in analyze, one kind in TABLE_DISTRUST_KINDS, one rank entry; no status keying, no routing keyed on the flag; magic-number grep (62/245/25.3) over the src diff is clean. 6) GH-211: the exhaustive reasons assertion gains exactly the new true entry, surrounding assertions (untrusted_pages==[1], WARNING, audit_passed=False) unrelaxed; the file passes at head. 7) FLAG-DIFFERENTIAL AT BASE (carried-forward finding): at f5b1d2a with no part of the change applied, flipping the flag moved document status in my agentic cells (ERROR vs AUDIT_FAILED) — the keying mechanism (state.py propagates has_unverifiable_table_region -> ps.native_table_unverifiable; d3_floor_pages and native_fallback_pages both consume it) confirmed by reading the base source. 8) FULL SUITE at 013c1b2: 1904 passed, 3 xfailed — matches the author's claim.",
+  "method_notes": "Own worktrees: /tmp/kimi-258-head (013c1b2), /tmp/kimi-258-base (f5b1d2a, later 49e491b); isolation canary passed before each run; ollama was LIVE locally during all runs, so the [] ladder + _resolve_judge_model='' hermeticity was exercised against a real daemon and held. Worktrees removed after the run."
+}

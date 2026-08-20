@@ -11,7 +11,8 @@
 - **Nothing was closed.** 62 issues open at the start, 62 open now.
 - **6 correction comments posted**, every issue verified still open afterwards.
 - **2 actions held for you**, including the run's only close.
-- **#251 merged. 4 PRs open, none merged, all four now APPROVED** by fresh independent reviewers after a round of fixes (§6c). A GPT round had rejected all four with blocking defects (§6b); every finding was addressed or declined with reasons a reviewer then upheld.
+- **ALL MERGED.** #251, #252, #254, #255 and #258 (the #253 redo) are on `main`, which is green at `ed4fb05`. Zero open PRs from this sweep. #253 was merged, reverted, rebuilt and re-merged — see §6d.
+- (historic) **#251 merged. 4 PRs open, none merged, all four APPROVED** by fresh independent reviewers after a round of fixes (§6c). A GPT round had rejected all four with blocking defects (§6b); every finding was addressed or declined with reasons a reviewer then upheld.
 - **Zero fabricated citations** across 192 machine-checked verdicts.
 
 The single most valuable thing that happened tonight was a fix **not** being
@@ -492,6 +493,50 @@ Rebasing #254 onto the new #253 hit a genuine semantic conflict in
 keeping **both** (`doc_fabrication` from #252, `text_grid_rejected_pages` from #254);
 verified in the final tree and by the full suite. This is precisely the collision the
 one-owner-stacked-branches decision existed to keep visible rather than silent.
+
+---
+
+## 6d. After the report — #253 merged, reverted, rebuilt, re-merged
+
+`#253` was merged and then **reverted from main** (`d490250`, reverted by `f5b1d2a`). It
+passed locally on 1850 tests and failed in CI, which has no provider; the merge went in
+while that check was red.
+
+Its scope guard pinned absolute outcome tuples **measured locally**. In CI the
+provider-dependent machinery never fires, so nothing moved — and the pin asserted
+movement. The sixth instance of this run's recurring theme: evidence true in the
+environment where it was gathered and false in the one that matters.
+
+**The diagnosis handed to me was that the implementation was at fault. It was not.** The
+redo measured it — `process()` over a flagged page, emission on and off, all four
+(agentic × provider) cells — and found the outcome tuple, event list and OCR calls
+identical. The implementation was already inert; **the test was wrong**. A fresh reviewer
+confirmed that independently, on its own fixture and its own worktrees, having found the
+author's tree mid-merge and refused to trust anything from it.
+
+The rebuilt guard is differential — two runs differing only in the flag, or only in
+whether the emission happens — with no absolute tuple pinned anywhere, parametrised over
+both provider states. Green in CI, the environment that killed its predecessor.
+
+Final state, all on `main`, all green:
+
+| PR | what | merged as |
+|---|---|---|
+| #251 | #161 resume ledger | `dc0f13f` |
+| #252 | #225 fabricated image URLs | `885b833` |
+| #256 | CI runs on every PR, not only those based on main | `999ff59` |
+| #254 | #195 + #197 + #198 destruction check | `be2c3e4` |
+| #255 | #222 probe host | `49e491b` |
+| #258 | #205 TR-3 surfacing (the #253 redo) | `ed4fb05` |
+
+`#254` and `#255` were rebuilt off `main` with only their own three commits each — the
+duplicates of #225's now-merged work, and of the reverted #253, were dropped. The
+resulting diffs were verified **byte-identical** to what their reviewers had approved
+before either was merged.
+
+**One correction to §8 of this report:** the finding that document status is already
+keyed on the TR-3 flag is **fixture-dependent**. A second reviewer reproduced it in the
+agentic cells only. I stated it more firmly than the evidence supports.
 
 ---
 

@@ -1,0 +1,115 @@
+{
+  "ticket": "253-redo (#205 surfacing)",
+  "pr": 258,
+  "pr_url": "https://github.com/r-uben/socr/pull/258",
+  "branch": "fix/205-tr3-surfacing-inert",
+  "head": "013c1b2",
+  "base": "f5b1d2a (branch cut point); PR now merges cleanly into main at 49e491b",
+  "base_is_main": true,
+  "worktree": "/Users/rubenffuertes/repos/.worktrees/socr-253-redo",
+  "fault_attribution": {
+    "verdict": "THE TEST WAS WRONG. The implementation is inert.",
+    "instruction_given_was": "the implementation moved a status",
+    "measurement": {
+      "method": "At f5b1d2a, ran process() over one flagged page twice, identical in every respect except that _emit_tr3_detection_events was disabled in one run. Repeated for all four (agentic x provider) cells. Compared (page status, audit_passed, failure_mode, document status) and the OCR call list.",
+      "result": "IDENTICAL in all four cells. The emission changes exactly two observable things: the new audit event appears, and metadata.json's free-text `error` field gains the trust-note pointer (which is the intended surfacing).",
+      "outcome_tuples_with_emission": {
+        "non_agentic_no_provider": "SUCCESS, False, AUDIT_FAILED, DocumentStatus.AUDIT_FAILED",
+        "non_agentic_provider": "SUCCESS, False, AUDIT_FAILED, DocumentStatus.AUDIT_FAILED",
+        "agentic_no_provider": "WARNING, False, MODEL_UNAVAILABLE, DocumentStatus.ERROR",
+        "agentic_provider": "SUCCESS, False, NONE, DocumentStatus.ERROR"
+      },
+      "outcome_tuples_without_emission": "identical to the above, cell by cell; OCR call lists identical too"
+    },
+    "why_the_old_pin_failed": "_PINNED_OUTCOMES was a table of absolute tuples measured on a developer machine. It encoded PRE-EXISTING provider-dependent behaviour and asserted it as the required state. The ambient dependency was NOT _available_engines_for_agentic (the non-agentic path never consults it; patching it changed the non-agentic numbers not at all) but _phase_judge_hard_pages, which builds an OllamaVisionJudge and POSTs to it for real regardless of judge_backend: a live ~35s call locally returning judge_reject, a refused connection in CI."
+  },
+  "carried_forward_finding_reverified": {
+    "claim": "document status is ALREADY keyed on the TR-3 flag through the D3 floor and native_fallback, so #205's 'surfaced nowhere' is true of the analyze-time detection and not of the flag in general",
+    "status": "HOLDS at current main f5b1d2a, in BOTH provider states, with no part of this change applied",
+    "measured": {
+      "non_agentic": "flagged=True -> DocumentStatus.AUDIT_FAILED ; flagged=False -> DocumentStatus.SUCCESS",
+      "agentic": "flagged=True -> DocumentStatus.ERROR ; flagged=False -> DocumentStatus.AUDIT_FAILED"
+    },
+    "mechanism": "native_table_unverifiable is a term in native_fallback_pages (orchestrator.py:5319) and in the D3 floor; pages_ok is keyed on both (orchestrator.py:5425)"
+  },
+  "guard_design": {
+    "principle": "differential and environment-independent; no absolute outcome tuple is pinned anywhere",
+    "guard_A_test_surfacing_changes_nothing_but_the_event": "holds the TR-3 flag constant at True and toggles ONLY _emit_tr3_detection_events (extracted into its own method for this). Asserts the FULL outcome tuple including document status and the OCR call list are identical between the two runs, plus the event present in one and absent in the other so the equality is non-trivial. This is the guard that covers document status.",
+    "guard_B_test_flagging_a_page_moves_no_page_status_and_no_route": "toggles the flag; asserts page status, audit_passed, failure mode and routing identical. Document status DELIBERATELY EXCLUDED with the measurement above stated in the docstring: asserting flag-differential document-status equality would assert something false about the pipeline as it already is.",
+    "deviation_from_brief": "The brief asked for one flag-differential guard asserting the FULL tuple identical including document status. That requirement is provably false at f5b1d2a (see carried_forward_finding_reverified). Split into the two guards above so that every component is covered by a guard where the invariant is actually true.",
+    "both_provider_states": true,
+    "provider_states": [
+      "[] (CI, listed first)",
+      "[PROFILE_QWEN_LOCAL] (developer machine)"
+    ],
+    "hermeticity": "pipeline._resolve_judge_model patched to return '' so the ollama-backed VLM judge phase is out of the picture in both environments; file runtime 6min -> 0.8s"
+  },
+  "non_vacuity": {
+    "base_run_worktree": "/Users/rubenffuertes/repos/.worktrees/socr-253-base (detached at f5b1d2a)",
+    "base_canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-253-base/src/socr/__init__.py",
+    "base_result": "16 failed, 1 passed, 5 warnings in 0.87s",
+    "base_failure_lines_all_behavioural": [
+      "AssertionError: The TR-3 geometry hard-fail on page 1 reached no surface at all; recorded events were []  /  assert [] == [1]  -- line 114",
+      "AssertionError: assert 'table_region_geometry_hard_fail' in frozenset({'dualpass_flagged', ...})  -- line 134",
+      "AssertionError: []  /  assert [] == [1]  -- line 330 (surfaces, non-agentic/no_provider)",
+      "AssertionError: []  /  assert [] == [1]  -- line 330 (surfaces, non-agentic/provider)",
+      "AssertionError: [(1, 'page_failed'), (1, 'table_region_unverifiable')]  /  assert [] == [1]  -- line 330 (surfaces, agentic/no_provider)",
+      "AssertionError: [(1, 'native_table_verifier_hard_fail'), (1, 'page_failed'), (1, 'table_region_unverifiable')]  /  assert [] == [1]  -- line 330 (surfaces, agentic/provider)",
+      "AssertionError: ['page_failed', 'table_region_unverifiable']  /  assert 0 == 1  where 0 = [...].count('table_region_geometry_hard_fail')  -- line 365 (d3 pair, no_provider)",
+      "AssertionError: ['native_table_verifier_hard_fail', 'page_failed', 'table_region_unverifiable']  /  assert 0 == 1  -- line 365 (d3 pair, provider)",
+      "AssertionError: []  /  assert 0 == 1  where 0 = [].count('table_region_geometry_hard_fail')  -- line 419, all four cells of guard A",
+      "same shape at line 449, all four cells of guard B"
+    ],
+    "no_symbol_absence_errors": "no AttributeError, TypeError or ImportError anywhere in the base run; the emission seam is disabled by plain attribute assignment which is a harmless no-op at base",
+    "guards_equality_assertions_pass_at_base": "both scope guards' equality assertions PASS at f5b1d2a and fail only on the event-presence check that follows -- the invariant they assert is a real pre-existing property, not one this change creates",
+    "test_passing_at_base": "test_clean_table_page_stays_quiet (reverse-regression guard; must pass on both sides)",
+    "branch_canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-253-redo/src/socr/__init__.py",
+    "branch_result": "17 passed, 5 warnings in 0.76s",
+    "rerun_at_new_base": {
+      "base": "49e491b",
+      "result": "16 failed, 1 passed, 5 warnings in 0.89s -- identical failure lines to the f5b1d2a run"
+    }
+  },
+  "suite": {
+    "base_f5b1d2a": "1840 passed, 3 xfailed",
+    "branch_90863b8": "1857 passed, 3 xfailed",
+    "base_49e491b": "1887 passed, 3 xfailed",
+    "branch_013c1b2_postmerge": "1904 passed, 3 xfailed, 5 warnings in 141.68s",
+    "delta": "+17 against either base, exactly the new file; no test deleted or weakened"
+  },
+  "lint": {
+    "gate": "uvx ruff@0.16.0 format --check .",
+    "result": "328 files already formatted (post-merge)",
+    "advisory_check_parity": "uvx ruff@0.16.0 check on the three touched src files: 7 errors at base, 7 errors on branch (no new findings). New test file: All checks passed!"
+  },
+  "scope_kept": {
+    "dedicated_event_kind": "table_region_geometry_hard_fail, registered in TABLE_DISTRUST_KINDS and in audit_log.py rank",
+    "no_kind_collision": "table_region_unverifiable untouched; D3 page carries detection then disposition, once each, pinned by test",
+    "no_magic_numbers_in_src": "grep for 62 / 245 / 25.3 over the three touched src files: NONE",
+    "gh211_updated_truthfully": "exhaustive reasons list gains a second true entry; page still the only untrusted one, still WARNING, still audit_passed=False, table_structure_failed still asserted present",
+    "no_routing_change": true,
+    "no_status_keying": true,
+    "issue_205_stays_open": "steps 2 and 3"
+  },
+  "housekeeping": {
+    "temp_base_worktree": "/Users/rubenffuertes/repos/.worktrees/socr-253-base -- REMOVED after the base runs; git worktree list shows nothing stray",
+    "main_checkout_untouched": true,
+    "force_push": false,
+    "merged": false
+  },
+  "ci": {
+    "conclusion": "GREEN",
+    "test (3.11)": "pass, 1m24s",
+    "typecheck": "pass, 16s",
+    "CodeRabbit": "pass (review skipped, manual review required for this OSS repo)",
+    "cubic AI code reviewer": "pass",
+    "run": "https://github.com/r-uben/socr/actions/runs/32373324003"
+  },
+  "main_drift": {
+    "what": "main moved to 49e491b (#254, #255) while this branch was in review; both touch orchestrator.py::_phase_analyze",
+    "consequence": "GitHub could not compute a merge commit for the CONFLICTING PR, so NO CI workflow ran on it -- checks showed only CodeRabbit. This is a trap for the rest of the stack.",
+    "resolution": "MERGED main in (commit 013c1b2), not rebased -- a rebase needs a force-push, which this run forbids. Conflict was purely additive: main's GH-195 text_grid_rejected emission next to this branch's GH-205 call; both kept, main's first. Append order is not observable (build_run_audit sorts by (page_num, rank)).",
+    "cost": "the branch now carries two commits instead of one; flagged deliberately"
+  },
+  "mergeable": "MERGEABLE"
+}
