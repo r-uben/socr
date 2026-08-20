@@ -1,0 +1,37 @@
+{
+  "pr": 252,
+  "head": "4243212",
+  "reviewer": "gpt-sol",
+  "access_proof": {
+    "cmd": "bash $PLAN/bin/isolation_canary.sh --read-only /Users/rubenffuertes/repos/.worktrees/socr-night-base",
+    "output": "CANARY OK (read-only mode): worktree = /Users/rubenffuertes/repos/.worktrees/socr-night-base\n           HEAD          = 53b0637b928c486e9ff3023fa9527905fec017b2\n           note: interpreter NOT checked; this proves the tree, not import isolation.\n           Anyone running tests must use full mode instead."
+  },
+  "verdict": "REQUEST-CHANGES",
+  "content_loss_actually_fixed": true,
+  "guards_assert_shipped_output": true,
+  "non_vacuity_confirmed": true,
+  "reproduced_baseline_fail": true,
+  "partial_disagreement_sound": false,
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "The phase-major document sweep happens after overall status is computed, so a document whose only defect is a fabricated image ref remains DocumentStatus.SUCCESS with audit_passed=True even though the ref is removed and an error note is later appended.",
+      "where": "src/socr/pipeline/orchestrator.py:5505",
+      "why": "fabricated_ref_pages is calculated at lines 5386-5392 before _guard_fabricated_image_refs_document creates the page-0 event at line 5505. Phase-major lanes never increment PageState.fabricated_image_refs, so pages_ok stays true and status is frozen as SUCCESS at lines 5394-5401. final_result then copies that status and sets audit_passed from it at lines 5508-5523. This contradicts the PR's claim that phase-major documents are flagged and violates the required document-status surface. Move the sweep before status calculation or explicitly demote status when its removal list is non-empty."
+    },
+    {
+      "severity": "major",
+      "what": "The stated reason for declining the issue's explicit 'fail the page, not warn' criterion is a false dichotomy: PageStatus.ERROR does not require replacing the cleaned text with a failure marker or losing the table.",
+      "where": "src/socr/pipeline/orchestrator.py:1778",
+      "why": "Winner selection is controlled by audit_passed, not PageOutput.status. The round-2 fix correctly keeps audit_passed=True, so it can set status=ERROR while retaining the cleaned OCR text as the winner. _winning_page_output returns that output unchanged, canonical_page_texts ships its text, and the resume ledger refuses the non-success page. WARNING is a defensible product choice, but it does not meet #225's literal acceptance criterion, and the claimed content-loss necessity does not exist in the code."
+    },
+    {
+      "severity": "minor",
+      "what": "The PR body's surfacing table is stale and overstates the current implementation.",
+      "where": "PR #252 body, Surfacing table",
+      "why": "It still says audit_passed=False even though round 2 deliberately preserves True, and says the phase-major document is flagged without disclosing that its DocumentStatus and audit_passed remain SUCCESS/True. The body also describes five tests although the head has eight."
+    }
+  ],
+  "what_i_tried_to_break": "Verified the round-1 root cause in _winning_page_output and traced the round-2 winner through canonical_page_texts: the cleaned qwen OCR table stays selected because audit_passed remains True. Confirmed all reverse guards assert _shipped_body/canonical_page_texts rather than merely the mutated PageOutput. Copied the head test file into the pinned baseline, ran it with PYTHONPATH isolation, and got 4 behavioural failures / 4 passes with no ImportError or AttributeError; removed it afterward. Ran the same focused file at head: 8 passed. Searched for MagicMock (none). Traced page sidecar, metadata, document status, and CLI handling, which exposed the phase-major ordering defect and showed that ERROR status need not delete cleaned page text.",
+  "base_worktree_left_clean": true
+}

@@ -1,0 +1,36 @@
+{
+  "pr": 253,
+  "head": "83f6ac8",
+  "reviewer": "gpt-sol",
+  "access_proof": {
+    "cmd": "bash /private/tmp/claude-501/-Users-rubenffuertes-repos-tools-socr/bae3cd33-3698-4e2f-999a-b6ed84289e24/scratchpad/planwt/docs/plans/2026-08-20_overnight-issue-sweep/bin/isolation_canary.sh --read-only /Users/rubenffuertes/repos/.worktrees/socr-night-base",
+    "output": "CANARY OK (read-only mode): worktree = /Users/rubenffuertes/repos/.worktrees/socr-night-base\n           HEAD          = 53b0637b928c486e9ff3023fa9527905fec017b2\n           note: interpreter NOT checked; this proves the tree, not import isolation.\n           Anyone running tests must use full mode instead."
+  },
+  "verdict": "REQUEST-CHANGES",
+  "existing_test_edit_legitimate": true,
+  "scope_held_no_routing_change": true,
+  "non_vacuity_confirmed": true,
+  "reproduced_baseline_fail": true,
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "The reused event kind no longer has one meaning: it previously denoted a D3 fail-closed page routed to an image asset, but now also denotes a detection-only page whose native output may ship. D3 pages also receive two same-kind events, inflating audit counts.",
+      "where": "src/socr/pipeline/orchestrator.py:867",
+      "why": "The established producer at src/socr/pipeline/orchestrator.py:5469 and contract comment at src/socr/core/audit_log.py:104-107 define table_region_unverifiable as routed/fail-closed. Consumers and humans cannot distinguish output disposition from kind/count alone after this change. Use a distinct detection event or migrate the kind contract and de-duplicate the D3 emission explicitly."
+    },
+    {
+      "severity": "major",
+      "what": "The claimed scope guard exercises only _phase_analyze and cannot fail if later process/assemble logic keys the new event on document status, metadata, escalation, or routing.",
+      "where": "tests/test_gh205_tr3_unconditional_event.py:92",
+      "why": "Its assertions at lines 109-121 inspect immediate PageState fields only. The event is consumed later by build_tables_trust and document metadata assembly; a future or accidental downstream status/routing branch would pass this guard. The binding no-routing constraint needs an end-to-end process test, with the provider ladder patched for CI hermeticity."
+    },
+    {
+      "severity": "major",
+      "what": "Empirical sample counts and a disputed sample-specific rate are hardcoded into source comments, tests, and runtime event detail.",
+      "where": "src/socr/pipeline/orchestrator.py:839",
+      "why": "Project instructions prohibit hardcoding empirical data in source. Issue #205 also records that neither 25.3% nor 13.8% is 'the' rate. Runtime detail at lines 873-875 bakes the 62-page sample into every future document; describe the pending hand-judgement without sample-specific constants."
+    }
+  ],
+  "what_i_tried_to_break": "Started with the modified GH-211 exhaustive assertion and confirmed it remains exhaustive and additively records a real second event, so that edit is legitimate. Traced every changed production line and found no direct page/document status, escalation, or routing mutation. Traced the reused kind through audit_log.py, tables_trust.py, metadata, CLI, and the pre-existing D3 producer; this exposed the semantic collision and duplicate same-kind D3 count. Inspected the scope guard and found it stops at _phase_analyze rather than exercising downstream consumers. Copied the new test to the pinned baseline, ran it with full isolation canary and PYTHONPATH, observed a behavioural F.. failure at the event assertion (not ImportError), deleted it, and verified the baseline worktree clean. No MagicMock-negative assertion is vacuous: assertions inspect concrete state/events returned after the stubbed detector call. The test does not drive _phase_agentic/process, so no provider patch is required for its current shape.",
+  "base_worktree_left_clean": true
+}

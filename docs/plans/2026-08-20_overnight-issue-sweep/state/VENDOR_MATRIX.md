@@ -47,3 +47,27 @@ adding capacity.
 Add it as the escalation seat for any `SPLIT` the adjudicator records, and as a
 third reviewer on any action whose two reviewers disagree. Do not re-run work that
 is already terminal.
+
+## Owner directive, 2026-08-20 ~07:xx — pane fallback for failing vendors
+
+Gemini errors out intermittently as a subagent or via the CLI. Two vendor seats hit
+`API Error: Server error mid-response` during this run (`triage-b2-gemini`,
+`triage-b2-flash`, and `rb-b1-gemini`).
+
+**Rule from here on:** when a vendor fails repeatedly, do NOT drop the seat and do NOT
+retry it the same way. Open a Herdr pane running `agy-yolo` and drive Gemini there
+instead. A pane is the general fallback for any vendor that keeps failing — opening
+panes is authorised without limit for this run.
+
+**The failure that actually matters** is losing a vendor silently: it collapses a
+two-vendor check into a single unchecked opinion while still looking like a check.
+If a seat cannot be filled at all, record it in the verdict as `MISSING` and treat it
+as a **split**, never as agreement.
+
+Note this run got that partly right and partly by luck: `rb-b1-gemini` reported
+`failed` at the transport level *after* writing all five of its review files, so its
+REJECT on the #147 close survived. Had it failed a minute earlier, the close would
+have had one approving reviewer, no second reading, and the tally would have held it
+as `only 1 reviewer(s) reported` — correct, but only because
+`bin/tally_review_board.py` counts reviewers mechanically rather than trusting that
+two were dispatched. That mechanical count is the thing to keep.

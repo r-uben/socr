@@ -34,6 +34,12 @@ closed**, **5 PRs open and unmerged**, 2 actions held for the owner.
 | W1–W3 | DONE | `state/checkpoint-wave{0,1,3}.json` |
 | F1 | DONE | `MORNING-REPORT.md` |
 
+## Late addition — GPT review round
+
+All four previously-unreviewed PRs were reviewed by independent GPT agents after the
+main run. **#252, #253, #254 and #255 all returned REQUEST-CHANGES with blocking
+findings.** #251 is the only PR that is ready. See `MORNING-REPORT.md` §6b.
+
 ## Open threads for the owner
 
 0. **`#252` round 2 is unreviewed.** Its reviewer found the original fix caused

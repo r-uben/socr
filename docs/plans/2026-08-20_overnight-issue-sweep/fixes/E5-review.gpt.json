@@ -1,0 +1,41 @@
+{
+  "pr": 254,
+  "head": "163ffcb",
+  "reviewer": "gpt-sol",
+  "access_proof": {
+    "cmd": "bash /private/tmp/claude-501/-Users-rubenffuertes-repos-tools-socr/bae3cd33-3698-4e2f-999a-b6ed84289e24/scratchpad/planwt/docs/plans/2026-08-20_overnight-issue-sweep/bin/isolation_canary.sh --read-only /Users/rubenffuertes/repos/.worktrees/socr-night-base",
+    "output": "CANARY OK (read-only mode): worktree = /Users/rubenffuertes/repos/.worktrees/socr-night-base\n           HEAD          = 53b0637b928c486e9ff3023fa9527905fec017b2\n           note: interpreter NOT checked; this proves the tree, not import isolation.\n           Anyone running tests must use full mode instead."
+  },
+  "verdict": "REQUEST-CHANGES",
+  "deleted_path_was_truly_dead": false,
+  "filter_widening_symmetric": true,
+  "non_vacuity_confirmed": true,
+  "reproduced_baseline_fail": true,
+  "per_issue": {
+    "195": "Not accepted: the issue explicitly requires page status and document status, but the PR deliberately leaves both unchanged. An AuditEvent and CLI warning are useful metadata/visibility, not the requested status-bearing propagation.",
+    "197": "Not accepted: numeric_scope=None means no extracted grid cell passes _cell_has_numeric_token; it does not prove the native layer contains no numeric token or that the grid did not corrupt it into a non-numeric-looking cell. Skipping all checking can therefore hide real destruction.",
+    "198": "Candidate and survival widening move together and the decorated split tests are non-vacuous. However the PR codifies loss of significance stars as legal even though those stars carry econometric meaning, leaving semantic content loss silent."
+  },
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "The new None-scope early return deletes a reachable real-detection path based on an invalid inference.",
+      "where": "src/socr/tables/reconstruct.py:178",
+      "why": "_numeric_row_bbox derives None from the already-corrupted extracted grid: no cell's whitespace pieces are all numeric-token-shaped. That does not imply native words contain no numeric values. A native 0.67 whose grid cell became 0.6x, in a grid still admitted by _looks_tabular through embedded digits, yields None precisely because corruption made the cell fail _cell_has_numeric_token; the PR then keeps that corrupted grid without inspecting the native token. The current #197 test proves only the overrun false-positive case, not the universal claim used to remove detection."
+    },
+    {
+      "severity": "blocking",
+      "what": "The implementation does not meet #195's explicit page-status and document-status requirement.",
+      "where": "src/socr/pipeline/orchestrator.py:889",
+      "why": "The code explicitly says NOT a demotion and only appends an AuditEvent plus a console line. The issue and repository cardinal rule require failures to surface at page status, document status, metadata, and CLI. Correct fallback output may justify a repaired/warning status rather than damaged status, but not omitting both status surfaces while closing the issue."
+    },
+    {
+      "severity": "major",
+      "what": "Decoration-only significance-marker loss is explicitly accepted and regression-pinned as correct.",
+      "where": "tests/test_destruction_check_gh195_197_198.py:154",
+      "why": "In econometric tables, *** is not cosmetic styling; it encodes a significance category. Treating 0.67*** rendered as 0.67 as survival silently changes scientific meaning. Currency may sometimes be supplied by a caption, but significance stars cannot be discarded under the same blanket strip_presentation rule without independent evidence that their meaning survives elsewhere."
+    }
+  ],
+  "what_i_tried_to_break": "I traced the None-scope premise back through _numeric_row_bbox and _cell_has_numeric_token, constructed the counterexample class where corruption itself makes every extracted grid cell non-numeric-shaped while _looks_tabular still accepts embedded digits, checked candidate/survival symmetry for decorated values, compared #195's exact issue requirements to the AuditEvent-only implementation, inspected every new test for baseline-only symbols, and copied the complete PR test file into the pinned baseline worktree. Under an isolated PYTHONPATH canary it produced the claimed five behavioural failures and three passes; I deleted it afterward.",
+  "base_worktree_left_clean": true
+}

@@ -1,0 +1,38 @@
+{
+  "pr": 255,
+  "head": "2fe7355",
+  "reviewer": "gpt-sol",
+  "access_proof": {
+    "cmd": "bash $PLAN/bin/isolation_canary.sh --read-only /Users/rubenffuertes/repos/.worktrees/socr-night-base",
+    "output": "CANARY OK (read-only mode): worktree = /Users/rubenffuertes/repos/.worktrees/socr-night-base\n           HEAD          = 53b0637b928c486e9ff3023fa9527905fec017b2\n           note: interpreter NOT checked; this proves the tree, not import isolation.\n           Anyone running tests must use full mode instead."
+  },
+  "verdict": "REQUEST-CHANGES",
+  "host_resolution_robust": false,
+  "existing_patches_still_effective": true,
+  "scope_held_had_timeout_untouched": true,
+  "non_vacuity_confirmed": true,
+  "reproduced_baseline_fail": true,
+  "pr_body_claims_accurate": false,
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "The default path still probes Ollama localhost for a configured vLLM backend, so the issue's named non-Ollama false-halt remains unless callers know to inject a separate imperative seam.",
+      "where": "src/socr/pipeline/orchestrator.py:5145",
+      "why": "With PipelineConfig(qwen_vllm_url='http://gpu-node.cluster:8000/v1') and no OLLAMA_HOST/ollama_host, _probe_backend_idle called probe_ollama_idle('http://localhost:11434') and returned False. The CLI only constructs UnifiedPipeline(config) and exposes no backend_probe assignment, so the PR body overclaims that defect 1 is resolved for vLLM/non-Ollama deployments. Resolve the probe from the selected backend/config, or make the non-Ollama probe declaratively configurable through the actual CLI/config path."
+    },
+    {
+      "severity": "major",
+      "what": "A bare unbracketed IPv6 host resolves to an invalid HTTP endpoint.",
+      "where": "src/socr/tables/extract.py:107",
+      "why": "resolve_ollama_host('::1') returns 'http://::1'; it neither brackets the address nor appends :11434. Bracketed IPv6 shapes work, but the resolver advertises bare host spelling and has no IPv6 regression case."
+    },
+    {
+      "severity": "minor",
+      "what": "The scope guard checks source-text presence rather than trigger behavior.",
+      "where": "tests/test_gh222_probe_host.py:101",
+      "why": "The actual diff leaves _had_timeout untouched, but this assertion would still pass if a second condition overrode or bypassed that predicate while the old line remained. It pins spelling, not behavior."
+    }
+  ],
+  "what_i_tried_to_break": "Exercised bare host, explicit port, existing scheme, trailing slash, blank/whitespace, bracketed and unbracketed IPv6; traced the CLI construction path; demonstrated a remote qwen_vllm_url still probes localhost; ran all four existing test files that patch socr.pipeline.orchestrator.probe_ollama_idle (69 passed, 2 xfailed); directly verified the module-level patch and custom seam; ran the five new tests plus both config meta-tests (7 passed); copied the new test to the pinned baseline and reproduced two behavioral assertion failures (2 failed, 3 passed), then removed it.",
+  "base_worktree_left_clean": true
+}

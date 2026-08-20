@@ -11,7 +11,7 @@
 - **Nothing was closed.** 62 issues open at the start, 62 open now.
 - **6 correction comments posted**, every issue verified still open afterwards.
 - **2 actions held for you**, including the run's only close.
-- **5 PRs open, none merged**: #251–#255. #252's blocking review findings (including a content-loss defect caused by the fix itself) were **found and then fixed** in a second round — but that second round is unreviewed.
+- **5 PRs open, none merged**: #251–#255. **#251 is the only one ready.** A late GPT review round (§6b) returned `REQUEST-CHANGES` on #252, #253, #254 and #255 — every one with a blocking defect.
 - **Zero fabricated citations** across 192 machine-checked verdicts.
 
 The single most valuable thing that happened tonight was a fix **not** being
@@ -356,6 +356,56 @@ self-verifies. Detail in `logs/2026-08-20_stacked-prs-get-no-ci.md`.
 
 ---
 
+## 6b. GPT review round — added after the main run, and it changes the picture
+
+GPT's quota returned and the owner asked for the missing reviewers. Four independent
+GPT reviewers were dispatched, one per PR, each seeing only its own PR and each
+prompted to refute rather than confirm.
+
+**All four returned `REQUEST-CHANGES`. Every one found at least one blocking defect.**
+All four confirmed non-vacuity, all four reproduced the baseline failure themselves,
+and all four left the reference worktree clean — so these are grounded readings, not
+drive-by rejections. Each posted its findings as a comment on its PR.
+
+| PR | verdict | blocking finding |
+|---|---|---|
+| #252 | **REQUEST-CHANGES** | The phase-major document sweep happens after overall status is computed, so a document whose only defect is a fabricated image ref remains DocumentSta |
+| #253 | **REQUEST-CHANGES** | The reused event kind no longer has one meaning: it previously denoted a D3 fail-closed page routed to an image asset, but now also denotes a detectio |
+| #254 | **REQUEST-CHANGES** | The new None-scope early return deletes a reachable real-detection path based on an invalid inference. |
+| #255 | **REQUEST-CHANGES** | The default path still probes Ollama localhost for a configured vLLM backend, so the issue's named non-Ollama false-halt remains unless callers know t |
+
+The three worst, in the order I would read them:
+
+- **#254 — a real detection path was deleted.** `reconstruct.py:178`: the new
+  None-scope early return removes a *reachable* real-detection path on an invalid
+  inference. This was the single edit I flagged to the reviewer as the most dangerous
+  in the stack, and it did not survive contact. #254 also fails #195's explicit
+  page-status and document-status requirement.
+- **#252 — the document sweep runs too late.** `orchestrator.py:5505`: the phase-major
+  sweep happens *after* overall status is computed, so a document whose only defect is
+  a fabricated ref can still finish clean. Round 2 fixed the content loss; it did not
+  fix the surfacing. GPT also calls the "warn, don't fail" argument a false dichotomy.
+- **#255 — the named defect is still live on the default path.** `orchestrator.py:5145`:
+  a configured vLLM backend still gets probed at Ollama's localhost, which is exactly
+  the non-Ollama case #222 is about. The host resolver improved; the wiring did not
+  reach the default path.
+
+**#253** is the mildest but still blocking: reusing the `table_region_unverifiable`
+event kind gives it two meanings, and its scope guard only exercises `_phase_analyze`,
+so it could not catch scope creep in `process`/`assemble`.
+
+**What this means for the merge order.** Nothing in the stack is ready. #251 remains
+the only PR that is both CI-verified and approved by its reviewer — it is still
+mergeable on its own. Everything above it needs another round.
+
+**What this means about the night.** My earlier assessment said to assume the
+unreviewed PRs contained problems comparable to the one reviewed PR. That was right,
+and if anything understated: the base rate is now five reviews, five substantive
+rejections, zero clean passes. The implementation seat outran the review seat all
+night, and the review seat is where the value was.
+
+---
+
 ## 7. Deferred measurements — what needs the corpus
 
 A local corpus exists at `~/data/fiscal-ballast` (302 PDFs); the specific cited runs
@@ -449,20 +499,21 @@ stated reason was wrong. Proof in `logs/2026-08-20_A1-sentinel-transcript.md`.
    p26 characterisation. Say post-corrected or drop.
 3. **One line in `ci.yml`** (2 min, optional). Drop `branches: [main]` from the
    `pull_request:` trigger so stacked PRs get CI. Pays for itself immediately.
-4. **Read #252's round-2 fix** (10 min). A reviewer found the original caused silent
+4. **Merge only #251 for now** (2 min). It is the only PR with both CI and an
+   approving reviewer. Everything above it was rejected in §6b.
+5. **Read #252's round-2 fix** (10 min). A reviewer found the original caused silent
    content loss on born-digital pages; the code owner reproduced it, root-caused it
    to `audit_passed` being the winner-selection flag, and fixed it — but round 2 is
    unreviewed. It also declines part of the issue's literal wording (page stays
    WARNING, document becomes AUDIT_FAILED) on cardinal-rule grounds. Confirm you
    agree. See §6.
-5. **Get #253, #254 and #255 reviewed** (30 min). None has CI *or* an independent
-   reviewer — only the author's own tests. #253 is deliberately narrow (AuditEvent
-   only); confirm you want that scope before it grows.
-6. **Settle #147** (15 min, design). Narrow the closing Note to table pages and
+5. **Read the four GPT reviews** (20 min) — §6b. They are now reviewed, and all four
+   were rejected with blocking findings. Start with #254's deleted detection path.
+7. **Settle #147** (15 min, design). Narrow the closing Note to table pages and
    close it, or keep the literal reading and accept the work. The measurement in
    `fixes/E4-result.json` is the input. Worth a GPT second opinion now that its
    quota is back.
-7. **Decide what to do with 32 live fix candidates** (30 min). That is the real
+8. **Decide what to do with 32 live fix candidates** (30 min). That is the real
    output of the night. The backlog is not stale; it is deep. `fixes/queue.json`
    lists the 28 that were adjudicated FIX-CANDIDATE but deliberately not attempted,
    because authoring fix scope at 04:00 is how #250 happened.
