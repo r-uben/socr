@@ -837,12 +837,20 @@ class UnifiedPipeline:
         # numbers as a silent SUCCESS — and until now it was visible only as a
         # logger.warning inside reconstruct.py. A log line is not a surface.
         #
-        # NOT a demotion. The fallback rowizer is proven lossless in isolation
-        # (GH-144 A1 §2 control), so the page ships correct numbers and must not
-        # be flagged as damaged. What the run needs to know is that this page's
-        # layout is ADVERSARIAL to the text strategy and is worth spot-checking —
-        # a different statement from "this page is wrong", and the issue asks for
-        # exactly the first one.
+        # This IS a demotion, at page and document level (round 2 of the #254
+        # review). An earlier version of this comment argued the opposite — that
+        # the fallback rowizer being lossless in isolation (GH-144 A1 §2 control)
+        # meant the page must not be flagged — and the review did not accept it:
+        # #195 requires the rejection to reach page status and document status,
+        # not only metadata and the CLI.
+        #
+        # The demotion is STATUS-ONLY and the page keeps its rebuilt text. What
+        # it says is "this page's layout is adversarial to the text strategy and
+        # a grid had to be thrown away and rebuilt" — worth spot-checking, and
+        # operationally different from a clean first-pass render. See
+        # ``_winning_page_output``'s ``grid_rejected`` term for the page surface
+        # and ``text_grid_rejected_pages`` in ``_phase_assemble`` for the
+        # document one.
         for pa in assessment.pages:
             rejections = getattr(pa, "text_grid_rejections", None) or []
             if not rejections:
