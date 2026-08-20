@@ -1,0 +1,203 @@
+[
+ {
+  "pdf": "2002__cochrane_piazzesi__bond_risk_premia__WP.pdf",
+  "name": "2002__cochrane_piazzesi__bond_risk_premia__WP.pdf",
+  "pages": [
+   {
+    "page": 7,
+    "kind": "table",
+    "se": 48,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 10,
+    "kind": "table",
+    "se": 20,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 12,
+    "kind": "table",
+    "se": 16,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 15,
+    "kind": "table",
+    "se": 14,
+    "math": 0,
+    "imgs": 0
+   }
+  ]
+ },
+ {
+  "pdf": "2015__gertler_karadi__monetary_policy_surprises__credit_costs_economic_activity__AEJ.pdf",
+  "name": "2015__gertler_karadi__monetary_policy_surprises__credit_cost",
+  "pages": [
+   {
+    "page": 14,
+    "kind": "table",
+    "se": 27,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 15,
+    "kind": "table",
+    "se": 22,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 16,
+    "kind": "table",
+    "se": 16,
+    "math": 0,
+    "imgs": 0
+   }
+  ]
+ },
+ {
+  "pdf": "2018__nakamura_steinsson__high_frequency_identification_of_monetary_non_neutrality__QJE.pdf",
+  "name": "2018__nakamura_steinsson__high_frequency_identification_of_m",
+  "pages": [
+   {
+    "page": 42,
+    "kind": "table",
+    "se": 76,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 13,
+    "kind": "table",
+    "se": 27,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 43,
+    "kind": "table",
+    "se": 27,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 44,
+    "kind": "table",
+    "se": 27,
+    "math": 0,
+    "imgs": 0
+   }
+  ]
+ },
+ {
+  "pdf": "2020__pflueger_rinaldi__fed_moves_market__WP.pdf",
+  "name": "2020__pflueger_rinaldi__fed_moves_market__WP.pdf",
+  "pages": [
+   {
+    "page": 34,
+    "kind": "table",
+    "se": 9,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 43,
+    "kind": "equation",
+    "se": 0,
+    "math": 7,
+    "imgs": 0
+   }
+  ]
+ },
+ {
+  "pdf": "2021__kaminska_mumtaz_sustek__monetary_policy_surprises_transmision_through_term_premia_and_expected_interest_rates__BoE.pdf",
+  "name": "2021__kaminska_mumtaz_sustek__monetary_policy_surprises_tran",
+  "pages": [
+   {
+    "page": 39,
+    "kind": "table",
+    "se": 8,
+    "math": 0,
+    "imgs": 0
+   },
+   {
+    "page": 33,
+    "kind": "figure",
+    "se": 0,
+    "math": 0,
+    "imgs": 1
+   },
+   {
+    "page": 34,
+    "kind": "figure",
+    "se": 0,
+    "math": 0,
+    "imgs": 1
+   },
+   {
+    "page": 38,
+    "kind": "figure",
+    "se": 0,
+    "math": 0,
+    "imgs": 1
+   }
+  ]
+ },
+ {
+  "pdf": "2022__bauer_swanson__reassessment_monetary_policy_surprises__WP.pdf",
+  "name": "2022__bauer_swanson__reassessment_monetary_policy_surprises_",
+  "pages": [
+   {
+    "page": 21,
+    "kind": "table",
+    "se": 20,
+    "math": 0,
+    "imgs": 0
+   }
+  ]
+ },
+ {
+  "pdf": "2022__kekre_lenel__monetary_policy_redistribution__Econometrica.pdf",
+  "name": "2022__kekre_lenel__monetary_policy_redistribution__Econometr",
+  "pages": [
+   {
+    "page": 20,
+    "kind": "equation",
+    "se": 0,
+    "math": 14,
+    "imgs": 0
+   }
+  ]
+ },
+ {
+  "pdf": "2023__bauer_swanson__reassessment_of_monetary_policy_surprises__WP.pdf",
+  "name": "2023__bauer_swanson__reassessment_of_monetary_policy_surpris",
+  "pages": [
+   {
+    "page": 20,
+    "kind": "table",
+    "se": 20,
+    "math": 0,
+    "imgs": 0
+   }
+  ]
+ },
+ {
+  "pdf": "2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.pdf",
+  "name": "2023__bybee__the_ghost_in_the_machine_beliefs_with_llm__WP.p",
+  "pages": [
+   {
+    "page": 34,
+    "kind": "figure",
+    "se": 0,
+    "math": 0,
+    "imgs": 1
+   }
+  ]
+ }
+]
