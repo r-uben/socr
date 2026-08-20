@@ -1687,6 +1687,203 @@ class UnifiedPipeline:
 
         page_out.text = text
 
+        # GH-225: provenance gate.  strip_phantom_images cannot adjudicate an
+        # absolute URL — it has no view of the source — so a fabricated
+        # ``![](https://i.imgur.com/…)`` survives it and every other gate,
+        # because a hyperlink is text.  This is the one FABRICATION check in a
+        # pipeline whose other gates all check for loss, so it runs on the same
+        # seam, before the provisional flush, and demotes the page.
+        self._guard_fabricated_image_refs(state, page_num, page_out, doc_dir)
+
+    def _guard_fabricated_image_refs(
+        self,
+        state: DocumentState,
+        page_num: int,
+        page_out: PageOutput,
+        doc_dir: Path | None,
+    ) -> None:
+        """Remove image refs with no provenance in the source, loudly (GH-225).
+
+        Deterministic and model-free: legitimacy is decided by the document
+        itself (its link annotations and text layer) plus the asset directory
+        socr wrote, never by a host allowlist and never by a network fetch —
+        reachability is not provenance.  See ``socr.core.url_provenance``.
+
+        The page is DEMOTED, not merely annotated.  #225's whole point is that
+        two pages shipped invented content under ``status: success`` with
+        ``judge_rejected: false`` and, on one of them, zero audit events; a
+        marker alone would leave a consumer gating on status none the wiser.
+        Demotion also makes the resume ledger refuse the page on a re-run
+        (GH-161), so the fabrication is re-OCR'd rather than restored.
+
+        Removal is content-safe: an image ref is a pure pointer, and a pointer
+        to an asset that does not exist carries nothing.  The invented target
+        and its alt text are preserved in the audit event, so nothing is lost
+        for forensics — only for the shipped corpus, which is the point.
+        """
+        text = page_out.text or ""
+        if "![" not in text:
+            return
+        try:
+            from socr.core.url_provenance import redact_fabricated_image_refs
+
+            cleaned, removed = redact_fabricated_image_refs(
+                text,
+                source_urls=self._source_url_index(state),
+                doc_dir=doc_dir,
+            )
+        except Exception as exc:  # a gate failure must never drop the page
+            logger.warning("GH-225: provenance gate errored on p%d (%s); text kept", page_num, exc)
+            return
+        if not removed:
+            return
+
+        page_out.text = cleaned
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.result import FailureMode
+
+        targets = [entry["target"] for entry in removed]
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="fabricated_image_ref",
+                engine=page_out.engine or "",
+                detail=(
+                    f"removed {len(removed)} image reference(s) absent from the source "
+                    "document's link annotations, text layer and asset directory"
+                ),
+                data={"targets": targets, "alts": [entry["alt"] for entry in removed]},
+            )
+        )
+        # #225 asks to FAIL the page, not warn on it, and the round-2 review is
+        # right that my reason for softening that to WARNING was a false
+        # dichotomy.  ERROR does NOT delete the cleaned text: winner selection is
+        # controlled by ``audit_passed`` (which stays True — see below), and
+        # ``failed_pages`` is derived from a page-failure MARKER in the body
+        # text, not from status, so an ERROR page with real text is never
+        # substituted for a marker.  Verified on the born-digital shape: the
+        # table still ships.  So the criterion is met as written.
+        #
+        # ``audit_passed`` is deliberately NOT flipped, and this is the whole
+        # correctness of the demotion.  In this codebase ``audit_passed=False``
+        # on ``best_output`` does not mean "flag this page" — it means "this
+        # attempt is not the winner": ``_winning_page_output`` (manifest.py:314)
+        # returns ``best_output`` only while it is True, and otherwise falls
+        # through to the born-digital native-text branch.  Flipping it here
+        # therefore threw away the CLEANED OCR page and shipped flattened native
+        # text under a fresh SUCCESS — on #225's own document class, the OBR
+        # born-digital pages.  The invented URL went, and the extracted table
+        # went with it, and the page was restamped clean.  That is a worse
+        # silent content loss than the fabrication this gate exists to remove.
+        #
+        # So the winner stays the winner and carries the demotion itself, and
+        # the document-level signal rides on ``fabricated_image_refs`` below
+        # rather than on the winner-selection flag.
+        if page_out.status == PageStatus.SUCCESS:
+            page_out.status = PageStatus.ERROR
+        if page_out.failure_mode == FailureMode.NONE:
+            page_out.failure_mode = FailureMode.HALLUCINATION
+        ps = state.pages.get(page_num)
+        if ps is not None:
+            ps.fabricated_image_refs = getattr(ps, "fabricated_image_refs", 0) + len(removed)
+        if not self.config.quiet:
+            console.print(
+                f"  [red]p{page_num}: {len(removed)} fabricated image reference(s) removed "
+                f"(no provenance in the source)[/red]"
+            )
+
+    def _source_url_index(self, state: DocumentState) -> frozenset[str]:
+        """Per-document cache of the source PDF's own URLs (GH-225).
+
+        Indexing walks every page's link annotations and text layer, so it is
+        computed once per document rather than once per page.  Keyed by the
+        resolved input path so a batch run does not reuse one document's index
+        for the next.
+        """
+        from socr.core.url_provenance import source_url_index
+
+        key = str(state.handle.path)
+        cached = getattr(self, "_source_url_cache", None)
+        if cached is None:
+            cached = {}
+            self._source_url_cache = cached
+        if key not in cached:
+            cached[key] = source_url_index(state.handle.path)
+        return cached[key]
+
+    def _guard_fabricated_image_refs_document(
+        self, state: DocumentState, final_text: str, doc_dir: Path | None
+    ) -> str:
+        """Document-level provenance sweep for the phase-major lanes (GH-225).
+
+        The page-major agentic loop demotes the individual page; these lanes have
+        no equivalent per-page seam at this point, so the signal is recorded
+        against page 0 (the document) and surfaces through ``metadata.json`` via
+        ``_fabricated_url_note``.  Stated plainly because it is a real gap: on
+        these lanes the fabrication is caught and removed, and the document is
+        flagged, but no individual PAGE status is demoted.
+        """
+        if "![" not in final_text:
+            return final_text
+        try:
+            from socr.core.url_provenance import redact_fabricated_image_refs
+
+            cleaned, removed = redact_fabricated_image_refs(
+                final_text,
+                source_urls=self._source_url_index(state),
+                doc_dir=doc_dir,
+            )
+        except Exception as exc:  # never lose the document over a gate
+            logger.warning("GH-225: document provenance gate errored (%s); text kept", exc)
+            return final_text
+        if not removed:
+            return final_text
+
+        from socr.core.audit_log import AuditEvent
+
+        state.events.append(
+            AuditEvent(
+                page_num=0,
+                kind="fabricated_image_ref",
+                engine=", ".join(state.engines_used) if state.engines_used else "",
+                detail=(
+                    f"removed {len(removed)} image reference(s) absent from the source "
+                    "document's link annotations, text layer and asset directory"
+                ),
+                data={
+                    "targets": [entry["target"] for entry in removed],
+                    "alts": [entry["alt"] for entry in removed],
+                    "scope": "document",
+                },
+            )
+        )
+        if not self.config.quiet:
+            console.print(
+                f"  [red]{len(removed)} fabricated image reference(s) removed from the "
+                f"document (no provenance in the source)[/red]"
+            )
+        return cleaned
+
+    @staticmethod
+    def _fabricated_url_note(events: list) -> str | None:
+        """Document-level one-liner naming pages that carried invented refs.
+
+        Mirrors ``_repetition_truncated_note``: a consumer gating on
+        ``metadata.json`` must see that a page shipped fabricated content
+        without parsing the full audit log.  ``None`` on a clean run.
+        """
+        pages = sorted({e.page_num for e in events if e.kind == "fabricated_image_ref"})
+        if not pages:
+            return None
+        # page 0 is the document-level sweep on the phase-major lanes, which has
+        # no page to name; render it as such rather than as a page called "0".
+        labels = ["document" if n == 0 else str(n) for n in pages]
+        return (
+            f"page(s) {', '.join(labels)}: "
+            "fabricated image reference(s) removed (no provenance in the source document)"
+        )
+
     # ------------------------------------------------------------------
     # GH-96: table escalation lane
     # ------------------------------------------------------------------
@@ -5182,9 +5379,52 @@ class UnifiedPipeline:
         # won't have per-page best_outputs.  A passing whole-doc attempt
         # covers the entire document -- treat it as success.
         has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
+        # GH-225: a page the model invented content on must not leave the run
+        # reporting a clean SUCCESS.  Because the fabrication demotion keeps the
+        # cleaned page as the winner (see ``_guard_fabricated_image_refs``), it
+        # deliberately does NOT flip ``best_output.audit_passed``, so it cannot
+        # reach the document through ``pages_needing_repair`` the way the other
+        # defects do.  It gets its own term, exactly like the three lists above.
+        # AUDIT_FAILED rather than ERROR: no real content was lost — the page
+        # ships correct text — so the CLI's "completed with warnings, output
+        # written" path is the honest one, not a hard failure.
+        # Strip phantom image references, and sweep for fabricated ones, BEFORE
+        # the status calculation below (#252 review, blocking).  This block used
+        # to sit after the status was already frozen, so a phase-major document
+        # whose ONLY defect was a fabricated link had the ref removed and an
+        # error note appended while still finishing SUCCESS / audit_passed=True —
+        # the document-status surface the issue requires, silently absent on
+        # exactly the lanes that have no per-page seam.  Running it here also
+        # means the saved body and the reported status are computed from the same
+        # text, which they previously were not.
+        from ocr_output_contract import doc_dir_for, relative_key
+
+        normalizer = OutputNormalizer()
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        if has_text:
+            final_text = normalizer.strip_phantom_images(final_text, output_dir=doc_dir)
+            # The phase-major lanes (single-engine, multi-engine, consensus,
+            # repair) never reach the agentic per-page seam, and the engines that
+            # invent image refs — Gemini, Mistral, any VLM — run on those lanes
+            # too.  Idempotent for agentic runs: the per-page seam already cleaned
+            # them, so this finds nothing.
+            final_text = self._guard_fabricated_image_refs_document(state, final_text, doc_dir)
+
+        fabricated_ref_pages = sorted(
+            n for n, p in state.pages.items() if getattr(p, "fabricated_image_refs", 0)
+        )
+        # The phase-major sweep has no PageState to increment, so its removals
+        # ride on the page-0 document event it records.  Without this term the
+        # sweep could redact a fabricated ref and still leave the run SUCCESS.
+        doc_fabrication = any(
+            getattr(e, "kind", "") == "fabricated_image_ref" and getattr(e, "page_num", None) == 0
+            for e in state.events
+        )
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
+        pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -5281,15 +5521,6 @@ class UnifiedPipeline:
         # Compute total processing time
         total_time = sum(r.processing_time for r in state.engine_runs)
 
-        # Strip phantom image references before saving
-        from ocr_output_contract import doc_dir_for, relative_key
-
-        normalizer = OutputNormalizer()
-        scan_root = self._scan_root or state.handle.path.parent
-        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
-        if has_text:
-            final_text = normalizer.strip_phantom_images(final_text, output_dir=doc_dir)
-
         # Build the final result
         final_result = EngineResult(
             document_path=state.handle.path,
@@ -5341,6 +5572,15 @@ class UnifiedPipeline:
         # can gate on by substring. ``tables_trust.json`` remains authoritative;
         # this only tells a consumer to go look. Appended (never overwriting) so
         # a lost-content or halt reason still reads first.
+        # GH-225: surface fabricated image references at document level, for
+        # the same reason GH-97 does above — a consumer reading metadata.json
+        # must be able to see that a page shipped invented content.
+        _fab_note = self._fabricated_url_note(state.events)
+        if _fab_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_fab_note}"
+            else:
+                final_result.error = _fab_note
         _trust_note = self._tables_trust_note(state)
         if _trust_note:
             if final_result.error:
