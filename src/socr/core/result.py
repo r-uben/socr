@@ -55,6 +55,11 @@ class FailureMode(str, Enum):
     LOW_WORD_COUNT = "low_word_count"
     TRUNCATED = "truncated"
     NATIVE_TABLE_STRUCTURE_FAILED = "native_table_structure_failed"
+    #: #259: the model DID produce a page, but no ladder rung was accepted
+    #: and the page carries a native-table-distrust flag. The model output
+    #: stays the winner (native cannot arbitrate a grid it could not parse);
+    #: this mode is what says the page ships flagged rather than clean.
+    MODEL_OUTPUT_FLAGGED = "model_output_flagged"
 
 
 @dataclass

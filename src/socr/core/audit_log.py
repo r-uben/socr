@@ -125,6 +125,7 @@ def build_run_audit(state) -> RunAudit:
         "dualpass_flag": 3,
         "table_region_geometry_hard_fail": 4,
         "table_region_unverifiable": 5,
+        "flagged_model_table_kept": 6,
         "native_fallback": 6,
         "page_failed": 7,
     }

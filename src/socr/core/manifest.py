@@ -28,7 +28,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from ocr_output_contract import (
@@ -293,6 +293,84 @@ def _native_text_with_appends(p) -> str:
     return base
 
 
+def flagged_model_page_output(p) -> PageOutput | None:
+    """#259: the model output a flagged table page must ship instead of native.
+
+    ``_winning_page_output`` returns ``best_output`` only while
+    ``audit_passed`` is True, and the agentic router sets
+    ``att.output.audit_passed = att.accepted`` for every attempt. So on a
+    born-digital table page where the ladder accepted nothing, a model output
+    that is fully PRESENT — real text, no floor, no hallucination verdict —
+    fell through to the native branch and was replaced wholesale by the native
+    reading.
+
+    That substitution collapses two different outcomes: *the model produced
+    nothing* and *the model produced something a check flagged*. Only the first
+    is a reason to fall back. The second hands the page to native precisely
+    when native is least able to arbitrate: the flag on these pages is a
+    native-table-distrust flag, i.e. the pipeline's own record that the native
+    text does not represent this table's grid. On the reference page
+    ``table_not_scorable`` had already fired — the native layer parsed four rows
+    that do not form a grid — at the moment native was chosen as the
+    replacement.
+
+    Returns the output to keep, or ``None`` to leave selection unchanged. The
+    caller demotes it; this predicate never mutates ``audit_passed``, which is
+    the winner-SELECTION flag and not a page-quality flag (flipping it discards
+    the page's content, the #252 round-1 defect).
+
+    Deliberately NOT widened beyond a table defect. A page demoted only by
+    ``needs_ocr_enhancement`` (deficient native prose) keeps today's behaviour:
+    there the model output was rejected on its own merits and native is a
+    legitimate reading, so preferring a rejected model page could ship garbage
+    over clean text.
+    """
+    if not (p.is_born_digital and p.native_text):
+        return None
+    # The two fail-closed floors are hard verdicts, not flags, and both ship an
+    # explicit failure marker rather than native — so neither is the
+    # substitution this fixes, and neither may be bypassed here.
+    if getattr(p, "scanned_table_evidence_failed", False):
+        return None
+    if p.native_table_structure_failed and (
+        getattr(p, "native_table_unverifiable", False)
+        or getattr(p, "native_table_header_unattributed", False)
+    ):
+        return None
+    if not (
+        p.native_table_structure_failed
+        or getattr(p, "native_table_unverifiable", False)
+        or getattr(p, "native_table_structure_defective", False)
+        or getattr(p, "native_table_header_unattributed", False)
+    ):
+        return None
+
+    bo = p.best_output
+    if bo is None or bo.audit_passed:
+        return None
+    if (bo.engine or "").startswith("native"):
+        return None
+    # "The model produced nothing" — the case that must still fall back.
+    if not (bo.text or "").strip():
+        return None
+    # A positively-rejected reading, not a flagged one: an ERROR output, or one
+    # a floor already overwrote with a failure marker, is not evidence of
+    # anything and must not displace the native reading.
+    if bo.status is PageStatus.ERROR or bo.failure_mode is FailureMode.HALLUCINATION:
+        return None
+    # The comparison being fixed is between two readings of a TABLE. If the
+    # model emitted no grid at all on a table page it did not produce the thing
+    # under comparison -- that is the "produced nothing" case for this
+    # predicate's purposes, and native remains the only table reading there is.
+    # Note this is a property of the model's own output alone; native structure
+    # is never consulted as ground truth, which is the root error #259 names.
+    from socr.tables.reconcile import find_table_blocks
+
+    if not find_table_blocks(bo.text):
+        return None
+    return bo
+
+
 def _winning_page_output(
     state: DocumentState,
     page_num: int,
@@ -392,6 +470,25 @@ def _winning_page_output(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+            )
+
+        # #259: a flagged-but-PRESENT model output stays the winner. Placed
+        # AFTER the D3 floor above so a hard-fail still fails closed, and before
+        # the native fallback below, which is the substitution being fixed.
+        # Demotion is by ``status``/``failure_mode`` on a COPY -- selection is
+        # settled at this point, and ``audit_passed`` on the frozen record keeps
+        # the resume ledger re-OCRing the page exactly as the native fallback did.
+        flagged_model = flagged_model_page_output(p)
+        if flagged_model is not None:
+            return replace(
+                flagged_model,
+                status=PageStatus.WARNING,
+                audit_passed=False,
+                failure_mode=(
+                    FailureMode.MODEL_OUTPUT_FLAGGED
+                    if flagged_model.failure_mode is FailureMode.NONE
+                    else flagged_model.failure_mode
+                ),
             )
 
         # An enhancement page (native layer known deficient) whose recovery was
