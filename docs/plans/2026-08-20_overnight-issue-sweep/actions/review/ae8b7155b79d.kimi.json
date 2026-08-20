@@ -1,0 +1,14 @@
+{
+  "action_id": "ae8b7155b79d",
+  "issue": 220,
+  "reviewer": "kimi",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-night-base show \"53b0637b928c486e9ff3023fa9527905fec017b2:src/socr/cli.py\" | sed -n '1037p'",
+    "output": "def review("
+  },
+  "vote": "APPROVE",
+  "reason": "The fifth (explicitly optional) acceptance item is genuinely unmet: the review CLI takes only doc_dir/--pdf/--output/--scale/--quality and the HTML/JS contains no filter control; 'n' jumps to the next page with ANY recorded signal, not pages a given gate fired on, so PARTIALLY-IMPLEMENTED with the issue kept open is correct.",
+  "refutation_attempted": "Tried to prove the gate-filter actually exists (which would flip the disposition): read cli.py review() signature and click decorators (no filter option), grepped review/html.py for filter/jump/goto (zero hits), and read the keydown handler — 'n' uses PAGES.findIndex(p.signals.length), i.e. any signal, not a named gate. Tried to find the other four criteria unmet (which would make the comment overstate): side-by-side render (image_b64 vs pages/NNN.md with loud MISSING/EMPTY panels), header with status/engine/provider plus signal chips (judge_rejected, audit event kinds, 'tables untrusted'), prev/next (j/k/arrows) and jump-to-page (rail buttons) all present; viewer is read-only over existing artefacts. Comment's '4 of 5 met' is exact.",
+  "unsatisfied_criteria": ["optional filter: only pages a given gate fired on"],
+  "comment_corrections": ""
+}

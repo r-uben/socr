@@ -1,0 +1,7 @@
+{"action_id":"37244541225c","issue":215,"reviewer":"ollama-deepseek",
+ "access_proof":{"cmd":"git -C /Users/rubenffuertes/repos/.worktrees/socr-night-base show \"53b0637b928c486e9ff3023fa9527905fec017b2:src/socr/core/born_digital.py\" | sed -n '1170p'","output":"                        structure_check.table_output_defect(native_text, words)"},
+ "vote":"APPROVE",
+ "reason":"The comment is accurate: header_cut_verdict landed as term 2 of table_output_defect but the native lane calls it with rules=None so the term abstains by construction, and the xfail test remains strict.",
+ "refutation_attempted":"Read table_output_defect (structure_check.py:270-290): term 2 runs only 'if words and rules', and the docstring states born_digital's native-lane check 'passes nothing and gets the shape term alone'. Confirmed born_digital.py:1170 calls table_output_defect(native_text, words) with rules defaulting to None. Confirmed test_native_only_records_header_defect_without_rerouting is @pytest.mark.xfail(strict=True) with reason text 'flips to XPASS the moment a sound predicate is wired back in'. No category error: the issue's defect (destroyed header bands ship undetected) is exactly the native-lane gap the comment names.",
+ "unsatisfied_criteria":[],
+ "comment_corrections":""}

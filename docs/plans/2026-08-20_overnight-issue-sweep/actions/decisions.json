@@ -1,0 +1,181 @@
+{
+ "d1ff9e8c7406": {
+  "action_id": "d1ff9e8c7406",
+  "issue": 144,
+  "kind": "comment",
+  "decision": "APPROVED",
+  "why_held": null,
+  "readings": {
+   "gemini-pro": {
+    "vote": "APPROVE",
+    "reason": "The status comment accurately describes the partial implementation and acknowledges its coverage holes without prematurely closing the issue.",
+    "refutation_attempted": "Attempted to refute the claim that the destruction check fires and rejects value-splitting grids; checked `reconstruct.py:171` and confirmed the fallback routing and logging matches the comment exactly.",
+    "unsatisfied_criteria": []
+   },
+   "ollama-deepseek": {
+    "vote": "APPROVE",
+    "reason": "The comment's central claim is accurate: the destruction check lands (reconstruct.py:171) but the fallback rowizer still loses values on the issue-comment synthetic, which I reproduced directly.",
+    "refutation_attempted": "Reproduced the issue #144 comment's 3-row synthetic at main_sha: the text-strategy grid is rejected ('destroyed 2 numeric tokens 0.85/1.00') and the fallback rowizer emits '| 6M Treasury | yield | 0.85 |' losing exactly 0.06/0.80/0.05/0.94 (LOST counter confirmed). Also confirmed the 6-row test fixture (test_no_table_value_is_lost) loses nothing, so the comment's distinction between the test fixture and the issue-comment synthetic is load-bearing and correct, not a category error. The coverage-hole references (#197 None-scope->table.bbox at reconstruct.py:169, #198 decorated numerics, #195 log-only) all resolve to real code.",
+    "unsatisfied_criteria": []
+   }
+  }
+ },
+ "524e08eaf32d": {
+  "action_id": "524e08eaf32d",
+  "issue": 146,
+  "kind": "comment",
+  "decision": "APPROVED",
+  "why_held": null,
+  "readings": {
+   "gemini-pro": {
+    "vote": "APPROVE",
+    "reason": "The adjudicator correctly assessed that the fix only partially resolves the issue, since header bands still ship as prose on the plain rowizer path.",
+    "refutation_attempted": "Attempted to refute the claim that `_extend_scope_for_header` only runs on the fallback scope. Checked `reconstruct.py:1154` and the comment confirms the scope limitation, matching the proposed status comment.",
+    "unsatisfied_criteria": []
+   },
+   "ollama-deepseek": {
+    "vote": "APPROVE",
+    "reason": "Cause 1 (unconditional grid[0] promotion) is fixed exactly as the issue prescribes (reconstruct.py:572 emits an empty header when _is_data_row), and cause 2 is genuinely partial, so PARTIALLY-IMPLEMENTED is the correct disposition.",
+    "refutation_attempted": "Verified reconstruct.py:572 guards with _is_data_row and emits an empty header (matches the issue's 'Immediate and safe' fix). Traced _extend_scope_for_header (called only at line 211, the destroyed-fallback) and _prepend_header_band (called at line 1102 inside rowize_from_word_list). The comment's phrase 'only on the rejected-grid fallback scope' is slightly imprecise for _prepend_header_band, which also runs on the plain rowizer path, but the substantive claim (the header-band half is not fully fixed and the corpus measurement is unreproduced) holds, so this is a wording nit, not a category error.",
+    "unsatisfied_criteria": []
+   }
+  }
+ },
+ "04d07063d61a": {
+  "action_id": "04d07063d61a",
+  "issue": 147,
+  "kind": "close",
+  "decision": "HELD-FOR-OWNER",
+  "why_held": [
+   "rejected by gemini-pro (The rotation check is nested inside `if has_tables:`, meaning rotated pages without tables bypass the gate entirely and ship as trusted native text, violating the explicit binding requirement.)"
+  ],
+  "readings": {
+   "gemini-pro": {
+    "vote": "REJECT",
+    "reason": "The rotation check is nested inside `if has_tables:`, meaning rotated pages without tables bypass the gate entirely and ship as trusted native text, violating the explicit binding requirement.",
+    "refutation_attempted": "Checked whether the fix satisfies the binding requirement for all pages. Found that `text_direction_is_rotated(direction)` is only checked if `has_tables` is True (born_digital.py:1119), leaving rotated non-table pages to ship as trusted native text.",
+    "unsatisfied_criteria": [
+     "A page whose dominant text direction is not horizontal must not ship as trusted native text in its current form (not met for pages where has_tables is False).",
+     "Measurement of non-horizontal pages across the 407-paper library to decide whether remedy (2) is warranted is buried by closing."
+    ]
+   },
+   "ollama-deepseek": {
+    "vote": "APPROVE",
+    "reason": "The binding requirement (no transposed native text ships) and remedy 1 (refuse lane, route to OCR) are both implemented at born_digital.py:1119 and verified by 20 passing tests; remedy 2 is explicitly conditional on a corpus measurement the issue itself declines to demand.",
+    "refutation_attempted": "Enumerated every acceptance criterion from the issue body: the Note (binding), remedy 1, remedy 2, and the 'worth measuring first' gate. Opened born_digital.py:1119 (refusal before extract_structured, prose retained, needs_ocr_enhancement + native_table_lane_refused set) and orchestrator.py:767 (landscape_page_refused event). Re-ran tests/test_landscape_detection_gh147.py + tests/test_landscape_refusal_a2_gh147.py at main_sha with PYTHONPATH isolation: 20 passed. Confirmed 13033a3 is an ancestor of main_sha. Tried to find a path where a rotated table page still ships transposed native text (has_tables False -> no rowizer runs; has_tables True -> refusal branch is unconditional first statement) and found none. The dissenting seats' remedy-2 objection is answered by the issue's own words: 'That number decides whether (2) is warranted'.",
+    "unsatisfied_criteria": []
+   }
+  }
+ },
+ "532ec048d535": {
+  "action_id": "532ec048d535",
+  "issue": 151,
+  "kind": "comment",
+  "decision": "HELD-FOR-OWNER",
+  "why_held": [
+   "rejected by ollama-deepseek (The comment's central claim 'the p26 evidence shape passes the gate' is false: the verbatim p26 markdown is ragged (row_widths 8,6,7,7,7,7,7) and fires structural_gate_fires, so the comment mischaracterizes the p26 case as 'rectangular' and overstates the gap.)"
+  ],
+  "readings": {
+   "gemini-pro": {
+    "vote": "APPROVE",
+    "reason": "The proposed comment correctly identifies that the structural gate exists but is intentionally narrowed, meaning the p26 rectangular evidence shape remains uncovered.",
+    "refutation_attempted": "Attempted to refute the claim that `structural_gate_fires` exists but narrows out `orphan_rows`. Checked `structure_check.py:210` and `born_digital.py:1155` and found the implementation accurately aligns with the proposed comment.",
+    "unsatisfied_criteria": []
+   },
+   "ollama-deepseek": {
+    "vote": "REJECT",
+    "reason": "The comment's central claim 'the p26 evidence shape passes the gate' is false: the verbatim p26 markdown is ragged (row_widths 8,6,7,7,7,7,7) and fires structural_gate_fires, so the comment mischaracterizes the p26 case as 'rectangular' and overstates the gap.",
+    "refutation_attempted": "Ran check_markdown + structural_gate_fires on GH151_P26_MD (the issue's verbatim p26 markdown, pinned in tests/test_structure_check_gh151.py): ragged=True, row_widths=(8,6,7,7,7,7,7), detached_label_rows=(5,), findings=('ragged','orphan_rows','detached_label'), structural_gate_fires=True. test_p26_grid_reported_defective and test_p26_seam_fires both assert this. So the p26 case fires the gate via raggedness AND the R2-unbound detached-label seam; only the spanning-headers and coefficient/SE-unbinding aspects pass. The comment's 'rectangular grid ... passes the gate' is a factual error that would post publicly.",
+    "unsatisfied_criteria": []
+   }
+  }
+ },
+ "37244541225c": {
+  "action_id": "37244541225c",
+  "issue": 215,
+  "kind": "comment",
+  "decision": "APPROVED",
+  "why_held": null,
+  "readings": {
+   "gemini-pro": {
+    "vote": "APPROVE",
+    "reason": "The adjudicator correctly points out that `table_output_defect` is called with `rules=None` on the native lane, bypassing the check.",
+    "refutation_attempted": "Attempted to refute the claim that the term never runs on the trusted-native lane. Checked `born_digital.py:1170` and found `rules=None` is indeed the default when calling `table_output_defect`, leaving the defect open on that lane.",
+    "unsatisfied_criteria": []
+   },
+   "ollama-deepseek": {
+    "vote": "APPROVE",
+    "reason": "The comment is accurate: header_cut_verdict landed as term 2 of table_output_defect but the native lane calls it with rules=None so the term abstains by construction, and the xfail test remains strict.",
+    "refutation_attempted": "Read table_output_defect (structure_check.py:270-290): term 2 runs only 'if words and rules', and the docstring states born_digital's native-lane check 'passes nothing and gets the shape term alone'. Confirmed born_digital.py:1170 calls table_output_defect(native_text, words) with rules defaulting to None. Confirmed test_native_only_records_header_defect_without_rerouting is @pytest.mark.xfail(strict=True) with reason text 'flips to XPASS the moment a sound predicate is wired back in'. No category error: the issue's defect (destroyed header bands ship undetected) is exactly the native-lane gap the comment names.",
+    "unsatisfied_criteria": []
+   }
+  }
+ },
+ "9862f4b02245": {
+  "action_id": "9862f4b02245",
+  "issue": 127,
+  "kind": "comment",
+  "decision": "APPROVED",
+  "why_held": null,
+  "readings": {
+   "kimi": {
+    "vote": "APPROVE",
+    "reason": "Span collapse confirmed inside extract_structured (born_digital.py:1553, def at 1355), get_links has zero hits across all of src/ at main_sha, and open issue #223 (36 unrepresented headings in the qwen lane, 'do not fold into #127') independently supports moving headings out of #127's scope while lists/links/emphasis stay.",
+    "refutation_attempted": "Tried to show the native-structure defect was being buried: the comment keeps the issue OPEN with lists/links/emphasis explicitly retained in scope, and #223 is itself OPEN, so no live defect loses its tracker home. Tried to falsify the 'contrast does not hold' claim: #223's measured table (qwen: 36 unrepresented headings, 20 pages with no ATX heading) confirms VLM pages do not reliably emit headings, matching the comment. Tried to find get_links called anywhere in src (not just the native lane): git grep over the whole tree at main_sha returns nothing, so 'never calls page.get_links()' is true.",
+    "unsatisfied_criteria": []
+   },
+   "ollama-minimax": {
+    "vote": "APPROVE",
+    "reason": "The comment accurately scopes #127 to lists/links/emphasis and explicitly hands headings to #223, which #223 itself documents as a falsification of #127's VLM-vs-native contrast.",
+    "refutation_attempted": "(1) Refuted ROADMAP-UMBRELLA as burying a live defect: born_digital.py:1553 confirms line_text still drops span info; a file-wide grep for page.get_links returned zero hits, so the native drop is real and remains this issue's scope. (2) Refuted the heading-split as wrong: opened #223 and confirmed it explicitly falsifies the VLM-vs-native contrast in #127 ('VLM pages emit real Markdown headings'). The proposed comment names #223 by number and points the heading half at it, so it does not get quietly closed when #127 is done. (3) Refuted as too vague to act on: comment is concrete (born_digital.py:1553, get_links absent, four features, golden regen) and the owner can act on it.",
+    "unsatisfied_criteria": []
+   }
+  }
+ },
+ "ae8b7155b79d": {
+  "action_id": "ae8b7155b79d",
+  "issue": 220,
+  "kind": "comment",
+  "decision": "APPROVED",
+  "why_held": null,
+  "readings": {
+   "kimi": {
+    "vote": "APPROVE",
+    "reason": "The fifth (explicitly optional) acceptance item is genuinely unmet: the review CLI takes only doc_dir/--pdf/--output/--scale/--quality and the HTML/JS contains no filter control; 'n' jumps to the next page with ANY recorded signal, not pages a given gate fired on, so PARTIALLY-IMPLEMENTED with the issue kept open is correct.",
+    "refutation_attempted": "Tried to prove the gate-filter actually exists (which would flip the disposition): read cli.py review() signature and click decorators (no filter option), grepped review/html.py for filter/jump/goto (zero hits), and read the keydown handler \u2014 'n' uses PAGES.findIndex(p.signals.length), i.e. any signal, not a named gate. Tried to find the other four criteria unmet (which would make the comment overstate): side-by-side render (image_b64 vs pages/NNN.md with loud MISSING/EMPTY panels), header with status/engine/provider plus signal chips (judge_rejected, audit event kinds, 'tables untrusted'), prev/next (j/k/arrows) and jump-to-page (rail buttons) all present; viewer is read-only over existing artefacts. Comment's '4 of 5 met' is exact.",
+    "unsatisfied_criteria": [
+     "optional filter: only pages a given gate fired on"
+    ]
+   },
+   "ollama-minimax": {
+    "vote": "APPROVE",
+    "reason": "The optional fifth criterion (filter to pages a given gate fired on) is genuinely unmet: the CLI takes only doc_dir/pdf_path/output/scale/quality, and the HTML 'n' key only filters by any-signal \u2014 there is no per-gate filter.",
+    "refutation_attempted": "(1) Tried to find a --gate or --filter flag in cli.py around the review() command (lines 1015-1100) \u2014 none exist; only doc_dir/pdf_path/output/scale/quality are decorated. (2) Tried to refute by claiming the 'n' jump-to-next-suspect satisfies the filter: opened review/html.py:514 \u2014 the handler is `PAGES.findIndex((p,ix)=>ix>cur && p.signals.length)`, i.e. any signal, not a specific gate. A calibration pass walking 'only the firings of judge_rejected' would still walk every signal. (3) Tried to refute as category error: issue #220 says optional, so PARTIALLY-IMPLEMENTED with 4/5 met is the right disposition \u2014 closing would be the error. The comment correctly states the disposition and does not close. (4) Refuted as overstated by 'CLI options are only doc_dir/pdf/output/scale/quality' \u2014 read the @click decorators literally, those are exactly the four plus the positional doc_dir and pdf_path. Statement is true.",
+    "unsatisfied_criteria": [
+     "optional filter: only pages a given gate fired on (issue #220 acceptance item)"
+    ]
+   }
+  }
+ },
+ "82eba5077926": {
+  "action_id": "82eba5077926",
+  "issue": 249,
+  "kind": "comment",
+  "decision": "APPROVED",
+  "why_held": null,
+  "readings": {
+   "kimi": {
+    "vote": "APPROVE",
+    "reason": "Both corrections are code-true: the value_guard row-count mismatch is structurally incapable of hard-rejecting (soft warn, and multiset hard-fail is explicitly disabled under a count discrepancy), and table_not_scorable grades with native_rows_from_page/rows_establish_grid \u2014 a parser whose own docstring says the verifier's _rows_by_y parser is 'deliberately NOT reused here' \u2014 so the unanimous FIX-CANDIDATE 'abstain on not_scorable' patch would have touched the wrong yardstick.",
+    "refutation_attempted": "Tried to find a hard-reject path triggered by the 49-vs-1 count gap: read _value_guard end-to-end (native_verifier.py:690-889) \u2014 row-count mismatch sets only row_count_warn_info; label-binding needs a systematic interleaved pattern; multiset CERTAIN_FAIL fires only under clean alignment and explicitly SHIPS FLAGGED under a count discrepancy (comment even names 'chart axis ticks' as the mis-pairing cause). Read the agentic.py dispatch (508-630): value_guard_row_count_warning emits then delegates, native_table_verifier_warn delegates to self._inner.assess, and _apply_structural_gate returns rejecting inner decisions unchanged \u2014 page 17's audit trail (two warns, no native_table_verifier_hard_fail) matches warn-and-delegate, so 'the verifier rejects it for disagreeing with the 49' is indeed imprecise. Tried to collapse the two-parser claim: native_rows_from_page is scoped via locate_tables with fitz block/line grouping, _rows_by_y_from_words works on whole-page words with pairing-derived y-band scoping \u2014 genuinely different, and on page 17 they produced 2 vs 49. Checked the #167 compatibility line: #167 scopes chart-asset lane entry for non-table pages while orchestrator.py:2255-2300 holds mixed pages (chart+table signals) out of the chart lane \u2014 distinct mechanisms, claim defensible.",
+    "unsatisfied_criteria": []
+   },
+   "ollama-minimax": {
+    "vote": "APPROVE",
+    "reason": "Both corrections are accurate and read independently from the code: row_count_warn is a soft warning (table ships), native_table_verifier_warn delegates to the inner judge, and the parser that grades the rung (numeric-tokens over the whole word stream) is genuinely different from the parser that drives table_not_scorable (label-aware, scoped to locate_tables regions) \u2014 so 'abstain on not_scorable' cannot be the one-line fix the unanimous FIX-CANDIDATE proposed.",
+    "refutation_attempted": "(1) Refuted as category-wrong the other way: tried to defend the FIX-CANDIDATE by arguing the soft-warning still routes away from native on chart pages. Opened native_verifier.py:138 \u2014 `row_count_warn: bool = False  # row-count mismatch soft-flag (table ships, status\u2192WARNING)`. The comment is in the dataclass itself, and `_value_guard` (lines 644+) describes the row-count check as a 'COMPLETENESS concern' that ships flagged, not as a hard reject. (2) Refuted as wrong about parser identity: opened native_rows.py:125 \u2014 the function's own docstring says 'native_verifier._rows_by_y is deliberately NOT reused here \u2014 it keeps numeric tokens only'. So the 49-row `_rows_by_y_from_words` count and the `native_rows_from_page` rows are different artifacts. Setting `not_scorable` to 'abstain' would change the table_not_scorable path, not the rung-rejection path. (3) Refuted as undermining #167 compatibility: read the chart_table_arbitration detail at orchestrator.py:2278 \u2014 it holds the page out of the page-level chart lane only; the page still runs the table verifier. The comment says exactly this ('mixed pages stay on the table route'), which is consistent with #167's chart-only claim. (4) Tried to refute as overstated by 'value_guard row-count is a SOFT WARNING': opened agentic.py:555 and read the surrounding code \u2014 `_emit_event` with `kind=value_guard_row_count_warning` fires before any return path; the function continues to other predicates and only `hard_fail` short-circuits with `accept=False`. So a soft row_count_warn does not by itself reject the rung. (5) Refuted as closing-worthy: the comment stays OPEN and posts a correction, not a close. Risk of wrong-direction patch is the exact failure mode the comment is trying to prevent.",
+    "unsatisfied_criteria": []
+   }
+  }
+ }
+}

@@ -1,0 +1,14 @@
+{
+  "action_id": "82eba5077926",
+  "issue": 249,
+  "reviewer": "kimi",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-night-base show \"53b0637b928c486e9ff3023fa9527905fec017b2:src/socr/cli.py\" | sed -n '1037p'",
+    "output": "def review("
+  },
+  "vote": "APPROVE",
+  "reason": "Both corrections are code-true: the value_guard row-count mismatch is structurally incapable of hard-rejecting (soft warn, and multiset hard-fail is explicitly disabled under a count discrepancy), and table_not_scorable grades with native_rows_from_page/rows_establish_grid — a parser whose own docstring says the verifier's _rows_by_y parser is 'deliberately NOT reused here' — so the unanimous FIX-CANDIDATE 'abstain on not_scorable' patch would have touched the wrong yardstick.",
+  "refutation_attempted": "Tried to find a hard-reject path triggered by the 49-vs-1 count gap: read _value_guard end-to-end (native_verifier.py:690-889) — row-count mismatch sets only row_count_warn_info; label-binding needs a systematic interleaved pattern; multiset CERTAIN_FAIL fires only under clean alignment and explicitly SHIPS FLAGGED under a count discrepancy (comment even names 'chart axis ticks' as the mis-pairing cause). Read the agentic.py dispatch (508-630): value_guard_row_count_warning emits then delegates, native_table_verifier_warn delegates to self._inner.assess, and _apply_structural_gate returns rejecting inner decisions unchanged — page 17's audit trail (two warns, no native_table_verifier_hard_fail) matches warn-and-delegate, so 'the verifier rejects it for disagreeing with the 49' is indeed imprecise. Tried to collapse the two-parser claim: native_rows_from_page is scoped via locate_tables with fitz block/line grouping, _rows_by_y_from_words works on whole-page words with pairing-derived y-band scoping — genuinely different, and on page 17 they produced 2 vs 49. Checked the #167 compatibility line: #167 scopes chart-asset lane entry for non-table pages while orchestrator.py:2255-2300 holds mixed pages (chart+table signals) out of the chart lane — distinct mechanisms, claim defensible.",
+  "unsatisfied_criteria": [],
+  "comment_corrections": ""
+}
