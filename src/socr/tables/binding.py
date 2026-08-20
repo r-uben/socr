@@ -46,8 +46,12 @@ worse than a missed one.
   native lane count; otherwise the whole table's column binding is
   unverifiable, and cell-level convictions stop there too — but a lane or
   column with no counterpart under ANY admissible assignment still surfaces
-  as ``native_unbound``/``model_unbound`` (see I1 below), rather than the
-  whole table's content vanishing behind the one flag.
+  as ``native_unbound``/``model_unbound`` (see I1 below), and a lane/column
+  that DOES have a plausible DP-aligned counterpart is never claimed as a
+  binding either way — it is counted ``ambiguous_count`` instead, so a real
+  disagreement hidden behind a lane/column mismatch is at least surfaced as
+  "not verified" rather than vanishing behind the one flag with no signal
+  at all.
 - **Uniqueness (C3)**: a native token binds to a cell only when exactly one
   row band and one lane claim it, and neither the band nor the lane is
   ambiguous with a neighbour. Otherwise the token is AMBIGUOUS and
@@ -960,6 +964,23 @@ def bind(words: list, markdown: str) -> BindingResult:
             if native_row.is_parent:
                 continue
             cand_row = grid.rows[cand_idx]
+
+            # I1 follow-up: a lane/column the DP maps has a plausible
+            # counterpart, so it is not the dropped/invented-digit signal
+            # native_unbound/model_unbound exist for -- but leaving it
+            # completely unreported was itself an unreported third state,
+            # no better than the silence this branch exists to fix. Count
+            # it as ambiguous -- the same "known geometry, not confidently
+            # convictable either way" bucket C3 already uses for exactly
+            # this shape of uncertainty -- once per row per mapped pair (one
+            # physical cell shared by both sides of I1), so a disagreement
+            # hidden behind a lane/column mismatch surfaces as an honest
+            # "not verified" rather than vanishing with no signal at all.
+            for lane, col_idx in lane_to_col.items():
+                col = col_idx + 1
+                cand_text = cand_row[col].strip() if col < len(cand_row) else ""
+                if lane in native_row.lane_tokens or (cand_text and is_numeric_token(cand_text)):
+                    result.ambiguous_count += 1
 
             for lane, (text, ambiguous) in native_row.lane_tokens.items():
                 if lane in mapped_lanes:

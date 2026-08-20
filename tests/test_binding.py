@@ -42,14 +42,21 @@ def _assert_bidirectional_coverage(result, native_total: int, candidate_total: i
     """I1 BIDIRECTIONALITY: every native data cell must be accounted for as
     matched, contradicted, native_unbound, or ambiguous -- and likewise
     every candidate data cell as matched, contradicted, model_unbound, or
-    ambiguous. A cell that is neither bound NOR reported unbound has been
-    dropped invisibly -- the exact defect shape BLOCKING 1 (round 1), HIGH 1,
-    and HIGH 2 each independently turned out to be. Scoped to tables where
-    `column_binding_unverifiable` is False: that is the case where full
-    cell-for-cell coverage is a clean, unconditional guarantee; the
-    already-degraded lane/column-mismatch path (HIGH 1's fix) only promises
-    that lanes/columns with no counterpart under ANY admissible assignment
-    surface as unbound, not full coverage of the ones it could place."""
+    ambiguous. A cell that is neither bound NOR reported unbound (NOR
+    ambiguous) has been dropped invisibly -- the exact defect shape
+    BLOCKING 1 (round 1), HIGH 1, and HIGH 2 each independently turned out
+    to be.
+
+    Applies even to tables where `column_binding_unverifiable` is True (the
+    lane/column-mismatch path HIGH 1's fix salvages): a lane/column the DP
+    salvage maps to a counterpart is not claimed as a binding (never
+    matched/contradicted -- the table stays column_binding_unverifiable
+    regardless), but it is not left unreported either. It is counted as
+    ambiguous, same as any other "known geometry, not confidently
+    convictable either way" cell -- an earlier version of this helper
+    excluded that branch from the invariant entirely, which was itself an
+    unreported third state (bound, reported-unbound, or silently mapped)
+    hiding behind the very branch I1 was written to fix."""
     matched = len(result.matched_cells)
     contradicted = len(result.contradicted_cells)
     native_seen = matched + contradicted + len(result.native_unbound) + result.ambiguous_count
@@ -568,6 +575,56 @@ def test_lane_column_mismatch_still_surfaces_invented_column_as_model_unbound():
     assert result.native_unbound == []
     unbound = {(u.row_path[-1], u.token) for u in result.model_unbound}
     assert unbound == {("Coef", "5.55")}
+    # I1: the DP-mapped pair (lane 0 <-> Val) is not claimed as a binding,
+    # but is not silently dropped either -- it must land in ambiguous_count,
+    # or coverage below fails. native_total=1 ("1.23"); candidate_total=2
+    # ("1.23" and "5.55").
+    _assert_bidirectional_coverage(result, native_total=1, candidate_total=2)
+
+
+def test_mapped_lane_disagreement_is_not_silently_dropped():
+    """Coordinator follow-up to HIGH 1: a lane the DP salvage maps to a
+    candidate column is never claimed as a binding (the table stays
+    `column_binding_unverifiable`), but a REAL disagreement at that mapped
+    position must not vanish with no signal at all either -- that would be
+    the exact silent-third-state gap the coordinator flagged: neither bound,
+    nor reported unbound, nor even counted as ambiguous.
+
+    Native has one lane (A=1.0, B=2.0). Candidate has two columns: "Val"
+    agrees with native for row A (1.0) but DISAGREES for row B (Val=9.0,
+    native says 2.0) -- a genuine wrong-digit case hidden behind a
+    lane/column-count mismatch. "Extra" never agrees with native at all, so
+    the DP maps lane 0 -> Val (score 1) and leaves Extra unmapped (score 0),
+    deterministically, not by tie-break.
+
+    Row B's disagreement must not be silently eaten: it cannot be asserted
+    `contradicted_cells` (the fix never claims a binding under a lane/column
+    mismatch), but it must show up as `ambiguous_count`, not nothing."""
+    words = [
+        w(50, 100, 90, 110, "A"),
+        w(150, 100, 180, 110, "1.0"),
+        w(50, 130, 90, 140, "B"),
+        w(150, 130, 180, 140, "2.0"),
+    ]
+    md = """
+|   | Val | Extra |
+|---|-----|-------|
+| A | 1.0 | 5.0   |
+| B | 9.0 | 5.0   |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is True
+    # Never a false conviction either way for the mapped (disagreeing) pair.
+    assert result.matched_cells == []
+    assert result.contradicted_cells == []
+    assert result.native_unbound == []
+    unbound = {(u.row_path[-1], u.token) for u in result.model_unbound}
+    assert unbound == {("A", "5.0"), ("B", "5.0")}
+    # One ambiguous cell per row for the mapped Val<->lane-0 pair -- this is
+    # the count that would be 0 (i.e. the disagreement plain vanished) before
+    # this fix.
+    assert result.ambiguous_count == 2
+    _assert_bidirectional_coverage(result, native_total=2, candidate_total=4)
 
 
 def test_invented_candidate_row_surfaces_its_values_as_model_unbound():
