@@ -38,6 +38,34 @@ def nums(markdown: str) -> list[str]:
     return out
 
 
+def _assert_bidirectional_coverage(result, native_total: int, candidate_total: int) -> None:
+    """I1 BIDIRECTIONALITY: every native data cell must be accounted for as
+    matched, contradicted, native_unbound, or ambiguous -- and likewise
+    every candidate data cell as matched, contradicted, model_unbound, or
+    ambiguous. A cell that is neither bound NOR reported unbound has been
+    dropped invisibly -- the exact defect shape BLOCKING 1 (round 1), HIGH 1,
+    and HIGH 2 each independently turned out to be. Scoped to tables where
+    `column_binding_unverifiable` is False: that is the case where full
+    cell-for-cell coverage is a clean, unconditional guarantee; the
+    already-degraded lane/column-mismatch path (HIGH 1's fix) only promises
+    that lanes/columns with no counterpart under ANY admissible assignment
+    surface as unbound, not full coverage of the ones it could place."""
+    matched = len(result.matched_cells)
+    contradicted = len(result.contradicted_cells)
+    native_seen = matched + contradicted + len(result.native_unbound) + result.ambiguous_count
+    candidate_seen = matched + contradicted + len(result.model_unbound) + result.ambiguous_count
+    assert native_seen == native_total, (
+        f"native side: accounted for {native_seen}, expected {native_total} "
+        f"(matched={matched} contradicted={contradicted} "
+        f"native_unbound={len(result.native_unbound)} ambiguous={result.ambiguous_count})"
+    )
+    assert candidate_seen == candidate_total, (
+        f"candidate side: accounted for {candidate_seen}, expected {candidate_total} "
+        f"(matched={matched} contradicted={contradicted} "
+        f"model_unbound={len(result.model_unbound)} ambiguous={result.ambiguous_count})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. THE MULTISET-KILLER
 # ---------------------------------------------------------------------------
@@ -323,6 +351,10 @@ def test_dropped_native_row_is_surfaced_not_silently_agreed():
     assert result.contradicted_cells == []
     a_c_matches = {(m.row_path[-1], m.value) for m in result.matched_cells}
     assert a_c_matches == {("A", "1.0"), ("A", "2.0"), ("C", "5.0"), ("C", "6.0")}
+    # I1: this is precisely the fixture round 1 shipped one-sided -- had the
+    # bidirectionality invariant been checked here then, it would have
+    # failed before the round-2/round-3 findings ever needed a reviewer.
+    _assert_bidirectional_coverage(result, native_total=6, candidate_total=4)
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +532,99 @@ def test_unlabeled_data_matrix_keeps_its_first_column():
     assert result.contradicted_cells == []
     matches = {(m.col_path[-1], m.value) for m in result.matched_cells}
     assert matches == {("OLS", "1.10"), ("IV", "1.11"), ("OLS", "2.20"), ("IV", "2.21")}
+
+
+# ---------------------------------------------------------------------------
+# 12. I1 BIDIRECTIONALITY -- round-2 review: both fixes above still went in
+#     one-sided. Round 1 fixed the native side (BLOCKING 1); the candidate
+#     side was never implemented (HIGH 2), and the column-mismatch early
+#     return dropped BOTH sides' cell signal for the whole table (HIGH 1).
+#     MEDIUM 3 is a third instance of the same root cause: a row-level "no
+#     candidate at all" fact getting demoted to vague in-row ambiguity.
+# ---------------------------------------------------------------------------
+
+
+def test_lane_column_mismatch_still_surfaces_invented_column_as_model_unbound():
+    """HIGH 1: on a lane/column-count mismatch `bind` used to return
+    immediately with ZERO cell signal for the whole table -- an invented
+    candidate column vanished exactly as completely as a genuinely
+    unknowable one. Reproduced with 1 native lane against 2 candidate
+    columns, the second wholly invented: the invented value must surface as
+    `model_unbound` even though the table stays `column_binding_unverifiable`
+    (never claiming a binding for it, only refusing to hide it)."""
+    words = [
+        w(50, 100, 90, 110, "Coef"),
+        w(150, 100, 180, 110, "1.23"),
+    ]
+    md = """
+|      | Val  | Extra |
+|------|------|-------|
+| Coef | 1.23 | 5.55  |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is True
+    # The one native lane DOES have a plausible candidate counterpart (their
+    # values agree), so it must not also be reported native_unbound.
+    assert result.native_unbound == []
+    unbound = {(u.row_path[-1], u.token) for u in result.model_unbound}
+    assert unbound == {("Coef", "5.55")}
+
+
+def test_invented_candidate_row_surfaces_its_values_as_model_unbound():
+    """HIGH 2: the candidate-side mirror of BLOCKING 1 (round 1's fix for a
+    dropped NATIVE row). An invented candidate row that `_bind_rows` cannot
+    anchor to anything used to never enter the per-cell walk at all, so its
+    values vanished with nothing but `row_binding_unverifiable` to show for
+    it -- C4's invented-digit signal, silently dropped instead of
+    surfaced."""
+    words = [
+        w(50, 100, 90, 110, "A"),
+        w(150, 100, 180, 110, "1.0"),
+        w(50, 130, 90, 140, "B"),
+        w(150, 130, 180, 140, "2.0"),
+    ]
+    md = """
+|          | Val  |
+|----------|------|
+| A        | 1.0  |
+| B        | 2.0  |
+| Invented | 99.0 |
+"""
+    result = bind(words, md)
+    assert result.row_binding_unverifiable is True
+    unbound = {(u.row_path[-1], u.token) for u in result.model_unbound}
+    assert unbound == {("Invented", "99.0")}
+    assert result.native_unbound == []
+    matched = {(m.row_path[-1], m.value) for m in result.matched_cells}
+    assert matched == {("A", "1.0"), ("B", "2.0")}
+    _assert_bidirectional_coverage(result, native_total=2, candidate_total=3)
+
+
+def test_dropped_row_ambiguity_does_not_hide_behind_ambiguous_count():
+    """MEDIUM 3: a native row with NO candidate counterpart at all is a
+    STRONGER, more specific fact than in-row lane jitter -- the ambiguity
+    gate exists to guard the per-cell walk (where a wrong lane assignment
+    could misattribute a value to the wrong column), not to swallow a
+    row that was never even reachable from the candidate side. Reproduced
+    with a duplicated row 15pt from its twin (inside `_WELL_SEPARATED_GAP_PT`,
+    so both copies are band-ambiguous): the duplication must surface as
+    `native_unbound`, not vanish into `ambiguous_count`."""
+    words = [
+        w(50, 100, 90, 110, "X"),
+        w(150, 100, 180, 110, "1.0"),
+        w(50, 115, 90, 125, "X"),
+        w(150, 115, 180, 125, "1.0"),
+    ]
+    md = """
+|   | Val |
+|---|-----|
+| X | 1.0 |
+"""
+    result = bind(words, md)
+    assert result.row_binding_unverifiable is True
+    tokens = [u.token for u in result.native_unbound]
+    assert tokens == ["1.0", "1.0"]
+    _assert_bidirectional_coverage(result, native_total=2, candidate_total=1)
 
 
 if __name__ == "__main__":

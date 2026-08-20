@@ -44,11 +44,21 @@ worse than a missed one.
   ``row_binding_unverifiable`` and nothing in it is convicted. Columns map
   left-to-right only when the candidate's data-column count equals the
   native lane count; otherwise the whole table's column binding is
-  unverifiable.
+  unverifiable, and cell-level convictions stop there too — but a lane or
+  column with no counterpart under ANY admissible assignment still surfaces
+  as ``native_unbound``/``model_unbound`` (see I1 below), rather than the
+  whole table's content vanishing behind the one flag.
 - **Uniqueness (C3)**: a native token binds to a cell only when exactly one
   row band and one lane claim it, and neither the band nor the lane is
   ambiguous with a neighbour. Otherwise the token is AMBIGUOUS and
   contributes to no conviction in either direction.
+- **Bidirectionality (I1)**: every native row and every candidate row must
+  be bound or explicitly reported unbound — a one-sided walk can see a
+  dropped native row (round 1's fix) but not an invented candidate row, or
+  vice versa. Row-level unbound detection therefore runs unconditionally,
+  never gated behind whether column geometry is itself verifiable this
+  call: a dropped/invented ROW is a fact about ``_bind_rows``'s whole-row
+  multiset anchoring, independent of per-column lane geometry.
 
 Deliberately does NOT use ``native_rows.py::LabeledRow.values`` — it drops
 empty cells and parent rows and cannot represent a binding.
@@ -766,6 +776,84 @@ class BindingResult:
         return self.fully_checked and self.no_known_contradiction
 
 
+def _best_lane_column_map(
+    native_rows: list[_NativeRow],
+    grid_rows: tuple[tuple[str, ...], ...],
+    row_binding: dict[int, int],
+    lane_count: int,
+    n_cand_cols: int,
+) -> dict[int, int]:
+    """The single monotone, injective lane -> (0-based data column) map that
+    maximises numeric agreement across rows ``_bind_rows`` already anchored.
+
+    Used only when ``lane_count != n_cand_cols`` (``bind`` has already set
+    ``column_binding_unverifiable``) to salvage column-level signal from an
+    otherwise-abandoned table. Same DP shape as
+    ``benchmark.table_exactness._best_lane_column_map`` — map / skip-lane /
+    skip-column, monotone and injective, so a genuine column transposition
+    is never explained away as a match — but scored from this module's own
+    native lane tokens and candidate cells rather than that module's
+    ``LabeledRow``, since binding.py's row/lane representation is its own.
+
+    The map is used ONLY to identify which lanes/columns the DP could not
+    place anywhere — the ones with no counterpart under ANY admissible
+    assignment of the rest — never to claim a value match or contradiction
+    for the lanes/columns it DOES place: the table stays
+    ``column_binding_unverifiable`` regardless of what this returns.
+    """
+    if lane_count == 0 or n_cand_cols == 0:
+        return {}
+
+    score = [[0] * n_cand_cols for _ in range(lane_count)]
+    for cand_idx, native_idx in row_binding.items():
+        native_row = native_rows[native_idx]
+        if native_row.is_parent:
+            continue
+        cand_row = grid_rows[cand_idx]
+        for lane, (native_text, ambiguous) in native_row.lane_tokens.items():
+            if ambiguous or not (0 <= lane < lane_count):
+                continue
+            for col_idx in range(n_cand_cols):
+                col = col_idx + 1
+                cand_text = cand_row[col].strip() if col < len(cand_row) else ""
+                if not cand_text or not is_numeric_token(cand_text):
+                    continue
+                if _normalize_numeric_token(native_text) == _normalize_numeric_token(cand_text):
+                    score[lane][col_idx] += 1
+
+    dp = [[0] * (n_cand_cols + 1) for _ in range(lane_count + 1)]
+    choice = [[""] * (n_cand_cols + 1) for _ in range(lane_count + 1)]
+    for i in range(lane_count + 1):
+        for j in range(n_cand_cols + 1):
+            if i == 0 and j == 0:
+                continue
+            best, best_choice = -1, ""
+            if i > 0 and j > 0:
+                candidate = dp[i - 1][j - 1] + score[i - 1][j - 1]
+                if candidate > best:
+                    best, best_choice = candidate, "map"
+            if j > 0 and dp[i][j - 1] > best:
+                best, best_choice = dp[i][j - 1], "skip_column"
+            if i > 0 and dp[i - 1][j] > best:
+                best, best_choice = dp[i - 1][j], "skip_lane"
+            dp[i][j] = best
+            choice[i][j] = best_choice
+
+    mapping: dict[int, int] = {}
+    i, j = lane_count, n_cand_cols
+    while i > 0 or j > 0:
+        move = choice[i][j]
+        if move == "map":
+            mapping[i - 1] = j - 1
+            i -= 1
+            j -= 1
+        elif move == "skip_column":
+            j -= 1
+        else:
+            i -= 1
+    return mapping
+
+
 def bind(words: list, markdown: str) -> BindingResult:
     """Bind *markdown*'s candidate grid to the native geometry in *words*.
 
@@ -790,10 +878,13 @@ def bind(words: list, markdown: str) -> BindingResult:
     )
     result.column_header_paths = build_column_header_paths(words, grid, lane_centers, header_words)
 
-    if lane_count == 0 or n_cand_cols != lane_count:
-        result.column_binding_unverifiable = True
-        return result
-
+    # I1 BIDIRECTIONALITY: row-level binding and its unbound-row signals run
+    # regardless of whether column geometry (lane_count vs n_cand_cols) is
+    # even usable this call. `_bind_rows` anchors rows from whole-row
+    # multisets, independent of lane geometry, so gating this behind the
+    # lane/column check (an early `return` used to) silently swallowed
+    # every row-level drop/invention signal whenever column geometry was
+    # ALSO unverifiable — this is exactly what HIGH 1 and HIGH 2 reported.
     row_binding = _bind_rows(native_rows, grid.rows)
     if len(row_binding) != len(grid.rows):
         result.row_binding_unverifiable = True
@@ -816,15 +907,86 @@ def bind(words: list, markdown: str) -> BindingResult:
     header_paths_by_lane = {chp.lane: chp for chp in result.column_header_paths}
 
     for idx, nr in unbound_native_rows:
-        for lane, (text, ambiguous) in nr.lane_tokens.items():
-            if ambiguous:
-                result.ambiguous_count += 1
-                continue
+        # MEDIUM 3: the row itself having no candidate counterpart at all is
+        # a STRONGER, more specific fact than a token's own in-row lane
+        # ambiguity (which exists to guard the per-cell walk below, where a
+        # wrong lane assignment could misattribute a value to the wrong
+        # column) — do not let `ambiguous` demote this to a vague
+        # `ambiguous_count` and hide that the whole row was dropped.
+        for lane, (text, _ambiguous) in nr.lane_tokens.items():
             chp = header_paths_by_lane.get(lane)
             col_path = chp.path if chp else (str(lane),)
             result.native_unbound.append(
                 UnboundCell(row_path=nr.row_path, col_path=col_path, token=text)
             )
+
+    # HIGH 2: the candidate-side mirror of BLOCKING 1. An invented candidate
+    # row that `_bind_rows` could not anchor to anything never enters the
+    # per-cell walk below (it isn't a key in `row_binding`), so its values
+    # must be reported here or they vanish — C4's invented-digit signal,
+    # dropped instead of surfaced.
+    for cand_idx, cand_row in enumerate(grid.rows):
+        if cand_idx in row_binding:
+            continue
+        row_path = (cand_row[0],) if cand_row and cand_row[0] else ()
+        for col in range(1, len(cand_row)):
+            model_value = cand_row[col].strip()
+            if not model_value or not is_numeric_token(model_value):
+                continue
+            lane = col - 1
+            chp = header_paths_by_lane.get(lane)
+            col_path = chp.path if chp else (str(lane),)
+            result.model_unbound.append(
+                UnboundCell(row_path=row_path, col_path=col_path, token=model_value)
+            )
+
+    if lane_count == 0 or n_cand_cols != lane_count:
+        result.column_binding_unverifiable = True
+
+        # HIGH 1: column geometry itself is unverifiable, but that is not
+        # licence to drop every cell signal for the whole table — only to
+        # stop CLAIMING a binding for it. `_best_lane_column_map` salvages
+        # what row_binding already proves: for each row we DO know binds,
+        # any lane/column the map could not place anywhere (under ANY
+        # admissible assignment) is unbound content, not an unknown.
+        lane_to_col = _best_lane_column_map(
+            native_rows, grid.rows, row_binding, lane_count, n_cand_cols
+        )
+        mapped_lanes = set(lane_to_col.keys())
+        mapped_cols = set(lane_to_col.values())
+
+        for cand_idx, native_idx in row_binding.items():
+            native_row = native_rows[native_idx]
+            if native_row.is_parent:
+                continue
+            cand_row = grid.rows[cand_idx]
+
+            for lane, (text, ambiguous) in native_row.lane_tokens.items():
+                if lane in mapped_lanes:
+                    continue
+                if ambiguous:
+                    result.ambiguous_count += 1
+                    continue
+                chp = header_paths_by_lane.get(lane)
+                col_path = chp.path if chp else (str(lane),)
+                result.native_unbound.append(
+                    UnboundCell(row_path=native_row.row_path, col_path=col_path, token=text)
+                )
+
+            for col_idx in range(n_cand_cols):
+                if col_idx in mapped_cols:
+                    continue
+                col = col_idx + 1
+                cand_text = cand_row[col].strip() if col < len(cand_row) else ""
+                if not cand_text or not is_numeric_token(cand_text):
+                    continue
+                chp = header_paths_by_lane.get(col_idx)
+                col_path = chp.path if chp else (str(col_idx),)
+                result.model_unbound.append(
+                    UnboundCell(row_path=native_row.row_path, col_path=col_path, token=cand_text)
+                )
+
+        return result
 
     for cand_idx, cand_row in enumerate(grid.rows):
         if cand_idx not in row_binding:
