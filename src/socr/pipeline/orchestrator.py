@@ -1759,11 +1759,29 @@ class UnifiedPipeline:
         # Never ship fabrication under SUCCESS.  WARNING rather than ERROR: the
         # rest of the page is real extracted text and must survive; it is the
         # invented pointer that is gone.
-        page_out.audit_passed = False
+        #
+        # ``audit_passed`` is deliberately NOT flipped, and this is the whole
+        # correctness of the demotion.  In this codebase ``audit_passed=False``
+        # on ``best_output`` does not mean "flag this page" — it means "this
+        # attempt is not the winner": ``_winning_page_output`` (manifest.py:314)
+        # returns ``best_output`` only while it is True, and otherwise falls
+        # through to the born-digital native-text branch.  Flipping it here
+        # therefore threw away the CLEANED OCR page and shipped flattened native
+        # text under a fresh SUCCESS — on #225's own document class, the OBR
+        # born-digital pages.  The invented URL went, and the extracted table
+        # went with it, and the page was restamped clean.  That is a worse
+        # silent content loss than the fabrication this gate exists to remove.
+        #
+        # So the winner stays the winner and carries the demotion itself, and
+        # the document-level signal rides on ``fabricated_image_refs`` below
+        # rather than on the winner-selection flag.
         if page_out.status == PageStatus.SUCCESS:
             page_out.status = PageStatus.WARNING
         if page_out.failure_mode == FailureMode.NONE:
             page_out.failure_mode = FailureMode.HALLUCINATION
+        ps = state.pages.get(page_num)
+        if ps is not None:
+            ps.fabricated_image_refs = getattr(ps, "fabricated_image_refs", 0) + len(removed)
         if not self.config.quiet:
             console.print(
                 f"  [red]p{page_num}: {len(removed)} fabricated image reference(s) removed "
@@ -5356,9 +5374,22 @@ class UnifiedPipeline:
         # won't have per-page best_outputs.  A passing whole-doc attempt
         # covers the entire document -- treat it as success.
         has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
+        # GH-225: a page the model invented content on must not leave the run
+        # reporting a clean SUCCESS.  Because the fabrication demotion keeps the
+        # cleaned page as the winner (see ``_guard_fabricated_image_refs``), it
+        # deliberately does NOT flip ``best_output.audit_passed``, so it cannot
+        # reach the document through ``pages_needing_repair`` the way the other
+        # defects do.  It gets its own term, exactly like the three lists above.
+        # AUDIT_FAILED rather than ERROR: no real content was lost — the page
+        # ships correct text — so the CLI's "completed with warnings, output
+        # written" path is the honest one, not a hard failure.
+        fabricated_ref_pages = sorted(
+            n for n, p in state.pages.items() if getattr(p, "fabricated_image_refs", 0)
+        )
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
+        pages_ok = pages_ok and not fabricated_ref_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS

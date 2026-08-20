@@ -48,6 +48,10 @@ class PageState:
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     judge_rejected: bool = False  # VLM judge rejected the best output
+    #: GH-225: how many image references on this page had no provenance in
+    #: the source document and were removed. Non-zero demotes the DOCUMENT
+    #: to AUDIT_FAILED; the page itself keeps its cleaned text and ships.
+    fabricated_image_refs: int = 0
     native_table_structure_failed: bool = False  # native table text lost its grid
     #: GH-151 TICKET-B1: grid-shape defect (ragged / detached-label row pair)
     #: found in the native markdown at extraction time. Deliberately a

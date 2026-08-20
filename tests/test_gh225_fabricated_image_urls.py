@@ -24,6 +24,7 @@ import pytest
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
+from socr.core.manifest import _winning_page_output, canonical_page_texts
 from socr.core.result import PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -74,7 +75,22 @@ def _pdf_with_link(tmp_path: Path, url: str) -> Path:
     return path
 
 
-def _state_for(pdf_path: Path, text: str) -> tuple[DocumentState, PageOutput]:
+def _shipped_body(state: DocumentState) -> str:
+    """What actually reaches the saved ``.md`` and ``pages/NNN.md``.
+
+    ``canonical_page_texts`` is the SINGLE source of truth for both (see its
+    docstring); it runs ``_winning_page_output`` per page. Asserting here rather
+    than on the ``PageOutput`` the gate mutated is the difference between
+    testing the predicate and testing the corpus — a fix that strips too much,
+    or that loses the winner to the native fallback, passes the former and fails
+    the latter.
+    """
+    return "\n\n".join(canonical_page_texts(state))
+
+
+def _state_for(
+    pdf_path: Path, text: str, *, born_digital: bool = False, native_text: str = ""
+) -> tuple[DocumentState, PageOutput]:
     state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
     out = PageOutput(
         page_num=1,
@@ -84,6 +100,8 @@ def _state_for(pdf_path: Path, text: str) -> tuple[DocumentState, PageOutput]:
         audit_passed=True,
     )
     ps = state.pages[1]
+    ps.is_born_digital = born_digital
+    ps.native_text = native_text
     ps.attempts.append(out)
     ps.best_output = out
     return state, out
@@ -108,17 +126,31 @@ def test_fabricated_image_url_is_removed_demoted_and_surfaced(tmp_path: Path) ->
     assert "## Public finances" in out.text
     # 3. Its removal is marked in the page body, not silent.
     assert "fabricated image reference removed" in out.text, out.text
-    # 4. The page no longer ships under SUCCESS with a passing audit.
+    # 4. The page no longer ships under SUCCESS.
     assert out.status != PageStatus.SUCCESS, out.status
-    assert out.audit_passed is False
+    # audit_passed MUST stay True. In this codebase it is the winner-selection
+    # flag, not a "flag this page" flag: _winning_page_output returns
+    # best_output only while it is True. Flipping it made assemble discard the
+    # cleaned OCR page and ship flattened native text under a fresh SUCCESS —
+    # a worse content loss than the fabrication. See
+    # test_born_digital_page_keeps_its_ocr_table_after_redaction.
+    assert out.audit_passed is True
     # 5. An audit event carries the invented target for forensics.
     events = [e for e in state.events if e.kind == "fabricated_image_ref"]
     assert len(events) == 1, state.events
     assert events[0].page_num == 1
     assert "https://i.imgur.com/1234567.png" in events[0].data["targets"]
-    # 6. The document level names the page.
+    # 6. The document level names the page, and the page is counted so the
+    #    document cannot report a clean SUCCESS.
     note = pipeline._fabricated_url_note(state.events)
     assert note is not None and "1" in note, note
+    assert state.pages[1].fabricated_image_refs == 1
+
+    # 7. END-TO-END: the same is true of what actually reaches the .md.
+    body = _shipped_body(state)
+    assert "i.imgur.com" not in body, body
+    assert "fabricated image reference removed" in body, body
+    assert "Borrowing falls over the forecast." in body, body
 
 
 def test_url_present_in_the_source_pdf_still_ships(tmp_path: Path) -> None:
@@ -142,6 +174,9 @@ def test_url_present_in_the_source_pdf_still_ships(tmp_path: Path) -> None:
     assert out.status == PageStatus.SUCCESS
     assert out.audit_passed is True
     assert not [e for e in state.events if e.kind == "fabricated_image_ref"]
+    assert getattr(state.pages[1], "fabricated_image_refs", 0) == 0
+    # END-TO-END: it must still be in what reaches the .md.
+    assert f"![Chart 2.3]({url})" in _shipped_body(state), _shipped_body(state)
 
 
 def test_local_asset_socr_wrote_still_ships(tmp_path: Path) -> None:
@@ -166,6 +201,8 @@ def test_local_asset_socr_wrote_still_ships(tmp_path: Path) -> None:
     assert out.status == PageStatus.SUCCESS
     assert out.audit_passed is True
     assert not [e for e in state.events if e.kind == "fabricated_image_ref"]
+    # END-TO-END: a real extracted figure must still be in the shipped body.
+    assert ref in _shipped_body(state), _shipped_body(state)
 
 
 def test_inline_links_are_not_touched(tmp_path: Path) -> None:
@@ -186,6 +223,7 @@ def test_inline_links_are_not_touched(tmp_path: Path) -> None:
 
     assert link in out.text, out.text
     assert out.status == PageStatus.SUCCESS
+    assert link in _shipped_body(state), _shipped_body(state)
 
 
 def test_data_uri_image_is_fabricated(tmp_path: Path) -> None:
@@ -206,4 +244,101 @@ def test_data_uri_image_is_fabricated(tmp_path: Path) -> None:
 
     assert "data:image/png" not in out.text, out.text
     assert "Before" in out.text and "After" in out.text
-    assert out.audit_passed is False
+    assert out.status != PageStatus.SUCCESS
+    assert state.pages[1].fabricated_image_refs == 1
+    body = _shipped_body(state)
+    assert "data:image/png" not in body, body
+    assert "Before" in body and "After" in body
+
+
+def test_born_digital_page_keeps_its_ocr_table_after_redaction(tmp_path: Path) -> None:
+    """The regression the first version of this fix CAUSED (PR #252 review, blocking).
+
+    #225's own document class is born-digital: the OBR EFO pages have a native
+    text layer AND a VLM OCR read that recovered the real table. Demoting the
+    page by flipping ``best_output.audit_passed`` looked correct in isolation,
+    but ``_winning_page_output`` returns ``best_output`` only while that flag is
+    True — so assemble fell through to the born-digital native branch, shipped
+    flattened native prose under a FRESH SUCCESS, and the extracted table went
+    with the invented URL. Fabrication removed, corpus damaged, page restamped
+    clean: strictly worse than the defect being fixed.
+
+    So this asserts the whole point at the output: the URL is gone AND the table
+    survives AND the page is not restamped clean.
+    """
+    pdf_path = _pdf_without_links(tmp_path)
+    doc_dir = tmp_path / "out"
+    doc_dir.mkdir()
+
+    native = "Table 2.3 Public finances\n\nborrowing forecast 2022 2023 2024\n"
+    ocr = (
+        "## Table 2.3 Public finances\n\n"
+        "| Year | Borrowing |\n|---|---|\n| 2022 | 177.0 |\n| 2023 | 139.2 |\n\n"
+        f"{FABRICATED_REF}\n"
+    )
+    state, out = _state_for(pdf_path, ocr, born_digital=True, native_text=native)
+
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    pipeline._sanitize_agentic_page_image_refs(state, 1, out, doc_dir)
+
+    body = _shipped_body(state)
+
+    # The fabrication is gone.
+    assert "i.imgur.com" not in body, body
+    assert "fabricated image reference removed" in body, body
+    # The extracted table SURVIVES. This is the content-loss assertion.
+    assert "177.0" in body and "139.2" in body, (
+        "the OCR table was thrown away and native text shipped instead — the fix "
+        f"caused exactly the content loss it exists to prevent:\n{body}"
+    )
+    # The winner is still the OCR page, not a synthetic native fallback.
+    winner = _winning_page_output(state, 1, None)
+    assert winner.engine == "qwen", winner
+    assert winner.status != PageStatus.SUCCESS, winner
+    # And the document cannot report clean.
+    assert state.pages[1].fabricated_image_refs == 1
+
+
+def test_provenanced_url_with_a_commonmark_title_still_ships(tmp_path: Path) -> None:
+    """PR #252 review, major: a title made a REAL link look fabricated.
+
+    CommonMark allows ``![alt](url "title")``. Taking the parenthetical verbatim
+    swallowed the title into the URL, so it no longer matched the PDF's own link
+    annotation and a genuine image was redacted.
+    """
+    url = "https://example.com/chart.png"
+    pdf_path = _pdf_with_link(tmp_path, url)
+    doc_dir = tmp_path / "out"
+    doc_dir.mkdir()
+
+    ref = f'![Chart]({url} "Official chart")'
+    state, out = _state_for(pdf_path, f"See below.\n\n{ref}\n")
+
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    pipeline._sanitize_agentic_page_image_refs(state, 1, out, doc_dir)
+
+    assert ref in _shipped_body(state), _shipped_body(state)
+    assert not [e for e in state.events if e.kind == "fabricated_image_ref"]
+    assert getattr(state.pages[1], "fabricated_image_refs", 0) == 0
+
+
+def test_fabricated_url_with_a_title_is_still_caught(tmp_path: Path) -> None:
+    """Reverse of the above: parsing the title off must not open an escape hatch."""
+    pdf_path = _pdf_without_links(tmp_path)
+    doc_dir = tmp_path / "out"
+    doc_dir.mkdir()
+
+    state, out = _state_for(
+        pdf_path, 'Before\n\n![c](https://i.imgur.com/1234567.png "Chart 2")\n\nAfter\n'
+    )
+
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    pipeline._sanitize_agentic_page_image_refs(state, 1, out, doc_dir)
+
+    body = _shipped_body(state)
+    assert "i.imgur.com" not in body, body
+    assert "Before" in body and "After" in body
+    assert state.pages[1].fabricated_image_refs == 1

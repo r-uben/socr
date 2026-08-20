@@ -138,6 +138,28 @@ def source_url_index(pdf_path: Path) -> frozenset[str]:
     return frozenset(urls)
 
 
+def _image_target(raw: str) -> str:
+    """The URL out of a markdown image's parenthetical.
+
+    CommonMark allows an optional title after the destination —
+    ``![Chart](https://example.com/c.png "Official chart")`` — and an
+    angle-bracketed destination.  Taking the parenthetical verbatim swallowed
+    the title into the URL, so a link the PDF genuinely carries no longer
+    matched its own annotation and a REAL image was redacted as fabricated.
+    That is the reverse regression this gate must never cause.
+
+    A destination cannot contain unescaped whitespace, so the first token is
+    the URL whenever the destination is not angle-bracketed.
+    """
+    s = raw.strip()
+    if s.startswith("<"):
+        end = s.find(">")
+        if end != -1:
+            return s[1:end].strip()
+        return s[1:].strip()
+    return s.split(None, 1)[0] if s.split() else ""
+
+
 def _is_local_asset(target: str, doc_dir: Path | None) -> bool:
     """True when *target* is a file socr itself wrote under the document's dir."""
     if doc_dir is None:
@@ -174,7 +196,7 @@ def redact_fabricated_image_refs(
     removed: list[dict] = []
 
     def _replace(match: re.Match) -> str:
-        target = (match.group("target") or "").strip().strip("<>")
+        target = _image_target(match.group("target") or "")
         lowered = target.lower()
         if not lowered.startswith(_ABSOLUTE_SCHEMES):
             # A path, not an absolute reference: strip_phantom_images owns it
