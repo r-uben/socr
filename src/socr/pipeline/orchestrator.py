@@ -5447,7 +5447,12 @@ class UnifiedPipeline:
         # native text after recovery was tried and never passed. Both demote
         # the document from SUCCESS: a run that lost content or shipped known-
         # lossy fallbacks must not report a clean pass.
-        from socr.core.manifest import canonical_page_texts, is_page_failed_marker
+        from socr.core.manifest import (
+            canonical_page_texts,
+            flagged_model_page_output,
+            is_page_failed_marker,
+            kept_table_grid_defect,
+        )
 
         page_texts = canonical_page_texts(state)
 
@@ -5527,6 +5532,39 @@ class UnifiedPipeline:
             and all((a.engine or "").startswith("native") for a in p.attempts)
             and not (p.best_output and p.best_output.audit_passed)
         ]
+        # #259: pages where the ladder accepted nothing but the model DID
+        # produce a table, so ``_winning_page_output`` now ships the model's
+        # reading rather than substituting native. They must be excluded from
+        # ``native_fallback_pages`` for the same reason D3 floor pages are: that
+        # list's exclusion predicate has to match exactly what the manifest
+        # ships, and "fell back to native text" is simply false for these. The
+        # page still ships FLAGGED, so it gets its own term in ``pages_ok``, its
+        # own audit kind and its own CLI line -- one bucket per disposition.
+        flagged_model_pages = [
+            n for n, p in sorted(state.pages.items()) if flagged_model_page_output(p) is not None
+        ]
+
+        # #259 round 3: pages where the value guard DETECTED a numeric multiset
+        # mismatch but declined to call it certain (row-count discrepancy →
+        # unreliable pairing). The owner's ruling keeps the flagged table, so
+        # this is not a reason to fail the page -- but socr privately believing
+        # one of its numbers is wrong and saying nothing is the cardinal rule,
+        # so it must reach the document, the metadata and the CLI as well as the
+        # page body. Derived from the audit log because the verifier judge has
+        # no PageState to mark, exactly like ``doc_fabrication`` below.
+        def _kept_defect(page_num: int) -> str:
+            ps_ = state.pages.get(page_num)
+            bo_ = ps_.best_output if ps_ else None
+            return kept_table_grid_defect(bo_.text) if bo_ and bo_.text else ""
+
+        value_drift_pages = sorted(
+            {
+                getattr(e, "page_num", 0)
+                for e in state.events
+                if getattr(e, "kind", "") == "table_value_drift_unadjudicated"
+                and getattr(e, "page_num", 0)
+            }
+        )
         native_fallback_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -5581,6 +5619,8 @@ class UnifiedPipeline:
             # meaning is "OCR was tried and never passed". They surface
             # through native_only_distrust_pages instead.
             and n not in native_only_distrust_pages
+            # #259: the model's table ships on these; native did not.
+            and n not in flagged_model_pages
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
         ]
@@ -5635,6 +5675,15 @@ class UnifiedPipeline:
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
+        # #259: the kept model page carries a table flag, so the document
+        # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
+        # ships the better of the two readings, nothing was lost.
+        pages_ok = pages_ok and not flagged_model_pages
+        # NOT a page failure -- the owner was explicit that the page is not failed
+        # and the table is kept. AUDIT_FAILED at the document level is the
+        # "completed with warnings, output written" path, which is the honest
+        # one: content shipped, and a named value on it is disputed.
+        pages_ok = pages_ok and not value_drift_pages
         pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
         # GH-195: a page whose table grid was actively destroying values and had
         # to be rejected and rebuilt must not leave the run reporting a clean
@@ -5655,7 +5704,14 @@ class UnifiedPipeline:
 
         state.status = status
 
-        if failed_pages or native_fallback_pages or d3_floor_pages or native_only_distrust_pages:
+        if (
+            failed_pages
+            or native_fallback_pages
+            or d3_floor_pages
+            or native_only_distrust_pages
+            or flagged_model_pages
+            or value_drift_pages
+        ):
             from socr.core.audit_log import AuditEvent
 
             for n in failed_pages:
@@ -5696,6 +5752,37 @@ class UnifiedPipeline:
                         "attempted (ladder disabled); native text shipped flagged",
                     )
                 )
+            # #259: the model's flagged table was KEPT. Distinct from
+            # native_fallback (nothing fell back) and from the D3 floor (nothing
+            # failed closed): the page ships model content under a flag.
+            for n in flagged_model_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="flagged_model_table_kept",
+                        engine=(
+                            state.pages[n].best_output.engine if state.pages[n].best_output else ""
+                        ),
+                        detail=(
+                            "no OCR rung was accepted, but the model produced a table and"
+                            " the native layer carries a table-distrust flag; the model's"
+                            " reading ships FLAGGED rather than being replaced by native"
+                            + (
+                                f"; kept grid is structurally defective ({_kept_defect(n)})"
+                                if _kept_defect(n)
+                                else ""
+                            )
+                        ),
+                        # #259 round 3: a ragged kept grid is a thing to FLAG, not a
+                        # reason to fall back to an ungridded native — so the
+                        # structural predicate's answer is recorded here rather than
+                        # gating the keep.
+                        data={
+                            "flagged_model_kept": True,
+                            "grid_defect": _kept_defect(n),
+                        },
+                    )
+                )
             # TR-3: distinct audit event for D3 floor pages — do NOT record
             # native_fallback for these; they were routed to the image-asset lane
             # (failed-table marker + explicit failure), never the collapsed native.
@@ -5731,6 +5818,25 @@ class UnifiedPipeline:
                         f"text with an unverifiable table region (--native-only: OCR not "
                         f"attempted): {native_only_distrust_pages}[/yellow]"
                     )
+                if flagged_model_pages:
+                    console.print(
+                        f"  [yellow]{len(flagged_model_pages)} table page(s) shipped the "
+                        f"model's FLAGGED reading (no rung accepted; native table "
+                        f"distrusted): {flagged_model_pages}[/yellow]"
+                    )
+                if value_drift_pages:
+                    from socr.tables.native_verifier import describe_drift
+
+                    console.print(
+                        f"  [red]{len(value_drift_pages)} kept table(s) carry a DISPUTED "
+                        f"value (detected, not adjudicated): {value_drift_pages}[/red]"
+                    )
+                    for _e in state.events:
+                        if getattr(_e, "kind", "") != "table_value_drift_unadjudicated":
+                            continue
+                        _rows = (getattr(_e, "data", None) or {}).get("drifted_rows") or []
+                        if _rows:
+                            console.print(f"    [red]p{_e.page_num}: {describe_drift(_rows)}[/red]")
                 if d3_floor_pages:
                     console.print(
                         f"  [red]{len(d3_floor_pages)} table page(s) hit the D3 fail-closed"

@@ -123,8 +123,10 @@ def build_run_audit(state) -> RunAudit:
         "judge_reject": 2,
         "dualpass_patch": 3,
         "dualpass_flag": 3,
+        "table_value_drift_unadjudicated": 4,
         "table_region_geometry_hard_fail": 4,
         "table_region_unverifiable": 5,
+        "flagged_model_table_kept": 6,
         "native_fallback": 6,
         "page_failed": 7,
     }

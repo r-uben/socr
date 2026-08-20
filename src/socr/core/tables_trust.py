@@ -51,6 +51,13 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         "dualpass_flagged",
         "native_table_verifier_warn",
         "native_table_verifier_hard_fail",
+        # #259 round 3: a multiset mismatch the value guard DETECTED but declined
+        # to call certain (row-count discrepancy → unreliable pairing). Under the
+        # owner's keep-the-flagged-table ruling this page SHIPS the model's
+        # reading, so a consumer must be told which of its numbers are disputed.
+        # A detection, not a disposition — it belongs in the same set as the
+        # hard-fail above.
+        "table_value_drift_unadjudicated",
         "value_guard_row_count_warning",
         # GH-205: TR-3's ANALYZE-time detection. The per-region geometry
         # verifier hard-failed on this page's native table and nothing acted on

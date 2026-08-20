@@ -123,6 +123,32 @@ class VerifierState:
     AMBIGUOUS: str = "AMBIGUOUS"
 
 
+def describe_drift(drifted: list[dict], limit: int = 3) -> str:
+    """Name the disagreeing values in a drift record, for humans.
+
+    #259 round 3. The owner's ruling keeps a flagged table rather than deleting
+    it, so the doubt has to be legible: "a number may be wrong here" is not
+    actionable, "the model wrote 9.99 where the page reads 6.60" is.
+    """
+    parts: list[str] = []
+    for row in drifted[:limit]:
+        out_ms = row.get("output_multiset") or {}
+        nat_ms = row.get("native_multiset") or {}
+        wrote = sorted(k for k in out_ms if k not in nat_ms)
+        reads = sorted(k for k in nat_ms if k not in out_ms)
+        if wrote or reads:
+            parts.append(
+                f"row {row.get('row_idx', '?')}: model wrote "
+                f"{', '.join(wrote) or '(nothing)'} where the page reads "
+                f"{', '.join(reads) or '(nothing)'}"
+            )
+        else:
+            parts.append(f"row {row.get('row_idx', '?')}: {row.get('predicate', 'drift')}")
+    if len(drifted) > limit:
+        parts.append(f"+{len(drifted) - limit} more row(s)")
+    return "; ".join(parts)
+
+
 @dataclass
 class VerifierResult:
     """Outcome of the native table verifier for one page."""
@@ -135,6 +161,15 @@ class VerifierResult:
     drifted_rows: list[dict] = field(
         default_factory=list
     )  # [{row_idx, native_lanes, output_cells, row_text}]
+    #: #259 round 3: numeric multiset mismatches the value guard DETECTED but
+    #: declined to call CERTAIN_FAIL, because a row-count discrepancy made the
+    #: per-row pairing unreliable (see ``_value_guard``, the
+    #: ``row_count_warn_info is not None`` branch). Deliberately NOT folded into
+    #: ``drifted_rows`` above: that field means "the drift that caused the hard
+    #: fail" and ``crop_repair`` keys on it. Until this field existed the
+    #: finding was returned by ``_value_guard`` and then dropped on the floor --
+    #: socr knew a number might be wrong and told nobody.
+    unadjudicated_drift: list[dict] = field(default_factory=list)
     row_count_warn: bool = False  # row-count mismatch soft-flag (table ships, status→WARNING)
     row_count_warn_reason: str = ""  # detail for the row_count_warn event
     # TR-6 tri-state verdict (derived from the fields above; set by _verify_from_words)
@@ -1033,6 +1068,11 @@ def _verify_from_words(
         result.state = VerifierState.CERTAIN_FAIL
         logger.debug("native_verifier [%s] hard-fail: %s", scope_label, result.reason)
         return result
+
+    # #259 round 3: not a certain fail, but not nothing either. Carry it so a
+    # consumer can be told which values disagree.
+    if vg_drifted:
+        result.unadjudicated_drift = vg_drifted
 
     # ------------------------------------------------------------------
     # Tier 2: Warn-and-defer — ambiguous lane-count mismatch

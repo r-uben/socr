@@ -30,7 +30,7 @@ from typing import Protocol
 
 from socr.core.config import EngineType
 from socr.core.providers import ProviderProfile
-from socr.core.result import PageOutput, PageStatus
+from socr.core.result import REJECTION_AMBIGUOUS_DEFERRED, PageOutput, PageStatus
 
 logger = logging.getLogger(__name__)
 
@@ -506,7 +506,11 @@ class NativeTableVerifierJudge:
         self._record_event = record_event
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
-        from socr.tables.native_verifier import VerifierState, verify_native_table
+        from socr.tables.native_verifier import (
+            VerifierState,
+            describe_drift,
+            verify_native_table,
+        )
 
         page_num = output.page_num
 
@@ -540,6 +544,31 @@ class NativeTableVerifierJudge:
             # delegation to the inner judge.
             decision = self._inner.assess(output, provider)
             return self._apply_structural_gate(decision, output, page_num, words=None)
+
+        # #259 round 3: the value guard found a numeric multiset mismatch but a
+        # row-count discrepancy made the pairing unreliable, so it is AMBIGUOUS
+        # rather than CERTAIN_FAIL. Under the owner's ruling the flagged table
+        # is KEPT, which makes surfacing this mandatory rather than optional: a
+        # kept table that socr privately believes contains a wrong number is
+        # silent content corruption. Emitted before the tri-state dispatch so it
+        # fires on every exit -- warn, row-count-warn-only, accept alike -- and
+        # exactly once per assess.
+        if getattr(vr, "unadjudicated_drift", None):
+            self._emit_event(
+                page_num=page_num,
+                kind="table_value_drift_unadjudicated",
+                engine=output.engine or "",
+                detail=(
+                    "numeric multiset mismatch detected but NOT adjudicated: the "
+                    "row-count discrepancy makes per-row pairing unreliable, so it "
+                    "is not a certain fail. " + describe_drift(vr.unadjudicated_drift)
+                ),
+                data={
+                    "drifted_rows": vr.unadjudicated_drift,
+                    "adjudicated": False,
+                    "verifier_state": vr.state,
+                },
+            )
 
         # TR-6 tri-state dispatch based on vr.state:
         #   EXACT_PASS   → ship immediately (no inner judge needed)
@@ -603,6 +632,19 @@ class NativeTableVerifierJudge:
             )
             # Defer to the inner judge — do NOT escalate here
             decision = self._inner.assess(output, provider)
+            # #259 round 2: record the DISPOSITION, not just the bool.
+            # ``ProviderAttempt.accepted`` is all that survives into
+            # ``PageOutput`` (orchestrator: ``att.output.audit_passed =
+            # att.accepted``), so downstream a CERTAIN_FAIL rejection above and
+            # this ambiguous deferral look identical -- and keeping a candidate
+            # the value guard positively proved wrong would corrupt the page.
+            # This is the one path on which socr can say the refusal was soft:
+            # the verifier reached AMBIGUOUS ("paired/spanning headers possible
+            # — deferring to VLM") and the inner judge, not a deterministic
+            # gate, is what refused. Marked BEFORE the structural gate runs, so
+            # a gate rejection below can never be mistaken for this one.
+            if not decision.accept:
+                output.rejection_class = REJECTION_AMBIGUOUS_DEFERRED
             return self._apply_structural_gate(decision, output, page_num, words, rules)
 
         if vr.state == VerifierState.EXACT_PASS:
