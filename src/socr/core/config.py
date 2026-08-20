@@ -289,6 +289,11 @@ class PipelineConfig:
     qwen_vllm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct"
     # OpenAI-compatible base URL of the vLLM server for the agentic VLM path.
     qwen_vllm_url: str = "http://localhost:8000/v1"
+    # GH-222: base URL of the Ollama daemon the cascade-halt liveness probe should
+    # ask about. ``None`` means "resolve it" — the OLLAMA_HOST environment
+    # variable, then the localhost default — rather than "assume localhost", which
+    # made the probe indict a healthy machine on every non-Ollama deployment.
+    ollama_host: str | None = None
     # Default sentinel: empty string means "not user-pinned; let the engine resolver pick
     # the right model for the resolved backend." When qwen_model_pinned is True the value
     # is an explicit user override and must reach qwen-ocr unchanged.

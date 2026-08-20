@@ -415,6 +415,11 @@ class PageAssessment:
     #: that ships, which is the same gap #136 was filed for.
     has_unrecovered_symbol_glyphs: bool = False
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
+    #: GH-195: one record per text-strategy grid rejected because a lane boundary
+    #: split a native numeric token. The word-geometry fallback that replaced it
+    #: is lossless, so this is a VISIBILITY signal, not a defect flag — the page
+    #: is not demoted on it. Empty on a page where every grid rendered cleanly.
+    text_grid_rejections: list[dict] = field(default_factory=list)
     #: #136: mid-band encoding corruption of the COSMETIC class (lost spaces, fused
     #: words) — the page is trustworthy for content but its text layer is suspect.
     #: Propagated to PageState so the agentic native lane can emit a durable audit
@@ -1112,6 +1117,10 @@ class BornDigitalDetector:
         # without tables (which never call _verify_regions) are not flagged.
         self._last_extraction_had_unverifiable: bool = False
 
+        # GH-195: same side-channel shape as the TR-3 flag above — reset per
+        # page so a rejection on page 7 is never attributed to page 8.
+        self._last_extraction_grid_rejections: list[dict] = []
+
         native_table_lane_refused = False
         native_table_structure_defective = False
         native_table_header_unattributed = False
@@ -1184,6 +1193,8 @@ class BornDigitalDetector:
         # TR-3: read the per-region geometry hard-fail flag written by
         # extract_structured → _verify_regions during table extraction above.
         has_unverifiable_table_region = self._last_extraction_had_unverifiable
+        # GH-195: text-strategy grids rejected for numeric-token destruction.
+        text_grid_rejections = list(self._last_extraction_grid_rejections)
 
         if has_complex_content:
             content_types = []
@@ -1229,6 +1240,7 @@ class BornDigitalDetector:
             has_corrupt_math=has_corrupt_math,
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
             has_unverifiable_table_region=has_unverifiable_table_region,
+            text_grid_rejections=text_grid_rejections,
             has_encoding_hygiene_suspect=encoding_hygiene_suspect,
             native_table_lane_refused=native_table_lane_refused,
             native_table_structure_defective=native_table_structure_defective,
@@ -1406,7 +1418,16 @@ class BornDigitalDetector:
         if not table_regions:
             from socr.tables.reconstruct import reconstruct_table_regions
 
-            table_regions = reconstruct_table_regions(page)
+            # GH-195: collect the text-strategy grid rejections so the page can
+            # SURFACE them. The fallback rowizer is proven lossless, so the page
+            # is not demoted — but "this page's layout is adversarial to
+            # find_tables(strategy='text') and a grid had to be rejected and
+            # rebuilt" is operationally different from "everything rendered
+            # cleanly first time", and until now only a log line said so.
+            _rejections: list[dict] = []
+            table_regions = reconstruct_table_regions(page, rejections=_rejections)
+            if _rejections:
+                self._last_extraction_grid_rejections = list(_rejections)
 
         # Word-geometry rowizer fallback (TR-1/TR-2): when find_tables() returns
         # nothing AND the text-strategy reconstruct also fails (e.g. a multi-region

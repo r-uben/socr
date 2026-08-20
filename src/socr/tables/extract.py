@@ -74,7 +74,114 @@ def crop_wall_clock_deadline(reader_timeout_s: float) -> float:
     return max(_CROP_DEADLINE_FLOOR_S, reader_timeout_s * _CROP_WALL_CLOCK_MULTIPLIER)
 
 
-def probe_ollama_idle(host: str = "http://localhost:11434", timeout: float = 5.0) -> bool:
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+
+# What a liveness probe is allowed to swallow. ``httpx.InvalidURL`` is NOT an
+# ``httpx.HTTPError`` — it is raised while building the request, before any
+# transport runs — so a malformed host (a typo in ``OLLAMA_HOST``, an IPv6
+# literal with no unambiguous reading) used to escape the probe and propagate
+# out of the cascade-halt guard. That is a failure path: it must answer "not
+# idle", never lose the document.
+_PROBE_ERRORS = (httpx.HTTPError, httpx.InvalidURL, OSError)
+
+# Backends served over an OpenAI-compatible HTTP API rather than by an Ollama
+# daemon. Single source of truth: ``make_table_reader`` picks the crop reader
+# with it, and the cascade-halt probe picks which server to ask with it, so the
+# two cannot drift into asking different machines about the same run.
+OPENAI_COMPATIBLE_BACKENDS: frozenset[str] = frozenset({"vllm", "sglang", "openai", "api"})
+
+
+def _bracket_bare_ipv6(candidate: str) -> str:
+    """Bracket an unbracketed IPv6 literal in *candidate* (scheme optional).
+
+    ``OLLAMA_HOST=::1`` is a spelling users and shell exports actually produce,
+    and RFC 3986 requires the brackets: without them ``http://::1`` is not a
+    URL, ``urlsplit`` cannot find a port in it, and httpx cannot connect to it.
+
+    A host token is read as a bare IPv6 literal when it holds more than one
+    colon and does not already start with ``[`` — one colon is a port
+    (``gpu-node:9999``), more than one cannot be. That also brackets the
+    ambiguous ``::1:11434``, which has no unambiguous reading: RFC 3986 says a
+    port after an IPv6 literal needs the brackets, so this is treated as an
+    address, not as address-plus-port.
+    """
+    scheme, sep, rest = candidate.partition("://")
+    if not sep:
+        scheme, rest = "http", candidate
+    hostpart, slash, tail = rest.partition("/")
+    if not hostpart.startswith("[") and hostpart.count(":") > 1:
+        hostpart = f"[{hostpart}]"
+    return f"{scheme}://{hostpart}{slash}{tail}" if slash else f"{scheme}://{hostpart}"
+
+
+def resolve_ollama_host(host: str | None = None) -> str:
+    """The Ollama base URL this deployment actually uses (GH-222).
+
+    Resolution order, most specific first: an explicit argument, then the
+    ``OLLAMA_HOST`` environment variable, then the localhost default. The env
+    var is the one the Ollama daemon and its official client already read, so
+    a deployment that has pointed those at a remote or non-default host has
+    already said where its backend lives — socr should not need to be told a
+    second time, and must not silently disagree.
+
+    Accepts the daemon's own bare ``host`` / ``host:port`` spelling as well as a
+    full URL; a value with no scheme is read as ``http://``, and a bare IPv6
+    literal is bracketed. A blank or whitespace-only env var is treated as unset
+    rather than as an empty host.
+
+    The port is filled in when the value omits it, because ``OLLAMA_HOST`` is
+    very commonly spelled bare (``127.0.0.1``, ``gpu-node``) and the daemon
+    itself supplies 11434 in that case.  Reading it literally would resolve to
+    ``http://127.0.0.1`` — port 80 — and turn honouring the variable into a NEW
+    way to probe the wrong place, which is the defect this function exists to
+    remove rather than relocate.
+
+    A value this cannot parse is returned unchanged rather than raising: the
+    caller is a liveness probe on a failure path, and a malformed host must
+    produce a failed probe, never an exception that loses the document.
+    """
+    import os
+    from urllib.parse import urlsplit, urlunsplit
+
+    candidate = (host or os.environ.get("OLLAMA_HOST") or "").strip()
+    if not candidate:
+        return DEFAULT_OLLAMA_HOST
+    candidate = _bracket_bare_ipv6(candidate)
+    try:
+        parts = urlsplit(candidate)
+        has_port = parts.port is not None
+    except ValueError:  # malformed host or port — leave the value exactly as given
+        logger.warning("GH-222: cannot parse backend host %r; using it verbatim", candidate)
+        return candidate
+    if not has_port and parts.hostname:
+        default_port = urlsplit(DEFAULT_OLLAMA_HOST).port
+        parts = parts._replace(netloc=f"{parts.netloc}:{default_port}")
+        candidate = urlunsplit(parts)
+    return candidate
+
+
+def probe_openai_server_idle(base_url: str, timeout: float = 5.0) -> bool:
+    """Return True if an OpenAI-compatible VLM server (vLLM/SGLang) is responding.
+
+    GH-222: the Ollama probe asks ``/api/tags``, an endpoint a vLLM server does
+    not serve, so pointing it at one reports a healthy machine dead. The
+    OpenAI-compatible equivalent is ``/models`` under the same ``/v1`` base URL
+    the crop reader already talks to.
+
+    Same shape and same caveat as ``probe_ollama_idle``: this is an HTTP-layer
+    liveness ping, NOT a check that the GPU is free. A server mid-generation
+    answers it. Detecting a wedged GPU needs a real generation call and is
+    #221/#227's problem, deliberately not this one's.
+    """
+    try:
+        resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
+        resp.raise_for_status()
+        return True
+    except _PROBE_ERRORS:
+        return False
+
+
+def probe_ollama_idle(host: str | None = None, timeout: float = 5.0) -> bool:
     """Return True if the Ollama HTTP server is responding (idle/ready).
 
     Used as a cascade guard after a crop timeout: if the backend is unreachable,
@@ -83,12 +190,21 @@ def probe_ollama_idle(host: str = "http://localhost:11434", timeout: float = 5.0
     This is a lightweight /api/tags ping — it does NOT check whether a generation
     is still running server-side (Ollama does not expose that). It only tells us
     whether the HTTP layer is healthy.
+
+    GH-222: ``host`` used to default to a hardcoded ``http://localhost:11434``,
+    and the cascade call site passed nothing. On any deployment without a local
+    Ollama daemon — vLLM, HPC, a remote Ollama host — this returned False
+    unconditionally, forever, on a perfectly healthy machine, and a single
+    timeout anywhere in the ladder truncated the document with a
+    ``PARTIAL_SAVE_VLM_TIMEOUT`` that named a cause which never happened.
+    ``None`` now means "resolve it" rather than "assume localhost".
     """
+    resolved = resolve_ollama_host(host)
     try:
-        resp = httpx.get(f"{host.rstrip('/')}/api/tags", timeout=timeout)
+        resp = httpx.get(f"{resolved.rstrip('/')}/api/tags", timeout=timeout)
         resp.raise_for_status()
         return True
-    except (httpx.HTTPError, OSError):
+    except _PROBE_ERRORS:
         return False
 
 
@@ -199,7 +315,7 @@ def make_table_reader(
     backend: str,
     model: str,
     timeout: float = 120.0,
-    ollama_host: str = "http://localhost:11434",
+    ollama_host: str | None = None,
     vllm_url: str = "http://localhost:8000/v1",
 ) -> TableReader:
     """Build the crop reader for *backend* ("vllm"/"sglang" -> OpenAI server, else Ollama).
@@ -208,9 +324,22 @@ def make_table_reader(
     server/HPC backends. Single place that maps backend -> reader so both crop
     construction sites stay consistent.
     """
-    if backend in ("vllm", "sglang", "openai", "api"):
+    if backend in OPENAI_COMPATIBLE_BACKENDS:
         return VllmTableReader(model=model, base_url=vllm_url, timeout=timeout)
-    return OllamaTableReader(model=model, host=ollama_host, timeout=timeout)
+    return OllamaTableReader(model=model, host=resolve_ollama_host(ollama_host), timeout=timeout)
+
+
+def _probe_reader_idle(reader: object) -> bool:
+    """Liveness ping for whichever server *reader* talks to (GH-222).
+
+    ``VllmTableReader`` and ``OllamaTableReader`` both expose ``.host``, but the
+    two servers answer different endpoints, so the endpoint has to follow the
+    reader type rather than the host string.
+    """
+    host = getattr(reader, "host", None) or DEFAULT_OLLAMA_HOST
+    if isinstance(reader, VllmTableReader):
+        return probe_openai_server_idle(host)
+    return probe_ollama_idle(host)
 
 
 class TableCropExtractor:
@@ -296,8 +425,15 @@ class TableCropExtractor:
                     # unsound. We degrade first, then probe only to enrich the log.
                     self._backend_degraded = True
                     if cascade_probe:
-                        host = getattr(self._reader, "host", "http://localhost:11434")
-                        idle = probe_ollama_idle(host)
+                        # GH-222: ask the reader's OWN server, with the endpoint
+                        # that server actually serves. ``VllmTableReader.host``
+                        # is its ``/v1`` base URL, and /api/tags is not there —
+                        # probing it reported "backend down" on every healthy
+                        # HPC run. The result only enriches this log line
+                        # (degradation above is unconditional), but a log line
+                        # that names a hardware failure that never happened is
+                        # exactly what #222 was filed about.
+                        idle = _probe_reader_idle(self._reader)
                         logger.warning(
                             "dual-pass: crop timeout on p%d — backend marked degraded "
                             "(probe idle=%s)",

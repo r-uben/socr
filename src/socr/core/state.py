@@ -52,6 +52,12 @@ class PageState:
     #: the source document and were removed. Non-zero demotes the DOCUMENT
     #: to AUDIT_FAILED; the page itself keeps its cleaned text and ships.
     fabricated_image_refs: int = 0
+    #: GH-195: this page had >=1 text-strategy table grid rejected because a
+    #: lane boundary split a native numeric token. The word-geometry rebuild
+    #: is lossless, so the page keeps its text — but it is demoted to WARNING
+    #: and the document to AUDIT_FAILED, because the issue requires the
+    #: rejection to surface at page and document status, not only in a log.
+    text_grid_rejected: bool = False
     native_table_structure_failed: bool = False  # native table text lost its grid
     #: GH-151 TICKET-B1: grid-shape defect (ragged / detached-label row pair)
     #: found in the native markdown at extraction time. Deliberately a
@@ -240,6 +246,10 @@ class DocumentState:
                     # D3 selection in _winning_page_output can route to the floor.
                     if getattr(pa, "has_unverifiable_table_region", False):
                         ps.native_table_unverifiable = True
+                    # GH-195: carry the text-strategy grid rejection onto the page
+                    # so it can reach page status and document status.
+                    if getattr(pa, "text_grid_rejections", None):
+                        ps.text_grid_rejected = True
 
     # ------------------------------------------------------------------
     # Read-only derived properties

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from rich.console import Console
@@ -45,7 +46,7 @@ from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_
 from socr.pipeline.agentic import route_page
 from socr.pipeline.consensus import ConsensusEngine
 from socr.pipeline.repair import RepairRouter
-from socr.tables.extract import probe_ollama_idle
+from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -213,6 +214,11 @@ class UnifiedPipeline:
         self.scorer = FailureModeScorer(checker=self.heuristics)
         self.repair_router = RepairRouter(config)
         self.bd_detector = BornDigitalDetector()
+        # GH-222: swappable liveness probe for the local VLM backend. ``None``
+        # means "use the resolved-host Ollama probe" (see ``_probe_backend_idle``);
+        # assign a zero-argument callable to substitute a different backend's
+        # health check without touching the cascade-halt logic.
+        self.backend_probe: Callable[[], bool] | None = None
         self._last_assessment: DocumentAssessment | None = None
         # Directory the current input was discovered under (batch input dir or
         # the file's parent). Threaded into every contract key so per-doc output
@@ -827,6 +833,65 @@ class UnifiedPipeline:
                     ),
                     data={"defects": defects},
                 )
+            )
+
+        # GH-195: surface a rejected text-strategy grid. GH-144 A2 rejects a
+        # find_tables(strategy="text") grid when a lane boundary split a native
+        # numeric token (0.67 -> "0" + ".67") and rebuilds the table with the
+        # word-geometry rowizer. That is a real content-loss event on the
+        # original rendering path — before A2 existed the page shipped the wrong
+        # numbers as a silent SUCCESS — and until now it was visible only as a
+        # logger.warning inside reconstruct.py. A log line is not a surface.
+        #
+        # This IS a demotion, at page and document level (round 2 of the #254
+        # review). An earlier version of this comment argued the opposite — that
+        # the fallback rowizer being lossless in isolation (GH-144 A1 §2 control)
+        # meant the page must not be flagged — and the review did not accept it:
+        # #195 requires the rejection to reach page status and document status,
+        # not only metadata and the CLI.
+        #
+        # The demotion is STATUS-ONLY and the page keeps its rebuilt text. What
+        # it says is "this page's layout is adversarial to the text strategy and
+        # a grid had to be thrown away and rebuilt" — worth spot-checking, and
+        # operationally different from a clean first-pass render. See
+        # ``_winning_page_output``'s ``grid_rejected`` term for the page surface
+        # and ``text_grid_rejected_pages`` in ``_phase_assemble`` for the
+        # document one.
+        for pa in assessment.pages:
+            rejections = getattr(pa, "text_grid_rejections", None) or []
+            if not rejections:
+                continue
+            destroyed_total = sum(int(r.get("destroyed_count", 0)) for r in rejections)
+            values: list[str] = []
+            for rec in rejections:
+                values.extend(str(v) for v in rec.get("values", []))
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="text_grid_rejected",
+                    engine="native",
+                    detail=(
+                        f"{len(rejections)} text-strategy table grid(s) rejected: a lane "
+                        f"boundary split {destroyed_total} native numeric token(s) "
+                        f"({', '.join(values)}). Rebuilt with the lossless word-geometry "
+                        "rowizer — the shipped values are correct, but this page's layout "
+                        "is adversarial to find_tables(strategy='text')."
+                    ),
+                    data={
+                        "rejected_grids": len(rejections),
+                        "destroyed_tokens": destroyed_total,
+                        "values": values,
+                    },
+                )
+            )
+        _rejected_pages = sorted(
+            pa.page_num for pa in assessment.pages if getattr(pa, "text_grid_rejections", None)
+        )
+        if _rejected_pages and not self.config.quiet:
+            console.print(
+                f"  [yellow]{len(_rejected_pages)} page(s) had a text-strategy table grid "
+                f"rejected for numeric-token destruction and rebuilt losslessly: "
+                f"{_rejected_pages}[/yellow]"
             )
 
         self._emit_tr3_detection_events(state, assessment)
@@ -3180,7 +3245,7 @@ class UnifiedPipeline:
                 # A judge timeout is encoded as reason="judge timeout" on the
                 # last attempt; a provider timeout is encoded similarly.
                 _had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)
-                if _had_timeout and not probe_ollama_idle():
+                if _had_timeout and not self._probe_backend_idle():
                     backend_degraded = True
                     halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
                     from socr.core.audit_log import AuditEvent
@@ -5086,6 +5151,92 @@ class UnifiedPipeline:
         except Exception as exc:  # surfacing must never break a run
             logger.debug("GH-161: could not record ledger audit reject for p%d (%s)", page_num, exc)
 
+    def _probe_backend_idle(self) -> bool:
+        """Liveness probe for THIS RUN's VLM backend, behind a swappable seam.
+
+        GH-222: the cascade-halt guard used to call ``probe_ollama_idle()`` with
+        no arguments, and that function defaulted to a hardcoded
+        ``http://localhost:11434``.  On any deployment that does not run an
+        Ollama daemon there — vLLM, HPC, a remote Ollama host — the probe
+        reported the backend dead for a perfectly healthy machine, so a single
+        timeout anywhere in the ladder truncated the document and blamed a
+        hardware failure that never happened.  ``--strict-local`` on a vLLM
+        backend is the worst case: the ladder is local-only, so one slow page
+        ends the run.
+
+        Which server is asked follows ``qwen_backend`` through
+        ``OPENAI_COMPATIBLE_BACKENDS`` — the SAME predicate ``make_table_reader``
+        uses to decide which server to send crops to, so the probe and the reader
+        can never end up asking about different machines.  A vLLM/SGLang backend
+        is probed at ``qwen_vllm_url``; anything else is an Ollama daemon, whose
+        host is RESOLVED (explicit config, then ``OLLAMA_HOST``, then the
+        localhost default) rather than assumed.  ``auto`` resolves to a local
+        Ollama daemon everywhere else in this codebase, so it probes Ollama here
+        too; deriving "vLLM" from a non-default ``qwen_vllm_url`` alone would
+        make the probe disagree with the crop reader, which is the class of bug
+        this is fixing.
+
+        ``backend_probe`` remains as an override seam for a backend socr does not
+        model, but the default path no longer depends on a caller knowing to
+        assign it.
+
+        Deliberately unchanged here: WHICH attempts arm the guard.  ``_had_timeout``
+        still scans every attempt and still matches the bare substring
+        ``"timeout"``, so a cloud-provider timeout or a judge's free-prose remark
+        can still arm it.  Narrowing that needs the timed-out attempt to carry
+        its backend identity (#159), which is #221/#227's dependency, not this
+        one's — and #227 warns that fixing half of that pair makes behaviour
+        worse.  This change only stops the probe asking the wrong machine; it
+        does not change what the probe can detect.
+        """
+        probe = getattr(self, "backend_probe", None)
+        if probe is not None:
+            return bool(probe())
+        # Module-level names on purpose: existing tests patch
+        # ``socr.pipeline.orchestrator.probe_ollama_idle``, and routing around
+        # that name would silently neuter every one of those patches.
+        if self._local_backend_is_openai_compatible():
+            return probe_openai_server_idle(self.config.qwen_vllm_url)
+        return probe_ollama_idle(self._local_backend_host())
+
+    def _local_backend_is_openai_compatible(self) -> bool:
+        """True when this run's local VLM is served over an OpenAI-compatible API.
+
+        Two ways to be one, matching the gate ``QwenEngine.is_available``
+        (``engines/qwen.py``) already uses to decide the qwen rung is usable:
+
+        1. ``qwen_backend`` names an OpenAI-compatible backend explicitly.
+        2. ``qwen_backend`` is ``"auto"`` AND ``VLLM_BASE_URL`` is set.
+
+        Case 2 is not a corner case, it is the HPC deployment: ``is_available``
+        short-circuits True on ``VLLM_BASE_URL`` alone ("vLLM path (e.g. HPC,
+        where Ollama is forbidden on server GPUs)"), and ``PipelineConfig``
+        adopts that variable into ``qwen_vllm_url`` in ``__post_init__`` while
+        leaving ``qwen_backend`` at its ``"auto"`` default. So a user reaches
+        "auto backend, remote vLLM server" by exporting ONE environment
+        variable and never touching a flag — and treating that as Ollama is
+        exactly #222's named failure: a healthy vLLM node reported dead, one
+        timeout truncating a ``--strict-local`` run.
+
+        An EXPLICIT ``qwen_backend`` always wins, in both directions:
+        ``"ollama"`` stays Ollama even with ``VLLM_BASE_URL`` exported, because
+        a value the user typed outranks one the environment happens to carry.
+        """
+        import os
+
+        from socr.tables.extract import OPENAI_COMPATIBLE_BACKENDS
+
+        backend = getattr(self.config, "qwen_backend", "")
+        if backend in OPENAI_COMPATIBLE_BACKENDS:
+            return True
+        return backend == "auto" and bool(os.environ.get("VLLM_BASE_URL"))
+
+    def _local_backend_host(self) -> str:
+        """Where this run's local Ollama daemon actually listens (GH-222)."""
+        from socr.tables.extract import resolve_ollama_host
+
+        return resolve_ollama_host(getattr(self.config, "ollama_host", None))
+
     def _restore_terminal_page_state(
         self, state: DocumentState, page_num: int, page_out: PageOutput, output_dir: Path
     ) -> None:
@@ -5485,6 +5636,15 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
         pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
+        # GH-195: a page whose table grid was actively destroying values and had
+        # to be rejected and rebuilt must not leave the run reporting a clean
+        # SUCCESS. AUDIT_FAILED, not ERROR: the rebuild is lossless, so the page
+        # ships correct values and the CLI's "completed with warnings, output
+        # written" path is the honest one.
+        text_grid_rejected_pages = sorted(
+            n for n, p in state.pages.items() if getattr(p, "text_grid_rejected", False)
+        )
+        pages_ok = pages_ok and not text_grid_rejected_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
