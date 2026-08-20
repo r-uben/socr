@@ -829,6 +829,55 @@ class UnifiedPipeline:
                 )
             )
 
+        # GH-205: surface the TR-3 per-region geometry hard-fail UNCONDITIONALLY.
+        #
+        # ``has_unverifiable_table_region`` is computed on every native table page,
+        # but until now it only ever reached a surface IN CONJUNCTION with
+        # something else: the loop above requires ``--native-only``, the D3-floor
+        # event at assemble requires the OCR ladder to have failed too, and
+        # ``_winning_page_output`` reads it only next to
+        # ``native_table_structure_failed``.  Measured over 32 papers / 245 native
+        # table pages, 62 pages (25.3%) carry the hard-fail; on the ones where no
+        # conjunction holds, the verdict reached no page status, no document
+        # status, no metadata field and no CLI line.  A detected failure that
+        # nothing surfaces is the no-silent-content-loss red line.
+        #
+        # SURFACING ONLY, deliberately.  Nothing here keys page status, document
+        # status or routing on the flag, and that restraint is the point rather
+        # than an omission: 25.3% is a FIRING rate whose precision has never been
+        # measured, TR-3 shares the ``is_numeric_token`` machinery whose notation
+        # gaps (``.034``, U+2217 significance stars) plausibly inflate it, and the
+        # issue blocks step 3 on hand-judging the 62-page set first.  GH-151 B1
+        # treated a 26.9% firing rate as a defect rate and cost three review rounds
+        # and a redesign.  Routing on this unattended could delete good tables.
+        #
+        # The kind is the EXISTING ``table_region_unverifiable``, which is already
+        # in ``TABLE_DISTRUST_KINDS`` and already ranked in the audit-log ordering,
+        # so the detection reaches ``audit_log.json``, ``tables_trust.json`` and the
+        # CLI summary with no new plumbing.  A D3-floor page legitimately carries
+        # this kind twice, from here at analyze time and again at assemble with the
+        # narrower wording — the same deliberate repetition GH-211 MAJOR-2 uses, and
+        # ``tables_trust`` de-duplicates by page.
+        for pa in assessment.pages:
+            if not getattr(pa, "has_unverifiable_table_region", False):
+                continue
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="table_region_unverifiable",
+                    engine="native",
+                    detail=(
+                        "per-region geometry verifier hard-failed on this page's native "
+                        "table (numeric-token multiset mismatch against the native words). "
+                        "Recorded as a detection only: it is deliberately NOT keyed to page "
+                        "status, document status or routing pending the hand-judgement of "
+                        "the 62-page set (GH-205 step 2), because the firing rate is not a "
+                        "measured defect rate."
+                    ),
+                    data={"detection_only": True, "native_only": bool(self.config.native_only)},
+                )
+            )
+
         bd_count = assessment.born_digital_count
         if not self.config.quiet:
             if bd_count:
