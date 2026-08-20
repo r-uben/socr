@@ -4,7 +4,7 @@
   "new_head": "3b7cbe8",
   "previous_head": "3a01cb5",
   "round": 4,
-  "kind": "evidence repair — no production code changed",
+  "kind": "evidence repair \u2014 no production code changed",
   "base_used_for_proof": "dc0f13f553ca947e88455c09c5db86b7e702f45a",
   "rebased": false,
   "force_pushed": false,
@@ -14,7 +14,7 @@
       "id": "E2-r3-1",
       "severity": "major",
       "reviewer": "kimi",
-      "summary": "The baseline proof is misreported for the one test that pins the round-2 fix. test_phase_major_document_status_is_demoted_by_the_sweep named state.pages[1].fabricated_image_refs — an attribute this PR adds — in its SETUP assert, so at dc0f13f it raised AttributeError before _phase_assemble was ever called. Counts (5 failed / 5 passed) were right; the claim that all five failures were behavioural was false, and the 'still finished SUCCESS' string quoted in the round-3 comment could only have come from the 7696719 run.",
+      "summary": "The baseline proof is misreported for the one test that pins the round-2 fix. test_phase_major_document_status_is_demoted_by_the_sweep named state.pages[1].fabricated_image_refs \u2014 an attribute this PR adds \u2014 in its SETUP assert, so at dc0f13f it raised AttributeError before _phase_assemble was ever called. Counts (5 failed / 5 passed) were right; the claim that all five failures were behavioural was false, and the 'still finished SUCCESS' string quoted in the round-3 comment could only have come from the 7696719 run.",
       "disposition": "FIXED",
       "reviewer_was_right": true,
       "how": "One line in the setup assert: getattr(state.pages[1], 'fabricated_image_refs', 0) == 0, with a comment naming the trap so it is not reintroduced a fourth time. Same defence the round-2 guards already use. Nothing else touched."
@@ -60,9 +60,12 @@
   },
   "pr_updated": [
     "Round-4 comment posted with the correction stated plainly and the corrected raw baseline output.",
-    "PR body prefixed with a SUPERSEDED banner pointing at the round-4 comment, so the stale proof section is not read as current."
+    "PR body prefixed with a SUPERSEDED banner. NOTE: the first attempt at this reported success (gh printed the PR URL, exit 0) but the banner was NOT present when Kimi checked, and was still absent when I re-verified. Re-applied and CONFIRMED BY READING THE BODY BACK. My earlier claim in this file that the banner existed was false when written."
   ],
   "ci": "This branch is based on main, so CI does run. At push time: typecheck pass, CodeRabbit skipped, test (3.11) and cubic pending.",
   "housekeeping": "Temporary base worktree socr-e2base created at dc0f13f, left clean (0 porcelain entries) and removed. socr-night-base untouched.",
-  "files_changed": ["tests/test_gh225_fabricated_image_urls.py"]
+  "files_changed": [
+    "tests/test_gh225_fabricated_image_urls.py"
+  ],
+  "reporting_correction": "Kimi was right: 252-round4.json claimed a banner that did not exist. Cause not fully established \u2014 gh pr edit exited 0 and printed the PR URL both times, and the same silent revert also wiped PR #255's round-2 body. Process fix adopted: every PR body edit is now followed by a read-back assertion, never trusting the exit code."
 }
