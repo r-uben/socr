@@ -2,10 +2,902 @@
  "batch": "batch-1",
  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
  "vendors": [
+  "claude",
   "grok",
+  "kimi",
   "ollama-minimax"
  ],
  "rows": [
+  {
+   "vendor": "claude",
+   "issue": 144,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 171,
+      "snippet": "        if destroyed:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if destroyed:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 377,
+      "snippet": "        if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1453,
+      "snippet": "        self._last_extraction_had_unverifiable = had_unverifiable"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._last_extraction_had_unverifiable = had_unverifiable"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Both halves of the issue got work and neither is complete. The minimal reproduction in the issue's own comment (a lane boundary bisecting `0.67`) is genuinely fixed: `reconstruct_table_regions` now runs `_destroyed_numeric_tokens` and rejects the text-strategy grid on detection, and the pinned xfail has flipped to a real passing test. The 'fail closed' half is also wired: `_verify_regions` returns the per-region geometry hard-fail and it reaches PageAssessment and the D3 floor. What is NOT closed is the destruction check's own coverage: its candidate filter is the bare `_NUM_TOKEN_RE`/`_NUMERIC_RE` pair, so a decorated value (`0.67***`, U+2212 minus, `$0.67`) is never a candidate and the same lane-boundary split ships silently (that is #198). The 49-of-152 real-paper measurement on Nakamura & Steinsson p42 has not been re-run at this SHA and cannot be from the repo alone, so the corpus claim is unverified either way.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "This is the parent of 195/197/198, which are three named holes in the very check that fixes it. Calling 144 partially-implemented and 195/197/198 fix-candidates is consistent: the mechanism landed, the coverage did not. Distinct from 146/151/226, which are structure-loss with every numeral intact."
+  },
+  {
+   "vendor": "claude",
+   "issue": 146,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 572,
+      "snippet": "    if not assume_header and _is_data_row(grid[0]):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not assume_header and _is_data_row(grid[0]):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 1154,
+      "snippet": "def _extend_scope_for_header(tight, words: list):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def _extend_scope_for_header(tight, words: list):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 1219,
+      "snippet": "def _prepend_header_band("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def _prepend_header_band("
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Cause 1 in the issue \u2014 `_grid_to_markdown` unconditionally promoting row 0 \u2014 is fixed exactly as the issue prescribed: the emitter now tests `_is_data_row(grid[0])` and emits an empty header rather than inventing a schema. Cause 2 (the region excludes the header band) has machinery: `_extend_scope_for_header` widens the tight numeric-row scope upward and `_prepend_header_band` reattaches a lane-snapping band. tests/test_table_header_gh146.py passes at main_sha. What stops this being ALREADY-FIXED is #226's TICKET-D2 corpus measurement, which reports 17 of 23 emitted tables still carrying wrong headers with 14 attributed to band demotion (this issue's mechanism). That measurement postdates the fixes and I cannot re-run it \u2014 the `2026-08-17_backlog-reconciliation` plan folder is not in the tree at main_sha, so its evidence is unverifiable from the repo.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "146 and 226 are the same symptom (wrong column labels) by different mechanisms \u2014 146 is band demotion in the NATIVE reconstructor, 226 is LaTeX span markup in VLM output. Both can be open at once. 151 is the third: headers intact-but-unbound over column groups. None of the three is caught by a numeric-multiset check, which is why 144's fixes do not help here."
+  },
+  {
+   "vendor": "claude",
+   "issue": 147,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1119,
+      "snippet": "            if text_direction_is_rotated(direction):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if text_direction_is_rotated(direction):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1132,
+      "snippet": "                needs_ocr_enhancement = True"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "needs_ocr_enhancement = True"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The issue's own non-negotiable \u2014 'a page whose dominant text direction is not horizontal must not ship as trusted native text' \u2014 is implemented as remedy 1. `_assess_page` tests `text_direction_is_rotated(direction)` before the structured-extraction branch, retains prose only, sets `native_table_lane_refused`, and forces `needs_ocr_enhancement = True`. Two dedicated test files exist (test_landscape_detection_gh147.py, test_landscape_refusal_a2_gh147.py). Remedy 2 (rotate word coordinates into the reading frame so the free native lane still works on landscape tables) is not implemented, and the prerequisite measurement the issue asks for \u2014 how many pages across the 407-paper library have a non-horizontal dominant direction \u2014 has not been done and cannot be done without the corpus.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Unclustered in clusters.json, but it is the fourth member of the 144/145/146 severity ladder the issue itself draws. Its remedy-1 shape (refuse the lane, route to OCR, surface a flag) is the same fail-closed pattern 144 part 2 and 205 rely on, so a fix here should reuse that plumbing rather than add a parallel one."
+  },
+  {
+   "vendor": "claude",
+   "issue": 151,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1155,
+      "snippet": "                native_table_structure_defective = structure_check.structural_gate_fires(reports)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "native_table_structure_defective = structure_check.structural_gate_fires(reports)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 223,
+      "snippet": "    return any(r.ragged or r.detached_label_rows for r in reports)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return any(r.ragged or r.detached_label_rows for r in reports)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 174,
+      "snippet": "    empty_cells = sum(1 for row in grid for cell in row if not cell.strip())"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "empty_cells = sum(1 for row in grid for cell in row if not cell.strip())"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "The issue's central ask \u2014 a second, free, deterministic component beside word recall \u2014 shipped as GH-151 TICKET-B1: `structural_gate_fires` (ragged OR detached_label_rows) is computed on the native lane and propagated as `native_table_structure_defective`. Two of the issue's five candidate signals are therefore live (rectangularity, orphan-row shape, the latter deliberately narrowed out of the gate). Three are not: empty-cell density is computed but given no vote, header sanity for SPANNING headers over column groups is not covered by anything (header_cut owes only what sits above the drawn midrule), and the binding check \u2014 the signal the issue calls the strongest, comparing a value's native x-position to its assigned column \u2014 does not exist. The Bauer-Pflueger-Sunderam p26 evidence is specifically a spanning-header + misbinding case, so the shipped gate does not demonstrably catch the page the issue was filed on.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "151 is the umbrella framing that 190, 226 and 215 each instantiate: shape-only validation is not sufficient. 190 is its most extreme case (a grid so empty the parser drops it entirely), 226 a third route to a wrong header, 215/245 the header-attribution term. Keeping 151 open while 215 is already-fixed is consistent \u2014 215 closed ONE of 151's five candidate signals, and not the one its own evidence page needs."
+  },
+  {
+   "vendor": "claude",
+   "issue": 152,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 1052,
+      "snippet": "        rows_by_y[round(w[1])].append(w)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "rows_by_y[round(w[1])].append(w)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1435,
+      "snippet": "        # Column-aware ordering (x-band then y) would be needed for multi-column"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "# Column-aware ordering (x-band then y) would be needed for multi-column"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Live and unstarted. `rowize_from_word_list` still groups words into rows by rounded y0 across the full page width, with no x-band segmentation anywhere in `src/socr` (grep for x_band/column_band finds only a comment and an unrelated `_is_canonical_column_band` in structure_check). `born_digital.py` carries the acknowledging comment the issue quotes. The plan folder `docs/plans/gh152-side-by-side-tables/` contains STATUS.md and TICKETS.md only \u2014 no code \u2014 and its STATUS records all three tickets as BLOCKED/TODO behind PR #149 and GH-144 A2, both of which have since landed, so the stated blocker is stale and A1 is now dispatchable. Scope is bounded: segment into x-bands, then reuse the existing clip-then-rowize path per band.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "152 and 213 are both 'the wrong thing entered table reconstruction / was reconstructed on the wrong geometry'. 152 is a two-column layout merged; 213 is a two-column index admitted at all. A shared x-band segmentation step would help both, and 213's synthetic reproducer below is itself a two-column page \u2014 worth noting the two fixes may want to land together."
+  },
+  {
+   "vendor": "claude",
+   "issue": 162,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 424,
+      "snippet": "            return self._inner.assess(output, provider)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return self._inner.assess(output, provider)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 542,
+      "snippet": "            return self._apply_structural_gate(decision, output, page_num, words=None)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return self._apply_structural_gate(decision, output, page_num, words=None)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Both fail-open paths named in the issue are live. `SourceEvidenceTableJudge.assess` catches any verifier exception, logs a warning, and returns `self._inner.assess(...)` with no gate at all. `NativeTableVerifierJudge.assess` does the same but has since gained a partial mitigation: it runs `_apply_structural_gate` with `words=None`, so a RAGGED candidate is still rejected. That does not satisfy the issue's first acceptance criterion \u2014 a shape-clean but unverified table still ships accepted, and on the SourceEvidence side nothing runs. Criterion 3 (a durable audit event recording verifier type and failure reason) is unmet on both paths: `logger.warning` only, no AuditEvent.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "162/163/166 are one mechanism seen three times: a verification step that cannot complete is treated as a verification that passed. 162 is the exception path, 163 the deferral path, 166 the crop-failure path. They should be adjudicated as one fail-open family and could be fixed by one agent in sequence."
+  },
+  {
+   "vendor": "claude",
+   "issue": 163,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/source_evidence.py",
+      "line": 308,
+      "snippet": "    if page_has_native_words(page):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if page_has_native_words(page):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/source_evidence.py",
+      "line": 83,
+      "snippet": "    return any(len(w) > 4 and str(w[4]).strip() for w in words)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return any(len(w) > 4 and str(w[4]).strip() for w in words)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Unchanged at main_sha. `verify_scanned_table` defers on the first line of its body if `page_has_native_words(page)` is true, and that helper is literally 'any non-empty word tuple' \u2014 no consultation of born-digital trust, no check that the text layer was accepted. A scanned page carrying a baked-in or corrupt OCR layer therefore skips the raster/classical evidence check entirely and the deferral hands the page to the inner judge, which can accept. All three acceptance criteria are unmet. The fix is well-scoped: replace the word-presence predicate with the trusted-native classification the detector already computes.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Same fail-open family as 162 and 166; see 162's note. 163 is the one of the three where the fail-open is a deliberate `deferred=True` rather than an exception or a dropped result, so its fix is a predicate change rather than new plumbing."
+  },
+  {
+   "vendor": "claude",
+   "issue": 166,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 279,
+      "snippet": "                    continue"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "continue"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 314,
+      "snippet": "                if md.strip():"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if md.strip():"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/tables_trust.py",
+      "line": 89,
+      "snippet": "        \"table_structure_failed\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "\"table_structure_failed\","
+    }
+   ],
+   "confidence": "high",
+   "rationale": "All four acceptance criteria are unmet and each is verifiable in a few lines. In `TableCropExtractor.extract`: a render failure `continue`s with no sentinel; a read exception `continue`s with no sentinel; and an empty (whitespace-only) model response is dropped by the `if md.strip():` guard with no sentinel. Only the timeout path appends a sentinel CropTable. Separately, `TABLE_DISTRUST_KINDS` does not contain `dualpass_crop_timeout` \u2014 the frozenset ends at `table_structure_failed` \u2014 even though the orchestrator emits that kind, so `tables_trust.json` can report zero untrusted pages after a page whose crop verification entirely timed out.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Third member of the 162/163 fail-open family. Note the ordering dependency for a fixer: adding `dualpass_crop_timeout` to TABLE_DISTRUST_KINDS is a one-line change that is independently correct and does not need the sentinel work."
+  },
+  {
+   "vendor": "claude",
+   "issue": 190,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconcile.py",
+      "line": 122,
+      "snippet": "        if cells and all(_SEP_CELL.match(c.strip()) for c in cells if c.strip()):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if cells and all(_SEP_CELL.match(c.strip()) for c in cells if c.strip()):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 223,
+      "snippet": "    return any(r.ragged or r.detached_label_rows for r in reports)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return any(r.ragged or r.detached_label_rows for r in reports)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 174,
+      "snippet": "    empty_cells = sum(1 for row in grid for cell in row if not cell.strip())"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "empty_cells = sum(1 for row in grid for cell in row if not cell.strip())"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Reproduced directly at main_sha, and the hole is worse than the issue describes. An all-empty grid does not merely pass the structural gate \u2014 it is invisible to the parser. `reconcile._parse_grid`'s separator test is vacuously true on an all-blank pipe row, so every row of the issue's example (header, separator, body) is dropped and `find_table_blocks` returns `[]`. `check_markdown` therefore returns no reports, `structural_gate_fires([])` is False, and `table_output_defect` returns the empty defect code. `empty_cells` is computed in `check_grid` but is deliberately given no vote, and would never be reached here anyway. The issue's 'not yet established' list can be narrowed: the check cannot live in structure_check as written, because the grid never arrives.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "190 is the limiting case of 151's thesis that shape-only checks cannot see content loss, and it is a strictly cheaper fix than 151's binding check. It does not conflict with 226: 226 is a residual-LaTeX guard on emitted markdown, 190 an emptiness guard; both are model-free string-level invariants and could reasonably land in the same change."
+  },
+  {
+   "vendor": "claude",
+   "issue": 195,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 55,
+      "snippet": "_SILENT_LOSS_FOLLOWUP_ISSUE = 195"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_SILENT_LOSS_FOLLOWUP_ISSUE = 195"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 173,
+      "snippet": "            logger.warning("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "logger.warning("
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Unchanged and self-documenting. The grid rejection is still surfaced only by `logger.warning` inside `reconstruct_table_regions`, and the module carries `_SILENT_LOSS_FOLLOWUP_ISSUE = 195` with a comment stating explicitly that page/document/CLI surfacing was deferred rather than implemented, and referencing this issue number in the warning text so the log line points at the gap. Nothing threads the structured `destroyed` record list out of `reconstruct_table_regions` into `extract_structured`'s return, so no page status, document status, metadata field or CLI line can distinguish a page whose table needed the rejection-and-fallback path. Directly against the CLAUDE.md rule that failures must surface at every level.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "195/197/198 are three disjoint defects in GH-144's own destruction check and do not overlap: 195 is surfacing, 197 is scope selection on the None branch, 198 is candidate coverage. All three can be true simultaneously with 144's core mechanism working, which is exactly the state at main_sha."
+  },
+  {
+   "vendor": "claude",
+   "issue": 197,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 169,
+      "snippet": "            numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Exactly as reported, unchanged. The call still passes `numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox)` as the destruction scope, so when `_numeric_row_bbox` finds no numeric-bearing row the check runs against the loose whitespace-inferred `table.bbox` \u2014 the overrun case review finding 2 asked to stop using. The asymmetry the issue points out also holds at main_sha: the FALLBACK rowizer's `None` branch logs before broadening, but the destruction check silently uses `table.bbox` with no log. Smallest fix in the batch: skip the destruction check when the scope is None, or skip the table, and add the hermetic fixture the issue specifies.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "See 195. 197 and 198 both edit `reconstruct.py` lines ~165-180 and ~377 respectively \u2014 close enough that one agent should take both in a single change rather than two colliding branches."
+  },
+  {
+   "vendor": "claude",
+   "issue": 198,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 377,
+      "snippet": "        if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/native_verifier.py",
+      "line": 491,
+      "snippet": "    return bool(_NUM_TOKEN_RE.match(cleaned) and _NUMERIC_RE.search(cleaned))"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return bool(_NUM_TOKEN_RE.match(cleaned) and _NUMERIC_RE.search(cleaned))"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Confirmed unchanged. `_destroyed_numeric_tokens` still filters candidates with the bare `_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)` pair, so `0.67***`, a U+2212 minus, and `$0.67` are never candidates and a grid that splits them the same way it split `0.67` is never rejected. The remedy the issue names already exists one module over: `native_verifier.is_numeric_token` strips presentation first (marks, unicode dashes, currency prefixes, leading decimals) and then applies the same two regexes, so this is a one-line substitution plus the survival-comparison decision, not a new heuristic. Note `_NUM_TOKEN_RE` does already admit `(0.14)` and `45%`, so the gap is specifically decoration the regex cannot express.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "See 195 and 197. 198 is also the reason 144 cannot be ALREADY-FIXED: it is the surviving half of 144's own root mechanism, so a fixer closing 198 should re-run 144's corpus evidence afterwards."
+  },
+  {
+   "vendor": "claude",
+   "issue": 205,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 809,
+      "snippet": "            if self.config.native_only and getattr(pa, \"has_unverifiable_table_region\", False):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if self.config.native_only and getattr(pa, \"has_unverifiable_table_region\", False):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 329,
+      "snippet": "        native_distrusted = (p.best_output.engine or \"\").startswith(\"native\") and ("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "native_distrusted = (p.best_output.engine or \"\").startswith(\"native\") and ("
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1453,
+      "snippet": "        self._last_extraction_had_unverifiable = had_unverifiable"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._last_extraction_had_unverifiable = had_unverifiable"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Two things changed since filing and neither closes the issue. The conjunction complaint is partly addressed: `manifest.py` now treats a native best_output as distrusted on a DISJUNCTION of native_table_unverifiable / structure_defective / header_unattributed, so TR-3 alone can demote a page. But the issue's step 1 \u2014 surface it as an AuditEvent UNCONDITIONALLY \u2014 is not done: the orchestrator's audit-event emission is still gated on `self.config.native_only and ...`, so on the ordinary agentic path a TR-3 geometry hard-fail produces no AuditEvent. Step 2 (hand-judge the firing pages) is unstarted and is explicitly a human task; the issue's own comments already reconciled the 25.3%-vs-13.8% discrepancy as two differently-drawn samples and refuted the notation hypothesis (2 of 68 firings). Step 3 remains blocked on step 2.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "205 is the surfacing sibling of 195 one layer up: 195 is a rejection surfaced only in a log, 205 a hard-fail surfaced only under one CLI flag. Both are the same house-rule violation and both have a small unblocked half (emit the event) and a blocked half. The blocked half here is a hand judgement no unattended agent can perform \u2014 that part is NEEDS-MEASUREMENT in substance."
+  },
+  {
+   "vendor": "claude",
+   "issue": 213,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1268,
+      "snippet": "        return has_numeric_columns(page)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return has_numeric_columns(page)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 87,
+      "snippet": "_MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "The defect is live and I ran the issue's own step-1 instrumentation, which CONTRADICTS the issue's reasoning. The issue argues `has_numeric_columns` cannot be the path because 'an index row has exactly one numeric token, hence one lane', leaving `find_tables()` as the leading candidate. That premise is wrong for real indexes, which carry comma-separated page-number RUNS. On a synthetic two-column index with runs like '12, 45, 88' (no corpus content), `page.find_tables()` returns 0 tables and `has_numeric_columns()` returns True, so `_detect_tables` returns True via the lane gate \u2014 the branch the issue eliminated. A control fixture with exactly one page number per entry fires neither. So the discriminating feature is multi-page-number rows, and the remedy is a negative index-shape signal at the lane gate, not arbitration around find_tables().",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Consistent with 152: both are two-column page geometry defeating a full-page-width analysis. 213 also underpins 205's precision caveat \u2014 index false positives are part of why TR-3's firing rate is not a defect rate, so a fixer closing 213 should expect 205's rate to move."
+  },
+  {
+   "vendor": "claude",
+   "issue": 215,
+   "verdict": "ALREADY-FIXED",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "an acceptance criterion is marked unmet \u2014 cannot be ALREADY-FIXED",
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 292,
+      "snippet": "            if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/header_cut.py",
+      "line": 227,
+      "snippet": "def header_cut_verdict("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def header_cut_verdict("
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 284,
+      "snippet": "    if structural_gate_fires(reports):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if structural_gate_fires(reports):"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "The issue's headline claim \u2014 'the header-attribution reject disjunct in table_output_defect is parked' \u2014 is false at main_sha. `ec390d8` (#247, an ancestor of main_sha) added `src/socr/tables/header_cut.py` and wired `header_cut_verdict` into `table_output_defect` as the second disjunct, returning DEFECT_HEADER_UNATTRIBUTED on HARD. It is the sound term the issue asked for and it escapes the failure mode that killed all four prior attempts: it cuts at the drawn rule above the numeric anchor and never inspects token content, so significance-star and n.a. rows are excluded geometrically rather than by vocabulary, and every ungroundable step abstains as UNVERIFIABLE. The blocking measurement the issue demanded was also completed (the 2026-08-15 B1 hand judgement, recorded in the issue's own comment). No xfail-marked header reject tests remain in tests/ at main_sha, consistent with the term having landed. Confidence is medium, not high, because the issue's comment raises a fifth defect class (transposed columns, values under wrong headers) that this term cannot catch and that the commenter left undecided \u2014 that residual needs its own issue rather than keeping this one open.",
+   "duplicate_of": null,
+   "fixed_by_commit": "ec390d8f67f307950d4cc2501a4c28db0dcd46f7",
+   "cluster_consistency": "215 and 245 must be adjudicated together and my two verdicts are the matched pair: the term 215 asked for LANDED (already-fixed), which is precisely what makes 245 live and unblocked \u2014 245 was 'blocked on #212 landing' and #212 has landed. Whoever adjudicates should not read 'already-fixed 215' as 'header attribution is solved': the term is HARD-only and abstains on every borderless table, which is 245's whole subject. If the adjudicator prefers, 215 downgrades cleanly to PARTIALLY-IMPLEMENTED on the fifth-defect-class residual alone; the fixed_by_commit and reproducer stand either way."
+  },
+  {
+   "vendor": "claude",
+   "issue": 226,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 284,
+      "snippet": "    if structural_gate_fires(reports):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if structural_gate_fires(reports):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 292,
+      "snippet": "            if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 223,
+      "snippet": "    return any(r.ragged or r.detached_label_rows for r in reports)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return any(r.ragged or r.detached_label_rows for r in reports)"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "The cheap guard the issue proposes does not exist. `table_output_defect`'s disjunction is exactly two terms \u2014 `structural_gate_fires` (ragged OR detached_label_rows) and `header_cut_verdict` HARD \u2014 and neither can see a residual LaTeX command in an emitted header. A row reading `| | Outturn | \\multicolumn{6}{c|}{Forecast} |` has a consistent pipe count, so the shape term passes; the header_cut term compares native content above the midrule against emitted header cells and abstains without drawn rules. So a page shipping `\\multicolumn` survives every gate, matching the issue's `status: success` observation. The model-free half \u2014 any surviving `\\multicolumn`/`\\multirow`/`\\cline`/`\\hline` in emitted markdown is by construction a leak \u2014 is a genuinely small, threshold-free change. Confidence is medium only because the fragment evidence lives outside the repo (the `2026-08-17_backlog-reconciliation` plan folder is absent at main_sha) so I could not re-observe the emitted pages.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "226 is placed in the table-destruction cluster but its mechanism is VLM emission, not `reconstruct.py` \u2014 it shares only the symptom (wrong column labels) with 146. It should NOT be merged with 146: 146's fixes are in the native reconstructor and cannot touch model output. Its cheap guard belongs with 190's emptiness guard \u2014 both are string-level invariants on emitted markdown, same layer, same change."
+  },
+  {
+   "vendor": "claude",
+   "issue": 245,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 622,
+      "snippet": "                accept=True,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "accept=True,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 624,
+      "snippet": "                confidence=1.0,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "confidence=1.0,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 660,
+      "snippet": "            if HeaderVerdict.UNVERIFIABLE in verdicts:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if HeaderVerdict.UNVERIFIABLE in verdicts:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 671,
+      "snippet": "        if not defect:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not defect:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Live, and its stated blocker is gone. #212 landed as ec390d8 (ancestor of main_sha), so the HARD-only term exists and there is now something to abstain from. The hole is exactly as described: on EXACT_PASS the judge builds `AcceptDecision(accept=True, ..., confidence=1.0)` and hands it to `_apply_structural_gate`, where an abstaining header term makes `table_output_defect` return the empty defect code and the decision is returned unchanged at `if not defect: return decision`. One thing HAS improved since filing: the abstain is no longer wholly silent \u2014 a `table_header_unverifiable` AuditEvent is emitted when any verdict is UNVERIFIABLE, so the firing rate is measurable. But the page still ships accepted at confidence 1.0 with the inner judge never called, which is the false accept the issue is about. The proposed remedy (treat abstain as AMBIGUOUS and delegate to VLMPageJudge) is control flow, not a fifth content rule, so it is one night's work \u2014 but its cost is unmeasured, and that measurement is corpus work.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Paired with 215 by design and my verdicts are the matched pair \u2014 215 ALREADY-FIXED is exactly what unblocks 245. A fixer must not read the two together as 'header attribution done': the term abstains on every borderless / no-midrule table, and on all of those EXACT_PASS still ships at confidence 1.0. Whoever takes 245 should also note the emitted `table_header_unverifiable` event already gives the abstain rate needed to scope the cost, so the measurement the issue says does not exist is now cheap to obtain from a corpus run."
+  },
   {
    "vendor": "grok",
    "issue": 144,
@@ -847,6 +1739,908 @@
    "duplicate_of": null,
    "fixed_by_commit": null,
    "cluster_consistency": "header-attribution: residual of #215. #215 PARTIALLY-IMPLEMENTED (HARD exists) and #245 still open (abstain ships) is the intended split."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 144,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "tests/test_region_overlap_gh145.py",
+      "line": 223,
+      "snippet": "def test_no_table_value_is_lost(table_page):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def test_no_table_value_is_lost(table_page):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 171,
+      "snippet": "if destroyed:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if destroyed:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 360,
+      "snippet": "rows).  The panel verdict Q1=D3: \"ship neither flawed table \u2014 emit an"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "# rows).  The panel verdict Q1=D3: \"ship neither flawed table \u2014 emit an"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The destruction mechanism in the minimal repro (text-strategy grid placing a lane boundary inside a numeric token) is fixed at baseline: reconstruct_table_regions rejects such grids via _destroyed_numeric_tokens and falls back to the word-geometry rowizer (d645b24, ancestor of main_sha), and the issue's pinned xfail has flipped to a passing regression test (I ran it: tests/test_region_overlap_gh145.py included in a 56-test green run). What is not established: (a) the original corpus evidence (Nakamura-Steinsson p17/42/43 losing 13/49/13 decimal values) has not been re-measured at baseline -- the PDF is not available locally, and those pages reportedly take the rowizer path, not the text-strategy path A2 fixed; (b) the issue's independent 'fail closed meanwhile' ask is only partially realized: TR-3's value_guard_multiset_mismatch feeds the D3 floor only in conjunction with native_table_structure_failed plus failed attempts, and the --native-only demotion, not universally.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Consistent with calling 195/197/198 FIX-CANDIDATE: the A2 destruction check exists and works for its core case, and those three issues are live defects in that check (surfacing, None-scope, decorated tokens). Consistent with 146 ALREADY-FIXED: the header-band half of the same pages was repaired by A2b's _prepend_header_band."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 146,
+   "verdict": "ALREADY-FIXED",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": false,
+   "reason": "acceptance_criteria present but not every criterion is explicitly marked met/unmet (accepted forms: status=met|unmet, or met=true|false)",
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 572,
+      "snippet": "if not assume_header and _is_data_row(grid[0]):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not assume_header and _is_data_row(grid[0]):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 1102,
+      "snippet": "grid, x0, y0, x1, y1 = _prepend_header_band("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "grid, x0, y0, x1, y1 = _prepend_header_band("
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Both halves of the issue's own fix are implemented at baseline. (1) 'Never promote a data row': _grid_to_markdown now consults _is_data_row and emits an empty header row instead of consuming row 0 (356b727, with 807fec3 teaching _is_data_row decorated values). (2) 'Extend the region upward to include the header band': _prepend_header_band runs on the primary rowizer path (reconstruct.py:1102, marked '#146 residual') and _extend_scope_for_header covers the GH-144 fallback path, plus the header_repair module rebuilds collapsed headers from native geometry post-hoc. The dedicated test file passes. Residual risk: the real Nakamura-Steinsson p13 page was not re-measured (corpus PDF unavailable locally), which is why confidence is medium rather than high.",
+   "duplicate_of": null,
+   "fixed_by_commit": "356b727",
+   "cluster_consistency": "Sits with 144 PARTIALLY-IMPLEMENTED: 146's header-band repair was delivered as part of the same A2/A2b work (d645b24), whose destruction check still carries the live defects tracked as 195/197/198."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 147,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1119,
+      "snippet": "if text_direction_is_rotated(direction):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if text_direction_is_rotated(direction):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1133,
+      "snippet": "native_table_lane_refused = True"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "native_table_lane_refused = True"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Remedy (1) -- refuse the native table lane on rotated pages and route to OCR -- is fully landed: GH-147 A1 detection (4721ace) plus A2 refusal (13033a3, PR #193), visible at born_digital.py:1119-1133, with needs_ocr_enhancement set and a landscape_page_refused audit event; both landscape test files pass (included in the 56-test green run). The issue's hard requirement ('a page whose dominant text direction is not horizontal must not ship as trusted native text in its current form') is met. Remedy (2) -- rotate word coordinates and keep the free lane -- is deliberately not implemented, and the issue itself gates that on a corpus measurement (how many pages have non-horizontal dominant direction) that has never been run.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Unclustered but table-adjacent: the refusal removes one more input shape from the rowizer paths whose remaining defects are 144/152."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 151,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1155,
+      "snippet": "native_table_structure_defective = structure_check.structural_gate_fires(reports)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "native_table_structure_defective = structure_check.structural_gate_fires(reports)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 211,
+      "snippet": "\"\"\"Whether the GH-151 TICKET-B1 structural gate fires over a page's reports."
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "\"\"\"Whether the GH-151 TICKET-B1 structural gate fires over a page's reports."
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 657,
+      "snippet": "defect = table_output_defect(output.text, words, rules)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "defect = table_output_defect(output.text, words, rules)"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "The issue's core demand -- a second, free, structural component alongside word recall -- exists and gates: GH-151 B1's structural_gate_fires (ragged widths OR detached label/value row pairs) runs at extraction time (born_digital.py:1155) and on every accepting path of the agentic judge via _apply_structural_gate (agentic.py:657), and the p26 evidence shape is pinned by a synthetic fixture in tests/test_structural_gate_b1_gh151.py (39 passed, 1 xfailed when I ran it with the header tests). But the class is not closed: the header-sanity candidate only fires when drawn rules exist (#212's header_cut abstains otherwise -- that residue is #245), orphan_rows is deliberately diagnostic-only, and sibling instances of structure-destroyed-but-recall-clean tables remain open (#190 all-empty grids, #226 LaTeX-multicolumn headers) -- both of which pass this gate. The specific cited page would now be caught (its emitted grid is ragged), so the narrow defect is fixed; the title's general claim is not.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Consistent with 190 and 226 FIX-CANDIDATE: those are live instances of 'ships at full recall with structure destroyed' that B1's two shape findings cannot see, which is exactly why 151 is not ALREADY-FIXED."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 152,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1435,
+      "snippet": "# Column-aware ordering (x-band then y) would be needed for multi-column"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "# Column-aware ordering (x-band then y) would be needed for multi-column"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Still valid verbatim at baseline. The known-limitation comment the issue quotes is still present in extract_structured ('Column-aware ordering (x-band then y) would be needed for multi-column layouts'), and no x-band segmentation exists anywhere in the rowizer path -- rowize_from_word_list clusters rows by y across the full clip width. The fix direction is given in the issue and is one-night sized: segment the page into x-bands and rowize each band independently, reusing the clip-then-rowize machinery rowize_from_word_list already applies to a region bbox.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Region-admission defect, same family as 213 (wrong thing admitted as a table region); both remain open while the destruction mechanics downstream (144 cluster) got the attention."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 162,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 418,
+      "snippet": "except Exception as exc:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "except Exception as exc:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 424,
+      "snippet": "return self._inner.assess(output, provider)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return self._inner.assess(output, provider)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 542,
+      "snippet": "return self._apply_structural_gate(decision, output, page_num, words=None)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return self._apply_structural_gate(decision, output, page_num, words=None)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "SourceEvidenceTableJudge.assess is unchanged and still fails open: a verifier exception logs a warning and returns self._inner.assess(output, provider) directly (agentic.py:418-424), so an accepting inner judge ships an unverified table with no audit event. NativeTableVerifierJudge gained a partial GH-200 mitigation: its exception path now routes the inner decision through _apply_structural_gate with words=None (agentic.py:541-542), so a ragged candidate is still rejected -- but the header term cannot run without words, a shape-clean destroyed table still ships on the inner judge's accept, and the exception itself remains a logger.warning with no durable audit event. None of the issue's four acceptance criteria are fully met for the general case.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Same verification-trust family as 163 (deferral predicate too weak) and 166 (verification failures invisible): the verification layer's failure modes still resolve toward shipping."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 163,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/source_evidence.py",
+      "line": 308,
+      "snippet": "if page_has_native_words(page):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if page_has_native_words(page):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/source_evidence.py",
+      "line": 313,
+      "snippet": "deferred=True,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "deferred=True,"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Still valid verbatim at baseline. verify_scanned_table defers whenever page_has_native_words sees any non-empty word (source_evidence.py:308 -> 313), and page_has_native_words is a pure presence test that never consults born-digital trust. A scanned page with a baked-in corrupt OCR layer therefore skips the fail-closed raster/classical evidence check and is judged against the same untrusted layer. The fix is scoped and one-night sized: route the deferral through the trusted-native classification instead of raw word presence, with the issue's regression fixture.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Region-verification admission defect; complements 162 (fail-open on exception) -- this is fail-open on deferral."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 166,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 278,
+      "snippet": "if img_path is None:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if img_path is None:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/extract.py",
+      "line": 310,
+      "snippet": "logger.warning(\"dual-pass: crop read failed p%d (%s)\", page_num, exc)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "logger.warning(\"dual-pass: crop read failed p%d (%s)\", page_num, exc)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 3350,
+      "snippet": "if not crops:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not crops:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/tables_trust.py",
+      "line": 49,
+      "snippet": "TABLE_DISTRUST_KINDS: frozenset[str] = frozenset("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "TABLE_DISTRUST_KINDS: frozenset[str] = frozenset("
+    }
+   ],
+   "confidence": "high",
+   "rationale": "All three claims verified at baseline. (1) Non-timeout crop failures leave no sentinel: render failure drops at extract.py:278, read failure logs-and-continues at extract.py:310, and an empty response is silently excluded by the 'if md.strip()' guard at extract.py:314. (2) If every crop fails, _reread_page_tables hits 'if not crops: return 0, 0' (orchestrator.py:3350) with no distrust event, leaving the incumbent table apparently verified. (3) dualpass_crop_timeout is emitted (orchestrator.py:3332) but is absent from TABLE_DISTRUST_KINDS (tables_trust.py:49-89 -- the set lists eleven kinds, none of them the timeout), so tables_trust.json can report a fully trusted page after an all-timeout reread. Fix is one-night sized: typed failure sentinels per crop, a page-level distrust event on all-failed, and adding the timeout kind to the distrust set.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Same surfacing-defect family as 195 and 205: a detected failure that reaches no trust surface."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 190,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 12,
+      "snippet": "emptiness is applied anywhere in this module. Density never votes. Three"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "emptiness is applied anywhere in this module. Density never votes. Three"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Still valid: no content-emptiness invariant exists anywhere in the validation path. structure_check.py:12 states 'Density never votes' by design, and the module docstring additionally documents that reconcile._parse_grid drops all-blank pipe rows as phantom separators before check_grid ever sees them -- so the issue's exact all-empty grid is invisible to the shape gate at two levels. The defect is latent (the offending model builds were removed) but the guard is small: 'a grid whose data cells are entirely empty is never a successful extraction'. Placement is the one open decision (trust index vs native verifier vs per-page audit); the issue itself says that requires reading the trust index, which is why confidence is medium. Note the raw-markdown level is the only place the check can see the all-blank rows at all, given the _parse_grid blind spot.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "A live instance of 151's general claim (structure destroyed, recall/shape clean) that the B1 gate cannot see -- one of the reasons 151 is not ALREADY-FIXED."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 195,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 173,
+      "snippet": "logger.warning("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "logger.warning("
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 55,
+      "snippet": "_SILENT_LOSS_FOLLOWUP_ISSUE = 195"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_SILENT_LOSS_FOLLOWUP_ISSUE = 195"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Still valid verbatim. The GH-144 A2 rejection path surfaces only via logger.warning (reconstruct.py:173), and the code itself names this issue as the follow-up (_SILENT_LOSS_FOLLOWUP_ISSUE = 195, reconstruct.py:55) threaded into the warning text. The structured 'destroyed' record list (value, bbox, boundary reason) is computed and then discarded after the log call -- nothing reaches page status, document status, metadata, or the CLI summary. The suggested fix is exactly the one-night shape: thread a summary (page had N text-strategy tables rejected for numeric-token destruction) up through extract_structured into the existing page-status/metadata channel.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "A defect in 144's own fix (surfacing), consistent with 144 PARTIALLY-IMPLEMENTED; sibling to 197/198 which are the check's correctness holes."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 197,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 169,
+      "snippet": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox),"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Still valid verbatim at baseline. When _numeric_row_bbox returns None, the destruction check is still called with fitz.Rect(table.bbox) as scope (reconstruct.py:169) -- exactly the overrun shape review finding 2 asked to stop using, so a numeral in the whitespace-inferred overrun (notes, ticks, page numbers) can still be counted 'no-cell' destroyed and reject a good grid. The issue's suggested fix (skip the check when numeric_scope is None, never pass table.bbox) plus its hermetic fixture are one-night sized.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Correctness hole in 144's destruction check; independent of 195 (surfacing) and 198 (token coverage)."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 198,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 377,
+      "snippet": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 78,
+      "snippet": "_NUM_TOKEN_RE = re.compile(r\"^[\\(\\[]?-?\\d[\\d.,]*[\\)\\]%]?$\")"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_NUM_TOKEN_RE = re.compile(r\"^[\\(\\[]?-?\\d[\\d.,]*[\\)\\]%]?$\")"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/native_verifier.py",
+      "line": 488,
+      "snippet": "def is_numeric_token(tok: str) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def is_numeric_token(tok: str) -> bool:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Still valid verbatim at baseline. The candidate filter in _destroyed_numeric_tokens is unchanged (reconstruct.py:377) and _NUM_TOKEN_RE (reconstruct.py:78) does not admit significance stars beyond a trailing %/paren/bracket, the U+2212 minus, or currency symbols -- so a split '0.67***' never enters the destruction check and can still ship as a silent wrong number. The suggested driver already exists in-tree: native_verifier.is_numeric_token (native_verifier.py:488), which strips presentation first. Filter swap plus the issue's hermetic regression (a text-strategy table that splits 0.67*** must reject and fall back) is one-night sized.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Coverage hole in 144's destruction check, disjoint from 197 (scope) and 195 (surfacing)."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 205,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 809,
+      "snippet": "if self.config.native_only and getattr(pa, \"has_unverifiable_table_region\", False):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if self.config.native_only and getattr(pa, \"has_unverifiable_table_region\", False):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5049,
+      "snippet": "or getattr(p, \"native_table_unverifiable\", False)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "or getattr(p, \"native_table_unverifiable\", False)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/state.py",
+      "line": 238,
+      "snippet": "ps.native_table_unverifiable = True"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "ps.native_table_unverifiable = True"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "The surfacing gap is narrower than at filing but not closed. TR-3 (has_unverifiable_table_region -> native_table_unverifiable, state.py:238) now reaches: a --native-only analyze-time table_structure_failed event (orchestrator.py:809, still config-gated), the assemble-time native_fallback audit/CLI bucket (orchestrator.py:5049), the manifest native_distrusted contradiction guard (manifest.py:330), and the D3 floor (in conjunction). What is still missing relative to the issue's scope: step 1's UNCONDITIONAL AuditEvent -- on the default agentic path a TR-3 fire whose page ships a passing OCR table emits nothing about TR-3; and step 3 (keying escalation on TR-3) remains blocked on the fuller hand-judgement, of which only a 7-page first round exists (docs/log/2026-08-15_tr3-hand-judgement.md). The two comments resolved the base-rate discrepancy (two different samples; true rate mid-teens to mid-twenties) and refuted the notation hypothesis.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "The measurement-gated member of the table cluster: its signal (TR-3) is the same machinery 144 relies on for fail-closed behaviour, so 144's residual 'fail closed universally' ask and this issue's step 3 are the same decision."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 213,
+   "verdict": "NEEDS-MEASUREMENT",
+   "effective_verdict": "NEEDS-MEASUREMENT",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1260,
+      "snippet": "tables = page.find_tables()"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "tables = page.find_tables()"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1268,
+      "snippet": "return has_numeric_columns(page)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return has_numeric_columns(page)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/reconstruct.py",
+      "line": 87,
+      "snippet": "_MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The issue's own 2026-08-15 correction withdrew its asserted mechanism and made instrumentation the first task -- and that instrumentation has not been done. What is established at baseline: _detect_tables tries page.find_tables() first and falls back to has_numeric_columns (born_digital.py:1260, 1268), and has_numeric_columns cannot fire on a single page-number lane by construction (reconstruct.py:87 requires 3 numeric lanes per row, 3 such rows), leaving find_tables() as the leading unverified candidate. The measurement itself is small and hermetic (a synthetic index-shaped fixture, not a corpus run), but which fix is correct depends on its outcome, so this is not yet a fixable defect -- it is a real question with a cheap, specified experiment.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Region-admission false positive, sibling to 152 (admission geometry wrong for multi-table pages); both upstream of the destruction mechanics."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 215,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 292,
+      "snippet": "if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if header_cut_verdict(block.grid, words, rules) is HeaderVerdict.HARD:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1170,
+      "snippet": "structure_check.table_output_defect(native_text, words)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "structure_check.table_output_defect(native_text, words)"
+    },
+    {
+     "citation": {
+      "path": "tests/test_agentic.py",
+      "line": 304,
+      "snippet": "@pytest.mark.xfail("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "@pytest.mark.xfail("
+    },
+    {
+     "citation": {
+      "path": "tests/test_structural_gate_b1_gh151.py",
+      "line": 715,
+      "snippet": "@pytest.mark.xfail("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "@pytest.mark.xfail("
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The premise 'the reject term is parked' is outdated but the defect is not closed. GH-212 (ec390d8, ancestor of main_sha) wired a geometric HARD-only term into table_output_defect: header_cut_verdict now rejects when words and drawn rules are supplied (structure_check.py:287-292), and its tests pass (test_header_cut.py green in my run). But the two xfail(strict=True) tests the issue pinned still xfail at baseline (verified: 39 passed, 1 xfailed and 46 passed, 1 xfailed in the two relevant runs) because both fixtures are rule-less, where header_cut abstains -- and the native-lane extraction path calls table_output_defect(native_text, words) WITHOUT rules (born_digital.py:1170), so the term can never fire at extraction time at all. Destroyed header bands on borderless/no-midrule tables still ship undetected; that residue is exactly #245 on the judge path. The issue's 'measurement that should come first' is done (per its own comment), and the direction it floated (a non-content-based signal) is the one that landed.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Must read with 245: 212 delivered the term 215 asked for; 245 is precisely the abstain residue this term leaves. Neither is fully closed; both xfails standing is the mechanical proof for 215."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 226,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 657,
+      "snippet": "defect = table_output_defect(output.text, words, rules)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "defect = table_output_defect(output.text, words, rules)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/structure_check.py",
+      "line": 178,
+      "snippet": "findings: list[str] = []"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "findings: list[str] = []"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Still valid at baseline: no guard anywhere rejects or repairs residual LaTeX table commands in emitted markdown (grep across tables/, pipeline/, core/ finds \\multicolumn handling only in unrelated hpc_pipeline/reconciler contexts). The only winner-side checks on shipping text are table_output_defect's two terms (agentic.py:657) -- grid shape and rule-anchored header geometry -- and structure_check's findings are limited to ragged/orphan/detached_label (structure_check.py:178), none of which can see a consistent-pipe-count row carrying a literal '\\multicolumn{6}{c|}{Forecast}'. The issue supplies two one-night remedies: flatten multi-row/spanning header bands at emission (D2 evidence shows the emitter already does this correctly on sibling pages) and a cheap model-free guard failing any page whose shipped table text contains a residual LaTeX command. Confidence medium because the emitter-side repair touches the VLM output path, whose exact emission point I did not trace.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "A third wrong-header mechanism distinct from 146 (band excluded) and 215 (band destroyed): the band is present but emitted as an unparseable LaTeX command, collapsing the column count. Another live instance of 151's general class."
+  },
+  {
+   "vendor": "kimi",
+   "issue": 245,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 5,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 608,
+      "snippet": "if vr.state == VerifierState.EXACT_PASS:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if vr.state == VerifierState.EXACT_PASS:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 624,
+      "snippet": "confidence=1.0,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "confidence=1.0,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 660,
+      "snippet": "if HeaderVerdict.UNVERIFIABLE in verdicts:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if HeaderVerdict.UNVERIFIABLE in verdicts:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/agentic.py",
+      "line": 671,
+      "snippet": "if not defect:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if not defect:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/locate.py",
+      "line": 36,
+      "snippet": "_RULE_MIN_WIDTH_PT = 72.0  # >= ~1 inch wide to be a table rule, not an underline"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_RULE_MIN_WIDTH_PT = 72.0  # >= ~1 inch wide to be a table rule, not an underline"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Still valid at baseline and now unblocked: #212 landed (ec390d8, ancestor of main_sha), so the term exists and its abstain path is live exactly as described. On EXACT_PASS the judge accepts with confidence=1.0 (agentic.py:623-624) and _apply_structural_gate returns the accept unchanged whenever table_output_defect finds no defect (agentic.py:671-672) -- which includes every header_cut abstain (no drawn rule above the anchor, empty get_drawings, rule below _RULE_MIN_WIDTH_PT=72pt at locate.py:36, non-unique anchor, fewer than 2 lane centers). The abstain produces only a table_header_unverifiable audit event (agentic.py:660), which is not in TABLE_DISTRUST_KINDS, so it reaches neither tables_trust.json nor page status nor CLI. The proposed fix (treat abstain as AMBIGUOUS and delegate to VLMPageJudge) is control flow and one-night sized; confidence is medium because the issue marks that fix 'not ratified' and its cost (a VLM call per borderless-table page) is unmeasured -- the owner decision on scope is the real open question, not the code.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Must adjudicate with 215: 215's term now exists (header_cut), and 245 is exactly what happens when it abstains -- both verified live at baseline, and the two standing xfail tests are 215's mechanical proof while agentic.py:671-672 is 245's."
   },
   {
    "vendor": "ollama-minimax",

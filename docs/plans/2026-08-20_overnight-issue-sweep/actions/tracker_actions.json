@@ -1,0 +1,263 @@
+{
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "count": 8,
+ "actions": [
+  {
+   "action_id": "d1ff9e8c7406",
+   "issue": 144,
+   "kind": "comment",
+   "disposition": "PARTIALLY-IMPLEMENTED",
+   "batch": "batch-1",
+   "adjudicator": "kimi",
+   "agreement": "UNANIMOUS",
+   "snapshot_updated_at": "2026-08-11T14:34:51Z",
+   "snapshot_body_hash": "c5b6d27c86f68ebf",
+   "evidence": [
+    {
+     "path": "src/socr/tables/reconstruct.py",
+     "line": 171,
+     "snippet": "        if destroyed:"
+    },
+    {
+     "path": "src/socr/tables/reconstruct.py",
+     "line": 377,
+     "snippet": "        if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):"
+    },
+    {
+     "path": "src/socr/tables/reconstruct.py",
+     "line": 169,
+     "snippet": "numeric_scope if numeric_scope is not None else fitz.Rect(table.bbox)"
+    }
+   ],
+   "basis": "All three seats, on machine-checked evidence for two, agree the mechanism landed but the issue is not closable: the destruction check fires and rejects (reconstruct.py:171), yet its coverage holes are exactly #197/#198, its surfacing hole is #195, the fallback rowizer still misplaces a lane on the issue-comment synthetic, and the original corpus evidence (p17/42/43) is unremeasured. Not ALREADY-FIXED (acceptance not mapped, corpus claim unverified); not FIX-CANDIDATE tonight because the remaining core \u2014 the fallback rowizer's lane placement and the step-3 routing \u2014 needs measurement the plan defers by design (#144 step 3 is explicitly deferred in TICKETS.md).",
+   "risk_if_wrong": "If actually fully fixed, an open issue lingers and a redundant comment is posted \u2014 cheap; the reverse (closing a live value-loss defect) is the unacceptable direction, so PARTIALLY-IMPLEMENTED is the safe error.",
+   "comment": "Status at 53b0637 (overnight sweep, machine-checked): the A2 destruction check lands and rejects value-splitting text-strategy grids with rowizer fallback (d645b24), and the per-region hard-fail reaches the D3 floor. Still open: (a) the check's own coverage \u2014 None numeric-scope falls back to table.bbox (#197), decorated numerics 0.67***/U+2212/$0.67 are never candidates (#198), rejection is log-only (#195); (b) on the issue-comment synthetic the fallback rowizer still emits `| 6M Treasury | yield | 0.85 |` and loses 0.06/0.80/0.05/0.94 from the grid; (c) the p17/42/43 corpus loss has not been re-measured at this SHA. Issue stays open; #195+#197+#198 are queued as one fix tonight.",
+   "url": "https://github.com/r-uben/socr/issues/144"
+  },
+  {
+   "action_id": "524e08eaf32d",
+   "issue": 146,
+   "kind": "comment",
+   "disposition": "PARTIALLY-IMPLEMENTED",
+   "batch": "batch-1",
+   "adjudicator": "kimi",
+   "agreement": "UNANIMOUS",
+   "snapshot_updated_at": "2026-08-11T14:39:41Z",
+   "snapshot_body_hash": "b14076e7d751082a",
+   "evidence": [
+    {
+     "path": "src/socr/tables/reconstruct.py",
+     "line": 572,
+     "snippet": "    if not assume_header and _is_data_row(grid[0]):"
+    },
+    {
+     "path": "src/socr/tables/reconstruct.py",
+     "line": 1154,
+     "snippet": "def _extend_scope_for_header(tight, words: list):"
+    }
+   ],
+   "basis": "Cause 1 (unconditional grid[0] promotion) is fixed as prescribed \u2014 reconstruct.py:572 guards with _is_data_row and emits an empty header. Cause 2 (region excludes the header band) has machinery (_extend_scope_for_header, _prepend_header_band) but it only runs on the rejected-grid fallback scope, not the rowizer path generally; the TICKET-D2 corpus measurement (17/23 wrong headers, 14 by this mechanism) postdates the fix and is unreproduced at main_sha. Two independent seats with verified evidence plus a third agree; the disposition is not ALREADY-FIXED because the issue's 'Then:' half is measurably incomplete on the corpus.",
+   "risk_if_wrong": "A stale-but-harmless status comment; the band-demotion half is corroborated by a corpus measurement taken after the fix, so the residual is near-certain to be real.",
+   "comment": "Status at 53b0637 (overnight sweep, machine-checked): the immediate lossless half landed \u2014 _grid_to_markdown tests _is_data_row(grid[0]) and emits an empty header rather than promoting a data row (356b727; tests/test_table_header_gh146.py green). The header-band half is partial: _extend_scope_for_header/_prepend_header_band exist but only on the rejected-grid fallback scope; on the plain rowizer path the header band still ships as prose above an empty-header grid, and TICKET-D2's corpus measurement (17 of 23 emitted tables with wrong headers, 14 by band demotion) postdates the fix and has not been re-run. Issue stays open.",
+   "url": "https://github.com/r-uben/socr/issues/146"
+  },
+  {
+   "action_id": "04d07063d61a",
+   "issue": 147,
+   "kind": "close",
+   "disposition": "ALREADY-FIXED",
+   "batch": "batch-1",
+   "adjudicator": "kimi",
+   "agreement": "SPLIT",
+   "snapshot_updated_at": "2026-08-11T14:46:00Z",
+   "snapshot_body_hash": "53d68e06a4c51e3d",
+   "evidence": [
+    {
+     "path": "src/socr/core/born_digital.py",
+     "line": 1119,
+     "snippet": "            if text_direction_is_rotated(direction):"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 767,
+     "snippet": "                        kind=\"landscape_page_refused\","
+    }
+   ],
+   "basis": "I side with grok/minimax. The issue's own words set the bar: 'Whatever the remedy, a page whose dominant text direction is not horizontal must not ship as trusted native text in its current form. That part is not a design question' \u2014 and remedy (2) is explicitly conditional: 'Worth measuring first... That number decides whether (2) is warranted.' An ALREADY-FIXED claim must satisfy the issue's acceptance criteria, not every conditional alternative the issue floats. All three proofs survive: (1) fixed_by_commit 13033a3f7affffd9b642f29e80ae2a63e7a4ce28 is an ancestor of main_sha (git merge-base --is-ancestor, re-run by me); (2) acceptance mapped \u2014 binding requirement met at born_digital.py:1119 (refusal before extract_structured, prose retained, needs_ocr_enhancement + native_table_lane_refused set, landscape_page_refused event at orchestrator.py:767), detection uses the pre-existing dominant_text_direction as the issue required, remedy 1 implemented exactly as specified; (3) regression tests re-run BY ME at main_sha with the isolation canary passed: tests/test_landscape_detection_gh147.py + tests/test_landscape_refusal_a2_gh147.py, 20 passed. claude's reading demands remedy 2, which the issue itself declines to demand \u2014 that is the category error this batch was warned about (answering a question the issue did not ask). Closing also correctly kills pre-authored TICKET-E4, which would otherwise re-implement an existing fix \u2014 the exact PR-#250 failure shape.",
+   "risk_if_wrong": "If some path still ships a transposed native table as SUCCESS, closing hides it \u2014 mitigated by 20 pinning tests over exactly that path; residual risk is an uncovered entry point, which the review board should probe.",
+   "comment": "Closed as fixed by 13033a3 (PR #193, GH-147 A2), ancestor of 53b0637. Acceptance mapping: (1) binding requirement ('a page whose dominant text direction is not horizontal must not ship as trusted native text') \u2014 met: _assess_page tests text_direction_is_rotated(direction) before the structured-extraction branch (born_digital.py:1119), retains prose, sets needs_ocr_enhancement + native_table_lane_refused, and _phase_analyze emits a landscape_page_refused AuditEvent (orchestrator.py:767); (2) remedy 1 (refuse the lane, route to OCR) \u2014 implemented exactly as specified; (3) remedy 2 (coordinate rotation) \u2014 the issue makes it explicitly conditional on a corpus measurement ('That number decides whether (2) is warranted'), so it is not a closure criterion. Regression proof, re-run at 53b0637 with PYTHONPATH isolation: tests/test_landscape_detection_gh147.py + tests/test_landscape_refusal_a2_gh147.py \u2014 20 passed.",
+   "url": "https://github.com/r-uben/socr/issues/147"
+  },
+  {
+   "action_id": "532ec048d535",
+   "issue": 151,
+   "kind": "comment",
+   "disposition": "PARTIALLY-IMPLEMENTED",
+   "batch": "batch-1",
+   "adjudicator": "kimi",
+   "agreement": "UNANIMOUS",
+   "snapshot_updated_at": "2026-08-11T16:34:37Z",
+   "snapshot_body_hash": "e647b949cd5a9367",
+   "evidence": [
+    {
+     "path": "src/socr/core/born_digital.py",
+     "line": 1155,
+     "snippet": "                native_table_structure_defective = structure_check.structural_gate_fires(reports)"
+    },
+    {
+     "path": "src/socr/tables/structure_check.py",
+     "line": 210,
+     "snippet": "def structural_gate_fires(reports: Sequence[GridStructureReport]) -> bool:"
+    }
+   ],
+   "basis": "The issue's central ask \u2014 a second, free, deterministic gate beside recall \u2014 partially shipped: structural_gate_fires is the single source of truth on the native lane (born_digital.py:1155) covering ragged and detached-label shapes. But the issue's own evidence page (Bauer-Pflueger-Sunderam p26) exhibits the rectangular-but-wrong class \u2014 spanning headers detached from column groups, coefficient/SE row unbinding \u2014 which B1 deliberately does not cover, and the issue's strongest candidate (the binding check reusing native geometry) does not exist. All three seats agree; the disposition names precisely which acceptance asks are met (a second deterministic gate exists and gates) and which are not (the p26 rectangular case still passes).",
+   "risk_if_wrong": "None beyond a status comment; all three seats independently verified the gate's coverage boundary.",
+   "comment": "Status at 53b0637 (overnight sweep, machine-checked): the second deterministic gate now exists \u2014 structural_gate_fires (ragged OR detached_label_rows, orphan_rows deliberately narrowed out) ships as native_table_structure_defective on the native lane and short-circuits the heuristic scorer. Not closed: the p26 evidence shape \u2014 a rectangular grid with spanning headers over column groups, panel labels as data, and R2 unbound from its values \u2014 passes the gate, and the binding check (native x-position vs assigned column) is unimplemented. Header-band destruction specifically is tracked in #215/#245. Issue stays open with narrowed scope: rectangular-but-wrong structure.",
+   "url": "https://github.com/r-uben/socr/issues/151"
+  },
+  {
+   "action_id": "37244541225c",
+   "issue": 215,
+   "kind": "comment",
+   "disposition": "PARTIALLY-IMPLEMENTED",
+   "batch": "batch-1",
+   "adjudicator": "kimi",
+   "agreement": "SPLIT",
+   "snapshot_updated_at": "2026-08-15T19:48:05Z",
+   "snapshot_body_hash": "497f53e1ba08a18d",
+   "evidence": [
+    {
+     "path": "src/socr/core/born_digital.py",
+     "line": 1170,
+     "snippet": "                        structure_check.table_output_defect(native_text, words)"
+    },
+    {
+     "path": "src/socr/tables/structure_check.py",
+     "line": 246,
+     "snippet": "    2. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only"
+    },
+    {
+     "path": "tests/test_structural_gate_b1_gh151.py",
+     "line": 727,
+     "snippet": "    def test_native_only_records_header_defect_without_rerouting(self, tmp_path: Path) -> None:"
+    }
+   ],
+   "basis": "claude is right that the headline is stale \u2014 the parked term was replaced by a sound drawn-rule predicate (I read structure_check.py:234-264: header_cut runs as term 2 when words AND rules are supplied) \u2014 but ALREADY-FIXED overreaches, and the issue's own acceptance is the arbiter. The defect #215 tracks is 'destroyed header bands ship undetected'. On the trusted-native lane that remains true: born_digital.py:1170 calls table_output_defect(native_text, words) with rules defaulting to None, so the term abstains by construction there, and the e2e test pinning the requirement (tests/test_structural_gate_b1_gh151.py:727) is still strict-xfail \u2014 its own reason text says it flips to XPASS 'the moment a sound predicate is wired back in', and it has not flipped. A term that exists but never runs on the lane where most native tables ship leaves the issue's defect open on that lane. PARTIALLY-IMPLEMENTED: term landed and gates the judge path; native-lane wiring and the xfail flip are the remainder. Decided jointly with #245: #245 presupposes the term's existence (its 'blocked on #212' is discharged) and covers the EXACT_PASS abstain consequence; #215 covers coverage. No contradiction.",
+   "risk_if_wrong": "If closed per claude's reading, header-destroyed tables on the trusted-native lane keep shipping undetected under a closed issue \u2014 the lane most native tables take.",
+   "comment": "Status at 53b0637 (overnight sweep, machine-checked): the headline is stale \u2014 the parked token-content term was REPLACED by header_cut_verdict (drawn-rule, HARD-only, abstains UNVERIFIABLE) as term 2 of table_output_defect (ec390d8, PR #247), escaping all four prior content-rule failures, and it gates the agentic judge paths where rules are precomputed. Still open: born_digital's trusted-native lane calls table_output_defect(native_text, words) with rules=None, so the term never runs on native extract, and test_native_only_records_header_defect_without_rerouting remains strict-xfail. The EXACT_PASS abstain consequence is tracked separately in #245. Issue stays open with narrowed scope: native-lane wiring + xfail flip.",
+   "url": "https://github.com/r-uben/socr/issues/215"
+  },
+  {
+   "action_id": "9862f4b02245",
+   "issue": 127,
+   "kind": "comment",
+   "disposition": "ROADMAP-UMBRELLA",
+   "batch": "batch-2",
+   "adjudicator": "grok",
+   "agreement": "SPLIT",
+   "snapshot_updated_at": "2026-08-09T17:24:41Z",
+   "snapshot_body_hash": "36504b45463ef977",
+   "evidence": [
+    {
+     "path": "src/socr/core/born_digital.py",
+     "line": 1553,
+     "snippet": "line_text = \"\".join(s.get(\"text\", \"\") for s in spans)"
+    },
+    {
+     "path": "src/socr/core/born_digital.py",
+     "line": 307,
+     "snippet": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"
+    }
+   ],
+   "basis": "The native collapse is real (1553; no get_links). Deepseek is category-wrong that four features plus golden regeneration is one night, and wrong that heading recovery is a native-only patch \u2014 #223 falsifies that half of #127's framing. Gemini's ROADMAP-UMBRELLA matches the issue as written. Native lists/links/emphasis stay in #127's scope; headings do not.",
+   "risk_if_wrong": "A later agent treats the whole native-structure programme as closed or, conversely, ships a heading-only native patch and calls #223 done.",
+   "comment": "Overnight adjudication at 53b0637: extract_structured still collapses spans to bare text (born_digital.py:1553) and never calls page.get_links() \u2014 that native drop is real. #223 is right that the heading half is not native-lane-specific; the contrast 'VLM pages emit real Markdown headings' does not hold. Lists/links/emphasis remain this issue's native-lane scope; headings are the pipeline-wide #223 question and must not be folded into a native-only patch. Not a one-night fix (four features + golden regeneration). ROADMAP-UMBRELLA; stays OPEN.",
+   "url": "https://github.com/r-uben/socr/issues/127"
+  },
+  {
+   "action_id": "ae8b7155b79d",
+   "issue": 220,
+   "kind": "comment",
+   "disposition": "PARTIALLY-IMPLEMENTED",
+   "batch": "batch-2",
+   "adjudicator": "grok",
+   "agreement": "UNANIMOUS",
+   "snapshot_updated_at": "2026-08-16T21:18:20Z",
+   "snapshot_body_hash": "bdf1e31410df2128",
+   "evidence": [
+    {
+     "path": "src/socr/cli.py",
+     "line": 1037,
+     "snippet": "def review("
+    },
+    {
+     "path": "src/socr/cli.py",
+     "line": 1044,
+     "snippet": "\"\"\"Build a side-by-side page-image/markdown page for hand judgement (GH-220).\"\"\""
+    },
+    {
+     "path": "src/socr/review/html.py",
+     "line": 48,
+     "snippet": "_BOOL_SIGNAL_KEYS = ("
+    },
+    {
+     "path": "src/socr/review/html.py",
+     "line": 246,
+     "snippet": "def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:"
+    },
+    {
+     "path": "src/socr/review/html.py",
+     "line": 514,
+     "snippet": "  else if(k==='n'){ const nx = PAGES.findIndex((p,ix)=>ix>cur && p.signals.length);"
+    }
+   ],
+   "basis": "Both seats claimed ALREADY-FIXED; the machine check already rejected that (deepseek's own table marks the optional gate-filter UNMET; gemini's fixed_by_commit never touched the cited ranges). Viewer exists (review(), build_review_html, _BOOL_SIGNAL_KEYS). CLI options are only doc_dir/pdf/output/scale/quality. `n` jumps to the next page with any signal \u2014 that is not 'filter to pages a given gate fired on'. 4 of 5 met. Do not close.",
+   "risk_if_wrong": "Closing would drop the gate-filter the owner listed for calibration passes; leaving it open when they consider the optional item waived is only a tracker nit.",
+   "comment": "Overnight adjudication at 53b0637: socr review exists (cli.py:1037, review/html.py) and covers side-by-side page image vs pages/NNN.md, sidecar header signals, and prev/next. The explicitly-optional acceptance item is still unmet: there is no filter for 'only pages a given gate fired on' (CLI is doc_dir/pdf/output/scale/quality only; `n` jumps to the next page with any recorded signal). Disposition is PARTIALLY-IMPLEMENTED, not a close. Stays OPEN.",
+   "url": "https://github.com/r-uben/socr/issues/220"
+  },
+  {
+   "action_id": "82eba5077926",
+   "issue": 249,
+   "kind": "comment",
+   "disposition": "NEEDS-MEASUREMENT",
+   "batch": "batch-2",
+   "adjudicator": "grok",
+   "agreement": "UNANIMOUS",
+   "snapshot_updated_at": "2026-08-19T22:34:42Z",
+   "snapshot_body_hash": "56fcb1cd3a29f908",
+   "evidence": [
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 2278,
+     "snippet": "kind=\"chart_table_arbitration\","
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 1765,
+     "snippet": "if not rows_establish_grid(gt_rows):"
+    },
+    {
+     "path": "src/socr/pipeline/orchestrator.py",
+     "line": 1769,
+     "snippet": "kind=\"table_not_scorable\","
+    },
+    {
+     "path": "src/socr/pipeline/agentic.py",
+     "line": 555,
+     "snippet": "kind=\"value_guard_row_count_warning\","
+    },
+    {
+     "path": "src/socr/tables/native_verifier.py",
+     "line": 138,
+     "snippet": "row_count_warn: bool = False  # row-count mismatch soft-flag (table ships, status\u2192WARNING)"
+    }
+   ],
+   "basis": "Unanimous FIX-CANDIDATE is category-wrong in the same way the first two owner drafts were. Mixed-page arbitration (2278) is real and holds these pages out of chart_asset \u2014 consistent with #167, which only claims the chart-only raster path. Two load-bearing errors in both seats: (1) value_guard row-count is a SOFT WARNING (native_verifier.py:138,658; agentic.py:552-555) and native_table_verifier_warn delegates to the inner judge (590-594) \u2014 it does not hard-reject the 49-row phantom; (2) table_not_scorable (1765-1769) uses native_rows_from_page/rows_establish_grid, a different parser than the 49-row _rows_by_y_from_words count, so 'abstain when not_scorable' is not the one-night fix they describe. The user-visible sludge is real; the reject story is still imprecise. Template is MISREPORTED-style correction, stay OPEN, no overnight routing change. Corpus/hand pass required.",
+   "risk_if_wrong": "If the inner judge really is rejecting solely because of the 49-row warning, delaying a fix leaves FOMC-style pages shipping axis dumps; if we had shipped the 'abstain on not_scorable' patch, we would have changed the wrong parser.",
+   "comment": "Overnight adjudication at 53b0637: mixed-page arbitration (chart_table_arbitration) and tick-label numeric rows in the native layer are real. Two corrections to the current write-up \u2014 not a close. (1) value_guard row-count mismatch is a SOFT WARNING (row_count_warn; table ships) and native_table_verifier_warn delegates to the inner judge; it is not a hard reject against the 49-row phantom. (2) table_not_scorable uses native_rows_from_page/rows_establish_grid, a different parser than the 49-row _rows_by_y_from_words count, so 'abstain when not_scorable' is not a one-line fix for the 49-vs-1 grading. Compatible with #167: the page-level chart-asset lane is chart-only pages; mixed pages stay on the table route. Needs a corpus/hand pass before a routing change. Stays OPEN.",
+   "url": "https://github.com/r-uben/socr/issues/249"
+  }
+ ],
+ "refused": []
+}

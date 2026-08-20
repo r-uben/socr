@@ -1,0 +1,15 @@
+{
+  "pr": 251,
+  "reviewer": "gemini-pro",
+  "access_proof": {
+    "cmd": "gh pr diff 251 --repo r-uben/socr",
+    "output": "diff --git a/src/socr/pipeline/orchestrator.py b/src/socr/pipeline/orchestrator.py"
+  },
+  "verdict": "APPROVE",
+  "non_vacuity_confirmed": true,
+  "reverse_regression_guarded": true,
+  "reproduced_baseline_fail": true,
+  "findings": [],
+  "what_i_tried_to_break": "Extracted the new tests, injected them into the baseline worktree (commit 53b0637), and ran them via pytest. test_judge_rejected_success_page_is_not_resume_skippable failed due to 'AssertionError... is None', proving it catches the behavioral defect, not an import error. test_audit_passed_success_page_is_still_resume_skippable passed on baseline, proving reverse regression is properly guarded. Audited orchestrator.py for blast radius (manifest/assemble paths untouched). Verified no MagicMocks are used. Verified PR surfacing claims align with the implementation (events reaching page sidecar, audit_log, and CLI, while Document status is deliberately untouched).",
+  "base_worktree_left_clean": true
+}

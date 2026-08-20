@@ -2,10 +2,1203 @@
  "batch": "batch-4",
  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
  "vendors": [
+  "claude",
   "gemini-pro",
   "grok"
  ],
  "rows": [
+  {
+   "vendor": "claude",
+   "issue": 140,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 5,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1095,
+      "snippet": "needs_ocr_enhancement = has_corrupt_math"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "needs_ocr_enhancement = has_corrupt_math"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 814,
+      "snippet": "has_equations = ("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "has_equations = ("
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/config.py",
+      "line": 166,
+      "snippet": "detect_equations: bool = False"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "detect_equations: bool = False"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/config.py",
+      "line": 180,
+      "snippet": "recover_clean_equations: bool = False"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "recover_clean_equations: bool = False"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2682,
+      "snippet": "kind=\"native_math_unrecovered\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "kind=\"native_math_unrecovered\","
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Still valid at main_sha. needs_ocr_enhancement is keyed to has_corrupt_math alone (born_digital.py:1095), while has_equations (814) is metadata only, so a page with CLEAN math fonts takes the free native lane. Both recovery flags default False (config.py:166,180), so nothing recovers it. Unlike the adjacent PUA class, which emits native_math_unrecovered (orchestrator.py:2682), the clean-math-font class emits no event at all - the loss is invisible at page, document and CLI level, which is the cardinal-rule violation. The issue frames the ROUTING choice as a policy fork needing measurement, but the AUDIT half (emit a mandatory event when math fonts are detected and the recovery flags are off) is a night-sized, zero-cost fix that does not prejudge the fork.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "140 is the flags-OFF default-policy gap; 157/164 are defects that appear with flags ON; 165 is the PUA variant of 140's silence; 219 is the detector-level variant. All five are simultaneously true because they sit at four different stages: page classification (140,165), region detection (219), sidecar attach (157,164). Recommend fixing 219 and 165 before 140, because 140's audit event should fire on the same predicate 219 widens."
+  },
+  {
+   "vendor": "claude",
+   "issue": 157,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5902,
+      "snippet": "if po is None:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if po is None:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5905,
+      "snippet": "\"GH-36b: page %d has detected equations but no PageOutput; skipping\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "\"GH-36b: page %d has detected equations but no PageOutput; skipping\","
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 3041,
+      "snippet": "self._attach_equation_latex_sidecars(state, [bo])"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._attach_equation_latex_sidecars(state, [bo])"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 3038,
+      "snippet": "self._detect_and_crop_equations(state, [page_num], output_dir)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._detect_and_crop_equations(state, [page_num], output_dir)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Confirmed at main_sha: the skip is still there verbatim - 'if po is None' (orchestrator.py:5902) followed by the GH-36b warning (5905) and continue. It is worse than the issue describes on the primary path: _phase_agentic calls _attach_equation_latex_sidecars(state, [bo]) with ONLY the current page (3041), while regions_by_page is rebuilt from the whole accumulated state.events list on every call. So for page N, every previously-detected page 1..N-1 hits the 'shouldn't happen, be defensive' branch - the skip is the NORMAL path in agentic mode, not an anomaly, and the warning text is actively misleading. The current page's own regions do get processed, so in agentic this is log-noise rather than lost work; the lost-work case is a call site that omits a detected page from page_outputs. Acceptance item 3 (one shared attach contract across agentic and legacy) is the real work and is night-sized.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "157 and 164 are both defects INSIDE _attach_equation_latex_sidecars and should be fixed in one change: 157 is the page-lookup contract, 164 is the native_text argument eight lines below it (5910). Neither can be reached unless 219/165 first let regions be detected, so those two gate the observability of 157/164 in practice."
+  },
+  {
+   "vendor": "claude",
+   "issue": 164,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5910,
+      "snippet": "native_text = state.pages[page_num].native_text or \"\""
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "native_text = state.pages[page_num].native_text or \"\""
+    },
+    {
+     "citation": {
+      "path": "src/socr/math/equation_latex.py",
+      "line": 238,
+      "snippet": "The native linearised text for this equation region."
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "The native linearised text for this equation region.  Kept on failure"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5902,
+      "snippet": "if po is None:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if po is None:"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Confirmed. orchestrator.py:5910 binds native_text to the WHOLE page (state.pages[page_num].native_text) once per page, then passes it unchanged into every region in the inner loop. build_equation_sidecar's own docstring says the parameter is 'The native linearised text for this equation region' (math/equation_latex.py:238), so caller and callee disagree about the contract. On 1A validation failure the sidecar emits that full page text and the orchestrator appends it onto po.text, which already contains the page - so a page with k rejected regions ships its prose k+1 times. Self-contained, night-sized fix: crop the fallback text to the region bbox already carried in the equation_region_detected event data.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Same function as 157, eight lines apart - fix together. Independent of 219/165, which only control whether regions reach this function at all."
+  },
+  {
+   "vendor": "claude",
+   "issue": 165,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 814,
+      "snippet": "has_equations = ("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "has_equations = ("
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2674,
+      "snippet": "if getattr(ps, \"has_unmapped_math_glyphs\", False) and not ("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if getattr(ps, \"has_unmapped_math_glyphs\", False) and not ("
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2682,
+      "snippet": "kind=\"native_math_unrecovered\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "kind=\"native_math_unrecovered\","
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 3038,
+      "snippet": "self._detect_and_crop_equations(state, [page_num], output_dir)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._detect_and_crop_equations(state, [page_num], output_dir)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Both halves confirmed. (a) has_equations is built from _detect_math_fonts / _detect_equations / has_corrupt_math (born_digital.py:814-816) and omits has_unmapped_math_glyphs; the agentic equation gate admits a page only if pa.has_equations, so a STIXGeneral+PUA page never enters detection even with both flags on. (b) The native_math_unrecovered emission is guarded by 'and not (self.config.detect_equations and self.config.recover_clean_equations)' (orchestrator.py:2674-2676) with no check that any region was detected or recovered - so turning the flags ON deletes the only durable PUA loss signal while, per (a), changing nothing about what is recovered. That is a strict regression in surfacing produced by opting into recovery, and it is the sharpest cardinal-rule violation in this cluster.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "165(b) and 140 are the same silence with opposite flag states: 140 is silence with flags OFF, 165(b) is silence CAUSED by flags ON. Any fix must make the event conditional on recovery having actually happened, not on configuration - that single change closes both. 165(a) and 219 are the same shape at different levels (page-level predicate vs region-level predicate) and both argue the font whitelist is the wrong primitive."
+  },
+  {
+   "vendor": "claude",
+   "issue": 219,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 38,
+      "snippet": "_MATH_FONT_RE = re.compile("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "_MATH_FONT_RE = re.compile("
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 42,
+      "snippet": "r\"Euler|rsfs)\"  # Euler script, RSFS (calligraphic)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "r\"Euler|rsfs)\"  # Euler script, RSFS (calligraphic)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/math/detect_equations.py",
+      "line": 90,
+      "snippet": "DISPLAY_MIN_MATH_SPAN_RATIO: float = 0.50"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "DISPLAY_MIN_MATH_SPAN_RATIO: float = 0.50"
+    },
+    {
+     "citation": {
+      "path": "src/socr/math/detect_equations.py",
+      "line": 220,
+      "snippet": "if candidate and _MATH_FONT_RE.search(candidate):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if candidate and _MATH_FONT_RE.search(candidate):"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Root cause confirmed by reading; the reporter's page measurements were not re-run. _MATH_FONT_RE (born_digital.py:38-43) is a closed whitelist of TeX/STIX/OTF-math families - CMMI|CMSY|CMEX|MSAM|MSBM|STIXMath|...|Euler|rsfs - with no Pazo, PazoMath, URWPalladioL or MathPazo entry. detect_display_equations builds its math_font_names set purely by running that regex over span fonts (detect_equations.py:220) and then requires DISPLAY_MIN_MATH_SPAN_RATIO = 0.50 of a line's characters to come from such spans (line 90), so the reported ratios of 0.04 and 0.00 discard every region. I did not reproduce the BHL_2026 p.6 numbers - no fixture in-tree and no PDF available to this seat - so the blast-radius claim rests on the reporter. The night-sized fix is the reporter's item 3: flag the disagreement when the page-level math predicate fires and the region detector returns zero regions, plus the whitelist extension as mitigation. The glyph-identity redesign (item 1) is a larger piece.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "219 is the highest-leverage item in the cluster: upstream of 157 and 164 (no regions means the attach function is a no-op) and the region-level twin of 165(a). Fixing 157/164 alone leaves Palatino papers exactly as broken. Recommended order: 219, 165, 140, then 157+164 together."
+  },
+  {
+   "vendor": "claude",
+   "issue": 155,
+   "verdict": "ROADMAP-UMBRELLA",
+   "effective_verdict": "ROADMAP-UMBRELLA",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 3041,
+      "snippet": "self._attach_equation_latex_sidecars(state, [bo])"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._attach_equation_latex_sidecars(state, [bo])"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5325,
+      "snippet": "self._rewrite_all_fragments(state, output_dir, final_text)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._rewrite_all_fragments(state, output_dir, final_text)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Not a defect. It is an eight-module extraction programme with an explicit 'no big-bang rewrite, slice by lane' non-goal, so by construction it cannot be one night's work. The premise is if anything understated: orchestrator.py at main_sha is 6117 lines, up from the ~5500 the issue reports. The acceptance target (facade under ~800 LOC, hard target 1.5k) means relocating roughly 4.6k lines across module boundaries while preserving byte-identical assemble output against existing golden/byte-identity tests. Keep open as the parent; dispatch only as individually-scoped child tickets, one lane each.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "155 is the parent of 174/175/176; 178 is the ADR constraining all three to Python. None of the five is a single defect and none should be dispatched to an implementer as written. 175 is the only one whose evidence is a mechanically checkable invariant (the import DAG), which makes it the natural first slice."
+  },
+  {
+   "vendor": "claude",
+   "issue": 174,
+   "verdict": "ROADMAP-UMBRELLA",
+   "effective_verdict": "ROADMAP-UMBRELLA",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/config.py",
+      "line": 253,
+      "snippet": "agentic: bool = True  # per-page: try cheapest provider, judge escalates"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "agentic: bool = True  # per-page: try cheapest provider, judge escalates"
+    },
+    {
+     "citation": {
+      "path": "docs/ARCHITECTURE.md",
+      "line": 9,
+      "snippet": "### Deterministic (default \u2014 `socr paper.pdf`)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "### Deterministic (default \u2014 `socr paper.pdf`)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Two stated facts hold at main_sha: config.py:253 sets agentic=True by default, and docs/ARCHITECTURE.md line 9 still heads its first section 'Deterministic (default - socr paper.pdf)'. But the ask - delete or quarantine the whole legacy stack behind --legacy-routing, collapse dual implementations of dual-pass/judge wiring, and add a CI rule that fails when agentic-only flags are wired only in legacy branches - is a multi-PR programme touching every phase method. The documentation half (ARCHITECTURE.md plus CLI help) is separable and genuinely night-sized; it should be split out as its own chore rather than used to justify dispatching the umbrella.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "174 and 155 overlap heavily - deleting the legacy stack is the single largest LOC reduction 155 asks for, so doing 174 first shrinks 155. 176 depends on 174: DocumentState.text is legacy-assembly archaeology that only 174 can retire."
+  },
+  {
+   "vendor": "claude",
+   "issue": 175,
+   "verdict": "DEFERRED",
+   "effective_verdict": "DEFERRED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/tables/escalation_decision.py",
+      "line": 72,
+      "snippet": "from socr.benchmark.table_exactness import score_page"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "from socr.benchmark.table_exactness import score_page"
+    },
+    {
+     "citation": {
+      "path": "src/socr/tables/native_rows.py",
+      "line": 19,
+      "snippet": "from socr.benchmark.scorer import BenchmarkScorer"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "from socr.benchmark.scorer import BenchmarkScorer"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1640,
+      "snippet": "from socr.tables.reconstruct import _NUM_TOKEN_RE, _NUMERIC_RE"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "from socr.tables.reconstruct import _NUM_TOKEN_RE, _NUMERIC_RE"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The reported 2-cycle is real and mechanically verifiable at main_sha: tables/escalation_decision.py:72 imports socr.benchmark.table_exactness, tables/native_rows.py:19 imports socr.benchmark.scorer, and core/born_digital.py:1640 imports the PRIVATE _NUM_TOKEN_RE out of socr.tables.reconstruct. Product code depends on the measurement harness and vice versa, exactly as described. It is nonetheless out of scope for one unattended night: extracting shared grid/numeric-token/exactness primitives into a neutral module relocates symbols that born_digital, the escalation lane and the benchmark scorer all depend on, with no behaviour change permitted and a ~1070-test suite to keep green. The last acceptance item alone - an import-linter test pinning the DAG - IS night-sized and would stop the cycle growing; recommend splitting it out.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "The only member of the architecture cluster with a machine-checkable acceptance criterion, which is why it gets DEFERRED (valid, bounded, just not tonight) rather than ROADMAP-UMBRELLA like 155/174/176. It is a prerequisite for 155's lane extraction: you cannot cleanly carve lanes/tables.py while tables imports benchmark."
+  },
+  {
+   "vendor": "claude",
+   "issue": 176,
+   "verdict": "ROADMAP-UMBRELLA",
+   "effective_verdict": "ROADMAP-UMBRELLA",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/state.py",
+      "line": 8,
+      "snippet": "  - DUMB DATA: no pipeline logic, no audit rules, no engine calls."
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "- DUMB DATA: no pipeline logic, no audit rules, no engine calls."
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/state.py",
+      "line": 73,
+      "snippet": "def needs_repair(self) -> bool:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def needs_repair(self) -> bool:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/state.py",
+      "line": 283,
+      "snippet": "return \"\\n\\n---\\n\\n\".join(texts)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return \"\\n\\n---\\n\\n\".join(texts)"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "The contradiction is real: state.py:8 declares 'DUMB DATA: no pipeline logic, no audit rules, no engine calls' while state.py:73 defines a needs_repair property encoding born-digital repair policy, and DocumentState.text (state.py:245) still joins pages with the legacy separator at state.py:283 that production assembly no longer uses. But the acceptance list is four architectural changes, one of which - move repair/routing policy out of PageState into pipeline policy objects - invents new types and rewires every consumer of PageState. The issue's own framing also makes it downstream of 174: DocumentState.text can only be deleted once the legacy assembly path it serves is retired.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Blocked behind 174 in practice. Shares the 'one authoritative selector' theme with 171 in the audit-provenance cluster - both are about sidecars, assembly and manifest disagreeing about a page's final content - but 171 is a concrete ordering bug and 176 is a refactor, so different verdicts are consistent."
+  },
+  {
+   "vendor": "claude",
+   "issue": 178,
+   "verdict": "CHORE-PLAN",
+   "effective_verdict": "CHORE-PLAN",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "docs/ARCHITECTURE.md",
+      "line": 9,
+      "snippet": "### Deterministic (default \u2014 `socr paper.pdf`)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "### Deterministic (default \u2014 `socr paper.pdf`)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Pure documentation: write an ADR recording 'stay Python, native kernels only after profiling'. No runtime behaviour, no code path, no test. The only acceptance item that could ever fail is a future PR violating the policy. Night-sized and zero-risk, but it is a decision the owner has to ratify - an agent should draft the ADR, not adopt the position. The technical claim it rests on (rendering, OCR subprocesses and VLM HTTP dominate runtime, not interpreter overhead) is consistent with the architecture but is asserted in the issue, not measured.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "178 is the constraint the other four operate under, not a peer task. Consistent to call it CHORE-PLAN while 155/174/176 are ROADMAP-UMBRELLA: those are the work, this is the note saying which language the work happens in."
+  },
+  {
+   "vendor": "claude",
+   "issue": 158,
+   "verdict": "PARTIALLY-IMPLEMENTED",
+   "effective_verdict": "PARTIALLY-IMPLEMENTED",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 5,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5330,
+      "snippet": "if has_text and (self.config.write_manifest or self.config.agentic):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if has_text and (self.config.write_manifest or self.config.agentic):"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/config.py",
+      "line": 253,
+      "snippet": "agentic: bool = True  # per-page: try cheapest provider, judge escalates"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "agentic: bool = True  # per-page: try cheapest provider, judge escalates"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/config.py",
+      "line": 259,
+      "snippet": "write_manifest: bool = False  # write reproducibility manifest + blob cache"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "write_manifest: bool = False  # write reproducibility manifest + blob cache"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 600,
+      "snippet": "model_versions = {r.engine: r.model_version for r in state.engine_runs if r.model_version}"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "model_versions = {r.engine: r.model_version for r in state.engine_runs if r.model_version}"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 124,
+      "snippet": "model_version: str = \"\""
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "model_version: str = \"\""
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Two premises have moved since filing and one has not. (a) 'only when opt-in manifest paths are used' is now stale: manifests are written whenever write_manifest OR agentic is set (orchestrator.py:5330), and agentic defaults True (config.py:253) even though write_manifest still defaults False (config.py:259) - so the default run DOES journal provenance. (b) Per-attempt provenance is wired: attempts carry provider_id/provider_model/provider_backend and the journal serialises them. (c) The fingerprint half is NOT done: PageFingerprint.model_version is resolved only from state.engine_runs (manifest.py:600) and falls back to empty (manifest.py:124); the per-attempt provider_model the journal already holds is never consulted. So 'changing only the model tag invalidates resume for affected pages' is unmet on the agentic path.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "158 is the parent identity problem; 169 and 238 are two specific fields missing from it (judge reason, resolved caption engine). Calling 158 PARTIALLY-IMPLEMENTED and 169/238 FIX-CANDIDATE is consistent: the provenance plumbing exists and works, and those two are named leaks in it. Deliberately not ALREADY-FIXED for any part - no reproducer was run, so per the brief the unproved criteria stay unmet or not-verified."
+  },
+  {
+   "vendor": "claude",
+   "issue": 169,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 3,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2766,
+      "snippet": "att.output.skip_reason = ("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "att.output.skip_reason = ("
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 2767,
+      "snippet": "att.reason if not att.accepted and not att.output.text else \"\""
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "att.reason if not att.accepted and not att.output.text else \"\""
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 648,
+      "snippet": "\"reason\": getattr(a, \"skip_reason\", \"\") or a.failure_mode.value,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "\"reason\": getattr(a, \"skip_reason\", \"\") or a.failure_mode.value,"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Confirmed verbatim at main_sha. _phase_agentic assigns skip_reason only when the attempt was rejected AND produced no text (orchestrator.py:2766-2767). build_manifest then journals reason from skip_reason or the failure_mode value (manifest.py:648), so a provider whose non-empty output the judge rejected on semantics lands in the manifest with a generic failure_mode string and its actual judge reason is discarded - exactly the audit gap reported. Since the journal already carries provider_id, model, backend and accepted, the fix is small and local: persist att.reason unconditionally plus a JSON-safe raw_verdict, and stop overloading skip_reason with two meanings.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "The most tractable item in this cluster and the only one where the core fix is a single conditional. Consistent with 158 PARTIALLY-IMPLEMENTED: the journal row exists and is populated (that is the 'partially'); this issue is one field inside it being blanked upstream."
+  },
+  {
+   "vendor": "claude",
+   "issue": 170,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 4,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 659,
+      "snippet": "def replay(manifest: Manifest, blobs: BlobStore) -> str:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def replay(manifest: Manifest, blobs: BlobStore) -> str:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 680,
+      "snippet": "def stale_pages(manifest: Manifest, blobs: BlobStore) -> list[int]:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def stale_pages(manifest: Manifest, blobs: BlobStore) -> list[int]:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 685,
+      "snippet": "if pn not in manifest.entries or not blobs.has(manifest.entries[pn].blob_ref)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if pn not in manifest.entries or not blobs.has(manifest.entries[pn].blob_ref)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5631,
+      "snippet": "result.figures = figures"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "result.figures = figures"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Confirmed. replay (manifest.py:659) walks pages, fetches each blob and joins the text - it never looks at any asset the markdown references. stale_pages (manifest.py:680) is defined purely as blob presence (manifest.py:685). Figure and chart PNGs are written to the document directory by the figure phase and referenced by relative path in the page bodies, so a replay into a different --output emits markdown whose image links point at nothing, with no error and no stale-page report. That is silent content loss under a successful-looking replay. Scope is real but bounded: hash and record emitted assets in the manifest, verify on replay, copy-or-rebase on relocation.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "170 and 171 are the same underlying gap seen from two ends: the figure phase's outputs never reach the durable provenance records. 171 is the write side (sidecars finalised before figures exist), 170 is the read side (replay never checks the assets). Fix 171 first - it makes the per-page asset list exist, which is what 170 needs to hash."
+  },
+  {
+   "vendor": "claude",
+   "issue": 171,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 5,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 4973,
+      "snippet": "self._flush_page_sidecar(state, pnum, output_dir)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._flush_page_sidecar(state, pnum, output_dir)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5296,
+      "snippet": "embedded_text = self._describe_and_embed_figures("
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "embedded_text = self._describe_and_embed_figures("
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5325,
+      "snippet": "self._rewrite_all_fragments(state, output_dir, final_text)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "self._rewrite_all_fragments(state, output_dir, final_text)"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 4543,
+      "snippet": "for run in state.engine_runs:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "for run in state.engine_runs:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5631,
+      "snippet": "result.figures = figures"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "result.figures = figures"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Ordering confirmed by line number at main_sha. Inside _phase_assemble, terminal sidecars are flushed at orchestrator.py:4973 (_flush_page_sidecar, whose terminal parameter defaults True), the figure phase runs afterwards at 5296, and the only post-figure rewrite is _rewrite_all_fragments at 5325 - which by its own docstring rewrites pages/NNN.md, not the NNN.json sidecars. Compounding it, _flush_page_sidecar collects figure_refs by iterating state.engine_runs (4543) while _describe_and_embed_figures stores them on the passed-in result object (5631). So the sidecar the resume gate treats as authoritative is written before figure provenance exists, and reads from the wrong container even if it were written later. Night-sized: rewrite terminal sidecars after the figure phase, from the same object that holds the figures.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "See 170. Also adjacent to 238: all three are cases where something the figure/caption lane decided at runtime never reaches a durable record, so resume and replay reason from a record that never described the run. Fixing 171 does not fix 238 (sidecar content vs fingerprint input) and vice versa."
+  },
+  {
+   "vendor": "claude",
+   "issue": 238,
+   "verdict": "FIX-CANDIDATE",
+   "effective_verdict": "FIX-CANDIDATE",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 483,
+      "snippet": "\"figure_caption_fallback_model\": (cfg.gemini_model if cfg.describe_figures else None),"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "\"figure_caption_fallback_model\": (cfg.gemini_model if cfg.describe_figures else None),"
+    },
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5631,
+      "snippet": "result.figures = figures"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "result.figures = figures"
+    }
+   ],
+   "confidence": "medium",
+   "rationale": "Confirmed at main_sha. _run_fingerprint records the CONFIGURED value - figure_caption_fallback_model set from cfg.gemini_model when describe_figures is on (orchestrator.py:483) - and nothing else about captions. _get_vision_engine resolves at call time to one of LocalFirstFigureEngine, GeminiAPIEngine, or None depending on Ollama reachability and the API key, and the fingerprint cannot distinguish them. So the exact class #232 was filed against still holds for the runtime dimension: process with Ollama up, resume with it down, and the ledger reuses sidecars whose captions came from a different producer. Confidence medium rather than high only because the fix is a genuine design choice - probing availability from inside an otherwise-pure fingerprint function; the issue names the precedent to follow (the judge lane's resolved-identity heuristic), which makes it dispatchable, but the sentinel semantics need ratifying, not inventing.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Sibling of 158: both are 'the fingerprint records configuration where it should record resolved identity'. 158 is the engine/model for the OCR lane, 238 the caption engine. One fix pattern (resolve-then-record, with a documented sentinel when nothing is reachable) serves both, which is why neither is marked DUPLICATE - they are different determinants in the same function family."
+  },
+  {
+   "vendor": "claude",
+   "issue": 39,
+   "verdict": "ROADMAP-UMBRELLA",
+   "effective_verdict": "ROADMAP-UMBRELLA",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 181,
+      "snippet": "return (p.cost_per_page_usd, ENGINE_PRIORITY.get(p.engine, 99))"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return (p.cost_per_page_usd, ENGINE_PRIORITY.get(p.engine, 99))"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Explicitly a three-stage programme, and the owner's 2026-06-12 comment records Stage 1 as landed on main (930e811, 2647656, 19864f7) with Stages 2 and 3 open. Stage 2 is hand-verified ground truth for the table/equation pages of a 10-paper set - human labour, definitionally not an unattended night. Stage 3 is a versioned calibration.lock artifact that four separate ladder constants must delegate to. The 2026-08-01 comment adds a hard blocker for Stage 3 that must not be lost: run-to-run variance exceeds the effect being measured (the same page scored 17.6% and ~100% on consecutive runs of the same local model), so per-page calibration from single runs is unsound. Keep open as the parent.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "39, 49 and 56 are the three umbrellas and are mutually consistent as ROADMAP-UMBRELLA: 39 is the routing/calibration programme, 49 the extraction-method ADR, 56 the CE corpus goal that consumes both. None is a single defect. 202/203 are the proposal pair and get BLOCKED-PROPOSAL instead because they are gated on a measurement and an upstream CLI, not on scope."
+  },
+  {
+   "vendor": "claude",
+   "issue": 49,
+   "verdict": "ROADMAP-UMBRELLA",
+   "effective_verdict": "ROADMAP-UMBRELLA",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/born_digital.py",
+      "line": 1095,
+      "snippet": "needs_ocr_enhancement = has_corrupt_math"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "needs_ocr_enhancement = has_corrupt_math"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Its own scope section is 'document the three-layer method as an ADR', 'apply the lens to figures', and '(later, separate tickets) implement the free native verifier' - by construction a parent, not a defect. Three owner comments have progressively re-scoped it: 2026-06-15 added that broad VLM routing over-routes chart and front-matter pages; 2026-07-31 added that the local model's READING is solved (138/138 values byte-identical) and only LAYOUT fails, and that the obvious deterministic repair was rejected on review because it converts a detectable failure into an undetectable one; 2026-08-11 proposed sharpening extract from page granularity to REGION granularity. That last proposal is unratified and is the live decision inside this umbrella.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "49 is the design parent of the batch-1 table-destruction cluster (144/146/147) and of 56. ROADMAP-UMBRELLA here is consistent with treating its children as individual FIX-CANDIDATEs; the verdict is about this issue's own text, not about whether its subject matter is real."
+  },
+  {
+   "vendor": "claude",
+   "issue": 56,
+   "verdict": "ROADMAP-UMBRELLA",
+   "effective_verdict": "ROADMAP-UMBRELLA",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/pipeline/orchestrator.py",
+      "line": 5330,
+      "snippet": "if has_text and (self.config.write_manifest or self.config.agentic):"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if has_text and (self.config.write_manifest or self.config.agentic):"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "A corpus-readiness goal spanning tables, figures/charts and dual-pass stability, with acceptance phrased as 'a CE smoke run produces output better than native without degrading chart pages' - a judgement over a document, not a testable defect. The 2026-06-21 comment records the bulk landing in #87 and enumerates three residuals: multi-section/nested-column tables come out flagged rather than reconstructed; a doc with one unrecoverable page never gets a completion marker and is reprocessed every pass; and the full 27-doc reprocess has never completed end to end. The second residual is the only night-sized one and deserves its own issue rather than being dispatched from here.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Consistent with 39/49: three umbrellas, none dispatchable. 56's 'no completion marker on a partially-unrecoverable doc' residual touches the same resume-ledger machinery as 158/171/238; if a night is spent in that area, spend it there, where the defect is stated precisely."
+  },
+  {
+   "vendor": "claude",
+   "issue": 114,
+   "verdict": "BLOCKED-PROPOSAL",
+   "effective_verdict": "BLOCKED-PROPOSAL",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 659,
+      "snippet": "def replay(manifest: Manifest, blobs: BlobStore) -> str:"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "def replay(manifest: Manifest, blobs: BlobStore) -> str:"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/manifest.py",
+      "line": 685,
+      "snippet": "if pn not in manifest.entries or not blobs.has(manifest.entries[pn].blob_ref)"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "if pn not in manifest.entries or not blobs.has(manifest.entries[pn].blob_ref)"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "The founding premise was falsified by the owner's own 2026-07-31 measurement: both Bocconi login and compute nodes reach the Gemini API (403 means reached and refused for want of a key, not blocked), so local OCR and cloud escalation do not need different machines. The owner's recommendation is 'keep open, re-scope to the corpus-reprocessing case, drop the HPC framing' - that re-scope has not been written into the issue body, so the issue as it stands still argues from a dead premise. Both hard parts survive re-scoping and are real: replay reconstructs from blobs of the ORIGINAL page text (manifest.py:659), so a post-hoc rewrite of fragments would be silently discarded, and escalate_ambiguous_tables is a fingerprint determinant. Blocked on an owner re-scope decision; the issue itself names #113 as fix-first.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "114's first hard part is literally issue 170: replay does not know about content produced after the manifest was built. Not marked DUPLICATE - 170 is about assets missing from an unchanged replay, 114 about deliberately changing page text after the fact - but 170 is a prerequisite, and any 114 work that skips it ships a replay that lies twice."
+  },
+  {
+   "vendor": "claude",
+   "issue": 202,
+   "verdict": "BLOCKED-PROPOSAL",
+   "effective_verdict": "BLOCKED-PROPOSAL",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 2,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT",
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 122,
+      "snippet": "cost_per_page_usd=0.001,"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "cost_per_page_usd=0.001,"
+    },
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 181,
+      "snippet": "return (p.cost_per_page_usd, ENGINE_PRIORITY.get(p.engine, 99))"
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "return (p.cost_per_page_usd, ENGINE_PRIORITY.get(p.engine, 99))"
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Self-declared blocked twice: on r-uben/mistral-ocr-cli#23 for the structured-blocks half, and on the owner naming 3-5 PDFs - the issue's last line is 'Do not start until someone names them'. Nobody can be asked tonight. One sub-item is genuinely unblocked and is an economics defect rather than a docs nit: PROFILE_MISTRAL still carries cost_per_page_usd=0.001 (providers.py:122) against a list price of $4/1k pages = $0.004, and that field is the sort key for the cheapest-first ladder (providers.py:181) and the input to the max_cost_per_page filter - so Mistral is under-priced 4x for anyone who opts in. That correction needs no bake-off and should be split into its own chore. The measurement itself is paid work on owner-chosen PDFs and stays blocked.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "202 gates 203, which says so explicitly; both BLOCKED-PROPOSAL. The one separable piece (the price constant) belongs to 202 rather than 203 because it affects the ladder today, whether or not any bake-off happens."
+  },
+  {
+   "vendor": "claude",
+   "issue": 203,
+   "verdict": "BLOCKED-PROPOSAL",
+   "effective_verdict": "BLOCKED-PROPOSAL",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "src/socr/core/providers.py",
+      "line": 125,
+      "snippet": "model=\"mistral-ocr-latest\","
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "model=\"mistral-ocr-latest\","
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Doubly blocked by its own text: on r-uben/mistral-ocr-cli#23 (the CLI must persist blocks at all - socr cannot consume an array nothing emits) and on 202's bake-off verdict, with the issue stating that if the verdict is 'markdown no better, keep manual-only' then this should be CLOSED. It also leaves three design questions explicitly open ('resolve at bake-off time, not now'), including whether the bboxes are even usable and who wins when Mistral says table and has_chart_marks says chart. There is nothing an implementer can do tonight that would not be inventing the answers the issue deliberately deferred.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Strictly downstream of 202; same verdict for consistency. Its named would-be consumers (#150 chart vs table, #151 structural gate, equation detection) are live lanes in other batches, so a positive bake-off would make this real - but those consumers must not be built against unmeasured labels."
+  },
+  {
+   "vendor": "claude",
+   "issue": 156,
+   "verdict": "CHORE-PLAN",
+   "effective_verdict": "CHORE-PLAN",
+   "evidence_verified": true,
+   "reason": null,
+   "citations_checked": 1,
+   "citations_failed": 0,
+   "citations_fabricated": 0,
+   "citations_drifted": 0,
+   "evidence_class": "CLEAN",
+   "citation_classes": [
+    "EXACT"
+   ],
+   "citation_detail": [
+    {
+     "citation": {
+      "path": "TODO.md",
+      "line": 4,
+      "snippet": "Last updated: 2026-06-10."
+     },
+     "ok": true,
+     "reason": null,
+     "classification": "EXACT",
+     "actual_line": "Last updated: 2026-06-10."
+    }
+   ],
+   "confidence": "high",
+   "rationale": "Pure doc drift, confirmed cheaply: TODO.md at main_sha still reads 'Last updated: 2026-06-10.' on line 4, over two months stale, and the issue's own table lists local items whose GitHub counterparts are closed. No runtime behaviour is involved. Night-sized, but with a trap worth stating: acceptance item 3 says any still-true TODO bullet gets a GH issue in the same PR, and this run is READ-ONLY on the tracker - so an unattended agent can rewrite TODO.md into a pointer list and propose the new issues in the PR body, but must not file them. Doing the doc half without the issue-filing half would delete live bugs that exist only as prose, which is the exact loss this issue was filed to prevent.",
+   "duplicate_of": null,
+   "fixed_by_commit": null,
+   "cluster_consistency": "Grouped with the umbrellas because it is likewise not a defect, but it is the only member of this cluster actually completable in a night. Consistent with 178, the other CHORE-PLAN in this batch: both are documents, neither changes runtime behaviour."
+  },
   {
    "vendor": "gemini-pro",
    "issue": 140,

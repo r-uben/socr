@@ -1,0 +1,240 @@
+{
+  "batch": "batch-2",
+  "adjudicator": "grok",
+  "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+  "grounding": {
+    "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-base/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-base"
+  },
+  "clusters": [
+    {
+      "cluster": "chart-arbitration",
+      "joint_reading": "At 53b0637 the page-level chart-asset lane is chart marks AND no table signal. has_chart_marks is True on any page.get_images() hit (no size filter) or on a vector cluster that passes _has_vector_data_marks or _has_framed_data_cluster (GH-150 A1). _is_chart_asset_page no longer pre-excludes tables (B1); the caller then splits chart-only (page-level PNG) vs mixed (chart_table_arbitration, normal table route, inline placeholder). Table signal is find_tables() OR has_numeric_columns. These six issues are faces of that one gate, not competing theories: #167 is over-eager raster on chart-only trusted-native pages; #249 is mixed pages whose table signal is axis ticks, so they never enter the chart-asset lane; #150 is the umbrella (detection half landed, precedence residual is #249); #181 is recursive find() swallowed to False; #189 is the accepted-rung path never calling _render_chart_region_pngs; #248 is has_numeric_columns false-firing on corrupt prose (orthogonal population to tick labels). #167 does not imply that a logo+ticks page becomes chart_asset — that page is mixed and follows #249.",
+      "issues": [150, 167, 181, 189, 248, 249]
+    },
+    {
+      "cluster": "structure-loss",
+      "joint_reading": "#223 is right about headings; #127 is right about the native extractor. extract_structured still joins spans to bare text and never calls page.get_links(), so native drops headings, emphasis, lists and links. #127's contrast that VLM pages already emit real Markdown headings is false: detect_native_structure_loss (offline; not wired into the pipeline) measured 36 unrepresented heading spans / 20 qwen pages with no ATX heading, while VLM lists are fine. So #127 remains a native-lane programme for lists/links/emphasis (and native headings); heading recovery across lanes is #223's design question and must not be folded into a native-only patch.",
+      "issues": [127, 223]
+    }
+  ],
+  "rows": [
+    {
+      "issue": 64,
+      "final_disposition": "FIX-CANDIDATE",
+      "agreement": "UNANIMOUS",
+      "vendor_readings": {
+        "gemini-flash": "Born-digital pages with tabular appearance (such as 2-column whitespace-aligned borderless tables) that fall to native text after PP-6 narrowed has_numeric_columns currently do so without any audit trace. Emitting a durable warning audit event (possible_table_structure_not_reconstructed) without altering routing behavior is a self-contained, low-risk fix.",
+        "ollama-deepseek": "PP-6 narrowed the born-digital table gate to has_numeric_columns (>=3 co-occupied lanes/row), so a 2-column borderless label|value table (1 numeric lane/row) now falls to native text with no audit trace. The ask is a warning-only audit event (possible_table_structure_not_reconstructed), not a routing change. That event does not exist anywhere in the tree; the old _detect_columnar_numbers heuristic is gone (only a docstring mention remains), so the 'would have fired' signal must be re-derived, but the deliverable is a small, self-contained audit flag with no #54 regression risk."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "Both seats answer the issue as written: a warning-only audit when a 2-column borderless table falls to native after PP-6. _detect_tables now returns has_numeric_columns(page) only; possible_table_structure_not_reconstructed is absent from the tree. No routing change. One-night, self-contained, cardinal-rule surfacing.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 1268, "snippet": "return has_numeric_columns(page)"}
+      ],
+      "action_recommended": "fix",
+      "proposed_comment": null,
+      "risk_if_wrong": "A sloppy 'looks tabular' re-derivation could spam prose pages with warnings, or someone could 'helpfully' re-widen the #54 gate."
+    },
+    {
+      "issue": 127,
+      "final_disposition": "ROADMAP-UMBRELLA",
+      "agreement": "SPLIT",
+      "vendor_readings": {
+        "gemini-flash": "Proposes a comprehensive overhaul of native born-digital extraction to reconstruct heading tiers, font styles (bold/italic), lists, and hyperlink annotations from PDF geometry and font stats. This represents a large programme of work requiring widespread regeneration of golden tests; moreover, issue #223 demonstrates that heading loss is a pipeline-wide problem not restricted to the native lane.",
+        "ollama-deepseek": "extract_structured collapses each line to bare text via line_text = ''.join(s.get('text','') for s in spans), discarding the size/flags/font every span already carries, and page.get_links() is never called anywhere in born_digital.py. The hyperlink drop is genuine content loss for a citation corpus (DOIs/URLs in the text layer vanish silently). Scope is contained to extract_structured; thresholds are to be derived per-document, not hardcoded. A competent agent can implement heading tiers, links, bold/italic and list detection in one night."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "The native collapse is real (1553; no get_links). Deepseek is category-wrong that four features plus golden regeneration is one night, and wrong that heading recovery is a native-only patch — #223 falsifies that half of #127's framing. Gemini's ROADMAP-UMBRELLA matches the issue as written. Native lists/links/emphasis stay in #127's scope; headings do not.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 1553, "snippet": "line_text = \"\".join(s.get(\"text\", \"\") for s in spans)"},
+        {"path": "src/socr/core/born_digital.py", "line": 307, "snippet": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"}
+      ],
+      "action_recommended": "comment-correction",
+      "proposed_comment": "Overnight adjudication at 53b0637: extract_structured still collapses spans to bare text (born_digital.py:1553) and never calls page.get_links() — that native drop is real. #223 is right that the heading half is not native-lane-specific; the contrast 'VLM pages emit real Markdown headings' does not hold. Lists/links/emphasis remain this issue's native-lane scope; headings are the pipeline-wide #223 question and must not be folded into a native-only patch. Not a one-night fix (four features + golden regeneration). ROADMAP-UMBRELLA; stays OPEN.",
+      "risk_if_wrong": "A later agent treats the whole native-structure programme as closed or, conversely, ships a heading-only native patch and calls #223 done."
+    },
+    {
+      "issue": 150,
+      "final_disposition": "PARTIALLY-IMPLEMENTED",
+      "agreement": "UNANIMOUS",
+      "vendor_readings": {
+        "gemini-flash": "Parts of GH-150 landed in A1 (framed thin-stroke cluster detection in has_chart_marks) and B1 (removing whole-page table pre-exclusion in _is_chart_asset_page). However, unframed thin-stroke vector charts still fail has_chart_marks, mixed pages arbitrated to tables still suffer phantom-grid verifier rejections (#249), and accepted ladder outputs drop chart regions (#189).",
+        "ollama-deepseek": "The detection half is fixed: _has_framed_data_cluster (added for GH-150 A1) catches thin-stroke monochrome spike plots like Heston p10 by detecting an axis-aligned frame enclosing >= MIN_DRAWINGS_FOR_VECTOR interior marks, so has_chart_marks no longer misses them. The precedence half is NOT fixed: the docstring still asserts 'Table pages are excluded upstream by _page_has_tables ... the correct structural boundary', and mixed chart+table pages are held out of the chart lane and routed to the table lane, where the axis labels are still claimed as a table. That residual is exactly #249's mechanism."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "Unanimous and category-correct: A1/B1 landed; the original 'tables always win' precedence is now an explicit mixed-page arbitration whose residual is filed as #249/#189. Do not close the umbrella. Do not re-fix A1.",
+      "citations": [
+        {"path": "src/socr/figures/extractor.py", "line": 833, "snippet": "def _has_framed_data_cluster("},
+        {"path": "src/socr/figures/extractor.py", "line": 960, "snippet": "def has_chart_marks(page) -> bool:"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 1418, "snippet": "page from this check (GH-150 TICKET-B1), because a mixed chart+table page must"}
+      ],
+      "action_recommended": "none",
+      "proposed_comment": null,
+      "risk_if_wrong": "Closing #150 would hide the still-open precedence residual; re-implementing A1 would fight the framed-cluster gate that already landed."
+    },
+    {
+      "issue": 167,
+      "final_disposition": "FIX-CANDIDATE",
+      "agreement": "UNANIMOUS",
+      "vendor_readings": {
+        "gemini-flash": "has_chart_marks in src/socr/figures/extractor.py unconditionally returns True upon encountering any embedded raster image via page.get_images(). This erroneously routes non-table trusted-native pages containing small logos, decorative icons, signatures, or author photos to the full-page chart_asset PNG lane. Adding a size, area, and dimension filter is self-contained and testable in one night.",
+        "ollama-deepseek": "has_chart_marks returns True immediately on any page.get_images() hit with no size/placement/logo/semantic filter, so a trusted-native page carrying a logo, photo, signature or decorative raster is routed into the chart-asset lane and audited as if chart data was untranscribed. The fast path is confirmed in the code. Fix is a filter on the raster path (size/placement/logo exclusion) plus regression tests for both chart and non-chart embedded images."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "Confirmed at 1003-1010: any get_images() hit returns True. That only sends a page to the page-level chart-asset lane when there is no table signal (see cluster reading). Compatible with #249: a logo-plus-tick-labels page is mixed, not chart_asset. Filter is a one-night raster-path change plus both-direction tests.",
+      "citations": [
+        {"path": "src/socr/figures/extractor.py", "line": 1003, "snippet": "raster_images = page.get_images()"},
+        {"path": "src/socr/figures/extractor.py", "line": 1004, "snippet": "if raster_images:"},
+        {"path": "src/socr/figures/extractor.py", "line": 1010, "snippet": "return True"}
+      ],
+      "action_recommended": "fix",
+      "proposed_comment": null,
+      "risk_if_wrong": "An over-tight size filter drops real embedded raster charts from the lane; an under-tight one leaves logos as chart_asset."
+    },
+    {
+      "issue": 181,
+      "final_disposition": "FIX-CANDIDATE",
+      "agreement": "UNANIMOUS",
+      "vendor_readings": {
+        "gemini-flash": "The union-find implementation in _cluster_drawings uses recursive find() with path compression, hitting Python's RecursionError on pages with ~1000+ drawings. In _is_chart_asset_page, a blanket except Exception catches this error and silently returns False, misrouting vector-dense chart pages to the table lane without any logged error or audit trace. Replacing recursive find() with an iterative loop is an isolated, robust fix.",
+        "ollama-deepseek": "_cluster_drawings' union-find uses recursive path-compression find() (parent[x] = find(parent[x])), which hits RecursionError on deep chains (~1000+ same-cluster drawings). _is_chart_asset_page wraps the whole detect in a blanket except Exception that logs at DEBUG and returns False, so a RecursionError silently misroutes a chart page into the table lane with no page/document/audit signal. Both halves confirmed in code. Fix is mechanical: iterative find (path halving/splitting) plus narrowing or logging the except."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "Both halves are on the cited lines: recursive find at 690-692, swallowed Exception → False at 1450-1452. Silent misroute is a cardinal-rule miss. Iterative find is mechanical and does not change the #167/#249 routing predicates.",
+      "citations": [
+        {"path": "src/socr/figures/extractor.py", "line": 690, "snippet": "def find(x: int) -> int:"},
+        {"path": "src/socr/figures/extractor.py", "line": 692, "snippet": "parent[x] = find(parent[x])"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 1450, "snippet": "except Exception as exc:"}
+      ],
+      "action_recommended": "fix",
+      "proposed_comment": null,
+      "risk_if_wrong": "If RecursionError is not actually reachable on real pages, the except-narrowing still helps; a broken iterative find would drop chart clustering entirely."
+    },
+    {
+      "issue": 189,
+      "final_disposition": "BLOCKED-PROPOSAL",
+      "agreement": "SPLIT",
+      "vendor_readings": {
+        "gemini-flash": "On mixed chart+table pages, _render_chart_region_pngs is guarded by if not decision.accepted. When a model rung is accepted, the ladder output text is shipped and the chart placeholder remains unrendered, causing the chart image to be silently stripped. How to combine accepted VLM table text with local chart crops is an architectural design decision (splicing vs re-routing vs rejecting).",
+        "ollama-deepseek": "On a mixed chart+table page, _render_chart_region_pngs runs only inside the 'if not decision.accepted and self._page_has_tables(...)' branch, so when the judge ACCEPTS a VLM rung the inline chart placeholder is never resolved to a file and strip_phantom_images removes it — the chart is silently dropped with no page/document/metadata/CLI signal. The guard is confirmed at the cited line. The issue itself flags the fix as a design fork (resolve on accepted path vs merge vs refuse acceptance) and that end-to-end repro is not yet established, hence medium confidence."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "The guard at 2864 is real and is silent content loss on the accepted mixed-page path. Gemini is right that the remedy is a named design fork (splice vs merge vs refuse), which the issue itself calls 'not a patch'. Deepseek's FIX-CANDIDATE would force an unattended pick of that fork — the #250 failure mode. Not a tonight PR. Compatible with #249 (rejected path ships ticks; accepted path drops the chart ref).",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 2864, "snippet": "if not decision.accepted and self._page_has_tables(page_num, ps):"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 2873, "snippet": "ps.native_text = self._render_chart_region_pngs("}
+      ],
+      "action_recommended": "none",
+      "proposed_comment": null,
+      "risk_if_wrong": "A real mixed page may already be dropping charts under SUCCESS; delaying the design leaves that hole open until morning."
+    },
+    {
+      "issue": 220,
+      "final_disposition": "PARTIALLY-IMPLEMENTED",
+      "agreement": "UNANIMOUS",
+      "vendor_readings": {
+        "gemini-flash": "socr review <doc_dir> was fully implemented in PR #224 (commits 1216f2e, a0c220b, 0c5bbd1), an ancestor of main_sha. It builds a self-contained side-by-side HTML viewer pairing rendered PDF page images with extracted markdown fragments, complete with sidecar metadata headers, navigation rail, warning signal filters, and strict read-only execution. All 17 regression tests pass cleanly.",
+        "ollama-deepseek": "socr review is implemented as a side-by-side page-image/markdown HTML judgement instrument (src/socr/review/html.py, wired into the CLI at cli.py:1037). It renders each page from the source PDF, shows pages/NNN.md, and derives per-page signals (judge_rejected, tables_trust, audit-event kinds) with prev/next and jump-to-page navigation. The only proposal item not implemented is the explicitly-optional 'filter to pages a given gate fired on'. 17 tests in tests/test_review_viewer_gh220.py pass."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "Both seats claimed ALREADY-FIXED; the machine check already rejected that (deepseek's own table marks the optional gate-filter UNMET; gemini's fixed_by_commit never touched the cited ranges). Viewer exists (review(), build_review_html, _BOOL_SIGNAL_KEYS). CLI options are only doc_dir/pdf/output/scale/quality. `n` jumps to the next page with any signal — that is not 'filter to pages a given gate fired on'. 4 of 5 met. Do not close.",
+      "citations": [
+        {"path": "src/socr/cli.py", "line": 1037, "snippet": "def review("},
+        {"path": "src/socr/cli.py", "line": 1044, "snippet": "\"\"\"Build a side-by-side page-image/markdown page for hand judgement (GH-220).\"\"\""},
+        {"path": "src/socr/review/html.py", "line": 48, "snippet": "_BOOL_SIGNAL_KEYS = ("},
+        {"path": "src/socr/review/html.py", "line": 246, "snippet": "def build_review_html(report: ReviewReport, *, title: str | None = None) -> str:"},
+        {"path": "src/socr/review/html.py", "line": 514, "snippet": "  else if(k==='n'){ const nx = PAGES.findIndex((p,ix)=>ix>cur && p.signals.length);"}
+      ],
+      "action_recommended": "comment-correction",
+      "proposed_comment": "Overnight adjudication at 53b0637: socr review exists (cli.py:1037, review/html.py) and covers side-by-side page image vs pages/NNN.md, sidecar header signals, and prev/next. The explicitly-optional acceptance item is still unmet: there is no filter for 'only pages a given gate fired on' (CLI is doc_dir/pdf/output/scale/quality only; `n` jumps to the next page with any recorded signal). Disposition is PARTIALLY-IMPLEMENTED, not a close. Stays OPEN.",
+      "risk_if_wrong": "Closing would drop the gate-filter the owner listed for calibration passes; leaving it open when they consider the optional item waived is only a tracker nit."
+    },
+    {
+      "issue": 223,
+      "final_disposition": "BLOCKED-PROPOSAL",
+      "agreement": "SPLIT",
+      "vendor_readings": {
+        "gemini-flash": "Issue #223 provides measurement evidence that VLM models also drop heading structure (36 unrepresented headings across 44 flagged pages in EFO-Nov-2022), falsifying the assumption in #127 that model escalation resolves heading loss. It poses the architectural design question of whether heading recovery belongs in a post-extraction structure pass across all lanes versus within lane-specific extractors or prompts.",
+        "ollama-deepseek": "The measurement (detect_native_structure_loss, added in 3c750a2) shows the VLM lane loses 49 heading spans across 44 flagged pages while losing zero lists, so heading fidelity is a whole-pipeline property, not a native-lane defect. The defect is real and measured; the fix is a design decision the issue itself leaves open (a post-extraction structure pass on every lane's output vs per-lane fixes). A competent agent could implement a structure pass, but the right shape is not settled, hence medium confidence."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "The measurement function exists (304) and is not wired into the production pipeline (tests only). #223 wins the framing fight with #127 on headings. Deepseek's FIX-CANDIDATE would have an unattended agent invent the post-extraction architecture the issue refuses to specify. Gemini's BLOCKED-PROPOSAL is the issue's own next step.",
+      "citations": [
+        {"path": "src/socr/core/born_digital.py", "line": 304, "snippet": "def detect_native_structure_loss(page: fitz.Page, native_text: str) -> dict[str, int]:"},
+        {"path": "src/socr/core/born_digital.py", "line": 307, "snippet": "GH-127. The native lane ships ``page.get_text(\"text\")``, which is a linear dump:"}
+      ],
+      "action_recommended": "none",
+      "proposed_comment": null,
+      "risk_if_wrong": "Heading loss stays unfixed until the design is made; a rushed structure pass could invent headings the VLM was right to omit."
+    },
+    {
+      "issue": 225,
+      "final_disposition": "FIX-CANDIDATE",
+      "agreement": "UNANIMOUS",
+      "vendor_readings": {
+        "gemini-flash": "strip_phantom_images in src/socr/core/normalizer.py explicitly skips stripping for URLs starting with http:// or https:// on the assumption that external URLs are never phantom. When VLMs hallucinate external image links (such as Imgur placeholders), they ship as page content under status: success with zero audit events. A deterministic validation gate checking external URLs against source PDF links and local assets can be implemented in one night.",
+        "ollama-deepseek": "strip_phantom_images treats any absolute URL as 'never phantom' (path_str.startswith(('http://','https://','data:')) -> return False), so a model-invented https://i.imgur.com/... reference ships as page content with status success and no audit event. There is no provenance check anywhere that an emitted URL corresponds to a local asset socr wrote or to the source PDF's link annotations/text layer. This is fabrication, the strongest form of the 'wrong number' invariant, and the fix (deterministic, model-free provenance check) is well-specified and cheap."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "Category-correct unanimous reading of a fabrication defect. 226-228 keep http(s)/data: image refs. No provenance gate exists. The issue's minimum is deterministic and model-free: a URL in page text must be a local asset socr wrote or appear in the source PDF's links/text layer; otherwise fail the page (not warn; no network fetch). That is a one-night gate and it engages the cardinal rule. Tonight-PR yes.",
+      "citations": [
+        {"path": "src/socr/core/normalizer.py", "line": 226, "snippet": "# Absolute URLs are never phantom (external images)"},
+        {"path": "src/socr/core/normalizer.py", "line": 227, "snippet": "if path_str.startswith((\"http://\", \"https://\", \"data:\")):"},
+        {"path": "src/socr/core/normalizer.py", "line": 228, "snippet": "return False"}
+      ],
+      "action_recommended": "fix",
+      "proposed_comment": null,
+      "risk_if_wrong": "A gate that strips every URL, including ones that really are in the PDF text layer, would destroy citation links; failing to fail the page would keep shipping fabrications under SUCCESS."
+    },
+    {
+      "issue": 248,
+      "final_disposition": "NEEDS-MEASUREMENT",
+      "agreement": "SPLIT",
+      "vendor_readings": {
+        "gemini-flash": "has_numeric_columns in src/socr/tables/reconstruct.py clusters numeric tokens into x-lanes to detect borderless tables, but on corrupt OCR text layers with scattered numbers, prose pages falsely trigger table detection. A proposed lane-reuse ratio would separate corrupt noise from true borderless tables, but setting and validating this heuristic requires corpus-wide measurement to ensure real borderless tables are not lost.",
+        "ollama-deepseek": "has_numeric_columns clusters numeric-token x-positions into lanes and counts rows populating >= _MIN_LANES_PER_ROW lanes, with no lane-reuse requirement. A corrupt text layer (upside-down OCR) manufactures spurious numeric tokens scattered across ~30 nearly-unique lanes, which the gate reads as a row x column grid, so pure prose pages are classified as borderless tables. The issue's own direction (a lane-reuse ratio, tokens-per-occupied-lane) separates real tables from encoding noise without a magic threshold, but it explicitly 'wants measuring across the corpus before adoption' in both directions to avoid dropping real borderless tables — hence medium confidence."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "The gate at 462 has no lane-reuse term; that is what the issue reports. Deepseek still labelled FIX-CANDIDATE while quoting the issue's own 'wants measuring across the corpus before adoption'. Gemini is right. This is routing/count inflation, not content loss. Same has_numeric_columns as #249 but an orthogonal population (encoding noise vs tick labels). Do not ship a ratio overnight.",
+      "citations": [
+        {"path": "src/socr/tables/reconstruct.py", "line": 432, "snippet": "def has_numeric_columns(page) -> bool:"},
+        {"path": "src/socr/tables/reconstruct.py", "line": 462, "snippet": "grid_rows = sum(1 for ls in row_lanes.values() if len(ls) >= _MIN_LANES_PER_ROW)"}
+      ],
+      "action_recommended": "none",
+      "proposed_comment": null,
+      "risk_if_wrong": "A guessed reuse ratio would drop real borderless tables — the case this gate exists to catch — and inflate #54-style over-routing in the other direction."
+    },
+    {
+      "issue": 249,
+      "final_disposition": "NEEDS-MEASUREMENT",
+      "agreement": "UNANIMOUS",
+      "vendor_readings": {
+        "gemini-flash": "On chart pages that contain axis tick numbers, has_numeric_columns fires and causes arbitration to route them as table pages. The table verifier then grades model outputs against the native text layer (which is only axis numbers), rejecting all rungs for row-count mismatch and shipping the raw axis dump as native fallback. Abstaining from table scoring when native text does not form a grid (table_not_scorable) or routing chart tick pages to chart_asset resolves this in one night.",
+        "ollama-deepseek": "On chart pages both chart and table signals fire; arbitration holds the page out of the chart lane and routes it as a table page; the table verifier grades every rung against the native text layer, which on a chart is the axis tick labels (49 'effective numeric rows'); every rung is rejected for disagreeing with the phantom, native ships, and the delivered page is the axis labels. The pipeline even emits table_not_scorable ('do not form a grid; not scorable against ground truth') AFTER using that same layer to reject every rung. The mechanism is read directly from audit_events and the fix direction is clear: abstain rather than reject when the native layer is not_scorable."
+      },
+      "evidence_verified": true,
+      "recoverable": false,
+      "basis": "Unanimous FIX-CANDIDATE is category-wrong in the same way the first two owner drafts were. Mixed-page arbitration (2278) is real and holds these pages out of chart_asset — consistent with #167, which only claims the chart-only raster path. Two load-bearing errors in both seats: (1) value_guard row-count is a SOFT WARNING (native_verifier.py:138,658; agentic.py:552-555) and native_table_verifier_warn delegates to the inner judge (590-594) — it does not hard-reject the 49-row phantom; (2) table_not_scorable (1765-1769) uses native_rows_from_page/rows_establish_grid, a different parser than the 49-row _rows_by_y_from_words count, so 'abstain when not_scorable' is not the one-night fix they describe. The user-visible sludge is real; the reject story is still imprecise. Template is MISREPORTED-style correction, stay OPEN, no overnight routing change. Corpus/hand pass required.",
+      "citations": [
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 2278, "snippet": "kind=\"chart_table_arbitration\","},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 1765, "snippet": "if not rows_establish_grid(gt_rows):"},
+        {"path": "src/socr/pipeline/orchestrator.py", "line": 1769, "snippet": "kind=\"table_not_scorable\","},
+        {"path": "src/socr/pipeline/agentic.py", "line": 555, "snippet": "kind=\"value_guard_row_count_warning\","},
+        {"path": "src/socr/tables/native_verifier.py", "line": 138, "snippet": "row_count_warn: bool = False  # row-count mismatch soft-flag (table ships, status→WARNING)"}
+      ],
+      "action_recommended": "comment-correction",
+      "proposed_comment": "Overnight adjudication at 53b0637: mixed-page arbitration (chart_table_arbitration) and tick-label numeric rows in the native layer are real. Two corrections to the current write-up — not a close. (1) value_guard row-count mismatch is a SOFT WARNING (row_count_warn; table ships) and native_table_verifier_warn delegates to the inner judge; it is not a hard reject against the 49-row phantom. (2) table_not_scorable uses native_rows_from_page/rows_establish_grid, a different parser than the 49-row _rows_by_y_from_words count, so 'abstain when not_scorable' is not a one-line fix for the 49-vs-1 grading. Compatible with #167: the page-level chart-asset lane is chart-only pages; mixed pages stay on the table route. Needs a corpus/hand pass before a routing change. Stays OPEN.",
+      "risk_if_wrong": "If the inner judge really is rejecting solely because of the 49-row warning, delaying a fix leaves FOMC-style pages shipping axis dumps; if we had shipped the 'abstain on not_scorable' patch, we would have changed the wrong parser."
+    }
+  ]
+}
