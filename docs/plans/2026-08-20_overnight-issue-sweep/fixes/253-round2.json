@@ -1,0 +1,89 @@
+{
+  "pr": 253,
+  "branch": "fix/205-tr3-auditevent",
+  "new_head": "cf9eb80",
+  "previous_head": "83924e9",
+  "base_used_for_proof": "7696719a9fd62c601715a53f5f0b16c9d12a118e",
+  "base_rationale": "The branch's parent commit — the pipeline immediately without this change. socr-night-base (main_sha 53b0637) was NOT used as the proof base because this branch is stacked on #252 and #254 heads that main does not contain; the parent is the honest 'without this change' state. socr-night-base was never touched.",
+  "rebased": false,
+  "force_pushed": false,
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-e/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-e",
+  "findings": [
+    {
+      "id": "E3-1",
+      "severity": "blocking",
+      "summary": "Reused table_region_unverifiable, which already denotes the D3 fail-closed disposition; consumers cannot tell detection from disposition and a D3 page carries the kind twice.",
+      "disposition": "FIXED",
+      "how": "New kind table_region_geometry_hard_fail. Added explicitly to TABLE_DISTRUST_KINDS (tables_trust.py) with a comment stating the detection/disposition split, and to the rank dict in audit_log.py at rank 4, immediately before table_region_unverifiable at 5, so a D3 page's audit log reads detected-then-acted-on in order. native_fallback 5->6, page_failed 6->7; no test pinned those. New test test_d3_page_carries_detection_and_disposition_once_each drives a real D3 page through process() and asserts each kind appears exactly once and in that order."
+    },
+    {
+      "id": "E3-2",
+      "severity": "major",
+      "summary": "62 / 245 / 25.3% hardcoded into runtime source comments and the event detail string.",
+      "disposition": "FIXED",
+      "how": "Removed from src/ entirely. The comment now says 'the firing set' and 'the firing rate is not a measured defect rate' with no sample-specific constant; the runtime event detail no longer bakes the sample size into every future document. Also removed from the test docstrings. Verified by grep over src/socr/pipeline/orchestrator.py: only unrelated pre-existing consilium timestamps match."
+    },
+    {
+      "id": "E3-3",
+      "severity": "major",
+      "summary": "Scope guard only drove _phase_analyze, but status is decided in _phase_assemble and routing in _phase_agentic, so it cannot catch the creep it exists to prevent.",
+      "disposition": "FIXED",
+      "how": "Renamed to test_surfacing_does_not_key_page_status_or_routing_scope_guard and widened to the whole of process(), parametrized over four cells (agentic x flagged). Pins page status, audit_passed, failure mode, document status and the OCR call list to values MEASURED at base 7696719. Patches _available_engines_for_agentic to [PROFILE_QWEN_LOCAL] for CI hermeticity. Pinning rather than flagged-vs-clean equality because the TR-3 flag already influences some of those outcomes through pre-existing paths (D3 floor, native_fallback) that #205 does not touch — an equality test would assert something untrue. This is stated explicitly in the test comment and the PR body."
+    }
+  ],
+  "existing_test_edit": "tests/test_native_only_table_status_gh211.py exhaustive reasons list moved a second time, from [table_region_unverifiable, table_structure_failed] to [table_region_geometry_hard_fail, table_structure_failed], purely as a consequence of the kind rename. Nothing relaxed: same single untrusted page, same WARNING, same audit_passed=False, table_structure_failed still present, every other assertion unchanged. Not re-litigated per instruction.",
+  "non_vacuity": {
+    "base_run": {
+      "commit": "7696719",
+      "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-e3base/src/socr/__init__.py",
+      "result": "5 failed, 5 passed, 5 warnings in 103.80s",
+      "failures_are_behavioural": true,
+      "raw": [
+        "E   AssertionError: The TR-3 geometry hard-fail on page 1 reached no surface at all; recorded events were []",
+        "tests/test_gh205_tr3_unconditional_event.py:92: AssertionError: The TR-3 geometry hard-fail on page 1 reached no surface at all; recorded events were []",
+        "E   AssertionError: assert {'table_regio...unverifiable'} <= frozenset({'d...imeout', ...})",
+        "tests/test_gh205_tr3_unconditional_event.py:116: AssertionError: assert {'table_regio...unverifiable'} <= frozenset({'d...imeout', ...})",
+        "E   AssertionError: [(1, 'judge_reject'), (1, 'native_fallback')]",
+        "tests/test_gh205_tr3_unconditional_event.py:280: AssertionError: [(1, 'judge_reject'), (1, 'native_fallback')]",
+        "E   AssertionError: [(1, 'native_table_verifier_hard_fail'), (1, 'page_failed'), (1, 'table_region_unverifiable')]",
+        "tests/test_gh205_tr3_unconditional_event.py:280: AssertionError: [(1, 'native_table_verifier_hard_fail'), (1, 'page_failed'), (1, 'table_region_unverifiable')]",
+        "E   AssertionError: ['native_table_verifier_hard_fail', 'page_failed', 'table_region_unverifiable']",
+        "tests/test_gh205_tr3_unconditional_event.py:312: AssertionError: ['native_table_verifier_hard_fail', 'page_failed', 'table_region_unverifiable']",
+        "FAILED tests/test_gh205_tr3_unconditional_event.py::test_tr3_hard_fail_is_surfaced_without_native_only",
+        "FAILED tests/test_gh205_tr3_unconditional_event.py::test_detection_kind_is_distinct_from_the_d3_disposition_kind",
+        "FAILED tests/test_gh205_tr3_unconditional_event.py::test_tr3_detection_reaches_every_surface_end_to_end[False]",
+        "FAILED tests/test_gh205_tr3_unconditional_event.py::test_tr3_detection_reaches_every_surface_end_to_end[True]",
+        "FAILED tests/test_gh205_tr3_unconditional_event.py::test_d3_page_carries_detection_and_disposition_once_each",
+        "5 failed, 5 passed, 5 warnings in 103.80s (0:01:43)"
+      ],
+      "note": "The 5 that PASS at base are the reverse-regression guard and the four scope-guard cells. They are supposed to pass at base; turning a baseline-passing guard into a baseline failure is the trap the predecessor flagged."
+    },
+    "branch_run": {
+      "commit": "cf9eb80",
+      "result": "10 passed, 5 warnings in 112.33s (0:01:52)"
+    }
+  },
+  "suite": "1848 passed, 3 xfailed, 5 warnings in 243.12s. No pre-existing failures.",
+  "lint": {
+    "format_gate": "uvx ruff@0.16.0 format --check . -> 326 files already formatted",
+    "check_advisory": "uvx ruff@0.16.0 check on touched files -> 7 findings, byte-identical with the changes stashed, i.e. all pre-existing. ruff check is continue-on-error in CI."
+  },
+  "cardinal_rule_levels": {
+    "page": "detection event recorded against the page, exactly once",
+    "document": "audit_log.json counts[table_region_geometry_hard_fail] == 1; document status untouched (pinned)",
+    "metadata": "tables_trust.json lists the page under the detection kind; paper/metadata.json error contains 'untrusted tables'",
+    "cli": "stdout contains 'untrusted tables'",
+    "all_four_asserted": true,
+    "asserted_in": "test_tr3_detection_reaches_every_surface_end_to_end, both agentic and non-agentic cells"
+  },
+  "ci": "NO-CHECKS by construction: ci.yml triggers only on push/pull_request into main and this branch is stacked on fix/225-phantom-image-urls. Stated in the PR body so NO-CHECKS is not read as green.",
+  "scope_held": "Surfacing only. No routing edit, no page-status edit, no document-status edit. #205 stays OPEN for steps 2 and 3.",
+  "housekeeping": "Temporary base worktree socr-e3base created at 7696719 and removed; socr-night-base never touched and verified clean (0 porcelain entries) after each use.",
+  "files_changed": [
+    "src/socr/core/audit_log.py",
+    "src/socr/core/tables_trust.py",
+    "src/socr/pipeline/orchestrator.py",
+    "tests/test_gh205_tr3_unconditional_event.py",
+    "tests/test_native_only_table_status_gh211.py"
+  ]
+}

@@ -62,3 +62,36 @@ whole PR and cost a round.
 4. The reviewer, not the author, re-runs the baseline.
 
 Point 3 is the cheap one and would have caught all four.
+
+---
+
+## Addendum — a fifth finding, about #205's own framing
+
+Recorded when the successor code owner fixed #253.
+
+#205 says the TR-3 geometry hard-fail "is detected on 62/245 table pages and surfaced
+nowhere", and the binding scope I gave both code owners was "do not key page or document
+status on it". Measuring at the branch's base `7696719` before writing the scope guard,
+the successor found that **document status is already keyed on the TR-3 flag** through
+pre-existing paths — the D3 floor and `native_fallback`:
+
+| | flagged | clean |
+|---|---|---|
+| non-agentic | `AUDIT_FAILED` | `SUCCESS` |
+| agentic | `ERROR` | `AUDIT_FAILED` |
+
+So "surfaced nowhere" is true of the **analyze-time detection**, and false of the flag in
+general. Nothing #205 controls does the keying, but something does.
+
+This mattered concretely. The obvious way to write the scope guard — assert that a
+flagged document and a clean one end in the same state — would have asserted something
+untrue and failed at the base for the right reason and the wrong cause. The guard instead
+pins the measured base values and shows they are byte-identical on the branch, which
+proves what actually needs proving: that this change moves nothing.
+
+It also matters for the morning. #205's remaining steps 2 and 3 are written on the
+premise that the signal is inert. It is not entirely inert, and the hand-judgement of the
+62-page set should be designed knowing that.
+
+Same lesson as the rest of this file: the framing in an issue — including an issue the
+owner wrote carefully and revised — is a claim, and a claim is not a measurement.
