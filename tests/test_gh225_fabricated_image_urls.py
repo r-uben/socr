@@ -25,7 +25,7 @@ import pytest
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.manifest import _winning_page_output, canonical_page_texts
-from socr.core.result import PageOutput, PageStatus
+from socr.core.result import DocumentStatus, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -342,3 +342,58 @@ def test_fabricated_url_with_a_title_is_still_caught(tmp_path: Path) -> None:
     assert "i.imgur.com" not in body, body
     assert "Before" in body and "After" in body
     assert state.pages[1].fabricated_image_refs == 1
+
+
+def test_phase_major_document_status_is_demoted_by_the_sweep(tmp_path: Path) -> None:
+    """PR #252 round-2 review, blocking: the sweep ran AFTER status was frozen.
+
+    The phase-major lanes (single-engine, multi-engine, consensus, repair) never
+    reach the agentic per-page seam, so they never increment
+    ``PageState.fabricated_image_refs``. Their fabricated refs are caught by the
+    document sweep — which used to run *after* ``pages_ok`` and ``status`` were
+    already computed. Result: the ref was removed and an error note appended,
+    while the document still finished ``SUCCESS`` with ``audit_passed=True``.
+    A document-status surface that the issue explicitly requires, silently
+    absent on exactly the lanes with no per-page seam.
+
+    Drives the real ``_phase_assemble``, so it asserts the ORDERING rather than
+    the sweep in isolation — the sweep worked fine before; it just ran too late.
+    """
+    pdf_path = _pdf_without_links(tmp_path)
+    out_dir = tmp_path / "out"
+
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+
+    # A page whose winner carries a fabricated ref but which the per-page seam
+    # never touched — the phase-major shape.
+    state, _out = _state_for(pdf_path, f"Real prose that must survive.\n\n{FABRICATED_REF}\n")
+    assert state.pages[1].fabricated_image_refs == 0, "setup: per-page seam not involved"
+
+    result = pipeline._phase_assemble(state, out_dir)
+
+    assert result.status != DocumentStatus.SUCCESS, (
+        "a document whose only defect is a fabricated image ref still finished "
+        f"SUCCESS: {result.status}, error={result.error!r}"
+    )
+    assert result.audit_passed is False, result
+    # And the redaction still happened, with the real prose intact.
+    saved = "\n".join(p.read_text(encoding="utf-8") for p in out_dir.rglob("*.md") if p.is_file())
+    assert "i.imgur.com" not in saved, saved
+    assert "Real prose that must survive." in saved, saved
+
+
+def test_clean_phase_major_document_still_succeeds(tmp_path: Path) -> None:
+    """Reverse regression: the new document term must not demote a clean run."""
+    pdf_path = _pdf_without_links(tmp_path)
+    out_dir = tmp_path / "out"
+
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    state, _out = _state_for(pdf_path, "Real prose with no image references at all.\n")
+
+    result = pipeline._phase_assemble(state, out_dir)
+
+    assert result.status == DocumentStatus.SUCCESS, (
+        f"a clean document was demoted: {result.status}, error={result.error!r}"
+    )

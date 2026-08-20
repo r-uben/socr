@@ -1756,9 +1756,14 @@ class UnifiedPipeline:
                 data={"targets": targets, "alts": [entry["alt"] for entry in removed]},
             )
         )
-        # Never ship fabrication under SUCCESS.  WARNING rather than ERROR: the
-        # rest of the page is real extracted text and must survive; it is the
-        # invented pointer that is gone.
+        # #225 asks to FAIL the page, not warn on it, and the round-2 review is
+        # right that my reason for softening that to WARNING was a false
+        # dichotomy.  ERROR does NOT delete the cleaned text: winner selection is
+        # controlled by ``audit_passed`` (which stays True — see below), and
+        # ``failed_pages`` is derived from a page-failure MARKER in the body
+        # text, not from status, so an ERROR page with real text is never
+        # substituted for a marker.  Verified on the born-digital shape: the
+        # table still ships.  So the criterion is met as written.
         #
         # ``audit_passed`` is deliberately NOT flipped, and this is the whole
         # correctness of the demotion.  In this codebase ``audit_passed=False``
@@ -1776,7 +1781,7 @@ class UnifiedPipeline:
         # the document-level signal rides on ``fabricated_image_refs`` below
         # rather than on the winner-selection flag.
         if page_out.status == PageStatus.SUCCESS:
-            page_out.status = PageStatus.WARNING
+            page_out.status = PageStatus.ERROR
         if page_out.failure_mode == FailureMode.NONE:
             page_out.failure_mode = FailureMode.HALLUCINATION
         ps = state.pages.get(page_num)
@@ -5383,13 +5388,43 @@ class UnifiedPipeline:
         # AUDIT_FAILED rather than ERROR: no real content was lost — the page
         # ships correct text — so the CLI's "completed with warnings, output
         # written" path is the honest one, not a hard failure.
+        # Strip phantom image references, and sweep for fabricated ones, BEFORE
+        # the status calculation below (#252 review, blocking).  This block used
+        # to sit after the status was already frozen, so a phase-major document
+        # whose ONLY defect was a fabricated link had the ref removed and an
+        # error note appended while still finishing SUCCESS / audit_passed=True —
+        # the document-status surface the issue requires, silently absent on
+        # exactly the lanes that have no per-page seam.  Running it here also
+        # means the saved body and the reported status are computed from the same
+        # text, which they previously were not.
+        from ocr_output_contract import doc_dir_for, relative_key
+
+        normalizer = OutputNormalizer()
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        if has_text:
+            final_text = normalizer.strip_phantom_images(final_text, output_dir=doc_dir)
+            # The phase-major lanes (single-engine, multi-engine, consensus,
+            # repair) never reach the agentic per-page seam, and the engines that
+            # invent image refs — Gemini, Mistral, any VLM — run on those lanes
+            # too.  Idempotent for agentic runs: the per-page seam already cleaned
+            # them, so this finds nothing.
+            final_text = self._guard_fabricated_image_refs_document(state, final_text, doc_dir)
+
         fabricated_ref_pages = sorted(
             n for n, p in state.pages.items() if getattr(p, "fabricated_image_refs", 0)
+        )
+        # The phase-major sweep has no PageState to increment, so its removals
+        # ride on the page-0 document event it records.  Without this term the
+        # sweep could redact a fabricated ref and still leave the run SUCCESS.
+        doc_fabrication = any(
+            getattr(e, "kind", "") == "fabricated_image_ref" and getattr(e, "page_num", None) == 0
+            for e in state.events
         )
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
-        pages_ok = pages_ok and not fabricated_ref_pages
+        pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -5485,24 +5520,6 @@ class UnifiedPipeline:
 
         # Compute total processing time
         total_time = sum(r.processing_time for r in state.engine_runs)
-
-        # Strip phantom image references before saving
-        from ocr_output_contract import doc_dir_for, relative_key
-
-        normalizer = OutputNormalizer()
-        scan_root = self._scan_root or state.handle.path.parent
-        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
-        if has_text:
-            final_text = normalizer.strip_phantom_images(final_text, output_dir=doc_dir)
-            # GH-225: the phase-major lanes (single-engine, multi-engine,
-            # consensus, repair) never reach the agentic per-page seam, and the
-            # engines that invent image refs — Gemini, Mistral, any VLM — run on
-            # those lanes too.  Redacting here is the last point before the .md
-            # is written and before _rewrite_all_fragments regenerates every
-            # fragment from this text, so the saved document, the fragments and
-            # the manifest all see one body.  Idempotent for agentic runs: the
-            # per-page seam already cleaned them, so this finds nothing.
-            final_text = self._guard_fabricated_image_refs_document(state, final_text, doc_dir)
 
         # Build the final result
         final_result = EngineResult(
