@@ -282,5 +282,118 @@ def test_strict_parser_accepts_a_real_table():
     assert grid.rows == (("1", "2"),)
 
 
+# ---------------------------------------------------------------------------
+# 7. A dropped NATIVE row must not vanish silently (BLOCKING 1)
+# ---------------------------------------------------------------------------
+
+
+def test_dropped_native_row_is_surfaced_not_silently_agreed():
+    """Native has three rows (A, B, C); the candidate only carries A and C —
+    row B was dropped entirely. The anchors either side of the gap (A, C)
+    still line up fine, so a binder that only checks "did every CANDIDATE
+    row get bound" sees nothing wrong. That is exactly the blind spot this
+    module exists to close: B's values must surface as ``native_unbound``
+    and the result must not claim ``structural_agreement``."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(240, 70, 270, 80, "IV"),
+        w(50, 100, 90, 110, "A"),
+        w(150, 100, 180, 110, "1.0"),
+        w(250, 100, 280, 110, "2.0"),
+        w(50, 130, 90, 140, "B"),
+        w(150, 130, 180, 140, "3.0"),
+        w(250, 130, 280, 140, "4.0"),
+        w(50, 160, 90, 170, "C"),
+        w(150, 160, 180, 170, "5.0"),
+        w(250, 160, 280, 170, "6.0"),
+    ]
+    md = """
+|   | OLS | IV  |
+|---|-----|-----|
+| A | 1.0 | 2.0 |
+| C | 5.0 | 6.0 |
+"""
+    result = bind(words, md)
+    assert result.structural_agreement is False
+    assert result.row_binding_unverifiable is True
+    dropped_tokens = {u.token for u in result.native_unbound}
+    assert dropped_tokens == {"3.0", "4.0"}
+    assert all(u.row_path[-1] == "B" for u in result.native_unbound)
+    # A and C themselves are untouched: both still bind and match cleanly.
+    assert result.contradicted_cells == []
+    a_c_matches = {(m.row_path[-1], m.value) for m in result.matched_cells}
+    assert a_c_matches == {("A", "1.0"), ("A", "2.0"), ("C", "5.0"), ("C", "6.0")}
+
+
+# ---------------------------------------------------------------------------
+# 8. A3 — decimal precision is not normalised away (MAJOR 3)
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_zero_precision_is_a_contradiction_not_a_match():
+    """Native '1.10' and candidate '1.1' are numerically equal but
+    typographically distinct precision claims (A3): the binder must treat
+    them as a CONTRADICTION, not silently normalise '1.10' down to '1.1'
+    and call it a match."""
+    words = [
+        w(50, 100, 90, 110, "Coef"),
+        w(150, 100, 180, 110, "1.10"),
+    ]
+    md = """
+|      | OLS |
+|------|-----|
+| Coef | 1.1 |
+"""
+    result = bind(words, md)
+    assert result.structural_agreement is False
+    assert len(result.contradicted_cells) == 1
+    bad = result.contradicted_cells[0]
+    assert bad.native_token == "1.10"
+    assert bad.model_token == "1.1"
+    assert result.matched_cells == []
+
+
+# ---------------------------------------------------------------------------
+# 9. A numeric row-label stub does not inflate the lane count (MAJOR 4)
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_row_label_is_not_mistaken_for_a_data_lane():
+    """A year used as the row's own stub label ('2020', '2021') is numeric
+    by ``is_numeric_token`` and would cluster into its own lane exactly like
+    a genuine data column — but it is always the LEFTMOST word in its row,
+    which a real data lane never is (the row's label text — even a numeric
+    one — always precedes the data). The lane count must stay at 2 (OLS,
+    IV), not 3, and the year itself must show up as the row's label, not be
+    silently dropped from the native multiset used for row anchoring."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(240, 70, 270, 80, "IV"),
+        w(50, 100, 90, 110, "2020"),
+        w(150, 100, 180, 110, "1.10"),
+        w(250, 100, 280, 110, "1.11"),
+        w(50, 130, 90, 140, "2021"),
+        w(150, 130, 180, 140, "2.20"),
+        w(250, 130, 280, 140, "2.21"),
+    ]
+    md = """
+|      | OLS  | IV   |
+|------|------|------|
+| 2020 | 1.10 | 1.11 |
+| 2021 | 2.20 | 2.21 |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert result.row_binding_unverifiable is False
+    assert result.structural_agreement is True
+    matches = {(m.row_path[-1], m.value) for m in result.matched_cells}
+    assert matches == {
+        ("2020", "1.10"),
+        ("2020", "1.11"),
+        ("2021", "2.20"),
+        ("2021", "2.21"),
+    }
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

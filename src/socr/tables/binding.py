@@ -210,13 +210,15 @@ class _NativeRow:
     band_ambiguous: bool  # this row's own y-band is not well-separated from a neighbour
 
 
-def _row_label(words_in_band: list, first_numeric_x: float | None) -> str:
-    """Leftmost non-numeric run before the first numeric token = the stub label."""
-    label_words = [
-        w[4]
-        for w in words_in_band
-        if not is_numeric_token(w[4]) and (first_numeric_x is None or w[0] < first_numeric_x)
-    ]
+def _row_label(words_in_band: list, lane_of: dict[float, int]) -> str:
+    """The stub label: every word before the row's first bound data-lane
+    token. A numeric row stub (e.g. a year used as the row's own label) is
+    not in ``lane_of`` (see :func:`_native_lane_geometry`), so it lands here
+    as label text instead of being swallowed as a phantom data column
+    (MAJOR 4)."""
+    sorted_words = sorted(words_in_band, key=lambda w: w[0])
+    first_data_x = next((w[0] for w in sorted_words if lane_of.get(w[0]) is not None), None)
+    label_words = [w[4] for w in sorted_words if first_data_x is None or w[0] < first_data_x]
     return " ".join(label_words).strip()
 
 
@@ -238,6 +240,60 @@ def _band_well_separated(centers: list[float], idx: int) -> bool:
         return True
     neighbours = [abs(centers[idx] - c) for j, c in enumerate(centers) if j != idx]
     return min(neighbours) >= _WELL_SEPARATED_GAP_PT
+
+
+def _native_lane_geometry(words: list) -> tuple[int, dict[float, int], list[float]]:
+    """Cluster numeric tokens into lanes (reusing ``native_verifier``'s raw
+    predicate + clusterer, so ``lane_of`` stays predicate-consistent with
+    ``_well_separated_lanes_in_row``), then drop any lane that is a STUB
+    lane rather than a data lane (MAJOR 4).
+
+    A numeric row label (e.g. a year used as the row's own stub, "2020")
+    clusters into its own lane exactly like a genuine data column would —
+    geometry alone cannot tell them apart. What distinguishes them: a stub
+    is, in EVERY row where it appears, the leftmost word of that row —
+    nothing, text or number, precedes it. A genuine data lane is preceded
+    by the row's label text in at least one row (a row with a blank label
+    is not proof either way, since it defers to the OTHER rows sharing that
+    lane). Surviving lanes are re-indexed 0..k-1 left to right and their
+    centres recomputed from the same x-positions ``_lane_count_from_words``
+    clustered internally, so this is also the single place lane geometry is
+    derived from — callers must not separately recompute lane centres with
+    a different numeric predicate (the "fix if cheap" note: a bolded number
+    like ``**1.2**`` must not be counted by one caller and skipped by
+    another).
+    """
+    raw_count, raw_lane_of = _lane_count_from_words(words)
+    if raw_count == 0:
+        return 0, {}, []
+
+    _band_centers, y_to_band = _assign_bands(words)
+    bands: dict[int, list] = {}
+    for w in words:
+        bands.setdefault(y_to_band[round(w[1], 1)], []).append(w)
+
+    always_leftmost: dict[int, bool] = {}
+    for band_words in bands.values():
+        if not band_words:
+            continue
+        leftmost_x = min(bw[0] for bw in band_words)
+        for wd in band_words:
+            li = raw_lane_of.get(wd[0])
+            if li is None:
+                continue
+            here = wd[0] == leftmost_x
+            always_leftmost[li] = (
+                here if li not in always_leftmost else (always_leftmost[li] and here)
+            )
+
+    stub_lanes = {li for li, always in always_leftmost.items() if always}
+
+    all_centers = _cluster_x_positions(sorted(set(raw_lane_of.keys())))
+    surviving_raw = [i for i in range(raw_count) if i not in stub_lanes]
+    remap = {raw: new for new, raw in enumerate(surviving_raw)}
+    centers = [all_centers[i] for i in surviving_raw]
+    lane_of = {x: remap[li] for x, li in raw_lane_of.items() if li in remap}
+    return len(surviving_raw), lane_of, centers
 
 
 def _native_rows(words: list) -> tuple[list[_NativeRow], list[float], list[int]]:
@@ -264,8 +320,7 @@ def _native_rows(words: list) -> tuple[list[_NativeRow], list[float], list[int]]
     for b in bands.values():
         b.sort(key=lambda w: w[0])
 
-    lane_count, lane_of = _lane_count_from_words(words)
-    lane_centers = _lane_count_and_centers(words)
+    lane_count, lane_of, lane_centers = _native_lane_geometry(words)
 
     ordered_band_idxs = sorted(bands, key=lambda i: band_centers[i])
 
@@ -297,11 +352,11 @@ def _native_rows(words: list) -> tuple[list[_NativeRow], list[float], list[int]]
     for bidx in data_positions:
         band_words = bands[bidx]
         numeric_words = [w for w in band_words if is_numeric_token(w[4])]
-        first_numeric_x = min((w[0] for w in numeric_words), default=None)
-        label = _row_label(band_words, first_numeric_x)
+        data_words = [w for w in band_words if lane_of.get(w[0]) is not None]
+        label = _row_label(band_words, lane_of)
         band_ambiguous = not _band_well_separated(band_centers, bidx)
 
-        if not numeric_words and label:
+        if not data_words and label:
             # value-less parent/panel row: push onto the indent stack and
             # keep it as its own row (C1's "value-less parent rows are kept").
             indent = min(w[0] for w in band_words)
@@ -324,19 +379,29 @@ def _native_rows(words: list) -> tuple[list[_NativeRow], list[float], list[int]]
         row_path = tuple(p[1] for p in prefix_stack) + (label,)
 
         row_tokens = [(w[0], w[4]) for w in numeric_words]
-        clean_lanes = set(_well_separated_lanes_in_row(row_tokens, lane_of))
+        row_lane_ids = {lane_of[x] for x, _ in row_tokens if x in lane_of}
+        if len(row_lane_ids) >= 2:
+            clean_lanes = set(_well_separated_lanes_in_row(row_tokens, lane_of))
+        else:
+            # `_well_separated_lanes_in_row` needs >= 2 lanes present in the
+            # row to judge row-internal jitter and returns [] otherwise — a
+            # lone data token isn't ambiguous merely because it's alone in
+            # its row. Fall back to whether ITS lane is well separated from
+            # its neighbours in the page-wide lane grid instead.
+            clean_lanes = {li for li in row_lane_ids if _band_well_separated(lane_centers, li)}
 
         lane_tokens: dict[int, tuple[str, bool]] = {}
         multiset: Counter = Counter()
         for x, text in row_tokens:
             li = lane_of.get(x)
-            token_ambiguous = band_ambiguous or li is None or li not in clean_lanes
-            if li is not None:
-                if li in lane_tokens:
-                    # two tokens landed in the same (band, lane) cell: collision.
-                    lane_tokens[li] = (lane_tokens[li][0], True)
-                else:
-                    lane_tokens[li] = (text, token_ambiguous)
+            if li is None:
+                continue  # stub token (e.g. a numeric row label) — not a data cell
+            token_ambiguous = band_ambiguous or li not in clean_lanes
+            if li in lane_tokens:
+                # two tokens landed in the same (band, lane) cell: collision.
+                lane_tokens[li] = (lane_tokens[li][0], True)
+            else:
+                lane_tokens[li] = (text, token_ambiguous)
             multiset[_normalize_numeric_token(text)] += 1
 
         rows.append(
@@ -604,11 +669,39 @@ class BindingResult:
     column_header_paths: list[ColumnHeaderPath] = field(default_factory=list)
 
     @property
-    def structural_agreement(self) -> bool:
-        """True only when every checkable binding agreed and nothing dropped
-        or invented. Ambiguous/unverifiable regions are neither proof of
-        agreement nor of disagreement — they simply do not vote."""
+    def fully_checked(self) -> bool:
+        """True when nothing about this binding was left unresolved: every
+        lane bound to exactly one candidate column, every native data row
+        bound to exactly one candidate row, and no cell's geometry was
+        ambiguous. False means some region of the table was never actually
+        compared — a different fact from whether the parts that WERE
+        compared agreed (MAJOR 2)."""
+        return (
+            not self.row_binding_unverifiable
+            and not self.column_binding_unverifiable
+            and self.ambiguous_count == 0
+        )
+
+    @property
+    def no_known_contradiction(self) -> bool:
+        """True when nothing that WAS checked disagreed. Says nothing about
+        coverage: a table that was almost entirely unverifiable can still be
+        ``no_known_contradiction`` simply because too little of it was
+        checkable to find a disagreement in. Read ``structural_agreement``
+        (or check this alongside ``fully_checked``) before treating a table
+        as verified correct."""
         return not (self.contradicted_cells or self.native_unbound or self.model_unbound)
+
+    @property
+    def structural_agreement(self) -> bool:
+        """True only when the table was FULLY checkable (every lane, every
+        native row, every cell's geometry unambiguous — see
+        ``fully_checked``) AND nothing checkable disagreed. An ambiguous or
+        unverifiable region is a DIFFERENT fact from disagreement — it means
+        "we don't know", not "it matched" — so it makes this False too, on
+        purpose: an incompletely-checked table is not a passing table
+        (MAJOR 2)."""
+        return self.fully_checked and self.no_known_contradiction
 
 
 def bind(words: list, markdown: str) -> BindingResult:
@@ -626,14 +719,12 @@ def bind(words: list, markdown: str) -> BindingResult:
         return result
 
     native_rows, band_centers, header_band_idxs = _native_rows(words)
-    lane_count, _lane_of = _lane_count_from_words(words)
+    lane_count, _lane_of, lane_centers = _native_lane_geometry(words)
 
     header_words = (
         _native_header_words(words, band_centers, header_band_idxs) if header_band_idxs else []
     )
-    result.column_header_paths = build_column_header_paths(
-        words, grid, [c for c in _lane_count_and_centers(words)], header_words
-    )
+    result.column_header_paths = build_column_header_paths(words, grid, lane_centers, header_words)
 
     n_cand_cols = grid.n_cols - 1  # exclude the stub column
     if lane_count == 0 or n_cand_cols != lane_count:
@@ -644,7 +735,33 @@ def bind(words: list, markdown: str) -> BindingResult:
     if len(row_binding) != len(grid.rows):
         result.row_binding_unverifiable = True
 
+    # BLOCKING 1: a native DATA row that no candidate row ever bound to is not
+    # merely "unverifiable" in the abstract — it is C4's dropped-digit signal
+    # for the whole row. `_bind_rows` only tracks candidate coverage; a
+    # dropped native row can still leave every candidate row bound (e.g. the
+    # anchors either side of the gap still line up), so it must be checked
+    # separately here rather than inferred from `len(row_binding)`.
+    bound_native_idxs = set(row_binding.values())
+    unbound_native_rows = [
+        (idx, nr)
+        for idx, nr in enumerate(native_rows)
+        if not nr.is_parent and idx not in bound_native_idxs
+    ]
+    if unbound_native_rows:
+        result.row_binding_unverifiable = True
+
     header_paths_by_lane = {chp.lane: chp for chp in result.column_header_paths}
+
+    for idx, nr in unbound_native_rows:
+        for lane, (text, ambiguous) in nr.lane_tokens.items():
+            if ambiguous:
+                result.ambiguous_count += 1
+                continue
+            chp = header_paths_by_lane.get(lane)
+            col_path = chp.path if chp else (str(lane),)
+            result.native_unbound.append(
+                UnboundCell(row_path=nr.row_path, col_path=col_path, token=text)
+            )
 
     for cand_idx, cand_row in enumerate(grid.rows):
         if cand_idx not in row_binding:
@@ -714,11 +831,3 @@ def bind(words: list, markdown: str) -> BindingResult:
                     )
 
     return result
-
-
-def _lane_count_and_centers(words: list) -> list[float]:
-    """Recover the lane x-centres (not just the count) for header-path building."""
-    num_xs = [w[0] for w in words if is_numeric_token(w[4])]
-    if not num_xs:
-        return []
-    return _cluster_x_positions(num_xs)
