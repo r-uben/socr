@@ -11,7 +11,7 @@
 - **Nothing was closed.** 62 issues open at the start, 62 open now.
 - **6 correction comments posted**, every issue verified still open afterwards.
 - **2 actions held for you**, including the run's only close.
-- **5 PRs open, none merged**: #251–#255. **#252 has blocking review findings and they were NOT fixed** — see §6 before merging anything above it.
+- **5 PRs open, none merged**: #251–#255. #252's blocking review findings (including a content-loss defect caused by the fix itself) were **found and then fixed** in a second round — but that second round is unreviewed.
 - **Zero fabricated citations** across 192 machine-checked verdicts.
 
 The single most valuable thing that happened tonight was a fix **not** being
@@ -240,7 +240,7 @@ its predecessor, not on `main`.
 | [#254](https://github.com/r-uben/socr/pull/254) | #195+#197+#198 destruction check, one PR | `163ffcb` | `fix/205-…` | **NO-CHECKS** | 1846 passed, 3 xfailed | not dispatched | 4 |
 | [#255](https://github.com/r-uben/socr/pull/255) | #222 probe extracted behind an interface | `2fe7355` | `fix/195-…` | **NO-CHECKS** | see result file | not dispatched | 5 (top) |
 
-### #252 has BLOCKING review findings — do not merge it
+### #252 — a content-loss defect was found in the fix, and then fixed
 
 Its independent reviewer (grok) returned **REQUEST-CHANGES**, and one finding is a
 cardinal-rule violation introduced *by the fix*:
@@ -259,10 +259,47 @@ cardinal-rule violation introduced *by the fix*:
   can vanish entirely.
 
 The reviewer independently reproduced the baseline failure, so it read the code
-carefully. **The findings were relayed to the code owner twice and were NOT
-addressed.** #252's head is still `4200171` — the commit the reviewer rejected. The
-code owner continued up the stack to E6/E7 instead and did not return. I chose to
-report that plainly rather than have it rush a cardinal-rule change at 06:40.
+carefully.
+
+**All four findings were fixed in a second round**, pushed at the very end of the
+run: head moved `4200171` → **`4243212`** (normal push, no force, no rebase), with a
+[reply comment](https://github.com/r-uben/socr/pull/252#issuecomment-5350071385) on
+the PR. What the code owner did is worth knowing, because it changes how much you
+need to re-check:
+
+- It **reproduced the content loss before fixing it**. At `4200171`, on a
+  born-digital OBR-shaped page: the sanitizer produced `WARNING / audit_passed=False`
+  with the fabricated `imgur` ref gone and table value `177.0` intact — but what
+  *assemble actually shipped* was `native / SUCCESS / audit_passed=True` with
+  **`177.0` gone**. The reviewer was right.
+- **Root cause**: `audit_passed` is the *winner-selection* flag, not a page flag.
+  `_winning_page_output` returns `best_output` only while it is True, so flipping it
+  made a born-digital page fall through to the native branch and discard the cleaned
+  OCR page. The fix stops flipping it; the page carries its own demotion
+  (`status → WARNING`, `failure_mode → HALLUCINATION`) and stays the winner.
+- Reverse regressions now assert through `canonical_page_texts` — the actual source
+  of the saved `.md` — not on the `PageOutput` the gate mutated. **The guard was
+  verified real** by re-introducing the flipped flag and watching the new test fail,
+  then reverting.
+- It caught a vacuity trap **in its own new tests**: it had written the guards as
+  `state.pages[1].fabricated_image_refs == 0`, which raises `AttributeError` at
+  `main_sha` — turning three baseline-passing guards into baseline failures for the
+  wrong reason. Changed to `getattr(..., 0)` so they stay evaluable at both revisions.
+
+Refreshed non-vacuity at `main_sha`: 4 failed / 4 passed, all four failures
+behavioural (`'i.imgur.com' not in …`), no `AttributeError`/`ImportError`. On the
+branch: 8 passed. Full suite 1838 passed, 3 xfailed. Lint clean.
+
+**One stated disagreement, which is yours to settle:** #225 asks to *fail* the page.
+The code owner keeps page status at `WARNING` and makes the *document*
+`AUDIT_FAILED` (via a new `fabricated_ref_pages` term), arguing that after redaction
+the page content is correct — the invented pointer is gone, everything real is
+intact — so emitting a page-failure marker would delete a genuine table to punish a
+pointer already removed, inverting the cardinal rule. The run no longer looks clean;
+the content survives. I think that argument is right, but it is a deliberate
+departure from the issue's literal wording and it is flagged, not hidden.
+
+**Caveat: round 2 was not re-reviewed.** `4243212` has had no independent reviewer.
 
 **#252 is the base of #253 and #254, so all three inherit this.** Merging bottom-up
 means #251 first, then **stopping** until #252 is fixed.
@@ -344,8 +381,9 @@ which is exactly what would make these passes fast.
   redesign around a 1-token functional canary, and *the canary is the fix* — it can
   only be validated against a real backend in both wedged and healthy states, and CI
   has no provider at all. Correct call. Detail in `fixes/E7-result.json`.
-- **#252's blocking findings** — **NOT ADDRESSED.** Relayed twice; the code owner did
-  not return. This is the run's main loose end. E7 was expected to be
+- **#252's blocking findings** — addressed in a second round at the very end
+  (`4243212`), including an independent reproduction of the content loss. Not
+  re-reviewed. See §6. E7 was expected to be
   **SKIPPED**: two independent seats found the combined fix depends on #159's
   attempt-identity work, and #227 warns that fixing #221's probe alone makes
   behaviour *worse*. It remains the correct thing to skip.
@@ -399,10 +437,12 @@ stated reason was wrong. Proof in `logs/2026-08-20_A1-sentinel-transcript.md`.
    p26 characterisation. Say post-corrected or drop.
 3. **One line in `ci.yml`** (2 min, optional). Drop `branches: [main]` from the
    `pull_request:` trigger so stacked PRs get CI. Pays for itself immediately.
-4. **Do not merge #252** (5 min to read). Its reviewer found the fix itself causes
-   silent content loss on born-digital pages, and the findings were never
-   addressed — the head is still the commit that was rejected. Everything above it
-   in the stack inherits this. See §6.
+4. **Read #252's round-2 fix** (10 min). A reviewer found the original caused silent
+   content loss on born-digital pages; the code owner reproduced it, root-caused it
+   to `audit_passed` being the winner-selection flag, and fixed it — but round 2 is
+   unreviewed. It also declines part of the issue's literal wording (page stays
+   WARNING, document becomes AUDIT_FAILED) on cardinal-rule grounds. Confirm you
+   agree. See §6.
 5. **Get #253, #254 and #255 reviewed** (30 min). None has CI *or* an independent
    reviewer — only the author's own tests. #253 is deliberately narrow (AuditEvent
    only); confirm you want that scope before it grows.
@@ -442,7 +482,7 @@ is a stack you have to review by hand.
 **What I'd distrust in my own report.** #253, #254 and #255 have had **no
 independent review at all** — only the code owner's own testing. Of the two PRs that
 *were* reviewed, one was approved and one was found to cause silent content loss
-that its author had not seen. On that base rate, assume the three unreviewed PRs
+that its author had not seen — and the round-2 fix for that is itself unreviewed. On that base rate, assume the three unreviewed PRs
 contain comparable problems until someone looks. **The review seat, not the
 implementation seat, was the scarce resource tonight, and I allocated it badly:**
 I let the code owner run five tickets deep while only two PRs got a reviewer. The

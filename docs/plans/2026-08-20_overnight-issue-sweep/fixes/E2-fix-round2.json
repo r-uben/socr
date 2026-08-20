@@ -1,0 +1,45 @@
+{
+  "pr": 252,
+  "branch": "fix/225-phantom-image-urls",
+  "new_head_sha": "4243212d00fdbfe7144f702dda8e082e9e443ff4",
+  "previous_head_sha": "42001710601a915a26057f3255fd18b694d0fe11",
+  "pushed": "normal push to the same branch, no force, no rebase",
+  "pr_comment": "https://github.com/r-uben/socr/pull/252#issuecomment-5350071385",
+  "reviewer_verdict_addressed": "all 4 findings: 2 blocking fixed, 2 major fixed (one with a stated partial disagreement)",
+  "finding_1_blocking": {
+    "status": "FIXED",
+    "independently_reproduced_before_fixing": true,
+    "repro_output_at_4200171": "after sanitizer: status=WARNING audit_passed=False, imgur gone, table row 177.0 present. What assemble ACTUALLY shipped: engine=native status=SUCCESS audit_passed=True, 177.0 GONE, text='Table 2.3 Public finances\\n\\nborrowing forecast 2022 2023 2024\\n'",
+    "root_cause": "audit_passed is the WINNER-SELECTION flag, not a page flag. _winning_page_output (manifest.py:314) returns best_output only while it is True; otherwise a born-digital page falls through to the native branch. Flipping it discarded the cleaned OCR page.",
+    "fix": "Stop flipping audit_passed. The page carries its own demotion (status -> WARNING, failure_mode -> HALLUCINATION) and stays the winner, so the cleaned text ships. Verified: engine=qwen, status=WARNING, 177.0 and 139.2 present."
+  },
+  "finding_2_blocking": {
+    "status": "FIXED",
+    "fix": "Every reverse regression now asserts through canonical_page_texts (the single source of truth for the saved .md and pages/NNN.md) via a _shipped_body(state) helper, not on the PageOutput the gate mutated. New test test_born_digital_page_keeps_its_ocr_table_after_redaction pins the content-loss case on the OBR shape.",
+    "guard_verified_real": "Re-introduced the flipped flag temporarily; the new test FAILED showing the flattened native text, then reverted. The guard catches the exact regression it was written for."
+  },
+  "finding_3_major": {
+    "status": "FIXED",
+    "fix": "_image_target parses the optional CommonMark title and angle brackets off the destination, so ![Chart](url \"Official chart\") matches the PDF's LINK_URI again. Covered both ways: a titled PROVENANCED ref survives, a titled FABRICATED ref is still caught (no escape hatch)."
+  },
+  "finding_4_major": {
+    "status": "FIXED, with a stated partial disagreement",
+    "fix": "fabricated_ref_pages is now its own term in pages_ok beside the three existing ones, so the document becomes AUDIT_FAILED. It needed its own term precisely because the demotion no longer flips audit_passed and so cannot reach pages_needing_repair.",
+    "declined_part": "The page status stays WARNING rather than the issue's literal 'fail the page', and the document is AUDIT_FAILED rather than ERROR. Reason argued in the PR comment: after redaction the page's content is CORRECT — the invented pointer is gone and everything real is intact — so emitting a page-failure marker would delete a genuine table to punish a pointer already removed, inverting the cardinal rule. The run must not look clean (it no longer does) but the content must survive (it does). Flagged as an owner call, not taken unilaterally."
+  },
+  "own_test_hygiene_correction": "I first wrote the 'no fabrication recorded' assertions in the reverse-regression tests as state.pages[1].fabricated_image_refs == 0, which raises AttributeError at main_sha — turning three baseline-PASSING guards into baseline failures for the wrong reason, the same vacuity trap. Changed to getattr(..., 0) so they stay evaluable at both revisions.",
+  "baseline_fail_output_refreshed": "FAILED test_fabricated_image_url_is_removed_demoted_and_surfaced\nFAILED test_data_uri_image_is_fabricated\nFAILED test_born_digital_page_keeps_its_ocr_table_after_redaction\nFAILED test_fabricated_url_with_a_title_is_still_caught\n4 failed, 4 passed, 5 warnings in 0.21s\n\nAll four failures behavioural ('i.imgur.com' not in ..., 'data:image/png' not in ...); no\nAttributeError/ImportError. The four passes are the reverse-regression guards.",
+  "branch_pass_output": "8 passed, 5 warnings in 0.20s",
+  "suite_result": "1838 passed, 3 xfailed, 0 failed, 156.69s (on this branch, which carries E1+E2 only)",
+  "lint": "uvx ruff@0.16.0 format --check . -> 325 files already formatted, exit 0",
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-e/src/socr/__init__.py, exit 0",
+  "files_changed_round2": [
+    "src/socr/pipeline/orchestrator.py (stop flipping audit_passed; set PageState.fabricated_image_refs; new fabricated_ref_pages term in pages_ok)",
+    "src/socr/core/url_provenance.py (_image_target: CommonMark title + angle-bracket parsing)",
+    "src/socr/core/state.py (PageState.fabricated_image_refs)",
+    "tests/test_gh225_fabricated_image_urls.py (end-to-end via canonical_page_texts; +3 tests, now 8)"
+  ],
+  "stack_note": "#253 -> #254 -> #255 were branched before 4243212 and do NOT contain it. Nothing rebased, nothing force-pushed. Whoever merges must carry the fix up the stack.",
+  "baseline_worktree_clean": true,
+  "merged": false
+}

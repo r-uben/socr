@@ -25,7 +25,7 @@ closed**, **5 PRs open and unmerged**, 2 actions held for the owner.
 | D3 | DONE | no discoveries filed by any agent; nothing to file |
 | E0 | DONE | `fixes/queue.json` |
 | E1 | DONE | PR #251, CI green, reviewer APPROVE |
-| E2 | DONE | PR #252, NO-CHECKS (stacked), local suite green |
+| E2 | DONE | PR #252, NO-CHECKS. Reviewer found content loss; fixed in round 2 (`4243212`), unreviewed |
 | E3 | DONE | PR #253, NO-CHECKS (stacked), surfacing only |
 | E4 | DONE — no PR | `DOES-NOT-REPRODUCE`; became a design question for the owner |
 | E5 | DONE | PR #254 (#195+#197+#198 as one PR) |
@@ -36,10 +36,11 @@ closed**, **5 PRs open and unmerged**, 2 actions held for the owner.
 
 ## Open threads for the owner
 
-0. **`#252` has blocking review findings that were never addressed** — its reviewer
-   found the fix itself causes silent content loss on born-digital pages, and the
-   head is still the rejected commit. #253/#254/#255 are all stacked on it. This is
-   the run's main loose end and the first thing to look at.
+0. **`#252` round 2 is unreviewed.** Its reviewer found the original fix caused
+   silent content loss on born-digital pages; the code owner reproduced it,
+   root-caused it (`audit_passed` is the winner-selection flag, not a page flag) and
+   fixed it at head `4243212`. Nobody has reviewed that fix, and #253/#254/#255 are
+   stacked on it. First thing to look at.
 1. `#147` — design call: narrow the closing Note to table pages, or accept the work.
 2. `#151` — one disputed sentence in a held correction comment.
 3. `ci.yml` — stacked PRs run no tests at all; one-line fix available.
@@ -49,5 +50,5 @@ closed**, **5 PRs open and unmerged**, 2 actions held for the owner.
 
 - Merge anything on the sweep's behalf; all three PRs are proposals.
 - Re-run `bin/apply_tracker_actions.sh` expecting new writes — it is idempotent.
-- Merge anything above #252 until its findings are resolved.
+- Merge anything above #252 until someone has reviewed its round-2 fix.
 - Assume #253/#254/#255 are sound: none of them was independently reviewed.
