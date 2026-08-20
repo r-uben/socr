@@ -1,0 +1,31 @@
+{
+  "pr": 254,
+  "head": "be95b8f",
+  "round": 2,
+  "reviewer": "ollama-deepseek",
+  "access_proof": {
+    "cmd": "git -C /Users/rubenffuertes/repos/.worktrees/socr-night-e show \"be95b8ffb6931a1e56c69074357ecec9958b6cf1:src/socr/tables/reconstruct.py\" | sed -n '342,346p'",
+    "output": "    ``y0=96.96`` while its own label word's native bbox starts at\n    ``y0=94.33``); unioning the row bbox alone would then silently exclude\n    that word from the scope built here — the same class of silent loss\n    this whole rejection path exists to prevent.\n    \"\"\""
+  },
+  "verdict": "APPROVE",
+  "detection_restored": true,
+  "false_positive_not_reintroduced": true,
+  "status_change_cannot_drop_content": true,
+  "declined_finding_sound": true,
+  "non_vacuity_confirmed": true,
+  "findings": [
+    {
+      "severity": "minor",
+      "what": "Stale comment in _phase_analyze still says 'NOT a demotion' and 'must not be flagged as damaged', contradicting the round-2 demotion now applied in _winning_page_output (WARNING) and _phase_assemble (AUDIT_FAILED).",
+      "where": "src/socr/pipeline/orchestrator.py:889",
+      "why": "The comment block was written in round 1 when the change was surfacing-only. Round 2 added a real demotion, so the comment now misdescribes the behaviour and will mislead the next reader into thinking the page is not demoted."
+    },
+    {
+      "severity": "minor",
+      "what": "_row_union_bbox unions raw row rects without the word-expansion _numeric_row_bbox performs, so a native numeric token whose centre sits a point or two outside its row bbox is excluded from the fallback destruction scope.",
+      "where": "src/socr/tables/reconstruct.py:299",
+      "why": "_numeric_row_bbox's own docstring warns that unioning row bboxes alone 'would then silently exclude that word'. The fallback scope inherits that gap. It is under-detection (a missed destroyed token), not a false positive, and only in the already-corrupted None path, so it is strictly better than round 1's skip and not blocking."
+    }
+  ],
+  "what_i_tried_to_break": "I traced the None path end-to-end: _numeric_row_bbox -> None on a corrupted grid (cells like '0.6x' fail _cell_has_numeric_token while _looks_tabular still admits embedded digits), then _row_union_bbox -> union of row rects, then _destroyed_numeric_tokens re-locates each native token ('0.67' centre in row 1) and finds '0.67' not in raw cell '0.6x' -> destroyed. Detection is restored. For the false-positive direction I confirmed _row_union_bbox stops at the last row, so the overrun numeral '106' at y=850 (rows end y=840) is outside scope and the good grid is kept. I read _winning_page_output and confirmed the demotion only flips status/audit_passed on the returned synthetic PageOutput while text stays _native_text_with_appends(p) (unchanged), and that _winning_page_output never reads or mutates best_output, so it is not the #252 winner-selection flip. I checked every new test against base 83924e9 signatures: reconstruct_table_regions is called without the rejections= kwarg, _row_union_bbox/is_numeric_token/strip_presentation are never imported, and the new PageState field is read via getattr(..., False). I did NOT run the tests (the code-owner worktree is at the head, not base, and I avoided the editable-install trap); non-vacuity is confirmed by reading the test file against the base signatures."
+}

@@ -1,0 +1,26 @@
+{
+  "pr": 252,
+  "head": "3a01cb5",
+  "round": 3,
+  "reviewer": "kimi",
+  "access_proof": {
+    "cmd": "git archive dc0f13f | tar -x -C /tmp/socr-252-base; copy head tests/test_gh225_fabricated_image_urls.py in; cd /tmp/socr-252-base && PYTHONPATH=/tmp/socr-252-base/src ~/venvs/socr/bin/pytest tests/test_gh225_fabricated_image_urls.py -q",
+    "output": "E       AttributeError: 'PageState' object has no attribute 'fabricated_image_refs'\n\ntests/test_gh225_fabricated_image_urls.py:371: AttributeError\nFAILED tests/test_gh225_fabricated_image_urls.py::test_fabricated_image_url_is_removed_demoted_and_surfaced\nFAILED tests/test_gh225_fabricated_image_urls.py::test_data_uri_image_is_fabricated\nFAILED tests/test_gh225_fabricated_image_urls.py::test_born_digital_page_keeps_its_ocr_table_after_redaction\nFAILED tests/test_gh225_fabricated_image_urls.py::test_fabricated_url_with_a_title_is_still_caught\nFAILED tests/test_gh225_fabricated_image_urls.py::test_phase_major_document_status_is_demoted_by_the_sweep\n5 failed, 5 passed, 5 warnings in 0.32s"
+  },
+  "verdict": "REQUEST-CHANGES",
+  "reorder_is_content_safe": true,
+  "reversal_is_correct": true,
+  "clean_run_cannot_be_demoted": true,
+  "earlier_guards_intact": true,
+  "non_vacuity_confirmed": false,
+  "ci_state": "test (3.11): pass; typecheck: pass; CodeRabbit: pass; cubic: pending. Real CI, green.",
+  "findings": [
+    {
+      "severity": "major",
+      "what": "The round-3 non-vacuity claim is misreported for the one test that pins the round-2 blocking fix. The author's comment states 'All five failures behavioural ... no ImportError/AttributeError', but test_phase_major_document_status_is_demoted_by_the_sweep fails at dc0f13f with AttributeError: 'PageState' object has no attribute 'fabricated_image_refs' at its setup assert (test line 371), before _phase_assemble is ever called. I reproduced this exactly (see access_proof): 5 failed / 5 passed matches, but one failure is a symbol-absence error, not the quoted 'still finished SUCCESS'. This is the same trap the author caught in round 2 (its own round-2 comment describes fixing identical direct-attribute asserts with getattr) and has now reintroduced in the new test. The fix is one line: use getattr(state.pages[1], 'fabricated_image_refs', 0) in the setup assert and re-run the baseline so the ordering proof is behavioural as claimed. Note: the code change itself is NOT in doubt — the test at head drives the real _phase_assemble and genuinely pins the ordering (a sweep running after pages_ok would leave status SUCCESS and fail it), and the author separately reproduced the behavioural failure against the previous head 7696719. What is void is the baseline proof as stated against dc0f13f.",
+      "where": "tests/test_gh225_fabricated_image_urls.py:371",
+      "why": "The board's evidence rule is that a non-vacuity proof must fail on behaviour, not on a symbol the PR itself adds; this PR has been caught by that trap twice tonight and the round-3 comment asserts, falsely, that it did not happen again."
+    }
+  ],
+  "what_i_tried_to_break": "1) Reorder content safety: traced final_text at head 3a01cb5 — _canonical_body at 5232, moved strip+sweep at ~5382-5422 (before pages_ok at 5424), _save_markdown at 5607/5634, _rewrite_all_fragments at 5646 rewrites fragments from the swept text; figure-embed still runs after the sweep exactly as strip did at dc0f13f, and figure refs are local so the sweep could not touch them anyway; saved body and status now derive from the same post-sweep text. 2) Reversal: _winning_page_output (manifest.py:313-332) returns best_output on audit_passed alone, status irrelevant; failed_pages at orchestrator head:5273 is is_page_failed_marker over canonical_page_texts, not status; the only status-keyed consumers (orch 1163, 1326) act on fresh engine outputs before the sanitize seam, and nothing substitutes a marker for an ERROR page carrying real text. The author's born-digital claim (qwen winner, ERROR, audit_passed=True, 177.0/139.2 intact) is exactly what test_born_digital_page_keeps_its_ocr_table_after_redaction asserts through canonical_page_texts — and it passes at head. 3) doc_fabrication: keyed on kind+page_num==0, an event only the document sweep creates, only when removed is non-empty; test_clean_phase_major_document_still_succeeds passes at head. 4) Non-vacuity: exported dc0f13f via git archive to /tmp, copied the head test file in, ran with PYTHONPATH isolation — 5 failed/5 passed, but one failure is AttributeError (finding above). At head: 10 passed. Scratch trees deleted; socr-night-base git status --porcelain empty. 5) Round-1/round-2 guards: _shipped_body/canonical_page_texts assertions present in all six page-level tests, unnarrowed, passing. 6) No MagicMock anywhere in the test file. 7) No host allowlist: the gate unions PDF link annotations + text-layer URLs + the doc's own asset dir; schemes tuple only; no network. 8) Corrected surfacing table in the author's round-3 comment matches the code, including the honest phase-major no-page-status row; CLI shows the red removal line plus the AUDIT_FAILED 'completed with warnings' path (cli.py:453-463)."
+}

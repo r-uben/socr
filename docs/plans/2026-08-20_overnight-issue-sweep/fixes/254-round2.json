@@ -1,0 +1,34 @@
+{
+  "pr": 254,
+  "branch": "fix/195-197-198-destruction-check",
+  "new_head": "be95b8ffb6931a1e56c69074357ecec9958b6cf1",
+  "previous_head": "df4b24a",
+  "base_used_for_proof": "83924e9 (fix/205-tr3-auditevent)",
+  "pushed": "normal push, no force",
+  "blocking_A": {
+    "status": "FIXED",
+    "reviewer_was_right": true,
+    "independently_reproduced": "_looks_tabular True, any cell numeric-shaped False, _numeric_row_bbox None, destroyed if we DID check: ['0.67','0.12','1.10','0.14']",
+    "fix": "None path now scopes to _row_union_bbox (union of the table's own row rects) instead of skipping. Excludes the whitespace overrun (#197's false positive) by construction while still inspecting every real row.",
+    "regression_proof": "test_corrupted_grid_with_no_numeric_cell_is_still_checked FAILS against the previous head df4b24a showing '| Alpha | 0.6x | 0.1x |' shipped. It PASSES at base 83924e9 because the base has no None path — stated explicitly in the PR rather than implied as a base failure."
+  },
+  "blocking_B": {
+    "status": "FIXED",
+    "page": "native branch of _winning_page_output demotes to WARNING on text_grid_rejected; NOT gated on p.attempts, because the rejection happens during native extraction on pages that may never reach the OCR ladder.",
+    "document": "text_grid_rejected_pages term in pages_ok -> AUDIT_FAILED.",
+    "safety": "Status-only demotion of an output that is already the selected winner. Explicitly not the #252 mistake of flipping audit_passed on best_output.",
+    "base_behaviour": "'the rejected-and-rebuilt page still ships as SUCCESS' at 83924e9."
+  },
+  "major_significance_stars": {
+    "status": "DECLINED WITH REASONS, argued in the PR",
+    "why": "_destroyed_numeric_tokens decides whether to DISCARD the whole grid. Treating a dropped star as destruction rejects an entire table over one presentation mark, on a corpus where starred coefficients are the common case — trading a marker for a table, the cardinal rule inverted. The rowizer rebuild is not guaranteed to preserve the star either, so the rejection would not even fix it. Star loss deserves its own detector with its own remedy (flag the page, don't discard the grid) as a separate issue."
+  },
+  "198": "unchanged — reviewer cleared the filter widening as symmetric and non-vacuous",
+  "own_correction": "One of my new tests called reconstruct_table_regions(page, rejections=...) and so failed at the base on a TypeError rather than behaviour. Rewritten to use the base-compatible call.",
+  "baseline_output": "base 83924e9: 6 failed, 5 passed — all failures behavioural, no ImportError/TypeError",
+  "branch_output": "11 passed",
+  "suite": "1852 passed, 3 xfailed, 0 failed",
+  "lint": "327 files already formatted",
+  "canary": "CANARY OK ... socr-night-e, exit 0",
+  "merged": false
+}

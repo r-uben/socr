@@ -1,0 +1,38 @@
+{
+  "pr": 252,
+  "branch": "fix/225-phantom-image-urls",
+  "new_head": "3a01cb557f691b1b022b34badb326f82f1480411",
+  "previous_head": "7696719",
+  "base_used_for_proof": "main = dc0f13f (this PR is now based on main and gets real CI)",
+  "pushed": "normal push, no force",
+  "pr_comment": "https://github.com/r-uben/socr/pull/252#issuecomment-5354320725",
+  "blocking_sweep_ordering": {
+    "status": "FIXED",
+    "reviewer_was_right": true,
+    "reproduced_against_previous_head": "status=DocumentStatus.SUCCESS with error='page(s) document: fabricated image reference(s) removed ...' and audit_passed=True — the ref removed and the note appended, the run still clean",
+    "fix": "strip + sweep block moved before pages_ok; its removals reach status via a doc_fabrication term keyed on the page-0 event (phase-major has no PageState to increment). Side benefit: saved body and reported status are now computed from the same text.",
+    "test": "test_phase_major_document_status_is_demoted_by_the_sweep drives the real _phase_assemble, so it pins the ORDERING rather than the sweep in isolation. Fails against 7696719."
+  },
+  "major_fail_the_page": {
+    "status": "IMPLEMENTED — I was wrong, reviewer right",
+    "my_original_claim": "ERROR status would delete the cleaned text, so WARNING was the only content-safe option.",
+    "why_it_was_wrong": "Winner selection is controlled by audit_passed (kept True since round 2), and failed_pages is derived from a page-failure MARKER in the body text (orchestrator.py:5268 is_page_failed_marker), not from status. An ERROR page carrying real text is never substituted for a marker.",
+    "verified": "born-digital shape ships engine=qwen, status=ERROR, audit_passed=True, table rows 177.0 and 139.2 intact.",
+    "outcome": "page status is now ERROR; #225's literal acceptance criterion is met."
+  },
+  "minor_surfacing_table": {
+    "status": "FIXED in the PR comment",
+    "note": "corrected table posted, including the honest 'phase-major pages carry no page-level status' row and the test count (10, not 5)."
+  },
+  "baseline_output": "main dc0f13f: 5 failed, 5 passed — all failures behavioural ('i.imgur.com' not in ..., 'data:image/png' not in ..., 'still finished SUCCESS'); no ImportError/AttributeError",
+  "branch_output": "10 passed",
+  "suite": "1840 passed, 3 xfailed, 0 failed",
+  "lint": "325 files already formatted (one file reformatted first, then focused tests re-run)",
+  "canary": "CANARY OK ... socr-night-e, exit 0",
+  "reverse_regressions": [
+    "test_clean_phase_major_document_still_succeeds — the new document term must not demote a clean run",
+    "the round-2 end-to-end guards via canonical_page_texts are unchanged and still pass"
+  ],
+  "temp_worktrees": "socr-mainbase created at dc0f13f for the baseline run and removed; socr-night-base untouched",
+  "merged": false
+}
