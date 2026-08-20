@@ -5081,10 +5081,36 @@ class UnifiedPipeline:
         return probe_ollama_idle(self._local_backend_host())
 
     def _local_backend_is_openai_compatible(self) -> bool:
-        """True when this run's local VLM is served over an OpenAI-compatible API."""
+        """True when this run's local VLM is served over an OpenAI-compatible API.
+
+        Two ways to be one, matching the gate ``QwenEngine.is_available``
+        (``engines/qwen.py``) already uses to decide the qwen rung is usable:
+
+        1. ``qwen_backend`` names an OpenAI-compatible backend explicitly.
+        2. ``qwen_backend`` is ``"auto"`` AND ``VLLM_BASE_URL`` is set.
+
+        Case 2 is not a corner case, it is the HPC deployment: ``is_available``
+        short-circuits True on ``VLLM_BASE_URL`` alone ("vLLM path (e.g. HPC,
+        where Ollama is forbidden on server GPUs)"), and ``PipelineConfig``
+        adopts that variable into ``qwen_vllm_url`` in ``__post_init__`` while
+        leaving ``qwen_backend`` at its ``"auto"`` default. So a user reaches
+        "auto backend, remote vLLM server" by exporting ONE environment
+        variable and never touching a flag — and treating that as Ollama is
+        exactly #222's named failure: a healthy vLLM node reported dead, one
+        timeout truncating a ``--strict-local`` run.
+
+        An EXPLICIT ``qwen_backend`` always wins, in both directions:
+        ``"ollama"`` stays Ollama even with ``VLLM_BASE_URL`` exported, because
+        a value the user typed outranks one the environment happens to carry.
+        """
+        import os
+
         from socr.tables.extract import OPENAI_COMPATIBLE_BACKENDS
 
-        return getattr(self.config, "qwen_backend", "") in OPENAI_COMPATIBLE_BACKENDS
+        backend = getattr(self.config, "qwen_backend", "")
+        if backend in OPENAI_COMPATIBLE_BACKENDS:
+            return True
+        return backend == "auto" and bool(os.environ.get("VLLM_BASE_URL"))
 
     def _local_backend_host(self) -> str:
         """Where this run's local Ollama daemon actually listens (GH-222)."""

@@ -46,6 +46,10 @@ def recorded_urls(monkeypatch) -> list[str]:
         urls.append(url)
         return _Resp()
 
+    # Hermetic by default: a developer or runner with VLLM_BASE_URL exported
+    # would otherwise flip the backend under tests that never mention it.
+    # Tests that want it set do so explicitly, after this fixture has run.
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
     monkeypatch.setattr(extract_mod.httpx, "get", _fake_get)
     return urls
 
@@ -149,6 +153,11 @@ def test_probe_is_consulted_only_after_a_timeout(
         _real_pdf,
     )
 
+    # This test patches the OLLAMA probe by name, so the run must resolve to the
+    # Ollama backend. An exported VLLM_BASE_URL would route to the vLLM probe and
+    # the patch would record nothing — a false "guard held" for the wrong reason.
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+
     pdf_path = _real_pdf(tmp_path, page_count=1)
     pipeline = _make_pipeline(_make_config(agentic=True, enabled_engines=[EngineType.QWEN]))
     pipeline.bd_detector = MagicMock()
@@ -210,6 +219,7 @@ def test_existing_module_level_patches_still_reach_the_probe(monkeypatch) -> Non
     from unittest.mock import patch
 
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)  # must resolve to the Ollama path
     pipeline = _pipeline()  # default backend: Ollama
 
     with patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True) as patched:
@@ -311,11 +321,15 @@ def test_injected_backend_probe_still_wins(monkeypatch) -> None:
     assert pipeline._probe_backend_idle() is True
 
 
-def test_probe_and_crop_reader_agree_on_which_server_to_ask() -> None:
-    """They must not drift: one predicate decides both.
+def test_probe_and_crop_reader_agree_on_which_server_to_ask(monkeypatch) -> None:
+    """They must not drift on the BACKEND FLAG: one predicate decides both.
 
     The reader and the probe reading different config is how a run ends up
     sending crops to one machine and asking a different one whether it is alive.
+
+    Scoped to an environment without ``VLLM_BASE_URL`` on purpose — see
+    ``test_auto_plus_vllm_base_url_is_a_known_documented_asymmetry`` for the one
+    case where they deliberately DO disagree, and why that is out of scope here.
     """
     from socr.tables.extract import (
         OPENAI_COMPATIBLE_BACKENDS,
@@ -323,6 +337,8 @@ def test_probe_and_crop_reader_agree_on_which_server_to_ask() -> None:
         VllmTableReader,
         make_table_reader,
     )
+
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
 
     for backend in ("auto", "ollama", "vllm", "sglang", "openai", "api"):
         reader = make_table_reader(backend=backend, model="m")
@@ -332,6 +348,92 @@ def test_probe_and_crop_reader_agree_on_which_server_to_ask() -> None:
         assert pipeline._local_backend_is_openai_compatible() is reader_is_openai, backend
         if not reader_is_openai:
             assert isinstance(reader, OllamaTableReader)
+
+
+# ----------------------------------------------------------------------
+# ``auto`` + VLLM_BASE_URL — the HPC deployment reached by one env var
+# ----------------------------------------------------------------------
+
+
+def test_auto_backend_with_vllm_base_url_is_probed_at_the_vllm_server(
+    recorded_urls, monkeypatch
+) -> None:
+    """The HPC shape, reached without touching a single flag.
+
+    ``PipelineConfig.__post_init__`` adopts ``VLLM_BASE_URL`` into
+    ``qwen_vllm_url`` and leaves ``qwen_backend`` at ``"auto"``, and
+    ``QwenEngine.is_available`` already treats ``VLLM_BASE_URL`` alone as "this
+    deployment serves via vLLM". Probing Ollama at localhost for that run is
+    #222's exact named failure: a healthy vLLM node reported dead, and under
+    ``--strict-local`` one timeout ends the document.
+    """
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.setenv("VLLM_BASE_URL", "http://gpu-node.cluster:8000/v1")
+
+    config = PipelineConfig()  # no flags touched at all
+    assert config.qwen_backend == "auto", "precondition: the default backend"
+    assert config.qwen_vllm_url == "http://gpu-node.cluster:8000/v1", (
+        "precondition: __post_init__ adopts VLLM_BASE_URL"
+    )
+
+    assert UnifiedPipeline(config)._probe_backend_idle() is True
+    assert recorded_urls == ["http://gpu-node.cluster:8000/v1/models"], (
+        f"an auto-backend HPC run was probed at the wrong machine: {recorded_urls}"
+    )
+
+
+def test_an_explicit_ollama_backend_outranks_the_environment(recorded_urls, monkeypatch) -> None:
+    """A value the user typed beats one the environment happens to carry.
+
+    Reverse regression on the rule above: ``VLLM_BASE_URL`` may be exported for
+    some other tool. It must only decide the backend when the user left the
+    backend on ``auto``.
+    """
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.setenv("VLLM_BASE_URL", "http://gpu-node.cluster:8000/v1")
+
+    UnifiedPipeline(PipelineConfig(qwen_backend="ollama"))._probe_backend_idle()
+
+    assert recorded_urls == ["http://localhost:11434/api/tags"], recorded_urls
+
+
+def test_auto_without_the_env_var_is_still_ollama(recorded_urls, monkeypatch) -> None:
+    """Reverse regression: an ordinary local run is untouched by all of this."""
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+
+    UnifiedPipeline(PipelineConfig())._probe_backend_idle()
+
+    assert recorded_urls == ["http://localhost:11434/api/tags"], recorded_urls
+
+
+def test_auto_plus_vllm_base_url_is_a_known_documented_asymmetry(monkeypatch) -> None:
+    """DELIBERATE, and pinned here so it is impossible to discover by accident.
+
+    With ``auto`` + ``VLLM_BASE_URL`` the cascade-halt probe now correctly asks
+    the vLLM server, but ``make_table_reader`` still returns an
+    ``OllamaTableReader`` — so dual-pass table crops on that deployment still go
+    to an Ollama daemon that HPC does not run.
+
+    That is a real latent bug and it is NOT fixed here. The cascade halt guards
+    the whole-page provider path, which is driven by the ``qwen-ocr`` CLI and
+    does serve via vLLM; the crop reader is a different consumer, changing it is
+    a behavioural change to the dual-pass lane, and #222 is about the probe.
+    It wants its own issue. This test exists so the asymmetry is a recorded
+    decision rather than a surprise, and so closing it later is a deliberate act
+    that has to come here and delete this test.
+    """
+    from socr.tables.extract import OllamaTableReader, make_table_reader
+
+    monkeypatch.setenv("VLLM_BASE_URL", "http://gpu-node.cluster:8000/v1")
+    config = PipelineConfig()
+
+    assert UnifiedPipeline(config)._local_backend_is_openai_compatible() is True
+    reader = make_table_reader(backend=config.qwen_backend, model="m")
+    assert isinstance(reader, OllamaTableReader), (
+        "if this now returns a VllmTableReader the asymmetry has been closed — "
+        "good, but delete this test and the PR-body note that describes it"
+    )
 
 
 # ----------------------------------------------------------------------
