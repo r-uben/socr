@@ -125,6 +125,10 @@ def build_run_audit(state) -> RunAudit:
         "dualpass_flag": 3,
         "table_value_drift_unadjudicated": 4,
         "table_region_geometry_hard_fail": 4,
+        # #263: analyze-time detection AND disposition in one -- unlike the
+        # TR-3 pair above there is no second kind, because this flag always
+        # acts (the page is routed to OCR and refuses to ship its fragments).
+        "rotated_text_shredded": 4,
         "table_region_unverifiable": 5,
         "flagged_model_table_kept": 6,
         "native_fallback": 6,

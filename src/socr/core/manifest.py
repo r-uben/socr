@@ -476,6 +476,10 @@ def _winning_page_output(
             getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_structure_defective", False)
             or getattr(p, "native_table_header_unattributed", False)
+            # #263: same contradiction, for a rotated page whose native layer
+            # is confetti. A passing native best_output next to this flag is
+            # the resume-ledger / late-flag shape described above.
+            or getattr(p, "native_rotated_text_shredded", False)
         )
         if not native_distrusted:
             return p.best_output
@@ -538,6 +542,33 @@ def _winning_page_output(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+            )
+
+        # #263: rotated-shredded fail-closed floor. The native layer of a
+        # rotated page can come back as one glyph run per line -- 177 chars
+        # over 47 lines on the reference page, 32 of them two characters or
+        # fewer. Those fragments are not a reading of the page: two independent
+        # judges rated the shipped output unusable, and the caption they
+        # encode is only recoverable by reversing and re-joining them, which
+        # is a repair this floor deliberately does not attempt (a wrong
+        # reading is worse than a missing one). So the page ships the marker
+        # plus the page image, exactly like the D3 table floor above.
+        #
+        # Deliberately NOT gated on ``bool(p.attempts)``, following the GH-195
+        # precedent immediately below: the damage is found during native
+        # extraction, on a page that may never reach the OCR ladder at all
+        # (``--native-only``), and the attempt gate would leave exactly those
+        # pages stamped SUCCESS over confetti.
+        if getattr(p, "native_rotated_text_shredded", False):
+            shred_marker = f"[page {page_num} failed: rotated text extraction shredded — see image]"
+            shred_png = getattr(p, "rotated_shred_png_ref", "")
+            return PageOutput(
+                page_num=page_num,
+                text=f"{shred_marker}\n\n{shred_png}" if shred_png else shred_marker,
+                status=PageStatus.ERROR,
+                engine="native",
+                audit_passed=False,
+                failure_mode=FailureMode.NATIVE_TEXT_SHREDDED,
             )
 
         # #259: a flagged-but-PRESENT model output stays the winner. Placed

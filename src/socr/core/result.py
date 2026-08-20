@@ -60,6 +60,10 @@ class FailureMode(str, Enum):
     #: stays the winner (native cannot arbitrate a grid it could not parse);
     #: this mode is what says the page ships flagged rather than clean.
     MODEL_OUTPUT_FLAGGED = "model_output_flagged"
+    #: #263: the page's dominant text direction is rotated and its native layer
+    #: came back as one glyph run per line. The fragments are not a reading of
+    #: the page, so the page ships a failure marker plus an image ref instead.
+    NATIVE_TEXT_SHREDDED = "native_text_shredded"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The

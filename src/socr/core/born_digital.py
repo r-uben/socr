@@ -153,6 +153,90 @@ def text_direction_is_rotated(direction: tuple[float, float]) -> bool:
     return abs(direction[1]) >= abs(direction[0])
 
 
+def rotated_text_is_shredded(blocks: list, direction: tuple[float, float]) -> bool:
+    """True when a rotated page's extracted lines are pieces of ONE text run.
+
+    #263. On a rotated page the extractor sometimes breaks a single caption
+    into one "line" per glyph run and emits them in y-order, i.e. reversed.
+    The reference page (Kaminska-Mumtaz-Sustek p38) ships 177 characters over
+    47 lines, 32 of them two characters or fewer::
+
+        MC / O / F / round / a / ields / y / n / i / anges / h / c / requency
+
+    Read off that page's own ``get_text("dict")``, every one of those lines
+    carries ``dir=(0.0, -1.0)`` and ``bbox`` x-extent ``491.8 .. 503.7`` --
+    the SAME column -- with y-extents that butt directly against each other
+    (``94.5..113.7``, ``113.7..122.8``, ``122.5..130.1``, ...). They are not
+    lines. They are one line the extractor cut up, and the cuts are visible in
+    the geometry: two genuine lines of rotated text sit side by side in
+    *different* columns and each spans the column's whole length, whereas two
+    pieces of one run share a column and are adjacent along it.
+
+    So the predicate compares each break against the page's own type size:
+
+    * two lines are considered at all only when their extents PERPENDICULAR to
+      the text direction overlap -- they sit on the same baseline column;
+    * the break between them is **spurious** when their separation ALONG the
+      text direction is non-negative (they do not overlap, so they are not
+      stacked lines) and no larger than the thinner line's own perpendicular
+      extent, which is that line's glyph height on this page. A gap smaller
+      than one glyph height on a shared baseline is an inter-word space, not a
+      line break;
+    * every other pair is a genuine break.
+
+    The verdict is ``spurious > genuine``: a comparison between two counts the
+    page itself produces. There is no threshold to tune, and nothing here is
+    calibrated against a corpus.
+
+    A fraction-of-short-lines test was measured and REJECTED. Over the 11
+    rotated born-digital pages in the reference corpus it cannot separate the
+    defect from a chart: Pflueger-Rinaldi p37 extracts 67 short lines out of 95
+    and is perfectly sound -- they are axis tick labels (``0 5 10 15 20``) --
+    while its caption reads back verbatim. This predicate fires on 1 of those
+    11 pages, the one known-damaged page, and on none of the other 10.
+
+    ``blocks`` is ``page.get_text("dict")["blocks"]``; ``direction`` is the
+    page's dominant text direction. Fewer than two comparable lines means no
+    break to judge, and the answer is False -- the same absence-of-evidence
+    rule the rest of this module follows (#145).
+    """
+    along = 1 if abs(direction[1]) >= abs(direction[0]) else 0
+    perp = 1 - along
+    spans: list[tuple[float, float, float, float]] = []
+    for block in blocks or []:
+        for line in block.get("lines", []) or []:
+            bbox = line.get("bbox")
+            if not bbox:
+                continue
+            text = "".join(span.get("text", "") for span in line.get("spans", []) or [])
+            if not text.strip():
+                continue
+            line_dir = (
+                round(float(line.get("dir", direction)[0]), _DIR_PRECISION),
+                round(float(line.get("dir", direction)[1]), _DIR_PRECISION),
+            )
+            if line_dir != direction:
+                continue
+            spans.append((bbox[perp], bbox[perp + 2], bbox[along], bbox[along + 2]))
+    if len(spans) < 2:
+        return False
+    # Column first, then position down the column: consecutive entries are the
+    # pairs a reader would see as adjacent.
+    spans.sort(key=lambda s: ((s[0] + s[1]) / 2.0, s[2]))
+    spurious = genuine = 0
+    for (p0, p1, a0, a1), (q0, q1, b0, b1) in zip(spans, spans[1:]):
+        if min(p1, q1) - max(p0, q0) <= 0:
+            genuine += 1  # different columns: a real line break
+            continue
+        separation = max(b0 - a1, a0 - b1)
+        glyph_height = min(p1 - p0, q1 - q0)
+        if 0 <= separation <= glyph_height:
+            spurious += 1
+        else:
+            genuine += 1
+    return spurious > genuine
+
+
 #: Word tokens used to decide whether a region's markdown already contains a
 #: line. Letters and numbers only: punctuation and the markdown table scaffolding
 #: (pipes, dashes) must not count as content.
@@ -434,6 +518,16 @@ class PageAssessment:
     #: text to have retained. Audit code must key off this flag, not re-derive
     #: "refusal happened" from conditions that merely correlate with it.
     native_table_lane_refused: bool = False
+    #: #263: this page's dominant text direction is rotated AND its native
+    #: layer is confetti -- one glyph run per extracted line, all in one
+    #: column (see ``rotated_text_is_shredded``). Set ONLY in the no-table
+    #: branch of ``_assess_page_signals``, never re-derived downstream, the
+    #: same rule ``native_table_lane_refused`` above states. The rotated
+    #: has_tables case is not covered here because it is already refused
+    #: unconditionally by the GH-147 branch, and because a rotated TABLE's
+    #: cells legitimately tile along the reading axis, which is the geometry
+    #: the shred predicate reads as damage.
+    native_rotated_text_shredded: bool = False
     #: GH-151 TICKET-B1: set ONLY inside the non-rotated, has_tables branch of
     #: ``_assess_page_signals`` (the structured-extraction branch, not the
     #: refusal branch, and never for non-table pages), from
@@ -753,6 +847,19 @@ class BornDigitalDetector:
                 len(report.unmapped_glyphs),
                 ", ".join(report.unmapped_glyphs),
             )
+
+    @staticmethod
+    def _text_blocks(page: fitz.Page) -> list:
+        """``page.get_text("dict")["blocks"]``, guarded like every other read.
+
+        Same fallback contract as ``_assess_page`` below: a page whose text
+        layer cannot be walked yields no blocks rather than raising out of the
+        detector.
+        """
+        try:
+            return page.get_text("dict").get("blocks", [])
+        except Exception:
+            return []
 
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
         """Assess a page and stamp its dominant text direction onto the result.
@@ -1122,6 +1229,7 @@ class BornDigitalDetector:
         self._last_extraction_grid_rejections: list[dict] = []
 
         native_table_lane_refused = False
+        native_rotated_text_shredded = False
         native_table_structure_defective = False
         native_table_header_unattributed = False
         if has_tables:
@@ -1184,6 +1292,30 @@ class BornDigitalDetector:
             native_text = raw_text.strip()
             notes.append("born-digital: clean text layer detected")
 
+            # #263: until now the rotation refusal above was reachable ONLY
+            # through ``if has_tables:``, so a rotated page with no detected
+            # table shipped its native layer untouched -- and on a rotated
+            # FIGURE page that layer is character-level confetti under a clean
+            # SUCCESS. Rotation is now consulted on this branch too.
+            #
+            # The condition is rotation AND shredding, not rotation alone: a
+            # rotated page whose text is re-laid cleanly extracts
+            # byte-for-byte (measured, and pinned by
+            # ``test_landscape_refusal_a2_gh147.py``), and refusing it would
+            # route a sound free page to a paid VLM. ``rotated_text_is_shredded``
+            # decides that on this page's own geometry -- see its docstring for
+            # why a short-line fraction was measured and rejected.
+            if text_direction_is_rotated(direction) and rotated_text_is_shredded(
+                self._text_blocks(page), direction
+            ):
+                notes.append(
+                    "born-digital: native text layer refused "
+                    f"(dominant text direction {direction} is rotated and the extracted "
+                    "lines are pieces of one text run); page routed to OCR"
+                )
+                needs_ocr_enhancement = True
+                native_rotated_text_shredded = True
+
         if _zw_stripped or _spaces_normalized:
             notes.append(
                 f"native layer cleaned: stripped {_zw_stripped} zero-width char(s), "
@@ -1243,6 +1375,7 @@ class BornDigitalDetector:
             text_grid_rejections=text_grid_rejections,
             has_encoding_hygiene_suspect=encoding_hygiene_suspect,
             native_table_lane_refused=native_table_lane_refused,
+            native_rotated_text_shredded=native_rotated_text_shredded,
             native_table_structure_defective=native_table_structure_defective,
             native_table_header_unattributed=native_table_header_unattributed,
             notes=notes,
