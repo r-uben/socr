@@ -110,6 +110,175 @@ def find_table_blocks(markdown: str) -> list[_Block]:
     return blocks
 
 
+# #262 round 3: a STRICT separator cell. ``_SEP_CELL`` above accepts a single
+# dash (``|-|``), which ordinary prose and a truncated grid both reach by
+# accident; three is the GitHub-markdown convention and is not something a
+# sentence produces. Deliberately a SECOND pattern rather than a tightening of
+# ``_SEP_CELL``: that one is read by ``_parse_grid`` on every caller's behalf.
+_STRICT_SEP_CELL = re.compile(r"^:?-{3,}:?$")
+
+#: #262 round 3: the minimum column count for a grid to count as authored. One
+#: column is a list, not a table, and cannot carry the row/column binding the
+#: D3 floor is arbitrating over.
+_STRICT_MIN_COLUMNS = 2
+
+#: A fence opener/closer: three or more backticks or tildes, optionally indented,
+#: optionally followed by an info string. Content inside a fence is a code
+#: sample, not markdown structure.
+_FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+
+#: #262 round 4, PENDING THE OWNER'S RULING -- do not silently flip this.
+#:
+#: The spec this predicate was built to requires every body row to carry the
+#: header's cell count. That rejects a RAGGED but genuine grid, so such a page
+#: ships the zero-content marker -- which contradicts #259's merged ruling to
+#: FLAG AND KEEP a structurally defective grid (``kept_table_grid_defect``).
+#: The reviewer recommends yielding to #259; the owner has not ruled.
+#:
+#: Isolated here as a single named switch so the decision is one line, not a
+#: rewrite. False makes a body row count when it matches the header's width,
+#: ignoring its ragged siblings; True (current, per spec) requires all of them.
+STRICT_GRID_REQUIRES_UNIFORM_BODY = True
+
+
+def _strip_fenced_regions(lines: list[str]) -> list[str]:
+    """Blank out fenced code content so it is never read as markdown structure.
+
+    A table inside a backtick or tilde fence is a code SAMPLE -- the model
+    showing what a grid looks like, or echoing the prompt -- not a reading of
+    the page. The fence lines themselves go too, so a grid opening immediately after a fence
+    with no blank line between them cannot inherit the fence's row.
+
+    An UNCLOSED fence swallows the rest of the document, on purpose: the
+    document is malformed, and this predicate suppresses a fail-closed marker,
+    so the honest answer under malformation is "no grid here".
+    """
+    out: list[str] = []
+    fence: str | None = None
+    for line in lines:
+        m = _FENCE_LINE.match(line)
+        if fence is None:
+            if m:
+                fence = m.group(1)[0]  # ` or ~
+                out.append("")
+                continue
+            out.append(line)
+        else:
+            # Only a fence of the SAME character can close one (CommonMark).
+            if m and m.group(1)[0] == fence:
+                fence = None
+            out.append("")
+    return out
+
+
+def has_strict_table_grid(markdown: str) -> bool:
+    """Whether ``markdown`` contains a real GitHub-markdown table.
+
+    ``find_table_blocks`` asks only for two consecutive pipe-bearing lines that
+    parse to a non-empty cell grid, and its docstring states the safety
+    assumption rather than checking it: "Prose almost never produces
+    consecutive pipe lines". Measured at ``origin/main``: prose with a pipe on
+    two adjacent lines returns one block, and so does a header plus separator
+    with no body row.
+
+    That looseness is harmless where a false positive costs a wasted
+    comparison. It is NOT harmless in the #262 D3 keep predicate, where "an
+    attempt authored a grid" is what SUPPRESSES a fail-closed marker. A phantom
+    grid there silences the marker on a page with nothing usable on it, which
+    inverts the ticket's own intent: the marker must yield to a real
+    extraction, never to a phantom one.
+
+    WHY THIS IS A SHAPE CHECK AND NOT A LIST OF REJECTIONS. Rounds 1-3 each
+    bounded this by enumerating what to refuse, and each list turned out to be
+    incomplete -- the failure shape that took #259/#260 through three
+    rejections. A denylist grown one reviewer at a time does not converge. But
+    unlike that problem, this one is bounded: a GitHub-markdown table has a
+    DEFINED shape, so the predicate asserts the shape and returns False for
+    everything else. A case nobody anticipated fails CLOSED, which is the
+    honest outcome here -- the marker is a true statement about the page and a
+    phantom grid is not.
+
+    The shape, at some offset ``i`` inside a run of consecutive pipe-bearing
+    lines that is not inside a code fence::
+
+        rows[i]      header     N cells, N >= 2
+        rows[i + 1]  separator  N cells, EVERY cell matching :?-{3,}:?
+        rows[i + 2:] body       at least one CONTENT row -- N cells, not blank,
+                                and not itself a separator
+
+    The separator is at ``i + 1`` specifically, never merely "somewhere"; the
+    body starts strictly at ``i + 2``, so a separator can never also be counted
+    as the body row after itself.
+
+    The offset exists because a run may open with pipe-bearing prose before the
+    real table starts. That is not laxity -- each candidate offset must satisfy
+    the whole shape -- and it is what keeps a genuine grid from being lost to a
+    stray sentence above it.
+
+    ``find_table_blocks`` itself is deliberately UNCHANGED. Other callers
+    depend on its looseness, and tightening it globally would be a silent
+    behaviour change across the codebase. This is additive, with one caller.
+    """
+    lines = _strip_fenced_regions(markdown.splitlines())
+    i, n = 0, len(lines)
+    while i < n:
+        if not _is_table_line(lines[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and _is_table_line(lines[j]):
+            j += 1
+        if _run_contains_grid([_split_row(line) for line in lines[i:j]]):
+            return True
+        i = j
+    return False
+
+
+def _run_contains_grid(rows: list[list[str]]) -> bool:
+    """True iff the header/separator/body shape holds at some offset in ``rows``."""
+    return any(_grid_starts_at(rows, i) for i in range(len(rows)))
+
+
+def _grid_starts_at(rows: list[list[str]], i: int) -> bool:
+    """The shape, anchored at ``i``. Every exit is False; the only True is the end."""
+    if i + 2 >= len(rows) + 1:  # need a header and a separator at minimum
+        return False
+    if i + 1 >= len(rows):
+        return False
+    header, separator = rows[i], rows[i + 1]
+    width = len(header)
+    if width < _STRICT_MIN_COLUMNS:
+        return False
+    if len(separator) != width:
+        return False
+    if not all(_STRICT_SEP_CELL.match(cell.strip()) for cell in separator):
+        return False
+    body = rows[i + 2 :]
+    if not body:
+        return False  # header + separator and nothing under it
+
+    def _is_body_row(cells: list[str]) -> bool:
+        """A body row carries CONTENT at the header's width.
+
+        Three things a row of the right width can be and still not be content:
+        empty (punctuation), a second separator (structure, not a reading --
+        found by adversarial testing of this predicate, and the reason the body
+        cannot simply be "the rows after index i+1"), or both.
+        """
+        if len(cells) != width:
+            return False
+        if not any(cell.strip() for cell in cells):
+            return False
+        return not all(_STRICT_SEP_CELL.match(cell.strip()) for cell in cells)
+
+    if STRICT_GRID_REQUIRES_UNIFORM_BODY:
+        # Per spec: every row under the separator belongs to the grid.
+        return all(len(cells) == width for cells in body) and any(
+            _is_body_row(cells) for cells in body
+        )
+    return any(_is_body_row(cells) for cells in body)
+
+
 def _is_table_line(line: str) -> bool:
     return "|" in line and bool(_PIPE_LINE.match(line))
 

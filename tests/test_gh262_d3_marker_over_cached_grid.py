@@ -434,6 +434,230 @@ def test_born_digital_page_carrying_the_scanned_flag_is_not_rescued(tmp_path: Pa
 
 
 # ---------------------------------------------------------------------------
+# Round 3: "authored a grid" must mean a REAL grid.
+#
+# ``find_table_blocks`` asks only for two consecutive pipe-bearing lines that
+# parse to a non-empty cell grid; its docstring states the safety assumption
+# ("prose almost never produces consecutive pipe lines") rather than checking
+# it. Measured at origin/main: prose with a pipe on two adjacent lines returns
+# ONE block, and so does a header plus separator with no body row. Here the
+# predicate's answer suppresses a fail-closed marker, so a phantom grid would
+# silence the floor on a page with nothing usable on it -- the inverse of what
+# this ticket asks for. All three directions are asserted.
+# ---------------------------------------------------------------------------
+
+# Prose that genuinely satisfies the loose parser: two CONSECUTIVE lines, each
+# carrying a pipe, no separator row. Built this way on purpose -- a fixture
+# without two adjacent pipe lines would pass the tests below for the wrong
+# reason and prove nothing.
+PROSE_WITH_PIPES = (
+    "The Fama-Bliss regressions are reported in Table 4.\n"
+    "Estimates for the constrained | unconstrained pair are discussed above.\n"
+    "The spread coefficient | and its standard error | are reported in the text.\n"
+    "The unconstrained estimates reject the expectations hypothesis.\n"
+)
+
+# A grid the model started and never finished: header, separator, no body row.
+HALF_EMITTED_GRID = (
+    "The Fama-Bliss regressions are reported in Table 4.\n\n"
+    "| | const. | spread | $R^2$ | $\\chi^2$ |\n"
+    "|---|---|---|---|---|\n"
+)
+
+
+def test_the_loose_parser_really_does_accept_these_fixtures() -> None:
+    """Grounding. Without this the three tests below could pass vacuously.
+
+    If ``find_table_blocks`` ever stopped accepting these, the fixtures would
+    no longer be exercising the gap between loose and strict, and the guards
+    would be asserting nothing.
+    """
+    from socr.tables.reconcile import find_table_blocks
+
+    assert len(find_table_blocks(PROSE_WITH_PIPES)) >= 1, "fixture has no consecutive pipe lines"
+    assert len(find_table_blocks(HALF_EMITTED_GRID)) >= 1, HALF_EMITTED_GRID
+    assert len(find_table_blocks(MODEL_PAGE)) >= 1, MODEL_PAGE
+
+
+def test_prose_containing_pipes_does_not_count_as_an_authored_grid(tmp_path: Path) -> None:
+    """Direction 1: the marker must yield to a real extraction, not a phantom one."""
+    state = _state(_born_digital_pdf(tmp_path), model_text=PROSE_WITH_PIPES)
+
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" in winner.text, winner.text
+    assert "constrained | unconstrained" not in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+
+
+def test_a_half_emitted_grid_does_not_count_as_an_authored_grid(tmp_path: Path) -> None:
+    """Direction 2: a header and a separator with no body row is not a reading."""
+    state = _state(_born_digital_pdf(tmp_path), model_text=HALF_EMITTED_GRID)
+
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+
+
+def test_a_real_grid_still_supersedes_the_marker(tmp_path: Path) -> None:
+    """Direction 3: the whole point. Tightening must not make the fix inert."""
+    state = _state(_born_digital_pdf(tmp_path))
+
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" not in winner.text, winner.text
+    assert MODEL_PAGE.strip() in winner.text, winner.text
+
+
+# Every case the round-3 review named, plus the ones adversarial testing of the
+# predicate itself turned up. Table-driven so the enumeration is the test: a
+# future condition is added as a row, not as a new function nobody reads.
+#
+# ``G`` is a minimal real grid, reused so each row varies ONE thing.
+_G = "| a | b |\n|---|---|\n| 1 | 2 |\n"
+
+STRICT_GRID_CASES: list[tuple[str, str, bool]] = [
+    # --- the shape, in its legitimate spellings -------------------------
+    ("real grid", _G, True),
+    ("no leading or trailing pipes", "a | b\n--- | ---\n1 | 2\n", True),
+    ("leading pipe only", "| a | b\n| --- | ---\n| 1 | 2\n", True),
+    ("trailing pipe only", "a | b |\n--- | --- |\n1 | 2 |\n", True),
+    ("alignment colons in the separator", "| a | b |\n|:---:|---:|\n| 1 | 2 |\n", True),
+    ("spaces inside the separator", "| a | b |\n| --- | --- |\n| 1 | 2 |\n", True),
+    # --- reviewer's three phantoms --------------------------------------
+    ("REVIEW: table inside a backtick fence", "```\n" + _G + "```\n", False),
+    ("REVIEW: fence with an info string", "```markdown\n" + _G + "```\n", False),
+    ("REVIEW: table inside a tilde fence", "~~~\n" + _G + "~~~\n", False),
+    ("REVIEW: separator in the middle", "| a | b |\n| 1 | 2 |\n|---|---|\n", False),
+    ("REVIEW: separator-as-body", "| a | b |\n|---|---|\n|---|---|\n", False),
+    # --- found by adversarially testing this predicate ------------------
+    ("indented fence", "  ```\n" + _G + "  ```\n", False),
+    ("tilde fence nested in a backtick fence", "```\n~~~\n" + _G + "~~~\n```\n", False),
+    ("backtick fence nested in a tilde fence", "~~~\n```\n" + _G + "```\n~~~\n", False),
+    ("unclosed fence swallows the rest", "```\n" + _G, False),
+    ("grid immediately after a fence, no blank line", "```\ncode\n```\n" + _G, True),
+    ("prose with pipes after a closed fence", "```\n" + _G + "```\nx | y\nz | w\n", False),
+    (
+        "separator, separator, then a real body row",
+        "| a | b |\n|---|---|\n|---|---|\n| 1 | 2 |\n",
+        True,
+    ),
+    ("empty body row, then a real one", "| a | b |\n|---|---|\n|  |  |\n| 1 | 2 |\n", True),
+    ("two grids separated by prose", _G + "\nsome prose\n\n" + _G, True),
+    ("pipe-bearing prose above a real grid", "x | y\nz | w\n" + _G, True),
+    ("separator wider than the header", "| a | b |\n|---|---|---|\n| 1 | 2 |\n", False),
+    ("a later row is ragged", "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 | 5 |\n", False),
+    ("rows of empty cells only", "||\n||\n", False),
+    ("empty text", "", False),
+    # --- the round-3 conditions, still holding --------------------------
+    ("prose with pipes", "x | y is here\nz | w also\n", False),
+    ("one-column pipe list", "| a |\n|---|\n| 1 |\n", False),
+    ("single-dash separator", "| a | b |\n|-|-|\n| 1 | 2 |\n", False),
+    ("two-dash separator", "| a | b |\n|--|--|\n| 1 | 2 |\n", False),
+    ("header and separator, no body", "| a | b |\n|---|---|\n", False),
+    ("body row of empty cells only", "| a | b |\n|---|---|\n|  |  |\n", False),
+    # --- pending the owner's ruling, see STRICT_GRID_REQUIRES_UNIFORM_BODY
+    ("ragged body (spec; contested, see #259)", "| a | b | c |\n|---|---|---|\n| 1 | 2 |\n", False),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "model_text"),
+    [
+        ("fenced code block", "Here is the layout:\n\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n"),
+        ("separator in the middle", "Table 4.\n\n| a | b |\n| 1 | 2 |\n|---|---|\n"),
+        ("separator-as-body", "Table 4.\n\n| a | b |\n|---|---|\n|---|---|\n"),
+    ],
+)
+def test_the_reviewers_phantoms_do_not_suppress_the_marker(
+    tmp_path: Path, label: str, model_text: str
+) -> None:
+    """The three round-3 phantoms, at the level that matters: the shipped page.
+
+    Each of these shipped WARNING with no marker. A predicate test alone would
+    not have caught that -- these drive ``_winning_page_output``, so they fail
+    if the strict check is ever bypassed at the call site rather than merely
+    weakened inside the helper.
+    """
+    state = _state(_born_digital_pdf(tmp_path), model_text=model_text)
+
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" in winner.text, f"{label}: {winner.text!r}"
+    assert winner.status is PageStatus.ERROR, f"{label}: {winner.status}"
+    assert "kept a model reading" not in winner.text, f"{label}: {winner.text!r}"
+
+
+@pytest.mark.parametrize(
+    ("label", "text", "expected"),
+    [
+        pytest.param(t, x, e, id=t.replace(" ", "_").replace(":", ""))
+        for t, x, e in STRICT_GRID_CASES
+    ],
+)
+def test_the_strict_predicate_on_its_own_terms(label: str, text: str, expected: bool) -> None:
+    """The shape check, case by case, so a failure names which case broke.
+
+    Reached by ``getattr`` on the module: importing a name the fix adds would
+    make this file fail at the baseline with an ImportError rather than on
+    behaviour.
+    """
+    import socr.tables.reconcile as reconcile
+
+    strict = getattr(reconcile, "has_strict_table_grid", None)
+    assert strict is not None, "the fix must add a strict grid predicate"
+    assert strict(text) is expected, f"{label}: {text!r}"
+
+
+def test_the_predicate_fails_closed_on_a_shape_nobody_enumerated() -> None:
+    """The property the table above cannot express: DEFAULT IS FALSE.
+
+    Rounds 1-3 each bounded this by listing what to refuse, and each list was
+    incomplete. The structural version asserts a shape instead, so an input
+    nobody thought of is refused rather than accepted. Garbage that happens to
+    carry pipes stands in for "a case nobody enumerated".
+    """
+    import socr.tables.reconcile as reconcile
+
+    strict = getattr(reconcile, "has_strict_table_grid", None)
+    assert strict is not None
+    for junk in (
+        "|\n|\n",
+        "|||\n|||\n",
+        "-|-\n-|-\n",
+        "| --- |\n| --- |\n",
+        "a|b\n",
+        "\n\n|\n",
+        "| a | b |\n\n|---|---|\n\n| 1 | 2 |\n",  # blank lines break the run
+    ):
+        assert strict(junk) is False, junk
+
+
+def test_the_uniform_body_switch_is_one_named_line() -> None:
+    """PENDING THE OWNER: equal-width rejects a ragged but GENUINE grid, which
+    contradicts #259's merged ruling to flag-and-keep a defective grid
+    (``kept_table_grid_defect``). Kept as the spec says for now.
+
+    This pins that the decision stays a single named switch rather than logic
+    spread through the predicate, so flipping it is one line when they rule.
+    """
+    import socr.tables.reconcile as reconcile
+
+    flag = getattr(reconcile, "STRICT_GRID_REQUIRES_UNIFORM_BODY", None)
+    assert flag is True, "the contested condition must stay named and discoverable"
+
+
+def test_find_table_blocks_itself_is_unchanged() -> None:
+    """Scope guard. Other callers depend on the loose helper's looseness.
+
+    Tightening it globally would be a silent behaviour change across the
+    codebase, so the strict check is additive and this pins the split.
+    """
+    from socr.tables.reconcile import find_table_blocks
+
+    assert len(find_table_blocks("a | b\nc | d\n")) == 1
+    assert len(find_table_blocks("| a | b |\n|---|---|\n")) == 1
+    assert len(find_table_blocks("| a |\n|---|\n| 1 |\n")) == 1
+
+
+# ---------------------------------------------------------------------------
 # The allowlist is only worth anything if the disposition is really written.
 # These drive the REAL ``NativeTableVerifierJudge``, not a stub, so they prove
 # the paths genuinely do and do not set it -- rather than proving that the test
