@@ -439,6 +439,17 @@ def flagged_model_page_output(p) -> PageOutput | None:
     return bo
 
 
+#: #263 round 2: the engines whose winning text IS (or embeds) the page's
+#: ``PageState.native_text``. ``native`` ships it directly; ``chart_asset``
+#: (PP-7) ships ``native_text`` with a whole-page PNG ref appended. A flag that
+#: says "this page's native text is not a reading of the page" therefore
+#: contradicts a passing winner from EITHER lane, and keying the contradiction
+#: guard below on ``engine.startswith("native")`` alone let the chart lane
+#: return before the fail-closed floor could run (the #265 review finding).
+#: Every other engine label is a real model output and is unaffected.
+_NATIVE_TEXT_LANES = ("native", "chart_asset")
+
+
 def _winning_page_output(
     state: DocumentState,
     page_num: int,
@@ -472,12 +483,24 @@ def _winning_page_output(
         #
         # Falling through re-demotes it through the normal path below. A
         # passing NON-native best_output is unaffected and returns immediately.
-        native_distrusted = (p.best_output.engine or "").startswith("native") and (
+        winning_engine = p.best_output.engine or ""
+        native_distrusted = winning_engine.startswith("native") and (
             getattr(p, "native_table_unverifiable", False)
             or getattr(p, "native_table_structure_defective", False)
             or getattr(p, "native_table_header_unattributed", False)
         )
-        if not native_distrusted:
+        # #263: same contradiction, for a rotated page whose native layer is
+        # confetti -- but scoped to ``_NATIVE_TEXT_LANES`` rather than the
+        # ``native`` prefix. The table flags above are about a native TABLE
+        # reconstruction, which only the native lane performs; this flag is
+        # about ``native_text`` itself, and the chart lane ships that too.
+        # Without the wider scope, ``--native-only`` routed the page to the
+        # chart lane and its passing winner returned here before the
+        # fail-closed floor below could run.
+        native_text_shredded = winning_engine.startswith(_NATIVE_TEXT_LANES) and getattr(
+            p, "native_rotated_text_shredded", False
+        )
+        if not (native_distrusted or native_text_shredded):
             return p.best_output
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
@@ -538,6 +561,33 @@ def _winning_page_output(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+            )
+
+        # #263: rotated-shredded fail-closed floor. The native layer of a
+        # rotated page can come back as one glyph run per line -- 177 chars
+        # over 47 lines on the reference page, 32 of them two characters or
+        # fewer. Those fragments are not a reading of the page: two independent
+        # judges rated the shipped output unusable, and the caption they
+        # encode is only recoverable by reversing and re-joining them, which
+        # is a repair this floor deliberately does not attempt (a wrong
+        # reading is worse than a missing one). So the page ships the marker
+        # plus the page image, exactly like the D3 table floor above.
+        #
+        # Deliberately NOT gated on ``bool(p.attempts)``, following the GH-195
+        # precedent immediately below: the damage is found during native
+        # extraction, on a page that may never reach the OCR ladder at all
+        # (``--native-only``), and the attempt gate would leave exactly those
+        # pages stamped SUCCESS over confetti.
+        if getattr(p, "native_rotated_text_shredded", False):
+            shred_marker = f"[page {page_num} failed: rotated text extraction shredded — see image]"
+            shred_png = getattr(p, "rotated_shred_png_ref", "")
+            return PageOutput(
+                page_num=page_num,
+                text=f"{shred_marker}\n\n{shred_png}" if shred_png else shred_marker,
+                status=PageStatus.ERROR,
+                engine="native",
+                audit_passed=False,
+                failure_mode=FailureMode.NATIVE_TEXT_SHREDDED,
             )
 
         # #259: a flagged-but-PRESENT model output stays the winner. Placed

@@ -779,6 +779,26 @@ class UnifiedPipeline:
                     )
                 )
 
+        # #263: same shape for the rotated page with NO detected table, whose
+        # native layer came back as one glyph run per line. Keyed on the flag
+        # set inside the refusal branch in born_digital.py, never re-derived
+        # from ``text_is_rotated`` here -- for the same reason the GH-147 loop
+        # above is not re-derived.
+        for pa in assessment.pages:
+            if getattr(pa, "native_rotated_text_shredded", False):
+                state.events.append(
+                    AuditEvent(
+                        page_num=pa.page_num,
+                        kind="rotated_text_shredded",
+                        engine="native",
+                        detail=(
+                            "native text layer refused (dominant text direction is rotated "
+                            "and the extracted lines are pieces of one text run); "
+                            "page routed to OCR"
+                        ),
+                    )
+                )
+
         # GH-151 TICKET-B1 / GH-200 / GH-211: surface every table-structure
         # defect as a durable audit event -- EXACTLY ONE per affected page.
         #
@@ -1727,6 +1747,9 @@ class UnifiedPipeline:
         pdf_path: Path,
         page_num: int,
         figures_dir: Path,
+        *,
+        stem: str = "failed_table",
+        label: str = "Failed table page",
     ) -> str:
         """TR-3: render a PNG for a D3 fail-closed floor page and return an image ref.
 
@@ -1747,15 +1770,18 @@ class UnifiedPipeline:
         fail-closed and never a plausible-but-wrong table).
         """
         try:
-            fname = f"failed_table_p{page_num}.png"
+            fname = f"{stem}_p{page_num}.png"
             saved = self._render_chart_page_png(pdf_path, page_num, figures_dir)
             # _render_chart_page_png saves chart_page_{page_num}.png; rename to
-            # our D3-specific name so the file is clearly identifiable in figures/.
+            # our floor-specific name so the file is clearly identifiable in
+            # figures/. ``stem``/``label`` distinguish the TR-3 table floor from
+            # #263's rotated-shred floor: the two mean different things and must
+            # not overwrite each other's PNG on a page that reaches both.
             saved_path = Path(saved)
             d3_path = saved_path.parent / fname
             saved_path.rename(d3_path)
             figures_dir_name = figures_dir.name
-            ref = f"![Failed table page {page_num}]({figures_dir_name}/{fname})"
+            ref = f"![{label} {page_num}]({figures_dir_name}/{fname})"
             logger.debug("TR-3 D3 floor: saved full-page PNG %s", d3_path)
             return ref
         except Exception as exc:
@@ -2929,6 +2955,16 @@ class UnifiedPipeline:
                 if chart_render_failed:
                     ps.chart_asset_render_failed = True
 
+                # #263 round 2: this page's native half is confetti, so
+                # _winning_page_output will refuse ``chart_body`` and ship the
+                # failure marker instead. The PNG is the half that IS good --
+                # on a chart page the image is the content -- so hand the ref
+                # to the floor rather than re-rendering the same page. The
+                # chart lane's own behaviour is untouched for every page that
+                # is not flagged.
+                if getattr(ps, "native_rotated_text_shredded", False) and chart_png_ref:
+                    ps.rotated_shred_png_ref = chart_png_ref
+
                 chart_status = PageStatus.WARNING if chart_render_failed else PageStatus.SUCCESS
                 chart_out = PageOutput(
                     page_num=page_num,
@@ -3179,6 +3215,22 @@ class UnifiedPipeline:
                         ps.best_output.status = PageStatus.ERROR
                         ps.best_output.audit_passed = False
                         ps.best_output.failure_mode = FailureMode.HALLUCINATION
+
+                # #263: rotated-shredded floor PNG. The page's native layer is
+                # confetti and the OCR ladder accepted nothing, so the marker
+                # that ships in its place carries the page image -- otherwise a
+                # human has no way to read a caption socr just refused. Render
+                # only when nothing was accepted: an accepted model output wins
+                # in _winning_page_output and the floor never applies.
+                if getattr(ps, "native_rotated_text_shredded", False) and not decision.accepted:
+                    if _chart_figures_dir is not None:
+                        ps.rotated_shred_png_ref = self._render_d3_floor_png(
+                            state.handle.path,
+                            page_num,
+                            _chart_figures_dir,
+                            stem="shredded_rotated_page",
+                            label="Shredded rotated page",
+                        )
 
                 # Provenance guard: when the judge rejected ALL ladder rungs for a
                 # born-digital table page, mark the page so _assemble_result treats
@@ -4918,6 +4970,12 @@ class UnifiedPipeline:
             "native_table_structure_failed": (
                 bool(ps.native_table_structure_failed) if ps else False
             ),
+            # #263: rotated page whose native layer was refused as shredded,
+            # and the image ref its floor ships in place of the fragments.
+            "native_rotated_text_shredded": (
+                bool(getattr(ps, "native_rotated_text_shredded", False)) if ps else False
+            ),
+            "rotated_shred_png_ref": (str(getattr(ps, "rotated_shred_png_ref", "")) if ps else ""),
             # GH-151 TICKET-B1: grid-shape defect found at extraction time.
             "native_table_structure_defective": (
                 bool(getattr(ps, "native_table_structure_defective", False)) if ps else False
@@ -5295,6 +5353,10 @@ class UnifiedPipeline:
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
+            # #263: restore the shredded-page image ref too, so a resumed run's
+            # floor ships marker + image exactly as the first run did instead of
+            # silently degrading to a bare marker.
+            ps.rotated_shred_png_ref = str(meta.get("rotated_shred_png_ref", ""))
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
             ps.judge_rejected = bool(meta.get("judge_rejected", False))
         except Exception as exc:

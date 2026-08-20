@@ -58,6 +58,13 @@ class PageState:
     #: and the document to AUDIT_FAILED, because the issue requires the
     #: rejection to surface at page and document status, not only in a log.
     text_grid_rejected: bool = False
+    #: #263: rotated page whose native layer is confetti (one glyph run per
+    #: extracted line). Set once in ``apply_born_digital`` from the assessment
+    #: flag of the same name, never re-derived. Read by
+    #: ``manifest._winning_page_output``, which ships a failure marker instead
+    #: of the fragments -- unreadable fragments under a SUCCESS are exactly the
+    #: silent loss the cardinal rule forbids.
+    native_rotated_text_shredded: bool = False
     native_table_structure_failed: bool = False  # native table text lost its grid
     #: GH-151 TICKET-B1: grid-shape defect (ragged / detached-label row pair)
     #: found in the native markdown at extraction time. Deliberately a
@@ -77,6 +84,11 @@ class PageState:
     native_table_unverifiable: bool = False  # TR-3: per-region verifier flagged hard-fail
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
+    #: #263: image ref for the shredded-rotated-page floor. Deliberately NOT
+    #: ``d3_floor_png_ref``: that field means "the table region was routed to
+    #: the image lane", and a consumer must be able to tell the two floors
+    #: apart.
+    rotated_shred_png_ref: str = ""
     chart_asset_render_failed: bool = False  # PP-7: chart-lane PNG render failed
 
     @property
@@ -250,6 +262,11 @@ class DocumentState:
                     # so it can reach page status and document status.
                     if getattr(pa, "text_grid_rejections", None):
                         ps.text_grid_rejected = True
+                    # #263: carry the rotated-shredded verdict so the ship
+                    # surface can refuse the confetti.
+                    ps.native_rotated_text_shredded = getattr(
+                        pa, "native_rotated_text_shredded", False
+                    )
 
     # ------------------------------------------------------------------
     # Read-only derived properties
