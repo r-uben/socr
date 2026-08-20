@@ -23,6 +23,36 @@ pages, audits quality, and falls back. Two modes: deterministic (default) and
   from `socr.core.providers`) or it passes locally (ollama installed) and **fails in CI** (the
   provider ladder is empty → the loop bails before routing). This trap bit PP-2/PP-7 — always
   confirm hermeticity, and **wait for CI green before merging.**
+- **The no-provider trap has a second face, and patching the ladder does NOT close it: never
+  pin an absolute outcome you measured locally.** Provider-dependent machinery (the D3 floor,
+  `native_fallback`) does not fire in CI, so a page's status, `audit_passed`, failure mode and
+  document status can legitimately differ there. A test that asserts the tuple it saw on your
+  machine passes locally and fails in CI on a page that is behaving correctly. This reverted
+  #253 off `main` (see #257): its scope guard pinned `(SUCCESS, False, AUDIT_FAILED,
+  AUDIT_FAILED)`; CI produced the inert `(SUCCESS, True, NONE, SUCCESS)` — which is what the
+  issue actually wanted — and the pin failed.
+  **Pin a DIFFERENCE, not a value.** Run the pipeline twice in the same process, changing only
+  the one thing under test (the flag, or whether the new code path executes), and assert the
+  outcomes are identical or differ exactly as intended. Parametrise over both provider states.
+  Note also that `_available_engines_for_agentic` is not always the ambient dependency: the
+  non-agentic path never consults it, and `_phase_judge_hard_pages` builds an
+  `OllamaVisionJudge` and POSTs to it for real regardless of `judge_backend` — patch
+  `_resolve_judge_model` to `""` to make such a file hermetic.
+- **A PR that CONFLICTS with its base runs NO CI at all, and the checks tab still looks green.**
+  GitHub cannot compute a merge commit for a conflicting PR, so no `pull_request` workflow
+  starts; the checks list then shows only the advisory reviewers (CodeRabbit, cubic) with green
+  ticks, and `gh pr checks` does not distinguish "all passed" from "nothing ran". Absence of a
+  signal reads as a passing signal. (`#256` removed the old `branches: [main]` filter, which had
+  silently un-CI'd every *stacked* PR; this is the remaining hole.)
+  **Before merging, confirm a run exists for the exact head — do not merely check nothing is red:**
+  ```
+  gh run list --repo r-uben/socr --branch <branch> --workflow CI \
+    --json status,conclusion,headSha --limit 3
+  ```
+  If the newest run's `headSha` is not the PR's head, CI has not seen what you are about to
+  merge. `gh run list --commit <branch-head>` is NOT a substitute: for `pull_request` events the
+  run is recorded against the synthesised merge commit, so it returns nothing and looks
+  identical to "CI never ran".
 
 ## Architecture (the agentic path is page-major)
 
