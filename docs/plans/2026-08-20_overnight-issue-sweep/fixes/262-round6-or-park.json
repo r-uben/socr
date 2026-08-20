@@ -1,0 +1,214 @@
+{
+  "issue": 262,
+  "round": "6-or-park",
+  "answer": "PARK. The candidate grounding rule does NOT hold. Measured, not argued.",
+  "code_written_this_round": "none -- no container strip shipped, existing strips kept as instructed",
+  "pr": {
+    "number": 264,
+    "head": "887f17e6753fc9e26a36e17178d0cd1abf82748f",
+    "unchanged_this_round": true
+  },
+  "deepseek_finding_confirmed": {
+    "case": "raw HTML blocks (<pre>, <div>, <code>, <script>, <style>, <blockquote>) wrap a grid that supersedes the D3 marker",
+    "verdict": "REAL. CommonMark raw-HTML block, type 6 -- the fifth container class in five rounds.",
+    "shipped_a_strip": false,
+    "why_not": "Instructed not to, and the instruction is right: five rounds, five container types. HTML blocks alone have seven tag classes in the spec, and after those come <details>, <figure>, MDX and front-matter. The set is not bounded by a list."
+  },
+  "the_measurement": {
+    "hypothesis": "For the D3 floor, restricting the keep path to REJECTION_AMBIGUOUS_DEFERRED (refusing judge_only and empty) kills every phantom without any container strip, because ambiguous_deferred means the verifier ran against native words and deferred -- positive evidence of provenance.",
+    "result": "FALSIFIED.",
+    "single_case": {
+      "setup": "Real NativeTableVerifierJudge. Page carries 3 rows x 2 numeric lanes of real values. Output is a 5-column markdown grid whose numbers (9.91, 9.92, ...) appear NOWHERE on the page, wrapped in <pre>.",
+      "observed_rejection_class": "ambiguous_deferred",
+      "meaning": "A phantom maximally unrelated to the page earns the disposition the rule would treat as positive evidence of provenance."
+    },
+    "mechanism": "rejection_class = ambiguous_deferred is set on the vr.warn branch, and vr.warn fires iff col_gap = abs(output_col_count - native_lane_count) >= 2 (native_verifier.py, Tier 2). output_col_count comes from _parse_output_col_count -- a THIRD text-only markdown scanner, with exactly the same HTML / fence / comment blindness as find_table_blocks and check_markdown. So the disposition never certifies that the text is a reading of the page; it certifies that a text-parsed column count differed from a geometric lane count by at least two.",
+    "the_perverse_part": "The relationship is monotonic in the gap, so the LESS the text has to do with the page, the LARGER the gap and the MORE likely it earns the 'soft' disposition. The rule is not merely insufficient -- in the relevant band it is anti-correlated with truth. A wild phantom qualifies where a near-miss real reading (gap 0 or 1) gets judge_only and would be refused.",
+    "container_independence": "Across none / <pre> / <div> / fenced / HTML-comment wrappers the disposition is IDENTICAL at every column count. The verifier's disposition is completely blind to the container, so no grounding rule read off it can distinguish a wrapped phantom from an unwrapped reading.",
+    "sweep": [
+      {
+        "wrapper": "none",
+        "phantom_cols": 2,
+        "parsed_cols": 2,
+        "native_lane_count": 2,
+        "col_gap": 0,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "none",
+        "phantom_cols": 3,
+        "parsed_cols": 3,
+        "native_lane_count": 2,
+        "col_gap": 1,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "none",
+        "phantom_cols": 4,
+        "parsed_cols": 4,
+        "native_lane_count": 2,
+        "col_gap": 2,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "none",
+        "phantom_cols": 5,
+        "parsed_cols": 5,
+        "native_lane_count": 2,
+        "col_gap": 3,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "pre",
+        "phantom_cols": 2,
+        "parsed_cols": 2,
+        "native_lane_count": 2,
+        "col_gap": 0,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "pre",
+        "phantom_cols": 3,
+        "parsed_cols": 3,
+        "native_lane_count": 2,
+        "col_gap": 1,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "pre",
+        "phantom_cols": 4,
+        "parsed_cols": 4,
+        "native_lane_count": 2,
+        "col_gap": 2,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "pre",
+        "phantom_cols": 5,
+        "parsed_cols": 5,
+        "native_lane_count": 2,
+        "col_gap": 3,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "div",
+        "phantom_cols": 2,
+        "parsed_cols": 2,
+        "native_lane_count": 2,
+        "col_gap": 0,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "div",
+        "phantom_cols": 3,
+        "parsed_cols": 3,
+        "native_lane_count": 2,
+        "col_gap": 1,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "div",
+        "phantom_cols": 4,
+        "parsed_cols": 4,
+        "native_lane_count": 2,
+        "col_gap": 2,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "div",
+        "phantom_cols": 5,
+        "parsed_cols": 5,
+        "native_lane_count": 2,
+        "col_gap": 3,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "fence",
+        "phantom_cols": 2,
+        "parsed_cols": 2,
+        "native_lane_count": 2,
+        "col_gap": 0,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "fence",
+        "phantom_cols": 3,
+        "parsed_cols": 3,
+        "native_lane_count": 2,
+        "col_gap": 1,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "fence",
+        "phantom_cols": 4,
+        "parsed_cols": 4,
+        "native_lane_count": 2,
+        "col_gap": 2,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "fence",
+        "phantom_cols": 5,
+        "parsed_cols": 5,
+        "native_lane_count": 2,
+        "col_gap": 3,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "comment",
+        "phantom_cols": 2,
+        "parsed_cols": 2,
+        "native_lane_count": 2,
+        "col_gap": 0,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "comment",
+        "phantom_cols": 3,
+        "parsed_cols": 3,
+        "native_lane_count": 2,
+        "col_gap": 1,
+        "rejection_class": "judge_only"
+      },
+      {
+        "wrapper": "comment",
+        "phantom_cols": 4,
+        "parsed_cols": 4,
+        "native_lane_count": 2,
+        "col_gap": 2,
+        "rejection_class": "ambiguous_deferred"
+      },
+      {
+        "wrapper": "comment",
+        "phantom_cols": 5,
+        "parsed_cols": 5,
+        "native_lane_count": 2,
+        "col_gap": 3,
+        "rejection_class": "ambiguous_deferred"
+      }
+    ],
+    "corollary_the_strips_are_load_bearing": "The fenced and commented rows above still earn ambiguous_deferred, and are refused today only by round 5's has_strict_table_grid strips. Had the grounding rule REPLACED the strips, every one of those phantoms would ship. Keeping the strips was the right call."
+  },
+  "why_this_settles_the_general_question": "The proposed rule was the strongest grounding signal available on the attempt today, and it is a text-derived number in disguise. Every other candidate on the attempt (audit_passed, status, failure_mode, engine) carries strictly less information. There is therefore nothing currently recorded that distinguishes 'a grid that reads this page' from 'a grid that appears in this text', which is exactly the design note's claim, now measured rather than argued.",
+  "new_design_finding_for_268": {
+    "what_i_got_wrong_earlier": "In fixes/262-round5-or-design.json I estimated #268 as 'persist a fact the verifier already computes'. That is too optimistic and I am correcting it.",
+    "the_problem": "The verifier's only POSITIVE corroboration state is VerifierState.EXACT_PASS (row counts match, no label-binding, multisets clean). But EXACT_PASS returns AcceptDecision(accept=True) (agentic.py:655-671), so an EXACT_PASS attempt is ACCEPTED and never reaches the D3 keep path, which by construction only sees attempts every rung REFUSED.",
+    "consequence": "Among refused attempts there is currently NO corroboration signal at all -- only degrees of 'not refuted'. CERTAIN_FAIL says refuted; AMBIGUOUS says undecided; neither says corroborated.",
+    "what_268_must_therefore_do": "Not merely persist an existing fact, but COMPUTE a new one: a positive, quantitative corroboration measure that survives refusal -- e.g. how many of the emitted grid's numeric rows matched native word-geometry rows, carried on the attempt even when the judge refuses. That is the signal a <pre>-wrapped phantom cannot fake, because its numbers are not on the page. _value_guard already does the per-row pairing; what is missing is retaining the positive count rather than only the failure verdict.",
+    "revised_cost": "Larger than my earlier 150-250 line estimate. Still bounded, but it is a verifier change plus a schema change plus two call sites, and it needs a decision on what match fraction counts as corroborated -- which is a corpus judgement, i.e. exactly the design pass."
+  },
+  "recommendation": {
+    "pr_264": "PARK for the design pass. Do not land as the answer to #262.",
+    "predicate": "Move to #268, including round 5's strips and the 51-case corpus -- they are correct as far as they go and are load-bearing today.",
+    "still_worth_rescuing": "The policy layer beneath the predicate has now been verified by five independent models. If the owner wants value from #264 before #268 lands, the split (already recorded at the top of the PR body) or the non-table-content half remain available.",
+    "what_i_am_NOT_recommending": "A sixth container strip, and equally not swapping the strips for the grounding rule -- measured above to be strictly worse."
+  },
+  "state": {
+    "branch_head_unchanged": "887f17e",
+    "worktree": "clean",
+    "ci_last_run": "success on 887f17e",
+    "uniform_body_switch": "untouched, still the owner's",
+    "force_push": "never",
+    "merged_by_me": "never"
+  }
+}

@@ -1,0 +1,379 @@
+{
+  "issue": 262,
+  "round": 5,
+  "verdict": "FAIL-CLOSED INTERIM DELIVERED",
+  "pr": {
+    "number": 264,
+    "url": "https://github.com/r-uben/socr/pull/264",
+    "head": "887f17e6753fc9e26a36e17178d0cd1abf82748f",
+    "round4_head": "f9f16b9228b86aafe3c817678fb6cf04f6614fbc",
+    "base": "main @ 4c18ef2",
+    "mergeable": "MERGEABLE",
+    "ci": {
+      "headSha": "887f17e6753fc9e26a36e17178d0cd1abf82748f",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  },
+  "posture_change_this_round": {
+    "claim_withdrawn": "Round 4's 'a case nobody anticipated fails closed'.",
+    "why_it_was_false": "None of the three round-5 phantoms is a shape violation -- each contains a syntactically perfect GitHub-markdown table. They are PROVENANCE failures: the text is a real grid that is not a reading of the page. No markdown predicate can see that, because by markdown the input is correct.",
+    "test_renamed": "test_the_predicate_fails_closed_on_a_shape_nobody_enumerated -> test_junk_carrying_pipes_is_refused. Seven junk inputs cannot establish a universal and the test no longer pretends to.",
+    "new_framing": "Documented in the predicate's own docstring as a deliberately CONSERVATIVE INTERIM, not a decision procedure. Operative rule: FAIL CLOSED. Refusing a real grid costs the marker, which is what ships today; accepting a phantom silently replaces a page with text describing nothing. Asymmetric costs, asymmetric predicate.",
+    "sound_fix_pointer": "#268 -- a geometry-corroborated fact recorded at extraction time, serving this caller AND flagged_model_page_output (#259), which has the same hole in merged code today."
+  },
+  "three_findings": [
+    {
+      "id": 1,
+      "case": "prose line with one pipe as header",
+      "reproduced_at_f9f16b9": true,
+      "remedy_NOT_taken": "The reviewer's proposed definition -- a header whose cells are 'not all separators and not all blank' -- does NOT close its own finding. Measured: ['noise','a'] is neither, so the phantom would have been ACCEPTED. Implementing it would have been the fifth confident wrong measurement.",
+      "remedy_taken": "Two fail-closed rules: (a) EXACTLY ONE separator row per block -- a doubled separator is ambiguous about where the table starts; (b) the header must share the separator's BORDER STYLE -- a table is emitted consistently by whatever wrote it, a sentence that happens to precede a separator is not. Leaves all-bordered and all-unbordered spellings alone."
+    },
+    {
+      "id": 2,
+      "case": "4-space indented code block (CommonMark indented code)",
+      "reproduced_at_f9f16b9": true,
+      "remedy_taken": "_INDENTED_CODE blanks any line indented 4+ spaces or a tab, applied AFTER fence stripping because a fence's content may itself be indented."
+    },
+    {
+      "id": 3,
+      "case": "grid inside an HTML comment",
+      "reproduced_at_f9f16b9": true,
+      "remedy_taken": "_strip_html_comments runs FIRST (comments can contain fence markers); an unclosed '<!--' swallows the rest of the document, same fail-closed reasoning as an unclosed fence."
+    }
+  ],
+  "deliberate_tightenings_vs_round4": [
+    {
+      "case": "separator, separator, then a real body row",
+      "was": true,
+      "now": false,
+      "why": "A block with more than one separator is ambiguous about where its table starts; under a fail-closed interim ambiguity costs the marker."
+    },
+    {
+      "case": "pipe-bearing prose directly above a grid",
+      "was": true,
+      "now": false,
+      "why": "Removes round 4's offset scan -- the header is now the run's FIRST line, per review instruction. That flexibility was the room the prose-as-header phantom lived in. Cost is a marker on a real grid whose run opens with prose and no blank line; a blank line still separates runs, so a grid after a paragraph is unaffected."
+    }
+  ],
+  "my_own_expectation_corrected": {
+    "case": "header cell that is literally --- text (| --- | b |)",
+    "i_expected": false,
+    "predicate_says": true,
+    "resolution": "The predicate is right and I was wrong. The body is real content and there is exactly one separator; refusing it would reject legitimate tables. Corrected in the corpus with the reasoning rather than forcing the code to match a bad expectation."
+  },
+  "adversarial_corpus": {
+    "count": 51,
+    "source": "read back from tests.STRICT_GRID_CASES and re-executed against the shipped predicate, so this listing cannot drift from the code",
+    "reviewer_categories_covered": [
+      "escaped pipes",
+      "CRLF",
+      "unicode en-dash",
+      "unicode em-dash",
+      "tab indentation",
+      "fences inside tables",
+      "blank-line splits",
+      "header without outer pipes",
+      "separator wider than header",
+      "separator narrower than header",
+      "dash-as-header-text",
+      "single-cell table",
+      "unclosed fence",
+      "unclosed HTML comment",
+      "two-dash separator",
+      "header-only defect",
+      "separator-as-body",
+      "prose-as-header"
+    ],
+    "cases": [
+      {
+        "case": "real grid",
+        "input": "| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "unbordered spelling throughout",
+        "input": "a | b\n--- | ---\n1 | 2\n",
+        "verdict": true
+      },
+      {
+        "case": "leading pipe only, consistently",
+        "input": "| a | b\n| --- | ---\n| 1 | 2\n",
+        "verdict": true
+      },
+      {
+        "case": "trailing pipe only, consistently",
+        "input": "a | b |\n--- | --- |\n1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "alignment colons in the separator",
+        "input": "| a | b |\n|:---:|---:|\n| 1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "spaces inside the separator",
+        "input": "| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "windows CRLF line endings",
+        "input": "| a | b |\r\n|---|---|\r\n| 1 | 2 |\r\n",
+        "verdict": true
+      },
+      {
+        "case": "grid after a paragraph",
+        "input": "Some prose here.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "grid immediately after a fence, no blank line",
+        "input": "```\ncode\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "two grids separated by prose",
+        "input": "| a | b |\n|---|---|\n| 1 | 2 |\n\nprose\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "empty body row, then a real one",
+        "input": "| a | b |\n|---|---|\n|  |  |\n| 1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "header cell that is literally --- text",
+        "input": "| --- | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": true
+      },
+      {
+        "case": "MM: prose header with a doubled separator",
+        "input": "noise | a\n| --- | --- |\n| --- | --- |\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: prose header, single separator",
+        "input": "noise | a\n| --- | --- |\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: 4-space indented code block",
+        "input": "Example:\n\n    | a | b |\n    |---|---|\n    | 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: tab-indented code block",
+        "input": "Example:\n\n\t| a | b |\n\t|---|---|\n\t| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: grid inside an HTML comment",
+        "input": "<!--\n| a | b |\n|---|---|\n| 1 | 2 |\n-->\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: single-line HTML comment",
+        "input": "<!-- | a | b |\n|---|---|\n| 1 | 2 | -->\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: unclosed HTML comment",
+        "input": "<!--\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: escaped pipes in cells",
+        "input": "| a \\| x | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: unicode en-dash separator",
+        "input": "| a | b |\n|–––|–––|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: unicode em-dash separator",
+        "input": "| a | b |\n|———|———|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: blank lines split the grid",
+        "input": "| a | b |\n\n|---|---|\n\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: fence opened inside a table region",
+        "input": "| a | b |\n|---|---|\n```\n| 1 | 2 |\n```\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: header without outer pipes, bordered separator",
+        "input": "a | b\n|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: separator narrower than the header",
+        "input": "| a | b | c |\n|---|---|\n| 1 | 2 | 3 |\n",
+        "verdict": false
+      },
+      {
+        "case": "MM: blank header row",
+        "input": "|  |  |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "table inside a backtick fence",
+        "input": "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n",
+        "verdict": false
+      },
+      {
+        "case": "fence with an info string",
+        "input": "```markdown\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n",
+        "verdict": false
+      },
+      {
+        "case": "table inside a tilde fence",
+        "input": "~~~\n| a | b |\n|---|---|\n| 1 | 2 |\n~~~\n",
+        "verdict": false
+      },
+      {
+        "case": "indented fence",
+        "input": "  ```\n| a | b |\n|---|---|\n| 1 | 2 |\n  ```\n",
+        "verdict": false
+      },
+      {
+        "case": "tilde fence nested in a backtick fence",
+        "input": "```\n~~~\n| a | b |\n|---|---|\n| 1 | 2 |\n~~~\n```\n",
+        "verdict": false
+      },
+      {
+        "case": "backtick fence nested in a tilde fence",
+        "input": "~~~\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n~~~\n",
+        "verdict": false
+      },
+      {
+        "case": "HTML comment containing a fence",
+        "input": "<!--\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n-->\n",
+        "verdict": false
+      },
+      {
+        "case": "unclosed fence swallows the rest",
+        "input": "```\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "prose with pipes after a closed fence",
+        "input": "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\nx | y\nz | w\n",
+        "verdict": false
+      },
+      {
+        "case": "separator in the middle",
+        "input": "| a | b |\n| 1 | 2 |\n|---|---|\n",
+        "verdict": false
+      },
+      {
+        "case": "separator-as-body",
+        "input": "| a | b |\n|---|---|\n|---|---|\n",
+        "verdict": false
+      },
+      {
+        "case": "separator wider than the header",
+        "input": "| a | b |\n|---|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "a later row is ragged",
+        "input": "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 | 5 |\n",
+        "verdict": false
+      },
+      {
+        "case": "prose with pipes",
+        "input": "x | y is here\nz | w also\n",
+        "verdict": false
+      },
+      {
+        "case": "one-column pipe list",
+        "input": "| a |\n|---|\n| 1 |\n",
+        "verdict": false
+      },
+      {
+        "case": "single-dash separator",
+        "input": "| a | b |\n|-|-|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "two-dash separator",
+        "input": "| a | b |\n|--|--|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "header and separator, no body",
+        "input": "| a | b |\n|---|---|\n",
+        "verdict": false
+      },
+      {
+        "case": "body row of empty cells only",
+        "input": "| a | b |\n|---|---|\n|  |  |\n",
+        "verdict": false
+      },
+      {
+        "case": "rows of empty cells only",
+        "input": "||\n||\n",
+        "verdict": false
+      },
+      {
+        "case": "empty text",
+        "input": "",
+        "verdict": false
+      },
+      {
+        "case": "r5 TIGHTENED: separator, separator, then a real body row",
+        "input": "| a | b |\n|---|---|\n|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "r5 TIGHTENED: pipe-bearing prose directly above a grid",
+        "input": "x | y\nz | w\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      },
+      {
+        "case": "ragged body (spec; contested, see #259)",
+        "input": "| a | b | c |\n|---|---|---|\n| 1 | 2 |\n",
+        "verdict": false
+      }
+    ]
+  },
+  "page_level_coverage": "All three phantoms are asserted through _winning_page_output as well as at predicate level (test_the_reviewers_phantoms_do_not_suppress_the_marker, now six cases), so they fail if the check is ever bypassed at the call site rather than weakened inside the helper.",
+  "non_vacuity": {
+    "origin_main_4c18ef2": "68 failed, 22 passed -- reported for completeness, but mostly the feature's absence rather than this round's finding",
+    "round4_head_f9f16b9": "13 failed, 77 passed -- the baseline that demonstrates THIS round",
+    "branch": "90 passed",
+    "failure_lines": [
+      ">       assert \"failed: unverifiable table\" in winner.text\nE       AssertionError: prose line as header: 'Table 4.\\n\\nnoise | a\\n| --- | --- |\\n| --- | --- |\\n| 1 | 2 |\\n\\n[page 1: unverifiable table — kept a model reading over the failed-table marker; ...]'",
+      ">       assert \"failed: unverifiable table\" in winner.text\nE       AssertionError: 4-space indented code block: 'Example:\\n\\n    | a | b |\\n    |---|---|\\n    | 1 | 2 |\\n\\n[page 1: unverifiable table — kept a model reading ...]'",
+      ">       assert \"failed: unverifiable table\" in winner.text\nE       AssertionError: grid inside an HTML comment: 'Table 4.\\n\\n<!--\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n-->\\n\\n[page 1: unverifiable table — kept a model reading ...]'",
+      ">       assert strict(text) is expected\nE       AssertionError: MM: prose header with a doubled separator: 'noise | a\\n| --- | --- |\\n| --- | --- |\\n| 1 | 2 |\\n'",
+      ">       assert strict(text) is expected\nE       AssertionError: MM: tab-indented code block: 'Example:\\n\\n\\t| a | b |\\n\\t|---|---|\\n\\t| 1 | 2 |\\n'",
+      ">       assert strict(text) is expected\nE       AssertionError: MM: unclosed HTML comment: '<!--\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n'",
+      ">       assert strict(text) is expected\nE       AssertionError: r5 TIGHTENED: pipe-bearing prose directly above a grid: 'x | y\\nz | w\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n'"
+    ]
+  },
+  "task_2_split_judgement": {
+    "done": true,
+    "where": "Prepended to the #264 PR body as a blockquote, attributed to the run lead, presented as a recommendation to the owner and explicitly not as decided.",
+    "condition_stated_as_a_condition": "Yes -- the fail-closed requirement is quoted in full, with an author's note recording that round 5 is built to it (interim framing, fail-closed rule, two deliberate tightenings, round-4 claim withdrawn)."
+  },
+  "verification": {
+    "suite": "2028 passed, 3 xfailed, 5 warnings in 140.32s",
+    "lint": "uvx ruff@0.16.0 format --check . -> 332 files already formatted",
+    "ruff_check_advisory": "107 on branch, 107 at 4c18ef2 -- none added",
+    "find_table_blocks_unchanged": "verified byte-identical to origin/main by direct comparison of the 24-line function body",
+    "uniform_body_switch": "untouched, still STRICT_GRID_REQUIRES_UNIFORM_BODY = True, still the owner's call",
+    "canary": "CANARY OK",
+    "abort_latch": "not set",
+    "force_push": "never",
+    "merged_by_me": "never"
+  },
+  "standing_recommendation": "The predicate still belongs in #268, for the four reasons now at the top of the PR body. Round 5 is built to move there intact if the owner takes the split, and to be safe to land in #264 if they do not -- because it fails closed either way."
+}

@@ -90,3 +90,67 @@ Asking a syntax question of a provenance problem produces a bound that cannot be
 by enumeration. Four rounds is the cost of not noticing which kind of question you are
 asking. The tell was available from round 1: every rejection was a *new category* of input,
 not a *tighter case* of the previous one.
+
+---
+
+## Settled by measurement: there is no grounding signal on a refused attempt
+
+Round 5 was rejected on a **fifth** container class — raw HTML blocks (`<pre>`, `<div>`,
+`<code>`, `<script>`, `<style>`, `<blockquote>`). Five rounds, five container types. I
+forbade a sixth strip and asked for one measurement instead.
+
+**Hypothesis.** Restrict the D3 keep path to `REJECTION_AMBIGUOUS_DEFERRED`, refusing
+`judge_only` and empty. That disposition is written when the verifier ran against native
+words and deferred, so it should be positive evidence of provenance — already on the
+attempt, already serialized, no new plumbing. A `<pre>`-wrapped phantom cannot have been
+geometrically compared and deferred on, because nothing on the page matches it.
+
+**FALSIFIED, with a real judge and a single case.** Page: 3 rows × 2 numeric lanes of real
+values. Output: a 5-column grid whose numbers (`9.91`, `9.92`, …) appear **nowhere on the
+page**, wrapped in `<pre>`. Observed `rejection_class`: **`ambiguous_deferred`**. A phantom
+maximally unrelated to the page earns the disposition the rule would have treated as proof
+of provenance.
+
+**Mechanism, and it is the same bug a fourth time.** `ambiguous_deferred` is set on the
+`vr.warn` branch, and `vr.warn` fires iff `col_gap = abs(output_col_count -
+native_lane_count) >= 2`. `output_col_count` comes from `_parse_output_col_count` — a
+**third** text-only markdown scanner, with exactly the same HTML/fence/comment blindness as
+`find_table_blocks` and `check_markdown`. The disposition never certifies that the text
+reads the page; it is a text-derived number wearing a geometric costume.
+
+Since this was the strongest grounding signal available on an attempt today — every other
+field (`audit_passed`, `status`, `failure_mode`, `engine`) carries strictly less — nothing
+currently recorded distinguishes *"a grid that reads this page"* from *"a grid that appears
+in this text."* The design note's claim is now measured rather than argued.
+
+## The finding that resizes #268
+
+The code owner corrected its own earlier estimate, which had #268 as "persist a fact the
+verifier already computes."
+
+The verifier's only POSITIVE corroboration state is `VerifierState.EXACT_PASS` — row counts
+match, no label-binding problem, multisets clean. But `EXACT_PASS` returns
+`AcceptDecision(accept=True)` (`agentic.py:655-671`), so an EXACT_PASS attempt is
+**accepted** and never reaches the D3 keep path — which by construction only ever sees
+attempts that **every rung refused**.
+
+**Among refused attempts there is no corroboration signal at all** — only degrees of "not
+refuted". `CERTAIN_FAIL` says refuted; `AMBIGUOUS` says undecided; neither says
+corroborated.
+
+So #268 cannot persist an existing fact. It must **compute a new one**: a positive,
+quantitative corroboration measure that survives refusal — for instance, how many of the
+emitted grid's numeric rows matched native word-geometry rows, carried on the attempt even
+when the judge refuses. That is the signal a `<pre>`-wrapped phantom cannot fake, because
+its numbers are not on the page. `_value_guard` already performs the per-row pairing; what
+is missing is retaining and surfacing the result on the refusal path.
+
+## Outcome
+
+**PR #264: PARK.** Not merged, not closed, CI green at `887f17e`. The policy layer beneath
+the predicate has been verified by five independent models and should be rescued via the
+split, not thrown away. Round 5's strips and its 51-case corpus move to #268 — they are
+correct as far as they go and load-bearing today.
+
+Five rounds, five reviewers, five models, zero phantoms shipped to `main` from this PR. The
+gate cost five rounds and prevented five distinct silent-corruption paths from landing.

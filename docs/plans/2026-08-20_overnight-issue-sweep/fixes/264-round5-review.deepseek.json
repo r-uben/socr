@@ -1,0 +1,46 @@
+{
+  "pr": 264,
+  "head": "887f17e",
+  "round": 5,
+  "reviewer": "ollama-deepseek",
+  "access_proof": {
+    "cmd": "PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-262/src bash bin/isolation_canary.sh /Users/rubenffuertes/repos/.worktrees/socr-262",
+    "output": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-262/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-262"
+  },
+  "verdict": "REQUEST-CHANGES",
+  "found_a_phantom_that_ships": true,
+  "phantoms_i_tried": [
+    "<pre> block wrapping a grid (ships)",
+    "<div> block wrapping a grid (ships)",
+    "<code> block wrapping a grid (ships)",
+    "<script> block wrapping a grid (ships)",
+    "<style> block wrapping a grid (ships)",
+    "<blockquote> HTML tag wrapping a grid (ships)",
+    "nested HTML comment <!-- <!-- --> then grid (correctly True: grid is after a closed comment)",
+    "fence opened, closing fence inside a comment (correctly False: fail-closed)",
+    "blockquote markdown > | a | b | (correctly False: '>' becomes a non-separator cell)",
+    "2-space / 3-space list-indented table (True: these ARE real GFM tables)",
+    "separator with a single trailing space (True: real grid)",
+    "CRLF mixed with LF (True: normalised)",
+    "BOM before header (False: over-reject, fail-closed)",
+    "zero-width space / RTL mark in header cells (True: real grid with invisible chars)"
+  ],
+  "fails_closed_as_claimed": false,
+  "tightenings_acceptable": true,
+  "dash_header_call_correct": true,
+  "corpus_cannot_drift": true,
+  "page_level_asserted": true,
+  "non_vacuity_confirmed": true,
+  "find_table_blocks_unchanged": true,
+  "safe_to_land_as_interim": false,
+  "reran_baseline_myself": true,
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "Raw HTML blocks are not stripped, so a markdown table inside <pre>/<div>/<code>/<script>/<style>/<blockquote> ships as a phantom over the D3 marker. The stripping sequence handles HTML comments, fenced code, and 4-space/tab indented code, but not CommonMark's raw-HTML block (type 6), which is the same 'code sample, not a reading' class the author just closed three times.",
+      "where": "src/socr/tables/reconcile.py:281-283",
+      "why": "Driven through _winning_page_output with model_text = '<pre>\\n| a | b |\\n|---|---|\\n| 1 | 2 |\\n</pre>\\n' and rejection_class='judge_only': the page ships WARNING with the marker fully suppressed and the 'kept a model reading' note present. In GFM a table inside a raw HTML block is NOT rendered as a table, so this is a syntax-level phantom, not a provenance one. It directly falsifies the round-5 central claim that 'the remaining failure class is provenance, not syntax' — a markdown parser CAN see that <pre> content is not a table. The fix is one more stripping pass (blank lines inside raw-HTML block tags) plus corpus + page-level cases."
+    }
+  ],
+  "what_i_tried_to_break": "Built 14 adversarial inputs and drove the strict predicate directly, then the three that returned True through the full _winning_page_output path. The raw-HTML-block family (<pre>, <div>, <code>, <script>, <style>, <blockquote>) all return True at the predicate and all ship WARNING with the marker suppressed at page level. Everything else I tried either fails closed (nested comments, fence-closed-in-comment, blockquote markdown, BOM) or is a genuine GFM table (2-3 space list indent, trailing-space separator, CRLF, zero-width/RTL marks). Re-ran the baseline at f9f16b9 in a throwaway worktree: the three round-5 phantoms return True there (ship) and False at 887f17e, confirming non-vacuity; removed the worktree after. find_table_blocks is byte-identical between 4c18ef2 and 887f17e. The 51-case corpus is read back from tests.STRICT_GRID_CASES and re-executed via test_the_strict_predicate_on_its_own_terms, so it cannot drift from the code. The three round-5 phantoms are asserted at page level through _winning_page_output (test_the_reviewers_phantoms_do_not_suppress_the_marker), but the raw-HTML-block phantom is asserted nowhere."
+}
