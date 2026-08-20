@@ -242,11 +242,53 @@ def _band_well_separated(centers: list[float], idx: int) -> bool:
     return min(neighbours) >= _WELL_SEPARATED_GAP_PT
 
 
-def _native_lane_geometry(words: list) -> tuple[int, dict[float, int], list[float]]:
-    """Cluster numeric tokens into lanes (reusing ``native_verifier``'s raw
-    predicate + clusterer, so ``lane_of`` stays predicate-consistent with
-    ``_well_separated_lanes_in_row``), then drop any lane that is a STUB
+def _presentation_normalized_for_lanes(words: list) -> list:
+    """Return *words* with each numeric token's TEXT replaced by its
+    presentation-stripped form (``strip_presentation``); every other word,
+    and every word's position, is untouched.
+
+    ``_lane_count_from_words`` (imported from ``native_verifier``, shared
+    with its other callers there and never modified here) selects numeric
+    tokens with ``_NUM_TOKEN_RE.match`` on the RAW text. Row and header
+    parsing in *this* module select numerics with ``is_numeric_token``,
+    which strips presentation FIRST. Left to clash, a decorated native
+    value — ``**23,126**`` (markdown bold), ``0.05∗∗`` (a Unicode
+    significance star), ``$1.10`` (a currency prefix) — is exactly the
+    ordinary shape of a typeset econometrics table (GH-103, GH-206), and
+    would fail the raw predicate, drop out of ``_lane_count_from_words``
+    entirely, and collapse the whole table's lane count to zero: the
+    oracle abstains (fails safe, never falsely convicts) but on precisely
+    the table shape it exists to check, reintroducing inside this module
+    the same drop-class those two issues were filed to eliminate.
+
+    Only TEXT is rewritten; x0/x1/y0/y1 — what lane clustering keys on —
+    stay exactly as given, so the returned ``lane_of`` dict remains indexed
+    by the caller's original, unmodified x-positions.
+    """
+    normalized = []
+    for wd in words:
+        text = wd[4]
+        if is_numeric_token(text):
+            stripped = strip_presentation(text)
+            if stripped != text:
+                wd = (wd[0], wd[1], wd[2], wd[3], stripped, *wd[5:])
+        normalized.append(wd)
+    return normalized
+
+
+def _native_lane_geometry(
+    words: list, n_cand_cols: int | None = None
+) -> tuple[int, dict[float, int], list[float]]:
+    """Cluster numeric tokens into lanes, then drop any lane that is a STUB
     lane rather than a data lane (MAJOR 4).
+
+    Lane clustering runs on a presentation-normalized copy of *words* (see
+    ``_presentation_normalized_for_lanes``), so a decorated native value
+    clusters into a lane under the SAME predicate (``is_numeric_token``)
+    that row and header parsing use to select numeric tokens elsewhere in
+    this module — the raw ``_lane_count_from_words`` predicate alone is
+    NOT predicate-consistent with them (it does not know about
+    markdown/Unicode presentation marks; ``is_numeric_token`` does).
 
     A numeric row label (e.g. a year used as the row's own stub, "2020")
     clusters into its own lane exactly like a genuine data column would —
@@ -256,14 +298,12 @@ def _native_lane_geometry(words: list) -> tuple[int, dict[float, int], list[floa
     by the row's label text in at least one row (a row with a blank label
     is not proof either way, since it defers to the OTHER rows sharing that
     lane). Surviving lanes are re-indexed 0..k-1 left to right and their
-    centres recomputed from the same x-positions ``_lane_count_from_words``
-    clustered internally, so this is also the single place lane geometry is
-    derived from — callers must not separately recompute lane centres with
-    a different numeric predicate (the "fix if cheap" note: a bolded number
-    like ``**1.2**`` must not be counted by one caller and skipped by
-    another).
+    centres recomputed from the same x-positions this function clustered
+    internally, so this is also the single place lane geometry is derived
+    from — callers must not separately recompute lane centres with a
+    different numeric predicate.
     """
-    raw_count, raw_lane_of = _lane_count_from_words(words)
+    raw_count, raw_lane_of = _lane_count_from_words(_presentation_normalized_for_lanes(words))
     if raw_count == 0:
         return 0, {}, []
 
@@ -286,7 +326,27 @@ def _native_lane_geometry(words: list) -> tuple[int, dict[float, int], list[floa
                 here if li not in always_leftmost else (always_leftmost[li] and here)
             )
 
-    stub_lanes = {li for li, always in always_leftmost.items() if always}
+    stub_candidates = {li for li, always in always_leftmost.items() if always}
+
+    # "Always leftmost in its own row" is necessary but NOT sufficient
+    # evidence of a stub: in a table with no row-label text at all, the
+    # leftmost genuine DATA lane is trivially "always leftmost" too (there
+    # is nothing to its left in any row), and would be misclassified the
+    # same way a real numeric stub is. Only actually remove a lane when
+    # doing so is both NECESSARY and SUFFICIENT to reconcile the raw native
+    # lane count with the candidate's own data-column count — the same
+    # "native geometry proves it AND candidate confirms it" pattern this
+    # module already uses for header spans (A4), applied here to lane
+    # exclusion instead. If the raw count already matches what the
+    # candidate needs, nothing is a stub. If more than one lane would need
+    # removing, or exactly one candidate can't be identified, removing
+    # nothing (and deferring to the ordinary lane_count-mismatch
+    # unverifiable path in ``bind()``) is safer than guessing which lane to
+    # drop.
+    if n_cand_cols is not None and raw_count == n_cand_cols + 1 and len(stub_candidates) == 1:
+        stub_lanes = stub_candidates
+    else:
+        stub_lanes = set()
 
     all_centers = _cluster_x_positions(sorted(set(raw_lane_of.keys())))
     surviving_raw = [i for i in range(raw_count) if i not in stub_lanes]
@@ -296,7 +356,9 @@ def _native_lane_geometry(words: list) -> tuple[int, dict[float, int], list[floa
     return len(surviving_raw), lane_of, centers
 
 
-def _native_rows(words: list) -> tuple[list[_NativeRow], list[float], list[int]]:
+def _native_rows(
+    words: list, n_cand_cols: int | None = None
+) -> tuple[list[_NativeRow], list[float], list[int]]:
     """Parse native words into row bands with row paths and per-lane tokens.
 
     Header detection stops at the first band that is not "header-like".
@@ -320,7 +382,7 @@ def _native_rows(words: list) -> tuple[list[_NativeRow], list[float], list[int]]
     for b in bands.values():
         b.sort(key=lambda w: w[0])
 
-    lane_count, lane_of, lane_centers = _native_lane_geometry(words)
+    lane_count, lane_of, lane_centers = _native_lane_geometry(words, n_cand_cols)
 
     ordered_band_idxs = sorted(bands, key=lambda i: band_centers[i])
 
@@ -718,15 +780,16 @@ def bind(words: list, markdown: str) -> BindingResult:
     if grid is None:
         return result
 
-    native_rows, band_centers, header_band_idxs = _native_rows(words)
-    lane_count, _lane_of, lane_centers = _native_lane_geometry(words)
+    n_cand_cols = grid.n_cols - 1  # exclude the stub column
+
+    native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols)
+    lane_count, _lane_of, lane_centers = _native_lane_geometry(words, n_cand_cols)
 
     header_words = (
         _native_header_words(words, band_centers, header_band_idxs) if header_band_idxs else []
     )
     result.column_header_paths = build_column_header_paths(words, grid, lane_centers, header_words)
 
-    n_cand_cols = grid.n_cols - 1  # exclude the stub column
     if lane_count == 0 or n_cand_cols != lane_count:
         result.column_binding_unverifiable = True
         return result

@@ -395,5 +395,112 @@ def test_numeric_row_label_is_not_mistaken_for_a_data_lane():
     }
 
 
+# ---------------------------------------------------------------------------
+# 10. Decorated numerics (bold, significance stars, currency) still cluster
+#     into lanes and bind normally — the lane predicate must match the row/
+#     header predicate (is_numeric_token), not the raw undecorated regex.
+# ---------------------------------------------------------------------------
+
+
+def test_decorated_native_numerics_yield_a_non_zero_lane_count_and_bind():
+    """Markdown bold (``**1.2**``) and a Unicode significance star
+    (``0.05∗∗``) are the ordinary shape of a typeset econometrics table
+    (GH-103, GH-206). If lane clustering uses a predicate that does not
+    strip presentation the way row/header parsing does, every decorated
+    native value fails to cluster into any lane, lane_count collapses to
+    zero, and the whole table becomes ``column_binding_unverifiable`` —
+    silently abstaining everywhere instead of binding normally."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 90, 110, "Coef"),
+        w(150, 100, 180, 110, "**1.2**"),
+        w(50, 130, 90, 140, "SE"),
+        w(150, 130, 180, 140, "0.05∗∗"),
+    ]
+    md = """
+|      | OLS  |
+|------|------|
+| Coef | 1.2  |
+| SE   | 0.05 |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert result.structural_agreement is True
+    matches = {(m.row_path[-1], m.value) for m in result.matched_cells}
+    # The reported value is the native token AS PRINTED (evidence stays
+    # verbatim); the comparison that decided it matched normalizes both
+    # sides internally.
+    assert matches == {("Coef", "**1.2**"), ("SE", "0.05∗∗")}
+
+
+def test_decorated_native_numeric_contradicted_by_candidate_is_a_contradiction():
+    """A decorated native value that disagrees with the candidate must
+    produce a real CONTRADICTION, not a vacuous abstention. This is the
+    test that proves the oracle actually works on the table shape it was
+    built for, not just that it fails safe on it."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 90, 110, "Coef"),
+        w(150, 100, 180, 110, "$1.10"),
+        w(50, 130, 90, 140, "SE"),
+        w(150, 130, 180, 140, "0.05∗∗"),
+    ]
+    md = """
+|      | OLS    |
+|------|--------|
+| Coef | 1.10   |
+| SE   | 999.99 |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert result.structural_agreement is False
+    assert len(result.contradicted_cells) == 1
+    bad = result.contradicted_cells[0]
+    assert bad.row_path[-1] == "SE"
+    assert bad.native_token == "0.05∗∗"
+    assert bad.model_token == "999.99"
+    # Coef's own decorated value still matches cleanly (value reported
+    # verbatim, as printed natively, not normalized).
+    assert any(m.row_path[-1] == "Coef" and m.value == "$1.10" for m in result.matched_cells)
+
+
+# ---------------------------------------------------------------------------
+# 11. A label-less data matrix must not have its first column mistaken for
+#     a stub — "always leftmost in its row" alone is not sufficient
+#     evidence (MAJOR 4 follow-up: caught by an independent reviewer's own
+#     adversarial fixture while re-checking the stub-lane fix).
+# ---------------------------------------------------------------------------
+
+
+def test_unlabeled_data_matrix_keeps_its_first_column():
+    """A pure numeric matrix with no row-label text at all makes its first
+    (leftmost) data column trivially "always leftmost in its row" too —
+    exactly the same shape a genuine numeric row-label stub has. Removing
+    it as a stub would silently turn a fully verifiable table into a
+    completely unverifiable one. Stub removal must only fire when the
+    candidate's own column count confirms it is needed, not on the
+    "always leftmost" geometry signal alone."""
+    words = [
+        w(150, 70, 180, 80, "OLS"),
+        w(250, 70, 280, 80, "IV"),
+        w(150, 100, 180, 110, "1.10"),
+        w(250, 100, 280, 110, "1.11"),
+        w(150, 130, 180, 140, "2.20"),
+        w(250, 130, 280, 140, "2.21"),
+    ]
+    md = """
+|   | OLS  | IV   |
+|---|------|------|
+|   | 1.10 | 1.11 |
+|   | 2.20 | 2.21 |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert result.structural_agreement is True
+    assert result.contradicted_cells == []
+    matches = {(m.col_path[-1], m.value) for m in result.matched_cells}
+    assert matches == {("OLS", "1.10"), ("IV", "1.11"), ("OLS", "2.20"), ("IV", "2.21")}
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
