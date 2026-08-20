@@ -1,0 +1,56 @@
+{
+ "wave": "4 + 5",
+ "closed_at": "2026-08-20T01:31:10Z",
+ "tickets": {
+  "E0": "DONE",
+  "E1": "DONE PR#251",
+  "E2": "DONE PR#252 (blocking review findings UNADDRESSED)",
+  "E3": "DONE PR#253",
+  "E4": "DONE \u2014 no PR, DOES-NOT-REPRODUCE",
+  "E5": "DONE PR#254",
+  "E6": "DONE PR#255",
+  "E7": "SKIPPED (canary cannot be validated without a real backend)",
+  "F1": "DONE MORNING-REPORT.md"
+ },
+ "prs": [
+  {
+   "n": 251,
+   "base": "main",
+   "ci": "GREEN",
+   "reviewed": "APPROVE"
+  },
+  {
+   "n": 252,
+   "base": "fix/161",
+   "ci": "NO-CHECKS",
+   "reviewed": "REQUEST-CHANGES \u2014 NOT FIXED"
+  },
+  {
+   "n": 253,
+   "base": "fix/225",
+   "ci": "NO-CHECKS",
+   "reviewed": null
+  },
+  {
+   "n": 254,
+   "base": "fix/205",
+   "ci": "NO-CHECKS",
+   "reviewed": null
+  },
+  {
+   "n": 255,
+   "base": "fix/195",
+   "ci": "NO-CHECKS",
+   "reviewed": null
+  }
+ ],
+ "merged": 0,
+ "closes_executed": 0,
+ "comments_posted": 6,
+ "held_for_owner": 2,
+ "open_issues_before": 62,
+ "open_issues_after": 62,
+ "main_sha_drift": "none",
+ "abort_latch_set": false,
+ "main_loose_end": "#252 blocking review findings unaddressed; it is the base of 3 other PRs"
+}

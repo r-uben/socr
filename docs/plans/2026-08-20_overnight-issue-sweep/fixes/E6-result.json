@@ -1,0 +1,20 @@
+{
+  "branch": "fix/222-probe-interface",
+  "base_branch": "fix/195-197-198-destruction-check",
+  "pr_url": "https://github.com/r-uben/socr/pull/255",
+  "head_sha": "2fe735563e0691aa2d1af2cd8954c17576653cf8",
+  "ci_state": "NO-CHECKS",
+  "ci_detail": "Structural (ci.yml triggers only into main). Local suite + lint are the only verification; stated in the PR body.",
+  "scope": "#222 defect 1 (hardcoded host) ONLY. Defects 2 and 3 untouched and pinned by a scope-guard test. #222 stays open.",
+  "baseline_fail_output": "$ PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-night-base/src ~/venvs/socr/bin/pytest tests/test_gh222_probe_host.py -q\n\nE       AssertionError: the probe asked the wrong machine: ['http://localhost:11434/api/tags']\nE       assert ['http://loca...434/api/tags'] == ['http://gpu-...434/api/tags']\nE         At index 0 diff: 'http://localhost:11434/api/tags' != 'http://gpu-node.cluster:11434/api/tags'\nE       AssertionError: ['http://localhost:11434/api/tags']\nE       assert ['http://loca...434/api/tags'] == ['http://127....434/api/tags']\nE         At index 0 diff: 'http://localhost:11434/api/tags' != 'http://127.0.0.1:11434/api/tags'\n\nFAILED tests/test_gh222_probe_host.py::test_probe_targets_the_configured_host_not_localhost\nFAILED tests/test_gh222_probe_host.py::test_bare_host_env_keeps_the_daemon_default_port\n2 failed, 3 passed, 5 warnings in 0.17s\n\nBoth behavioural, against probe_ollama_idle which exists at main_sha. The 3 passed are the\ntwo reverse-regression guards and the scope guard.",
+  "branch_pass_output": "$ PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-night-e/src ~/venvs/socr/bin/pytest tests/test_gh222_probe_host.py -q\n.....                                                                    [100%]\n5 passed, 5 warnings in 0.19s",
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-e/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-e\nCANARY_EXIT=0",
+  "lint": "$ uvx ruff@0.16.0 format --check .  ->  328 files already formatted, exit 0",
+  "suite_result": "1851 passed, 3 xfailed, 0 failed, 104.03s. No pre-existing failures.\nTwo meta-tests DID fail mid-work, caused by the new config field, and were satisfied properly\nrather than exempted (see meta_tests below).",
+  "trap_found": "OLLAMA_HOST is very commonly spelled BARE (127.0.0.1, gpu-node) and the daemon\nsupplies port 11434 itself in that case. My first resolver read the value literally, producing\nhttp://127.0.0.1 — port 80 — on this very machine, where the variable is set that way. That\nwould have turned honouring the variable into a NEW way to probe the wrong place: the defect\nrelocated rather than removed. The resolver now fills the port in when omitted, pinned by\ntest_bare_host_env_keeps_the_daemon_default_port.",
+  "meta_tests": "- test_every_config_field_is_classified (#142): ollama_host added to _UNEXERCISED with\n  its reason (read by _probe_backend_idle, which runs only after a timeout; that fixture\n  produces none).\n- test_every_field_is_restorable (#240): the generic prober had no branch for a None default.\n  I extended the PROBER rather than adding the field to the exemption list, so ollama_host is\n  genuinely PROVEN restorable and every future optional scalar gets the coverage free.",
+  "deliberately_unchanged": "- _had_timeout's scope and substring match (#222 defects 2 and 3). Gated on #159; pinned by\n  test_trigger_predicate_unchanged. #222 STAYS OPEN.\n- The liveness ping itself (issue fix-sketch item 4, replace /api/tags with #221's functional\n  canary). That is #221's change.\n- The other hardcoded localhost:11434 defaults in consensus.py, math/recover.py,\n  judge/ollama_judge.py, engines/gemini_api.py, cli.py. Same smell, different call paths,\n  none of them the cascade-halt guard. Worth a separate sweep.",
+  "blockers": [],
+  "baseline_worktree_clean": true,
+  "merged": false
+}

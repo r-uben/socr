@@ -1,0 +1,31 @@
+{
+  "branch": "fix/195-197-198-destruction-check",
+  "base_branch": "fix/205-tr3-auditevent",
+  "pr_url": "https://github.com/r-uben/socr/pull/254",
+  "head_sha": "163ffcbb338e744a93ca56bca9fb8a0b6dbe7cba",
+  "ci_state": "NO-CHECKS",
+  "ci_detail": "Structural (ci.yml triggers only on push/pull_request into main; base is a feature branch). Local full-suite + lint are the only verification for this change.",
+  "issues_closed": [
+    197,
+    198,
+    195
+  ],
+  "issues_dropped": [],
+  "all_three_reproduced_at_baseline": true,
+  "baseline_fail_output": "$ PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-night-base/src ~/venvs/socr/bin/pytest tests/test_destruction_check_gh195_197_198.py -q\n\nE       AssertionError: a lane boundary split the decorated value '0.67***' and the destruction check did not notice; got []\nE       assert [] == ['0.67***']\nE       AssertionError: a lane boundary split the decorated value '−0.253' and the destruction check did not notice; got []\nE       assert [] == ['−0.253']\nE       AssertionError: a lane boundary split the decorated value '$0.67' and the destruction check did not notice; got []\nE       assert [] == ['$0.67']\nE       AssertionError: the good grid was rejected on the None path: []\nE       assert 0 == 1\nE        +  where 0 = len([])\nE       AssertionError: the text-strategy grid rejection reached no surface — it exists only as a logger.warning; recorded events were []\nE       assert []\n\n=========================== short test summary info ============================\nFAILED tests/test_destruction_check_gh195_197_198.py::test_decorated_numeric_destruction_is_detected[significance-stars]\nFAILED tests/test_destruction_check_gh195_197_198.py::test_decorated_numeric_destruction_is_detected[unicode-minus]\nFAILED tests/test_destruction_check_gh195_197_198.py::test_decorated_numeric_destruction_is_detected[currency-prefix]\nFAILED tests/test_destruction_check_gh195_197_198.py::test_no_numeric_row_keeps_the_grid_instead_of_checking_table_bbox\nFAILED tests/test_destruction_check_gh195_197_198.py::test_real_rejection_reaches_a_surface\n5 failed, 3 passed, 5 warnings in 0.32s\n\nThree failures for #198, one for #197, one for #195 — one per issue, every one a behavioural\nassertion against code that exists at main_sha. The 3 passed are the reverse-regression guards.",
+  "branch_pass_output": "$ PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-night-e/src ~/venvs/socr/bin/pytest tests/test_destruction_check_gh195_197_198.py -q\n........                                                                 [100%]\n8 passed, 5 warnings in 0.32s",
+  "canary": "CANARY OK: socr.__file__ = /Users/rubenffuertes/repos/.worktrees/socr-night-e/src/socr/__init__.py\n           worktree      = /Users/rubenffuertes/repos/.worktrees/socr-night-e\nCANARY_EXIT=0",
+  "lint": "$ uvx ruff@0.16.0 format --check .\n327 files already formatted\nexit 0\n(Three files needed reformatting first; applied before committing, then the full suite re-run.)",
+  "suite_result": "1846 passed, 3 xfailed, 0 failed, 100.45s (re-run after formatting). No pre-existing failures.",
+  "two_self_corrections_worth_reviewing": "1. VACUITY CAUGHT IN MY OWN TEST. My first #195 tests asserted on the new `rejections=`\n   keyword and the new PageAssessment field. At main_sha they failed with\n   `TypeError: reconstruct_table_regions() got an unexpected keyword argument 'rejections'`\n   — exactly the vacuous shape the non-vacuity rule exists to catch, since a reverted fix\n   would fail on a signature error rather than on behaviour. Replaced with a test that drives\n   the REAL BornDigitalDetector over GH-144's own regression fixture and asserts on\n   state.events, naming no symbol the fix introduces.\n\n2. CONTRADICTORY FIXTURE. My first #198 fixture modelled the raw cell as \"0.67\" (star\n   dropped, value intact). That is the DECORATION case, not a boundary split — it made the\n   defect test and the reverse-regression test assert opposite things about identical inputs,\n   and the defect test failed on my own branch. The fixture now models the cell as \"0\" (the\n   value itself cut), the actual GH-144 mechanism.",
+  "deliberately_unchanged": "- Page and document STATUS for #195. The word-geometry fallback is proven lossless\n  (GH-144 A1 §2 control), so the page ships CORRECT values; flagging the document as damaged\n  would be a false signal. The event says \"this layout is adversarial to the text strategy,\n  worth spot-checking\", which is what the issue asks for.\n- RESIDUAL GAP, stated in the PR body: decoration-only loss (0.67*** rendered as 0.67) is NOT\n  treated as destruction. The significance marker is lost and the grid is kept. That follows\n  the issue's own guidance, but it is a real remaining gap, not something the fix covers.\n- _destroyed_numeric_tokens' conservative \"any ambiguity counts as destroyed\" contract\n  (no-cell / cell=None / grid-missing / grid-none) — untouched.\n- _NUM_TOKEN_RE itself and its other call sites (has_numeric_columns, _looks_tabular, the\n  rowizer). Only the destruction check's candidate filter was widened, and as a UNION so no\n  previously-checked token stops being checked.",
+  "blockers": [],
+  "files_changed": [
+    "src/socr/tables/reconstruct.py (#197 None-path skip + dead branch removed; #198 union candidate filter + symmetric survival widening; #195 rejections out-param)",
+    "src/socr/core/born_digital.py (#195 side-channel + PageAssessment.text_grid_rejections)",
+    "src/socr/pipeline/orchestrator.py (#195 text_grid_rejected audit event + CLI line)",
+    "tests/test_destruction_check_gh195_197_198.py (new, 8 tests: 5 defect + 3 reverse-regression)"
+  ],
+  "baseline_worktree_clean": true,
+  "merged": false
+}

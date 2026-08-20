@@ -11,7 +11,7 @@
 - **Nothing was closed.** 62 issues open at the start, 62 open now.
 - **6 correction comments posted**, every issue verified still open afterwards.
 - **2 actions held for you**, including the run's only close.
-- **3 PRs open, none merged**: #251, #252, #253.
+- **5 PRs open, none merged**: #251–#255. **#252 has blocking review findings and they were NOT fixed** — see §6 before merging anything above it.
 - **Zero fabricated citations** across 192 machine-checked verdicts.
 
 The single most valuable thing that happened tonight was a fix **not** being
@@ -229,7 +229,7 @@ page: `fixes/E4-result.json`.
 
 ## 6. PR decision queue
 
-**None merged. All three are proposals.** They are a **stack** — each is based on
+**None merged. All five are proposals.** They are a **stack** — each is based on
 its predecessor, not on `main`.
 
 | PR | issue | head | base | CI | local suite | reviewer | stack pos |
@@ -237,6 +237,35 @@ its predecessor, not on `main`.
 | [#251](https://github.com/r-uben/socr/pull/251) | #161 resume ledger trusts judge-rejected pages | `b562acc` | `main` | **test + typecheck PASS** | 1830 passed, 3 xfailed | gemini-pro **APPROVE** | 1 (bottom) |
 | [#252](https://github.com/r-uben/socr/pull/252) | #225 fabricated image URLs ship under SUCCESS | `4200171` | `fix/161-…` | **NO-CHECKS** | 1835 passed, 3 xfailed | grok, in flight at cutoff | 2 |
 | [#253](https://github.com/r-uben/socr/pull/253) | #205 TR-3 hard-fail surfaced (surfacing only) | `83f6ac8` | `fix/225-…` | **NO-CHECKS** | 1838 passed, 3 xfailed | not dispatched | 3 |
+| [#254](https://github.com/r-uben/socr/pull/254) | #195+#197+#198 destruction check, one PR | `163ffcb` | `fix/205-…` | **NO-CHECKS** | 1846 passed, 3 xfailed | not dispatched | 4 |
+| [#255](https://github.com/r-uben/socr/pull/255) | #222 probe extracted behind an interface | `2fe7355` | `fix/195-…` | **NO-CHECKS** | see result file | not dispatched | 5 (top) |
+
+### #252 has BLOCKING review findings — do not merge it
+
+Its independent reviewer (grok) returned **REQUEST-CHANGES**, and one finding is a
+cardinal-rule violation introduced *by the fix*:
+
+- **blocking, `manifest.py:314`** — demoting `audit_passed=False` makes assemble
+  throw away the cleaned OCR page and ship native SUCCESS instead. On #225's own
+  document class (born-digital) that is **silent content loss caused by the fix
+  meant to prevent it**.
+- **blocking, `manifest.py:355`** — no end-to-end assertion that a legitimate image
+  ref survives assemble. The reviewer reports `legitimate_urls_still_ship = false`.
+  The three reverse tests only inspect the gate predicate, not the assembled output.
+- major, `normalizer.py:66` — a provenanced URL in CommonMark title syntax
+  (`![Chart](https://…/c.png "Official chart")`) is stripped as fabricated.
+- major, `orchestrator.py:5104` — #225 asks to **fail** the page; the PR demotes
+  SUCCESS→WARNING and the born-digital path then restamps SUCCESS, so the signal
+  can vanish entirely.
+
+The reviewer independently reproduced the baseline failure, so it read the code
+carefully. **The findings were relayed to the code owner twice and were NOT
+addressed.** #252's head is still `4200171` — the commit the reviewer rejected. The
+code owner continued up the stack to E6/E7 instead and did not return. I chose to
+report that plainly rather than have it rush a cardinal-rule change at 06:40.
+
+**#252 is the base of #253 and #254, so all three inherit this.** Merging bottom-up
+means #251 first, then **stopping** until #252 is fixed.
 
 ### Non-vacuity proof
 
@@ -301,12 +330,25 @@ which is exactly what would make these passes fast.
 ## 8. Failures, skips, and things that went wrong
 
 - **E4 (#147)** — no branch, no PR. `DOES-NOT-REPRODUCE`. Correct outcome, §5.
-- **E5 (#195+#197+#198), E6 (#222), E7 (#221+#227)** — dispatched to the code owner
-  near the end of the run; **not terminal at report time**. E7 was expected to be
+- **E5 (#195+#197+#198)** — landed as **PR #254**, 1846 passed locally, no blockers
+  reported by the code owner, not independently reviewed.
+- **E6 (#222)** — landed as **PR #255**, no blockers reported by the code owner, not
+  independently reviewed.
+- **E7 (#221+#227)** — **SKIPPED**, and the reasoning is better than the gate I set.
+  The gate said skip if the timeout stub cannot carry backend identity without #159.
+  The code owner found that premise is **false** — `ProviderAttempt` and
+  `ProviderProfile` already carry `provider_id`/`model`/`backend`, `prof` is in scope
+  at the timeout site, and the two sibling branches already populate all three; the
+  timeout branch is simply the one never updated. Three lines, no #159 needed.
+  It skipped anyway, for a stronger reason: the substantive fix is a routing
+  redesign around a 1-token functional canary, and *the canary is the fix* — it can
+  only be validated against a real backend in both wedged and healthy states, and CI
+  has no provider at all. Correct call. Detail in `fixes/E7-result.json`.
+- **#252's blocking findings** — **NOT ADDRESSED.** Relayed twice; the code owner did
+  not return. This is the run's main loose end. E7 was expected to be
   **SKIPPED**: two independent seats found the combined fix depends on #159's
   attempt-identity work, and #227 warns that fixing #221's probe alone makes
-  behaviour *worse*. Check `fixes/E5-result.json`, `E6-result.json`, `E7-result.json`
-  for whatever landed after this was written.
+  behaviour *worse*. It remains the correct thing to skip.
 - **Vendors:** grok and kimi produced nothing for ~35 minutes and were declared
   MISSING; replacement seats were dispatched. Both then delivered, and grok's
   citations were the cleanest in the run (39/39 exact). The replacements became
@@ -357,14 +399,18 @@ stated reason was wrong. Proof in `logs/2026-08-20_A1-sentinel-transcript.md`.
    p26 characterisation. Say post-corrected or drop.
 3. **One line in `ci.yml`** (2 min, optional). Drop `branches: [main]` from the
    `pull_request:` trigger so stacked PRs get CI. Pays for itself immediately.
-4. **Review #252 and #253** (15 min). Neither has CI; both have a full local suite
-   pass and a non-vacuity proof in the body. #253 is deliberately narrow — confirm
-   you agree the AuditEvent-only scope is what you want before it grows.
-5. **Settle #147** (15 min, design). Narrow the closing Note to table pages and
+4. **Do not merge #252** (5 min to read). Its reviewer found the fix itself causes
+   silent content loss on born-digital pages, and the findings were never
+   addressed — the head is still the commit that was rejected. Everything above it
+   in the stack inherits this. See §6.
+5. **Get #253, #254 and #255 reviewed** (30 min). None has CI *or* an independent
+   reviewer — only the author's own tests. #253 is deliberately narrow (AuditEvent
+   only); confirm you want that scope before it grows.
+6. **Settle #147** (15 min, design). Narrow the closing Note to table pages and
    close it, or keep the literal reading and accept the work. The measurement in
    `fixes/E4-result.json` is the input. Worth a GPT second opinion now that its
    quota is back.
-6. **Decide what to do with 32 live fix candidates** (30 min). That is the real
+7. **Decide what to do with 32 live fix candidates** (30 min). That is the real
    output of the night. The backlog is not stale; it is deep. `fixes/queue.json`
    lists the 28 that were adjudicated FIX-CANDIDATE but deliberately not attempted,
    because authoring fix scope at 04:00 is how #250 happened.
@@ -393,9 +439,14 @@ staleness — the evidence apparatus is worth far more supervising *fixes* than
 supervising *closes*. And fix the CI trigger first; a stack that cannot be verified
 is a stack you have to review by hand.
 
-**What I'd distrust in my own report.** E5/E6/E7 were still running when this was
-written, and the #252 review had not returned. Everything in §6 about those is
-"as of 05:10" and should be re-read from the `fixes/*.json` files.
+**What I'd distrust in my own report.** #253, #254 and #255 have had **no
+independent review at all** — only the code owner's own testing. Of the two PRs that
+*were* reviewed, one was approved and one was found to cause silent content loss
+that its author had not seen. On that base rate, assume the three unreviewed PRs
+contain comparable problems until someone looks. **The review seat, not the
+implementation seat, was the scarce resource tonight, and I allocated it badly:**
+I let the code owner run five tickets deep while only two PRs got a reviewer. The
+stack should have been capped at whatever I could get reviewed.
 
 ---
 

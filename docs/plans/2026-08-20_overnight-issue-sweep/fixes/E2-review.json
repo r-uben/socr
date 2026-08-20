@@ -1,0 +1,41 @@
+{
+  "pr": 252,
+  "reviewer": "grok",
+  "access_proof": {
+    "cmd": "bash $PLAN/bin/isolation_canary.sh --read-only /Users/rubenffuertes/repos/.worktrees/socr-night-base && gh pr view 252 --repo r-uben/socr --json title,body,baseRefName,headRefName && gh pr diff 252 --repo r-uben/socr",
+    "output": "CANARY OK (read-only mode): worktree = /Users/rubenffuertes/repos/.worktrees/socr-night-base\n           HEAD          = 53b0637b928c486e9ff3023fa9527905fec017b2\nPR #252 title=fix(fabrication): gate emitted image refs on source provenance (#225) base=fix/161-resume-ledger-audit head=fix/225-phantom-image-urls\ndiff starts: diff --git a/src/socr/core/url_provenance.py b/src/socr/core/url_provenance.py"
+  },
+  "verdict": "REQUEST-CHANGES",
+  "non_vacuity_confirmed": true,
+  "legitimate_urls_still_ship": false,
+  "reproduced_baseline_fail": true,
+  "ci_state": "NO-CHECKS for real CI: claude=skipping, CodeRabbit=pass (reviews disabled for this base branch), cubic=pass. No pytest/ruff GitHub Actions job reported.",
+  "base_worktree_left_clean": true,
+  "findings": [
+    {
+      "severity": "blocking",
+      "what": "Demoting audit_passed=False makes assemble throw away the cleaned OCR page and ship native SUCCESS instead. On the issue's own document class (born-digital, native_text present, VLM OCR) the fabricated URL is gone, but so is the table the VLM actually extracted; the corpus gets flattened native, the page sidecar is restamped SUCCESS/audit_passed=True, and the document stays SUCCESS. The sanitizer-only tests cannot see this.",
+      "where": "src/socr/core/manifest.py:314",
+      "why": "At main_sha, _winning_page_output returns best_output only when audit_passed is true; otherwise a born-digital page with native_text takes the native branch (manifest.py:355) and ships engine=native / SUCCESS unless a table-distrust flag is set. I reproduced this against commit 4200171: after _sanitize_agentic_page_image_refs, out.text had the marker and no imgur, but _winning_page_output(state, 1) returned native text 'Table 2.3 Public finances\\n\\nborrowing forecast 2022 2023 2024\\n' with status=SUCCESS, audit_passed=True, table markdown gone. needs_repair is False because a non-native attempt exists (state.py:115-116), so pages_ok stays true and assemble stamps DocumentStatus.SUCCESS (orchestrator.py:5104-5109). The OBR pages that motivated #225 are exactly this shape. A page that also had a real local figure would lose that too. Fix the seam: keep the OCR body as the winner while demoting, or demote after winner selection \u2014 do not flip audit_passed on best_output before assemble."
+    },
+    {
+      "severity": "blocking",
+      "what": "No reverse-regression assertion that a legitimate image ref still ships through assemble/_winning_page_output. The three reverse tests only inspect the PageOutput mutated by _sanitize_agentic_page_image_refs. That is the naive test the brief warned about: a strip-too-much (or swap-to-native) fix still passes them.",
+      "where": "src/socr/core/manifest.py:355",
+      "why": "test_url_present_in_the_source_pdf_still_ships and test_local_asset_socr_wrote_still_ships never call _winning_page_output, _canonical_body, or _phase_assemble. Combined with finding 1 they are vacuous as corpus-level guards. Issue #225's suggested minimum is that a real local asset and a URL the PDF itself carries must still ship; that property is untested on the path that actually writes pages/NNN.md."
+    },
+    {
+      "severity": "major",
+      "what": "A provenanced URL in CommonMark title syntax is treated as fabricated and stripped: ![Chart](https://example.com/chart.png \"Official chart\") when the PDF's LINK_URI is exactly that URL.",
+      "where": "src/socr/core/normalizer.py:66",
+      "why": "The new matcher is the same [^)]+ shape as OutputNormalizer._RE_MD_IMAGE at main_sha. The title is swallowed into the target, normalize_url does not equal the annotation, and the ref is replaced by the marker. Reproduced against 4200171: source_url_index contained https://example.com/chart.png; redact_fabricated_image_refs removed the image. That is a real URL the PDF carries, i.e. the reverse regression the brief ranked first. The reverse test only uses ![Chart 2.3](url) with no title."
+    },
+    {
+      "severity": "major",
+      "what": "Issue #225 said fail the page, not warn. The PR demotes SUCCESS\u2192WARNING and, on the born-digital path, assemble then restamps SUCCESS. Cardinal-rule surfacing is overstated.",
+      "where": "src/socr/pipeline/orchestrator.py:5104",
+      "why": "PR body table claims page/metadata/document/CLI all carry the signal. On a scanned page, needs_repair becomes True so the document is AUDIT_FAILED and CLI prints the yellow audit warning \u2014 that path works. On the OBR born-digital path, pages_ok is True, result.status is SUCCESS, metadata is COMPLETED, CLI prints Success, and the note in final_result.error is a dim line on a green run. CLI only non-zeros AUDIT_FAILED when LOST_CONTENT_NOTE is in result.error (cli.py:454-466); a fabrication note does not trip that. Phase-major 'no per-page demotion' is honestly disclosed; the agentic born-digital SUCCESS restamp is not."
+    }
+  ],
+  "what_i_tried_to_break": "1) Reverse regression: copied tests into socr-night-base, pytest 2 failed / 3 passed on behavioural asserts inside existing _sanitize_agentic_page_image_refs (not ImportError); deleted the file, git status --porcelain empty. 2) Drove _winning_page_output after the new sanitizer on a born-digital table page (OBR shape) \u2014 assemble winner became native SUCCESS and dropped the OCR table. 3) Title-syntax image with a real LINK_URI was redacted. 4) Text-layer URL without annotation is kept (claimed). 5) HTML <img> is untouched (out of markdown-image scope). 6) Scanned (no native_text) keeps the marker and demotes, and needs_repair is True. 7) No MagicMock in the new test. 8) No host allowlist; schemes tuple only. 9) Tests do not drive _phase_agentic, so no CI-provider hermeticity hole in the new file. 10) CI has no pytest job on this PR."
+}

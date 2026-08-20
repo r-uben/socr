@@ -1,0 +1,28 @@
+{
+  "branch": null,
+  "base_branch": "fix/222-probe-interface",
+  "pr_url": null,
+  "head_sha": null,
+  "ci_state": "N/A",
+  "verdict": "SKIPPED",
+  "issues": [
+    221,
+    227
+  ],
+  "gate_result": "GATE PREMISE IS FALSE, BUT THE CONCLUSION HOLDS — skipping for a different, stronger reason.",
+  "gate_as_stated": "Skip if the timeout stub cannot carry backend identity without also shipping #159.",
+  "what_i_actually_found": "The stub CAN carry backend identity, in three lines, with no #159\nwork at all. Verified mechanically at main_sha:\n\n  * ProviderAttempt (agentic.py:72-81) ALREADY declares provider_id, model and backend, each\n    defaulting to \"\".\n  * ProviderProfile (providers.py:45-55) ALREADY carries .id, .backend and .model.\n  * At the timeout site (main_sha agentic.py:232-243) `prof` is in scope — the very same\n    statement reads prof.engine twice.\n  * The sibling \"provider raised\" branch ~15 lines below, and the \"judge raised\" branch below\n    that, both populate all three from that same `prof`. The timeout branch is simply the one\n    that was never updated.\n\nSo #227's stated prerequisite (\"Backend identity must be recorded there (issue #159) before\nany per-backend canary can be selected\") overstates the dependency: recording the identity is\nindependent of #159 and changes no behaviour, because nothing reads those fields on the\ntimeout path today.",
+  "why_i_skipped_anyway": "Recording identity was never the hard part. The substantive\n#221+#227 fix is D1's ratified rule, and it is a routing redesign, not a patch:\n\n  \"On a page timeout, run a 1-token functional canary against the timing-out attempt's own\n   backend and model; if it passes, keep the ladder intact and continue; if it fails — or\n   cannot be run at all — mark that backend degraded, drop every ladder rung (and the judge)\n   using it for the rest of the document, and halt with PARTIAL_SAVE_VLM_TIMEOUT only when no\n   rung remains.\"\n\nThree reasons not to ship that unattended tonight:\n\n1. THE CANARY IS THE FIX AND IT CANNOT BE VERIFIED HERE. Its whole point is to distinguish a\n   wedged GPU from a healthy one — #221 measured /api/tags answering 200 in 0.03s against a\n   jammed GPU. A canary can only be tested against a real backend in both states. In CI there\n   is no provider at all, so anything I wrote would be exercised only through a stub, i.e. the\n   one component whose correctness matters would ship unverified.\n2. BOTH FAILURE MODES DESTROY OUTPUT. Halt too eagerly and a healthy document is truncated\n   (#222's damage); halt too late and a 45-page document burns 3.75 hours producing nothing\n   (#221's damage). There is no safe direction to be wrong in, and no way to measure which way\n   I was wrong before morning.\n3. IT IS A LADDER-PRUNING POLICY, not a predicate change. \"Drop every rung using that backend\n   for the rest of the document, halt only when no rung remains\" is new state threaded through\n   the per-page loop, and #227's own analysis notes the default local->cloud->gemini ladder\n   probes ONE endpoint for TWO rungs (PROFILE_QWEN_CLOUD.backend is \"ollama-cloud\" but still\n   runs through localhost:11434), so \"drop rungs using that backend\" has a non-obvious blast\n   radius that deserves a design decision, not an overnight guess.\n\n#227 warns that fixing #221's probe alone makes behaviour worse. The same logic applies to\nshipping a canary without the trigger fix, or the trigger fix without a trustworthy canary.",
+  "what_i_did_NOT_ship_but_is_safe": "The three-line identity enrichment on the timeout stub\n(provider_id / model / backend from `prof`, matching the two sibling branches) is inert — no\ncurrent reader — and unblocks the canary work. I did NOT ship it, because the ticket I was\ngiven was #221+#227 and a prerequisite-only PR is a different ticket that nobody asked for.\nOffered to the owner as a candidate small PR; it would also let #159 be narrowed.",
+  "interaction_with_E6_worth_knowing": "E6 fixed WHICH machine the probe asks, not what the\nprobe can detect. On a machine that runs ollama, #221's finding stands unchanged: /api/tags\nanswers 200 during a wedge, so the halt branch is still effectively dead there. On a machine\nwithout a local daemon, the probe still returns False, so #227's over-broad trigger can still\ntruncate a document in which every page succeeded. E6 therefore did NOT arm anything new — it\nstrictly reduces false halts on correctly-configured deployments — but it also did not close\neither #221 or #227, and neither should be read as mitigated.",
+  "recommendation": "Keep #221 and #227 open and paired. Give them a design pass (the canary's\nverification strategy is the crux — how do you test a wedge detector without a wedge?), not an\nimplementation ticket. Consider landing the three-line stub identity enrichment first as its\nown trivially-reviewable PR.",
+  "canary": "N/A — no code written for E7. All findings are source reads at main_sha, cited above.",
+  "lint": "N/A",
+  "suite_result": "N/A",
+  "deliberately_unchanged": "Everything. No branch cut, no file edited, no PR opened for E7.",
+  "blockers": [
+    "#221/#227 need a design decision on how a wedge detector is verified, before implementation."
+  ],
+  "baseline_worktree_clean": true,
+  "merged": false
+}

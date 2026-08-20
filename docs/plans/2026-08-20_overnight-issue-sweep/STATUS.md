@@ -7,7 +7,7 @@ Last updated: 2026-08-20 05:10 (night orchestrator, run complete)
 ## Outcome in one line
 
 62 issues triaged and adjudicated, 6 correction comments posted, **0 issues
-closed**, 3 PRs open and unmerged, 2 actions held for the owner.
+closed**, **5 PRs open and unmerged**, 2 actions held for the owner.
 
 ## Ticket board
 
@@ -28,12 +28,18 @@ closed**, 3 PRs open and unmerged, 2 actions held for the owner.
 | E2 | DONE | PR #252, NO-CHECKS (stacked), local suite green |
 | E3 | DONE | PR #253, NO-CHECKS (stacked), surfacing only |
 | E4 | DONE — no PR | `DOES-NOT-REPRODUCE`; became a design question for the owner |
-| E5–E7 | IN FLIGHT at cutoff | see `fixes/E5-result.json` etc. E7 expected SKIPPED (gated on #159) |
+| E5 | DONE | PR #254 (#195+#197+#198 as one PR) |
+| E6 | DONE | PR #255 (#222 probe interface) |
+| E7 | SKIPPED | correctly — the canary IS the fix and cannot be validated without a real backend |
 | W1–W3 | DONE | `state/checkpoint-wave{0,1,3}.json` |
 | F1 | DONE | `MORNING-REPORT.md` |
 
 ## Open threads for the owner
 
+0. **`#252` has blocking review findings that were never addressed** — its reviewer
+   found the fix itself causes silent content loss on born-digital pages, and the
+   head is still the rejected commit. #253/#254/#255 are all stacked on it. This is
+   the run's main loose end and the first thing to look at.
 1. `#147` — design call: narrow the closing Note to table pages, or accept the work.
 2. `#151` — one disputed sentence in a held correction comment.
 3. `ci.yml` — stacked PRs run no tests at all; one-line fix available.
@@ -43,4 +49,5 @@ closed**, 3 PRs open and unmerged, 2 actions held for the owner.
 
 - Merge anything on the sweep's behalf; all three PRs are proposals.
 - Re-run `bin/apply_tracker_actions.sh` expecting new writes — it is idempotent.
-- Treat `E5`–`E7` status here as final; read their result files.
+- Merge anything above #252 until its findings are resolved.
+- Assume #253/#254/#255 are sound: none of them was independently reviewed.
