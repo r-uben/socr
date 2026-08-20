@@ -1,0 +1,33 @@
+{
+ "wave": "3",
+ "closed_at": "2026-08-20T00:31:12Z",
+ "tickets": {
+  "D0": "DONE",
+  "DR": "DONE",
+  "D1": "DONE (zero closes \u2014 valid outcome)",
+  "D2": "DONE",
+  "D3": "DONE (no discoveries filed)"
+ },
+ "staged": 8,
+ "approved": 6,
+ "held_for_owner": 2,
+ "executed": 6,
+ "closes_executed": 0,
+ "open_issue_count_before": 62,
+ "open_issue_count_after": 62,
+ "held": [
+  {
+   "issue": 147,
+   "kind": "close",
+   "why": "gemini-pro refuted it: rotation check nested inside the has_tables branch, so rotated pages without tables bypass the gate"
+  },
+  {
+   "issue": 151,
+   "kind": "comment",
+   "why": "ollama-deepseek: the comment's central claim about the p26 evidence shape is false"
+  }
+ ],
+ "discoveries_dir_empty": true,
+ "abort_latch_set": false,
+ "next": "wave 4 \u2014 E3, E4 in flight; E5/E6 queued; E7 gated on #159"
+}

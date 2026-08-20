@@ -1,0 +1,137 @@
+{
+ "main_sha": "53b0637b928c486e9ff3023fa9527905fec017b2",
+ "policy": "one code owner, one worktree, stacked branches; each PR based on its predecessor",
+ "candidates": [
+  {
+   "id": "E1",
+   "issues": [
+    161
+   ],
+   "status": "SELECTED-DONE",
+   "branch": "fix/161-resume-ledger-audit",
+   "stack_base": "main_sha",
+   "pr": 251,
+   "why": "FIX-CANDIDATE unanimous across batch-3 seats AND mechanically reproduced at main_sha before any code was written"
+  },
+  {
+   "id": "E2",
+   "issues": [
+    225
+   ],
+   "status": "SELECTED-DONE",
+   "branch": "fix/225-phantom-image-urls",
+   "stack_base": "fix/161-resume-ledger-audit",
+   "pr": 252,
+   "why": "FIX-CANDIDATE, category-correct unanimous reading of a fabrication defect (batch-2 adjudicator)"
+  },
+  {
+   "id": "E3",
+   "issues": [
+    205
+   ],
+   "status": "SELECTED",
+   "branch": "fix/205-tr3-auditevent",
+   "stack_base": "fix/225-phantom-image-urls",
+   "why": "batch-1 adjudicator overrode three PARTIALLY-IMPLEMENTED seats to FIX-CANDIDATE on the ground that zero of the issue's own three steps landed",
+   "binding_scope": "AuditEvent surfacing ONLY. No routing change, no status keying. The issue itself forbids acting on the TR-3 hard-fail before its 62-page set is hand-judged, and a 25% firing rate is not a 25% defect rate."
+  },
+  {
+   "id": "E4",
+   "issues": [
+    147
+   ],
+   "status": "SELECTED-REVIVED",
+   "branch": "fix/147-landscape-axis",
+   "stack_base": "fix/205-tr3-auditevent",
+   "why": "REVIVED. The adjudicator called #147 ALREADY-FIXED and staged a close; the review board REJECTED that close. gemini-pro found the remaining defect precisely: text_direction_is_rotated() is only consulted inside the has_tables branch (born_digital.py:1119), so a rotated page WITHOUT tables bypasses the gate and ships as trusted native text. The night's own gate turned a wrong close into a well-specified fix.",
+   "scope": "hoist the rotation refusal out of the has_tables branch; do NOT implement the issue's conditional remedy (2), which needs the 407-paper measurement"
+  },
+  {
+   "id": "E5",
+   "issues": [
+    195,
+    197,
+    198
+   ],
+   "status": "SELECTED",
+   "branch": "fix/195-197-198-destruction-check",
+   "stack_base": "fix/147-landscape-axis",
+   "why": "all three FIX-CANDIDATE in batch-1; merged into one PR because they edit the same function and #198 introduces an import native_verifier already depends on"
+  },
+  {
+   "id": "E6",
+   "issues": [
+    222
+   ],
+   "status": "SELECTED",
+   "branch": "fix/222-probe-interface",
+   "stack_base": "fix/195-197-198-destruction-check",
+   "why": "FIX-CANDIDATE unanimous in batch-3; extracting the probe interface is separable from loop logic"
+  },
+  {
+   "id": "E7",
+   "issues": [
+    221,
+    227
+   ],
+   "status": "GATED",
+   "branch": "fix/221-227-cascade-latch",
+   "stack_base": "fix/222-probe-interface",
+   "why": "both FIX-CANDIDATE, but kimi and the batch-3 adjudicator independently found the combined fix depends on #159's attempt-identity work (the timeout stub must carry backend identity). Per TICKETS.md the gate is explicit: if it cannot, SKIP rather than half-build \u2014 #227 warns that fixing #221's probe alone makes behaviour WORSE.",
+   "gate": "can the timeout stub carry backend identity without shipping #159?"
+  }
+ ],
+ "fix_candidates_not_queued": [
+  {
+   "issues": [
+    139,
+    154,
+    159,
+    160,
+    162,
+    163,
+    166,
+    172,
+    177,
+    190,
+    213,
+    226,
+    140,
+    157,
+    164,
+    165,
+    219,
+    158,
+    169,
+    170,
+    171,
+    238,
+    64,
+    167,
+    181,
+    189,
+    223,
+    248
+   ],
+   "reason": "adjudicated FIX-CANDIDATE but not among the pre-authored candidates. Deliberately deferred: the panel's finding was that fix tickets cannot be authored at 03:00, and a fix written without a pre-agreed scope is how #250 happened. These are the morning's queue, not tonight's."
+  }
+ ],
+ "deferred_by_design": [
+  {
+   "issues": [
+    144
+   ],
+   "step": "step 3 routing change",
+   "reason": "needs the corpus measurement"
+  },
+  {
+   "issues": [
+    248,
+    249,
+    189,
+    245
+   ],
+   "reason": "need corpus measurement or hand judgement; cannot be settled unattended"
+  }
+ ]
+}
