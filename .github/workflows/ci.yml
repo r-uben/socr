@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # No branch filter: this trigger filters on the BASE branch, so a stacked PR
+  # based on its predecessor rather than on main silently ran no jobs at all --
+  # reviewed by people, executed by nobody. Every PR now self-verifies.
   pull_request:
-    branches: [main]
 
 jobs:
   test:
