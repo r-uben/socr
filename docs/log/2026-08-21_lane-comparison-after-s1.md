@@ -27,10 +27,17 @@ the cloud model on 5, native on 4, and nougat on 1 — native's share fell from 
 
 ## What this measures and what it does not
 
-This run was NOT a repeat of the one quoted in the 2026-08-20 record's re-run
-section. That earlier re-measurement ran against `d25b761`, **before** the review fix
-`d88d01e` reworked the S1 gate by 146 lines in `pipeline/orchestrator.py`. Its
-numbers never described shipped code. This file replaces them.
+This is the **first committed measurement of S1 as it actually shipped.** An earlier
+re-measurement was run during the working session against `d25b761`, the S1 branch
+before review; its numbers circulated in that session and are superseded here. They
+were never committed, so nothing in this repo is being corrected — the 2026-08-20
+record contains no re-measurement numbers, only the baseline and the method.
+
+The distinction matters because `d25b761` is not the shipped code. Merged `7c7f174`
+differs from it by 146 changed lines in `pipeline/orchestrator.py` (108 added, 38
+removed), the substantive part being `d88d01e`, which reworked the S1 gate. Anyone
+quoting the earlier session numbers as a description of shipped behaviour would be
+wrong.
 
 ## The 8 contested pages, before and after
 
@@ -96,15 +103,25 @@ invisible to a check that only asks whether a grid exists.
 
 Marked explicitly, as in the 2026-08-20 file.
 
-The per-page **quality** verdicts (faithful / degraded / wrong / absent) exist only as
-the table above. They came from two models reading page images that cannot be
-committed. The verdict JSON records which engine shipped and with what flags — not
-which output was better.
+**Everything content-level is session record, not repo-checkable.** The verdict JSON
+records which engine shipped, with what flags and status, and how many decimals each
+cached attempt held. It does not record what any of that text said, so no claim about
+quality can be confirmed from this repo. That covers, exhaustively:
 
-Also session record rather than repo-checkable: the `1.10`/`1.11` substitution, the
-byte counts on the discarded p15 and p43 candidates, and the judges' 7-of-8
-agreement. The routing, flags, statuses, decimal counts and engine mix are all in
-`2026-08-21_lane-comparison-after-s1-verdicts.json`.
+- the per-page quality verdicts (faithful / degraded / wrong / absent) and both
+  judges' category counts, including the 7-of-8 agreement and the grounding procedure
+  they were held to;
+- the four "citable grid" readings in the before/after table;
+- everything asserted about p42 — "every digit, no grid", native rated better than the
+  model, neither lane citable, and the `1.10`/`1.11` substitution itself;
+- the p15 figures (11 grid rows, 36 values, prose recovered) and the p43 figures
+  (0 fractions and 0 display environments shipped against 11 and 6 available);
+- that the two runs differ only in the code under test, and which commit each ran
+  against. The verdict JSON carries no SHA; `MEASURED_AGAINST` was a session file.
+
+The routing, flags, statuses, decimal counts, candidate lists and engine mix ARE in
+`2026-08-21_lane-comparison-after-s1-verdicts.json`, and the arithmetic over them can
+be rechecked from this repo alone.
 
 ## Re-running it
 
