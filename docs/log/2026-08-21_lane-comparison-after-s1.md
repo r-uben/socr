@@ -127,8 +127,8 @@ They agree on **7 of 8** exactly. The single split is severity on the equation p
 one calls it WRONG, the other DEGRADED; both call it worse than the alternative that
 was available. The two absents do not differ between them.
 
-Their agreement is not the reassurance it looks like: they passed the same two pages
-that a hand check fails, by two different oversights — see below.
+Their agreement is not the reassurance it looks like: both passed the same two pages
+that a hand check fails, missing a different defect on each — see below.
 
 | | faithful | degraded | wrong | absent |
 |---|---|---|---|---|
@@ -140,8 +140,10 @@ that a hand check fails, by two different oversights — see below.
 ## What the judges missed, and why it is the most useful thing here
 
 Both judges rated cochrane p10 FAITHFUL. Both cited its coefficient values matching
-the page. Neither checked whether those values were bound to the right rows — and they
-were not.
+the page. **Neither detected that those values were bound to the wrong rows** — and
+they were. What a judge internally checked is not observable; what is observable is
+that both justifications cite matching values, neither mentions the binding, and the
+binding is wrong. This file claims the miss, not the reasoning behind it.
 
 On the page, the coefficient row of the top panel is **unlabelled**, and the row below
 it is labelled `Large T`. The shipped grid moves that one label up: `Large T` lands on
@@ -167,12 +169,15 @@ Two consequences, and the second is the reason this section exists:
 1. **Model output is not citable merely because a grid exists and the numbers are
    right.** That is the assumption S1 ships on, and it does not hold on half the pages
    S1 newly routed here.
-2. **These two judges checked values despite a rubric that named structure.** Both, on
-   different vendors, were given a rubric naming row and column binding explicitly plus
-   a grounding requirement; both passed a shifted label on one page and a malformed
-   grid on another, and both justified their verdicts by citing values that do match.
-   That is two instruments, two different oversights, one blind spot — not a law about
-   judges in general, but enough to stop relying on them alone here. The 2026-08-20 record lists
+2. **A structure rubric did not produce a structure check.** Both judges, on different
+   vendors, were given a rubric naming row and column binding explicitly plus a
+   grounding requirement. Both passed a shifted label on one page and a malformed grid
+   on another, and every justification they wrote cites values rather than bindings.
+   Whether they looked at the structure and misread it, or never looked, is not
+   something their outputs can settle — and it does not matter for the conclusion: two
+   instruments, two different misses, and asking for structure in the prompt was not
+   sufficient to get it. Not a law about judges in general; enough to stop relying on
+   them alone here. The 2026-08-20 record lists
    "one row-label shift" among the model defects it found, so this class was known and
    still walked past. Any future measurement here needs a mechanical binding check —
    the judges cannot be the only instrument, because they fail the same way the
