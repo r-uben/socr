@@ -2218,14 +2218,16 @@ class UnifiedPipeline:
         profile,
         run_provider,
         pdf_path,
-    ) -> bool:
+    ) -> tuple[bool, PageOutput]:
         """Re-read one table page with *profile*; keep it only if it measures better.
 
-        Returns True when the lane should be disabled for the rest of the document
-        (a wedged provider), False otherwise.
+        Returns whether the lane should be disabled for the rest of the document
+        (a wedged provider), plus the output the caller must use downstream.
 
-        Every rejection path keeps the incumbent text untouched, so the worst case
-        is a wasted call.
+        Every rejection path returns the incumbent untouched. Acceptance promotes
+        the candidate object itself so text, provenance, cost, and audit metadata
+        remain one atomic engine result and the incumbent attempt remains historical
+        evidence rather than being mutated in place.
         """
         import concurrent.futures
 
@@ -2238,7 +2240,7 @@ class UnifiedPipeline:
             with open_pdf(pdf_path) as doc:
                 page = doc[page_num - 1]
                 if not self._table_page_needs_escalation(state, page_num, page, ps, bo):
-                    return False
+                    return False, bo
                 incumbent_text = bo.text or ""
 
                 # A cloud CLI has no timeout of its own and was observed wedged for
@@ -2265,7 +2267,7 @@ class UnifiedPipeline:
                             ),
                         )
                     )
-                    return True
+                    return True, bo
 
                 # `_run_engine_on_pages` converts a failed engine call into a
                 # native-text PageOutput. Assigning that would replace a structured
@@ -2284,7 +2286,7 @@ class UnifiedPipeline:
                             ),
                         )
                     )
-                    return False
+                    return False, bo
                 if out.status is not PageStatus.SUCCESS or not (out.text or "").strip():
                     state.events.append(
                         AuditEvent(
@@ -2294,7 +2296,7 @@ class UnifiedPipeline:
                             detail=f"candidate status={out.status}, no usable text",
                         )
                     )
-                    return False
+                    return False, bo
 
                 decision = decide_escalation(page, incumbent_text, out.text)
 
@@ -2327,10 +2329,15 @@ class UnifiedPipeline:
                         data={"gate": decision.gate, "delta": decision.delta},
                     )
                 )
-                return False
+                return False, bo
 
-            bo.text = out.text
+            out.escalated_from = bo.engine
+            out.cost_usd = profile.cost_per_page_usd
+            out.provider_id = profile.id
+            out.provider_model = profile.model
+            out.provider_backend = profile.backend
             ps.attempts.append(out)
+            ps.best_output = out
             self._clear_fail_closed_flags(state, page_num, ps, profile)
             if not self.config.quiet:
                 console.print(
@@ -2346,11 +2353,11 @@ class UnifiedPipeline:
                     data={"gate": decision.gate, "delta": decision.delta},
                 )
             )
-            return False
+            return False, out
 
         except Exception as exc:  # a failed escalation must never lose a page
             logger.warning("table escalation failed on p%d (%s); keeping text", page_num, exc)
-            return False
+            return False, bo
 
     @staticmethod
     def _clear_fail_closed_flags(state: DocumentState, page_num: int, ps, profile) -> None:
@@ -3390,7 +3397,7 @@ class UnifiedPipeline:
                 and bo.text
                 and bo.engine != "chart_asset"
             ):
-                _escalation_degraded = self._escalate_table_page(
+                _escalation_degraded, bo = self._escalate_table_page(
                     state,
                     page_num,
                     ps,
