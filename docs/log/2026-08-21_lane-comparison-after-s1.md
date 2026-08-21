@@ -14,8 +14,12 @@ the statistics.
 
 ## The number
 
-On the **8 pages where socr held two or more candidates and had to choose**, it now
-ships output a reader could cite on **4**. On the baseline it shipped the better of
+On the **baseline's 8 contested pages** — the pages where the 2026-08-20 run held two
+or more candidates and socr had to choose — it now ships output a reader could cite on
+**4**. That denominator is fixed to the baseline on purpose: in this run only 4 pages
+had two or more surviving cached candidates, so "pages with a choice" is not a stable
+set to measure across two runs, and quoting this run's own count would compare
+different denominators. On the baseline it shipped the better of
 its two candidates on **0 of 8** — 7 worse, 1 tie, native won nothing outright.
 
 Those two numbers are not the same measurement and this file will not pretend they
@@ -88,9 +92,24 @@ lane is citable**: native keeps every digit and loses the grid, the model builds
 grid and corrupts a digit. The same `1.11`-for-`1.10` slip is recorded in the
 2026-08-20 file, so it reproduces rather than being run-to-run noise.
 
-That is the strongest argument in this record for the binding oracle (#266): the
-defect is invisible to any check that compares bags of numbers, and it is equally
-invisible to a check that only asks whether a grid exists.
+**This page is NOT an example of multiset blindness, and an earlier draft of this
+file said it was.** Normalising every minus variant and comparing the two candidates
+as bags of decimals: both hold 152, native holds one `1.10` the model lacks, the model
+holds one extra `1.11`. A Unicode-aware multiset comparison separates them exactly.
+What it cannot see is native's flattening — that bag is identical to a correctly bound
+table's — and a grid-existence check catches *that* one while being blind to a changed
+digit.
+
+So the two checks are complementary here, and neither defect on this page escapes
+both. What p42 actually shows is narrower and still worth the space: on one page, the
+lane that preserves the digits destroys the binding, and the lane that builds the
+binding alters a digit, so **shipping either one unqualified is wrong** and no
+single-lane policy fixes it.
+
+The argument for the binding oracle (#266) rests on the 2026-08-20 finding and on
+GH-270 — a value that exists elsewhere on the page placed at the wrong (row, column),
+where the bag really is identical and only position distinguishes right from wrong.
+It does not rest on this page, and this file no longer claims it does.
 
 ## What came out of it
 
