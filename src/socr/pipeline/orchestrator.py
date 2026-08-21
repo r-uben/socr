@@ -1501,20 +1501,6 @@ class UnifiedPipeline:
         pa = self._assessment_for_page(page_num)
         return bool(pa and pa.has_tables)
 
-    def _page_is_structure_class(self, page_num: int, ps: PageState | None = None) -> bool:
-        """C2/R3: tables OR equations -- the model-rung guarantee applies to both.
-
-        Same source ``_page_has_tables`` reads (``ps.has_tables`` first, the
-        assessment as a fallback for callers before ``apply_born_digital``
-        has run) plus ``has_equations``, via ``PageState.is_structure_class``
-        so the manifest's winner selection cannot diverge from this routing
-        gate on what counts as structure-class.
-        """
-        if ps is not None and ps.is_structure_class():
-            return True
-        pa = self._assessment_for_page(page_num)
-        return bool(pa and (pa.has_tables or pa.has_equations))
-
     def _is_native_eligible_without_ocr(self, page_num: int, ps: PageState) -> bool:
         """Whether a page is native-eligible, WITHOUT the table exclusion.
 
@@ -1550,16 +1536,22 @@ class UnifiedPipeline:
         pages and rotated table-less pages are unaffected and still take the
         unconditional ``native_only`` short-circuit.
 
-        R3 (the model-rung guarantee): outside ``--native-only`` the bypass
-        also excludes equation pages, not only table pages. "Native may never
-        author a GRID on a structure-class page" (C1) is meaningless unless a
-        model attempt actually runs to author one -- an equation-only page
-        that never entered the OCR ladder has no alternative candidate for
-        ``_winning_page_output`` to choose, and ships exactly the untrusted
-        native reading again. ``--native-only``'s own bypass is left on its
-        narrower table-only check deliberately (see the "Open" question in
-        the S1 build spec): forcing a model rung under an explicit
-        native-only run is a separate, unresolved policy call.
+        R3 (the model-rung guarantee) originally widened this bypass-exclusion
+        to equation pages too, on the theory that "native may never author a
+        GRID on a structure-class page" (C1) is meaningless unless a model
+        attempt actually runs to author one. BLOCKING 1 on #269 reverted that:
+        S1's case (i)/(iii) branch only accepts a GFM table as a "grid was
+        authored" signal, so forcing a model rung on an equation page cannot
+        select anything a ``$...$``-reading attempt produces -- it only turns
+        a free native SUCCESS into an accepted hallucination or a false
+        AUDIT_FAILED demotion. Equations stay outside C2 until a non-GFM
+        acceptance path exists; this bypass is table-only again, matching
+        ``PageState.is_structure_class``.
+
+        ``--native-only``'s own bypass is left on its narrower table-only
+        check deliberately (see the "Open" question in the S1 build spec):
+        forcing a model rung under an explicit native-only run is a separate,
+        unresolved policy call.
         """
         if not self._is_native_eligible_without_ocr(page_num, ps):
             return False
@@ -1568,7 +1560,7 @@ class UnifiedPipeline:
             rotated = bool(pa and pa.text_is_rotated)
             if not (rotated and self._page_has_tables(page_num, ps)):
                 return True
-        return not self._page_is_structure_class(page_num, ps)
+        return not self._page_has_tables(page_num, ps)
 
     def _is_agentic_trusted_native(self, page_num: int, ps: PageState) -> bool:
         """Backward-compatible alias for the agentic native-bypass predicate."""
@@ -4918,11 +4910,21 @@ class UnifiedPipeline:
             _whole_doc_page_texts,
             _winning_page_output,
             is_page_failed_marker,
+            structure_class_grid_winner,
         )
 
         whole_doc = _whole_doc_page_texts(state)
         winning_out = _winning_page_output(state, page_num, whole_doc) if ps else None
         winning_dict = winning_out.to_dict() if winning_out is not None else {}
+        # MAJOR 7(b) on #269: persisted so a RESUMED run can re-derive
+        # ``structure_class_model_pages`` membership without the full attempt
+        # history. Resume collapses ``p.attempts`` to the single frozen
+        # winner (``_restore_terminal_page_state``), so on a resumed run a
+        # clean-passing S1 case (i) grid winner is indistinguishable, from
+        # ``p.attempts`` alone, from a page that was never an S1 case at all
+        # -- it silently drops out of the bucket on run 2 even though it was
+        # correctly counted on run 1. See ``PageState.structure_class_model_kept_on_resume``.
+        structure_class_model_kept = bool(ps and structure_class_grid_winner(ps) is not None)
 
         # Audit events for this page only, serialised as plain dicts.
         page_events = [
@@ -5019,6 +5021,8 @@ class UnifiedPipeline:
                 bool(ps.chart_asset_render_failed) if ps else False  # PP-7
             ),
             "judge_rejected": bool(ps.judge_rejected) if ps else False,
+            # MAJOR 7(b): S1 case (i) resume-idempotency flag (see above).
+            "structure_class_model_kept": structure_class_model_kept,
             # Audit log subset for this page.
             "audit_events": page_events,
             # Table-pass and figure refs.
@@ -5384,6 +5388,13 @@ class UnifiedPipeline:
             ps.rotated_shred_png_ref = str(meta.get("rotated_shred_png_ref", ""))
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
             ps.judge_rejected = bool(meta.get("judge_rejected", False))
+            # MAJOR 7(b): restore the S1 resume-idempotency flag so
+            # ``_reaches_structure_class_branch`` can re-derive the bucket
+            # membership a resumed run's collapsed ``attempts`` list can no
+            # longer prove on its own.
+            ps.structure_class_model_kept_on_resume = bool(
+                meta.get("structure_class_model_kept", False)
+            )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
 
@@ -5545,36 +5556,6 @@ class UnifiedPipeline:
 
         page_texts = canonical_page_texts(state)
 
-        # PP-1: flush per-page fragments and sidecars from the in-memory page
-        # texts, then verify stitch round-trips byte-identically.
-        # Non-fatal: any error keeps the in-memory body.
-        if has_text and page_texts:
-            try:
-                page_nums = list(range(1, state.handle.page_count + 1))
-                for pnum, ptext in zip(page_nums, page_texts):
-                    self._flush_page_fragment(state, pnum, ptext, output_dir)
-                    self._flush_page_sidecar(state, pnum, output_dir)
-                stitched = self._stitch_fragments(state, output_dir)
-                if stitched == final_text:
-                    # Byte-identical: the fragment/stitch path is verified.
-                    # Use stitched to confirm we go through the new code path.
-                    final_text = stitched
-                else:
-                    # Mismatch — log and fall back to in-memory body.
-                    logger.warning(
-                        "PP-1 [%s]: stitched body differs from in-memory body "
-                        "(%d vs %d bytes); falling back to in-memory assembly",
-                        state.handle.path.name,
-                        len(stitched),
-                        len(final_text),
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "PP-1 [%s]: fragment flush/stitch failed (%s); "
-                    "falling back to in-memory assembly",
-                    state.handle.path.name,
-                    exc,
-                )
         failed_pages = [i for i, t in enumerate(page_texts, start=1) if is_page_failed_marker(t)]
         # TR-3: D3 fail-closed floor pages — born-digital table pages where the
         # per-region geometry verifier hard-failed AND the OCR ladder also failed.
@@ -5633,7 +5614,9 @@ class UnifiedPipeline:
             n for n, p in sorted(state.pages.items()) if flagged_model_page_output(p) is not None
         ]
 
-        # S1: the general structure-class case (C2 -- tables or equations).
+        # S1: the general structure-class case (C2, tables only -- narrowed
+        # from "tables or equations" by BLOCKING 1 on #269's review; see
+        # ``_is_trusted_native_without_ocr``'s docstring above for why).
         # ``_winning_page_output`` ships the grid-authoring model attempt
         # instead of native whenever one exists, regardless of whether any
         # native-distrust flag ever fired (the 2026-08-20 measurement: 7 of 8
@@ -5691,7 +5674,6 @@ class UnifiedPipeline:
                 or getattr(p, "native_table_structure_defective", False)
                 or getattr(p, "native_table_header_unattributed", False)  # GH-200
                 or p.chart_asset_render_failed  # PP-7: render failure surfaces at doc level
-                or p.is_structure_class()  # S1: C2 -- tables or equations
             )
             # TR-3: D3 floor pages (see d3_floor_pages below --
             # ``native_table_structure_failed AND native_table_unverifiable``)
@@ -5738,11 +5720,21 @@ class UnifiedPipeline:
             and n not in flagged_model_pages
             # S1: the model's grid ships on these; native did not.
             and n not in structure_class_model_pages
-            # S1 case (iii): a structure-class page ships native WARNING even
-            # with ZERO attempts (R3's guarantee found nothing to run, or
-            # --native-only never ran a rung at all) -- ``p.attempts`` alone
-            # would silently drop those from this list.
-            and (p.attempts or p.is_structure_class())
+            # S1 case (iii): this page has its OWN bucket
+            # (``structure_class_native_fallback_pages``) and its own event
+            # kind/CLI line. BLOCKING 2 on #269: this list previously OR'd
+            # ``p.is_structure_class()`` straight into its attempts-gate below
+            # AND its include-clause above, so a structure-class page could
+            # satisfy BOTH this generic bucket and its dedicated S1 bucket at
+            # once (two events, two CLI lines for one page) -- or, with zero
+            # attempts (a cascade-halt page), land in this list even though
+            # ``_winning_page_output`` never demoted it and shipped SUCCESS.
+            # Excluding the dedicated bucket here and reverting the
+            # attempts-gate below to plain ``p.attempts`` restores this list
+            # to "OCR was tried [for a REASON OTHER THAN S1] and never
+            # passed" -- S1's own bucket owns S1's own pages exclusively.
+            and n not in structure_class_native_fallback_pages
+            and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
         ]
 
@@ -6030,6 +6022,48 @@ class UnifiedPipeline:
                         f" floor (unverifiable region → explicit failure marker): "
                         f"{d3_floor_pages}[/red]"
                     )
+
+        # MAJOR 6(a) on #269: this flush loop was moved here, AFTER the
+        # bucket derivation and audit-event-append block above, instead of
+        # running right after `page_texts` is computed. `_flush_page_sidecar`
+        # filters `state.events` by page_num at the MOMENT it writes each
+        # sidecar -- so flushing before the S1 events
+        # (`structure_class_model_table_kept` / `structure_class_native_fallback`)
+        # were appended meant those events never reached `pages/NNN.json`'s
+        # `audit_events` field at all, and no later pass corrects a sidecar
+        # (`_rewrite_all_fragments` only rewrites `.md` fragments). Nothing
+        # between the old position and here reads or depends on `final_text`'s
+        # post-stitch value, so moving the whole block is safe.
+        # PP-1: flush per-page fragments and sidecars from the in-memory page
+        # texts, then verify stitch round-trips byte-identically.
+        # Non-fatal: any error keeps the in-memory body.
+        if has_text and page_texts:
+            try:
+                page_nums = list(range(1, state.handle.page_count + 1))
+                for pnum, ptext in zip(page_nums, page_texts):
+                    self._flush_page_fragment(state, pnum, ptext, output_dir)
+                    self._flush_page_sidecar(state, pnum, output_dir)
+                stitched = self._stitch_fragments(state, output_dir)
+                if stitched == final_text:
+                    # Byte-identical: the fragment/stitch path is verified.
+                    # Use stitched to confirm we go through the new code path.
+                    final_text = stitched
+                else:
+                    # Mismatch — log and fall back to in-memory body.
+                    logger.warning(
+                        "PP-1 [%s]: stitched body differs from in-memory body "
+                        "(%d vs %d bytes); falling back to in-memory assembly",
+                        state.handle.path.name,
+                        len(stitched),
+                        len(final_text),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "PP-1 [%s]: fragment flush/stitch failed (%s); "
+                    "falling back to in-memory assembly",
+                    state.handle.path.name,
+                    exc,
+                )
 
         # Compute total processing time
         total_time = sum(r.processing_time for r in state.engine_runs)

@@ -477,13 +477,26 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     GH-268: ``find_table_blocks`` alone is not the "was a grid authored"
     check -- it only requires >= 2 consecutive pipe-bearing lines, with no
     GFM separator row, so two lines of plain prose that each happen to
-    contain a "|" (e.g. ``"revenue | costs were up\\nmargins | fell
-    sharply\\n"``) register as an authored 2x2 grid. A real GFM separator row
-    is unambiguous; require one to actually be present in the text before
-    trusting ``find_table_blocks``'s verdict here. Reuses
-    ``native_verifier._MD_SEP_RE`` -- the same canonical separator regex the
-    winner-side chain already verifies real output tables against -- rather
-    than deriving a second, possibly-drifting copy.
+    contain a "|" (e.g. "revenue | costs were up\nmargins | fell sharply")
+    register as an authored 2x2 grid. A real GFM separator row is
+    unambiguous; require one to actually be present -- but BLOCKING 3 on
+    #269 found the first fix (a page-GLOBAL ``native_verifier._MD_SEP_RE``
+    scan) both under- and over-accepts: a real separator row anywhere on the
+    page licenses an unrelated phantom prose block elsewhere on the SAME
+    page (model text "see identification | strategy.\n\n|---|---|\n\n
+    revenue | costs were up\nmargins | fell sharply" has a real separator
+    line that belongs to no block adjacent to the prose pair, yet the
+    page-global check passed it); and ``_MD_SEP_RE`` itself requires >= 2
+    column groups, so it rejects a genuine ONE-column table ("| Header
+    |\n|---|\n| value |").
+
+    Fixed by asking each candidate block whether ITS OWN separator row was
+    actually found and dropped, reusing ``find_table_blocks``'s own parse
+    (``reconcile._parse_grid`` drops a row only when every cell matches
+    ``_SEP_CELL``, which -- unlike ``_MD_SEP_RE`` -- accepts any dash-count,
+    so a one-column separator counts). A block whose parsed ``grid`` has
+    fewer rows than its raw line span had exactly one row removed as a
+    separator; no new regex, no second copy of the GFM grammar to drift.
     """
     if out is None:
         return False
@@ -499,30 +512,39 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     ):
         return False
 
-    from socr.tables.native_verifier import _MD_SEP_RE
     from socr.tables.reconcile import find_table_blocks
 
-    if not any(_MD_SEP_RE.match(line) for line in text.splitlines()):
+    blocks = find_table_blocks(text)
+    if not blocks:
         return False
-    return bool(find_table_blocks(text))
+    return any(len(block.grid) < (block.end - block.start + 1) for block in blocks)
 
 
 def _reaches_structure_class_branch(p) -> bool:
     """Whether ``_winning_page_output`` would actually reach the S1
-    structure-class branch for this page, rather than returning earlier via
-    its own early-return short-circuit for an ordinary, already-passing,
-    non-native reading.
+    structure-class branch for this page, mirroring EVERY precondition that
+    branch sits behind, in the SAME order, rather than a subset of them.
 
-    Without this gate, a page whose ``best_output`` was ALREADY the natural
-    winner -- non-native, ``audit_passed=True``, never at risk of native
-    clobbering it -- gets counted as an S1 rescue/demotion purely because
-    SOME grid-authoring attempt happens to sit in ``p.attempts`` too. That is
-    a false positive: this exact page shipped identically, as a clean
-    SUCCESS, before S1 existed, and S1 contributes nothing to it. Mirrors
-    ``_winning_page_output``'s own early-return condition exactly (including
-    #263's ``native_text_shredded`` term), so a caller outside that function
-    (``_phase_assemble``'s document-level buckets) cannot disagree with what
-    the manifest actually ships.
+    BLOCKING 2 on #269: the prior version reproduced only the early-return
+    short-circuit and then unconditionally returned True -- so a page whose
+    ``best_output`` was never a clean non-native pass (e.g. any AUDIT_FAILED
+    or born-digital-with-no-native-text page) satisfied this gate regardless
+    of ``is_structure_class()``, born-digital status, or whether the D3/#263
+    fail-closed floors or #259's flagged-model substitution actually fired
+    first. Concrete fallout: a PROSE page with a refused model GFM landed in
+    ``structure_class_model_pages`` and flipped the document to
+    AUDIT_FAILED while ``_winning_page_output`` shipped native SUCCESS and
+    never entered the S1 branch at all; a D3-floor page's bucket claimed a
+    model grid shipped when the real winner was the fail-closed ERROR
+    marker; a #259 page's bucket described the undemoted attempt rather
+    than the ``replace()`` copy that actually ships.
+
+    Fixed by walking the SAME branches ``_winning_page_output`` walks, in
+    the same order, so a caller outside that function (the document-level
+    buckets in ``_phase_assemble``) cannot disagree with what the manifest
+    actually ships. ``_winning_page_output`` itself now calls this function
+    for its own S1 entry-point check instead of duplicating it inline, so
+    the two cannot drift apart again.
     """
     if p.best_output and p.best_output.audit_passed:
         winning_engine = p.best_output.engine or ""
@@ -535,17 +557,59 @@ def _reaches_structure_class_branch(p) -> bool:
         native_text_shredded = winning_engine.startswith(_NATIVE_TEXT_LANES) and getattr(
             p, "native_rotated_text_shredded", False
         )
-        if not (native_distrusted or native_text_shredded):
+        # MAJOR 7(b): resume collapses ``p.attempts`` to the single frozen
+        # winner (``_restore_terminal_page_state``), so a resumed run's own
+        # attempt list can no longer prove a non-native rung authored a grid
+        # on the run that actually produced this winner. The persisted flag
+        # (set at flush time, restored on resume -- see ``PageState``) is
+        # this predicate's only source of truth for that case; a live run
+        # never sets it, so it is inert everywhere else.
+        if not (
+            native_distrusted
+            or native_text_shredded
+            or getattr(p, "structure_class_model_kept_on_resume", False)
+        ):
             return False
-    return True
+    # Everything below mirrors, in order, the preconditions
+    # ``_winning_page_output`` itself checks before reaching the S1 branch:
+    # born-digital native text (the branch's own containing ``if``), the
+    # TR-3 D3 fail-closed floor, the #263 rotated-shredded floor, and #259's
+    # flagged-model substitution. Any one of these means the S1 branch is
+    # never reached for this page -- a different, earlier return ships.
+    if not (p.is_born_digital and p.native_text):
+        return False
+    if (
+        p.native_table_structure_failed
+        and (
+            getattr(p, "native_table_unverifiable", False)
+            or getattr(p, "native_table_header_unattributed", False)
+        )
+        and bool(p.attempts)
+    ):
+        return False
+    if getattr(p, "native_rotated_text_shredded", False):
+        return False
+    if flagged_model_page_output(p) is not None:
+        return False
+    if not p.is_structure_class():
+        return False
+    return any(not (a.engine or "").startswith("native") for a in p.attempts)
 
 
 def structure_class_grid_winner(p) -> PageOutput | None:
     """S1 case (i): the grid-authoring model attempt a structure-class page ships.
 
-    ``best_output`` first -- ``_best_effort``/the agentic scorer already
-    judged it the most trustworthy attempt, a judgement rather than an
-    ordering -- then the ladder in reverse, mirroring #259's own tie-break.
+    Ranks every qualifying attempt by ``(audit_passed, confidence,
+    word_count)`` and takes the best -- MAJOR 4 on #269: the prior version
+    walked ``reversed(p.attempts)`` and took the LAST qualifying one, so a
+    refused earlier attempt with a better reading could lose to a later,
+    worse one purely by ladder position (and if native would have beaten
+    that worse grid, shipping it is a text regression the 7/8 measurement
+    does not license). ``best_output`` is checked first regardless -- the
+    agentic scorer already judged it the most trustworthy attempt, a
+    judgement rather than an ordering, and #259's own tie-break defers to it
+    the same way.
+
     Returned UNCHANGED, body untouched, flagged only per its own status (S1
     spec, verbatim) -- unlike the #259 branch, S1 case (i) does not demote on
     a copy, because there is no binder yet (R2) to justify a stronger warning
@@ -558,10 +622,10 @@ def structure_class_grid_winner(p) -> PageOutput | None:
         return None
     if _grid_authored_attempt(p.best_output):
         return p.best_output
-    for out in reversed(list(p.attempts)):
-        if _grid_authored_attempt(out):
-            return out
-    return None
+    candidates = [out for out in p.attempts if _grid_authored_attempt(out)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda out: (out.audit_passed, out.confidence, out.word_count))
 
 
 def structure_class_native_fallback_applies(p) -> bool:
@@ -575,25 +639,18 @@ def structure_class_native_fallback_applies(p) -> bool:
     scorer misses (the 2026-08-20 measurement: the winner-side chain up to
     this point -- ``native_verifier``, ``source_evidence``, header anchors --
     compares numeric multisets, blind to binding loss) -- so
-    ``p.best_output.audit_passed``
-    stays True and a bucket keyed off it alone would silently miss the page.
-    CLAUDE.md: a failure must surface at every level, not just one.
+    ``p.best_output.audit_passed`` stays True and a bucket keyed off it alone
+    would silently miss the page. CLAUDE.md: a failure must surface at every
+    level, not just one.
 
-    Mirrors ``_winning_page_output``'s own gating exactly: enters only when a
-    real, non-native-labelled rung actually ran (``has_model_rung_attempt``
-    below -- see that call site for why a page with none defers entirely to
-    the pre-existing tail logic instead: GH-211 / GH-195-198 both have
-    pre-existing, deliberately-tested coverage of a clean structure-class
-    native page shipping SUCCESS when no OCR ladder ever ran for it), and
-    resolves to case (iii) only when no attempt authored a usable grid
+    ``_reaches_structure_class_branch`` is the single unified gate (BLOCKING 2
+    on #269) and already checks ``is_structure_class()`` and
+    ``has_model_rung_attempt`` itself, in the same order
+    ``_winning_page_output`` does -- this function's own job is only to ask
+    whether that gate passes and no attempt authored a usable grid
     (``structure_class_grid_winner`` returns ``None``).
     """
-    if not p.is_structure_class():
-        return False
     if not _reaches_structure_class_branch(p):
-        return False
-    has_model_rung_attempt = any(not (a.engine or "").startswith("native") for a in p.attempts)
-    if not has_model_rung_attempt:
         return False
     return structure_class_grid_winner(p) is None
 
@@ -768,7 +825,20 @@ def _winning_page_output(
                 ),
             )
 
-        # S1: the general structure-class case (C2 -- tables or equations).
+        # S1: the general structure-class case (C2, tables only). Originally
+        # scoped to "tables or equations"; BLOCKING 1 on #269's review found
+        # this forced every equation-only page through a check
+        # (``_grid_authored_attempt``) that asks for a markdown TABLE grid --
+        # meaningless for an equation reading, which authors no grid at all.
+        # That produced both directions of harm: a correct native equation
+        # transcription got wrongly demoted to WARNING purely because no
+        # attempt authored a *table* grid on a page that was never going to
+        # have one, and a model attempt whose text coincidentally matched the
+        # grid-shape check (stray pipe characters near a matrix or an
+        # absolute-value bar) could ship over a fine native reading with
+        # nothing to actually verify it. Narrowed to ``bool(p.has_tables)`` in
+        # ``PageState.is_structure_class`` -- equation pages keep their
+        # pre-existing native-fallback/R3 behaviour, untouched by S1.
         # Every branch above this point already handles the pages where a
         # native-distrust flag positively fired (the scanned floor, TR-3's D3
         # floor, #263's rotated-shredded floor, #259's flagged-model
@@ -797,23 +867,41 @@ def _winning_page_output(
         # native-labelled (``native``, ``native+math``, ...): those exist
         # without any external rung ever having run, so their presence alone
         # must not trip this branch either.
-        has_model_rung_attempt = any(not (a.engine or "").startswith("native") for a in p.attempts)
-        if p.is_structure_class() and has_model_rung_attempt:
+        if _reaches_structure_class_branch(p):
             grid_winner = structure_class_grid_winner(p)
             if grid_winner is not None:
                 # (i) a grid-authoring model attempt from ``p.attempts``, body
-                # untouched, flagged per its own status (S1 spec, verbatim).
-                # S1 ships no binder (R2), so nobody has verified this grid's
-                # row/column attribution either -- only that a model actually
-                # authored a grid and the still-live value guard / structural
-                # gate did not positively hard-reject it (see
-                # ``_grid_authored_attempt``). Never mutated: ``audit_passed``
-                # is the winner-SELECTION flag and flipping it on the stored
-                # object discards the page (#252 round-1). If the attempt's
-                # own routing already left it WARNING/audit_passed=False (the
-                # normal shape for a soft-rejected rung), that ships as-is;
-                # this branch adds nothing on top of it.
-                return grid_winner
+                # untouched, flagged only per its own status (S1 spec,
+                # verbatim) WHEN it is a clean pass. MAJOR 7(a) on #269: a
+                # ``grid_winner`` accepted only via the
+                # ``REJECTION_AMBIGUOUS_DEFERRED`` allowlist
+                # (``_grid_authored_attempt``) is a SOFT reject, not a clean
+                # one -- shipping it unchanged left the page SUCCESS /
+                # failure_mode NONE while the document-level bucket flipped
+                # to AUDIT_FAILED, a direct contradiction at two different
+                # surfaces of the SAME page. Demoted via a ``replace()`` copy
+                # exactly like #259 does immediately above: status /
+                # failure_mode on the COPY, never ``audit_passed`` on the
+                # stored attempt (the #252 round-1 defect). A clean pass
+                # (``audit_passed`` already True) ships exactly as before --
+                # this adds nothing on top of an ordinary passing attempt.
+                if grid_winner.audit_passed:
+                    return grid_winner
+                kept_text = grid_winner.text
+                note = kept_table_flag_note(state, page_num, kept_text)
+                if note:
+                    kept_text = f"{kept_text.rstrip()}\n\n{note}\n"
+                return replace(
+                    grid_winner,
+                    text=kept_text,
+                    status=PageStatus.WARNING,
+                    audit_passed=False,
+                    failure_mode=(
+                        FailureMode.MODEL_OUTPUT_FLAGGED
+                        if grid_winner.failure_mode is FailureMode.NONE
+                        else grid_winner.failure_mode
+                    ),
+                )
             # (iii) no attempt authored a grid (R3's model-rung guarantee
             # found nothing usable, or -- under --native-only -- no rung ran
             # at all). Native is the only reading left. C1: its PROSE still
