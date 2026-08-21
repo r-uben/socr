@@ -242,13 +242,14 @@ def test_a_non_grid_page_costs_nothing(tmp_path):
 def _run(pipe, pdf_path, incumbent, provider_result, ps=None):
     state, ps = _State(), ps or _PageState()
     bo = _out(incumbent, engine="qwen")
+    ps.best_output = bo
 
     def run_provider(engine, page_num):
         if isinstance(provider_result, Exception):
             raise provider_result
         return provider_result
 
-    degraded = pipe._escalate_table_page(state, 1, ps, bo, _GEMINI, run_provider, pdf_path)
+    degraded, bo = pipe._escalate_table_page(state, 1, ps, bo, _GEMINI, run_provider, pdf_path)
     return state, ps, bo, degraded
 
 
@@ -260,6 +261,82 @@ def test_a_measured_improvement_is_kept(pdf_path):
     kinds = [e.kind for e in state.events]
     assert "table_escalation_accepted" in kinds
     assert state.engine_runs, "the cloud call must be costed"
+
+
+@pytest.mark.parametrize("incumbent_engine", ["native", "nougat"])
+def test_an_accepted_escalation_atomically_becomes_the_winner(pdf_path, incumbent_engine):
+    """GH-274: shipped text and producer provenance must be one PageOutput.
+
+    The incumbent is retained in ``attempts`` as historical evidence.  Mutating
+    only its text destroys that history and leaves the shipped reading labelled
+    with the incumbent producer.  The caller also needs the accepted object back
+    because it continues processing through its local ``bo`` reference.
+    """
+    pipe = _pipeline()
+    state, ps = _State(), _PageState()
+    incumbent = PageOutput(
+        page_num=1,
+        text=_SHIFTED,
+        status=PageStatus.SUCCESS,
+        engine=incumbent_engine,
+        provider_id=f"{incumbent_engine}-profile",
+        provider_model=f"{incumbent_engine}-model",
+        provider_backend=f"{incumbent_engine}-backend",
+        cost_usd=0.01,
+    )
+    candidate = PageOutput(
+        page_num=1,
+        text=_PERFECT,
+        status=PageStatus.SUCCESS,
+        engine=_GEMINI.engine.value,
+        provider_id=_GEMINI.id,
+        provider_model="candidate-model",
+        provider_backend="candidate-backend",
+        processing_time=8.5,
+        confidence=0.91,
+        cost_usd=0.42,
+        audit_notes=["candidate-produced"],
+    )
+    ps.attempts = [incumbent]
+    ps.best_output = incumbent
+
+    degraded, downstream_output = pipe._escalate_table_page(
+        state,
+        1,
+        ps,
+        incumbent,
+        _GEMINI,
+        lambda _engine, _page_num: candidate,
+        pdf_path,
+    )
+
+    assert degraded is False
+    assert ps.best_output is candidate
+    assert downstream_output is candidate
+    assert ps.attempts == [incumbent, candidate]
+    assert incumbent.text == _SHIFTED
+    assert candidate.escalated_from == incumbent_engine
+    assert (
+        candidate.text,
+        candidate.engine,
+        candidate.provider_id,
+        candidate.provider_model,
+        candidate.provider_backend,
+        candidate.processing_time,
+        candidate.confidence,
+        candidate.cost_usd,
+        candidate.audit_notes,
+    ) == (
+        _PERFECT,
+        _GEMINI.engine.value,
+        _GEMINI.id,
+        "candidate-model",
+        "candidate-backend",
+        8.5,
+        0.91,
+        0.42,
+        ["candidate-produced"],
+    )
 
 
 def test_a_regression_is_rejected_and_the_incumbent_kept(pdf_path):
@@ -312,7 +389,7 @@ def test_a_wedged_provider_disables_the_lane_for_the_document(pdf_path):
         time.sleep(5)
         return _out(_PERFECT)
 
-    degraded = pipe._escalate_table_page(state, 1, ps, bo, _GEMINI, hang, pdf_path)
+    degraded, bo = pipe._escalate_table_page(state, 1, ps, bo, _GEMINI, hang, pdf_path)
 
     assert degraded is True, "the lane must latch off after a hang"
     assert bo.text == _SHIFTED
