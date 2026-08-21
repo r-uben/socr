@@ -15,10 +15,14 @@ than an honest narrow one, because it gets quoted as if it were a proof.
 Covered.
   * Every ``*verdict*.json`` in ``docs/log`` -- matched on the word, so ``-verdict``
     and ``-verdicts-v2`` are caught, not one exact suffix.
-  * Row IDENTITY, which is the load-bearing check. The set of ``(doc, page, kind)``
-    triples must equal the manifest's selected pages exactly: same count, no extras,
-    no duplicates, each anchored to a manifest document name. A row cannot be added,
-    and ``doc``/``page``/``kind`` cannot say anything the manifest does not.
+  * Row IDENTITY, which is the load-bearing check. Each ``doc`` is resolved through a
+    FINITE table of permitted spellings -- the manifest name, with and without the
+    ``.pdf`` suffix, and the two widths the runner has truncated to -- and the SET of
+    resolved ``(document, page, kind)`` triples must equal the manifest's selected
+    pages exactly. Not a prefix match: an earlier revision compared with
+    ``name.startswith(doc)``, so 21 rows carrying 21 distinct prefixes of one document
+    all matched the same page, dropped 20 real pages, and passed a check whose
+    docstring claimed exact identity.
   * Row SHAPE: exactly the schema's keys, no more and no fewer.
   * Every remaining string against a CAMPAIGN-APPROVED vocabulary -- flags, engines,
     kinds, statuses. These are the values this measurement may record, NOT the
@@ -28,6 +32,9 @@ Covered.
     entire 1,675-byte page into 37 ``decimals`` values and passed every other check.
   * Value bounds -- type, element type, string length, element count, serialised size.
   * File bounds -- row count and byte size.
+  * The MANIFEST's own page records: exact key set, integer types, derived ranges on
+    ``se``/``math``/``imgs``. Those three counts were unbounded, and a reviewer
+    compressed a real 1,675-byte page into the 63 of them that already exist.
   * Filesystem paths in every ``*lane-comparison*`` file, scanned BOTH as raw text and
     as decoded JSON strings. Raw-text scanning alone is defeated by JSON escaping: a
     backslash-escaped solidus decodes to an absolute path while carrying no bare
@@ -75,6 +82,9 @@ MAX_VERDICT_ROWS = 48
 MAX_VERDICT_BYTES = 12_000
 MAX_DECIMAL_COUNT = 512
 MAX_MANIFEST_ENTRIES = 32
+# Manifest page-record counts, observed maxima se=76, math=14, imgs=1.
+MAX_SELECTION_COUNT = 512
+MAX_PAGE_IMAGES = 32
 DOCUMENT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,160}")
 
 # key -> (value types, element types, max string, max elements, max serialised size)
@@ -156,20 +166,33 @@ def _decoded_strings(path):
             stack.extend(item.values())
 
 
-def _manifest_page_keys():
-    """``(document name, page, kind)`` for every page the manifest selected.
+# Widths the runner has truncated document names to across the committed campaigns.
+# A FINITE set, deliberately: accepting any prefix lets one document impersonate
+# twenty-one, which is exactly how the previous version of this check was defeated.
+RUNNER_NAME_WIDTHS = (58, 60)
 
-    Names are kept with and without the ``.pdf`` suffix because the runner truncates
-    long names to a fixed width, which can cut mid-extension.
-    """
+
+def _manifest_documents():
+    """``{permitted spelling: canonical document id}`` for the manifest's documents."""
+    spellings = {}
+    for entry in json.loads(MANIFEST.read_text()):
+        canonical = str(entry["name"]).removesuffix(".pdf")
+        names = {str(entry.get(key, "")) for key in ("pdf", "name")}
+        names |= {n.removesuffix(".pdf") for n in names}
+        names |= {n[:width] for n in set(names) for width in RUNNER_NAME_WIDTHS}
+        for name in names:
+            if name:
+                spellings.setdefault(name, canonical)
+    return spellings
+
+
+def _manifest_page_keys():
+    """``(canonical document, page, kind)`` for every page the manifest selected."""
     keys = set()
     for entry in json.loads(MANIFEST.read_text()):
-        names = {str(entry.get(key, "")) for key in ("pdf", "name")}
-        names |= {n[:-4] for n in names if n.endswith(".pdf")}
+        canonical = str(entry["name"]).removesuffix(".pdf")
         for page in entry.get("pages", []):
-            for name in names:
-                if name:
-                    keys.add((name, page["page"], page["kind"]))
+            keys.add((canonical, page["page"], page["kind"]))
     return keys
 
 
@@ -197,24 +220,26 @@ def test_verdict_rows_are_exactly_the_manifest_pages():
     manifest already selected, none may repeat, and the count must match.
     """
     manifest_keys = _manifest_page_keys()
+    documents = _manifest_documents()
     assert manifest_keys, "manifest selects no pages to anchor against"
-    # Count from the manifest directly: ``_manifest_page_keys`` deliberately holds
-    # several spellings of each document name, so its length is not a page count.
-    selected = sum(len(entry["pages"]) for entry in json.loads(MANIFEST.read_text()))
     for path in VERDICT_FILES:
         rows = json.loads(path.read_text())
         seen = set()
         for row in rows:
-            triple = (row["doc"], row["page"], row["kind"])
+            canonical = documents.get(row["doc"])
+            assert canonical is not None, (
+                f"{path.name}: doc {row['doc']!r} is not a permitted spelling of any "
+                "manifest document"
+            )
+            triple = (canonical, row["page"], row["kind"])
             assert triple not in seen, f"{path.name}: duplicate row {triple}"
             seen.add(triple)
-            assert any(
-                name.startswith(row["doc"]) and page == row["page"] and kind == row["kind"]
-                for name, page, kind in manifest_keys
-            ), f"{path.name}: row {triple} is not a page the manifest selected"
-        assert len(rows) == selected, (
-            f"{path.name} holds {len(rows)} rows; the manifest selects {selected} "
-            "pages, and a verdict file records exactly those"
+        assert seen == manifest_keys, (
+            f"{path.name}: the rows are not the manifest's pages. "
+            f"missing {sorted(manifest_keys - seen)[:3]}, extra {sorted(seen - manifest_keys)[:3]}"
+        )
+        assert len(rows) == len(manifest_keys), (
+            f"{path.name} holds {len(rows)} rows for {len(manifest_keys)} selected pages"
         )
 
 
@@ -319,10 +344,28 @@ def test_manifest_is_bounded_since_the_verdicts_anchor_to_it():
             assert DOCUMENT_NAME.fullmatch(str(entry[key])), (
                 f"manifest {key} {entry[key]!r} is not a plain document name"
             )
+        assert isinstance(entry["pages"], list), "manifest pages must be a list"
+        seen_pages = set()
         for page in entry["pages"]:
+            assert set(page) == {"page", "kind", "se", "math", "imgs"}, (
+                f"manifest page keys {sorted(page)}"
+            )
             assert page["kind"] in APPROVED_KINDS, f"manifest kind {page['kind']!r}"
-            assert isinstance(page["page"], int) and not isinstance(page["page"], bool)
-            assert 0 < page["page"] <= 2000, f"manifest page {page['page']}"
+            for field, cap in (
+                ("page", 2000),
+                ("se", MAX_SELECTION_COUNT),
+                ("math", MAX_SELECTION_COUNT),
+                ("imgs", MAX_PAGE_IMAGES),
+            ):
+                value = page[field]
+                assert isinstance(value, int) and not isinstance(value, bool), (
+                    f"manifest {field} is {type(value).__name__}"
+                )
+                assert 0 <= value <= cap, f"manifest {field} is {value}, cap {cap}"
+            assert page["page"] > 0, f"manifest page {page['page']}"
+            key = (page["page"], page["kind"])
+            assert key not in seen_pages, f"manifest repeats page {key}"
+            seen_pages.add(key)
 
 
 def test_no_absolute_paths_anywhere_in_the_record():
