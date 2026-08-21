@@ -112,7 +112,7 @@
   "doc": "2018__nakamura_steinsson__high_frequency_identification_of_m",
   "page": 13,
   "kind": "table",
-  "shipped_engine": "gemini",
+  "shipped_engine": "qwen",
   "page_status": "success",
   "flags": [],
   "candidates": [
@@ -174,7 +174,7 @@
   "doc": "2020__pflueger_rinaldi__fed_moves_market__WP",
   "page": 34,
   "kind": "table",
-  "shipped_engine": "nougat",
+  "shipped_engine": "qwen",
   "page_status": "success",
   "flags": [],
   "candidates": [

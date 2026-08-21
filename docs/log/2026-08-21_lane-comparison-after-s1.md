@@ -12,6 +12,30 @@ and the baseline this file is measured against.
 repo is public. What is committed is the method, the per-page routing verdicts, and
 the statistics.
 
+> **CORRECTION, 2026-08-21 — two ENGINE NAMES in this record were stale.** On an
+> accepted GH-96 post-route escalation, socr copies only the escalated attempt's text
+> into the winning output (`bo.text = out.text` at
+> `src/socr/pipeline/orchestrator.py@7c7f174:2332`). It does not replace that output or
+> its `engine` / provider provenance. The escalated text therefore ships under the
+> pre-escalation engine's name (GH-274).
+>
+> The nine document `audit_log.json` files identify exactly 2 escalations across these
+> 21 pages, both via qwen: nakamura_steinsson p13 was recorded as `gemini`, and
+> pflueger_rinaldi p34 as `nougat`. The verdict JSON and table below now name qwen for
+> both. The recorded mix was qwen 11 / gemini 5 / native 4 / nougat 1; the corrected
+> mix is **qwen 13 / gemini 4 / native 4 / nougat 0**.
+>
+> **What survives:** all quality findings, including "2 of 8 citable" and the per-page
+> defects, because those came from reading the shipped text against page images rather
+> than from trusting its engine label. The cross-run byte comparison also stands. In
+> this run, "native's share fell from 8 to 4" still holds because neither escalated
+> page carried a native label. That is not a structural guarantee: the caller's guard
+> at `orchestrator.py@7c7f174:3387-3401` excludes `chart_asset`, not `native`, so the
+> same mutation can in general put model text into a native-labelled output.
+>
+> This survived eight review rounds because every round checked the quality claims
+> against the page images and nobody checked whether the engine labels were true.
+
 ## The number
 
 On the **baseline's 8 contested pages** — the pages where the 2026-08-20 run held two
@@ -48,9 +72,9 @@ is the shipped text citable at all. A page can move on one and not the other.
 
 What is directly comparable, and recorded on both sides rather than judged: **4 of the
 8 moved off native to a model lane.** Across all 21 pages the shipped engine was the
-local model on 11, the cloud model on 5, native on 4, and nougat on 1 — native's share
-fell from 8 to 4. That routing change is real. What the model lanes then produced is
-the question the rest of this file is about, and the answer is mixed.
+qwen model on 13, the gemini model on 4, native on 4, and nougat on 0. Native's share
+fell from 8 to 4 in this run. That routing change is real. What the model lanes then
+produced is the question the rest of this file is about, and the answer is mixed.
 
 ## What this measures and what it does not
 
@@ -81,8 +105,8 @@ would be wrong.
 |---|---|---|---|---|---|
 | cochrane_piazzesi | 10 | table | native / warning | **qwen** / success | grid, but the `Large T` label sits on the coefficient row |
 | cochrane_piazzesi | 12 | table | native / warning | **gemini** / success | citable grid (checked by hand) |
-| nakamura_steinsson | 13 | table | native / success | **gemini** / success | citable grid (checked by hand) |
-| pflueger_rinaldi | 34 | table | native / success | **nougat** / success | grid malformed: 4-column header, 10 body rows of 5 |
+| nakamura_steinsson | 13 | table | native / success | **qwen** / success | citable grid (checked by hand) |
+| pflueger_rinaldi | 34 | table | native / success | **qwen** / success | grid malformed: 4-column header, 10 body rows of 5 |
 | kaminska_et_al | 38 | figure | native / success | native / **error** | content absent, but a silent SUCCESS became a hard failure |
 | cochrane_piazzesi | 15 | table | native / error | unchanged | refusal marker; a cached extraction was discarded (#262) |
 | pflueger_rinaldi | 43 | equation | native / warning | unchanged | display structure lost (#271) |
@@ -274,6 +298,8 @@ quality can be confirmed from this repo. That covers, exhaustively:
   `aligned` environments in the discarded candidate);
 - that the two runs differ only in the code under test, and which commit each ran
   against. The verdict JSON carries no SHA; `MEASURED_AGAINST` was a session file;
+- the accepted qwen escalations on p13 and p34 that justify correcting their recorded
+  producers — the source `audit_log.json` files are not committed;
 - the entire cross-run byte comparison — that shipped text changed on 5 of the 8 pages
   and was byte-identical on 3, which 3 those were, that p42's two candidate files and
   page image are identical across runs, and that the runs used separate output
