@@ -65,11 +65,17 @@ cooperative author: the nine absolute paths that really were committed here, a s
 
 It cannot address a HOSTILE author, and no test in this repository can. Someone with
 commit access who wants the corpus out does not need ``decimals`` or a name prefix --
-they can add a file this glob never sees. Each bypass a reviewer demonstrated against
-earlier revisions was of that second kind, and each was still worth fixing, because a
-check whose docstring overstates it gets cited as a guarantee. But the residual
-channels listed above are not holes to be closed one by one; they are what remains
-after the accidental cases are covered, and they are bounded by review, not by code.
+they can add a file this glob never sees. The deliberately encoded payloads a reviewer
+built against earlier revisions -- a page compressed into integers, one document
+impersonating twenty-one through name prefixes -- illustrate that limit.
+
+Not every earlier miss was of that kind, and claiming so would be too kind to this
+file: an alternate verdict FILENAME and a slash-escaped path are both ordinary
+cooperative-author accidents, and both slipped through. What the guard covers is the
+NAMED and SCHEMA-SHAPED accidents -- wrong key, wrong type, wrong vocabulary, wrong
+row, a path spelled the way this machine spells one. The remaining channels in the
+NOT-covered list include plausible accidents too, prose in a hand-written record most
+of all. Those are not covered and not bounded: they are LEFT TO REVIEW.
 
 It is a tripwire on the shapes these records take. It is not a proof of
 confidentiality and must not be cited as one.
