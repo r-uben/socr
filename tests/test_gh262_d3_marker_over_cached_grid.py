@@ -730,6 +730,43 @@ def test_junk_carrying_pipes_is_refused() -> None:
         assert strict(junk) is False, junk
 
 
+@pytest.mark.parametrize("fence_char", ["`", "~"], ids=["backtick", "tilde"])
+@pytest.mark.parametrize("predicate_name", ["has_strict_table_grid", "has_authored_table_grid"])
+@pytest.mark.parametrize(
+    "false_closer_suffix",
+    [pytest.param(None, id="shorter_run"), pytest.param(" not-a-closer", id="info_string")],
+)
+def test_grid_inside_longer_fence_stays_hidden_from_both_predicates(
+    fence_char: str, predicate_name: str, false_closer_suffix: str | None
+) -> None:
+    """A shorter run or a run with trailing text cannot close a fence."""
+    import socr.tables.reconcile as reconcile
+
+    opener = fence_char * 4
+    false_closer = fence_char * (3 if false_closer_suffix is None else 4)
+    false_closer += false_closer_suffix or ""
+    text = f"{opener}\nexample\n{false_closer}\n{_G}{opener}\n"
+
+    predicate = getattr(reconcile, predicate_name)
+    assert predicate(text) is False
+
+
+@pytest.mark.parametrize("fence_char", ["`", "~"], ids=["backtick", "tilde"])
+@pytest.mark.parametrize("predicate_name", ["has_strict_table_grid", "has_authored_table_grid"])
+def test_equal_or_longer_clean_fence_closer_exposes_the_following_grid(
+    fence_char: str, predicate_name: str
+) -> None:
+    """Reverse control: a clean same-character run may close the fence."""
+    import socr.tables.reconcile as reconcile
+
+    opener = fence_char * 4
+    longer_closer = fence_char * 5
+    text = f"{opener} example\ncode\n{longer_closer}  \n{_G}"
+
+    predicate = getattr(reconcile, predicate_name)
+    assert predicate(text) is True
+
+
 def test_authored_grids_require_uniform_body_rows() -> None:
     """GH-268 requires consistent column counts across the entire grid."""
     import socr.tables.reconcile as reconcile

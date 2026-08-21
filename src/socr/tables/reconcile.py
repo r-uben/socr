@@ -118,10 +118,14 @@ def find_table_blocks(markdown: str) -> list[_Block]:
 _STRICT_SEPARATOR_MIN_HYPHENS = 3
 _STRICT_SEP_CELL = re.compile(rf"^:?-{{{_STRICT_SEPARATOR_MIN_HYPHENS},}}:?$")
 
-#: A fence opener/closer: three or more backticks or tildes, optionally indented,
-#: optionally followed by an info string. Content inside a fence is a code
-#: sample, not markdown structure.
+#: A fence opener: three or more backticks or tildes, optionally indented and
+#: followed by an info string. Content inside a fence is a code sample, not
+#: markdown structure.
 _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+
+#: A closing fence may be longer than its opener, but never shorter, and may
+#: carry only trailing whitespace -- not an opener-style info string.
+_FENCE_CLOSER = re.compile(r"^\s{0,3}(`{3,}|~{3,})[ \t]*$")
 
 #: GH-268 requires consistent column counts across every row of an authored
 #: grid. Keep the policy named because accepting a ragged block here can either
@@ -175,19 +179,25 @@ def _strip_fenced_regions(lines: list[str]) -> list[str]:
     so the honest answer under malformation is "no grid here".
     """
     out: list[str] = []
-    fence: str | None = None
+    fence: tuple[str, int] | None = None
     for line in lines:
-        m = _FENCE_LINE.match(line)
         if fence is None:
+            m = _FENCE_LINE.match(line)
             if m:
-                fence = m.group(1)[0]  # ` or ~
+                run = m.group(1)
+                fence = (run[0], len(run))
                 out.append("")
                 continue
             out.append(line)
         else:
-            # Only a fence of the SAME character can close one (CommonMark).
-            if m and m.group(1)[0] == fence:
-                fence = None
+            # CommonMark: the closer uses the same character, is at least as
+            # long as the opener, and has no info string.
+            m = _FENCE_CLOSER.match(line)
+            if m:
+                run = m.group(1)
+                opener_char, opener_length = fence
+                if run[0] == opener_char and len(run) >= opener_length:
+                    fence = None
             out.append("")
     return out
 
