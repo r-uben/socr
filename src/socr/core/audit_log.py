@@ -130,6 +130,10 @@ def build_run_audit(state) -> RunAudit:
         # acts (the page is routed to OCR and refuses to ship its fragments).
         "rotated_text_shredded": 4,
         "table_region_unverifiable": 5,
+        # #262: the D3 disposition's sibling -- same phase, opposite outcome
+        # (a model grid superseded the floor). Ranked explicitly rather than
+        # falling into the default 9, so a page's story still reads in order.
+        "d3_floor_model_table_kept": 5,
         "flagged_model_table_kept": 6,
         "native_fallback": 6,
         # S1 (#269): same disposition rank as the two above -- a structure-class

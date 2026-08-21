@@ -439,6 +439,59 @@ def flagged_model_page_output(p) -> PageOutput | None:
     return bo
 
 
+def d3_floor_kept_model_output(p) -> PageOutput | None:
+    """#262: the model attempt that must ship instead of the D3 marker.
+
+    The D3 conjunction is a verdict on the native lane. When a model attempt
+    authored a grid, shipping the failed-table marker would discard the page's
+    model reading, prose, and equations along with the native table.
+
+    Returns the output to keep, or ``None`` to leave the floor firing. The
+    caller demotes a copy; this predicate never mutates ``audit_passed``, which
+    remains the winner-selection flag.
+    """
+    if not (
+        p.is_born_digital
+        and p.native_text
+        and p.native_table_structure_failed
+        and (
+            getattr(p, "native_table_unverifiable", False)
+            or getattr(p, "native_table_header_unattributed", False)
+        )
+        and bool(p.attempts)
+    ):
+        return None
+    # GH-90's scanned floor is a different lane and is not reachable from here
+    # (it requires ``not is_born_digital``), but a page carrying its flag must
+    # never be rescued by this path either.
+    if getattr(p, "scanned_table_evidence_failed", False):
+        return None
+
+    from socr.tables.reconcile import find_table_blocks
+
+    # Ladder order, then ``best_output`` last: ``attempts`` is appended rung by
+    # rung as the router escalates, so the last qualifying candidate is the most
+    # escalated reading. ``best_output`` is the tie-break when the winner was
+    # never appended, not a separate source of truth.
+    candidates = list(p.attempts)
+    if p.best_output is not None:
+        candidates.append(p.best_output)
+
+    kept: PageOutput | None = None
+    for out in candidates:
+        if (out.engine or "").startswith("native"):
+            continue
+        text = (out.text or "").strip()
+        if not text or is_page_failed_marker(text):
+            continue
+        if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+            continue
+        if not find_table_blocks(text):
+            continue
+        kept = out
+    return kept
+
+
 #: #263 round 2: the engines whose winning text IS (or embeds) the page's
 #: ``PageState.native_text``. ``native`` ships it directly; ``chart_asset``
 #: (PP-7) ships ``native_text`` with a whole-page PNG ref appended. A flag that
@@ -755,6 +808,19 @@ def _winning_page_output(
             )
             and bool(p.attempts)
         ):
+            # #262: unless some attempt did author a grid, in which case the
+            # failed-table marker would be the lossier outcome. This D3-specific
+            # decision stays before the broader S1 structure-class branch; the
+            # latter's reachability predicate mirrors this precondition order.
+            kept_model = d3_floor_kept_model_output(p)
+            if kept_model is not None:
+                return replace(
+                    kept_model,
+                    status=PageStatus.WARNING,
+                    audit_passed=False,
+                    failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
+                )
+
             # TR-3: D3 fail-closed floor text = failed-table marker + image ref.
             # The marker is always present (makes the failure loud and greppable);
             # the PNG image ref lets a human SEE the table without transcription.

@@ -237,7 +237,11 @@ def test_watched_kinds_are_real_emitted_kinds():
     src = pathlib.Path(__file__).resolve().parents[1] / "src" / "socr"
     literals = set()
     for path in src.rglob("*.py"):
-        literals.update(re.findall(r'kind="([a-z_]+)"', path.read_text(encoding="utf-8")))
+        # #262: ``[a-z_]+`` could not see a kind with a DIGIT in its name
+        # (``d3_floor_model_table_kept``), so a real, emitted kind read as
+        # "never emitted anywhere" and the guard fired on its own blind spot.
+        # Widened, never relaxed: the assertion below is unchanged.
+        literals.update(re.findall(r'kind="([a-z0-9_]+)"', path.read_text(encoding="utf-8")))
 
     dynamic = {"dualpass_flagged"}
     # GH-97 ships on its own branch. Listing it here is forward-compatible in both

@@ -72,6 +72,14 @@ class FailureMode(str, Enum):
     #: guarantee found nothing to corroborate it, or (under --native-only)
     #: never ran a model rung at all. Never SUCCESS.
     STRUCTURE_CLASS_NO_MODEL_ATTEMPT = "structure_class_no_model_attempt"
+    #: #262: the TR-3 D3 fail-closed floor fired on the NATIVE lane, but a model
+    #: attempt in the page's own run cache authored a grid. The marker's whole
+    #: justification is that no better reading exists; when one does, the marker
+    #: is content loss. The model's reading ships under this mode instead.
+    #: Deliberately distinct from ``MODEL_OUTPUT_FLAGGED``: that one means "no
+    #: rung accepted and native carries a table-distrust flag", this one means
+    #: "a hard fail-closed floor was superseded", which is a stronger warning.
+    MODEL_TABLE_OVER_FAILED_FLOOR = "model_table_over_failed_floor"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The
