@@ -42,6 +42,7 @@ from socr.core.cache import BlobStore
 from socr.core.document import DocumentHandle
 from socr.core.result import (
     REJECTION_AMBIGUOUS_DEFERRED,
+    REJECTION_JUDGE_ONLY,
     FailureMode,
     PageOutput,
     PageStatus,
@@ -432,11 +433,134 @@ def flagged_model_page_output(p) -> PageOutput | None:
     # predicate's purposes, and native remains the only table reading there is.
     # Note this is a property of the model's own output alone; native structure
     # is never consulted as ground truth, which is the root error #259 names.
-    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.reconcile import has_authored_table_grid
 
-    if not find_table_blocks(bo.text):
+    if not has_authored_table_grid(bo.text):
         return None
     return bo
+
+
+#: #262: the dispositions on which an attempt may supersede the D3 fail-closed
+#: floor. An ALLOWLIST of positively-identified SOFT refusals -- the reading was
+#: refused by a judge, not refuted by a deterministic gate. Anything else,
+#: including an empty ``rejection_class``, keeps the failed-table marker.
+D3_SUPERSEDING_REJECTIONS: frozenset[str] = frozenset(
+    {REJECTION_AMBIGUOUS_DEFERRED, REJECTION_JUDGE_ONLY}
+)
+
+
+def d3_superseded_note(page_num: int) -> str:
+    """The in-body flag a superseded D3 page carries, in the #259 note's shape.
+
+    The page ships a table every rung of the ladder refused, in place of a
+    marker that said so in the document itself. Status and audit surfaces carry
+    that, but a reader holding only the ``.md`` sees neither, so the flag has to
+    be in the body as well. Phrased so it can never match
+    ``is_page_failed_marker`` -- this page did not fail, it shipped flagged.
+    """
+    return (
+        f"[page {page_num}: unverifiable table — kept a model reading over the "
+        "failed-table marker; the native table region failed verification and no "
+        "OCR rung was accepted — verify against the page image before citing]"
+    )
+
+
+def d3_floor_kept_model_output(p) -> PageOutput | None:
+    """#262: the model attempt that must ship instead of the D3 marker.
+
+    The D3 conjunction is a verdict on the native lane. When a model attempt
+    authored a grid, shipping the failed-table marker would discard the page's
+    model reading, prose, and equations along with the native table.
+
+    Returns the output to keep, or ``None`` to leave the floor firing. The
+    caller demotes a COPY; this predicate never mutates anything, and in
+    particular never touches ``audit_passed``, which is the winner-SELECTION
+    flag and not a page-quality flag (flipping it discards the page's content —
+    the #252 round-1 defect).
+
+    ALLOWLIST, never a denylist. Round 1 of this fix reasoned that because the
+    alternative here is a marker with zero content rather than #259's complete
+    native reading, "we do not know why this rung was refused" was good enough
+    to keep. It is not, and the counterexample is exact: the verifier's
+    CERTAIN_FAIL path (``agentic.py``, ``vr.hard_fail``) returns
+    ``accept=False`` and mutates NOTHING on the ``PageOutput`` -- status stays
+    SUCCESS, ``failure_mode`` stays NONE -- so a grid the value guard
+    POSITIVELY REFUTED for a numeric-multiset or label-binding mismatch passed
+    every one of those rules and would have shipped over a fail-closed floor.
+    A denylist of bad dispositions cannot see a disposition that was never
+    written; only an allowlist of good ones is fail-safe. An empty
+    ``rejection_class`` means "socr cannot say why this was refused" and keeps
+    the marker.
+
+    The allowlist is the two dispositions on which socr can positively say the
+    refusal was SOFT -- no deterministic gate refuted the reading, a judge did:
+    ``REJECTION_AMBIGUOUS_DEFERRED`` (#259: the verifier reached AMBIGUOUS and
+    deferred) and ``REJECTION_JUDGE_ONLY`` (#262: the verifier found nothing to
+    refute and the inner judge alone refused). Both are written before the
+    structural gate runs, so a gate rejection is never mistaken for either.
+    ``flagged_model_page_output`` deliberately keeps the narrower one-value
+    allowlist: its fallback is a real native reading, so it can afford to.
+
+    Selecting among qualifying candidates is then a choice between readings
+    socr has NO evidence to rank -- ladder position is not quality, and the
+    most escalated rung is not the best one. So ``best_output`` wins when it
+    qualifies: ``_best_effort`` already picked it as the most trustworthy
+    attempt, which is a judgement rather than an ordering. Only when the winner
+    was cleared or does not qualify does ladder order break the tie, and the
+    audit event records that the choice was unranked.
+
+    Also excluded, on either list: an ERROR output, a HALLUCINATION verdict,
+    empty text, a native-lane reading (native is precisely what the floor
+    distrusts), and text that is itself a failure marker (the GH-90 floor
+    overwrites ``best_output.text`` in place).
+    """
+    if not (
+        p.is_born_digital
+        and p.native_text
+        and p.native_table_structure_failed
+        and (
+            getattr(p, "native_table_unverifiable", False)
+            or getattr(p, "native_table_header_unattributed", False)
+        )
+        and bool(p.attempts)
+    ):
+        return None
+    # GH-90's scanned floor is a different lane and is not reachable from here
+    # (it requires ``not is_born_digital``), but a page carrying its flag must
+    # never be rescued by this path either.
+    if getattr(p, "scanned_table_evidence_failed", False):
+        return None
+    # #263 owns the disposition of a page whose native text is shredded. D3 is
+    # earlier in winner selection, so declining here preserves the existing D3
+    # floor instead of letting #262 silently choose a model on #263's behalf.
+    if getattr(p, "native_rotated_text_shredded", False):
+        return None
+
+    from socr.tables.reconcile import has_strict_table_grid
+
+    def _qualifies(out: PageOutput) -> bool:
+        if out is None:
+            return False
+        if getattr(out, "rejection_class", "") not in D3_SUPERSEDING_REJECTIONS:
+            return False
+        # ``chart_asset`` ships native_text plus a PNG reference. Relabelling
+        # the text does not make it independent evidence capable of overriding
+        # the D3 floor that distrusts that same native text (#265).
+        if (out.engine or "").startswith(_NATIVE_TEXT_LANES):
+            return False
+        text = (out.text or "").strip()
+        if not text or is_page_failed_marker(text):
+            return False
+        if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+            return False
+        return has_strict_table_grid(text)
+
+    if _qualifies(p.best_output):
+        return p.best_output
+    for out in reversed(list(p.attempts)):
+        if _qualifies(out):
+            return out
+    return None
 
 
 #: #263 round 2: the engines whose winning text IS (or embeds) the page's
@@ -474,29 +598,9 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     authoring the GRID on a structure-class page, full stop; native's PROSE
     ships separately, untouched, via the last-resort WARNING branch below.
 
-    GH-268: ``find_table_blocks`` alone is not the "was a grid authored"
-    check -- it only requires >= 2 consecutive pipe-bearing lines, with no
-    GFM separator row, so two lines of plain prose that each happen to
-    contain a "|" (e.g. "revenue | costs were up\nmargins | fell sharply")
-    register as an authored 2x2 grid. A real GFM separator row is
-    unambiguous; require one to actually be present -- but BLOCKING 3 on
-    #269 found the first fix (a page-GLOBAL ``native_verifier._MD_SEP_RE``
-    scan) both under- and over-accepts: a real separator row anywhere on the
-    page licenses an unrelated phantom prose block elsewhere on the SAME
-    page (model text "see identification | strategy.\n\n|---|---|\n\n
-    revenue | costs were up\nmargins | fell sharply" has a real separator
-    line that belongs to no block adjacent to the prose pair, yet the
-    page-global check passed it); and ``_MD_SEP_RE`` itself requires >= 2
-    column groups, so it rejects a genuine ONE-column table ("| Header
-    |\n|---|\n| value |").
-
-    Fixed by asking each candidate block whether ITS OWN separator row was
-    actually found and dropped, reusing ``find_table_blocks``'s own parse
-    (``reconcile._parse_grid`` drops a row only when every cell matches
-    ``_SEP_CELL``, which -- unlike ``_MD_SEP_RE`` -- accepts any dash-count,
-    so a one-column separator counts). A block whose parsed ``grid`` has
-    fewer rows than its raw line span had exactly one row removed as a
-    separator; no new regex, no second copy of the GFM grammar to drift.
+    GH-268 centralizes "authored a grid" in ``has_strict_table_grid``. S1
+    must use the same structural contract as the earlier D3 and #259 branches;
+    otherwise an output one branch rejects can be selected by this later one.
     """
     if out is None:
         return False
@@ -512,12 +616,9 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     ):
         return False
 
-    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.reconcile import has_strict_table_grid
 
-    blocks = find_table_blocks(text)
-    if not blocks:
-        return False
-    return any(len(block.grid) < (block.end - block.start + 1) for block in blocks)
+    return has_strict_table_grid(text)
 
 
 def _reaches_structure_class_branch(p) -> bool:
@@ -755,6 +856,31 @@ def _winning_page_output(
             )
             and bool(p.attempts)
         ):
+            # #262: unless some attempt did author a grid, in which case the
+            # failed-table marker would be the lossier outcome. This D3-specific
+            # decision stays before the broader S1 structure-class branch; the
+            # latter's reachability predicate mirrors this precondition order.
+            kept_model = d3_floor_kept_model_output(p)
+            if kept_model is not None:
+                # The marker carried a PNG of the page so a human could SEE the
+                # table it refused to transcribe. That backstop matters MORE
+                # here, not less: what ships in the marker's place is a grid
+                # every rung refused, and the image is the only way a reader can
+                # check it. Kept text = model reading + in-body flag + the same
+                # image ref the floor would have shipped.
+                kept_text = kept_model.text.rstrip()
+                kept_text = f"{kept_text}\n\n{d3_superseded_note(page_num)}\n"
+                png_ref = getattr(p, "d3_floor_png_ref", "")
+                if png_ref:
+                    kept_text = f"{kept_text}\n{png_ref}\n"
+                return replace(
+                    kept_model,
+                    text=kept_text,
+                    status=PageStatus.WARNING,
+                    audit_passed=False,
+                    failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
+                )
+
             # TR-3: D3 fail-closed floor text = failed-table marker + image ref.
             # The marker is always present (makes the failure loud and greppable);
             # the PNG image ref lets a human SEE the table without transcription.

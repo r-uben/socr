@@ -30,7 +30,12 @@ from typing import Protocol
 
 from socr.core.config import EngineType
 from socr.core.providers import ProviderProfile
-from socr.core.result import REJECTION_AMBIGUOUS_DEFERRED, PageOutput, PageStatus
+from socr.core.result import (
+    REJECTION_AMBIGUOUS_DEFERRED,
+    REJECTION_JUDGE_ONLY,
+    PageOutput,
+    PageStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -669,6 +674,17 @@ class NativeTableVerifierJudge:
 
         # No issue detected → delegate to inner judge
         decision = self._inner.assess(output, provider)
+        # #262: record the DISPOSITION here too, exactly as the warn branch
+        # above does. The verifier found nothing to refute -- no multiset
+        # mismatch, no lane-count gap -- so if this reading was refused, the
+        # inner judge alone refused it. That is a soft refusal by the same
+        # definition #259 used, and without recording it the D3 floor cannot
+        # tell it from a CERTAIN_FAIL and must assume the worst. Set BEFORE
+        # ``_apply_structural_gate`` so a deterministic gate rejection below is
+        # never mislabelled as a judge-only one (the gate returns a rejecting
+        # decision unchanged and leaves ``rejection_class`` alone).
+        if not decision.accept:
+            output.rejection_class = REJECTION_JUDGE_ONLY
         return self._apply_structural_gate(decision, output, page_num, words, rules)
 
     def _apply_structural_gate(

@@ -166,17 +166,29 @@ def test_model_produced_nothing_still_falls_back_to_native(tmp_path: Path) -> No
     assert "Large T" in winner.text, winner.text
 
 
-def test_d3_fail_closed_floor_still_wins_over_a_flagged_model_table(tmp_path: Path) -> None:
+def test_d3_fail_closed_floor_still_wins_when_no_attempt_authored_a_grid(
+    tmp_path: Path,
+) -> None:
     """Reverse regression: the TR-3 D3 floor is a hard-fail, not a flag.
 
-    A page whose per-region geometry verifier hard-failed AND whose ladder
-    failed ships the explicit failed-table marker. Preferring the model output
-    there would re-open exactly the plausible-but-wrong table D3 exists to
-    prevent.
+    AMENDED BY #262, deliberately and not silently. As written at #259 this
+    passed ``MODEL_TABLE`` -- a page with a grid sitting in its own attempts --
+    and asserted that the marker shipped anyway. That is precisely the behaviour
+    #262 measures as a defect: on Cochrane-Piazzesi p15 the page shipped a
+    100-character marker with no numbers while a 2546-character extraction two
+    judges rated faithful sat in the cache, and the page's prose and equations
+    went with it. The floor's premise is that no better reading exists.
+
+    The guarantee the test exists for is kept and still asserted here, at the
+    scope where it is true: when NO attempt authored a grid, the floor fires and
+    a plausible-but-wrong native table is never emitted. The superseding case
+    has its own file, ``test_gh262_d3_marker_over_cached_grid.py``, which also
+    carries the reverse guards for an empty, hallucinated, ERROR-status or
+    native-engine attempt.
     """
     state = _state(
         _born_digital_pdf(tmp_path),
-        model_text=MODEL_TABLE,
+        model_text="Table 1 could not be read from this page.\n",
         structure_failed=True,
         unverifiable=True,
     )
@@ -184,6 +196,8 @@ def test_d3_fail_closed_floor_still_wins_over_a_flagged_model_table(tmp_path: Pa
     winner = _winning_page_output(state, 1)
     assert "failed: unverifiable table" in winner.text, winner.text
     assert winner.status is PageStatus.ERROR, winner.status
+    # ...and the native reading, which the floor exists to suppress, is absent.
+    assert "Large T" not in winner.text, winner.text
 
 
 def test_model_produced_no_table_on_a_table_page_falls_back_to_native(
@@ -203,6 +217,22 @@ def test_model_produced_no_table_on_a_table_page_falls_back_to_native(
     winner = _winning_page_output(state, 1)
     assert winner.engine == "native", winner.engine
     assert "Large T" in winner.text, winner.text
+
+
+def test_pipe_bearing_prose_does_not_supersede_native(tmp_path: Path) -> None:
+    """GH-268: consecutive prose lines with pipes are not an authored grid.
+
+    The permissive reconciliation parser accepts this shape, but the shipping
+    policy must fail closed: the model did not produce a table reading, so the
+    existing native reading remains the only grid available to this branch.
+    """
+    prose = "revenue | costs were up\nmargins | fell sharply\n"
+    state = _state(_born_digital_pdf(tmp_path), model_text=prose)
+
+    winner = _winning_page_output(state, 1)
+
+    assert winner.engine == "native", winner
+    assert winner.text.strip() == NATIVE_TABLE.strip()
 
 
 def test_native_engine_winner_is_untouched(tmp_path: Path) -> None:
@@ -614,6 +644,16 @@ def test_ragged_kept_grid_is_flagged_not_handed_back_to_native(tmp_path: Path) -
     assert winner.engine == "qwen", winner.engine
     assert "flagged table kept" in winner.text, winner.text
     assert "grid shape" in winner.text, winner.text
+
+
+def test_authored_grid_recognizes_a_header_narrower_than_every_body_row() -> None:
+    """GH-276's shape stays authored on #259, without repairing it here."""
+    from socr.tables.reconcile import has_authored_table_grid, has_strict_table_grid
+
+    ragged = "| a | b |\n| --- | --- |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n"
+
+    assert has_authored_table_grid(ragged) is True
+    assert has_strict_table_grid(ragged) is False
 
 
 def test_a_clean_kept_table_carries_no_noise(tmp_path: Path) -> None:

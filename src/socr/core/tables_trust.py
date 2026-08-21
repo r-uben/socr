@@ -69,6 +69,14 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # carries both; the pair says "detected here, acted on there".
         "table_region_geometry_hard_fail",
         "table_region_unverifiable",
+        # #262: the D3 floor was SUPERSEDED -- a model attempt authored a grid,
+        # so the page ships that reading instead of the failed-table marker.
+        # It must be watched here for the same reason the marker was: the native
+        # table region hard-failed verification and the shipped grid was refused
+        # by every ladder rung, so a consumer must be told to distrust its
+        # digits. Without this entry, removing the marker would silently move
+        # the page from "untrusted" to "trusted" in the sidecar.
+        "d3_floor_model_table_kept",
         "source_evidence_table_reject",
         "table_row_repetition_truncated",
         # GH-96: an escalation that was refused or timed out leaves the SUSPECT

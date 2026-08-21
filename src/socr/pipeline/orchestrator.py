@@ -5547,6 +5547,7 @@ class UnifiedPipeline:
         # lossy fallbacks must not report a clean pass.
         from socr.core.manifest import (
             canonical_page_texts,
+            d3_floor_kept_model_output,
             flagged_model_page_output,
             is_page_failed_marker,
             kept_table_grid_defect,
@@ -5614,6 +5615,14 @@ class UnifiedPipeline:
         # double-counted below (both in d3_floor_pages via the manifest ship
         # and in native_fallback_pages via this list, since the exclusion
         # predicate must match exactly what _winning_page_output ships).
+        # #262: a page where some attempt DID author a grid no longer ships the
+        # marker -- ``_winning_page_output`` keeps the model's reading instead --
+        # so it must leave this list. As with every other bucket here, the
+        # exclusion predicate has to match EXACTLY what the manifest ships, or
+        # the page is counted under a disposition it does not have.
+        d3_model_table_pages = [
+            n for n, p in sorted(state.pages.items()) if d3_floor_kept_model_output(p) is not None
+        ]
         d3_floor_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -5624,6 +5633,7 @@ class UnifiedPipeline:
                 or getattr(p, "native_table_header_unattributed", False)
             )
             and bool(p.attempts)
+            and n not in d3_model_table_pages
         ]
         # GH-211 MAJOR-2: under --native-only the OCR ladder never runs, so a
         # page demoted purely because the extraction-time TR-3 geometry check
@@ -5845,6 +5855,11 @@ class UnifiedPipeline:
         # but it is never SUCCESS -- the grid it carries is exactly what
         # this branch could not vouch for (no rung authored one).
         pages_ok = pages_ok and not structure_class_native_fallback_pages
+        # #262: the model's reading superseded a HARD fail-closed floor. That is
+        # strictly more alarming than #259's flag, and it must not leave the run
+        # reporting a clean SUCCESS. AUDIT_FAILED rather than ERROR: the page
+        # ships real, scored content -- the marker it replaced had none.
+        pages_ok = pages_ok and not d3_model_table_pages
         # NOT a page failure -- the owner was explicit that the page is not failed
         # and the table is kept. AUDIT_FAILED at the document level is the
         # "completed with warnings, output written" path, which is the honest
@@ -5878,6 +5893,7 @@ class UnifiedPipeline:
             or flagged_model_pages
             or structure_class_model_pages
             or structure_class_native_fallback_pages
+            or d3_model_table_pages
             or value_drift_pages
         ):
             from socr.core.audit_log import AuditEvent
@@ -5949,6 +5965,29 @@ class UnifiedPipeline:
                             "flagged_model_kept": True,
                             "grid_defect": _kept_defect(n),
                         },
+                    )
+                )
+            # #262: the D3 floor was SUPERSEDED on these pages -- distinct from
+            # ``table_region_unverifiable`` (the floor fired and a marker
+            # shipped) and from ``flagged_model_table_kept`` (#259: no floor was
+            # involved, only a distrust flag). A consumer of the audit log must
+            # be able to tell "we shipped nothing" from "we shipped the model
+            # over a hard fail", so it gets its own kind rather than reusing one.
+            for n in d3_model_table_pages:
+                _kept_d3 = d3_floor_kept_model_output(state.pages[n])
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="d3_floor_model_table_kept",
+                        engine=(_kept_d3.engine if _kept_d3 else ""),
+                        detail=(
+                            "the native table region failed geometry/header verification"
+                            " and no OCR rung was accepted, but a model attempt authored a"
+                            " grid; the model's reading ships FLAGGED instead of the"
+                            " failed-table marker — verify it against the source image"
+                            " before citing"
+                        ),
+                        data={"d3_floor_superseded": True},
                     )
                 )
             # TR-3: distinct audit event for D3 floor pages — do NOT record
@@ -6061,6 +6100,12 @@ class UnifiedPipeline:
                         _rows = (getattr(_e, "data", None) or {}).get("drifted_rows") or []
                         if _rows:
                             console.print(f"    [red]p{_e.page_num}: {describe_drift(_rows)}[/red]")
+                if d3_model_table_pages:
+                    console.print(
+                        f"  [red]{len(d3_model_table_pages)} table page(s) shipped a MODEL"
+                        f" reading over a failed-closed native table region (verify against"
+                        f" the source image before citing): {d3_model_table_pages}[/red]"
+                    )
                 if d3_floor_pages:
                     console.print(
                         f"  [red]{len(d3_floor_pages)} table page(s) hit the D3 fail-closed"

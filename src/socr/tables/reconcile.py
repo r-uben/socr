@@ -110,6 +110,305 @@ def find_table_blocks(markdown: str) -> list[_Block]:
     return blocks
 
 
+#: GFM permits a delimiter cell with one hyphen, but this shipping-policy
+#: predicate deliberately requires the conventional three. One- and two-dash
+#: fragments are easy products of prose or truncated output; rejecting them
+#: fails closed to the existing native/marker behavior. Keep this separate from
+#: ``_SEP_CELL``, whose permissive grammar remains part of reconciliation.
+_STRICT_SEPARATOR_MIN_HYPHENS = 3
+_STRICT_SEP_CELL = re.compile(rf"^:?-{{{_STRICT_SEPARATOR_MIN_HYPHENS},}}:?$")
+
+#: A fence opener: three or more backticks or tildes, optionally indented and
+#: followed by an info string. Content inside a fence is a code sample, not
+#: markdown structure.
+_FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+
+#: A closing fence may be longer than its opener, but never shorter, and may
+#: carry only trailing whitespace -- not an opener-style info string.
+_FENCE_CLOSER = re.compile(r"^\s{0,3}(`{3,}|~{3,})[ \t]*$")
+
+#: GH-268 requires consistent column counts across every row of an authored
+#: grid. Keep the policy named because accepting a ragged block here can either
+#: displace native text (#259) or suppress the D3 fail-closed marker (#262).
+STRICT_GRID_REQUIRES_UNIFORM_BODY = True
+
+
+#: An HTML comment, possibly spanning lines. A grid inside one is commented-out
+#: content, not a reading of the page.
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+#: CommonMark's OTHER code construct: four spaces (or a tab) of indentation.
+#: ``_PIPE_LINE`` allows leading whitespace and ``_split_row`` strips it, so
+#: without this an indented code sample reads as table structure.
+_INDENTED_CODE = re.compile(r"^(?: {4,}|\t)")
+
+
+def _strip_html_comments(markdown: str) -> str:
+    """Blank out HTML comments, keeping line count so nothing shifts.
+
+    An UNCLOSED ``<!--`` swallows the rest of the document, by the same
+    fail-closed reasoning as an unclosed fence.
+    """
+    text = _HTML_COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), markdown)
+    head, sep, _ = text.partition("<!--")
+    return head if sep else text
+
+
+def _row_border(line: str) -> tuple[bool, bool]:
+    """Whether a row is written with a leading / trailing pipe.
+
+    A real table is written consistently by whatever emitted it, so its header
+    and its separator share a border style. A prose sentence that happens to
+    sit above a separator generally does not -- which is what separates
+    ``noise | a`` from a header.
+    """
+    stripped = line.strip()
+    return stripped.startswith("|"), stripped.endswith("|")
+
+
+def _strip_fenced_regions(lines: list[str]) -> list[str]:
+    """Blank out fenced code content so it is never read as markdown structure.
+
+    A table inside a backtick or tilde fence is a code SAMPLE -- the model
+    showing what a grid looks like, or echoing the prompt -- not a reading of
+    the page. The fence lines themselves go too, so a grid opening immediately after a fence
+    with no blank line between them cannot inherit the fence's row.
+
+    An UNCLOSED fence swallows the rest of the document, on purpose: the
+    document is malformed, and this predicate suppresses a fail-closed marker,
+    so the honest answer under malformation is "no grid here".
+    """
+    out: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in lines:
+        if fence is None:
+            m = _FENCE_LINE.match(line)
+            if m:
+                run = m.group(1)
+                fence = (run[0], len(run))
+                out.append("")
+                continue
+            out.append(line)
+        else:
+            # CommonMark: the closer uses the same character, is at least as
+            # long as the opener, and has no info string.
+            m = _FENCE_CLOSER.match(line)
+            if m:
+                run = m.group(1)
+                opener_char, opener_length = fence
+                if run[0] == opener_char and len(run) >= opener_length:
+                    fence = None
+            out.append("")
+    return out
+
+
+def has_strict_table_grid(markdown: str) -> bool:
+    """Whether ``markdown`` contains a real GitHub-markdown table.
+
+    ``find_table_blocks`` asks only for two consecutive pipe-bearing lines that
+    parse to a non-empty cell grid, and its docstring states the safety
+    assumption rather than checking it: "Prose almost never produces
+    consecutive pipe lines". Measured at ``origin/main``: prose with a pipe on
+    two adjacent lines returns one block, and so does a header plus separator
+    with no body row.
+
+    That looseness is harmless where a false positive costs a wasted
+    comparison. It is NOT harmless in the #262 D3 keep predicate, where "an
+    attempt authored a grid" is what SUPPRESSES a fail-closed marker. A phantom
+    grid there silences the marker on a page with nothing usable on it, which
+    inverts the ticket's own intent: the marker must yield to a real
+    extraction, never to a phantom one.
+
+    WHAT THIS IS, STATED PLAINLY (round 5). It is a deliberately CONSERVATIVE
+    INTERIM, not a sound decision procedure, and it is not claimed to be one.
+    Round 4 claimed "a case nobody anticipated fails closed"; a reviewer
+    falsified that within the hour with three inputs -- a grid inside an
+    indented code block, a grid inside an HTML comment, and a prose line acting
+    as a header. None of those are shape violations. Each contains a
+    syntactically perfect GitHub-markdown table. They are PROVENANCE failures:
+    the text is a real grid that is not a reading of the page. No markdown
+    predicate can see that, because by markdown the input is correct.
+
+    GH-268 makes this the policy predicate for the D3 and S1 keep decisions.
+    ``flagged_model_page_output`` uses the same structural scan through
+    ``has_authored_table_grid``, but follows #259's keep-and-flag ruling for a
+    ragged body. The permissive reconciliation parser is intentionally not a
+    shipping-policy oracle.
+
+    Until then the operative rule is FAIL CLOSED: where the answer is unclear,
+    return False and let the failed-table marker ship. Refusing a real grid
+    costs the marker, which is exactly what ships today; accepting a phantom
+    silently replaces a page with text that describes nothing. Those costs are
+    not symmetric, so neither is this predicate.
+
+    WHY THE POSITIVE SHAPE CHECK, AND NOT A LIST OF REJECTIONS. Rounds 1-3 each
+    bounded this by enumerating what to refuse, and each list turned out to be
+    incomplete -- the failure shape that took #259/#260 through three
+    rejections. A denylist grown one reviewer at a time does not converge. But
+    unlike that problem, this one is bounded: a GitHub-markdown table has a
+    DEFINED shape, so the predicate asserts the shape and returns False for
+    everything else. A case nobody anticipated fails CLOSED, which is the
+    honest outcome here -- the marker is a true statement about the page and a
+    phantom grid is not.
+
+    The shape, at the start of a run of consecutive pipe-bearing lines that is
+    not inside a code fence::
+
+        rows[0]      header     N cells, N >= 1; not entirely blank
+        rows[1]      separator  N cells, EVERY cell matching :?-{3,}:?
+        rows[2:]     body       at least one CONTENT row; every row has N cells
+
+    The separator is at index 1 specifically, never merely "somewhere"; the
+    body starts strictly at index 2, so a separator can never also be counted
+    as the body row after itself.
+
+    ``find_table_blocks`` itself is deliberately UNCHANGED. Other callers
+    depend on its looseness, and tightening it globally would be a silent
+    behaviour change across the codebase. This predicate is the stricter,
+    strict shipping-policy layer.
+    """
+    return _has_table_grid(markdown, require_uniform_body=STRICT_GRID_REQUIRES_UNIFORM_BODY)
+
+
+def has_authored_table_grid(markdown: str) -> bool:
+    """Whether model text contains a table reading for #259 to keep and flag.
+
+    This uses the same positive markdown shape and provenance guards as
+    ``has_strict_table_grid``: a real delimiter row, a nonblank header, a
+    content-bearing body, consistent border style, and no code/comment grid.
+    It differs only on body width. Under #259's owner ruling, a ragged table is
+    still authored table content and must remain visible with its structural
+    flag instead of being replaced by the already-distrusted native reading.
+
+    D3 and S1 deliberately do not use this predicate: their fail-closed choice
+    is between a strict grid and the existing marker/native behavior.
+    """
+    return _has_table_grid(markdown, require_uniform_body=False)
+
+
+def _has_table_grid(markdown: str, *, require_uniform_body: bool) -> bool:
+    """Scan markdown for the shared table shape under a caller's width policy."""
+    # Order matters: comments first (they can contain fence markers), then
+    # fences, then indented code (a fence's CONTENT may be indented, and is
+    # already blanked by then). CRLF is normalised so a trailing \r cannot
+    # make a separator cell fail to match.
+    text = _strip_html_comments(markdown.replace("\r\n", "\n").replace("\r", "\n"))
+    lines = _strip_fenced_regions(text.splitlines())
+    lines = ["" if _INDENTED_CODE.match(line) else line for line in lines]
+    i, n = 0, len(lines)
+    while i < n:
+        if not _is_table_line(lines[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and _is_table_line(lines[j]):
+            j += 1
+        block = lines[i:j]
+        if _run_contains_grid(
+            [_split_row(line) for line in block],
+            [_row_border(line) for line in block],
+            require_uniform_body=require_uniform_body,
+        ):
+            return True
+        i = j
+    return False
+
+
+def _run_contains_grid(
+    rows: list[list[str]],
+    borders: list[tuple[bool, bool]],
+    *,
+    require_uniform_body: bool,
+) -> bool:
+    """True iff the header/separator/body shape starts at the first row.
+
+    FAIL-CLOSED RULE, and the reason it lives here rather than inside the
+    per-offset check: a block containing MORE THAN ONE separator row is
+    ambiguous about where its table starts, so it is refused outright. That is
+    what closes the reviewer's ``noise | a`` phantom, whose block carries a
+    doubled separator -- and note the remedy proposed with that finding (a
+    header whose cells are "not all separators and not all blank") does NOT
+    close it: ``['noise', 'a']`` is neither, so it would have been accepted.
+    Measured before choosing this rule instead.
+    """
+    separators = sum(1 for cells in rows if _is_separator_row(cells))
+    if separators != 1:
+        return False
+    # FAIL-CLOSED: the header is the run's FIRST line, not "some offset in it".
+    # Round 4 scanned every offset so a genuine grid would not be lost to a
+    # stray pipe-bearing sentence directly above it. That flexibility is
+    # exactly the room the reviewer's prose-as-header phantom lived in, and the
+    # cost of removing it is a marker on a real grid whose run happens to open
+    # with prose and no blank line between -- which is today's behaviour, not a
+    # new loss. A blank line still separates runs, so a grid after a paragraph
+    # is unaffected.
+    return _grid_starts_at(rows, 0, borders, require_uniform_body=require_uniform_body)
+
+
+def _is_separator_row(cells: list[str]) -> bool:
+    return bool(cells) and all(_STRICT_SEP_CELL.match(cell.strip()) for cell in cells)
+
+
+def _grid_starts_at(
+    rows: list[list[str]],
+    i: int,
+    borders: list[tuple[bool, bool]],
+    *,
+    require_uniform_body: bool,
+) -> bool:
+    """The shape, anchored at ``i`` (always 0 -- see ``_run_contains_grid``).
+
+    Every exit is False; the only True is the end.
+    """
+    if i + 2 >= len(rows) + 1:  # need a header and a separator at minimum
+        return False
+    if i + 1 >= len(rows):
+        return False
+    header, separator = rows[i], rows[i + 1]
+    width = len(header)
+    if len(separator) != width:
+        return False
+    if not _is_separator_row(separator):
+        return False
+    # FAIL-CLOSED: the header must be written in the SAME border style as the
+    # separator. A table is emitted consistently by whatever wrote it; a prose
+    # line that happens to precede a separator generally is not. This is what
+    # separates ``noise | a`` (no outer pipes) from the ``| --- | --- |`` under
+    # it, while leaving the legitimate all-bordered and all-unbordered
+    # spellings alone. A heuristic, deliberately: under a fail-closed interim
+    # the cost of refusing a real grid is the marker, which is today's
+    # behaviour, and the cost of accepting a phantom is silent content loss.
+    if borders[i] != borders[i + 1]:
+        return False
+    # A header may not itself be a separator, nor be entirely blank.
+    if _is_separator_row(header) or not any(cell.strip() for cell in header):
+        return False
+    body = rows[i + 2 :]
+    if not body:
+        return False  # header + separator and nothing under it
+
+    def _is_body_row(cells: list[str], *, require_width: bool) -> bool:
+        """A body row carries CONTENT, at header width when required.
+
+        Empty punctuation and a second separator are structure, not a reading.
+        The #259 authored-content policy permits any body width because both a
+        narrower row and GH-276's wider-body shape are ragged tables to keep
+        and flag; the strict D3/S1 policy still requires the header's width.
+        """
+        if require_width and len(cells) != width:
+            return False
+        if not any(cell.strip() for cell in cells):
+            return False
+        return not all(_STRICT_SEP_CELL.match(cell.strip()) for cell in cells)
+
+    if require_uniform_body:
+        # Per spec: every row under the separator belongs to the grid.
+        return all(len(cells) == width for cells in body) and any(
+            _is_body_row(cells, require_width=True) for cells in body
+        )
+    return any(_is_body_row(cells, require_width=False) for cells in body)
+
+
 def _is_table_line(line: str) -> bool:
     return "|" in line and bool(_PIPE_LINE.match(line))
 

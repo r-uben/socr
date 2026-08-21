@@ -72,6 +72,14 @@ class FailureMode(str, Enum):
     #: guarantee found nothing to corroborate it, or (under --native-only)
     #: never ran a model rung at all. Never SUCCESS.
     STRUCTURE_CLASS_NO_MODEL_ATTEMPT = "structure_class_no_model_attempt"
+    #: #262: the TR-3 D3 fail-closed floor fired on the NATIVE lane, but a model
+    #: attempt in the page's own run cache authored a grid. The marker's whole
+    #: justification is that no better reading exists; when one does, the marker
+    #: is content loss. The model's reading ships under this mode instead.
+    #: Deliberately distinct from ``MODEL_OUTPUT_FLAGGED``: that one means "no
+    #: rung accepted and native carries a table-distrust flag", this one means
+    #: "a hard fail-closed floor was superseded", which is a stronger warning.
+    MODEL_TABLE_OVER_FAILED_FLOOR = "model_table_over_failed_floor"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The
@@ -83,6 +91,21 @@ class FailureMode(str, Enum):
 #: refused -- and read as an ALLOWLIST: an empty ``rejection_class`` means "we
 #: do not know why this was refused", which must behave as it always has.
 REJECTION_AMBIGUOUS_DEFERRED = "ambiguous_deferred"
+
+#: #262: the SECOND provably-soft disposition, recorded on the other path where
+#: no deterministic gate refuted the reading -- the verifier found no issue at
+#: all and the inner VLM judge alone refused. Like the value above it is written
+#: BEFORE the structural gate runs, so a gate rejection can never be mistaken
+#: for it, and it is read as part of an ALLOWLIST: an empty ``rejection_class``
+#: still means "we do not know why this was refused".
+#:
+#: It exists because #260 only ever needed to separate soft from hard on the
+#: AMBIGUOUS branch; #262 has to make the same distinction on every branch, and
+#: reading "empty" as soft would have shipped a CERTAIN_FAIL grid over a
+#: fail-closed floor. Deliberately NOT accepted by ``flagged_model_page_output``
+#: (#259), whose fallback is a complete native reading rather than a marker and
+#: whose allowlist is therefore narrower on purpose.
+REJECTION_JUDGE_ONLY = "judge_only"
 
 
 @dataclass
