@@ -33,8 +33,12 @@ the statistics.
 > at `orchestrator.py@7c7f174:3387-3401` excludes `chart_asset`, not `native`, so the
 > same mutation can in general put model text into a native-labelled output.
 >
-> This survived eight review rounds because every round checked the quality claims
-> against the page images and nobody checked whether the engine labels were true.
+> This survived eight review rounds, and none of them checked whether the engine labels
+> were true. An earlier revision of this note claimed a reason — that every round
+> checked quality against the page images instead — which is not supported: the later
+> rounds were adversarial checks of the content-free guard, of schema and manifest
+> identity, of path encodings, and of wording. Why nobody checked the labels is not
+> established, and inventing a cause is the same failure this note is about.
 
 ## The number
 
