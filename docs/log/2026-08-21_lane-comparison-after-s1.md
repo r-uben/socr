@@ -119,9 +119,9 @@ It does not rest on this page, and this file no longer claims it does.
   the shared grid predicate (#268).
 - **#271 filed.** An equation page shipped native under WARNING with
   `needs_ocr_enhancement` set, while a cached candidate with correct aligned LaTeX was
-  discarded: 0 fractions and 0 display environments shipped against 11 and 6
-  available. S1 does not reach it — S1 is gated on `is_structure_class()`, which means
-  tables.
+  discarded: 0 fractions and 0 display environments shipped, against 33 `\frac`
+  commands and 3 `aligned` environments available. S1 does not reach it — S1 is gated
+  on `is_structure_class()`, which means tables.
 
 ## What in this record cannot be checked from the repo
 
@@ -139,7 +139,8 @@ quality can be confirmed from this repo. That covers, exhaustively:
 - everything asserted about p42 — "every digit, no grid", native rated better than the
   model, neither lane citable, and the `1.10`/`1.11` substitution itself;
 - the p15 figures (11 grid rows, 36 values, prose recovered) and the p43 figures
-  (0 fractions and 0 display environments shipped against 11 and 6 available);
+  (0 fractions and 0 display environments shipped, against 33 `\frac` commands and 3
+  `aligned` environments in the discarded candidate);
 - that the two runs differ only in the code under test, and which commit each ran
   against. The verdict JSON carries no SHA; `MEASURED_AGAINST` was a session file.
 
