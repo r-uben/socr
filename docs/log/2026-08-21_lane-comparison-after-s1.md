@@ -30,8 +30,10 @@ different denominators.
 
 **The baseline's own split is NOT a measured comparable and this file will not use it
 as one.** The 2026-08-20 record states 7 worse, 1 tie, native won nothing outright.
-That is the old panel's prose; its per-page verdicts were never recorded, and the new
-panel contradicts it on the one page where a direct comparison is possible (see
+That is the old panel's prose; its per-page verdicts were never COMMITTED — they exist
+in that session's own reconciliation artifacts, so they were recorded, just not here —
+and the new panel contradicts it on the one page where a direct comparison is possible
+(see
 "How much of this is the code" below). The defensible before/after is the routing,
 which is recorded on both sides.
 
@@ -104,8 +106,9 @@ outputs sit in the byte-changed group, and none of the three byte-identical outp
 citable under this panel.**
 
 It is tempting to call that an improvement count and this file will not, for the reason
-given above — the two panels answered different questions and the baseline's per-page
-verdicts were never recorded, so "how many pages got better" has no defined value here.
+given above — the two panels answered different questions, and the baseline's per-page
+verdicts were never committed, so "how many pages got better" has no value this repo
+can check.
 What byte-identity establishes is narrower: where the shipped text did not change, any
 difference in verdict is the panel, not the code.
 
@@ -221,9 +224,18 @@ binding alters a digit, so **shipping either one unqualified is wrong** and no
 single-lane policy fixes it.
 
 The argument for the binding oracle (#266) rests on the 2026-08-20 finding and on
-GH-270 — a value that exists elsewhere on the page placed at the wrong (row, column),
-where the bag really is identical and only position distinguishes right from wrong.
-It does not rest on this page, and this file no longer claims it does.
+**p10, the shifted-label page filed as #273** — which is the genuine identical-bag case
+and is measured, not asserted: baseline native and the qwen output shipped today each
+hold **50 decimals with identical sign-aware multisets**, and differ only in which row
+carries the `Large T` label. A bag comparison cannot see that defect at all. GH-270 is
+NOT such a case despite an earlier revision of this file citing it as one — its
+fabricating output holds 176 decimals against the source's 152, so the bags differ
+substantially and a multiset check would notice. It is a fabrication case, not a
+binding-blindness case.
+
+So the record's own strongest evidence for #266 is p10, and it took a hand check to
+find it: it is a page where every number is right, the bag is identical, a grid exists,
+and the output is still uncitable.
 
 ## What came out of it
 

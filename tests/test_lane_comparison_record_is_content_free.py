@@ -14,13 +14,19 @@ Covered.
     ``-verdict.json`` or ``-verdicts-v2.json`` is caught, not just one exact suffix.
     Each row must carry ONLY allowlisted keys, and each value is bounded five ways:
     its own type, the type of every element inside it, the length of any one string,
-    the number of elements, and the serialised size of the whole value. Those bounds
-    together are what stop corpus prose or a base64 image being parked inside an
-    allowed field -- a key-name check permits it, a per-string cap alone is defeated
-    by chopping the payload into legal-sized pieces, and a string cap of any kind is
-    blind to a numeric byte array.
+    the number of elements, and the serialised size of the whole value. A key-name
+    check alone permits a payload inside an allowed field; a per-string cap alone is
+    defeated by chopping it into legal pieces; any string cap is blind to a numeric
+    byte array. These bounds close all three PER VALUE.
+  * The whole file, not only its values: a row count and a byte size. Per-value bounds
+    are per value, so 50 extra rows each carrying a legal 80 characters assemble a
+    page-sized payload out of individually-innocent parts. The file-level bounds are
+    what stop that, and an earlier revision without them was walked exactly that way.
   * Every ``*lane-comparison*`` file whatever its extension, scanned for filesystem
-    paths.
+    paths -- BOTH as raw text and as decoded JSON strings. Raw-text scanning alone is
+    defeated by JSON's own escaping: a backslash-escaped solidus is valid JSON,
+    decodes to an absolute path, and contains no bare ``/Users/`` substring for a
+    text scan to find.
 
 NOT covered, and a reader should assume these are open.
   * Path detection is a NAMED-PREFIX scan, not an absolute-path parser. It knows the
@@ -29,8 +35,11 @@ NOT covered, and a reader should assume these are open.
     companions are hand-written prose, and no test can tell an author's sentence from
     a page's sentence. The prose records are protected by review, not by this.
   * Anything in a file matching neither pattern.
-  * Content that fits inside the bounds. A short phrase in ``doc`` is unexamined; the
-    guard bounds VOLUME and SHAPE, and cannot read meaning.
+  * Content that fits inside the bounds. The widest per-value channel is ``flags`` at
+    roughly 80 characters, and the file-level cap admits a comparable total spread
+    thinly across rows. The guard bounds VOLUME and SHAPE; it cannot read meaning, and
+    a determined author has a sentence-sized channel.
+  * Path spellings nobody listed, in any encoding the decoder does not produce.
 
 It is a tripwire on the shapes these records actually take. It is not a proof of
 confidentiality and must not be cited as one.
@@ -70,6 +79,12 @@ MANIFEST = LOG / "2026-08-20_lane-comparison-manifest.json"
 # spread over legal-looking entries. That is a phrase, not a page, and no bound above
 # the observed maximum can close it entirely. The guard bounds VOLUME and SHAPE; it
 # cannot read meaning, and the residual channel is a sentence fragment wide.
+# File-level bounds, also derived: both committed verdict files hold 21 rows and just
+# under 5.9 KB. Doubling gives room for a larger campaign while keeping the total far
+# below anything that could carry a page of corpus text spread across rows.
+MAX_VERDICT_ROWS = 48
+MAX_VERDICT_BYTES = 12_000
+
 VERDICT_SCHEMA = {
     #                value types          element types  str  items  bytes
     "doc": ((str,), (), 80, 0, 96),
@@ -126,6 +141,20 @@ def test_verdict_rows_carry_only_allowlisted_keys():
             assert not extra, f"unexpected key(s) in {path.name}: {sorted(extra)}"
 
 
+def test_verdict_files_are_bounded_as_files_not_only_per_value():
+    """Per-value bounds are per value; a payload can be spread across extra rows."""
+    for path in VERDICT_FILES:
+        rows = json.loads(path.read_text())
+        assert len(rows) <= MAX_VERDICT_ROWS, (
+            f"{path.name} holds {len(rows)} rows against a cap of {MAX_VERDICT_ROWS}; "
+            "a campaign this large needs the cap re-derived, deliberately"
+        )
+        size = len(path.read_bytes())
+        assert size <= MAX_VERDICT_BYTES, (
+            f"{path.name} is {size} bytes against a cap of {MAX_VERDICT_BYTES}"
+        )
+
+
 def test_verdict_values_cannot_smuggle_prose_or_images():
     """A key-name allowlist alone lets a page of text ride inside ``flags``.
 
@@ -166,12 +195,41 @@ def test_verdict_values_cannot_smuggle_prose_or_images():
                     )
 
 
+def _decoded_strings(path):
+    """Every string a JSON consumer would actually see, escapes resolved.
+
+    Scanning raw file text is not enough: JSON may escape the solidus, so a value
+    that decodes to an absolute path can carry no bare ``/Users/`` substring for a
+    text scan to find. A reviewer walked exactly that past the previous version.
+    """
+    if path.suffix != ".json":
+        return
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+
+
 def test_no_absolute_paths_anywhere_in_the_record():
     """Absolute paths leak the corpus location and the local username."""
     for path in {*RECORD_FILES, *VERDICT_FILES, MANIFEST}:
         blob = path.read_text()
         for marker in ABSOLUTE_PATH_MARKERS:
             assert marker not in blob, f"{path.name} exposes a path under {marker}"
+            for text in _decoded_strings(path):
+                assert marker not in text, (
+                    f"{path.name} hides a path under {marker} behind JSON escaping"
+                )
 
 
 def test_manifest_references_documents_by_basename_only():
