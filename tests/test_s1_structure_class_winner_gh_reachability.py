@@ -954,15 +954,15 @@ def test_grid_authored_attempt_rejects_a_real_separator_elsewhere_on_the_page(
     )
 
 
-def test_grid_authored_attempt_rejects_a_one_column_pipe_list(tmp_path: Path) -> None:
-    """GH-268 requires a grid with at least two columns, not a pipe list."""
+def test_grid_authored_attempt_accepts_a_one_column_table(tmp_path: Path) -> None:
+    """A header, separator, and body form a table regardless of width."""
     _grid_authored_attempt = _manifest_symbol("_grid_authored_attempt")
 
     text = "| Header |\n|---|\n| value |"
     out = PageOutput(
         page_num=1, text=text, status=PageStatus.SUCCESS, engine="gemini", audit_passed=True
     )
-    assert _grid_authored_attempt(out) is False, "a one-column pipe list is not a grid"
+    assert _grid_authored_attempt(out) is True, "a one-column table is an authored grid"
 
 
 # ---------------------------------------------------------------------------

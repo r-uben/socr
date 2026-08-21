@@ -523,6 +523,16 @@ def test_prose_containing_pipes_does_not_count_as_an_authored_grid(tmp_path: Pat
     assert winner.status is PageStatus.ERROR, winner.status
 
 
+def test_ragged_grid_does_not_suppress_the_d3_marker(tmp_path: Path) -> None:
+    """#259 keeps ragged table content; D3 still requires a strict grid."""
+    ragged = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 | 5 |\n"
+    state = _state(_born_digital_pdf(tmp_path), model_text=ragged)
+
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+
+
 def test_a_half_emitted_grid_does_not_count_as_an_authored_grid(tmp_path: Path) -> None:
     """Direction 2: a header and a separator with no body row is not a reading."""
     state = _state(_born_digital_pdf(tmp_path), model_text=HALF_EMITTED_GRID)
@@ -608,7 +618,7 @@ STRICT_GRID_CASES: list[tuple[str, str, bool]] = [
     ("separator wider than the header", "| a | b |\n|---|---|---|\n| 1 | 2 |\n", False),
     ("a later row is ragged", "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 | 5 |\n", False),
     ("prose with pipes", "x | y is here\nz | w also\n", False),
-    ("one-column pipe list", "| a |\n|---|\n| 1 |\n", False),
+    ("one-column table", "| a |\n|---|\n| 1 |\n", True),
     ("single-dash separator", "| a | b |\n|-|-|\n| 1 | 2 |\n", False),
     ("two-dash separator", "| a | b |\n|--|--|\n| 1 | 2 |\n", False),
     ("header and separator, no body", "| a | b |\n|---|---|\n", False),

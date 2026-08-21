@@ -618,8 +618,13 @@ def test_drift_is_surfaced_and_the_table_is_still_kept(tmp_path: Path) -> None:
     assert "[page 1 failed" not in winner.text
 
 
-def test_ragged_model_output_does_not_count_as_an_authored_grid(tmp_path: Path) -> None:
-    """GH-268 fails closed when column counts are inconsistent across rows."""
+def test_ragged_kept_grid_is_flagged_not_handed_back_to_native(tmp_path: Path) -> None:
+    """Hole A under the ruling: surface the defect, keep the table.
+
+    The round-2 review asked for a structural GATE here. The owner overruled the
+    premise — an ungridded native is not a better home for this page — so the
+    same predicate runs for surfacing only.
+    """
     from socr.tables.structure_check import table_output_defect
 
     pg = _fitz_page_with_numeric_rows([[(100.0, "1.1"), (160.0, "2.2")]])
@@ -636,8 +641,19 @@ def test_ragged_model_output_does_not_count_as_an_authored_grid(tmp_path: Path) 
     assert getattr(output, "rejection_class", "") == SOFT_REJECTION
 
     winner = _winning_page_output(_state_with(_born_digital_pdf(tmp_path), output), 1)
-    assert winner.engine == "native", winner.engine
-    assert winner.text.strip() == NATIVE_TABLE.strip()
+    assert winner.engine == "qwen", winner.engine
+    assert "flagged table kept" in winner.text, winner.text
+    assert "grid shape" in winner.text, winner.text
+
+
+def test_authored_grid_recognizes_a_header_narrower_than_every_body_row() -> None:
+    """GH-276's shape stays authored on #259, without repairing it here."""
+    from socr.tables.reconcile import has_authored_table_grid, has_strict_table_grid
+
+    ragged = "| a | b |\n| --- | --- |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n"
+
+    assert has_authored_table_grid(ragged) is True
+    assert has_strict_table_grid(ragged) is False
 
 
 def test_a_clean_kept_table_carries_no_noise(tmp_path: Path) -> None:

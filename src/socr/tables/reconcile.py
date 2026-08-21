@@ -118,11 +118,6 @@ def find_table_blocks(markdown: str) -> list[_Block]:
 _STRICT_SEPARATOR_MIN_HYPHENS = 3
 _STRICT_SEP_CELL = re.compile(rf"^:?-{{{_STRICT_SEPARATOR_MIN_HYPHENS},}}:?$")
 
-#: #262 round 3: the minimum column count for a grid to count as authored. One
-#: column is a list, not a table, and cannot carry the row/column binding the
-#: D3 floor is arbitrating over.
-_STRICT_MIN_COLUMNS = 2
-
 #: A fence opener/closer: three or more backticks or tildes, optionally indented,
 #: optionally followed by an info string. Content inside a fence is a code
 #: sample, not markdown structure.
@@ -224,9 +219,11 @@ def has_strict_table_grid(markdown: str) -> bool:
     the text is a real grid that is not a reading of the page. No markdown
     predicate can see that, because by markdown the input is correct.
 
-    GH-268 makes this the shared policy predicate for both the D3 keep decision
-    and ``flagged_model_page_output``. The permissive reconciliation parser is
-    intentionally not a shipping-policy oracle.
+    GH-268 makes this the policy predicate for the D3 and S1 keep decisions.
+    ``flagged_model_page_output`` uses the same structural scan through
+    ``has_authored_table_grid``, but follows #259's keep-and-flag ruling for a
+    ragged body. The permissive reconciliation parser is intentionally not a
+    shipping-policy oracle.
 
     Until then the operative rule is FAIL CLOSED: where the answer is unclear,
     return False and let the failed-table marker ship. Refusing a real grid
@@ -247,7 +244,7 @@ def has_strict_table_grid(markdown: str) -> bool:
     The shape, at the start of a run of consecutive pipe-bearing lines that is
     not inside a code fence::
 
-        rows[0]      header     N cells, N >= 2
+        rows[0]      header     N cells, N >= 1; not entirely blank
         rows[1]      separator  N cells, EVERY cell matching :?-{3,}:?
         rows[2:]     body       at least one CONTENT row; every row has N cells
 
@@ -258,8 +255,29 @@ def has_strict_table_grid(markdown: str) -> bool:
     ``find_table_blocks`` itself is deliberately UNCHANGED. Other callers
     depend on its looseness, and tightening it globally would be a silent
     behaviour change across the codebase. This predicate is the stricter,
-    shared shipping-policy layer.
+    strict shipping-policy layer.
     """
+    return _has_table_grid(markdown, require_uniform_body=STRICT_GRID_REQUIRES_UNIFORM_BODY)
+
+
+def has_authored_table_grid(markdown: str) -> bool:
+    """Whether model text contains a table reading for #259 to keep and flag.
+
+    This uses the same positive markdown shape and provenance guards as
+    ``has_strict_table_grid``: a real delimiter row, a nonblank header, a
+    content-bearing body, consistent border style, and no code/comment grid.
+    It differs only on body width. Under #259's owner ruling, a ragged table is
+    still authored table content and must remain visible with its structural
+    flag instead of being replaced by the already-distrusted native reading.
+
+    D3 and S1 deliberately do not use this predicate: their fail-closed choice
+    is between a strict grid and the existing marker/native behavior.
+    """
+    return _has_table_grid(markdown, require_uniform_body=False)
+
+
+def _has_table_grid(markdown: str, *, require_uniform_body: bool) -> bool:
+    """Scan markdown for the shared table shape under a caller's width policy."""
     # Order matters: comments first (they can contain fence markers), then
     # fences, then indented code (a fence's CONTENT may be indented, and is
     # already blanked by then). CRLF is normalised so a trailing \r cannot
@@ -277,14 +295,21 @@ def has_strict_table_grid(markdown: str) -> bool:
             j += 1
         block = lines[i:j]
         if _run_contains_grid(
-            [_split_row(line) for line in block], [_row_border(line) for line in block]
+            [_split_row(line) for line in block],
+            [_row_border(line) for line in block],
+            require_uniform_body=require_uniform_body,
         ):
             return True
         i = j
     return False
 
 
-def _run_contains_grid(rows: list[list[str]], borders: list[tuple[bool, bool]]) -> bool:
+def _run_contains_grid(
+    rows: list[list[str]],
+    borders: list[tuple[bool, bool]],
+    *,
+    require_uniform_body: bool,
+) -> bool:
     """True iff the header/separator/body shape starts at the first row.
 
     FAIL-CLOSED RULE, and the reason it lives here rather than inside the
@@ -307,14 +332,20 @@ def _run_contains_grid(rows: list[list[str]], borders: list[tuple[bool, bool]]) 
     # with prose and no blank line between -- which is today's behaviour, not a
     # new loss. A blank line still separates runs, so a grid after a paragraph
     # is unaffected.
-    return _grid_starts_at(rows, 0, borders)
+    return _grid_starts_at(rows, 0, borders, require_uniform_body=require_uniform_body)
 
 
 def _is_separator_row(cells: list[str]) -> bool:
     return bool(cells) and all(_STRICT_SEP_CELL.match(cell.strip()) for cell in cells)
 
 
-def _grid_starts_at(rows: list[list[str]], i: int, borders: list[tuple[bool, bool]]) -> bool:
+def _grid_starts_at(
+    rows: list[list[str]],
+    i: int,
+    borders: list[tuple[bool, bool]],
+    *,
+    require_uniform_body: bool,
+) -> bool:
     """The shape, anchored at ``i`` (always 0 -- see ``_run_contains_grid``).
 
     Every exit is False; the only True is the end.
@@ -325,8 +356,6 @@ def _grid_starts_at(rows: list[list[str]], i: int, borders: list[tuple[bool, boo
         return False
     header, separator = rows[i], rows[i + 1]
     width = len(header)
-    if width < _STRICT_MIN_COLUMNS:
-        return False
     if len(separator) != width:
         return False
     if not _is_separator_row(separator):
@@ -348,26 +377,26 @@ def _grid_starts_at(rows: list[list[str]], i: int, borders: list[tuple[bool, boo
     if not body:
         return False  # header + separator and nothing under it
 
-    def _is_body_row(cells: list[str]) -> bool:
-        """A body row carries CONTENT at the header's width.
+    def _is_body_row(cells: list[str], *, require_width: bool) -> bool:
+        """A body row carries CONTENT, at header width when required.
 
-        Three things a row of the right width can be and still not be content:
-        empty (punctuation), a second separator (structure, not a reading --
-        found by adversarial testing of this predicate, and the reason the body
-        cannot simply be "the rows after index i+1"), or both.
+        Empty punctuation and a second separator are structure, not a reading.
+        The #259 authored-content policy permits any body width because both a
+        narrower row and GH-276's wider-body shape are ragged tables to keep
+        and flag; the strict D3/S1 policy still requires the header's width.
         """
-        if len(cells) != width:
+        if require_width and len(cells) != width:
             return False
         if not any(cell.strip() for cell in cells):
             return False
         return not all(_STRICT_SEP_CELL.match(cell.strip()) for cell in cells)
 
-    if STRICT_GRID_REQUIRES_UNIFORM_BODY:
+    if require_uniform_body:
         # Per spec: every row under the separator belongs to the grid.
         return all(len(cells) == width for cells in body) and any(
-            _is_body_row(cells) for cells in body
+            _is_body_row(cells, require_width=True) for cells in body
         )
-    return any(_is_body_row(cells) for cells in body)
+    return any(_is_body_row(cells, require_width=False) for cells in body)
 
 
 def _is_table_line(line: str) -> bool:

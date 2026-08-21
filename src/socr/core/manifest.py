@@ -433,9 +433,9 @@ def flagged_model_page_output(p) -> PageOutput | None:
     # predicate's purposes, and native remains the only table reading there is.
     # Note this is a property of the model's own output alone; native structure
     # is never consulted as ground truth, which is the root error #259 names.
-    from socr.tables.reconcile import has_strict_table_grid
+    from socr.tables.reconcile import has_authored_table_grid
 
-    if not has_strict_table_grid(bo.text):
+    if not has_authored_table_grid(bo.text):
         return None
     return bo
 
