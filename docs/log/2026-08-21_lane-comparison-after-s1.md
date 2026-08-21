@@ -53,11 +53,15 @@ record contains no re-measurement numbers, only the baseline and the method.
 
 The distinction matters because `d25b761` is not the shipped code. Merged `7c7f174`
 differs from it by 146 changed lines in `pipeline/orchestrator.py` (108 added, 38
-removed). Two commits sit in that gap and only one of them is about this: `d88d01e`
+removed). That is a source-tree comparison, not an ancestry walk: #269 was
+squash-merged, so `d25b761`, `d88d01e` and `3cc4d9d` are not ancestors of `7c7f174`
+and `git merge-base --is-ancestor` will say so. Two follow-up commits on the
+pre-squash branch produced that gap, and only one is about routing: `d88d01e`
 reworked the S1 gate itself (96 added, 62 removed against `d25b761`), while `3cc4d9d`
-(67 added, 31 removed) split a fragment flush and does not touch routing. The three
-line counts do not sum, because the two commits edit overlapping regions -- which is
-exactly why the 146 belongs to the branch-to-merged gap and to no single commit.
+(67 added, 31 removed against `d88d01e`) moved fragment/stitch flushing and left
+winner selection alone. The three counts do not sum, because the two commits edit
+overlapping regions -- which is exactly why the 146 belongs to the
+branch-to-merged gap and to no single commit.
 
 Anyone quoting the earlier session numbers as a description of shipped behaviour
 would be wrong.
