@@ -90,6 +90,42 @@ class PageState:
     #: apart.
     rotated_shred_png_ref: str = ""
     chart_asset_render_failed: bool = False  # PP-7: chart-lane PNG render failed
+    #: S1/MAJOR-7(b): persisted answer to ``structure_class_grid_winner(p) is
+    #: not None`` from the run that produced the terminal sidecar, restored by
+    #: ``_restore_terminal_page_state`` on resume. Needed because resume
+    #: collapses ``p.attempts`` down to the single frozen winner, so a resumed
+    #: run's own attempt list can no longer prove a non-native rung authored a
+    #: grid on the ORIGINAL pass -- without this flag,
+    #: ``_reaches_structure_class_branch``'s early-return mirror sees a clean
+    #: non-native ``audit_passed`` winner and (correctly, by its own logic)
+    #: treats it as an ordinary passing page, silently dropping it from
+    #: ``structure_class_model_pages`` on the second run even though the same
+    #: input produced it on the first.
+    structure_class_model_kept_on_resume: bool = False
+
+    def is_structure_class(self) -> bool:
+        """C2: pages whose native branch may never author a GRID.
+
+        Backed by ``has_tables`` -- the field ``apply_born_digital`` sets from
+        detected table structures -- so the orchestrator's OCR-bypass routing
+        (``_page_has_tables``) and the manifest's winner selection
+        (``_winning_page_output``) read the same source and cannot diverge on
+        what counts as structure-class.
+
+        Equations are deliberately OUT of scope (BLOCKING 1 on #269): the S1
+        case (i)/(iii) branch only accepts a GFM table as a "grid was
+        authored" signal (``_grid_authored_attempt`` requires
+        ``find_table_blocks``), so routing an equation page through the same
+        branch cannot select anything a ``$...$``-reading model attempt
+        produces -- it either ships an accepted hallucination or falls
+        through to case (iii) and demotes a page that shipped a free native
+        SUCCESS before S1 to WARNING, flipping the document to
+        AUDIT_FAILED for no gain. Equations get the model-rung guarantee and
+        grid-authorship rule once a non-GFM acceptance path exists to
+        actually select between a native and model equation reading; until
+        then this stays tables-only.
+        """
+        return bool(self.has_tables)
 
     @property
     def needs_repair(self) -> bool:

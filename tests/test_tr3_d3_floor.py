@@ -361,17 +361,53 @@ class TestAuditEventDistinctness:
         )
 
     def test_non_d3_fallback_emits_native_fallback_not_d3(self) -> None:
-        """A native-fallback page (verifier passed, OCR failed) must emit
-        ``native_fallback`` and NOT ``table_region_unverifiable``."""
+        """A native-fallback page (verifier passed, OCR failed) must emit its
+        own distinct audit event and NOT ``table_region_unverifiable``.
+
+        #269 BLOCKING 2: this fixture is table-bearing (``has_tables=True``),
+        so it is structure-class (C2) with a real failed OCR attempt in
+        ``p.attempts`` (R3's model-rung guarantee is satisfied). Before the
+        fix, ``native_fallback_pages`` also matched it via a since-removed
+        ``or p.is_structure_class()`` term, so this same page was
+        double-booked into BOTH ``native_fallback_pages`` (generic) and
+        ``structure_class_native_fallback_pages`` (S1-specific) -- exactly
+        the double-booking BLOCKING 2 named. The fix excludes a
+        structure-class page from the generic bucket in favour of the more
+        specific one, so this page now emits ``structure_class_native_fallback``
+        only, never the plain ``native_fallback`` kind (still reserved for a
+        native-fallback page that is NOT structure-class).
+        """
         state = _build_state_native_fallback()
         events = self._run_assemble(state)
         kinds = [e.kind for e in events]
-        assert "native_fallback" in kinds, (
-            f"Expected 'native_fallback' event for non-D3 fallback page; got: {kinds}"
+        assert "structure_class_native_fallback" in kinds, (
+            f"Expected 'structure_class_native_fallback' for this structure-class "
+            f"native-fallback page; got: {kinds}"
+        )
+        assert "native_fallback" not in kinds, (
+            f"a structure-class page must not ALSO double-book into the generic "
+            f"native_fallback bucket; got: {kinds}"
         )
         assert "table_region_unverifiable" not in kinds, (
             "Non-D3 fallback page must NOT emit table_region_unverifiable"
         )
+
+    def test_non_structure_class_native_fallback_still_emits_the_generic_kind(
+        self,
+    ) -> None:
+        """Reverse guard for the split above: a native-fallback page that is
+        NOT structure-class (no tables) must keep emitting the plain
+        ``native_fallback`` kind -- the specific ``structure_class_native_fallback``
+        kind is reserved for a table-bearing page, per C2."""
+        state = _build_state_native_fallback()
+        state.pages[1].has_tables = False
+        events = self._run_assemble(state)
+        kinds = [e.kind for e in events]
+        assert "native_fallback" in kinds, (
+            f"Expected the generic 'native_fallback' kind for a non-structure-class "
+            f"page; got: {kinds}"
+        )
+        assert "structure_class_native_fallback" not in kinds, kinds
 
 
 # ---------------------------------------------------------------------------

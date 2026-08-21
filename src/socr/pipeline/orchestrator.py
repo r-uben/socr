@@ -1535,6 +1535,23 @@ class UnifiedPipeline:
         ``--native-only`` must not bypass OCR for it either. Horizontal table
         pages and rotated table-less pages are unaffected and still take the
         unconditional ``native_only`` short-circuit.
+
+        R3 (the model-rung guarantee) originally widened this bypass-exclusion
+        to equation pages too, on the theory that "native may never author a
+        GRID on a structure-class page" (C1) is meaningless unless a model
+        attempt actually runs to author one. BLOCKING 1 on #269 reverted that:
+        S1's case (i)/(iii) branch only accepts a GFM table as a "grid was
+        authored" signal, so forcing a model rung on an equation page cannot
+        select anything a ``$...$``-reading attempt produces -- it only turns
+        a free native SUCCESS into an accepted hallucination or a false
+        AUDIT_FAILED demotion. Equations stay outside C2 until a non-GFM
+        acceptance path exists; this bypass is table-only again, matching
+        ``PageState.is_structure_class``.
+
+        ``--native-only``'s own bypass is left on its narrower table-only
+        check deliberately (see the "Open" question in the S1 build spec):
+        forcing a model rung under an explicit native-only run is a separate,
+        unresolved policy call.
         """
         if not self._is_native_eligible_without_ocr(page_num, ps):
             return False
@@ -4893,11 +4910,21 @@ class UnifiedPipeline:
             _whole_doc_page_texts,
             _winning_page_output,
             is_page_failed_marker,
+            structure_class_grid_winner,
         )
 
         whole_doc = _whole_doc_page_texts(state)
         winning_out = _winning_page_output(state, page_num, whole_doc) if ps else None
         winning_dict = winning_out.to_dict() if winning_out is not None else {}
+        # MAJOR 7(b) on #269: persisted so a RESUMED run can re-derive
+        # ``structure_class_model_pages`` membership without the full attempt
+        # history. Resume collapses ``p.attempts`` to the single frozen
+        # winner (``_restore_terminal_page_state``), so on a resumed run a
+        # clean-passing S1 case (i) grid winner is indistinguishable, from
+        # ``p.attempts`` alone, from a page that was never an S1 case at all
+        # -- it silently drops out of the bucket on run 2 even though it was
+        # correctly counted on run 1. See ``PageState.structure_class_model_kept_on_resume``.
+        structure_class_model_kept = bool(ps and structure_class_grid_winner(ps) is not None)
 
         # Audit events for this page only, serialised as plain dicts.
         page_events = [
@@ -4994,6 +5021,8 @@ class UnifiedPipeline:
                 bool(ps.chart_asset_render_failed) if ps else False  # PP-7
             ),
             "judge_rejected": bool(ps.judge_rejected) if ps else False,
+            # MAJOR 7(b): S1 case (i) resume-idempotency flag (see above).
+            "structure_class_model_kept": structure_class_model_kept,
             # Audit log subset for this page.
             "audit_events": page_events,
             # Table-pass and figure refs.
@@ -5359,6 +5388,13 @@ class UnifiedPipeline:
             ps.rotated_shred_png_ref = str(meta.get("rotated_shred_png_ref", ""))
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
             ps.judge_rejected = bool(meta.get("judge_rejected", False))
+            # MAJOR 7(b): restore the S1 resume-idempotency flag so
+            # ``_reaches_structure_class_branch`` can re-derive the bucket
+            # membership a resumed run's collapsed ``attempts`` list can no
+            # longer prove on its own.
+            ps.structure_class_model_kept_on_resume = bool(
+                meta.get("structure_class_model_kept", False)
+            )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
 
@@ -5514,19 +5550,35 @@ class UnifiedPipeline:
             flagged_model_page_output,
             is_page_failed_marker,
             kept_table_grid_defect,
+            structure_class_grid_winner,
+            structure_class_native_fallback_applies,
         )
 
         page_texts = canonical_page_texts(state)
 
-        # PP-1: flush per-page fragments and sidecars from the in-memory page
-        # texts, then verify stitch round-trips byte-identically.
-        # Non-fatal: any error keeps the in-memory body.
+        # PP-1: flush per-page fragments from the in-memory page texts, then
+        # verify stitch round-trips byte-identically. Non-fatal: any error
+        # keeps the in-memory body.
+        #
+        # Fragment write + stitch check MUST run here, before the
+        # ``strip_phantom_images`` / ``_guard_fabricated_image_refs_document``
+        # mutations below (and before the S1 bucket/event derivation further
+        # down) -- ``final_text`` at this point is still the pre-strip value
+        # ``_stitch_fragments`` (built from these same pre-strip ``page_texts``)
+        # is meant to match. A prior version of this fix (MAJOR 6(a) on #269)
+        # moved this ENTIRE block, sidecar flush included, down past the strip
+        # mutations to fix sidecar event delivery -- which also silently moved
+        # this comparison past the point where ``final_text`` is mutated,
+        # tripping the byte-identity guard on every document where the strip
+        # actually removes a phantom image ref (output stayed correct; the
+        # self-check did not). Splitting the two flushes apart fixes both:
+        # this loop stays early, only the sidecar flush (below, near the S1
+        # event derivation) needs to run late.
         if has_text and page_texts:
             try:
                 page_nums = list(range(1, state.handle.page_count + 1))
                 for pnum, ptext in zip(page_nums, page_texts):
                     self._flush_page_fragment(state, pnum, ptext, output_dir)
-                    self._flush_page_sidecar(state, pnum, output_dir)
                 stitched = self._stitch_fragments(state, output_dir)
                 if stitched == final_text:
                     # Byte-identical: the fragment/stitch path is verified.
@@ -5548,6 +5600,7 @@ class UnifiedPipeline:
                     state.handle.path.name,
                     exc,
                 )
+
         failed_pages = [i for i, t in enumerate(page_texts, start=1) if is_page_failed_marker(t)]
         # TR-3: D3 fail-closed floor pages — born-digital table pages where the
         # per-region geometry verifier hard-failed AND the OCR ladder also failed.
@@ -5604,6 +5657,33 @@ class UnifiedPipeline:
         # own audit kind and its own CLI line -- one bucket per disposition.
         flagged_model_pages = [
             n for n, p in sorted(state.pages.items()) if flagged_model_page_output(p) is not None
+        ]
+
+        # S1: the general structure-class case (C2, tables only -- narrowed
+        # from "tables or equations" by BLOCKING 1 on #269's review; see
+        # ``_is_trusted_native_without_ocr``'s docstring above for why).
+        # ``_winning_page_output`` ships the grid-authoring model attempt
+        # instead of native whenever one exists, regardless of whether any
+        # native-distrust flag ever fired (the 2026-08-20 measurement: 7 of 8
+        # losing pages set none). Must match the manifest's winner EXACTLY --
+        # same predicate, same function -- or this list and the shipped page
+        # disagree, exactly the failure mode the other bucket exclusions above
+        # already guard against.
+        structure_class_model_pages = [
+            n for n, p in sorted(state.pages.items()) if structure_class_grid_winner(p) is not None
+        ]
+
+        # S1 case (iii): the same branch, resolved the OTHER way -- a real
+        # rung ran but authored no usable grid, so native's PROSE ships
+        # (C1), demoted to WARNING/audit_passed=False. Nothing upstream in
+        # ``_score_per_page`` ever flips ``p.best_output.audit_passed`` for
+        # this shape (a clean-looking native table is exactly what that
+        # scorer is blind to), so this needs its OWN bucket -- folding it
+        # into ``native_fallback_pages`` above would silently miss every
+        # page here, since that list's final clause reads
+        # ``p.best_output.audit_passed`` and this branch never touches it.
+        structure_class_native_fallback_pages = [
+            n for n, p in sorted(state.pages.items()) if structure_class_native_fallback_applies(p)
         ]
 
         # #259 round 3: pages where the value guard DETECTED a numeric multiset
@@ -5683,6 +5763,22 @@ class UnifiedPipeline:
             and n not in native_only_distrust_pages
             # #259: the model's table ships on these; native did not.
             and n not in flagged_model_pages
+            # S1: the model's grid ships on these; native did not.
+            and n not in structure_class_model_pages
+            # S1 case (iii): this page has its OWN bucket
+            # (``structure_class_native_fallback_pages``) and its own event
+            # kind/CLI line. BLOCKING 2 on #269: this list previously OR'd
+            # ``p.is_structure_class()`` straight into its attempts-gate below
+            # AND its include-clause above, so a structure-class page could
+            # satisfy BOTH this generic bucket and its dedicated S1 bucket at
+            # once (two events, two CLI lines for one page) -- or, with zero
+            # attempts (a cascade-halt page), land in this list even though
+            # ``_winning_page_output`` never demoted it and shipped SUCCESS.
+            # Excluding the dedicated bucket here and reverting the
+            # attempts-gate below to plain ``p.attempts`` restores this list
+            # to "OCR was tried [for a REASON OTHER THAN S1] and never
+            # passed" -- S1's own bucket owns S1's own pages exclusively.
+            and n not in structure_class_native_fallback_pages
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
         ]
@@ -5741,6 +5837,14 @@ class UnifiedPipeline:
         # cannot report a clean SUCCESS. AUDIT_FAILED, not ERROR: the page
         # ships the better of the two readings, nothing was lost.
         pages_ok = pages_ok and not flagged_model_pages
+        # S1: the general structure-class case (C2). Same reasoning as #259 --
+        # the page ships the kept model reading over native, so it is not a
+        # page failure, but the document cannot report a clean SUCCESS either.
+        pages_ok = pages_ok and not structure_class_model_pages
+        # S1 case (iii): native's PROSE ships (there is no better reading),
+        # but it is never SUCCESS -- the grid it carries is exactly what
+        # this branch could not vouch for (no rung authored one).
+        pages_ok = pages_ok and not structure_class_native_fallback_pages
         # NOT a page failure -- the owner was explicit that the page is not failed
         # and the table is kept. AUDIT_FAILED at the document level is the
         # "completed with warnings, output written" path, which is the honest
@@ -5772,6 +5876,8 @@ class UnifiedPipeline:
             or d3_floor_pages
             or native_only_distrust_pages
             or flagged_model_pages
+            or structure_class_model_pages
+            or structure_class_native_fallback_pages
             or value_drift_pages
         ):
             from socr.core.audit_log import AuditEvent
@@ -5863,6 +5969,50 @@ class UnifiedPipeline:
                         data={"d3_floor": True},
                     )
                 )
+            # S1: the general structure-class case (C2). Distinct from #259's
+            # ``flagged_model_table_kept`` (which only fires once an OLD
+            # native-distrust flag is set) and from #262's D3 supersession
+            # (which requires the TR-3 hard-fail conjunction): this fires on
+            # ANY structure-class page whose native branch may not author the
+            # grid, flag or no flag -- the 2026-08-20 measurement's actual bug.
+            for n in structure_class_model_pages:
+                _kept_sc = structure_class_grid_winner(state.pages[n])
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="structure_class_model_table_kept",
+                        engine=(_kept_sc.engine if _kept_sc else ""),
+                        detail=(
+                            "structure-class page (table); native may not"
+                            " author the grid (C1), and a model attempt did -- the"
+                            " model's reading ships instead of native, flagged per its"
+                            " own status"
+                        ),
+                        data={"structure_class_model_kept": True},
+                    )
+                )
+            # S1 case (iii): the same structure-class branch resolved the other
+            # way -- a real model rung ran (R3) but authored no usable grid,
+            # so native's PROSE ships (C1 permits prose, never a grid),
+            # demoted to WARNING/audit_passed=False. Recorded on its own
+            # bucket because ``p.best_output.audit_passed`` is never mutated
+            # for this case (the non-negotiable audit_passed rule), so
+            # nothing keyed off that flag alone would ever see it.
+            for n in structure_class_native_fallback_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="structure_class_native_fallback",
+                        engine="native",
+                        detail=(
+                            "structure-class page (table); a model rung ran"
+                            " but authored no usable grid, and native may not author one"
+                            " either (C1) -- native's prose ships instead, flagged"
+                            " WARNING rather than SUCCESS"
+                        ),
+                        data={"structure_class_native_fallback": True},
+                    )
+                )
             if not self.config.quiet:
                 if failed_pages:
                     console.print(
@@ -5886,6 +6036,18 @@ class UnifiedPipeline:
                         f"model's FLAGGED reading (no rung accepted; native table "
                         f"distrusted): {flagged_model_pages}[/yellow]"
                     )
+                if structure_class_model_pages:
+                    console.print(
+                        f"  [yellow]{len(structure_class_model_pages)} structure-class page(s) "
+                        f"shipped the model's grid reading over native (native may not author "
+                        f"a grid): {structure_class_model_pages}[/yellow]"
+                    )
+                if structure_class_native_fallback_pages:
+                    console.print(
+                        f"  [yellow]{len(structure_class_native_fallback_pages)} structure-class "
+                        f"page(s) shipped native's prose flagged (a model rung ran but authored "
+                        f"no usable grid): {structure_class_native_fallback_pages}[/yellow]"
+                    )
                 if value_drift_pages:
                     from socr.tables.native_verifier import describe_drift
 
@@ -5905,6 +6067,39 @@ class UnifiedPipeline:
                         f" floor (unverifiable region → explicit failure marker): "
                         f"{d3_floor_pages}[/red]"
                     )
+
+        # MAJOR 6(a) on #269: only the SIDECAR flush belongs here, after the
+        # bucket derivation and audit-event-append block above.
+        # `_flush_page_sidecar` filters `state.events` by page_num at the
+        # MOMENT it writes each sidecar -- so flushing before the S1 events
+        # (`structure_class_model_table_kept` / `structure_class_native_fallback`)
+        # were appended meant those events never reached `pages/NNN.json`'s
+        # `audit_events` field at all, and no later pass corrects a sidecar
+        # (`_rewrite_all_fragments` only rewrites `.md` fragments).
+        #
+        # The fragment write + byte-identity stitch check stays at its
+        # ORIGINAL position, right after `page_texts` is computed (above,
+        # before `failed_pages`) -- an earlier version of this fix moved that
+        # check down here too, past where `strip_phantom_images` /
+        # `_guard_fabricated_image_refs_document` mutate `final_text`, which
+        # tripped the check on every document where the strip actually
+        # changed something (output stayed correct; only the self-check
+        # false-alarmed). Sidecar delivery and the stitch guard have
+        # different correctness requirements -- one wants the LATEST events,
+        # the other wants the PRE-strip text -- so they no longer share a loop.
+        # Non-fatal: any error here leaves whatever sidecars were already
+        # written, in-memory body is unaffected either way.
+        if has_text and page_texts:
+            try:
+                page_nums = list(range(1, state.handle.page_count + 1))
+                for pnum in page_nums:
+                    self._flush_page_sidecar(state, pnum, output_dir)
+            except Exception as exc:
+                logger.warning(
+                    "PP-1 [%s]: sidecar flush failed (%s)",
+                    state.handle.path.name,
+                    exc,
+                )
 
         # Compute total processing time
         total_time = sum(r.processing_time for r in state.engine_runs)

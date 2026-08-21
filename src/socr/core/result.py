@@ -64,6 +64,14 @@ class FailureMode(str, Enum):
     #: came back as one glyph run per line. The fragments are not a reading of
     #: the page, so the page ships a failure marker plus an image ref instead.
     NATIVE_TEXT_SHREDDED = "native_text_shredded"
+    #: S1 (the reachability-measurement build): a structure-class page (C2 --
+    #: tables or equations) reached selection with no attempt that authored a
+    #: GRID and no positively-caught native distrust flag either (that case
+    #: is NATIVE_TABLE_STRUCTURE_FAILED). Native cannot author the grid here
+    #: (C1) but its prose still ships -- flagged, because R3's model-rung
+    #: guarantee found nothing to corroborate it, or (under --native-only)
+    #: never ran a model rung at all. Never SUCCESS.
+    STRUCTURE_CLASS_NO_MODEL_ATTEMPT = "structure_class_no_model_attempt"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The

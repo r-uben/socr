@@ -103,6 +103,17 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # stated bias (a flag on a fine page costs a look, a missing flag on a
         # wrong one costs a wrong number in the corpus).
         "table_structure_failed",
+        # S1 (#269): a structure-class page (table-bearing, C1) where native may
+        # not author a grid. "structure_class_model_table_kept" ships a model's
+        # UNVERIFIED grid reading over native (no measured native table exists to
+        # compare against, so nothing adjudicated the numbers);
+        # "structure_class_native_fallback" ships native's PROSE instead because
+        # no rung authored a usable grid, which is itself a table-structure
+        # failure by another name. Both leave a consumer holding table content
+        # that was never cross-checked -- same rule as ``table_structure_failed``
+        # above, applied to the S1 winner-selection branch.
+        "structure_class_model_table_kept",
+        "structure_class_native_fallback",
     }
 )
 
