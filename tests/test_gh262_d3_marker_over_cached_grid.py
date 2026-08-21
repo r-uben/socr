@@ -35,6 +35,7 @@ from socr.core.document import DocumentHandle
 from socr.core.manifest import (
     _winning_page_output,
     canonical_page_texts,
+    d3_floor_kept_model_output,
     is_page_failed_marker,
 )
 from socr.core.result import FailureMode, PageOutput, PageStatus
@@ -407,6 +408,39 @@ def test_a_native_engine_grid_never_rescues_the_page(tmp_path: Path) -> None:
     assert "failed: unverifiable table" in winner.text, winner.text
 
 
+def test_a_chart_asset_native_text_grid_never_rescues_the_page(tmp_path: Path) -> None:
+    """#265: chart_asset embeds the same native text D3 distrusts.
+
+    Changing the engine label and appending an image cannot turn that text into
+    independent model evidence capable of superseding the floor.
+    """
+    state = _state(_born_digital_pdf(tmp_path), model_engine="chart_asset")
+
+    assert d3_floor_kept_model_output(state.pages[1]) is None
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" in winner.text, winner.text
+
+
+def test_a_rotated_shredded_page_is_not_rescued_by_the_d3_predicate(tmp_path: Path) -> None:
+    """#263 owns pages whose native text is shredded; #262 must decline."""
+    state = _state(_born_digital_pdf(tmp_path), model_engine="qwen")
+    state.pages[1].native_rotated_text_shredded = True
+
+    assert d3_floor_kept_model_output(state.pages[1]) is None
+    winner = _winning_page_output(state, 1)
+    assert "failed: unverifiable table" in winner.text, winner.text
+
+
+def test_a_plain_qwen_grid_still_supersedes_the_d3_floor(tmp_path: Path) -> None:
+    """Control: the two restored guards must not disable #262's intended path."""
+    state = _state(_born_digital_pdf(tmp_path), model_engine="qwen")
+
+    assert d3_floor_kept_model_output(state.pages[1]) is not None
+    winner = _winning_page_output(state, 1)
+    assert winner.engine == "qwen", winner.engine
+    assert "failed: unverifiable table" not in winner.text, winner.text
+
+
 def test_gh90_scanned_source_evidence_floor_still_wins(tmp_path: Path) -> None:
     """GH-90's floor is on the SCANNED lane and is not touched by this change.
 
@@ -450,7 +484,12 @@ def test_born_digital_page_carrying_the_scanned_flag_is_not_rescued(tmp_path: Pa
 # carrying a pipe, no separator row. Built this way on purpose -- a fixture
 # without two adjacent pipe lines would pass the tests below for the wrong
 # reason and prove nothing.
-PROSE_WITH_PIPES = "revenue | costs were up\nmargins | fell sharply\n"
+PROSE_WITH_PIPES = (
+    "The Fama-Bliss regressions are reported in Table 4.\n"
+    "Estimates for the constrained | unconstrained pair are discussed above.\n"
+    "The spread coefficient | and its standard error | are reported in the text.\n"
+    "The unconstrained estimates reject the expectations hypothesis.\n"
+)
 
 # A grid the model started and never finished: header, separator, no body row.
 HALF_EMITTED_GRID = (

@@ -110,12 +110,13 @@ def find_table_blocks(markdown: str) -> list[_Block]:
     return blocks
 
 
-# #262 round 3: a STRICT separator cell. ``_SEP_CELL`` above accepts a single
-# dash (``|-|``), which ordinary prose and a truncated grid both reach by
-# accident; three is the GitHub-markdown convention and is not something a
-# sentence produces. Deliberately a SECOND pattern rather than a tightening of
-# ``_SEP_CELL``: that one is read by ``_parse_grid`` on every caller's behalf.
-_STRICT_SEP_CELL = re.compile(r"^:?-{3,}:?$")
+#: GFM permits a delimiter cell with one hyphen, but this shipping-policy
+#: predicate deliberately requires the conventional three. One- and two-dash
+#: fragments are easy products of prose or truncated output; rejecting them
+#: fails closed to the existing native/marker behavior. Keep this separate from
+#: ``_SEP_CELL``, whose permissive grammar remains part of reconciliation.
+_STRICT_SEPARATOR_MIN_HYPHENS = 3
+_STRICT_SEP_CELL = re.compile(rf"^:?-{{{_STRICT_SEPARATOR_MIN_HYPHENS},}}:?$")
 
 #: #262 round 3: the minimum column count for a grid to count as authored. One
 #: column is a list, not a table, and cannot carry the row/column binding the
@@ -284,7 +285,7 @@ def has_strict_table_grid(markdown: str) -> bool:
 
 
 def _run_contains_grid(rows: list[list[str]], borders: list[tuple[bool, bool]]) -> bool:
-    """True iff the header/separator/body shape holds at some offset in ``rows``.
+    """True iff the header/separator/body shape starts at the first row.
 
     FAIL-CLOSED RULE, and the reason it lives here rather than inside the
     per-offset check: a block containing MORE THAN ONE separator row is

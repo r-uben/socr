@@ -530,6 +530,11 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
     # never be rescued by this path either.
     if getattr(p, "scanned_table_evidence_failed", False):
         return None
+    # #263 owns the disposition of a page whose native text is shredded. D3 is
+    # earlier in winner selection, so declining here preserves the existing D3
+    # floor instead of letting #262 silently choose a model on #263's behalf.
+    if getattr(p, "native_rotated_text_shredded", False):
+        return None
 
     from socr.tables.reconcile import has_strict_table_grid
 
@@ -538,7 +543,10 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
             return False
         if getattr(out, "rejection_class", "") not in D3_SUPERSEDING_REJECTIONS:
             return False
-        if (out.engine or "").startswith("native"):
+        # ``chart_asset`` ships native_text plus a PNG reference. Relabelling
+        # the text does not make it independent evidence capable of overriding
+        # the D3 floor that distrusts that same native text (#265).
+        if (out.engine or "").startswith(_NATIVE_TEXT_LANES):
             return False
         text = (out.text or "").strip()
         if not text or is_page_failed_marker(text):
