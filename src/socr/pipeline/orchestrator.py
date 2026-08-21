@@ -3166,8 +3166,8 @@ class UnifiedPipeline:
                                     kind="table_header_repair",
                                     engine=ps.best_output.engine or "",
                                     detail=(
-                                        f"rebuilt {_hdr_n} collapsed table header(s) "
-                                        "from native geometry (post-route)"
+                                        f"repaired {_hdr_n} too-narrow or collapsed "
+                                        "table header(s) (post-route)"
                                     ),
                                     data={"repair_count": _hdr_n},
                                 )
