@@ -127,17 +127,9 @@ _STRICT_MIN_COLUMNS = 2
 #: sample, not markdown structure.
 _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 
-#: #262 round 4, PENDING THE OWNER'S RULING -- do not silently flip this.
-#:
-#: The spec this predicate was built to requires every body row to carry the
-#: header's cell count. That rejects a RAGGED but genuine grid, so such a page
-#: ships the zero-content marker -- which contradicts #259's merged ruling to
-#: FLAG AND KEEP a structurally defective grid (``kept_table_grid_defect``).
-#: The reviewer recommends yielding to #259; the owner has not ruled.
-#:
-#: Isolated here as a single named switch so the decision is one line, not a
-#: rewrite. False makes a body row count when it matches the header's width,
-#: ignoring its ragged siblings; True (current, per spec) requires all of them.
+#: GH-268 requires consistent column counts across every row of an authored
+#: grid. Keep the policy named because accepting a ragged block here can either
+#: displace native text (#259) or suppress the D3 fail-closed marker (#262).
 STRICT_GRID_REQUIRES_UNIFORM_BODY = True
 
 
@@ -231,11 +223,9 @@ def has_strict_table_grid(markdown: str) -> bool:
     the text is a real grid that is not a reading of the page. No markdown
     predicate can see that, because by markdown the input is correct.
 
-    The sound fix is to record, at extraction time, that an attempt authored a
-    grid CORROBORATED BY PAGE GEOMETRY -- the verifier already computes it and
-    it is discarded before assemble runs. That is issue #268, and it must serve
-    both this caller and ``flagged_model_page_output`` (#259), which has the
-    same hole in merged code today.
+    GH-268 makes this the shared policy predicate for both the D3 keep decision
+    and ``flagged_model_page_output``. The permissive reconciliation parser is
+    intentionally not a shipping-policy oracle.
 
     Until then the operative rule is FAIL CLOSED: where the answer is unclear,
     return False and let the failed-table marker ship. Refusing a real grid
@@ -253,26 +243,21 @@ def has_strict_table_grid(markdown: str) -> bool:
     honest outcome here -- the marker is a true statement about the page and a
     phantom grid is not.
 
-    The shape, at some offset ``i`` inside a run of consecutive pipe-bearing
-    lines that is not inside a code fence::
+    The shape, at the start of a run of consecutive pipe-bearing lines that is
+    not inside a code fence::
 
-        rows[i]      header     N cells, N >= 2
-        rows[i + 1]  separator  N cells, EVERY cell matching :?-{3,}:?
-        rows[i + 2:] body       at least one CONTENT row -- N cells, not blank,
-                                and not itself a separator
+        rows[0]      header     N cells, N >= 2
+        rows[1]      separator  N cells, EVERY cell matching :?-{3,}:?
+        rows[2:]     body       at least one CONTENT row; every row has N cells
 
-    The separator is at ``i + 1`` specifically, never merely "somewhere"; the
-    body starts strictly at ``i + 2``, so a separator can never also be counted
+    The separator is at index 1 specifically, never merely "somewhere"; the
+    body starts strictly at index 2, so a separator can never also be counted
     as the body row after itself.
-
-    The offset exists because a run may open with pipe-bearing prose before the
-    real table starts. That is not laxity -- each candidate offset must satisfy
-    the whole shape -- and it is what keeps a genuine grid from being lost to a
-    stray sentence above it.
 
     ``find_table_blocks`` itself is deliberately UNCHANGED. Other callers
     depend on its looseness, and tightening it globally would be a silent
-    behaviour change across the codebase. This is additive, with one caller.
+    behaviour change across the codebase. This predicate is the stricter,
+    shared shipping-policy layer.
     """
     # Order matters: comments first (they can contain fence markers), then
     # fences, then indented code (a fence's CONTENT may be indented, and is

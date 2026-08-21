@@ -450,12 +450,7 @@ def test_born_digital_page_carrying_the_scanned_flag_is_not_rescued(tmp_path: Pa
 # carrying a pipe, no separator row. Built this way on purpose -- a fixture
 # without two adjacent pipe lines would pass the tests below for the wrong
 # reason and prove nothing.
-PROSE_WITH_PIPES = (
-    "The Fama-Bliss regressions are reported in Table 4.\n"
-    "Estimates for the constrained | unconstrained pair are discussed above.\n"
-    "The spread coefficient | and its standard error | are reported in the text.\n"
-    "The unconstrained estimates reject the expectations hypothesis.\n"
-)
+PROSE_WITH_PIPES = "revenue | costs were up\nmargins | fell sharply\n"
 
 # A grid the model started and never finished: header, separator, no body row.
 HALF_EMITTED_GRID = (
@@ -590,8 +585,8 @@ STRICT_GRID_CASES: list[tuple[str, str, bool]] = [
         False,
     ),
     ("r5 TIGHTENED: pipe-bearing prose directly above a grid", "x | y\nz | w\n" + _G, False),
-    # --- pending the owner's ruling, see STRICT_GRID_REQUIRES_UNIFORM_BODY
-    ("ragged body (spec; contested, see #259)", "| a | b | c |\n|---|---|---|\n| 1 | 2 |\n", False),
+    # --- GH-268 requires consistent column counts across all rows
+    ("ragged body", "| a | b | c |\n|---|---|---|\n| 1 | 2 |\n", False),
 ]
 
 
@@ -686,18 +681,12 @@ def test_junk_carrying_pipes_is_refused() -> None:
         assert strict(junk) is False, junk
 
 
-def test_the_uniform_body_switch_is_one_named_line() -> None:
-    """PENDING THE OWNER: equal-width rejects a ragged but GENUINE grid, which
-    contradicts #259's merged ruling to flag-and-keep a defective grid
-    (``kept_table_grid_defect``). Kept as the spec says for now.
-
-    This pins that the decision stays a single named switch rather than logic
-    spread through the predicate, so flipping it is one line when they rule.
-    """
+def test_authored_grids_require_uniform_body_rows() -> None:
+    """GH-268 requires consistent column counts across the entire grid."""
     import socr.tables.reconcile as reconcile
 
     flag = getattr(reconcile, "STRICT_GRID_REQUIRES_UNIFORM_BODY", None)
-    assert flag is True, "the contested condition must stay named and discoverable"
+    assert flag is True, "the uniform-row policy must stay named and discoverable"
 
 
 def test_find_table_blocks_itself_is_unchanged() -> None:

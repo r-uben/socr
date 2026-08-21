@@ -433,9 +433,9 @@ def flagged_model_page_output(p) -> PageOutput | None:
     # predicate's purposes, and native remains the only table reading there is.
     # Note this is a property of the model's own output alone; native structure
     # is never consulted as ground truth, which is the root error #259 names.
-    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.reconcile import has_strict_table_grid
 
-    if not find_table_blocks(bo.text):
+    if not has_strict_table_grid(bo.text):
         return None
     return bo
 
@@ -531,7 +531,7 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
     if getattr(p, "scanned_table_evidence_failed", False):
         return None
 
-    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.reconcile import has_strict_table_grid
 
     def _qualifies(out: PageOutput) -> bool:
         if out is None:
@@ -545,7 +545,7 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
             return False
         if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
             return False
-        return bool(find_table_blocks(text))
+        return has_strict_table_grid(text)
 
     if _qualifies(p.best_output):
         return p.best_output
@@ -590,29 +590,9 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     authoring the GRID on a structure-class page, full stop; native's PROSE
     ships separately, untouched, via the last-resort WARNING branch below.
 
-    GH-268: ``find_table_blocks`` alone is not the "was a grid authored"
-    check -- it only requires >= 2 consecutive pipe-bearing lines, with no
-    GFM separator row, so two lines of plain prose that each happen to
-    contain a "|" (e.g. "revenue | costs were up\nmargins | fell sharply")
-    register as an authored 2x2 grid. A real GFM separator row is
-    unambiguous; require one to actually be present -- but BLOCKING 3 on
-    #269 found the first fix (a page-GLOBAL ``native_verifier._MD_SEP_RE``
-    scan) both under- and over-accepts: a real separator row anywhere on the
-    page licenses an unrelated phantom prose block elsewhere on the SAME
-    page (model text "see identification | strategy.\n\n|---|---|\n\n
-    revenue | costs were up\nmargins | fell sharply" has a real separator
-    line that belongs to no block adjacent to the prose pair, yet the
-    page-global check passed it); and ``_MD_SEP_RE`` itself requires >= 2
-    column groups, so it rejects a genuine ONE-column table ("| Header
-    |\n|---|\n| value |").
-
-    Fixed by asking each candidate block whether ITS OWN separator row was
-    actually found and dropped, reusing ``find_table_blocks``'s own parse
-    (``reconcile._parse_grid`` drops a row only when every cell matches
-    ``_SEP_CELL``, which -- unlike ``_MD_SEP_RE`` -- accepts any dash-count,
-    so a one-column separator counts). A block whose parsed ``grid`` has
-    fewer rows than its raw line span had exactly one row removed as a
-    separator; no new regex, no second copy of the GFM grammar to drift.
+    GH-268 centralizes "authored a grid" in ``has_strict_table_grid``. S1
+    must use the same structural contract as the earlier D3 and #259 branches;
+    otherwise an output one branch rejects can be selected by this later one.
     """
     if out is None:
         return False
@@ -628,12 +608,9 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     ):
         return False
 
-    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.reconcile import has_strict_table_grid
 
-    blocks = find_table_blocks(text)
-    if not blocks:
-        return False
-    return any(len(block.grid) < (block.end - block.start + 1) for block in blocks)
+    return has_strict_table_grid(text)
 
 
 def _reaches_structure_class_branch(p) -> bool:
