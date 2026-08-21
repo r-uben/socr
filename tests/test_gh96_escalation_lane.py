@@ -294,7 +294,6 @@ def test_an_accepted_escalation_atomically_becomes_the_winner(pdf_path, incumben
         provider_backend="candidate-backend",
         processing_time=8.5,
         confidence=0.91,
-        cost_usd=0.42,
         audit_notes=["candidate-produced"],
     )
     ps.attempts = [incumbent]
@@ -316,6 +315,7 @@ def test_an_accepted_escalation_atomically_becomes_the_winner(pdf_path, incumben
     assert ps.attempts == [incumbent, candidate]
     assert incumbent.text == _SHIFTED
     assert candidate.escalated_from == incumbent_engine
+    assert candidate.cost_usd == state.engine_runs[-1].cost == _GEMINI.cost_per_page_usd
     assert (
         candidate.text,
         candidate.engine,
@@ -334,7 +334,7 @@ def test_an_accepted_escalation_atomically_becomes_the_winner(pdf_path, incumben
         "candidate-backend",
         8.5,
         0.91,
-        0.42,
+        _GEMINI.cost_per_page_usd,
         ["candidate-produced"],
     )
 
