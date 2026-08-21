@@ -35,9 +35,14 @@ record contains no re-measurement numbers, only the baseline and the method.
 
 The distinction matters because `d25b761` is not the shipped code. Merged `7c7f174`
 differs from it by 146 changed lines in `pipeline/orchestrator.py` (108 added, 38
-removed), the substantive part being `d88d01e`, which reworked the S1 gate. Anyone
-quoting the earlier session numbers as a description of shipped behaviour would be
-wrong.
+removed). Two commits sit in that gap and only one of them is about this: `d88d01e`
+reworked the S1 gate itself (96 added, 62 removed against `d25b761`), while `3cc4d9d`
+(67 added, 31 removed) split a fragment flush and does not touch routing. The three
+line counts do not sum, because the two commits edit overlapping regions -- which is
+exactly why the 146 belongs to the branch-to-merged gap and to no single commit.
+
+Anyone quoting the earlier session numbers as a description of shipped behaviour
+would be wrong.
 
 ## The 8 contested pages, before and after
 
