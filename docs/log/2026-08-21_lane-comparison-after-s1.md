@@ -19,15 +19,22 @@ or more candidates and socr had to choose — it now ships output a reader could
 **4**. That denominator is fixed to the baseline on purpose: in this run only 4 pages
 had two or more surviving cached candidates, so "pages with a choice" is not a stable
 set to measure across two runs, and quoting this run's own count would compare
-different denominators. On the baseline it shipped the better of
-its two candidates on **0 of 8** — 7 worse, 1 tie, native won nothing outright.
+different denominators.
 
-Those two numbers are not the same measurement and this file will not pretend they
-are. The baseline verdict was *relative* (which of the two candidates was better);
-this one is *absolute* (is the shipped text citable at all). What is directly
-comparable is the routing: **4 of the 8 moved off native to a model lane, and all 4
-became citable.** Across all 21 pages the shipped engine was the local model on 11,
-the cloud model on 5, native on 4, and nougat on 1 — native's share fell from 8 to 4.
+**The baseline's own split is NOT a measured comparable and this file will not use it
+as one.** The 2026-08-20 record states 7 worse, 1 tie, native won nothing outright.
+That is the old panel's prose; its per-page verdicts were never recorded, and the new
+panel contradicts it on the one page where a direct comparison is possible (see
+"How much of this is the code" below). The defensible before/after is the routing,
+which is recorded on both sides.
+
+Note also that the two panels were not even asked the same question. The baseline
+verdict was *relative* — which of two candidates is better. This one is *absolute* —
+is the shipped text citable at all. A page can move on one and not the other. What is
+directly comparable, and recorded on both sides: **4 of the 8 moved off native to a
+model lane, and all 4 became citable.** Across all 21 pages the shipped engine was the
+local model on 11, the cloud model on 5, native on 4, and nougat on 1 — native's share
+fell from 8 to 4.
 
 ## What this measures and what it does not
 
@@ -61,6 +68,31 @@ would be wrong.
 | pflueger_rinaldi | 43 | equation | native / warning | unchanged | display structure lost (#271) |
 | nakamura_steinsson | 42 | table | native / warning | unchanged | every digit, no grid |
 
+## How much of this is the code and how much is the judges
+
+The obvious threat to the headline is that two different judge panels scored the two
+runs, so some of the movement could be re-judging rather than S1. That is testable,
+because the shipped text either changed between runs or it did not.
+
+Comparing shipped bytes on the baseline's 8 contested pages:
+
+| | pages | what a verdict difference could mean |
+|---|---|---|
+| shipped text CHANGED | 5 | the code did something |
+| shipped text BYTE-IDENTICAL | 3 | only the judges differ |
+
+**All 4 pages that became citable are in the changed group** — each moved off native to
+a model lane, so its shipped bytes are different text. **None of the improvement comes
+from re-judging identical output.** That is the claim this record actually supports.
+
+The 3 byte-identical pages are p15, p42 and p43, and they are where the panels can be
+compared directly. On p42 they disagree outright: the baseline records native winning
+nothing on any contested page, while both judges here rate the shipped native output
+better than the model alternative — on the same image, the same two candidate files
+byte for byte, and the same shipped output. **Judge disagreement on identical evidence
+is therefore demonstrated, not hypothetical**, which is the reason the baseline split
+is quoted above as prose rather than used as an anchor.
+
 ## Judging
 
 Two judges on different vendors (an OpenAI model and an xAI model), each reading the
@@ -89,8 +121,15 @@ page image.
 
 So p42 is not a case of socr choosing the worse lane. It is a page where **neither
 lane is citable**: native keeps every digit and loses the grid, the model builds the
-grid and corrupts a digit. The same `1.11`-for-`1.10` slip is recorded in the
-2026-08-20 file, so it reproduces rather than being run-to-run noise.
+grid and corrupts a digit.
+
+The 2026-08-20 file records the same `1.11`-for-`1.10` slip, but that is **not** a
+second independent observation and an earlier draft here wrongly implied it was: the
+model's candidate file for this page is byte-identical between the two runs, as is the
+page image and the shipped output. The two runs used separate output directories and
+separate caches and no shared cache was found, so the likely explanation is that
+decoding is deterministic on this page — but that is not established here, and until
+it is, the slip is one observation seen twice rather than two.
 
 **This page is NOT an example of multiset blindness, and an earlier draft of this
 file said it was.** Normalising every minus variant and comparing the two candidates
