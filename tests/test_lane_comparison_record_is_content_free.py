@@ -5,54 +5,60 @@ and this repo is public. An earlier revision of the 2026-08-20 commit claimed a 
 like this existed when it did not, and shipped nine absolute paths exposing the
 corpus location. This is the guard, so the claim is true and stays true.
 
-WHAT IT CHECKS, and equally WHAT IT DOES NOT -- stated exhaustively because two
-earlier revisions of this docstring overstated it, and an overstated guard is worse
-than an honest narrow one:
+WHAT IT CHECKS, and equally WHAT IT DOES NOT. Stated exhaustively because four
+successive revisions of this docstring overstated it, each time in a way a reviewer
+then walked a payload through -- a per-string cap defeated by chopping the payload up,
+a size cap defeated by using the rows already present, a "no free-text field left"
+claim defeated by encoding a whole page into integers. An overstated guard is worse
+than an honest narrow one, because it gets quoted as if it were a proof.
 
 Covered.
-  * Every ``*verdict*.json`` in ``docs/log`` -- matched on the word, so a file named
-    ``-verdict.json`` or ``-verdicts-v2.json`` is caught, not just one exact suffix.
-    Each row must carry ONLY allowlisted keys, and each value is bounded five ways:
-    its own type, the type of every element inside it, the length of any one string,
-    the number of elements, and the serialised size of the whole value. A key-name
-    check alone permits a payload inside an allowed field; a per-string cap alone is
-    defeated by chopping it into legal pieces; any string cap is blind to a numeric
-    byte array. These bounds close all three PER VALUE.
-  * The whole file, not only its values: a row count and a byte size. Per-value bounds
-    are per value, so extra rows each carrying a legal payload assemble a page out of
-    individually-innocent parts. An earlier revision without these was walked that way.
-  * CLOSED VOCABULARIES, which are what actually reduce the channel to nothing. Bounds
-    alone were not enough: with only the 21 real rows, two legal strings per ``flags``
-    entry carry 1,932 characters -- more than a whole shipped page. So every string in
-    a verdict row must now come from a fixed set (flags, engines, kinds, statuses) or
-    be a prefix of a document name already committed in the manifest. There is no
-    free-text field left for a payload to occupy.
-  * Every ``*lane-comparison*`` file whatever its extension, scanned for filesystem
-    paths -- BOTH as raw text and as decoded JSON strings. Raw-text scanning alone is
-    defeated by JSON's own escaping: a backslash-escaped solidus is valid JSON,
-    decodes to an absolute path, and contains no bare ``/Users/`` substring for a
-    text scan to find.
+  * Every ``*verdict*.json`` in ``docs/log`` -- matched on the word, so ``-verdict``
+    and ``-verdicts-v2`` are caught, not one exact suffix.
+  * Row IDENTITY, which is the load-bearing check. The set of ``(doc, page, kind)``
+    triples must equal the manifest's selected pages exactly: same count, no extras,
+    no duplicates, each anchored to a manifest document name. A row cannot be added,
+    and ``doc``/``page``/``kind`` cannot say anything the manifest does not.
+  * Row SHAPE: exactly the schema's keys, no more and no fewer.
+  * Every remaining string against a CAMPAIGN-APPROVED vocabulary -- flags, engines,
+    kinds, statuses. These are the values this measurement may record, NOT the
+    pipeline's vocabularies, which are larger. An unrecognised value means either
+    corpus content or a pipeline change that belongs in this file, added deliberately.
+  * Integer RANGE. Unbounded integers are a payload channel: a reviewer compressed an
+    entire 1,675-byte page into 37 ``decimals`` values and passed every other check.
+  * Value bounds -- type, element type, string length, element count, serialised size.
+  * File bounds -- row count and byte size.
+  * Filesystem paths in every ``*lane-comparison*`` file, scanned BOTH as raw text and
+    as decoded JSON strings. Raw-text scanning alone is defeated by JSON escaping: a
+    backslash-escaped solidus decodes to an absolute path while carrying no bare
+    marker substring.
 
-NOT covered, and a reader should assume these are open.
-  * Path detection is a NAMED-PREFIX scan, not an absolute-path parser. It knows the
-    prefixes below. A location under a prefix nobody listed passes.
-  * Corpus prose written into a matched non-JSON record -- this very file's ``.md``
-    companions are hand-written prose, and no test can tell an author's sentence from
-    a page's sentence. The prose records are protected by review, not by this.
-  * Anything in a file matching neither pattern.
-  * Meaning. Every string must come from a committed vocabulary, but WHICH permitted
-    value sits in which row is unconstrained, so a low-rate covert channel exists in
-    the choice itself. Closing that is not worth the brittleness.
-  * The prose records, as above -- the vocabularies apply to JSON only.
+NOT covered. Assume these are open.
+  * A NUMERIC CHANNEL in ``decimals``, reduced but not closed. Each value is a count
+    in [0, 512], about nine bits, over at most four engines on 21 rows -- on the order
+    of 90 bytes if every count were chosen adversarially. A paragraph at most, not a
+    page, and bounding it further would mean asserting counts this measurement has not
+    made.
+  * WHICH permitted value sits in which row. Choosing among approved terms is itself a
+    low-rate channel. Closing it is not worth the brittleness.
+  * SELF-CONSISTENCY IS NOT PROVENANCE. The manifest anchors these checks and is
+    mutable in the very commit that changes them -- appending a document there and
+    referencing it here passes. What this proves is that the verdicts describe the
+    study the manifest describes. That the manifest describes the real study is
+    checked by review, not by code.
+  * Corpus prose in a hand-written ``.md`` record. No test distinguishes an author's
+    sentence from a page's. Those files are protected by review.
   * Path spellings nobody listed, in any encoding the decoder does not produce.
+  * Files matching neither pattern.
 
-It is a tripwire on the shapes these records actually take. It is not a proof of
+It is a tripwire on the shapes these records take. It is not a proof of
 confidentiality and must not be cited as one.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 LOG = Path(__file__).resolve().parents[1] / "docs" / "log"
@@ -60,54 +66,19 @@ VERDICT_FILES = sorted(LOG.glob("*verdict*.json"))
 RECORD_FILES = sorted(LOG.glob("*lane-comparison*"))
 MANIFEST = LOG / "2026-08-20_lane-comparison-manifest.json"
 
-# key -> (allowed types for the value, allowed types for elements inside it,
-#         max length of any single string, max number of elements, max serialised
-#         size of the whole value).
-#
-# The per-string cap alone is not enough and an earlier revision of this file wrongly
-# claimed it was: a reviewer defeated it by splitting a base64 image across two
-# under-cap ``flags`` entries, and again by splitting prose across three. An unbounded
-# list of short chunks carries as much as one long string. The element-type and
-# serialised-size bounds are what actually close that, and the element-type bound is
-# what stops a payload arriving as a numeric array with no strings in it at all.
-#
-# The bounds are DERIVED, not invented -- a first pass guessed round numbers generous
-# enough that the segmented payloads still walked through. Widest value actually
-# present across the committed verdict files: doc 60 chars, flags 32 chars / 2 items /
-# 69 serialised, candidates 6 / 2 / 20, decimals 6 / 2 / 30. Each cap below is roughly
-# double its observed maximum -- headroom for a longer flag name or a fifth engine,
-# and nowhere near enough for a page of prose. Re-derive them if the record's shape
-# changes rather than raising them to make a new file pass.
-#
-# The bounds alone are NOT sufficient and an earlier revision claimed they were: a
-# reviewer filled the 21 real rows with legal-length strings and carried 1,932
-# characters -- larger than an actual shipped page in this corpus. Bounds cap the size
-# of a payload; only the closed vocabularies below stop there being a place to put one.
-# File-level bounds, also derived: both committed verdict files hold 21 rows and just
-# under 5.9 KB. Doubling leaves room for a larger campaign. These bound the FILE; they
-# do not by themselves bound what it can carry -- see the vocabularies below.
+# Bounds are DERIVED from the widest value actually committed, at roughly double, not
+# guessed: doc 60 chars, manifest names 128, flags 32/2/69, candidates 6/2/20,
+# decimals 6/2/30, page 44, largest decimal count 152, and 21 rows per file at just
+# under 5.9 KB. Re-derive them if the record's shape changes; do not raise one to make
+# a new file pass.
 MAX_VERDICT_ROWS = 48
 MAX_VERDICT_BYTES = 12_000
+MAX_DECIMAL_COUNT = 512
+MAX_MANIFEST_ENTRIES = 32
+DOCUMENT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,160}")
 
-# Closed vocabularies. Every one is small and finite in the pipeline itself, so an
-# unrecognised value means either corpus content or a genuine pipeline change -- and a
-# genuine change should be added here deliberately, in the same commit that introduces
-# it, rather than the guard being loosened to admit it.
-KNOWN_FLAGS = frozenset(
-    {
-        "native_table_structure_defective",
-        "native_table_structure_failed",
-        "native_table_unverifiable",
-        "native_table_header_unattributed",
-        "native_rotated_text_shredded",
-    }
-)
-KNOWN_ENGINES = frozenset({"gemini", "native", "nougat", "qwen"})
-KNOWN_KINDS = frozenset({"equation", "figure", "table"})
-KNOWN_STATUSES = frozenset({"error", "success", "warning", "partial"})
-
+# key -> (value types, element types, max string, max elements, max serialised size)
 VERDICT_SCHEMA = {
-    #                value types          element types  str  items  bytes
     "doc": ((str,), (), 80, 0, 96),
     "page": ((int,), (), 0, 0, 6),
     "kind": ((str,), (), 16, 0, 20),
@@ -118,10 +89,24 @@ VERDICT_SCHEMA = {
     "decimals": ((dict,), (int,), 16, 6, 80),
 }
 
-# A named-prefix scan, deliberately not a general path parser: a regex loose enough
-# to catch every absolute path also matches ordinary prose like "/api/tags".
-# ``/Volumes/`` is here because a reviewer walked an external-drive corpus path past
-# the first version of this list.
+# Campaign-approved, NOT the pipeline's vocabularies -- socr's EngineType and
+# PageStatus are both larger. These are the values this measurement is allowed to
+# record, which is a deliberately tighter set.
+APPROVED_FLAGS = frozenset(
+    {
+        "native_table_structure_defective",
+        "native_table_structure_failed",
+        "native_table_unverifiable",
+        "native_table_header_unattributed",
+        "native_rotated_text_shredded",
+    }
+)
+APPROVED_ENGINES = frozenset({"gemini", "native", "nougat", "qwen"})
+APPROVED_KINDS = frozenset({"equation", "figure", "table"})
+APPROVED_STATUSES = frozenset({"error", "success", "warning", "partial"})
+
+# A named-prefix scan, deliberately not a general path parser: a regex loose enough to
+# catch every absolute path also matches ordinary prose like "/api/tags".
 ABSOLUTE_PATH_MARKERS = (
     "/Users/",
     "/home/",
@@ -147,44 +132,132 @@ def _strings_in(value):
             yield from _strings_in(item)
 
 
+def _decoded_strings(path):
+    """Every string a JSON consumer would see, escapes resolved.
+
+    Scanning raw file text is not enough: JSON may escape the solidus, so a value that
+    decodes to an absolute path can carry no bare marker for a text scan to find.
+    """
+    if path.suffix != ".json":
+        return
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+
+
+def _manifest_page_keys():
+    """``(document name, page, kind)`` for every page the manifest selected.
+
+    Names are kept with and without the ``.pdf`` suffix because the runner truncates
+    long names to a fixed width, which can cut mid-extension.
+    """
+    keys = set()
+    for entry in json.loads(MANIFEST.read_text()):
+        names = {str(entry.get(key, "")) for key in ("pdf", "name")}
+        names |= {n[:-4] for n in names if n.endswith(".pdf")}
+        for page in entry.get("pages", []):
+            for name in names:
+                if name:
+                    keys.add((name, page["page"], page["kind"]))
+    return keys
+
+
 def test_at_least_one_record_and_one_verdict_file_are_committed():
     """Otherwise every loop below would pass vacuously over an empty set."""
     assert VERDICT_FILES, "no *verdict*.json found in docs/log"
     assert RECORD_FILES, "no *lane-comparison* files found in docs/log"
 
 
-def test_verdict_rows_carry_only_allowlisted_keys():
+def test_verdict_rows_carry_exactly_the_schema_keys():
     for path in VERDICT_FILES:
         rows = json.loads(path.read_text())
         assert rows, f"{path.name} is empty"
         for row in rows:
-            extra = set(row) - set(VERDICT_SCHEMA)
-            assert not extra, f"unexpected key(s) in {path.name}: {sorted(extra)}"
+            assert set(row) == set(VERDICT_SCHEMA), (
+                f"{path.name}: row keys {sorted(row)} != schema {sorted(VERDICT_SCHEMA)}"
+            )
 
 
-def test_verdict_files_are_bounded_as_files_not_only_per_value():
-    """Per-value bounds are per value; a payload can be spread across extra rows."""
+def test_verdict_rows_are_exactly_the_manifest_pages():
+    """The check that leaves ``doc``/``page``/``kind`` nothing of their own to say.
+
+    Bounding a field limits how big a payload can be; pinning the row set to the
+    manifest removes the row as a place to put one. Every triple must be one the
+    manifest already selected, none may repeat, and the count must match.
+    """
+    manifest_keys = _manifest_page_keys()
+    assert manifest_keys, "manifest selects no pages to anchor against"
+    # Count from the manifest directly: ``_manifest_page_keys`` deliberately holds
+    # several spellings of each document name, so its length is not a page count.
+    selected = sum(len(entry["pages"]) for entry in json.loads(MANIFEST.read_text()))
     for path in VERDICT_FILES:
         rows = json.loads(path.read_text())
-        assert len(rows) <= MAX_VERDICT_ROWS, (
-            f"{path.name} holds {len(rows)} rows against a cap of {MAX_VERDICT_ROWS}; "
-            "a campaign this large needs the cap re-derived, deliberately"
+        seen = set()
+        for row in rows:
+            triple = (row["doc"], row["page"], row["kind"])
+            assert triple not in seen, f"{path.name}: duplicate row {triple}"
+            seen.add(triple)
+            assert any(
+                name.startswith(row["doc"]) and page == row["page"] and kind == row["kind"]
+                for name, page, kind in manifest_keys
+            ), f"{path.name}: row {triple} is not a page the manifest selected"
+        assert len(rows) == selected, (
+            f"{path.name} holds {len(rows)} rows; the manifest selects {selected} "
+            "pages, and a verdict file records exactly those"
         )
-        size = len(path.read_bytes())
-        assert size <= MAX_VERDICT_BYTES, (
-            f"{path.name} is {size} bytes against a cap of {MAX_VERDICT_BYTES}"
-        )
+
+
+def test_every_verdict_string_comes_from_an_approved_vocabulary():
+    """Bounds cap a payload's size; this removes anywhere to put one."""
+    for path in VERDICT_FILES:
+        for row in json.loads(path.read_text()):
+            assert row["kind"] in APPROVED_KINDS, f"{path.name}: kind {row['kind']!r}"
+            for key, vocabulary in (
+                ("page_status", APPROVED_STATUSES),
+                ("shipped_engine", APPROVED_ENGINES),
+            ):
+                value = row.get(key)
+                assert value is None or value in vocabulary, (
+                    f"{path.name}: {key} {value!r} is not an approved value"
+                )
+            for flag in row["flags"]:
+                assert flag in APPROVED_FLAGS, f"{path.name}: unknown flag {flag!r}"
+            for engine in list(row["candidates"]) + list(row["decimals"]):
+                assert engine in APPROVED_ENGINES, f"{path.name}: unknown engine {engine!r}"
+
+
+def test_integers_are_counts_not_a_payload_channel():
+    """An unbounded integer carries as much as an unbounded string.
+
+    A reviewer compressed a 1,675-byte page into 37 ``decimals`` values and passed
+    every string-side check. Ranging them costs nothing and reduces that channel to
+    roughly nine bits per count.
+    """
+    for path in VERDICT_FILES:
+        for row in json.loads(path.read_text()):
+            for engine, count in row["decimals"].items():
+                assert isinstance(count, int) and not isinstance(count, bool), (
+                    f"{path.name}: decimals[{engine}] is {type(count).__name__}"
+                )
+                assert 0 <= count <= MAX_DECIMAL_COUNT, (
+                    f"{path.name}: decimals[{engine}] is {count}, outside "
+                    f"[0, {MAX_DECIMAL_COUNT}] -- a count this size is a payload"
+                )
 
 
 def test_verdict_values_cannot_smuggle_prose_or_images():
-    """A key-name allowlist alone lets a page of text ride inside ``flags``.
-
-    Four bounds, because a reviewer walked something past each of the first three:
-    the value's own type, the type of every element in it (a numeric byte array holds
-    no strings to inspect), the length of any one string, the number of elements, and
-    the serialised size of the whole value (which is what defeats a payload chopped
-    into individually-legal pieces).
-    """
+    """Type, element type, string length, element count, serialised size."""
     for path in VERDICT_FILES:
         for row in json.loads(path.read_text()):
             for key, value in row.items():
@@ -216,71 +289,40 @@ def test_verdict_values_cannot_smuggle_prose_or_images():
                     )
 
 
-def _decoded_strings(path):
-    """Every string a JSON consumer would actually see, escapes resolved.
-
-    Scanning raw file text is not enough: JSON may escape the solidus, so a value
-    that decodes to an absolute path can carry no bare ``/Users/`` substring for a
-    text scan to find. A reviewer walked exactly that past the previous version.
-    """
-    if path.suffix != ".json":
-        return
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError:
-        return
-    stack = [data]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, str):
-            yield item
-        elif isinstance(item, list):
-            stack.extend(item)
-        elif isinstance(item, dict):
-            stack.extend(item.keys())
-            stack.extend(item.values())
-
-
-def _manifest_document_names():
-    names = set()
-    for entry in json.loads(MANIFEST.read_text()):
-        for key in ("pdf", "name"):
-            value = str(entry.get(key, ""))
-            if value:
-                names.add(value[:-4] if value.endswith(".pdf") else value)
-    return names
-
-
-def test_every_verdict_string_comes_from_a_closed_vocabulary():
-    """Bounds cap a payload's size; this removes anywhere to put one.
-
-    Filling only the real rows with legal-length strings carried 1,932 characters past
-    the size bounds -- more than an actual page of this corpus. Every string in a
-    verdict row must therefore come from a fixed set, or be a prefix of a document
-    name already committed in the manifest (the runner truncates long names).
-    """
-    document_names = _manifest_document_names()
-    assert document_names, "manifest carries no document names to anchor against"
+def test_verdict_files_are_bounded_as_files_not_only_per_value():
+    """Per-value bounds are per value; a payload can be spread across rows."""
     for path in VERDICT_FILES:
-        for row in json.loads(path.read_text()):
-            doc = row.get("doc", "")
-            assert any(name.startswith(doc) for name in document_names), (
-                f"{path.name}: doc {doc!r} is not a prefix of any manifest document; "
-                "a verdict may only name documents the manifest already names"
+        rows = json.loads(path.read_text())
+        assert len(rows) <= MAX_VERDICT_ROWS, (
+            f"{path.name} holds {len(rows)} rows against a cap of {MAX_VERDICT_ROWS}"
+        )
+        size = len(path.read_bytes())
+        assert size <= MAX_VERDICT_BYTES, (
+            f"{path.name} is {size} bytes against a cap of {MAX_VERDICT_BYTES}"
+        )
+
+
+def test_manifest_is_bounded_since_the_verdicts_anchor_to_it():
+    """The anchor needs bounds of its own, or it becomes the way in.
+
+    This does not make the manifest trustworthy -- it is mutable in the same commit as
+    these tests, so what is proved is self-consistency, not provenance. It does stop
+    the anchor being an unbounded free-text field.
+    """
+    entries = json.loads(MANIFEST.read_text())
+    assert 0 < len(entries) <= MAX_MANIFEST_ENTRIES, (
+        f"manifest holds {len(entries)} entries, cap {MAX_MANIFEST_ENTRIES}"
+    )
+    for entry in entries:
+        assert set(entry) == {"pdf", "name", "pages"}, f"manifest keys {sorted(entry)}"
+        for key in ("pdf", "name"):
+            assert DOCUMENT_NAME.fullmatch(str(entry[key])), (
+                f"manifest {key} {entry[key]!r} is not a plain document name"
             )
-            assert row.get("kind") in KNOWN_KINDS, f"{path.name}: kind {row.get('kind')!r}"
-            for key, vocabulary in (
-                ("page_status", KNOWN_STATUSES),
-                ("shipped_engine", KNOWN_ENGINES),
-            ):
-                value = row.get(key)
-                assert value is None or value in vocabulary, (
-                    f"{path.name}: {key} {value!r} is not a known value"
-                )
-            for flag in row.get("flags") or []:
-                assert flag in KNOWN_FLAGS, f"{path.name}: unknown flag {flag!r}"
-            for engine in list(row.get("candidates") or []) + list(row.get("decimals") or {}):
-                assert engine in KNOWN_ENGINES, f"{path.name}: unknown engine {engine!r}"
+        for page in entry["pages"]:
+            assert page["kind"] in APPROVED_KINDS, f"manifest kind {page['kind']!r}"
+            assert isinstance(page["page"], int) and not isinstance(page["page"], bool)
+            assert 0 < page["page"] <= 2000, f"manifest page {page['page']}"
 
 
 def test_no_absolute_paths_anywhere_in_the_record():
