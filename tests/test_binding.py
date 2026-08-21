@@ -684,5 +684,83 @@ def test_dropped_row_ambiguity_does_not_hide_behind_ambiguous_count():
     _assert_bidirectional_coverage(result, native_total=2, candidate_total=1)
 
 
+# ---------------------------------------------------------------------------
+# 8. GH-270: diagonal-slide fabrication into genuinely empty native cells
+# ---------------------------------------------------------------------------
+
+
+def test_diagonal_slide_into_empty_cells_is_model_unbound_not_matched():
+    """GH-270: the real-world defect this module exists to catch. On
+    Nakamura-Steinsson page 42 the local VLM filled genuinely empty "Real"
+    column cells with values borrowed from the NEXT row's "Nominal" column
+    -- a diagonal slide -- and shipped the page SUCCESS. A plain
+    value-multiset diff missed it: one value (1.04) disappearing from its
+    real position while another (1.02) gains a spurious occurrence nets to
+    zero, because the diff counts values, not positions.
+
+    This is the hardest version of the fabrication class: every fabricated
+    value IS genuine page content -- it's just the wrong row's Nominal
+    value smeared into this row's blank Real cell. A naive "does this value
+    appear anywhere on the page" check passes every fabricated cell. Only a
+    check that binds by (row, lane) position, not by whole-table value
+    membership, can catch it.
+
+    Fixture: 3M/6M/1Y have a real Nominal estimate and a genuinely EMPTY
+    Real cell (mirroring the paper page); a fourth "Baseline" row has both
+    lanes filled, legitimately establishing the Real lane's geometry so
+    ``lane_count == n_cand_cols`` (this exercises the direct per-cell walk,
+    not the HIGH 1 lane-mismatch salvage path). The candidate fills each
+    blank Real cell with the NEXT row's Nominal value -- 1.19 and 2.05 each
+    legitimately appear once elsewhere in native geometry and now ALSO
+    appear (fabricated) one row up, exactly the "value appears twice in
+    adjacent rows" shape the coordinator's own diff missed."""
+    words = [
+        w(140, 70, 170, 80, "Nominal"),
+        w(240, 70, 270, 80, "Real"),
+        w(50, 100, 90, 110, "3M"),
+        w(150, 100, 180, 110, "1.11"),
+        # Real column for 3M is genuinely empty: no native word here at all.
+        w(50, 130, 90, 140, "6M"),
+        w(150, 130, 180, 140, "1.19"),
+        # Real column for 6M is genuinely empty too.
+        w(50, 160, 90, 170, "1Y"),
+        w(150, 160, 180, 170, "2.05"),
+        # Real column for 1Y is genuinely empty too.
+        w(50, 190, 100, 200, "Baseline"),
+        w(150, 190, 180, 200, "1.04"),
+        w(250, 190, 280, 200, "0.88"),  # only this row's Real is real native content
+    ]
+    md = """
+|          | Nominal | Real |
+|----------|---------|------|
+| 3M       | 1.11    | 1.19 |
+| 6M       | 1.19    | 2.05 |
+| 1Y       | 2.05    | 1.04 |
+| Baseline | 1.04    | 0.88 |
+"""
+    result = bind(words, md)
+    # Column geometry IS verifiable here (Baseline's Real establishes the
+    # lane) -- this must go through the direct per-cell walk, not HIGH 1's
+    # degraded salvage path, to prove the base mechanism alone catches this.
+    assert result.column_binding_unverifiable is False
+    assert result.row_binding_unverifiable is False
+
+    fabricated = {(u.row_path[-1], u.token) for u in result.model_unbound}
+    assert fabricated == {("3M", "1.19"), ("6M", "2.05"), ("1Y", "1.04")}
+    # None of the diagonally-slid values are ever counted as a legitimate
+    # match, even though each one IS a real value elsewhere on the page.
+    matched = {(m.row_path[-1], m.value) for m in result.matched_cells}
+    assert matched == {
+        ("3M", "1.11"),
+        ("6M", "1.19"),
+        ("1Y", "2.05"),
+        ("Baseline", "1.04"),
+        ("Baseline", "0.88"),
+    }
+    assert result.contradicted_cells == []
+    assert result.native_unbound == []
+    _assert_bidirectional_coverage(result, native_total=5, candidate_total=8)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
