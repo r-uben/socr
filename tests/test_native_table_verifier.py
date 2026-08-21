@@ -534,6 +534,52 @@ class TestNativeTableVerifierAuditEvents:
         inner.assess.assert_called_once()
         assert len(events) == 0, "Scan bypass must not emit events"
 
+    def test_repairs_too_narrow_spanning_header_before_judging(self):
+        tokens: list[tuple[float, float, str]] = [
+            (80.0, 150.0, "Near"),
+            (80.0, 175.0, "outcome"),
+            (80.0, 315.0, "Far"),
+            (80.0, 335.0, "outcome"),
+        ]
+        data_xs = [150.0, 215.0, 280.0, 345.0]
+        for x, ordinal in zip(data_xs, ["(1)", "(2)", "(3)", "(4)"]):
+            tokens.append((110.0, x, ordinal))
+        for x, value in zip(data_xs, ["-4.8", None, "-4.1", "-0.2"]):
+            if value is not None:
+                tokens.append((140.0, x, value))
+        for x, value in zip(data_xs, ["0.1", "0.2", "0.3", "0.4"]):
+            tokens.append((170.0, x, value))
+        fitz_page = _make_fitz_page_explicit(tokens)
+        output_text = _md_table(
+            ["", "Dependent variable:", "", ""],
+            [
+                ["", "Near outcome", "", "Far outcome"],
+                ["", "(1)", "(2)", "(3)", "(4)"],
+                ["Signal", "-4.8", "", "-4.1", "-0.2"],
+                ["Control", "0.1", "0.2", "0.3", "0.4"],
+            ],
+        )
+        output = self._make_output(page_num=4, text=output_text)
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: fitz_page,
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+
+        decision = judge.assess(output, MagicMock())
+
+        from socr.tables.reconcile import find_table_blocks
+
+        repaired = find_table_blocks(output.text)[0].grid
+        assert decision.accept is True
+        assert {len(row) for row in repaired} == {5}
+        assert repaired[1][-1] == "Far outcome"
+        repair_events = [event for event in events if event.kind == "table_header_repair"]
+        assert len(repair_events) == 1
+
     def test_non_table_page_bypasses_verifier(self):
         """Non-table page (is_table_page=False): verifier bypassed entirely."""
         native_rows = [[(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")]]

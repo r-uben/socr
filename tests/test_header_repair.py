@@ -10,6 +10,7 @@ import fitz
 from socr.tables.header_repair import (
     detect_header_column_collapse,
     repair_collapsed_header,
+    repair_table_headers_in_text,
     repair_table_headers_on_page,
 )
 from socr.tables.native_verifier import verify_native_table_region
@@ -19,6 +20,7 @@ _COL_GAP = 55.0
 
 _LABEL_X = 40.0
 _DATA_XS = [_LABEL_X + 110.0 + i * _COL_GAP for i in range(7)]
+_NARROW_HEADER_DATA_XS = [150.0, 215.0, 280.0, 345.0]
 
 # Geometry derived from CE 202401.pdf page 3 exchange-rate table (coordinates
 # only — invented labels/values for license cleanliness).
@@ -108,6 +110,23 @@ def _make_exchange_rate_table_page() -> fitz.Page:
     for x, val in zip(_CE_EXCHANGE_DATA_XS, ["0", "3", "15", "40", "29", "9", "4"]):
         page.insert_text((x, 188), val, fontsize=9)
 
+    return page
+
+
+def _make_narrow_spanning_header_page(far_label_x: float = 315.0) -> fitz.Page:
+    """Synthetic regression table with a right-edge secondary header label."""
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=300)
+    page.insert_text((150.0, 80.0), "Near outcome", fontsize=9)
+    page.insert_text((far_label_x, 80.0), "Far outcome", fontsize=9)
+
+    for x, ordinal in zip(_NARROW_HEADER_DATA_XS, ["(1)", "(2)", "(3)", "(4)"]):
+        page.insert_text((x, 110.0), ordinal, fontsize=9)
+    for x, value in zip(_NARROW_HEADER_DATA_XS, ["-4.8", None, "-4.1", "-0.2"]):
+        if value is not None:
+            page.insert_text((x, 140.0), value, fontsize=9)
+    for x, value in zip(_NARROW_HEADER_DATA_XS, ["0.1", "0.2", "0.3", "0.4"]):
+        page.insert_text((x, 170.0), value, fontsize=9)
     return page
 
 
@@ -245,3 +264,139 @@ class TestRepairCollapsedHeader:
         out, count = repair_table_headers_on_page(page, good_md)
         assert count == 0
         assert out == good_md
+
+
+class TestRepairTooNarrowSpanningHeader:
+    def test_repairs_width_and_right_edge_header_binding_from_geometry(self):
+        malformed = _md_table(
+            ["", "Dependent variable:", "", ""],
+            [
+                ["", "Near outcome", "", "Far outcome"],
+                ["", "(1)", "(2)", "(3)", "(4)"],
+                ["Signal", "-4.8", "", "-4.1", "-0.2"],
+                ["Control", "0.1", "0.2", "0.3", "0.4"],
+            ],
+        )
+
+        page = _make_narrow_spanning_header_page()
+        repaired_md, count = repair_table_headers_on_page(page, malformed)
+
+        from socr.tables.reconcile import find_table_blocks
+
+        repaired = find_table_blocks(repaired_md)[0].grid
+        assert count == 1
+        assert {len(row) for row in repaired} == {5}
+        assert repaired[1] == [
+            "",
+            "Near outcome",
+            "",
+            "",
+            "Far outcome",
+        ]
+        assert repaired[3] == ["Signal", "-4.8", "", "-4.1", "-0.2"]
+
+        second_pass, second_count = repair_table_headers_on_page(page, repaired_md)
+        assert second_count == 0
+        assert second_pass == repaired_md
+
+    def test_geometry_can_keep_final_label_in_place_and_append_blank(self):
+        malformed = _md_table(
+            ["", "Dependent variable:", "", ""],
+            [
+                ["", "Near outcome", "", "Far outcome"],
+                ["", "(1)", "(2)", "(3)", "(4)"],
+                ["Signal", "-4.8", "", "-4.1", "-0.2"],
+                ["Control", "0.1", "0.2", "0.3", "0.4"],
+            ],
+        )
+        page = _make_narrow_spanning_header_page(far_label_x=250.0)
+
+        repaired_md, count = repair_table_headers_on_page(page, malformed)
+
+        from socr.tables.reconcile import find_table_blocks
+
+        repaired = find_table_blocks(repaired_md)[0].grid
+        assert count == 1
+        assert repaired[1] == ["", "Near outcome", "", "Far outcome", ""]
+
+    def test_abstains_when_right_edge_binding_has_no_geometry(self):
+        malformed = _md_table(
+            ["", "Dependent variable:", "", ""],
+            [
+                ["", "Near outcome", "", "Far outcome"],
+                ["", "(1)", "(2)", "(3)", "(4)"],
+                ["Signal", "-4.8", "", "-4.1", "-0.2"],
+                ["Control", "0.1", "0.2", "0.3", "0.4"],
+            ],
+        )
+
+        repaired_md, count = repair_table_headers_in_text([], malformed)
+
+        assert count == 0
+        assert repaired_md == malformed
+
+    def test_abstains_for_a_trailing_blank_secondary_band(self):
+        malformed = _md_table(
+            ["", "Dependent variable:", "", ""],
+            [
+                ["", "Near outcome", "Far outcome", ""],
+                ["", "(1)", "(2)", "(3)", "(4)"],
+                ["Signal", "-4.8", "", "-4.1", "-0.2"],
+                ["Control", "0.1", "0.2", "0.3", "0.4"],
+            ],
+        )
+
+        repaired_md, count = repair_table_headers_on_page(
+            _make_narrow_spanning_header_page(), malformed
+        )
+
+        assert count == 0
+        assert repaired_md == malformed
+
+    def test_does_not_widen_for_one_anomalously_wide_body_row(self):
+        malformed = _md_table(
+            ["Measure", "A", "B", "C"],
+            [
+                ["First", "1", "2", "3"],
+                ["Second", "4", "5", "6"],
+                ["Outlier", "7", "8", "9", "10"],
+            ],
+        )
+
+        repaired_md, count = repair_table_headers_in_text([], malformed)
+
+        assert count == 0
+        assert repaired_md == malformed
+
+    def test_does_not_reclassify_a_short_numeric_body_row_as_header(self):
+        malformed = _md_table(
+            ["Measure", "A", "B", "C"],
+            [
+                ["First", "1", "2", ""],
+                ["Second", "3", "4", "5", "6"],
+                ["Third", "7", "8", "9", "10"],
+                ["Fourth", "11", "12", "13", "14"],
+            ],
+        )
+
+        repaired_md, count = repair_table_headers_in_text([], malformed)
+
+        assert count == 0
+        assert repaired_md == malformed
+
+    def test_abstains_when_the_wider_suffix_is_still_ragged(self):
+        malformed = _md_table(
+            ["", "Dependent variable:", "", ""],
+            [
+                ["", "Near outcome", "", "Far outcome"],
+                ["", "(1)", "(2)", "(3)", "(4)"],
+                ["First", "1", "2", "3", "4"],
+                ["Second", "5", "6", "7", "8"],
+                ["Ragged", "9", "10", "11", "12", "13"],
+            ],
+        )
+
+        repaired_md, count = repair_table_headers_in_text([], malformed)
+
+        assert count == 0
+        assert repaired_md == malformed

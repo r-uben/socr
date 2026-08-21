@@ -1,4 +1,4 @@
-"""Deterministic repair for collapsed multi-band table headers (GH-56).
+"""Deterministic repair for malformed multi-band table headers (GH-56/GH-276).
 
 When a VLM (or a spanning-header merge) collapses probability-bin / range
 headers into one markdown cell while data rows retain the full column count,
@@ -10,7 +10,13 @@ match the OCR output's values; header words above those rows are snapped into
 per-lane cells.  Multi-line headers are then merged with the same
 ``_collapse_header_prefix`` logic used by the rowizer.
 
-No model call; uses only ``page.get_text("words")`` (or a pre-fetched list).
+For a narrower spanning-header prefix above a unanimous wider body (GH-276),
+the module instead widens the prefix arithmetically.  Moving a nonblank group
+label requires native geometry; otherwise the missing-cell placement is
+ambiguous and the repair abstains.
+
+No model call; both paths use only the markdown and, where needed,
+``page.get_text("words")`` (or a pre-fetched list).
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Range / bin markers in probability-band and binned numeric table headers.
 _RANGE_MARKER_RE = re.compile(r"%|\+/-|[<>]")
+_ORDINAL_CELL_RE = re.compile(r"^(?:\((\d+)\)|(\d+))$")
 
 # Minimum gap between header column count and data column count before repair
 # is attempted.  Set to 2: a single-column stub label (Forecaster + data cols)
@@ -76,6 +83,106 @@ def detect_header_column_collapse(grid: list[list[str]]) -> tuple[bool, int, int
     gap = expected_cols - header_cols
     collapsed = gap >= _MIN_HEADER_DATA_COL_GAP
     return collapsed, header_cols, expected_cols
+
+
+def _repair_too_narrow_spanning_header(
+    grid: list[list[str]],
+    words: list,
+) -> list[list[str]] | None:
+    """Widen an unambiguous spanning-header prefix to the body's width.
+
+    This is the narrow spanning-band GH-276 case, distinct from GH-56's
+    collapsed header reconstruction.  The wider width must be the unique modal
+    width below the markdown header, and every row from its first occurrence
+    onward must already have that width.  That makes a single anomalously wide
+    body row an abstention rather than a reason to widen the table.
+
+    Exactly one secondary header band, a single primary banner, and a
+    full-width sequential ordinal row are required.  The secondary band must
+    expose two group labels separated by a blank, with the second label at the
+    source row's right edge.  Its native x position identifies the target data
+    lane; all other placements abstain.
+    """
+    if len(grid) < 3:
+        return None
+
+    header_cols = len(grid[0])
+    widths = Counter(len(row) for row in grid[1:])
+    ranked_widths = widths.most_common()
+    if not ranked_widths:
+        return None
+
+    expected_cols, support = ranked_widths[0]
+    if expected_cols <= header_cols:
+        return None
+    if len(ranked_widths) > 1 and ranked_widths[1][1] == support:
+        return None
+
+    first_full_width = next(
+        (idx for idx, row in enumerate(grid[1:], start=1) if len(row) == expected_cols),
+        None,
+    )
+    # Exactly one secondary narrow band distinguishes this case from a single
+    # collapsed header and keeps body rows from being reclassified as headers.
+    if first_full_width != 2:
+        return None
+    if any(len(row) != expected_cols for row in grid[first_full_width:]):
+        return None
+    if any(len(row) != header_cols for row in grid[:first_full_width]):
+        return None
+    primary_nonblank = [cell for cell in grid[0][1:] if cell.strip()]
+    secondary = grid[1]
+    secondary_nonblank = [idx for idx, cell in enumerate(secondary) if cell.strip()]
+    if (
+        grid[0][0].strip()
+        or len(primary_nonblank) != 1
+        or secondary[0].strip()
+        or len(secondary_nonblank) != 2
+        or secondary_nonblank[-1] != len(secondary) - 1
+        or not any(not cell.strip() for cell in secondary[1:-1])
+        or not _is_sequential_ordinal_row(grid[first_full_width])
+    ):
+        return None
+    if any(
+        _NUM_TOKEN_RE.match(cell.strip()) and _NUMERIC_RE.search(cell)
+        for row in grid[1:first_full_width]
+        for cell in row
+        if cell.strip()
+    ):
+        # A short numeric row is body data, not evidence of a spanning header.
+        return None
+
+    deficit = expected_cols - header_cols
+    repaired: list[list[str]] = [list(grid[0]) + [""] * deficit]
+    for row in grid[1:first_full_width]:
+        widened = list(row)
+        lane_idx = _native_label_lane(grid, widened[-1], words)
+        if lane_idx is None:
+            return None
+        current_cell = len(widened) - 1
+        target_cell = lane_idx + 1  # account for the blank stub column
+        insert_before = target_cell - current_cell
+        insert_after = deficit - insert_before
+        if insert_before < 0 or insert_after < 0:
+            return None
+        widened = widened[:-1] + [""] * insert_before + [widened[-1]] + [""] * insert_after
+        repaired.append(widened)
+
+    repaired.extend(list(row) for row in grid[first_full_width:])
+    return repaired
+
+
+def _is_sequential_ordinal_row(row: list[str]) -> bool:
+    """Whether *row* is a blank stub followed by 1..N column ordinals."""
+    if len(row) < 2 or row[0].strip():
+        return False
+    ordinals: list[int] = []
+    for cell in row[1:]:
+        match = _ORDINAL_CELL_RE.fullmatch(cell.strip())
+        if match is None:
+            return False
+        ordinals.append(int(match.group(1) or match.group(2)))
+    return ordinals == list(range(1, len(row)))
 
 
 def _all_rows_by_y(words: list) -> dict[int, list]:
@@ -266,6 +373,81 @@ def _derive_lane_centers(rows_by_y: dict[int, list], data_ys: list[int]) -> list
         else:
             lanes.append([x])
     return [sum(g) / len(g) for g in lanes]
+
+
+def _native_label_lane(grid: list[list[str]], label: str, words: list) -> int | None:
+    """Return the native data-lane index occupied by *label*, or abstain.
+
+    The label must appear as one contiguous native word sequence above an
+    exact numeric anchor row.  Its horizontal centre is assigned only when it
+    lies inside the data lanes' dynamically derived outer half-gaps.
+    """
+    if not words:
+        return None
+    rows_by_y = _all_rows_by_y(words)
+    anchor_y = _best_anchor_y(rows_by_y, grid)
+    if anchor_y is None:
+        return None
+
+    anchor_y_int = round(anchor_y)
+    local_ys = _local_table_ys(rows_by_y, anchor_y_int)
+    split_threshold = max(_SPLIT_GAP_MULT * _median_row_gap(local_ys), _SPLIT_GAP_MIN_PT)
+    expected_lanes = max(len(row) for row in grid) - 1
+    if expected_lanes < 2:
+        return None
+    data_ys = _data_row_ys(rows_by_y, anchor_y_int, split_threshold, local_ys)
+    full_width_ys = [
+        y
+        for y in data_ys
+        if sum(
+            1
+            for word in rows_by_y.get(y, [])
+            if _NUM_TOKEN_RE.match(word[4]) and _NUMERIC_RE.search(word[4])
+        )
+        == expected_lanes
+    ]
+    if not full_width_ys:
+        return None
+    lane_centers = _derive_lane_centers(rows_by_y, full_width_ys)
+    if len(lane_centers) != expected_lanes:
+        return None
+
+    label_tokens = re.findall(r"[\w&]+", label.casefold())
+    if not label_tokens:
+        return None
+
+    candidate_centres: list[float] = []
+    for y, row_words in rows_by_y.items():
+        if y >= anchor_y_int:
+            continue
+        native_tokens = [w[4].casefold() for w in row_words]
+        span = len(label_tokens)
+        for start in range(len(native_tokens) - span + 1):
+            if native_tokens[start : start + span] != label_tokens:
+                continue
+            matched = row_words[start : start + span]
+            candidate_centres.append((matched[0][0] + matched[-1][2]) / 2)
+
+    if not candidate_centres:
+        return None
+
+    left_gap = lane_centers[1] - lane_centers[0]
+    right_gap = lane_centers[-1] - lane_centers[-2]
+    lower_bound = lane_centers[0] - left_gap / 2
+    upper_bound = lane_centers[-1] + right_gap / 2
+    lane_indices: set[int] = set()
+    for centre in candidate_centres:
+        if not lower_bound <= centre <= upper_bound:
+            continue
+        distances = [abs(centre - lane) for lane in lane_centers]
+        nearest = min(range(len(distances)), key=distances.__getitem__)
+        if distances.count(distances[nearest]) != 1:
+            return None
+        lane_indices.add(nearest)
+
+    if len(lane_indices) != 1:
+        return None
+    return lane_indices.pop()
 
 
 def _assign_words_to_lanes(
@@ -468,7 +650,7 @@ def repair_table_headers_in_text(
 
     Returns ``(new_markdown, repair_count)``.
     """
-    if not words or not markdown.strip():
+    if not markdown.strip():
         return markdown, 0
 
     blocks = find_table_blocks(markdown)
@@ -479,10 +661,12 @@ def repair_table_headers_in_text(
     repair_count = 0
     # Process blocks bottom-up so line indices stay valid after splices.
     for block in reversed(blocks):
-        collapsed, _, _ = detect_header_column_collapse(block.grid)
-        if not collapsed:
-            continue
-        repaired = repair_collapsed_header(block.grid, words)
+        repaired = _repair_too_narrow_spanning_header(block.grid, words)
+        if repaired is None:
+            collapsed, _, _ = detect_header_column_collapse(block.grid)
+            if not collapsed:
+                continue
+            repaired = repair_collapsed_header(block.grid, words)
         if repaired is None:
             continue
         # assume_header: `repaired`'s row 0 is a header this module just rebuilt
@@ -503,7 +687,5 @@ def repair_table_headers_on_page(page, markdown: str) -> tuple[str, int]:
     try:
         words = page.get_text("words")
     except Exception:
-        return markdown, 0
-    if not words:
-        return markdown, 0
+        words = []
     return repair_table_headers_in_text(words, markdown)

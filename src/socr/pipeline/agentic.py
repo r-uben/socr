@@ -743,16 +743,13 @@ class NativeTableVerifierJudge:
         )
 
     def _maybe_repair_collapsed_headers(self, fitz_page, output: PageOutput, vr):
-        """Rebuild collapsed multi-band headers from native geometry when detected."""
-        from socr.tables.header_repair import (
-            detect_header_column_collapse,
-            repair_table_headers_on_page,
-        )
+        """Repair too-narrow or collapsed multi-band headers when detected."""
+        from socr.tables.header_repair import repair_table_headers_on_page
         from socr.tables.native_verifier import verify_native_table
         from socr.tables.reconcile import find_table_blocks
 
         blocks = find_table_blocks(output.text)
-        if not blocks or not any(detect_header_column_collapse(b.grid)[0] for b in blocks):
+        if not blocks:
             return vr
 
         repaired_text, repair_count = repair_table_headers_on_page(fitz_page, output.text)
@@ -766,7 +763,7 @@ class NativeTableVerifierJudge:
             kind="table_header_repair",
             engine=output.engine or "",
             detail=(
-                f"rebuilt {repair_count} collapsed table header(s) from native geometry "
+                f"repaired {repair_count} too-narrow or collapsed table header(s) "
                 f"(cols {vr.output_col_count}→{new_vr.output_col_count})"
             ),
             data={
