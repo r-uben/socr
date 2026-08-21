@@ -58,6 +58,19 @@ NOT covered. Assume these are open.
   * Path spellings nobody listed, in any encoding the decoder does not produce.
   * Files matching neither pattern.
 
+WHO THIS GUARD IS FOR, which took seven review rounds to state and explains why the
+NOT-covered list can never be emptied. The threat it addresses is an ACCIDENT by a
+cooperative author: the nine absolute paths that really were committed here, a stray
+``shipped_text`` key, a debug field carrying page prose. Every one of those it catches.
+
+It cannot address a HOSTILE author, and no test in this repository can. Someone with
+commit access who wants the corpus out does not need ``decimals`` or a name prefix --
+they can add a file this glob never sees. Each bypass a reviewer demonstrated against
+earlier revisions was of that second kind, and each was still worth fixing, because a
+check whose docstring overstates it gets cited as a guarantee. But the residual
+channels listed above are not holes to be closed one by one; they are what remains
+after the accidental cases are covered, and they are bounded by review, not by code.
+
 It is a tripwire on the shapes these records take. It is not a proof of
 confidentiality and must not be cited as one.
 """
