@@ -12,10 +12,13 @@ than an honest narrow one:
 Covered.
   * Every ``*verdict*.json`` in ``docs/log`` -- matched on the word, so a file named
     ``-verdict.json`` or ``-verdicts-v2.json`` is caught, not just one exact suffix.
-    Each row must carry ONLY allowlisted keys, and each value must match the SHAPE
-    that key is supposed to hold. The shape check is what stops corpus prose or a
-    base64 image being parked inside an allowed field, which a key-name check alone
-    permits.
+    Each row must carry ONLY allowlisted keys, and each value is bounded five ways:
+    its own type, the type of every element inside it, the length of any one string,
+    the number of elements, and the serialised size of the whole value. Those bounds
+    together are what stop corpus prose or a base64 image being parked inside an
+    allowed field -- a key-name check permits it, a per-string cap alone is defeated
+    by chopping the payload into legal-sized pieces, and a string cap of any kind is
+    blind to a numeric byte array.
   * Every ``*lane-comparison*`` file whatever its extension, scanned for filesystem
     paths.
 
@@ -26,6 +29,8 @@ NOT covered, and a reader should assume these are open.
     companions are hand-written prose, and no test can tell an author's sentence from
     a page's sentence. The prose records are protected by review, not by this.
   * Anything in a file matching neither pattern.
+  * Content that fits inside the bounds. A short phrase in ``doc`` is unexamined; the
+    guard bounds VOLUME and SHAPE, and cannot read meaning.
 
 It is a tripwire on the shapes these records actually take. It is not a proof of
 confidentiality and must not be cited as one.
@@ -41,18 +46,40 @@ VERDICT_FILES = sorted(LOG.glob("*verdict*.json"))
 RECORD_FILES = sorted(LOG.glob("*lane-comparison*"))
 MANIFEST = LOG / "2026-08-20_lane-comparison-manifest.json"
 
-# key -> (allowed python types, max length for any string it contains).
-# The length bound is the part that matters: a page of prose and a base64 image are
-# both just "a long string" sitting in a field whose name is on the allowlist.
+# key -> (allowed types for the value, allowed types for elements inside it,
+#         max length of any single string, max number of elements, max serialised
+#         size of the whole value).
+#
+# The per-string cap alone is not enough and an earlier revision of this file wrongly
+# claimed it was: a reviewer defeated it by splitting a base64 image across two
+# under-cap ``flags`` entries, and again by splitting prose across three. An unbounded
+# list of short chunks carries as much as one long string. The element-type and
+# serialised-size bounds are what actually close that, and the element-type bound is
+# what stops a payload arriving as a numeric array with no strings in it at all.
+#
+# The bounds are DERIVED, not invented -- a first pass guessed round numbers generous
+# enough that the segmented payloads still walked through. Widest value actually
+# present across the committed verdict files: doc 60 chars, flags 32 chars / 2 items /
+# 69 serialised, candidates 6 / 2 / 20, decimals 6 / 2 / 30. Each cap below is roughly
+# double its observed maximum -- headroom for a longer flag name or a fifth engine,
+# and nowhere near enough for a page of prose. Re-derive them if the record's shape
+# changes rather than raising them to make a new file pass.
+#
+# What this still leaves open, measured rather than hand-waved: the widest gap is
+# ``flags``, whose 100-character serialised cap admits roughly 80 characters of text
+# spread over legal-looking entries. That is a phrase, not a page, and no bound above
+# the observed maximum can close it entirely. The guard bounds VOLUME and SHAPE; it
+# cannot read meaning, and the residual channel is a sentence fragment wide.
 VERDICT_SCHEMA = {
-    "doc": ((str,), 120),
-    "page": ((int,), 0),
-    "kind": ((str,), 40),
-    "shipped_engine": ((str, type(None)), 40),
-    "page_status": ((str, type(None)), 40),
-    "flags": ((list,), 80),
-    "candidates": ((list,), 40),
-    "decimals": ((dict,), 40),
+    #                value types          element types  str  items  bytes
+    "doc": ((str,), (), 80, 0, 96),
+    "page": ((int,), (), 0, 0, 6),
+    "kind": ((str,), (), 16, 0, 20),
+    "shipped_engine": ((str, type(None)), (), 16, 0, 20),
+    "page_status": ((str, type(None)), (), 16, 0, 20),
+    "flags": ((list,), (str,), 48, 4, 100),
+    "candidates": ((list,), (str,), 16, 6, 80),
+    "decimals": ((dict,), (int,), 16, 6, 80),
 }
 
 # A named-prefix scan, deliberately not a general path parser: a regex loose enough
@@ -100,19 +127,41 @@ def test_verdict_rows_carry_only_allowlisted_keys():
 
 
 def test_verdict_values_cannot_smuggle_prose_or_images():
-    """A key-name allowlist alone lets a page of text ride inside ``flags``."""
+    """A key-name allowlist alone lets a page of text ride inside ``flags``.
+
+    Four bounds, because a reviewer walked something past each of the first three:
+    the value's own type, the type of every element in it (a numeric byte array holds
+    no strings to inspect), the length of any one string, the number of elements, and
+    the serialised size of the whole value (which is what defeats a payload chopped
+    into individually-legal pieces).
+    """
     for path in VERDICT_FILES:
         for row in json.loads(path.read_text()):
             for key, value in row.items():
-                types, limit = VERDICT_SCHEMA[key]
+                types, elem_types, max_str, max_items, max_bytes = VERDICT_SCHEMA[key]
                 assert isinstance(value, types), (
                     f"{path.name}: {key} is {type(value).__name__}, expected "
                     f"{'/'.join(x.__name__ for x in types)}"
                 )
+                blob = json.dumps(value, ensure_ascii=False)
+                assert len(blob) <= max_bytes, (
+                    f"{path.name}: {key} serialises to {len(blob)} characters against a "
+                    f"cap of {max_bytes}; a value this large is content, not a label"
+                )
+                if isinstance(value, (list, dict)):
+                    assert len(value) <= max_items, (
+                        f"{path.name}: {key} holds {len(value)} entries, cap {max_items}"
+                    )
+                    elements = value.values() if isinstance(value, dict) else value
+                    for element in elements:
+                        assert isinstance(element, elem_types), (
+                            f"{path.name}: {key} holds a {type(element).__name__}, "
+                            f"expected {'/'.join(x.__name__ for x in elem_types)}"
+                        )
                 for text in _strings_in(value):
-                    assert len(text) <= limit, (
+                    assert len(text) <= max_str, (
                         f"{path.name}: {key} holds a {len(text)}-character string; "
-                        f"the cap is {limit}, and anything longer is corpus content "
+                        f"the cap is {max_str}, and anything longer is corpus content "
                         "or a blob rather than a label"
                     )
 

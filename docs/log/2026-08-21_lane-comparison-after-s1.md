@@ -16,7 +16,14 @@ the statistics.
 
 On the **baseline's 8 contested pages** — the pages where the 2026-08-20 run held two
 or more candidates and socr had to choose — it now ships output a reader could cite on
-**2**, possibly 3. That denominator is fixed to the baseline on purpose: in this run
+**2**. The count is consumer-dependent and the split is worth naming rather than
+hedging: 2 for anything that renders or parses the markdown to a conforming reader —
+both Pandoc's GFM reader and markdown-it obey pflueger p34's 4-cell delimiter row and
+drop its fourth regression column — and 3 only if a human reading the raw source and
+repairing the table's width by hand counts as citable. If the contract is usable
+markdown, it is 2.
+
+That denominator is fixed to the baseline on purpose: in this run
 only 4 pages had two or more surviving cached candidates, so "pages with a choice" is not a stable
 set to measure across two runs, and quoting this run's own count would compare
 different denominators.
@@ -70,7 +77,7 @@ would be wrong.
 
 | document | page | kind | baseline | after S1 | verdict on what ships now |
 |---|---|---|---|---|---|
-| cochrane_piazzesi | 10 | table | native / warning | **qwen** / success | grid, but every top-panel row label shifted by one |
+| cochrane_piazzesi | 10 | table | native / warning | **qwen** / success | grid, but the `Large T` label sits on the coefficient row |
 | cochrane_piazzesi | 12 | table | native / warning | **gemini** / success | citable grid (checked by hand) |
 | nakamura_steinsson | 13 | table | native / success | **gemini** / success | citable grid (checked by hand) |
 | pflueger_rinaldi | 34 | table | native / success | **nougat** / success | grid malformed: 4-column header, 10 body rows of 5 |
@@ -92,11 +99,15 @@ Comparing shipped bytes on the baseline's 8 contested pages:
 | shipped text CHANGED | 5 | the code did something |
 | shipped text BYTE-IDENTICAL | 3 | only the judges differ |
 
-**Every page whose verdict improved is in the changed group** — each moved off native
-to a model lane, so its shipped bytes are different text. **None of the improvement
-comes from re-judging identical output.** That is the claim this record actually
-supports, and it is unaffected by the correction above: whether the improved count is
-4 or 2, all of it sits on pages where the shipped text genuinely changed.
+The safe claim, and the only one this evidence carries: **both currently citable
+outputs sit in the byte-changed group, and none of the three byte-identical outputs is
+citable under this panel.**
+
+It is tempting to call that an improvement count and this file will not, for the reason
+given above — the two panels answered different questions and the baseline's per-page
+verdicts were never recorded, so "how many pages got better" has no defined value here.
+What byte-identity establishes is narrower: where the shipped text did not change, any
+difference in verdict is the panel, not the code.
 
 The 3 byte-identical pages are p15, p42 and p43, and they are where the panels can be
 compared directly. On p42 they disagree outright: the baseline records native winning
@@ -116,8 +127,8 @@ They agree on **7 of 8** exactly. The single split is severity on the equation p
 one calls it WRONG, the other DEGRADED; both call it worse than the alternative that
 was available. The two absents do not differ between them.
 
-Their agreement is not the reassurance it looks like. They agree because they made the
-same mistake in the same place — see below.
+Their agreement is not the reassurance it looks like: they passed the same two pages
+that a hand check fails, by two different oversights — see below.
 
 | | faithful | degraded | wrong | absent |
 |---|---|---|---|---|
@@ -133,27 +144,35 @@ the page. Neither checked whether those values were bound to the right rows — 
 were not.
 
 On the page, the coefficient row of the top panel is **unlabelled**, and the row below
-it is labelled `Large T`. The shipped grid puts `Large T` on the coefficient row and
-leaves the actual Large-T standard-error row unlabelled. Every number is present and
-correct; every label in that panel is off by one row. A reader citing a standard error
-from it gets the wrong one.
+it is labelled `Large T`. The shipped grid moves that one label up: `Large T` lands on
+the coefficient row, and the real Large-T standard-error row is left unlabelled.
+`Small T` and `EH` stay on their correct rows — an earlier revision of this file said
+every label in the panel had shifted, which is not true and overstated the defect.
+
+One label is enough. A reader taking `Large T` from this grid gets the coefficient row,
+and the standard errors it names are orphaned on the row beneath. Every number is
+present and correct.
 
 pflueger p34 fails differently and no judge mentioned it either: its delimiter row
 declares 4 columns while 10 body rows carry 5, so a standard markdown parser drops the
 excess cell from each — the entire fourth regression column. The source text holds the
 values in the right places; anything that renders or parses the file does not.
 
-So of the 4 pages S1 newly routed to a model, **2 produce citable output, 1 has shifted
-row labels, and 1 is structurally malformed.**
+So of the 4 pages S1 newly routed to a model, **2 produce citable output, 1 mislabels
+its coefficient row, and 1 is structurally malformed** — the last being citable only to
+a reader who repairs the table width by hand, since a conforming parser drops a column.
 
 Two consequences, and the second is the reason this section exists:
 
 1. **Model output is not citable merely because a grid exists and the numbers are
    right.** That is the assumption S1 ships on, and it does not hold on half the pages
    S1 newly routed here.
-2. **A judge asked for structure will still check values.** Two independent judges on
-   different vendors, both given a rubric that named row/column binding explicitly and
-   a grounding requirement, both passed a row-label shift. The 2026-08-20 record lists
+2. **These two judges checked values despite a rubric that named structure.** Both, on
+   different vendors, were given a rubric naming row and column binding explicitly plus
+   a grounding requirement; both passed a shifted label on one page and a malformed
+   grid on another, and both justified their verdicts by citing values that do match.
+   That is two instruments, two different oversights, one blind spot — not a law about
+   judges in general, but enough to stop relying on them alone here. The 2026-08-20 record lists
    "one row-label shift" among the model defects it found, so this class was known and
    still walked past. Any future measurement here needs a mechanical binding check —
    the judges cannot be the only instrument, because they fail the same way the
@@ -225,14 +244,22 @@ quality can be confirmed from this repo. That covers, exhaustively:
 - the per-page quality verdicts (faithful / degraded / wrong / absent) and both
   judges' category counts, including the 7-of-8 agreement and the grounding procedure
   they were held to;
-- the four "citable grid" readings in the before/after table;
+- every "verdict on what ships now" cell in the before/after table: the p10 shifted
+  label, the p34 width defect, and the hand checks that found p12 and p13 clean;
 - everything asserted about p42 — "every digit, no grid", native rated better than the
   model, neither lane citable, and the `1.10`/`1.11` substitution itself;
 - the p15 figures (11 grid rows, 36 values, prose recovered) and the p43 figures
   (0 fractions and 0 display environments shipped, against 33 `\frac` commands and 3
   `aligned` environments in the discarded candidate);
 - that the two runs differ only in the code under test, and which commit each ran
-  against. The verdict JSON carries no SHA; `MEASURED_AGAINST` was a session file.
+  against. The verdict JSON carries no SHA; `MEASURED_AGAINST` was a session file;
+- the entire cross-run byte comparison — that shipped text changed on 5 of the 8 pages
+  and was byte-identical on 3, which 3 those were, that p42's two candidate files and
+  page image are identical across runs, and that the runs used separate output
+  directories with no shared cache found. None of it is derivable from the committed
+  JSON, and the whole "how much of this is the code" section rests on it;
+- the judges' exact rubric and their written justifications, and the check that a
+  conforming markdown parser drops p34's fourth column.
 
 The routing, flags, statuses, decimal counts, candidate lists and engine mix ARE in
 `2026-08-21_lane-comparison-after-s1-verdicts.json`, and the arithmetic over them can
