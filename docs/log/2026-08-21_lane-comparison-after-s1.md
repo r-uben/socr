@@ -226,8 +226,12 @@ single-lane policy fixes it.
 The argument for the binding oracle (#266) rests on the 2026-08-20 finding and on
 **p10, the shifted-label page filed as #273** — which is the genuine identical-bag case
 and is measured, not asserted: baseline native and the qwen output shipped today each
-hold **50 decimals with identical sign-aware multisets**, and differ only in which row
-carries the `Large T` label. A bag comparison cannot see that defect at all. GH-270 is
+hold **50 decimals with identical sign-aware multisets**. They are not otherwise alike,
+and an earlier revision of this file wrongly said they differed only in a label:
+native is a 109-line flattened stream with no table at all, the qwen output a 46-line
+grid. The precise claim is that their numeric bags are identical while the qwen grid
+misbinds `Large T`, and only the page image settles which binding is right. A bag
+comparison cannot see that defect at all. GH-270 is
 NOT such a case despite an earlier revision of this file citing it as one — its
 fabricating output holds 176 decimals against the source's 152, so the bags differ
 substantially and a multiset check would notice. It is a fabrication case, not a

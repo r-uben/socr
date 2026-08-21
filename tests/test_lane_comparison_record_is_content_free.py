@@ -19,9 +19,14 @@ Covered.
     defeated by chopping it into legal pieces; any string cap is blind to a numeric
     byte array. These bounds close all three PER VALUE.
   * The whole file, not only its values: a row count and a byte size. Per-value bounds
-    are per value, so 50 extra rows each carrying a legal 80 characters assemble a
-    page-sized payload out of individually-innocent parts. The file-level bounds are
-    what stop that, and an earlier revision without them was walked exactly that way.
+    are per value, so extra rows each carrying a legal payload assemble a page out of
+    individually-innocent parts. An earlier revision without these was walked that way.
+  * CLOSED VOCABULARIES, which are what actually reduce the channel to nothing. Bounds
+    alone were not enough: with only the 21 real rows, two legal strings per ``flags``
+    entry carry 1,932 characters -- more than a whole shipped page. So every string in
+    a verdict row must now come from a fixed set (flags, engines, kinds, statuses) or
+    be a prefix of a document name already committed in the manifest. There is no
+    free-text field left for a payload to occupy.
   * Every ``*lane-comparison*`` file whatever its extension, scanned for filesystem
     paths -- BOTH as raw text and as decoded JSON strings. Raw-text scanning alone is
     defeated by JSON's own escaping: a backslash-escaped solidus is valid JSON,
@@ -35,10 +40,10 @@ NOT covered, and a reader should assume these are open.
     companions are hand-written prose, and no test can tell an author's sentence from
     a page's sentence. The prose records are protected by review, not by this.
   * Anything in a file matching neither pattern.
-  * Content that fits inside the bounds. The widest per-value channel is ``flags`` at
-    roughly 80 characters, and the file-level cap admits a comparable total spread
-    thinly across rows. The guard bounds VOLUME and SHAPE; it cannot read meaning, and
-    a determined author has a sentence-sized channel.
+  * Meaning. Every string must come from a committed vocabulary, but WHICH permitted
+    value sits in which row is unconstrained, so a low-rate covert channel exists in
+    the choice itself. Closing that is not worth the brittleness.
+  * The prose records, as above -- the vocabularies apply to JSON only.
   * Path spellings nobody listed, in any encoding the decoder does not produce.
 
 It is a tripwire on the shapes these records actually take. It is not a proof of
@@ -74,16 +79,32 @@ MANIFEST = LOG / "2026-08-20_lane-comparison-manifest.json"
 # and nowhere near enough for a page of prose. Re-derive them if the record's shape
 # changes rather than raising them to make a new file pass.
 #
-# What this still leaves open, measured rather than hand-waved: the widest gap is
-# ``flags``, whose 100-character serialised cap admits roughly 80 characters of text
-# spread over legal-looking entries. That is a phrase, not a page, and no bound above
-# the observed maximum can close it entirely. The guard bounds VOLUME and SHAPE; it
-# cannot read meaning, and the residual channel is a sentence fragment wide.
+# The bounds alone are NOT sufficient and an earlier revision claimed they were: a
+# reviewer filled the 21 real rows with legal-length strings and carried 1,932
+# characters -- larger than an actual shipped page in this corpus. Bounds cap the size
+# of a payload; only the closed vocabularies below stop there being a place to put one.
 # File-level bounds, also derived: both committed verdict files hold 21 rows and just
-# under 5.9 KB. Doubling gives room for a larger campaign while keeping the total far
-# below anything that could carry a page of corpus text spread across rows.
+# under 5.9 KB. Doubling leaves room for a larger campaign. These bound the FILE; they
+# do not by themselves bound what it can carry -- see the vocabularies below.
 MAX_VERDICT_ROWS = 48
 MAX_VERDICT_BYTES = 12_000
+
+# Closed vocabularies. Every one is small and finite in the pipeline itself, so an
+# unrecognised value means either corpus content or a genuine pipeline change -- and a
+# genuine change should be added here deliberately, in the same commit that introduces
+# it, rather than the guard being loosened to admit it.
+KNOWN_FLAGS = frozenset(
+    {
+        "native_table_structure_defective",
+        "native_table_structure_failed",
+        "native_table_unverifiable",
+        "native_table_header_unattributed",
+        "native_rotated_text_shredded",
+    }
+)
+KNOWN_ENGINES = frozenset({"gemini", "native", "nougat", "qwen"})
+KNOWN_KINDS = frozenset({"equation", "figure", "table"})
+KNOWN_STATUSES = frozenset({"error", "success", "warning", "partial"})
 
 VERDICT_SCHEMA = {
     #                value types          element types  str  items  bytes
@@ -168,7 +189,7 @@ def test_verdict_values_cannot_smuggle_prose_or_images():
         for row in json.loads(path.read_text()):
             for key, value in row.items():
                 types, elem_types, max_str, max_items, max_bytes = VERDICT_SCHEMA[key]
-                assert isinstance(value, types), (
+                assert isinstance(value, types) and not isinstance(value, bool), (
                     f"{path.name}: {key} is {type(value).__name__}, expected "
                     f"{'/'.join(x.__name__ for x in types)}"
                 )
@@ -218,6 +239,48 @@ def _decoded_strings(path):
         elif isinstance(item, dict):
             stack.extend(item.keys())
             stack.extend(item.values())
+
+
+def _manifest_document_names():
+    names = set()
+    for entry in json.loads(MANIFEST.read_text()):
+        for key in ("pdf", "name"):
+            value = str(entry.get(key, ""))
+            if value:
+                names.add(value[:-4] if value.endswith(".pdf") else value)
+    return names
+
+
+def test_every_verdict_string_comes_from_a_closed_vocabulary():
+    """Bounds cap a payload's size; this removes anywhere to put one.
+
+    Filling only the real rows with legal-length strings carried 1,932 characters past
+    the size bounds -- more than an actual page of this corpus. Every string in a
+    verdict row must therefore come from a fixed set, or be a prefix of a document
+    name already committed in the manifest (the runner truncates long names).
+    """
+    document_names = _manifest_document_names()
+    assert document_names, "manifest carries no document names to anchor against"
+    for path in VERDICT_FILES:
+        for row in json.loads(path.read_text()):
+            doc = row.get("doc", "")
+            assert any(name.startswith(doc) for name in document_names), (
+                f"{path.name}: doc {doc!r} is not a prefix of any manifest document; "
+                "a verdict may only name documents the manifest already names"
+            )
+            assert row.get("kind") in KNOWN_KINDS, f"{path.name}: kind {row.get('kind')!r}"
+            for key, vocabulary in (
+                ("page_status", KNOWN_STATUSES),
+                ("shipped_engine", KNOWN_ENGINES),
+            ):
+                value = row.get(key)
+                assert value is None or value in vocabulary, (
+                    f"{path.name}: {key} {value!r} is not a known value"
+                )
+            for flag in row.get("flags") or []:
+                assert flag in KNOWN_FLAGS, f"{path.name}: unknown flag {flag!r}"
+            for engine in list(row.get("candidates") or []) + list(row.get("decimals") or {}):
+                assert engine in KNOWN_ENGINES, f"{path.name}: unknown engine {engine!r}"
 
 
 def test_no_absolute_paths_anywhere_in_the_record():
