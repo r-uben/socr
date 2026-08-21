@@ -858,6 +858,44 @@ def _best_lane_column_map(
     return mapping
 
 
+def _record_inventions_on_parent_row(
+    result: BindingResult,
+    native_row: _NativeRow,
+    cand_row: tuple[str, ...],
+    n_cand_cols: int,
+    header_paths_by_lane: dict[int, ColumnHeaderPath],
+    col_to_lane: dict[int, int],
+) -> None:
+    """Record invented digits on a candidate row bound to a native parent.
+
+    A native parent (panel/section heading) has no numeric cells. Binding
+    the candidate row to it used to skip both cell walks, so any numbers
+    the model wrote on that row vanished — they were in ``row_binding``
+    (so HIGH 2 did not report them) and then ``continue``'d (so the walks
+    did not either). Empty candidate cells stay a no-op: a genuine empty
+    heading row is not an invention.
+
+    ``col_to_lane`` maps a candidate data-column index to a native lane.
+    At the equal-count walk that map is the identity; at the salvage walk
+    it is the inverse of ``lane_to_col``. Looking up
+    ``header_paths_by_lane`` with a candidate column index is only correct
+    when those two index spaces coincide — they do not under salvage.
+    A column with no native lane (or a lane with no header path) reports
+    an empty path: a bare index is not a header.
+    """
+    for col_idx in range(n_cand_cols):
+        col = col_idx + 1
+        cand_text = cand_row[col].strip() if col < len(cand_row) else ""
+        if not cand_text or not is_numeric_token(cand_text):
+            continue
+        lane = col_to_lane.get(col_idx)
+        chp = header_paths_by_lane.get(lane) if lane is not None else None
+        col_path = chp.path if chp is not None else ()
+        result.model_unbound.append(
+            UnboundCell(row_path=native_row.row_path, col_path=col_path, token=cand_text)
+        )
+
+
 def bind(words: list, markdown: str) -> BindingResult:
     """Bind *markdown*'s candidate grid to the native geometry in *words*.
 
@@ -958,12 +996,21 @@ def bind(words: list, markdown: str) -> BindingResult:
         )
         mapped_lanes = set(lane_to_col.keys())
         mapped_cols = set(lane_to_col.values())
+        col_to_lane = {col: lane for lane, col in lane_to_col.items()}
 
         for cand_idx, native_idx in row_binding.items():
             native_row = native_rows[native_idx]
-            if native_row.is_parent:
-                continue
             cand_row = grid.rows[cand_idx]
+            if native_row.is_parent:
+                _record_inventions_on_parent_row(
+                    result,
+                    native_row,
+                    cand_row,
+                    n_cand_cols,
+                    header_paths_by_lane,
+                    col_to_lane,
+                )
+                continue
 
             # I1 follow-up: a lane/column the DP maps has a plausible
             # counterpart, so it is not the dropped/invented-digit signal
@@ -1009,12 +1056,21 @@ def bind(words: list, markdown: str) -> BindingResult:
 
         return result
 
+    identity_col_to_lane = {i: i for i in range(n_cand_cols)}
     for cand_idx, cand_row in enumerate(grid.rows):
         if cand_idx not in row_binding:
             continue
         native_idx = row_binding[cand_idx]
         native_row = native_rows[native_idx]
         if native_row.is_parent:
+            _record_inventions_on_parent_row(
+                result,
+                native_row,
+                cand_row,
+                n_cand_cols,
+                header_paths_by_lane,
+                identity_col_to_lane,
+            )
             continue
 
         for lane in range(lane_count):

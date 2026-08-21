@@ -657,6 +657,123 @@ def test_invented_candidate_row_surfaces_its_values_as_model_unbound():
     _assert_bidirectional_coverage(result, native_total=2, candidate_total=3)
 
 
+def test_invented_digits_on_parent_heading_row_are_model_unbound():
+    """A candidate row interpolated onto a native parent (a section heading
+    such as "Panel A", carrying no numbers of its own) used to be present
+    in ``row_binding`` — so HIGH 2 did not report it — and then skipped by
+    both cell walks (``if native_row.is_parent: continue``). Invented
+    digits on that row landed in no bucket and ``structural_agreement``
+    stayed True. Those numbers are C4 invented-digit ``model_unbound``.
+
+    Pin a difference, not only the bad case: the same native geometry with
+    an empty Panel A heading still agrees. ``_assert_bidirectional_coverage``
+    on the invented table is the invariant no parent-row fixture applied
+    before — it would have been ``candidate_seen 2 vs 4`` on 8bba5ff."""
+    words = [
+        w(150, 70, 180, 80, "OLS"),
+        w(250, 70, 280, 80, "IV"),
+        w(50, 100, 100, 110, "Panel"),
+        w(105, 100, 115, 110, "A"),
+        w(50, 130, 90, 140, "Total"),
+        w(150, 130, 180, 140, "10.0"),
+        w(250, 130, 280, 140, "20.0"),
+    ]
+    honest = """
+|         | OLS  | IV   |
+|---------|------|------|
+| Panel A |      |      |
+| Total   | 10.0 | 20.0 |
+"""
+    invented = """
+|         | OLS  | IV   |
+|---------|------|------|
+| Panel A | 9.9  | 8.8  |
+| Total   | 10.0 | 20.0 |
+"""
+    result_honest = bind(words, honest)
+    assert result_honest.structural_agreement is True
+    assert result_honest.model_unbound == []
+    _assert_bidirectional_coverage(result_honest, native_total=2, candidate_total=2)
+
+    result = bind(words, invented)
+    assert result.structural_agreement is False
+    unbound = {(u.row_path[-1], u.token) for u in result.model_unbound}
+    assert unbound == {("Panel A", "9.9"), ("Panel A", "8.8")}
+    assert result.contradicted_cells == []
+    matched = {(m.row_path[-1], m.value) for m in result.matched_cells}
+    assert matched == {("Total", "10.0"), ("Total", "20.0")}
+    _assert_bidirectional_coverage(result, native_total=2, candidate_total=4)
+
+
+def test_invented_middle_row_interpolated_onto_parent_is_model_unbound():
+    """Second shape of the same hole: a native parent sits BETWEEN two data
+    rows. Equal-length interpolation binds an invented candidate row onto
+    that parent, and both cell walks skip it, so the invented digits vanish
+    even though every candidate row is 'bound'."""
+    words = [
+        w(150, 70, 180, 80, "OLS"),
+        w(250, 70, 280, 80, "IV"),
+        w(50, 100, 90, 110, "Coef"),
+        w(150, 100, 180, 110, "1.0"),
+        w(250, 100, 280, 110, "2.0"),
+        w(50, 130, 100, 140, "Panel"),
+        w(105, 130, 115, 140, "A"),
+        w(50, 160, 90, 170, "Total"),
+        w(150, 160, 180, 170, "10.0"),
+        w(250, 160, 280, 170, "20.0"),
+    ]
+    md = """
+|          | OLS  | IV   |
+|----------|------|------|
+| Coef     | 1.0  | 2.0  |
+| Invented | 9.9  | 8.8  |
+| Total    | 10.0 | 20.0 |
+"""
+    result = bind(words, md)
+    assert result.structural_agreement is False
+    unbound_tokens = {u.token for u in result.model_unbound}
+    assert unbound_tokens == {"9.9", "8.8"}
+    assert result.contradicted_cells == []
+    matched = {(m.row_path[-1], m.value) for m in result.matched_cells}
+    assert matched == {("Coef", "1.0"), ("Coef", "2.0"), ("Total", "10.0"), ("Total", "20.0")}
+    _assert_bidirectional_coverage(result, native_total=4, candidate_total=6)
+
+
+def test_parent_row_inventions_use_native_lane_headers_in_salvage_walk():
+    """Salvage (lane_count != n_cand_cols) must not treat a candidate column
+    index as a native lane index when attributing invented digits on a
+    parent-bound row. Native has three lanes Alpha/Beta/Gamma; the
+    candidate drops Alpha. DP maps Beta->col0, Gamma->col1, so 9.9 (under
+    the candidate's Beta column) is ('Beta',) and 8.8 is ('Gamma',) -- not
+    the off-by-one ('Alpha',)/('Beta',) you get from
+    ``header_paths_by_lane.get(col_idx)``. Detection without the right
+    header is the same defect a prior round already ruled out elsewhere
+    in this file."""
+    words = [
+        w(150, 70, 180, 80, "Alpha"),
+        w(250, 70, 280, 80, "Beta"),
+        w(350, 70, 380, 80, "Gamma"),
+        w(50, 100, 100, 110, "Panel"),
+        w(105, 100, 115, 110, "A"),
+        w(50, 130, 90, 140, "Total"),
+        w(150, 130, 180, 140, "10.0"),
+        w(250, 130, 280, 140, "20.0"),
+        w(350, 130, 380, 140, "30.0"),
+    ]
+    md = """
+|         | Beta | Gamma |
+|---------|------|-------|
+| Panel A | 9.9  | 8.8   |
+| Total   | 20.0 | 30.0  |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is True
+    assert result.structural_agreement is False
+    unbound = {(u.token, u.col_path) for u in result.model_unbound}
+    assert unbound == {("9.9", ("Beta",)), ("8.8", ("Gamma",))}
+    _assert_bidirectional_coverage(result, native_total=3, candidate_total=4)
+
+
 def test_dropped_row_ambiguity_does_not_hide_behind_ambiguous_count():
     """MEDIUM 3: a native row with NO candidate counterpart at all is a
     STRONGER, more specific fact than in-row lane jitter -- the ambiguity
