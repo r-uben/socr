@@ -2333,6 +2333,9 @@ class UnifiedPipeline:
 
             out.escalated_from = bo.engine
             out.cost_usd = profile.cost_per_page_usd
+            out.provider_id = profile.id
+            out.provider_model = profile.model
+            out.provider_backend = profile.backend
             ps.attempts.append(out)
             ps.best_output = out
             self._clear_fail_closed_flags(state, page_num, ps, profile)
