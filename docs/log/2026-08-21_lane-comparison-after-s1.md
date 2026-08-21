@@ -16,8 +16,8 @@ the statistics.
 
 On the **baseline's 8 contested pages** — the pages where the 2026-08-20 run held two
 or more candidates and socr had to choose — it now ships output a reader could cite on
-**4**. That denominator is fixed to the baseline on purpose: in this run only 4 pages
-had two or more surviving cached candidates, so "pages with a choice" is not a stable
+**2**, possibly 3. That denominator is fixed to the baseline on purpose: in this run
+only 4 pages had two or more surviving cached candidates, so "pages with a choice" is not a stable
 set to measure across two runs, and quoting this run's own count would compare
 different denominators.
 
@@ -28,13 +28,20 @@ panel contradicts it on the one page where a direct comparison is possible (see
 "How much of this is the code" below). The defensible before/after is the routing,
 which is recorded on both sides.
 
+**An earlier revision of this file said 4, and said all four newly-routed pages became
+citable. Both judges said so too. A hand check against the page images disproved it**
+— see "What the judges missed" below. Two of the four carry defects that leave the
+values right and the binding wrong, which is the failure this whole record is about.
+
 Note also that the two panels were not even asked the same question. The baseline
 verdict was *relative* — which of two candidates is better. This one is *absolute* —
-is the shipped text citable at all. A page can move on one and not the other. What is
-directly comparable, and recorded on both sides: **4 of the 8 moved off native to a
-model lane, and all 4 became citable.** Across all 21 pages the shipped engine was the
+is the shipped text citable at all. A page can move on one and not the other.
+
+What is directly comparable, and recorded on both sides rather than judged: **4 of the
+8 moved off native to a model lane.** Across all 21 pages the shipped engine was the
 local model on 11, the cloud model on 5, native on 4, and nougat on 1 — native's share
-fell from 8 to 4.
+fell from 8 to 4. That routing change is real. What the model lanes then produced is
+the question the rest of this file is about, and the answer is mixed.
 
 ## What this measures and what it does not
 
@@ -59,10 +66,10 @@ would be wrong.
 
 | document | page | kind | baseline | after S1 | verdict on what ships now |
 |---|---|---|---|---|---|
-| cochrane_piazzesi | 10 | table | native / warning | **qwen** / success | citable grid |
-| cochrane_piazzesi | 12 | table | native / warning | **gemini** / success | citable grid |
-| nakamura_steinsson | 13 | table | native / success | **gemini** / success | citable grid |
-| pflueger_rinaldi | 34 | table | native / success | **nougat** / success | citable grid |
+| cochrane_piazzesi | 10 | table | native / warning | **qwen** / success | grid, but every top-panel row label shifted by one |
+| cochrane_piazzesi | 12 | table | native / warning | **gemini** / success | citable grid (checked by hand) |
+| nakamura_steinsson | 13 | table | native / success | **gemini** / success | citable grid (checked by hand) |
+| pflueger_rinaldi | 34 | table | native / success | **nougat** / success | grid malformed: 4-column header, 10 body rows of 5 |
 | kaminska_et_al | 38 | figure | native / success | native / **error** | content absent, but a silent SUCCESS became a hard failure |
 | cochrane_piazzesi | 15 | table | native / error | unchanged | refusal marker; a cached extraction was discarded (#262) |
 | pflueger_rinaldi | 43 | equation | native / warning | unchanged | display structure lost (#271) |
@@ -81,9 +88,11 @@ Comparing shipped bytes on the baseline's 8 contested pages:
 | shipped text CHANGED | 5 | the code did something |
 | shipped text BYTE-IDENTICAL | 3 | only the judges differ |
 
-**All 4 pages that became citable are in the changed group** — each moved off native to
-a model lane, so its shipped bytes are different text. **None of the improvement comes
-from re-judging identical output.** That is the claim this record actually supports.
+**Every page whose verdict improved is in the changed group** — each moved off native
+to a model lane, so its shipped bytes are different text. **None of the improvement
+comes from re-judging identical output.** That is the claim this record actually
+supports, and it is unaffected by the correction above: whether the improved count is
+4 or 2, all of it sits on pages where the shipped text genuinely changed.
 
 The 3 byte-identical pages are p15, p42 and p43, and they are where the panels can be
 compared directly. On p42 they disagree outright: the baseline records native winning
@@ -101,12 +110,50 @@ and the printed column count before giving a verdict.
 
 They agree on **7 of 8** exactly. The single split is severity on the equation page —
 one calls it WRONG, the other DEGRADED; both call it worse than the alternative that
-was available. Neither the 4-of-8 headline nor the two absents differ between them.
+was available. The two absents do not differ between them.
+
+Their agreement is not the reassurance it looks like. They agree because they made the
+same mistake in the same place — see below.
 
 | | faithful | degraded | wrong | absent |
 |---|---|---|---|---|
 | judge 1 | 4 | 1 | 1 | 2 |
 | judge 2 | 4 | 2 | 0 | 2 |
+
+**Both faithful counts are too high by two.** See below.
+
+## What the judges missed, and why it is the most useful thing here
+
+Both judges rated cochrane p10 FAITHFUL. Both cited its coefficient values matching
+the page. Neither checked whether those values were bound to the right rows — and they
+were not.
+
+On the page, the coefficient row of the top panel is **unlabelled**, and the row below
+it is labelled `Large T`. The shipped grid puts `Large T` on the coefficient row and
+leaves the actual Large-T standard-error row unlabelled. Every number is present and
+correct; every label in that panel is off by one row. A reader citing a standard error
+from it gets the wrong one.
+
+pflueger p34 fails differently and no judge mentioned it either: its delimiter row
+declares 4 columns while 10 body rows carry 5, so a standard markdown parser drops the
+excess cell from each — the entire fourth regression column. The source text holds the
+values in the right places; anything that renders or parses the file does not.
+
+So of the 4 pages S1 newly routed to a model, **2 produce citable output, 1 has shifted
+row labels, and 1 is structurally malformed.**
+
+Two consequences, and the second is the reason this section exists:
+
+1. **Model output is not citable merely because a grid exists and the numbers are
+   right.** That is the assumption S1 ships on, and it does not hold on half the pages
+   S1 newly routed here.
+2. **A judge asked for structure will still check values.** Two independent judges on
+   different vendors, both given a rubric that named row/column binding explicitly and
+   a grounding requirement, both passed a row-label shift. The 2026-08-20 record lists
+   "one row-label shift" among the model defects it found, so this class was known and
+   still walked past. Any future measurement here needs a mechanical binding check —
+   the judges cannot be the only instrument, because they fail the same way the
+   pipeline does.
 
 ## The finding that complicates the story
 
