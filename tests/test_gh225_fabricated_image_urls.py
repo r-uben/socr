@@ -18,6 +18,7 @@ ladder, no ``_phase_agentic``, no ``_available_engines_for_agentic`` patch.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -404,3 +405,60 @@ def test_clean_phase_major_document_still_succeeds(tmp_path: Path) -> None:
     assert result.status == DocumentStatus.SUCCESS, (
         f"a clean document was demoted: {result.status}, error={result.error!r}"
     )
+
+
+def test_document_sweep_removal_does_not_trip_the_stitch_mismatch_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """PR #269 fresh-review round, finding 8: MAJOR 6(a)'s own fix regressed
+    the PP-1 byte-identity self-check.
+
+    That fix moved the whole per-page flush loop -- fragment write AND the
+    ``stitched == final_text`` comparison -- down past the S1 event-append
+    block, so ``_flush_page_sidecar`` would see the S1 audit events appended
+    just above it. But the fragment write and stitch check were bundled into
+    that SAME loop, so moving one moved both -- past this file's own
+    ``_guard_fabricated_image_refs_document`` call (and
+    ``strip_phantom_images`` beside it), which mutate ``final_text`` in
+    place. The fragments/stitched text stay built from the PRE-mutation
+    ``page_texts``, so on any document where the sweep actually removes
+    something, the comparison started reporting a spurious mismatch and
+    logging "falling back to in-memory assembly" -- even though the shipped
+    output stays correct (``_rewrite_all_fragments`` always uses the final,
+    post-sweep text, unconditionally, regardless of what this self-check
+    concludes).
+
+    Fixed by splitting the loop: the fragment write + stitch check run
+    early, immediately after ``page_texts`` is computed and BEFORE the
+    strip/sweep mutations; only the sidecar write stays late, after the S1
+    events. This test drives the real, unmocked ``_phase_assemble`` -- same
+    fabricated-ref setup as ``test_phase_major_document_status_is_demoted_by_the_sweep``
+    above, which already proves the sweep really does remove something here
+    -- and asserts the self-check does not false-alarm over that removal.
+    """
+    pdf_path = _pdf_without_links(tmp_path)
+    out_dir = tmp_path / "out"
+
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    state, _out = _state_for(pdf_path, f"Real prose that must survive.\n\n{FABRICATED_REF}\n")
+
+    with caplog.at_level(logging.WARNING, logger="socr.pipeline.orchestrator"):
+        result = pipeline._phase_assemble(state, out_dir)
+
+    mismatch_warnings = [
+        r.getMessage() for r in caplog.records if "stitched body differs" in r.getMessage()
+    ]
+    assert not mismatch_warnings, (
+        f"spurious byte-identity mismatch warning fired even though the shipped "
+        f"output is correct -- the stitch check is comparing against text from "
+        f"before the fabricated-ref sweep ran: {mismatch_warnings!r}"
+    )
+
+    # Prove the sweep actually fired -- otherwise the absence of a warning
+    # would be vacuous (nothing to mismatch on in the first place).
+    assert "i.imgur.com" not in result.markdown, (
+        "setup: the fabricated ref was not removed -- this test cannot tell "
+        "the byte-identity regression apart from a no-op sweep"
+    )
+    assert "Real prose that must survive." in result.markdown

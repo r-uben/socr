@@ -644,11 +644,12 @@ def structure_class_native_fallback_applies(p) -> bool:
     level, not just one.
 
     ``_reaches_structure_class_branch`` is the single unified gate (BLOCKING 2
-    on #269) and already checks ``is_structure_class()`` and
-    ``has_model_rung_attempt`` itself, in the same order
-    ``_winning_page_output`` does -- this function's own job is only to ask
-    whether that gate passes and no attempt authored a usable grid
-    (``structure_class_grid_winner`` returns ``None``).
+    on #269) and already checks ``is_structure_class()`` and R3 (at least one
+    non-native model rung ran -- inlined as its own final ``return``, not a
+    separate named predicate) itself, in the same order ``_winning_page_output``
+    does -- this function's own job is only to ask whether that gate passes and
+    no attempt authored a usable grid (``structure_class_grid_winner`` returns
+    ``None``).
     """
     if not _reaches_structure_class_branch(p):
         return False

@@ -5556,6 +5556,51 @@ class UnifiedPipeline:
 
         page_texts = canonical_page_texts(state)
 
+        # PP-1: flush per-page fragments from the in-memory page texts, then
+        # verify stitch round-trips byte-identically. Non-fatal: any error
+        # keeps the in-memory body.
+        #
+        # Fragment write + stitch check MUST run here, before the
+        # ``strip_phantom_images`` / ``_guard_fabricated_image_refs_document``
+        # mutations below (and before the S1 bucket/event derivation further
+        # down) -- ``final_text`` at this point is still the pre-strip value
+        # ``_stitch_fragments`` (built from these same pre-strip ``page_texts``)
+        # is meant to match. A prior version of this fix (MAJOR 6(a) on #269)
+        # moved this ENTIRE block, sidecar flush included, down past the strip
+        # mutations to fix sidecar event delivery -- which also silently moved
+        # this comparison past the point where ``final_text`` is mutated,
+        # tripping the byte-identity guard on every document where the strip
+        # actually removes a phantom image ref (output stayed correct; the
+        # self-check did not). Splitting the two flushes apart fixes both:
+        # this loop stays early, only the sidecar flush (below, near the S1
+        # event derivation) needs to run late.
+        if has_text and page_texts:
+            try:
+                page_nums = list(range(1, state.handle.page_count + 1))
+                for pnum, ptext in zip(page_nums, page_texts):
+                    self._flush_page_fragment(state, pnum, ptext, output_dir)
+                stitched = self._stitch_fragments(state, output_dir)
+                if stitched == final_text:
+                    # Byte-identical: the fragment/stitch path is verified.
+                    # Use stitched to confirm we go through the new code path.
+                    final_text = stitched
+                else:
+                    # Mismatch — log and fall back to in-memory body.
+                    logger.warning(
+                        "PP-1 [%s]: stitched body differs from in-memory body "
+                        "(%d vs %d bytes); falling back to in-memory assembly",
+                        state.handle.path.name,
+                        len(stitched),
+                        len(final_text),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "PP-1 [%s]: fragment flush/stitch failed (%s); "
+                    "falling back to in-memory assembly",
+                    state.handle.path.name,
+                    exc,
+                )
+
         failed_pages = [i for i, t in enumerate(page_texts, start=1) if is_page_failed_marker(t)]
         # TR-3: D3 fail-closed floor pages — born-digital table pages where the
         # per-region geometry verifier hard-failed AND the OCR ladder also failed.
@@ -5938,7 +5983,7 @@ class UnifiedPipeline:
                         kind="structure_class_model_table_kept",
                         engine=(_kept_sc.engine if _kept_sc else ""),
                         detail=(
-                            "structure-class page (table or equation); native may not"
+                            "structure-class page (table); native may not"
                             " author the grid (C1), and a model attempt did -- the"
                             " model's reading ships instead of native, flagged per its"
                             " own status"
@@ -5960,7 +6005,7 @@ class UnifiedPipeline:
                         kind="structure_class_native_fallback",
                         engine="native",
                         detail=(
-                            "structure-class page (table or equation); a model rung ran"
+                            "structure-class page (table); a model rung ran"
                             " but authored no usable grid, and native may not author one"
                             " either (C1) -- native's prose ships instead, flagged"
                             " WARNING rather than SUCCESS"
@@ -6023,44 +6068,35 @@ class UnifiedPipeline:
                         f"{d3_floor_pages}[/red]"
                     )
 
-        # MAJOR 6(a) on #269: this flush loop was moved here, AFTER the
-        # bucket derivation and audit-event-append block above, instead of
-        # running right after `page_texts` is computed. `_flush_page_sidecar`
-        # filters `state.events` by page_num at the MOMENT it writes each
-        # sidecar -- so flushing before the S1 events
+        # MAJOR 6(a) on #269: only the SIDECAR flush belongs here, after the
+        # bucket derivation and audit-event-append block above.
+        # `_flush_page_sidecar` filters `state.events` by page_num at the
+        # MOMENT it writes each sidecar -- so flushing before the S1 events
         # (`structure_class_model_table_kept` / `structure_class_native_fallback`)
         # were appended meant those events never reached `pages/NNN.json`'s
         # `audit_events` field at all, and no later pass corrects a sidecar
-        # (`_rewrite_all_fragments` only rewrites `.md` fragments). Nothing
-        # between the old position and here reads or depends on `final_text`'s
-        # post-stitch value, so moving the whole block is safe.
-        # PP-1: flush per-page fragments and sidecars from the in-memory page
-        # texts, then verify stitch round-trips byte-identically.
-        # Non-fatal: any error keeps the in-memory body.
+        # (`_rewrite_all_fragments` only rewrites `.md` fragments).
+        #
+        # The fragment write + byte-identity stitch check stays at its
+        # ORIGINAL position, right after `page_texts` is computed (above,
+        # before `failed_pages`) -- an earlier version of this fix moved that
+        # check down here too, past where `strip_phantom_images` /
+        # `_guard_fabricated_image_refs_document` mutate `final_text`, which
+        # tripped the check on every document where the strip actually
+        # changed something (output stayed correct; only the self-check
+        # false-alarmed). Sidecar delivery and the stitch guard have
+        # different correctness requirements -- one wants the LATEST events,
+        # the other wants the PRE-strip text -- so they no longer share a loop.
+        # Non-fatal: any error here leaves whatever sidecars were already
+        # written, in-memory body is unaffected either way.
         if has_text and page_texts:
             try:
                 page_nums = list(range(1, state.handle.page_count + 1))
-                for pnum, ptext in zip(page_nums, page_texts):
-                    self._flush_page_fragment(state, pnum, ptext, output_dir)
+                for pnum in page_nums:
                     self._flush_page_sidecar(state, pnum, output_dir)
-                stitched = self._stitch_fragments(state, output_dir)
-                if stitched == final_text:
-                    # Byte-identical: the fragment/stitch path is verified.
-                    # Use stitched to confirm we go through the new code path.
-                    final_text = stitched
-                else:
-                    # Mismatch — log and fall back to in-memory body.
-                    logger.warning(
-                        "PP-1 [%s]: stitched body differs from in-memory body "
-                        "(%d vs %d bytes); falling back to in-memory assembly",
-                        state.handle.path.name,
-                        len(stitched),
-                        len(final_text),
-                    )
             except Exception as exc:
                 logger.warning(
-                    "PP-1 [%s]: fragment flush/stitch failed (%s); "
-                    "falling back to in-memory assembly",
+                    "PP-1 [%s]: sidecar flush failed (%s)",
                     state.handle.path.name,
                     exc,
                 )
