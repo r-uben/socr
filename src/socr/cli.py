@@ -65,7 +65,11 @@ def common_options(f):
     f = click.option(
         "--recover-corrupt-math",
         is_flag=True,
-        help="Keep native prose but image-OCR font-corrupted equations to LaTeX (local VLM)",
+        help=(
+            "Keep native prose and re-read only positively detected corrupt-font equation "
+            "crops with the --math-model endpoint. Retains each crop as ground truth and "
+            "marks syntax-valid LaTeX as non-authoritative; the page remains WARNING."
+        ),
     )(f)
     f = click.option(
         "--detect-equations",
@@ -102,9 +106,9 @@ def common_options(f):
         "--math-model",
         default=None,
         help=(
-            "Local Ollama vision model for corrupt-font equation -> LaTeX recovery "
+            "Ollama-compatible vision model for corrupt-font equation-crop recovery "
             "(default: qwen3.5:cloud; use qwen3-vl:30b-a3b-instruct for offline). "
-            "Note: this is a math-only path, NOT the OCR qwen tier."
+            "This is a region-only math path, not the whole-page Qwen OCR tier."
         ),
     )(f)
     f = click.option("--timeout", type=int, default=1800, help="Subprocess timeout in seconds")(f)

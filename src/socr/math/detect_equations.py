@@ -18,10 +18,13 @@ phase; the goal is precise bounding boxes, not recall maximisation):
      equations (mid-sentence math) are excluded because they are embedded in
      prose lines that also contain non-math text.
 
-  3. **Equation numbering** — a flush-right token matching a parenthesised
-     number pattern on the same line as math is a strong confirmer
-     (``(3.4)``, ``(A.1)``).  A math-font line with a number is promoted even
-     if the centering is only approximate.
+  3. **Equation numbering** — a terminal, flush-right parenthesised label
+     (``(3.4)``, ``(A8)``) anchors a complete equation row.  Math-font fragments
+     in the same vertical connectivity component are assigned to the nearest
+     anchor by geometry.  Only assigned members enter the exact source target;
+     extraction-order ranges never define row ownership.  Crop padding is bounded
+     by whitespace between adjacent anchored rows.  Prose ending in an equation
+     reference is rejected unless its prefix is equation-like.
 
 All tolerance thresholds are **named constants** with documented basis below.
 None are bare literals.
@@ -37,6 +40,11 @@ Named constants and their basis
     equations (including those with short prose labels on the same line such
     as "Let  …  =").  Conservative: a missed equation is preferable to a
     false-positive prose crop.
+
+``DISPLAY_ANCHOR_PREFIX_RATIO_SCALE``
+    A numbered anchor's prefix may contain roman label material, so it needs
+    only half the general math-span ratio to count as equation-like.  The row
+    still requires a fully math-heavy member before replacement is possible.
 
 ``DISPLAY_CENTER_TOLERANCE_PT``
     Maximum deviation (in points) of a candidate line's horizontal midpoint
@@ -68,9 +76,9 @@ Named constants and their basis
 
 ``DISPLAY_EQ_NUM_RE``
     Regex matching an equation number in the parenthesised-number convention
-    common in academic papers: ``(3)``, ``(3.4)``, ``(A.1)``, ``(3.4.1)``.
-    A match anywhere on a candidate line promotes it even if centering is
-    approximate.
+    common in academic papers: ``(3)``, ``(3.4)``, ``(A8)``, ``(3.4.1)``.
+    Complete terminal labels can anchor fragmented equation rows; same-line
+    math labels still promote otherwise off-centre candidates.
 """
 
 from __future__ import annotations
@@ -88,6 +96,10 @@ logger = logging.getLogger(__name__)
 # Minimum fraction of a line's character count that must come from math-font
 # spans for the line to be treated as a math-font line.  See module docstring.
 DISPLAY_MIN_MATH_SPAN_RATIO: float = 0.50
+
+# Scale applied to the general math-font ratio when classifying text before a
+# terminal equation label. See the named-constant basis in the module docstring.
+DISPLAY_ANCHOR_PREFIX_RATIO_SCALE: float = 0.50
 
 # Maximum deviation (points) of a line's horizontal midpoint from the page
 # text-block midpoint for the line to be considered "centred".
@@ -107,6 +119,11 @@ DISPLAY_PAD_PT: float = 4.0
 # Equation number pattern: (3), (3.4), (A.1), (3.4.1) — typical in papers.
 DISPLAY_EQ_NUM_RE: re.Pattern = re.compile(r"\(\s*[A-Za-z]?\d+(?:\.\d+)*\s*\)")
 
+# A numbered-row anchor must be the complete terminal span, optionally carrying
+# equation punctuation.  Matching a complete span prevents prose such as
+# ``equation (25)`` from becoming an equation crop.
+DISPLAY_TERMINAL_EQ_NUM_RE: re.Pattern = re.compile(rf"({DISPLAY_EQ_NUM_RE.pattern})\s*$")
+
 # ── Data structures ─────────────────────────────────────────────────────────
 
 
@@ -125,6 +142,8 @@ class EquationRegion:
     bbox: tuple[float, float, float, float]  # (x0, y0, x1, y1) padded
     source_bbox: tuple[float, float, float, float]  # tight merged rect
     has_eq_number: bool = False
+    equation_label: str = ""
+    source_text: str = ""
     crop_path: str | None = None  # filled in after crop-PNG is saved
 
 
@@ -140,6 +159,21 @@ class EquationDetectionResult:
     page_num: int
     regions: list[EquationRegion] = field(default_factory=list)
     detection_time_s: float = 0.0
+
+
+@dataclass
+class _LineRecord:
+    """One PyMuPDF extraction line in native-text order."""
+
+    index: int
+    text: str
+    bbox: tuple[float, float, float, float]
+    math_ratio: float
+    terminal_label: str = ""
+
+    @property
+    def center_y(self) -> float:
+        return (self.bbox[1] + self.bbox[3]) / 2.0
 
 
 # ── Core detection ─────────────────────────────────────────────────────────
@@ -207,7 +241,7 @@ def _detect(
     pad_pt: float,
 ) -> EquationDetectionResult:
     """Inner (non-defensive) implementation of detect_display_equations."""
-    from socr.core.born_digital import _MATH_FONT_RE
+    from socr.core.born_digital import _MATH_FONT_RE, clean_native_text
 
     # --- Step 0: collect page-level font names for quick span-level lookup ---
     # page.get_fonts() returns (xref, ext, type, basefont, name, encoding, ...)
@@ -253,12 +287,11 @@ def _detect(
     # wider prose union.  The page-half is a simpler, equally stable reference.
     text_mid_x = page_width / 2.0
 
-    # --- Step 2: collect candidate math-font lines ---
-    # A line is a candidate if a sufficient fraction of its character content
-    # comes from spans whose font is a recognised math font.
-    candidates: list[tuple[float, float, float, float, bool]] = []
-    # Each entry: (x0, y0, x1, y1, has_eq_number)
-
+    # --- Step 2: preserve extraction order and identify numbered-row anchors ---
+    # ``get_text("text")`` follows this block/line order.  Keeping that same
+    # order lets a detected row carry an exact native-text substring rather than
+    # text reconstructed from crop geometry.
+    lines: list[_LineRecord] = []
     for block in blocks:
         if block.get("type", 0) == 1:
             continue
@@ -267,90 +300,179 @@ def _detect(
             if not spans:
                 continue
 
-            total_chars = 0
+            cleaned_spans = [clean_native_text(span.get("text", ""))[0] for span in spans]
+            text = "".join(cleaned_spans).rstrip()
+            total_chars = len(text)
+            if not total_chars:
+                continue
             math_chars = 0
-            has_eq_num = False
-
-            for span in spans:
-                text = span.get("text", "")
+            for span, span_text in zip(spans, cleaned_spans):
                 font = span.get("font", "")
-                char_count = len(text)
-                total_chars += char_count
-
-                # Check if this span's font is a math font.
-                # Span-level font names are usually just the basefont/name
-                # pair; try matching them against the page-level math set or
-                # directly against the regex (some embeddings differ slightly).
                 is_math_span = font in math_font_names or (
                     bool(font) and _MATH_FONT_RE.search(font) is not None
                 )
                 if is_math_span:
-                    math_chars += char_count
+                    math_chars += len(span_text)
 
-                # Equation number check: look for (3), (3.4), (A.1) on any span.
-                if DISPLAY_EQ_NUM_RE.search(text):
-                    has_eq_num = True
+            bbox = tuple(line.get("bbox", (0.0, 0.0, 0.0, 0.0)))
+            lines.append(
+                _LineRecord(
+                    index=len(lines),
+                    text=text,
+                    bbox=bbox,
+                    math_ratio=math_chars / total_chars,
+                )
+            )
 
-            if total_chars == 0:
-                continue
-            math_ratio = math_chars / total_chars
-            if math_ratio < min_math_span_ratio:
-                continue
-
-            # --- Step 3: centering check ---
-            lx0, ly0, lx1, ly1 = line.get("bbox", (0.0, 0.0, 0.0, 0.0))
-            line_mid_x = (lx0 + lx1) / 2.0
-            offset = abs(line_mid_x - text_mid_x)
-
-            # Promote if centred OR if it has an equation number (which is a
-            # reliable display-equation signal even when the line is slightly
-            # asymmetric due to the flush-right number itself).
-            if offset <= center_tolerance_pt or has_eq_num:
-                candidates.append((lx0, ly0, lx1, ly1, has_eq_num))
-
-    if not candidates:
+    if not lines:
         return EquationDetectionResult(page_num=page_num)
 
-    # --- Step 4: sort by vertical position and merge adjacent lines ---
-    candidates.sort(key=lambda c: c[1])  # sort by y0
+    text_right = max(line.bbox[2] for line in lines)
+    anchors: list[_LineRecord] = []
+    for line in lines:
+        match = DISPLAY_TERMINAL_EQ_NUM_RE.search(line.text)
+        if not match:
+            continue
+        label = match.group(1)
+        prefix = line.text[: match.start()].strip(" \t,.;:")
+        label_width = line.bbox[2] - line.bbox[0]
+        reaches_right_margin = text_right - line.bbox[2] <= label_width
+        equation_like_prefix = not prefix or line.math_ratio >= (
+            min_math_span_ratio * DISPLAY_ANCHOR_PREFIX_RATIO_SCALE
+        )
+        if reaches_right_margin and equation_like_prefix:
+            line.terminal_label = label
+            anchors.append(line)
 
-    merged: list[tuple[float, float, float, float, bool]] = []
-    cur_x0, cur_y0, cur_x1, cur_y1, cur_eq = candidates[0]
-
-    for nx0, ny0, nx1, ny1, neq in candidates[1:]:
-        if ny0 - cur_y1 <= merge_gap_pt:
-            # Merge: extend bounding box.
-            cur_x0 = min(cur_x0, nx0)
-            cur_x1 = max(cur_x1, nx1)
-            cur_y1 = max(cur_y1, ny1)
-            cur_eq = cur_eq or neq
+    # Build vertical connectivity components from math-heavy lines and terminal
+    # labels.  Extraction order is not row ownership: a PDF can emit a later
+    # equation's fragment before an earlier row's label.  Using that order to
+    # span first-member..label silently swept the intervening fragment into the
+    # wrong replacement target.  Connectivity uses the detector's existing
+    # merge-gap layout parameter; within a component, the nearest label owns a
+    # math line.  A label with no math-font member is never a numbered row.
+    assigned: dict[int, list[_LineRecord]] = {anchor.index: [] for anchor in anchors}
+    relevant = sorted(
+        (
+            line
+            for line in lines
+            if line.math_ratio >= min_math_span_ratio or bool(line.terminal_label)
+        ),
+        key=lambda line: (line.bbox[1], line.bbox[3], line.index),
+    )
+    components: list[list[_LineRecord]] = []
+    component_bottom = 0.0
+    for line in relevant:
+        if not components or line.bbox[1] - component_bottom > merge_gap_pt:
+            components.append([line])
+            component_bottom = line.bbox[3]
         else:
-            merged.append((cur_x0, cur_y0, cur_x1, cur_y1, cur_eq))
-            cur_x0, cur_y0, cur_x1, cur_y1, cur_eq = nx0, ny0, nx1, ny1, neq
-    merged.append((cur_x0, cur_y0, cur_x1, cur_y1, cur_eq))
+            components[-1].append(line)
+            component_bottom = max(component_bottom, line.bbox[3])
 
-    # --- Step 5: apply height filter and padding ---
+    for component in components:
+        component_anchors = [line for line in component if line.terminal_label]
+        if not component_anchors:
+            continue
+        for line in component:
+            if line.math_ratio < min_math_span_ratio:
+                continue
+            anchor = min(
+                component_anchors,
+                key=lambda item: (abs(item.center_y - line.center_y), item.index),
+            )
+            assigned[anchor.index].append(line)
+
+    numbered_rows: list[tuple[float, float, float, float, bool, str, str]] = []
+    numbered_line_indexes: set[int] = set()
+    for anchor in anchors:
+        math_members = assigned[anchor.index]
+        if not math_members:
+            continue
+        members_by_index = {line.index: line for line in [*math_members, anchor]}
+        members = [members_by_index[index] for index in sorted(members_by_index)]
+        x0 = min(line.bbox[0] for line in members)
+        y0 = min(line.bbox[1] for line in members)
+        x1 = max(line.bbox[2] for line in members)
+        y1 = max(line.bbox[3] for line in members)
+        source_text = "\n".join(line.text for line in members)
+        numbered_rows.append((x0, y0, x1, y1, True, anchor.terminal_label, source_text))
+        numbered_line_indexes.update(members_by_index)
+
+    # --- Step 3: retain the conservative legacy path for unnumbered equations ---
+    candidates: list[tuple[float, float, float, float, bool]] = []
+    for line in lines:
+        if line.index in numbered_line_indexes:
+            continue
+        if line.math_ratio < min_math_span_ratio:
+            continue
+        lx0, ly0, lx1, ly1 = line.bbox
+        line_mid_x = (lx0 + lx1) / 2.0
+        offset = abs(line_mid_x - text_mid_x)
+        has_eq_num = DISPLAY_EQ_NUM_RE.search(line.text) is not None
+        if offset <= center_tolerance_pt or has_eq_num:
+            candidates.append((lx0, ly0, lx1, ly1, has_eq_num))
+
+    # --- Step 4: sort by vertical position and merge adjacent unnumbered lines ---
+    merged: list[tuple[float, float, float, float, bool]] = []
+    if candidates:
+        candidates.sort(key=lambda c: c[1])  # sort by y0
+        cur_x0, cur_y0, cur_x1, cur_y1, cur_eq = candidates[0]
+
+        for nx0, ny0, nx1, ny1, neq in candidates[1:]:
+            if ny0 - cur_y1 <= merge_gap_pt:
+                cur_x0 = min(cur_x0, nx0)
+                cur_x1 = max(cur_x1, nx1)
+                cur_y1 = max(cur_y1, ny1)
+                cur_eq = cur_eq or neq
+            else:
+                merged.append((cur_x0, cur_y0, cur_x1, cur_y1, cur_eq))
+                cur_x0, cur_y0, cur_x1, cur_y1, cur_eq = nx0, ny0, nx1, ny1, neq
+        merged.append((cur_x0, cur_y0, cur_x1, cur_y1, cur_eq))
+
+    # --- Step 5: apply padding without crossing neighboring numbered rows ---
     regions: list[EquationRegion] = []
+    numbered_rows.sort(key=lambda row: row[1])
+    for index, (rx0, ry0, rx1, ry1, req, label, source_text) in enumerate(numbered_rows):
+        previous_bottom = numbered_rows[index - 1][3] if index else page_rect.y0
+        next_top = numbered_rows[index + 1][1] if index + 1 < len(numbered_rows) else page_rect.y1
+        top_pad = min(pad_pt, max(0.0, (ry0 - previous_bottom) / 2.0))
+        bottom_pad = min(pad_pt, max(0.0, (next_top - ry1) / 2.0))
+        regions.append(
+            EquationRegion(
+                page_num=page_num,
+                bbox=(
+                    max(page_rect.x0, rx0 - pad_pt),
+                    max(page_rect.y0, ry0 - top_pad),
+                    min(page_rect.x1, rx1 + pad_pt),
+                    min(page_rect.y1, ry1 + bottom_pad),
+                ),
+                source_bbox=(rx0, ry0, rx1, ry1),
+                has_eq_number=req,
+                equation_label=label,
+                source_text=source_text,
+            )
+        )
+
     for rx0, ry0, rx1, ry1, req in merged:
         height = ry1 - ry0
         if height < min_height_pt:
             continue
-
-        # Padded crop rectangle (clipped to page bounds)
-        px0 = max(page_rect.x0, rx0 - pad_pt)
-        py0 = max(page_rect.y0, ry0 - pad_pt)
-        px1 = min(page_rect.x1, rx1 + pad_pt)
-        py1 = min(page_rect.y1, ry1 + pad_pt)
-
         regions.append(
             EquationRegion(
                 page_num=page_num,
-                bbox=(px0, py0, px1, py1),
+                bbox=(
+                    max(page_rect.x0, rx0 - pad_pt),
+                    max(page_rect.y0, ry0 - pad_pt),
+                    min(page_rect.x1, rx1 + pad_pt),
+                    min(page_rect.y1, ry1 + pad_pt),
+                ),
                 source_bbox=(rx0, ry0, rx1, ry1),
                 has_eq_number=req,
             )
         )
 
+    regions.sort(key=lambda region: region.bbox[1])
     return EquationDetectionResult(page_num=page_num, regions=regions)
 
 

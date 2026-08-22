@@ -408,6 +408,39 @@ class TestChartAssetLaneCannotShipShreddedText:
             f"the page image was lost when the text was refused: {shipped_text!r}"
         )
 
+    def test_stale_corrupt_math_hybrid_cannot_override_shredded_floor(self, tmp_path: Path) -> None:
+        """A contradictory restored state must still select the rotated-page floor."""
+        from socr.core.document import DocumentHandle
+        from socr.core.manifest import _winning_page_output
+        from socr.core.result import FailureMode, PageOutput
+        from socr.core.state import DocumentState
+
+        pdf_path = tmp_path / "rot_shredded.pdf"
+        _rotated_caption_pdf(pdf_path, shredded=True)
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        page = state.pages[1]
+        page.is_born_digital = True
+        page.native_text = "shredded native equation"
+        page.native_rotated_text_shredded = True
+        page.rotated_shred_png_ref = "![Rotated page](figures/page.png)"
+        hybrid = PageOutput(
+            page_num=1,
+            text="unsafe hybrid must not ship",
+            status=PageStatus.WARNING,
+            engine="native+math",
+            audit_passed=False,
+        )
+        page.attempts.append(hybrid)
+        page.corrupt_math_hybrid = hybrid
+
+        winner = _winning_page_output(state, 1)
+
+        assert winner.engine == "native"
+        assert winner.status == PageStatus.ERROR
+        assert winner.failure_mode == FailureMode.NATIVE_TEXT_SHREDDED
+        assert "rotated text extraction shredded" in winner.text
+        assert "unsafe hybrid" not in winner.text
+
     def test_resumed_native_only_run_does_not_re_stamp_success(self, tmp_path: Path) -> None:
         """The #214 shape: a terminal ledger entry restored on the second run
         must not carry the page back to SUCCESS past the flag."""

@@ -1,17 +1,18 @@
-"""Recover font-corrupted equation regions as LaTeX via a local vision model.
+"""Recover font-corrupted equation regions without rewriting surrounding prose.
 
-Pipeline for a born-digital page whose math is font-map corrupted:
+A born-digital page can have a trustworthy native prose layer but unusable equation
+characters because an embedded font has no usable Unicode mapping.  This module:
 
-  1. ``corrupt_math_line_rects(page)`` — find text lines containing math mojibake
-     and merge vertically-adjacent ones into equation-region rectangles.
-  2. ``latex_for_image(png, ...)`` — render a region and read it back as LaTeX
-     with a local Ollama vision model (qwen3-vl by default; benchmarked faithful
-     on this corruption class where olmocr2 hallucinated).
-  3. ``splice_math(page, native_text, regions)`` — replace the corrupted lines in
-     the native text with the recovered LaTeX, leaving prose byte-for-byte intact.
+1. locates complete numbered equation rows when source labels provide reliable
+   anchors, otherwise falling back to positively corrupt native-text lines;
+2. renders and retains each matching crop as visual ground truth;
+3. asks an Ollama-compatible vision model for LaTeX and applies the deterministic
+   structural syntax gate; and
+4. replaces only an exact native-text slice, preserving the surrounding prose.
 
-Only the OCR call touches the network (localhost Ollama); everything else is pure
-geometry/text and is unit-tested without a model. ``urllib`` only — no new deps.
+Structural validation proves syntax only.  A parseable candidate can still contain a
+wrong sign, index, factor, or operator, so every candidate remains visibly marked as
+non-authoritative and the crop remains the ground truth.
 """
 
 from __future__ import annotations
@@ -19,82 +20,181 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
 
-from socr.core.born_digital import line_has_corrupt_math
+from socr.core.born_digital import clean_native_text, line_has_corrupt_math
+from socr.math.validate_latex import validate_latex_structure
 
 logger = logging.getLogger(__name__)
 
-# GH-36a (defect fix): the only sanctioned local vision model is
-# qwen3-vl:30b-a3b-instruct.  The former default "qwen3-vl:8b" is FORBIDDEN
-# per repo rules (collapses tables, wrong model tier).  The orchestrator path
-# overrides this via ``config.math_model`` (default "qwen3.5:cloud"), so the
-# bare default is only hit by direct callers and tests — but it must still be
-# correct.
 DEFAULT_MODEL = "qwen3-vl:30b-a3b-instruct"
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_DPI = 300
 
-# Vertical gap (in points) below which two corrupt-math lines belong to the same
-# equation region. A single display equation may wrap; consecutive numbered
-# equations sit within ~a line height of each other.
+# Geometry constants are named because they define which damaged lines share one
+# visual crop.  They are layout units, not empirical quality thresholds.
 _REGION_MERGE_GAP_PT = 6.0
-# Horizontal padding added to a region crop so sub/superscripts and wide
-# delimiters are not clipped at the edge.
 _REGION_PAD_PT = 4.0
 
-_PROMPT = (
+CORRUPT_MATH_PROMPT = (
     "Transcribe the mathematics in this image as LaTeX. "
     "Output ONLY the equations, one per line, with no prose, no markdown code "
     "fences, and no surrounding $ delimiters. Be faithful to every symbol: "
     "= + - parentheses, fractions, subscripts, superscripts, and Greek letters."
 )
 
+_CORRUPT_CANDIDATE_HEADER = (
+    "<!-- socr-corrupt-equation: structurally-valid LaTeX candidate "
+    "(syntax only, non-authoritative — crop is ground truth) -->"
+)
+_CORRUPT_UNRESOLVED_PREFIX = "[corrupt equation unresolved"
 
-def corrupt_math_line_rects(page) -> list[object]:
-    """Return merged ``fitz.Rect`` regions covering corrupt-math text lines.
 
-    Lines are taken from ``get_text("dict")``; a line qualifies if its text trips
-    ``line_has_corrupt_math``. Vertically-adjacent qualifying lines are merged so
-    a multi-line display equation renders as one crop. Never raises.
-    """
+def _candidate_with_source_label(region: CorruptMathRegion) -> str:
+    """Replace only this row's model-authored terminal label with the source label."""
+    candidate = region.raw_latex.strip()
+    label = region.equation_label.strip()
+    if not label:
+        return candidate
+    tag = label.removeprefix("(").removesuffix(")").strip()
+    terminal_label = re.compile(
+        rf"(?:\\tag\{{\s*(?:\({re.escape(tag)}\)|{re.escape(tag)})\s*\}}|"
+        rf"\\text\{{\s*{re.escape(label)}\s*\}}|"
+        rf"(?:\\(?:quad|qquad)\s*)?{re.escape(label)})\s*$"
+    )
+    candidate = terminal_label.sub("", candidate).rstrip(" ,.;")
+    return f"{candidate} \\tag{{{tag}}}"
+
+
+@dataclass
+class CorruptMathRegion:
+    """One corrupt region's evidence, candidate, and deterministic disposition."""
+
+    rect: object
+    source_text: str
+    crop_path: str | None
+    raw_latex: str
+    validation_ok: bool
+    validation_reason: str
+    model_id: str
+    equation_label: str = ""
+    attempts: int = 0
+    source_aligned: bool = False
+
+    @property
+    def resolved(self) -> bool:
+        return bool(
+            self.crop_path and self.validation_ok and self.raw_latex.strip() and self.source_aligned
+        )
+
+
+@dataclass
+class _CorruptLineGroup:
+    rect: object
+    lines: list[str]
+    crop_rect: object | None = None
+    equation_label: str = ""
+
+    @property
+    def source_text(self) -> str:
+        return "\n".join(self.lines)
+
+
+def _corrupt_math_line_groups(
+    page,
+    *,
+    covered_groups: list[_CorruptLineGroup] | None = None,
+) -> list[_CorruptLineGroup]:
+    """Return corrupt-line groups not already owned by aligned numbered rows."""
     import fitz
 
     try:
         data = page.get_text("dict")
     except Exception:  # pragma: no cover - defensive
         return []
+    try:
+        native_text = clean_native_text(page.get_text("text"))[0]
+    except Exception:  # pragma: no cover - defensive
+        native_text = ""
 
-    bad: list[object] = []
+    bad: list[_CorruptLineGroup] = []
     for block in data.get("blocks", []):
-        if block.get("type", 0) == 1:  # image block
+        if block.get("type", 0) == 1:
             continue
         for line in block.get("lines", []):
             text = "".join(span.get("text", "") for span in line.get("spans", []))
+            text, _stripped, _spaces = clean_native_text(text)
+            text = text.rstrip()
             if text.strip() and line_has_corrupt_math(text):
-                bad.append(fitz.Rect(line["bbox"]))
+                rect = fitz.Rect(line["bbox"])
+                already_covered = any(
+                    text in group.lines and rect.intersects(group.rect)
+                    for group in covered_groups or []
+                )
+                if not already_covered:
+                    bad.append(_CorruptLineGroup(rect, [text]))
 
     if not bad:
         return []
 
-    bad.sort(key=lambda r: r.y0)
-    merged: list[object] = [fitz.Rect(bad[0])]
-    for rect in bad[1:]:
+    bad.sort(key=lambda group: group.rect.y0)
+    merged = [_CorruptLineGroup(fitz.Rect(bad[0].rect), list(bad[0].lines))]
+    for group in bad[1:]:
         last = merged[-1]
-        if rect.y0 - last.y1 <= _REGION_MERGE_GAP_PT:
-            last.include_rect(rect)
+        combined_source = f"{last.source_text}\n{group.source_text}"
+        if group.rect.y0 - last.rect.y1 <= _REGION_MERGE_GAP_PT and combined_source in native_text:
+            last.rect.include_rect(group.rect)
+            last.lines.extend(group.lines)
         else:
-            merged.append(fitz.Rect(rect))
+            merged.append(_CorruptLineGroup(fitz.Rect(group.rect), list(group.lines)))
     return merged
 
 
+def _numbered_math_groups(page) -> list[_CorruptLineGroup]:
+    """Return complete numbered equation rows with exact native-text slices."""
+    import fitz
+
+    from socr.math.detect_equations import detect_display_equations
+
+    detected = detect_display_equations(page, page_num=1)
+    return [
+        _CorruptLineGroup(
+            fitz.Rect(region.source_bbox),
+            region.source_text.splitlines(),
+            fitz.Rect(region.bbox),
+            region.equation_label,
+        )
+        for region in detected.regions
+        if (
+            region.has_eq_number
+            and region.source_text
+            and line_has_corrupt_math(region.source_text)
+        )
+    ]
+
+
+def _recovery_groups(page) -> list[_CorruptLineGroup]:
+    """Return numbered rows plus corrupt lines outside every numbered row."""
+    numbered = _numbered_math_groups(page)
+    fallback = _corrupt_math_line_groups(page, covered_groups=numbered)
+    groups = [*numbered, *fallback]
+    groups.sort(key=lambda group: group.rect.y0)
+    return groups
+
+
+def corrupt_math_line_rects(page) -> list[object]:
+    """Return rectangles selected for corrupt-math recovery."""
+    return [group.rect for group in _recovery_groups(page)]
+
+
 def clean_latex(raw: str) -> str:
-    """Strip code fences, stray ``$`` delimiters, and prose lead-ins from a model
-    response, keeping the LaTeX lines."""
+    """Strip fences and surrounding math delimiters from a model response."""
     text = raw.strip()
     if text.startswith("```"):
-        # drop opening fence (optionally ```latex) and trailing fence
         lines = text.splitlines()
         if lines and lines[0].startswith("```"):
             lines = lines[1:]
@@ -102,15 +202,15 @@ def clean_latex(raw: str) -> str:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     out = []
-    for ln in text.splitlines():
-        s = ln.strip()
-        if not s:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
             continue
-        if s.startswith("$$") and s.endswith("$$") and len(s) > 4:
-            s = s[2:-2].strip()
-        elif s.startswith("$") and s.endswith("$") and len(s) > 2:
-            s = s[1:-1].strip()
-        out.append(s)
+        if stripped.startswith("$$") and stripped.endswith("$$") and len(stripped) > 4:
+            stripped = stripped[2:-2].strip()
+        elif stripped.startswith("$") and stripped.endswith("$") and len(stripped) > 2:
+            stripped = stripped[1:-1].strip()
+        out.append(stripped)
     return "\n".join(out).strip()
 
 
@@ -121,26 +221,18 @@ def latex_for_image(
     timeout: float = 300.0,
     keep_alive: str = "30m",
 ) -> str:
-    """OCR a rendered equation crop to LaTeX via the local Ollama API.
+    """Read an equation crop through an Ollama-compatible vision endpoint.
 
-    Returns cleaned LaTeX, or "" on any transport/parse failure (caller keeps the
-    crop image as the faithful fallback). Never raises.
+    Returns cleaned LaTeX or an empty string on transport/response failure.  Empty
+    output is not success; callers retain the crop and record the failed disposition.
     """
     payload = json.dumps(
         {
             "model": model,
-            "prompt": _PROMPT,
+            "prompt": CORRUPT_MATH_PROMPT,
             "images": [base64.b64encode(png_bytes).decode()],
             "stream": False,
-            # Keep the model resident between region calls. Without this, Ollama
-            # unloads after its default 5-minute idle and every subsequent crop
-            # pays a multi-minute cold reload — the cause of mass 240s timeouts on
-            # a full-book run. 30m comfortably bridges per-page native/render gaps.
             "keep_alive": keep_alive,
-            # Cap the context window: qwen3-vl otherwise loads its full 262k
-            # context (~48 GB, slow first token). A single equation crop needs
-            # only a few k tokens, so a small num_ctx is dramatically faster with
-            # no quality loss.
             "options": {"temperature": 0, "num_ctx": 8192},
         }
     ).encode()
@@ -156,99 +248,163 @@ def latex_for_image(
     return clean_latex(body.get("response", ""))
 
 
+def _save_crop(
+    png: bytes,
+    crop_dir: Path | None,
+    crop_ref_dir: str,
+    page_num: int,
+    region_index: int,
+) -> str | None:
+    if crop_dir is None:
+        return None
+    filename = f"corrupt_math_p{page_num:05d}_r{region_index + 1:03d}.png"
+    try:
+        crop_dir.mkdir(parents=True, exist_ok=True)
+        (crop_dir / filename).write_bytes(png)
+    except OSError as exc:
+        logger.warning("failed to retain corrupt-math crop %s: %s", filename, exc)
+        return None
+    return str(Path(crop_ref_dir) / filename)
+
+
 def recover_math_regions(
     page,
     ocr=latex_for_image,
     model: str = DEFAULT_MODEL,
     host: str = DEFAULT_HOST,
     dpi: int = DEFAULT_DPI,
-) -> list[tuple[object, str]]:
-    """Render each corrupt-math region and read it back as LaTeX.
+    *,
+    crop_dir: Path | None = None,
+    crop_ref_dir: str = "equations",
+    page_num: int = 1,
+    model_disabled_reason: str = "",
+) -> list[CorruptMathRegion]:
+    """Render, retain, transcribe, and syntax-check every corrupt-math region.
 
-    Returns ``(rect, latex)`` pairs (LaTeX may be "" if the model failed — the
-    caller decides whether to keep the crop). ``ocr`` is injectable for testing.
-    Never raises on the geometry/render path.
+    Render failures remain represented as failed results.  An empty model response
+    is retried once and then fails closed.  The returned records never claim that
+    syntax validation establishes mathematical fidelity.
     """
     import fitz
 
-    regions = corrupt_math_line_rects(page)
-    if not regions:
+    groups = _recovery_groups(page)
+    if not groups:
         return []
 
     scale = dpi / 72.0
-    out: list[tuple[object, str]] = []
-    for rect in regions:
-        crop = fitz.Rect(rect) + (-_REGION_PAD_PT, -_REGION_PAD_PT, _REGION_PAD_PT, _REGION_PAD_PT)
+    out: list[CorruptMathRegion] = []
+    for region_index, group in enumerate(groups):
+        crop = (
+            fitz.Rect(group.crop_rect)
+            if group.crop_rect is not None
+            else fitz.Rect(group.rect)
+            + (-_REGION_PAD_PT, -_REGION_PAD_PT, _REGION_PAD_PT, _REGION_PAD_PT)
+        )
         try:
             pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=crop)
             png = pix.tobytes("png")
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("failed to render math region %s: %s", rect, exc)
+            reason = f"crop render failed: {exc}"
+            logger.warning("failed to render math region %s: %s", group.rect, exc)
+            out.append(
+                CorruptMathRegion(
+                    rect=fitz.Rect(group.rect),
+                    source_text=group.source_text,
+                    crop_path=None,
+                    raw_latex="",
+                    validation_ok=False,
+                    validation_reason=reason,
+                    model_id=model,
+                    equation_label=group.equation_label,
+                )
+            )
             continue
-        # Local VLM calls are slow and occasionally return empty (timeout / cold
-        # reload). Retry once before giving up; the splice keeps the page image as
-        # the faithful fallback for a region that still yields nothing.
-        latex = ocr(png, model=model, host=host)
-        if not latex:
+
+        crop_path = _save_crop(
+            png,
+            crop_dir,
+            crop_ref_dir,
+            page_num,
+            region_index,
+        )
+        attempts = 0
+        latex = ""
+        if model_disabled_reason:
+            validation_ok = False
+            validation_reason = model_disabled_reason
+        else:
+            attempts = 1
             latex = ocr(png, model=model, host=host)
-        out.append((fitz.Rect(rect), latex))
+            if not latex:
+                attempts += 1
+                latex = ocr(png, model=model, host=host)
+            latex = clean_latex(latex)
+            validation_ok, validation_reason = validate_latex_structure(latex)
+        if crop_path is None:
+            validation_ok = False
+            crop_reason = "crop could not be retained as visual ground truth"
+            validation_reason = (
+                f"{validation_reason}; {crop_reason}" if validation_reason else crop_reason
+            )
+        out.append(
+            CorruptMathRegion(
+                rect=fitz.Rect(group.rect),
+                source_text=group.source_text,
+                crop_path=crop_path,
+                raw_latex=latex,
+                validation_ok=validation_ok,
+                validation_reason=validation_reason,
+                model_id=model,
+                equation_label=group.equation_label,
+                attempts=attempts,
+            )
+        )
     return out
 
 
-def splice_math(page, native_text: str, regions: list[tuple[object, str]]) -> str:
-    """Replace corrupt-math lines in ``native_text`` with recovered LaTeX.
+def _region_replacement(region: CorruptMathRegion) -> str:
+    crop = (
+        f"![Corrupt equation crop]({region.crop_path})"
+        if region.crop_path
+        else "<!-- socr-corrupt-equation: crop unavailable -->"
+    )
+    if region.resolved:
+        candidate = _candidate_with_source_label(region)
+        return f"{crop}\n{_CORRUPT_CANDIDATE_HEADER}\n$$\n{candidate}\n$$"
+    evidence = "; see retained crop" if region.crop_path else "; no crop was retained"
+    return f"{crop}\n{_CORRUPT_UNRESOLVED_PREFIX}: {region.validation_reason}{evidence}]"
 
-    Walks the page's dict lines in reading order; a line covered by a recovered
-    region is emitted as its LaTeX (once per region, as a ``$$``-delimited block);
-    every other line is emitted as its native text, byte-for-byte. Lines whose
-    region produced empty LaTeX are dropped in favour of a crop reference note so
-    corrupted glyphs never reach the corpus.
 
-    GH-36a NOTE — no LaTeX validation is performed here.  For the corrupt-font
-    case (``recover_corrupt_math`` pipeline) this is acceptable: the native text
-    for those lines is already garbage (font-map mojibake), so any non-empty
-    model output is an improvement and the crop reference fallback prevents
-    corrupted glyphs from reaching the corpus.
+def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str:
+    """Patch exact corrupt substrings in ``native_text`` and preserve all other bytes.
 
-    For the *clean-equation* case (GH-36b), the native linearised text is
-    faithful (correct symbols, lost super/subscripts), so an unvalidated,
-    malformed, or hallucinated LaTeX block would silently replace faithful
-    content — the exact data-loss the hard AC forbids.  GH-36b must add the
-    1A structural-validation gate (pylatexenc, pure-Python, offline) BEFORE
-    any splice into clean-equation pages.  DO NOT call this function from the
-    clean-equation path without that gate in place.
+    If the PDF extractor's region text cannot be found verbatim in the native
+    snapshot, the snapshot is left untouched and the evidence plus an explicit
+    unresolved marker is appended.  The function never rebuilds prose from page
+    geometry and never silently drops a damaged equation.
     """
-    import fitz
-
+    del page  # retained in the public signature for existing callers
     if not regions:
         return native_text
-    try:
-        data = page.get_text("dict")
-    except Exception:  # pragma: no cover - defensive
-        return native_text
 
-    emitted: set[int] = set()
-    parts: list[str] = []
-    for block in data.get("blocks", []):
-        if block.get("type", 0) == 1:
-            continue
-        for line in block.get("lines", []):
-            lrect = fitz.Rect(line["bbox"])
-            text = "".join(span.get("text", "") for span in line.get("spans", []))
-            covering = next(
-                (i for i, (r, _) in enumerate(regions) if fitz.Rect(r).intersects(lrect)),
-                None,
+    text = native_text
+    unmatched: list[str] = []
+    for region in regions:
+        source = region.source_text
+        region.source_aligned = bool(source and source in text)
+        replacement = _region_replacement(region)
+        if region.source_aligned and (region.resolved or region.crop_path):
+            text = text.replace(source, replacement, 1)
+        else:
+            retention_reason = (
+                "source could not be aligned"
+                if not region.source_aligned
+                else "crop could not be retained"
             )
-            if covering is None:
-                if text.strip():
-                    parts.append(text.strip())
-                continue
-            if covering in emitted:
-                continue
-            emitted.add(covering)
-            latex = regions[covering][1].strip()
-            if latex:
-                parts.append(f"$$\n{latex}\n$$")
-            else:
-                parts.append("*(equation — see page image; OCR unavailable)*")
-    return "\n".join(parts).strip()
+            unmatched.append(
+                f"{replacement}\n[corrupt equation {retention_reason}; native text retained]"
+            )
+    if unmatched:
+        suffix = "\n\n".join(unmatched)
+        text = f"{text.rstrip()}\n\n{suffix}" if text.strip() else suffix
+    return text

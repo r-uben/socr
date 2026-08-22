@@ -182,7 +182,7 @@ class PageOutput:
     audit_passed: bool = True
     audit_notes: list[str] = field(default_factory=list)
     escalated_from: str = ""  # engine that failed, triggering escalation
-    cost_usd: float = 0.0  # estimated USD cost of producing this page output
+    cost_usd: float | None = 0.0  # estimated USD cost; None when the direct call is unmetered
     # Agentic routing provenance (B3) — empty for non-agentic runs
     provider_id: str = ""  # ProviderProfile.id that produced this output
     provider_model: str = ""  # resolved model name (e.g. qwen3-vl:30b-a3b-instruct)
@@ -262,7 +262,7 @@ class EngineResult:
     failure_mode: FailureMode = FailureMode.NONE
     pages: list[PageOutput] = field(default_factory=list)
     model_version: str = ""
-    cost: float = 0.0
+    cost: float | None = 0.0
     pages_processed: int = 0
     processing_time: float = 0.0
     error: str | None = None
