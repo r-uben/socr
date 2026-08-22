@@ -781,9 +781,18 @@ def _winning_page_output(
     # the retained crop and restore the known-corrupt glyphs.  This narrow field is
     # set only by that lane; it is not a general licence to keep rejected outputs.
     math_hybrid = getattr(p, "corrupt_math_hybrid", None)
+    math_hybrid_blocked_by_table = bool(
+        p.is_structure_class()
+        or p.native_table_structure_failed
+        or getattr(p, "native_table_unverifiable", False)
+        or getattr(p, "native_table_structure_defective", False)
+        or getattr(p, "native_table_header_unattributed", False)
+        or getattr(p, "scanned_table_evidence_failed", False)
+    )
     if (
         math_hybrid is not None
         and not getattr(p, "native_rotated_text_shredded", False)
+        and not math_hybrid_blocked_by_table
         and math_hybrid in p.attempts
         and (math_hybrid.engine or "") == "native+math"
     ):

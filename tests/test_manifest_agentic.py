@@ -445,6 +445,34 @@ def test_corrupt_math_hybrid_does_not_promote_rejected_whole_page_candidate(tmp_
     assert rejected.text not in winner.text
 
 
+def test_corrupt_math_hybrid_cannot_bypass_hard_table_floor(tmp_path):
+    pdf = _make_pdf(tmp_path / "doc.pdf", n_pages=1)
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    page = state.pages[1]
+    page.is_born_digital = True
+    page.native_text = "collapsed native table"
+    page.has_tables = True
+    page.native_table_structure_failed = True
+    page.native_table_unverifiable = True
+    hybrid = PageOutput(
+        page_num=1,
+        text="native prose plus crop-backed equation",
+        status=PageStatus.WARNING,
+        engine="native+math",
+        audit_passed=False,
+        failure_mode=FailureMode.AUDIT_FAILED,
+    )
+    page.attempts.append(hybrid)
+    page.best_output = hybrid
+    page.corrupt_math_hybrid = hybrid
+
+    winner = _winning_page_output(state, 1)
+
+    assert winner.status == PageStatus.ERROR
+    assert "failed: unverifiable table" in winner.text
+    assert hybrid.text not in winner.text
+
+
 # ---------------------------------------------------------------------------
 # GH-200: D3 floor widening -- native_table_header_unattributed must reach
 # the same fail-closed floor as native_table_unverifiable (TR-3), because

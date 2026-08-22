@@ -435,6 +435,7 @@ def _detect(
 
     # --- Step 5: apply padding without crossing neighboring numbered rows ---
     regions: list[EquationRegion] = []
+    numbered_rows = [row for row in numbered_rows if row[3] - row[1] >= min_height_pt]
     numbered_rows.sort(key=lambda row: row[1])
     for index, (rx0, ry0, rx1, ry1, req, label, source_text) in enumerate(numbered_rows):
         previous_bottom = numbered_rows[index - 1][3] if index else page_rect.y0

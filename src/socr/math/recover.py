@@ -378,6 +378,11 @@ def _region_replacement(region: CorruptMathRegion) -> str:
 def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str:
     """Patch exact corrupt substrings in ``native_text`` and preserve all other bytes.
 
+    The function updates each record's ``source_aligned`` field.  An aligned
+    region with a retained crop replaces its native slice even when LaTeX is
+    unresolved; that replacement contains the crop plus an explicit unresolved
+    marker rather than silently leaving corrupt glyphs in place.
+
     If the PDF extractor's region text cannot be found verbatim in the native
     snapshot, the snapshot is left untouched and the evidence plus an explicit
     unresolved marker is appended.  The function never rebuilds prose from page
@@ -391,7 +396,7 @@ def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str
     unmatched: list[str] = []
     for region in regions:
         source = region.source_text
-        region.source_aligned = bool(source and source in text)
+        region.source_aligned = bool(source and source in native_text)
         replacement = _region_replacement(region)
         if region.source_aligned and (region.resolved or region.crop_path):
             text = text.replace(source, replacement, 1)

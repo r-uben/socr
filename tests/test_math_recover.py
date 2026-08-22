@@ -445,7 +445,7 @@ def test_recover_rejects_structurally_invalid_latex(tmp_path: Path):
 
 def test_recover_render_failure_remains_explicit():
     page = MagicMock()
-    page.get_text.return_value = {
+    text_dict = {
         "blocks": [
             {
                 "type": 0,
@@ -458,6 +458,7 @@ def test_recover_render_failure_remains_explicit():
             }
         ]
     }
+    page.get_text.side_effect = lambda mode: _EQ if mode == "text" else text_dict
     page.get_pixmap.side_effect = RuntimeError("render unavailable")
     ocr = MagicMock(return_value="must not run")
 
@@ -538,14 +539,6 @@ def test_splice_alignment_failure_is_unresolved_even_with_valid_latex():
     assert out.startswith(native)
     assert "source could not be aligned; native text retained" in out
     assert "corrupt equation unresolved" in out
-
-
-def test_splice_alignment_failure_retains_native_and_appends_evidence():
-    native = "Prose bytes stay exact.\n" + _EQ
-    out = splice_math(None, native, [_region("different extracted text", r"x = y")])
-
-    assert out.startswith(native)
-    assert "source could not be aligned; native text retained" in out
     assert "![Corrupt equation crop](equations/crop.png)" in out
 
 
@@ -555,3 +548,17 @@ def test_splice_alignment_failure_preserves_trailing_native_bytes():
 
     assert out[: len(native)] == native
     assert "source could not be aligned; native text retained" in out
+
+
+def test_identical_source_occurrences_align_and_replace_independently():
+    native = f"{_EQ}\nintervening prose\n{_EQ}"
+    first = _region(_EQ, r"P(A) = 1", crop="equations/first.png")
+    second = _region(_EQ, r"P(A) = 2", crop="equations/second.png")
+
+    out = splice_math(None, native, [first, second])
+
+    assert first.source_aligned is True
+    assert second.source_aligned is True
+    assert "![Corrupt equation crop](equations/first.png)" in out
+    assert "![Corrupt equation crop](equations/second.png)" in out
+    assert _EQ not in out

@@ -119,10 +119,16 @@ lane without retaining its mandatory chart PNG. The final implementation preserv
 prefix exactly, counts only retained characters, and embeds the chart asset alongside the math
 hybrid with an explicit arbitration event.
 
+Cubic's PR pass additionally found that combined legacy engine names could lose the math prompt
+fingerprint, a restored hybrid could outrank a hard table floor, and numbered artifacts bypassed
+the height floor. Each was reproduced and fixed. Its claim that identical source strings made the
+second region unalignable was refuted by a passing two-occurrence regression; `replace(..., 1)`
+leaves the second native occurrence available for the next region.
+
 ## Verification
 
 - Focused equation/recovery/state/orchestrator regressions: 293 passed.
-- Full suite after the PR review regressions: 2,177 passed, 3 expected failures.
+- Full suite after all PR review regressions: 2,181 passed, 3 expected failures.
 - Exact Continuous Integration formatting gate: 342 files formatted.
 - Whitespace check: clean.
 - Load-bearing sabotage: forcing the region eligibility route off made the paired regression fail

@@ -3134,6 +3134,25 @@ class TestAgenticIntegration:
         resume_state.apply_born_digital(assessment)
         assert pipeline._load_terminal_page(resume_state, 1, on_dir) is None
 
+    def test_combined_legacy_engine_keeps_corrupt_math_fingerprint(self, tmp_path):
+        pdf = self._real_pdf(tmp_path, 1)
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        state.engine_runs.append(
+            EngineResult(
+                document_path=pdf,
+                engine="native+math+qwen",
+                status=DocumentStatus.AUDIT_FAILED,
+            )
+        )
+        pipeline = UnifiedPipeline(_make_config(math_model="fixture-math-model"))
+
+        inputs = pipeline._fingerprint_inputs(state)
+
+        assert inputs["native+math"][:2] == (
+            "fixture-math-model",
+            "ollama-compatible",
+        )
+
     def test_legacy_corrupt_math_hybrid_does_not_trigger_whole_page_repair(self, tmp_path):
         """GH-271: the shared legacy lane stays region-only after audit/repair."""
         pdf = self._real_pdf(tmp_path, 1)

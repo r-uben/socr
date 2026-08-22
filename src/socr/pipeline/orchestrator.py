@@ -4397,7 +4397,16 @@ class UnifiedPipeline:
         from socr.engines.registry import get_engine
 
         inputs: dict[str, tuple[str, str, str | None, str | None]] = {}
-        if any(run.engine == "native+math" for run in state.engine_runs):
+        has_native_math = any(
+            {"native", "math"}
+            <= {
+                part.strip()
+                for part in str(run.engine).replace(",", "+").split("+")
+                if part.strip()
+            }
+            for run in state.engine_runs
+        )
+        if has_native_math:
             from socr.math.recover import CORRUPT_MATH_PROMPT
 
             inputs["native+math"] = (

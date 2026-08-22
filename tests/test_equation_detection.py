@@ -270,11 +270,8 @@ class TestDetectDisplayEquations:
 
     def test_numbered_fragments_form_exact_nonoverlapping_rows(self):
         """Numbered equation rows use complete source slices, not corrupt fragments."""
-
-        class _FragmentedNumberedPage:
-            rect = fitz.Rect(0, 0, 600, 800)
-
-            _lines = [
+        page = _ExtractedLinePage(
+            [
                 ("Introductory prose.", "Helvetica", (60, 40, 240, 52)),
                 ("h", "CMMI10", (180, 100, 188, 112)),
                 ("t+1", "CMMI10", (188, 94, 210, 106)),
@@ -295,34 +292,7 @@ class TestDetectDisplayEquations:
                 ("(A9)", "Helvetica", (520, 210, 548, 222)),
                 ("Concluding prose.", "Helvetica", (60, 270, 220, 282)),
             ]
-
-            def get_fonts(self):
-                return [
-                    (1, "cff", "Type1", "CMMI10", "CMMI10", ""),
-                    (2, "cff", "Type1", "CMSY10", "CMSY10", ""),
-                ]
-
-            def get_text(self, mode: str):
-                if mode == "text":
-                    return "\n".join(text for text, _font, _bbox in self._lines) + "\n"
-                assert mode == "dict"
-                return {
-                    "blocks": [
-                        {
-                            "type": 0,
-                            "bbox": bbox,
-                            "lines": [
-                                {
-                                    "bbox": bbox,
-                                    "spans": [{"text": text, "font": font, "bbox": bbox}],
-                                }
-                            ],
-                        }
-                        for text, font, bbox in self._lines
-                    ]
-                }
-
-        page = _FragmentedNumberedPage()
+        )
         native_text = page.get_text("text").strip()
         result = detect_display_equations(page, page_num=1)
 
@@ -367,6 +337,53 @@ class TestDetectDisplayEquations:
         result = detect_display_equations(page, page_num=1)
 
         assert not any(region.has_eq_number for region in result.regions)
+
+    def test_widest_prose_line_with_inline_math_reference_is_not_a_source_anchor(self):
+        """A terminal citation inside a prose span cannot own replacement bytes."""
+
+        class _ProseReferencePage:
+            rect = fitz.Rect(0, 0, 600, 800)
+
+            def get_fonts(self):
+                return [(1, "cff", "Type1", "CMMI10", "CMMI10", "")]
+
+            def get_text(self, mode: str):
+                assert mode == "dict"
+                return {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "lines": [
+                                {
+                                    "bbox": (60, 100, 548, 112),
+                                    "spans": [
+                                        {"text": "x+y+z+w+t+u+v", "font": "CMMI10"},
+                                        {
+                                            "text": " discussion ends in equation (25)",
+                                            "font": "Helvetica",
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+
+        result = detect_display_equations(_ProseReferencePage(), page_num=1)
+
+        assert not any(region.source_text for region in result.regions)
+
+    def test_tiny_numbered_artifact_obeys_the_region_height_floor(self):
+        page = _ExtractedLinePage(
+            [
+                ("x", "CMMI10", (200, 100, 201, 101)),
+                ("(A8)", "Helvetica", (520, 100, 548, 101)),
+            ]
+        )
+
+        result = detect_display_equations(page, page_num=1)
+
+        assert result.regions == []
 
     def test_label_extracted_before_same_row_math_still_anchors_the_row(self):
         """Geometry, not extraction order, binds a separated label to its equation."""

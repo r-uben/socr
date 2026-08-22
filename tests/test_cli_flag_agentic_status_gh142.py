@@ -25,6 +25,7 @@ stubbed or unreached here, verified by reading the source instead.
 from __future__ import annotations
 
 import dataclasses
+from unittest.mock import patch
 
 import fitz
 import pytest
@@ -291,7 +292,8 @@ def readers(tmp_path_factory):
         for p in nums
     ]
 
-    pipe.process(_fixture_pdf(tmp / "f.pdf"), output_dir=tmp / "out")
+    with patch("socr.math.recover.recover_math_regions", return_value=[]):
+        pipe.process(_fixture_pdf(tmp / "f.pdf"), output_dir=tmp / "out")
     return calls
 
 
