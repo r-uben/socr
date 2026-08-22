@@ -547,3 +547,11 @@ def test_splice_alignment_failure_retains_native_and_appends_evidence():
     assert out.startswith(native)
     assert "source could not be aligned; native text retained" in out
     assert "![Corrupt equation crop](equations/crop.png)" in out
+
+
+def test_splice_alignment_failure_preserves_trailing_native_bytes():
+    native = "Prose bytes stay exact.\n" + _EQ + "\n \t\n"
+    out = splice_math(None, native, [_region("different extracted text", r"x = y")])
+
+    assert out[: len(native)] == native
+    assert "source could not be aligned; native text retained" in out

@@ -125,6 +125,7 @@ def build_run_audit(state) -> RunAudit:
         "dualpass_flag": 3,
         "table_value_drift_unadjudicated": 4,
         "table_region_geometry_hard_fail": 4,
+        "chart_math_arbitration": 4,
         # GH-271: region evidence/candidate first, final shipped-warning
         # disposition second.
         "corrupt_math_region_recovery": 4,

@@ -203,6 +203,38 @@ class TestDetectDisplayEquations:
         assert region.bbox[2] >= region.source_bbox[2]
         assert region.bbox[3] >= region.source_bbox[3]
 
+    def test_trailing_math_span_whitespace_does_not_inflate_math_ratio(self):
+        """Characters removed from the denominator are removed from math count too."""
+
+        class _TrailingMathSpacePage:
+            rect = fitz.Rect(0, 0, 600, 800)
+
+            def get_fonts(self):
+                return [(1, "cff", "Type1", "CMMI10", "CMMI10", "")]
+
+            def get_text(self, mode: str):
+                assert mode == "dict"
+                return {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "lines": [
+                                {
+                                    "bbox": (260, 100, 340, 112),
+                                    "spans": [
+                                        {"text": "abcde", "font": "Helvetica"},
+                                        {"text": "x     ", "font": "CMMI10"},
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+
+        result = detect_display_equations(_TrailingMathSpacePage(), page_num=1)
+
+        assert result.regions == []
+
     def test_adjacent_math_lines_merge(self):
         """Two vertically adjacent math lines within DISPLAY_MERGE_GAP_PT merge."""
         lines = [

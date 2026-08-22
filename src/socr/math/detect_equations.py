@@ -305,14 +305,17 @@ def _detect(
             total_chars = len(text)
             if not total_chars:
                 continue
+            remaining_chars = total_chars
             math_chars = 0
             for span, span_text in zip(spans, cleaned_spans):
+                retained_length = min(len(span_text), remaining_chars)
+                remaining_chars -= retained_length
                 font = span.get("font", "")
                 is_math_span = font in math_font_names or (
                     bool(font) and _MATH_FONT_RE.search(font) is not None
                 )
                 if is_math_span:
-                    math_chars += len(span_text)
+                    math_chars += retained_length
 
             bbox = tuple(line.get("bbox", (0.0, 0.0, 0.0, 0.0)))
             lines.append(

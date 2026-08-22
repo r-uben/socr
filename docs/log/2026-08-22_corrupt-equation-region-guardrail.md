@@ -112,10 +112,17 @@ reported no merge blocker, and Flash reported no remaining finding. Composer's n
 docstring and audit-payload observations were also addressed; unknown prior spend intentionally
 suppresses later paid rungs under an active budget.
 
+PR #280's CodeRabbit pass found three further defects, each reproduced before repair: unresolved
+evidence used `rstrip()` and changed trailing native bytes; trailing math-span whitespace could
+inflate the detector ratio above one; and a contradictory chart+math page could enter the region
+lane without retaining its mandatory chart PNG. The final implementation preserves the native
+prefix exactly, counts only retained characters, and embeds the chart asset alongside the math
+hybrid with an explicit arbitration event.
+
 ## Verification
 
 - Focused equation/recovery/state/orchestrator regressions: 293 passed.
-- Full suite after the final real-page and audit regressions: 2,175 passed, 3 expected failures.
+- Full suite after the PR review regressions: 2,177 passed, 3 expected failures.
 - Exact Continuous Integration formatting gate: 342 files formatted.
 - Whitespace check: clean.
 - Load-bearing sabotage: forcing the region eligibility route off made the paired regression fail

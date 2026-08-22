@@ -3059,6 +3059,76 @@ class UnifiedPipeline:
                         f"[{self.config.math_model}][/cyan]"
                     )
                 math_out = self._recover_corrupt_math_page(state, page_num, output_dir)
+                if page_num in chart_winner_pages:
+                    from socr.core.audit_log import AuditEvent as _MathChartEvent
+
+                    chart_png_ref = ""
+                    chart_render_error = ""
+                    if _chart_figures_dir is not None:
+                        try:
+                            saved_png = self._render_chart_page_png(
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                            )
+                            chart_png_ref = (
+                                f"![Chart page {page_num}]"
+                                f"({_chart_figures_dir.name}/{Path(saved_png).name})"
+                            )
+                        except RuntimeError as exc:
+                            chart_render_error = str(exc)
+                    else:
+                        chart_render_error = "figures directory unavailable"
+
+                    if chart_png_ref:
+                        math_out.text = f"{math_out.text.rstrip()}\n\n{chart_png_ref}"
+                        math_out.audit_notes.append(
+                            "chart asset retained alongside corrupt-equation recovery"
+                        )
+                    else:
+                        state.events.append(
+                            _MathChartEvent(
+                                page_num=page_num,
+                                kind="chart_asset_render_failed",
+                                engine="native+math",
+                                detail=chart_render_error,
+                            )
+                        )
+
+                    state.events.append(
+                        _MathChartEvent(
+                            page_num=page_num,
+                            kind="chart_math_arbitration",
+                            engine="native+math",
+                            detail=(
+                                "both chart marks and corrupt-equation signals fired; "
+                                "the region hybrid retained the mandatory chart PNG"
+                                if chart_png_ref
+                                else "both chart marks and corrupt-equation signals fired; "
+                                "chart rendering failed and the region hybrid stayed WARNING"
+                            ),
+                            data={
+                                "winner": "native+math+chart_asset",
+                                "chart_png_rendered": bool(chart_png_ref),
+                                "chart_png_path": chart_png_ref,
+                            },
+                        )
+                    )
+                    state.events.append(
+                        _MathChartEvent(
+                            page_num=page_num,
+                            kind="chart_asset_page",
+                            engine="chart_asset",
+                            detail=(
+                                "visual chart semantics represented as image asset alongside "
+                                "the corrupt-equation region hybrid; data values not transcribed"
+                            ),
+                            data={
+                                "png_saved": bool(chart_png_ref),
+                                "png_path": chart_png_ref,
+                            },
+                        )
+                    )
                 ps.attempts.append(math_out)
                 ps.best_output = math_out
                 ps.corrupt_math_hybrid = math_out

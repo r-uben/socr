@@ -406,5 +406,5 @@ def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str
             )
     if unmatched:
         suffix = "\n\n".join(unmatched)
-        text = f"{text.rstrip()}\n\n{suffix}" if text.strip() else suffix
+        text = f"{text}\n\n{suffix}" if text else suffix
     return text

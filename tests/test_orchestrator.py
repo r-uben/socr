@@ -3003,6 +3003,9 @@ class TestAgenticIntegration:
             crop_path = run_dir / pdf.stem / "equations" / "corrupt_math_p00001_r001.png"
             crop_path.parent.mkdir(parents=True, exist_ok=True)
             crop_path.write_bytes(b"retained crop fixture")
+            chart_path = run_dir / pdf.stem / "figures" / "chart-page.png"
+            chart_path.parent.mkdir(parents=True, exist_ok=True)
+            chart_path.write_bytes(b"retained chart fixture")
             config = _make_config(
                 agentic=True,
                 native_first=True,
@@ -3035,6 +3038,12 @@ class TestAgenticIntegration:
                         )
                     ],
                 ) as recover_regions,
+                patch.object(pipeline, "_is_chart_asset_page", return_value=enabled),
+                patch.object(
+                    pipeline,
+                    "_render_chart_page_png",
+                    return_value=chart_path,
+                ),
                 patch.object(pipeline, "_resolve_crop_vlm_model", return_value=None),
                 patch.object(pipeline, "_resolve_judge_model", return_value=""),
             ):
@@ -3063,6 +3072,7 @@ class TestAgenticIntegration:
         assert "Clean prose after." in on_result.markdown
         assert r"P(A \text{ or } B) = P(A) + P(B)" in on_result.markdown
         assert "syntax only, non-authoritative" in on_result.markdown
+        assert "![Chart page 1](figures/chart-page.png)" in on_result.markdown
         assert "rejected whole-page candidate" not in on_result.markdown
         assert "¼" not in on_result.markdown and "ð" not in on_result.markdown
 
@@ -3093,8 +3103,17 @@ class TestAgenticIntegration:
             CORRUPT_MATH_PROMPT,
         )
         assert {event["kind"] for event in sidecar["audit_events"]} >= {
+            "chart_math_arbitration",
             "corrupt_math_region_recovery",
             "corrupt_math_hybrid_shipped",
+        }
+        arbitration = next(
+            event for event in sidecar["audit_events"] if event["kind"] == "chart_math_arbitration"
+        )
+        assert arbitration["data"] == {
+            "winner": "native+math+chart_asset",
+            "chart_png_rendered": True,
+            "chart_png_path": "![Chart page 1](figures/chart-page.png)",
         }
         shipped_event = next(
             event
