@@ -17,7 +17,7 @@ from collections import Counter
 
 import pytest
 
-from socr.tables.binding import bind, parse_grid
+from socr.tables.binding import BindingResult, bind, parse_grid
 
 
 def w(x0: float, y0: float, x1: float, y1: float, text: str) -> tuple:
@@ -315,6 +315,93 @@ def test_strict_parser_accepts_a_real_table():
     grid = parse_grid(md)
     assert grid is not None
     assert grid.rows == (("1", "2"),)
+
+
+def test_unparseable_or_empty_binding_fails_closed():
+    """No evidence is not structural agreement. A malformed candidate must
+    fail closed, and the public result's empty/default state must not be a
+    pass if a future early-return path constructs one directly."""
+    malformed = bind([], "not a markdown table")
+
+    assert malformed.structural_agreement is False
+    assert BindingResult().structural_agreement is False
+
+
+# ---------------------------------------------------------------------------
+# GH-273: numeric row anchors must verify the candidate row-label stub
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_row_anchors_reject_shifted_row_labels():
+    """GH-273: correct and shifted grids contain the exact same six numbers.
+    Numeric row anchoring therefore maps each candidate row to the right native
+    band in both cases; the candidate stub must then be checked against that
+    anchored native row rather than being trusted or used as the anchor itself.
+    """
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(240, 70, 270, 80, "IV"),
+        # The coefficient row is genuinely unlabelled.
+        w(150, 100, 180, 110, "1.10"),
+        w(250, 100, 280, 110, "1.11"),
+        w(50, 130, 100, 140, "Large T"),
+        w(150, 130, 180, 140, "0.05"),
+        w(250, 130, 280, 140, "0.06"),
+        w(50, 160, 100, 170, "Small T"),
+        w(150, 160, 180, 170, "0.07"),
+        w(250, 160, 280, 170, "0.08"),
+    ]
+    correct = """
+|         | OLS  | IV   |
+|---------|------|------|
+|         | 1.10 | 1.11 |
+| Large T | 0.05 | 0.06 |
+| Small T | 0.07 | 0.08 |
+"""
+    shifted = """
+|         | OLS  | IV   |
+|---------|------|------|
+| Large T | 1.10 | 1.11 |
+|         | 0.05 | 0.06 |
+| Small T | 0.07 | 0.08 |
+"""
+    assert Counter(nums(correct)) == Counter(nums(shifted))
+
+    correct_result = bind(words, correct)
+    shifted_result = bind(words, shifted)
+
+    assert correct_result.structural_agreement is True
+    assert correct_result.row_label_contradictions == []
+    assert len(correct_result.matched_cells) == 6
+
+    assert shifted_result.structural_agreement is False
+    assert len(shifted_result.matched_cells) == 6
+    assert [(m.row_path, m.candidate_label) for m in shifted_result.row_label_contradictions] == [
+        (("",), "Large T"),
+        (("Large T",), ""),
+    ]
+
+
+def test_symbolic_row_labels_fail_closed_as_unverifiable():
+    """The shared prose-label normalizer cannot prove mathematical notation
+    equivalent (native ``β`` versus model ``$\\beta$``). Do not falsely report
+    a contradiction, but do not let an unchecked label pass either."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 90, 110, "β"),
+        w(150, 100, 180, 110, "10.0"),
+    ]
+    candidate = r"""
+|         | OLS  |
+|---------|------|
+| $\beta$ | 10.0 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is True
+    assert result.structural_agreement is False
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +948,7 @@ def test_diagonal_slide_into_empty_cells_is_model_unbound_not_matched():
     # degraded salvage path, to prove the base mechanism alone catches this.
     assert result.column_binding_unverifiable is False
     assert result.row_binding_unverifiable is False
+    assert result.row_label_contradictions == []
 
     fabricated = {(u.row_path[-1], u.token) for u in result.model_unbound}
     assert fabricated == {("3M", "1.19"), ("6M", "2.05"), ("1Y", "1.04")}

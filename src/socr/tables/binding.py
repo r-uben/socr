@@ -41,12 +41,15 @@ worse than a missed one.
   anchors; the interval between two anchors (or before the first / after the
   last) binds by order ONLY when the candidate and native counts in that
   interval agree; otherwise every row in that interval is
-  ``row_binding_unverifiable`` and nothing in it is convicted. Columns map
-  left-to-right only when the candidate's data-column count equals the
-  native lane count; otherwise the whole table's column binding is
-  unverifiable, and cell-level convictions stop there too — but a lane or
-  column with no counterpart under ANY admissible assignment still surfaces
-  as ``native_unbound``/``model_unbound`` (see I1 below), and a lane/column
+  ``row_binding_unverifiable`` and nothing in it is convicted. Once numeric
+  content and order have established a row binding, the candidate's stub is
+  verified against that native row's own label; labels verify an existing
+  binding but never choose one. Columns map left-to-right only when the
+  candidate's data-column count equals the native lane count; otherwise the
+  whole table's column binding is unverifiable, and cell-level convictions
+  stop there too — but a lane or column with no counterpart under ANY
+  admissible assignment still surfaces as ``native_unbound``/``model_unbound``
+  (see I1 below), and a lane/column
   that DOES have a plausible DP-aligned counterpart is never claimed as a
   binding either way — it is counted ``ambiguous_count`` instead, so a real
   disagreement hidden behind a lane/column mismatch is at least surfaced as
@@ -81,6 +84,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
+from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import (
     _WELL_SEPARATED_GAP_PT,
     _cluster_x_positions,
@@ -727,6 +731,12 @@ class ContradictedCell:
 
 
 @dataclass(frozen=True)
+class RowLabelContradiction:
+    row_path: tuple[str, ...]
+    candidate_label: str
+
+
+@dataclass(frozen=True)
 class UnboundCell:
     row_path: tuple[str, ...]
     col_path: tuple[str, ...]
@@ -737,23 +747,26 @@ class UnboundCell:
 class BindingResult:
     matched_cells: list[MatchedCell] = field(default_factory=list)
     contradicted_cells: list[ContradictedCell] = field(default_factory=list)
+    row_label_contradictions: list[RowLabelContradiction] = field(default_factory=list)
     native_unbound: list[UnboundCell] = field(default_factory=list)  # dropped-digit signal (C4)
     model_unbound: list[UnboundCell] = field(default_factory=list)  # invented-digit signal (C4)
     ambiguous_count: int = 0
-    row_binding_unverifiable: bool = False
-    column_binding_unverifiable: bool = False
+    row_binding_unverifiable: bool = True
+    row_label_unverifiable: bool = False
+    column_binding_unverifiable: bool = True
     column_header_paths: list[ColumnHeaderPath] = field(default_factory=list)
 
     @property
     def fully_checked(self) -> bool:
         """True when nothing about this binding was left unresolved: every
         lane bound to exactly one candidate column, every native data row
-        bound to exactly one candidate row, and no cell's geometry was
-        ambiguous. False means some region of the table was never actually
-        compared — a different fact from whether the parts that WERE
+        bound to exactly one candidate row, every bound row label checked,
+        and no cell's geometry was ambiguous. False means some region of the
+        table was never actually compared — a different fact from whether the parts that WERE
         compared agreed (MAJOR 2)."""
         return (
             not self.row_binding_unverifiable
+            and not self.row_label_unverifiable
             and not self.column_binding_unverifiable
             and self.ambiguous_count == 0
         )
@@ -766,7 +779,12 @@ class BindingResult:
         checkable to find a disagreement in. Read ``structural_agreement``
         (or check this alongside ``fully_checked``) before treating a table
         as verified correct."""
-        return not (self.contradicted_cells or self.native_unbound or self.model_unbound)
+        return not (
+            self.contradicted_cells
+            or self.row_label_contradictions
+            or self.native_unbound
+            or self.model_unbound
+        )
 
     @property
     def structural_agreement(self) -> bool:
@@ -928,8 +946,37 @@ def bind(words: list, markdown: str) -> BindingResult:
     # every row-level drop/invention signal whenever column geometry was
     # ALSO unverifiable — this is exactly what HIGH 1 and HIGH 2 reported.
     row_binding = _bind_rows(native_rows, grid.rows)
-    if len(row_binding) != len(grid.rows):
-        result.row_binding_unverifiable = True
+    result.row_binding_unverifiable = len(row_binding) != len(grid.rows)
+
+    # GH-273: numeric content and order establish row identity; only then may
+    # the candidate stub verify that binding. Labels never choose a row (they
+    # collide legitimately across panels), but a shifted, dropped, or invented
+    # label is still a structural contradiction once the row is anchored.
+    # Keep raw presence load-bearing alongside ``normalize_label``: that
+    # normalizer deliberately erases presentation and punctuation, so a
+    # punctuation-only non-empty label must not collapse into an empty stub.
+    for cand_idx, native_idx in row_binding.items():
+        candidate_label = grid.rows[cand_idx][0].strip()
+        native_row = native_rows[native_idx]
+        native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
+        same_presence = bool(candidate_label) == bool(native_label)
+        candidate_key = normalize_label(candidate_label)
+        native_key = normalize_label(native_label)
+        if candidate_label and native_label and (not candidate_key or not native_key):
+            # The shared row-label normalizer intentionally handles prose
+            # labels, presentation, and footnotes; it does not canonicalize
+            # mathematical notation (for example native ``β`` versus model
+            # ``$\\beta$``). A non-empty label that normalizes to no key is
+            # therefore not evidence of a mismatch. Fail closed as
+            # unverifiable rather than falsely convicting or silently passing.
+            result.row_label_unverifiable = True
+        elif not same_presence or candidate_key != native_key:
+            result.row_label_contradictions.append(
+                RowLabelContradiction(
+                    row_path=native_row.row_path,
+                    candidate_label=candidate_label,
+                )
+            )
 
     # BLOCKING 1: a native DATA row that no candidate row ever bound to is not
     # merely "unverifiable" in the abstract — it is C4's dropped-digit signal
@@ -982,9 +1029,8 @@ def bind(words: list, markdown: str) -> BindingResult:
                 UnboundCell(row_path=row_path, col_path=col_path, token=model_value)
             )
 
-    if lane_count == 0 or n_cand_cols != lane_count:
-        result.column_binding_unverifiable = True
-
+    result.column_binding_unverifiable = lane_count == 0 or n_cand_cols != lane_count
+    if result.column_binding_unverifiable:
         # HIGH 1: column geometry itself is unverifiable, but that is not
         # licence to drop every cell signal for the whole table — only to
         # stop CLAIMING a binding for it. `_best_lane_column_map` salvages
