@@ -3213,9 +3213,11 @@ class TestAgenticIntegration:
 
         inputs = pipeline._fingerprint_inputs(state)
 
-        assert inputs["native+math"][:2] == (
+        assert inputs["native+math"] == (
             "fixture-math-model",
             "ollama-compatible",
+            None,
+            CORRUPT_MATH_PROMPT,
         )
 
     def test_legacy_corrupt_math_hybrid_does_not_trigger_whole_page_repair(self, tmp_path):

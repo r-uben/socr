@@ -125,6 +125,11 @@ the height floor. Each was reproduced and fixed. Its claim that identical source
 second region unalignable was refuted by a passing two-occurrence regression; `replace(..., 1)`
 leaves the second native occurrence available for the next region.
 
+A later Cubic pass identified the distinct overlap case: an earlier region can consume a later
+region's only source occurrence. That path now appends the later crop as explicit unresolved
+evidence instead of silently no-oping, while the two-identical-occurrence case remains independently
+replaceable. The combined-engine fingerprint test also pins the complete prompt tuple.
+
 The incremental Cubic pass then found chart-render `OSError` handling, contradictory failure
 labels, a paired test that varied two dimensions, and the same trailing-byte issue on the
 no-region path. Those were fixed with a dedicated success/failure chart-overlap battery and an
@@ -135,7 +140,7 @@ they can own source bytes.
 ## Verification
 
 - Focused equation/recovery/state/orchestrator regressions: 293 passed.
-- Full suite after all PR review regressions: 2,183 passed, 3 expected failures.
+- Full suite after all PR review regressions: 2,184 passed, 3 expected failures.
 - Exact Continuous Integration formatting gate: 342 files formatted.
 - Whitespace check: clean.
 - Load-bearing sabotage: forcing the region eligibility route off made the paired regression fail

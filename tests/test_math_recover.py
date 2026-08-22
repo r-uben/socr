@@ -562,3 +562,17 @@ def test_identical_source_occurrences_align_and_replace_independently():
     assert "![Corrupt equation crop](equations/first.png)" in out
     assert "![Corrupt equation crop](equations/second.png)" in out
     assert _EQ not in out
+
+
+def test_overlapping_later_source_becomes_visible_unresolved_evidence():
+    native = "corrupt prefix and suffix"
+    first = _region(native, r"x = 1", crop="equations/first.png")
+    second = _region("suffix", r"y = 2", crop="equations/second.png")
+
+    out = splice_math(None, native, [first, second])
+
+    assert first.source_aligned is True
+    assert second.source_aligned is False
+    assert "![Corrupt equation crop](equations/second.png)" in out
+    assert "source overlapped an earlier recovery" in out
+    assert "original bytes represented by that earlier recovery" in out

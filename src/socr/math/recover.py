@@ -396,18 +396,24 @@ def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str
     unmatched: list[str] = []
     for region in regions:
         source = region.source_text
-        region.source_aligned = bool(source and source in native_text)
+        source_in_native = bool(source and source in native_text)
+        source_available = bool(source and source in text)
+        region.source_aligned = source_in_native and source_available
         replacement = _region_replacement(region)
         if region.source_aligned and (region.resolved or region.crop_path):
             text = text.replace(source, replacement, 1)
         else:
-            retention_reason = (
-                "source could not be aligned"
-                if not region.source_aligned
-                else "crop could not be retained"
-            )
+            if source_in_native and not source_available:
+                retention_reason = "source overlapped an earlier recovery"
+                retention_note = "original bytes represented by that earlier recovery"
+            elif not region.source_aligned:
+                retention_reason = "source could not be aligned"
+                retention_note = "native text retained"
+            else:
+                retention_reason = "crop could not be retained"
+                retention_note = "native text retained"
             unmatched.append(
-                f"{replacement}\n[corrupt equation {retention_reason}; native text retained]"
+                f"{replacement}\n[corrupt equation {retention_reason}; {retention_note}]"
             )
     if unmatched:
         suffix = "\n\n".join(unmatched)
