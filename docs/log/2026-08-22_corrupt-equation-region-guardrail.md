@@ -125,10 +125,17 @@ the height floor. Each was reproduced and fixed. Its claim that identical source
 second region unalignable was refuted by a passing two-occurrence regression; `replace(..., 1)`
 leaves the second native occurrence available for the next region.
 
+The incremental Cubic pass then found chart-render `OSError` handling, contradictory failure
+labels, a paired test that varied two dimensions, and the same trailing-byte issue on the
+no-region path. Those were fixed with a dedicated success/failure chart-overlap battery and an
+exact-prefix no-region assertion. A genuinely math-heavy prose-reference fixture also reproduced
+the remaining anchor concern; terminal labels must now occupy their own extracted span before
+they can own source bytes.
+
 ## Verification
 
 - Focused equation/recovery/state/orchestrator regressions: 293 passed.
-- Full suite after all PR review regressions: 2,181 passed, 3 expected failures.
+- Full suite after all PR review regressions: 2,183 passed, 3 expected failures.
 - Exact Continuous Integration formatting gate: 342 files formatted.
 - Whitespace check: clean.
 - Load-bearing sabotage: forcing the region eligibility route off made the paired regression fail

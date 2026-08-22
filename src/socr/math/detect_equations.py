@@ -170,6 +170,7 @@ class _LineRecord:
     bbox: tuple[float, float, float, float]
     math_ratio: float
     terminal_label: str = ""
+    terminal_label_isolated: bool = False
 
     @property
     def center_y(self) -> float:
@@ -318,12 +319,21 @@ def _detect(
                     math_chars += retained_length
 
             bbox = tuple(line.get("bbox", (0.0, 0.0, 0.0, 0.0)))
+            terminal_match = DISPLAY_TERMINAL_EQ_NUM_RE.search(text)
+            terminal_label_isolated = bool(
+                terminal_match
+                and any(
+                    span_text.strip() == terminal_match.group(1).strip()
+                    for span_text in cleaned_spans
+                )
+            )
             lines.append(
                 _LineRecord(
                     index=len(lines),
                     text=text,
                     bbox=bbox,
                     math_ratio=math_chars / total_chars,
+                    terminal_label_isolated=terminal_label_isolated,
                 )
             )
 
@@ -333,6 +343,8 @@ def _detect(
     text_right = max(line.bbox[2] for line in lines)
     anchors: list[_LineRecord] = []
     for line in lines:
+        if not line.terminal_label_isolated:
+            continue
         match = DISPLAY_TERMINAL_EQ_NUM_RE.search(line.text)
         if not match:
             continue

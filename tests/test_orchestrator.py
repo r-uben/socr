@@ -3003,9 +3003,6 @@ class TestAgenticIntegration:
             crop_path = run_dir / pdf.stem / "equations" / "corrupt_math_p00001_r001.png"
             crop_path.parent.mkdir(parents=True, exist_ok=True)
             crop_path.write_bytes(b"retained crop fixture")
-            chart_path = run_dir / pdf.stem / "figures" / "chart-page.png"
-            chart_path.parent.mkdir(parents=True, exist_ok=True)
-            chart_path.write_bytes(b"retained chart fixture")
             config = _make_config(
                 agentic=True,
                 native_first=True,
@@ -3038,12 +3035,6 @@ class TestAgenticIntegration:
                         )
                     ],
                 ) as recover_regions,
-                patch.object(pipeline, "_is_chart_asset_page", return_value=enabled),
-                patch.object(
-                    pipeline,
-                    "_render_chart_page_png",
-                    return_value=chart_path,
-                ),
                 patch.object(pipeline, "_resolve_crop_vlm_model", return_value=None),
                 patch.object(pipeline, "_resolve_judge_model", return_value=""),
             ):
@@ -3072,7 +3063,6 @@ class TestAgenticIntegration:
         assert "Clean prose after." in on_result.markdown
         assert r"P(A \text{ or } B) = P(A) + P(B)" in on_result.markdown
         assert "syntax only, non-authoritative" in on_result.markdown
-        assert "![Chart page 1](figures/chart-page.png)" in on_result.markdown
         assert "rejected whole-page candidate" not in on_result.markdown
         assert "¼" not in on_result.markdown and "ð" not in on_result.markdown
 
@@ -3103,17 +3093,8 @@ class TestAgenticIntegration:
             CORRUPT_MATH_PROMPT,
         )
         assert {event["kind"] for event in sidecar["audit_events"]} >= {
-            "chart_math_arbitration",
             "corrupt_math_region_recovery",
             "corrupt_math_hybrid_shipped",
-        }
-        arbitration = next(
-            event for event in sidecar["audit_events"] if event["kind"] == "chart_math_arbitration"
-        )
-        assert arbitration["data"] == {
-            "winner": "native+math+chart_asset",
-            "chart_png_rendered": True,
-            "chart_png_path": "![Chart page 1](figures/chart-page.png)",
         }
         shipped_event = next(
             event
@@ -3133,6 +3114,90 @@ class TestAgenticIntegration:
         resume_state = DocumentState(handle=DocumentHandle.from_path(pdf))
         resume_state.apply_born_digital(assessment)
         assert pipeline._load_terminal_page(resume_state, 1, on_dir) is None
+
+    @pytest.mark.parametrize("render_fails", [False, True], ids=["chart-saved", "chart-failed"])
+    def test_agentic_corrupt_math_chart_overlap_preserves_or_surfaces_chart(
+        self,
+        tmp_path,
+        render_fails,
+    ):
+        import json
+
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        pdf = self._real_pdf(tmp_path, 1)
+        native = "Clean prose.\nPðA or BÞ ¼ PðAÞ þ PðBÞ"
+        assessment = DocumentAssessment(
+            path=pdf,
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text=native,
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                    has_equations=True,
+                    has_corrupt_math=True,
+                    word_count=100,
+                )
+            ],
+        )
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            recover_corrupt_math=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.QWEN],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = assessment
+        pipeline._available_engines_for_agentic = MagicMock(return_value=[PROFILE_QWEN_LOCAL])
+        chart_path = tmp_path / pdf.stem / "figures" / "chart-page.png"
+        chart_path.parent.mkdir(parents=True, exist_ok=True)
+        chart_path.write_bytes(b"retained chart fixture")
+        render_chart = (
+            MagicMock(side_effect=OSError("chart directory unavailable"))
+            if render_fails
+            else MagicMock(return_value=chart_path)
+        )
+        region = CorruptMathRegion(
+            rect=object(),
+            source_text="PðA or BÞ ¼ PðAÞ þ PðBÞ",
+            crop_path="equations/corrupt_math_p00001_r001.png",
+            raw_latex=r"P(A \text{ or } B) = P(A) + P(B)",
+            validation_ok=True,
+            validation_reason="ok",
+            model_id=config.math_model,
+            attempts=1,
+        )
+
+        with (
+            patch("socr.math.recover.recover_math_regions", return_value=[region]),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=True),
+            patch.object(pipeline, "_render_chart_page_png", render_chart),
+            patch.object(pipeline, "_resolve_crop_vlm_model", return_value=None),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        ):
+            result = pipeline.process(pdf, tmp_path)
+
+        sidecar = json.loads((tmp_path / pdf.stem / "pages" / "00001.json").read_text())
+        arbitration = next(
+            event for event in sidecar["audit_events"] if event["kind"] == "chart_math_arbitration"
+        )
+        expected_ref = "" if render_fails else "![Chart page 1](figures/chart-page.png)"
+        assert arbitration["data"] == {
+            "winner": "native+math" if render_fails else "native+math+chart_asset",
+            "chart_png_rendered": not render_fails,
+            "chart_png_path": expected_ref,
+        }
+        if render_fails:
+            assert "![Chart page 1]" not in result.markdown
+            assert any(
+                event["kind"] == "chart_asset_render_failed" for event in sidecar["audit_events"]
+            )
+        else:
+            assert expected_ref in result.markdown
 
     def test_combined_legacy_engine_keeps_corrupt_math_fingerprint(self, tmp_path):
         pdf = self._real_pdf(tmp_path, 1)
@@ -3304,7 +3369,7 @@ class TestAgenticIntegration:
     def test_agentic_corrupt_math_runs_without_whole_page_provider_and_fails_closed(self, tmp_path):
         """GH-271: an empty whole-page ladder cannot suppress region evidence."""
         pdf = self._real_pdf(tmp_path, 1)
-        native = "Native prose survives.\nPðA or BÞ ¼ PðAÞ þ PðBÞ"
+        native = "Native prose survives.\nPðA or BÞ ¼ PðAÞ þ PðBÞ\n \t\n"
         assessment = DocumentAssessment(
             path=pdf,
             pages=[
@@ -3346,6 +3411,7 @@ class TestAgenticIntegration:
         assert result.status == DocumentStatus.AUDIT_FAILED
         assert "Native prose survives." in result.markdown
         assert "PðA or BÞ ¼ PðAÞ þ PðBÞ" in result.markdown
+        assert native in result.markdown
         assert "corrupt equation unresolved" in result.markdown
         assert result.error == "corrupt equation candidate unverified on page(s) 1"
 

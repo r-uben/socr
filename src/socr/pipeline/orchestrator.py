@@ -1622,7 +1622,7 @@ class UnifiedPipeline:
                 "[corrupt equation unresolved: page detector flagged font corruption, "
                 "but no recoverable region was retained]"
             )
-            text = f"{text.rstrip()}\n\n{unresolved}" if text.strip() else unresolved
+            text = f"{text}\n\n{unresolved}" if text else unresolved
 
         recovered = sum(1 for region in regions if region.resolved)
         unresolved = len(regions) - recovered if regions else 1
@@ -3075,7 +3075,7 @@ class UnifiedPipeline:
                                 f"![Chart page {page_num}]"
                                 f"({_chart_figures_dir.name}/{Path(saved_png).name})"
                             )
-                        except RuntimeError as exc:
+                        except (RuntimeError, OSError) as exc:
                             chart_render_error = str(exc)
                     else:
                         chart_render_error = "figures directory unavailable"
@@ -3108,7 +3108,9 @@ class UnifiedPipeline:
                                 "chart rendering failed and the region hybrid stayed WARNING"
                             ),
                             data={
-                                "winner": "native+math+chart_asset",
+                                "winner": (
+                                    "native+math+chart_asset" if chart_png_ref else "native+math"
+                                ),
                                 "chart_png_rendered": bool(chart_png_ref),
                                 "chart_png_path": chart_png_ref,
                             },

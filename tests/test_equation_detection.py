@@ -357,7 +357,7 @@ class TestDetectDisplayEquations:
                                 {
                                     "bbox": (60, 100, 548, 112),
                                     "spans": [
-                                        {"text": "x+y+z+w+t+u+v", "font": "CMMI10"},
+                                        {"text": "x+y+" * 12, "font": "CMMI10"},
                                         {
                                             "text": " discussion ends in equation (25)",
                                             "font": "Helvetica",
