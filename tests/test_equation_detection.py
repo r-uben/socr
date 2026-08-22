@@ -125,6 +125,41 @@ class _MathFontPage:
         return self._page.get_pixmap(matrix=matrix, clip=clip)
 
 
+class _ExtractedLinePage:
+    """Synthetic page with caller-controlled extraction order and geometry."""
+
+    rect = fitz.Rect(0, 0, 600, 800)
+
+    def __init__(self, lines: list[tuple[str, str, tuple[float, float, float, float]]]):
+        self._lines = lines
+
+    def get_fonts(self):
+        return [
+            (1, "cff", "Type1", "CMMI10", "CMMI10", ""),
+            (2, "cff", "Type1", "CMSY10", "CMSY10", ""),
+        ]
+
+    def get_text(self, mode: str):
+        if mode == "text":
+            return "\n".join(text for text, _font, _bbox in self._lines) + "\n"
+        assert mode == "dict"
+        return {
+            "blocks": [
+                {
+                    "type": 0,
+                    "bbox": bbox,
+                    "lines": [
+                        {
+                            "bbox": bbox,
+                            "spans": [{"text": text, "font": font, "bbox": bbox}],
+                        }
+                    ],
+                }
+                for text, font, bbox in self._lines
+            ]
+        }
+
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 
@@ -168,6 +203,38 @@ class TestDetectDisplayEquations:
         assert region.bbox[2] >= region.source_bbox[2]
         assert region.bbox[3] >= region.source_bbox[3]
 
+    def test_trailing_math_span_whitespace_does_not_inflate_math_ratio(self):
+        """Characters removed from the denominator are removed from math count too."""
+
+        class _TrailingMathSpacePage:
+            rect = fitz.Rect(0, 0, 600, 800)
+
+            def get_fonts(self):
+                return [(1, "cff", "Type1", "CMMI10", "CMMI10", "")]
+
+            def get_text(self, mode: str):
+                assert mode == "dict"
+                return {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "lines": [
+                                {
+                                    "bbox": (260, 100, 340, 112),
+                                    "spans": [
+                                        {"text": "abcde", "font": "Helvetica"},
+                                        {"text": "x     ", "font": "CMMI10"},
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+
+        result = detect_display_equations(_TrailingMathSpacePage(), page_num=1)
+
+        assert result.regions == []
+
     def test_adjacent_math_lines_merge(self):
         """Two vertically adjacent math lines within DISPLAY_MERGE_GAP_PT merge."""
         lines = [
@@ -200,6 +267,140 @@ class TestDetectDisplayEquations:
         result = detect_display_equations(page, page_num=5)
         assert len(result.regions) >= 1
         assert result.regions[0].has_eq_number
+
+    def test_numbered_fragments_form_exact_nonoverlapping_rows(self):
+        """Numbered equation rows use complete source slices, not corrupt fragments."""
+        page = _ExtractedLinePage(
+            [
+                ("Introductory prose.", "Helvetica", (60, 40, 240, 52)),
+                ("h", "CMMI10", (180, 100, 188, 112)),
+                ("t+1", "CMMI10", (188, 94, 210, 106)),
+                ("=", "CMSY10", (235, 100, 244, 112)),
+                ("c", "CMMI10", (270, 100, 278, 112)),
+                ("t+1", "CMMI10", (278, 94, 300, 106)),
+                ("(A8)", "Helvetica", (520, 100, 548, 112)),
+                (
+                    "We substitute from equation (25)",
+                    "Helvetica",
+                    (60, 150, 548, 162),
+                ),
+                ("h", "CMMI10", (180, 210, 188, 222)),
+                ("t+2", "CMMI10", (188, 204, 210, 216)),
+                ("=", "CMSY10", (235, 210, 244, 222)),
+                ("c", "CMMI10", (270, 210, 278, 222)),
+                ("t+2", "CMMI10", (278, 204, 300, 216)),
+                ("(A9)", "Helvetica", (520, 210, 548, 222)),
+                ("Concluding prose.", "Helvetica", (60, 270, 220, 282)),
+            ]
+        )
+        native_text = page.get_text("text").strip()
+        result = detect_display_equations(page, page_num=1)
+
+        numbered = [region for region in result.regions if region.has_eq_number]
+        assert len(numbered) == 2
+        assert [region.equation_label for region in numbered] == ["(A8)", "(A9)"]
+        assert all(region.source_text in native_text for region in numbered)
+        assert numbered[0].source_text == "h\nt+1\n=\nc\nt+1\n(A8)"
+        assert numbered[1].source_text == "h\nt+2\n=\nc\nt+2\n(A9)"
+        assert "equation (25)" not in "\n".join(region.source_text for region in numbered)
+        assert numbered[0].bbox[3] <= numbered[1].bbox[1]
+
+    def test_interleaved_extraction_order_cannot_cross_numbered_source_slices(self):
+        """A later equation's early fragment must not be deleted with the prior row."""
+        page = _ExtractedLinePage(
+            [
+                ("a", "CMMI10", (180, 100, 190, 112)),
+                ("b", "CMMI10", (180, 210, 190, 222)),
+                ("(A8)", "Helvetica", (520, 100, 548, 112)),
+                ("(A9)", "Helvetica", (520, 210, 548, 222)),
+            ]
+        )
+
+        result = detect_display_equations(page, page_num=1)
+        numbered = [region for region in result.regions if region.has_eq_number]
+
+        assert [region.source_text for region in numbered] == ["a\n(A8)", "b\n(A9)"]
+        assert set(numbered[0].source_text.splitlines()).isdisjoint(
+            numbered[1].source_text.splitlines()
+        )
+
+    def test_label_only_anchor_is_not_a_numbered_replacement_target(self):
+        """A bare right-margin label cannot overwrite an earlier prose reference."""
+        page = _ExtractedLinePage(
+            [
+                ("See equation (A8)", "Helvetica", (60, 40, 220, 52)),
+                ("(A8)", "Helvetica", (520, 100, 548, 112)),
+                ("z", "CMMI10", (295, 300, 305, 312)),
+            ]
+        )
+
+        result = detect_display_equations(page, page_num=1)
+
+        assert not any(region.has_eq_number for region in result.regions)
+
+    def test_widest_prose_line_with_inline_math_reference_is_not_a_source_anchor(self):
+        """A terminal citation inside a prose span cannot own replacement bytes."""
+
+        class _ProseReferencePage:
+            rect = fitz.Rect(0, 0, 600, 800)
+
+            def get_fonts(self):
+                return [(1, "cff", "Type1", "CMMI10", "CMMI10", "")]
+
+            def get_text(self, mode: str):
+                assert mode == "dict"
+                return {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "lines": [
+                                {
+                                    "bbox": (60, 100, 548, 112),
+                                    "spans": [
+                                        {"text": "x+y+" * 12, "font": "CMMI10"},
+                                        {
+                                            "text": " discussion ends in equation (25)",
+                                            "font": "Helvetica",
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+
+        result = detect_display_equations(_ProseReferencePage(), page_num=1)
+
+        assert not any(region.source_text for region in result.regions)
+
+    def test_tiny_numbered_artifact_obeys_the_region_height_floor(self):
+        page = _ExtractedLinePage(
+            [
+                ("x", "CMMI10", (200, 100, 201, 101)),
+                ("(A8)", "Helvetica", (520, 100, 548, 101)),
+            ]
+        )
+
+        result = detect_display_equations(page, page_num=1)
+
+        assert result.regions == []
+
+    def test_label_extracted_before_same_row_math_still_anchors_the_row(self):
+        """Geometry, not extraction order, binds a separated label to its equation."""
+        page = _ExtractedLinePage(
+            [
+                ("(A8)", "Helvetica", (520, 100, 548, 112)),
+                ("x", "CMMI10", (180, 100, 190, 112)),
+                ("=", "CMSY10", (230, 100, 240, 112)),
+                ("y", "CMMI10", (280, 100, 290, 112)),
+            ]
+        )
+
+        result = detect_display_equations(page, page_num=1)
+        numbered = [region for region in result.regions if region.has_eq_number]
+
+        assert len(numbered) == 1
+        assert numbered[0].source_text == "(A8)\nx\n=\ny"
 
     def test_detection_time_measured(self):
         """AC5 — throughput harness: detection_time_s is a positive float."""

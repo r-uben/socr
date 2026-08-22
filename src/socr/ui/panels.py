@@ -91,7 +91,7 @@ class SummaryPanel:
         self.pages_total = 0
         self.figures_count = 0
         self.time_seconds = 0.0
-        self.cost = 0.0
+        self.cost: float | None = 0.0
         self.engines_used: dict[str, int] = {}
         self.output_path = ""
         self.output_files: list[str] = []
@@ -102,7 +102,7 @@ class SummaryPanel:
         pages_total: int,
         figures_count: int = 0,
         time_seconds: float = 0.0,
-        cost: float = 0.0,
+        cost: float | None = 0.0,
     ) -> None:
         """Set processing statistics."""
         self.pages_success = pages_success
@@ -135,7 +135,9 @@ class SummaryPanel:
 
         lines.append(Text(f"     {self.time_seconds:.1f}s", style="dim"))
 
-        if self.cost > 0:
+        if self.cost is None:
+            lines.append(Text("     cost unknown", style="dim"))
+        elif self.cost > 0:
             lines.append(Text(f"     ${self.cost:.4f}", style="dim"))
 
         # Engines

@@ -125,6 +125,10 @@ def build_run_audit(state) -> RunAudit:
         "dualpass_flag": 3,
         "table_value_drift_unadjudicated": 4,
         "table_region_geometry_hard_fail": 4,
+        "chart_math_arbitration": 4,
+        # GH-271: region evidence/candidate first, final shipped-warning
+        # disposition second.
+        "corrupt_math_region_recovery": 4,
         # #263: analyze-time detection AND disposition in one -- unlike the
         # TR-3 pair above there is no second kind, because this flag always
         # acts (the page is routed to OCR and refuses to ship its fragments).
@@ -136,6 +140,7 @@ def build_run_audit(state) -> RunAudit:
         "d3_floor_model_table_kept": 5,
         "flagged_model_table_kept": 6,
         "native_fallback": 6,
+        "corrupt_math_hybrid_shipped": 6,
         # S1 (#269): same disposition rank as the two above -- a structure-class
         # page's winner is a kept-but-unverified model grid or a native-prose
         # fallback, either way the last word on this page's table content.

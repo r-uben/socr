@@ -1089,20 +1089,9 @@ class UnifiedPipeline:
         # Born-digital pages whose prose is clean but whose math is font-corrupted:
         # keep native prose, recover only the equation regions to LaTeX (Tier 1).
         math_recovery_pages: set[int] = set()
-        corrupt_math_pages = {
-            pa.page_num
-            for pa in (self._last_assessment.pages if self._last_assessment else [])
-            if pa.has_corrupt_math
-        }
 
         for page_num, ps in sorted(state.pages.items()):
-            if (
-                self.config.recover_corrupt_math
-                and page_num in corrupt_math_pages
-                and ps.is_born_digital
-                and ps.native_text
-                and not self._page_has_tables(page_num, ps)
-            ):
+            if self._is_corrupt_math_recovery_page(page_num, ps):
                 # Trust the native prose layer; math is spliced in Tier 1. This
                 # also avoids whole-page VLM OCR that would degrade the prose.
                 prose_pages.append(page_num)
@@ -1187,44 +1176,32 @@ class UnifiedPipeline:
         page_outputs: list[PageOutput] = []
 
         # Tier 1: Native text for prose pages (with math recovery where flagged)
-        math_doc = None
-        if math_recovery_pages:
-            try:
-                from socr.core.pdf import open_pdf
-
-                math_doc = open_pdf(state.handle.path)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("math recovery disabled (cannot open PDF): %s", exc)
-                math_recovery_pages = set()
-            if math_recovery_pages and not self.config.quiet:
-                console.print(
-                    f"  [cyan]{len(math_recovery_pages)} page(s): recovering "
-                    f"corrupt math -> LaTeX [{self.config.math_model}][/cyan]"
-                )
+        if math_recovery_pages and not self.config.quiet:
+            console.print(
+                f"  [cyan]{len(math_recovery_pages)} page(s): recovering "
+                f"corrupt math -> LaTeX [{self.config.math_model}][/cyan]"
+            )
 
         math_done = 0
         math_total = len(math_recovery_pages)
         for page_num in prose_pages:
             ps = state.pages[page_num]
+            if page_num in math_recovery_pages:
+                math_out = self._recover_corrupt_math_page(state, page_num, output_dir)
+                ps.best_output = math_out
+                ps.corrupt_math_hybrid = math_out
+                page_outputs.append(math_out)
+                math_done += 1
+                if not self.config.quiet:
+                    console.print(
+                        f"    [yellow]math {math_done}/{math_total}: p{page_num} "
+                        "crop-backed candidate(s) retained; mathematical fidelity "
+                        "unverified[/yellow]"
+                    )
+                continue
+
             text = ps.native_text
             engine = "native"
-            if page_num in math_recovery_pages and math_doc is not None:
-                from socr.math.recover import recover_math_regions, splice_math
-
-                try:
-                    page = math_doc[page_num - 1]
-                    regions = recover_math_regions(page, model=self.config.math_model)
-                    text = splice_math(page, ps.native_text, regions)
-                    engine = "native+math"
-                    math_done += 1
-                    recovered = sum(1 for _, tex in regions if tex)
-                    if not self.config.quiet:
-                        console.print(
-                            f"    [dim]math {math_done}/{math_total}: p{page_num} "
-                            f"{recovered}/{len(regions)} equations -> LaTeX[/dim]"
-                        )
-                except Exception as exc:
-                    logger.warning("math recovery failed on p%d: %s", page_num, exc)
             # GH-151 TICKET-B1 / GH-200 / #211: a page can reach prose_pages
             # carrying a table-distrust flag only via --native-only (the
             # non-native-only eligibility predicate already excludes has_tables
@@ -1253,8 +1230,6 @@ class UnifiedPipeline:
                     ),
                 )
             )
-        if math_doc is not None:
-            math_doc.close()
 
         # GH-36a: Deterministic display-equation region detection (model-free).
         # Runs on born-digital prose pages that carry the ``has_equations`` signal
@@ -1363,11 +1338,18 @@ class UnifiedPipeline:
         engines_used = set()
         for p in page_outputs:
             if p.engine and p.engine != "native":
-                engines_used.add(p.engine)
+                engines_used.update(part for part in p.engine.split("+") if part != "native")
         if engines_used:
             engine_name = "native+" + "+".join(sorted(engines_used))
         else:
             engine_name = "native"
+
+        page_costs = [page.cost_usd for page in page_outputs]
+        run_cost = (
+            None
+            if any(cost is None for cost in page_costs)
+            else sum(cost for cost in page_costs if cost is not None)
+        )
 
         result = EngineResult(
             document_path=state.handle.path,
@@ -1376,6 +1358,7 @@ class UnifiedPipeline:
             pages=page_outputs,
             pages_processed=total,
             processing_time=elapsed,
+            cost=run_cost,
         )
         state.apply_result(result)
         return result
@@ -1565,6 +1548,159 @@ class UnifiedPipeline:
     def _is_agentic_trusted_native(self, page_num: int, ps: PageState) -> bool:
         """Backward-compatible alias for the agentic native-bypass predicate."""
         return self._is_trusted_native_without_ocr(page_num, ps)
+
+    def _corrupt_math_model_disabled_reason(self) -> str:
+        """Why the direct equation-model call is forbidden by run policy."""
+        model = self.config.math_model or ""
+        if self.config.strict_local and "cloud" in model.casefold():
+            return f"model call skipped: strict-local forbids remote model {model}"
+        if "cloud" in model.casefold() and (
+            self.config.max_cost_per_page > 0 or self.config.cost_budget > 0
+        ):
+            return "model call skipped: remote equation model has no configured price"
+        return ""
+
+    def _is_corrupt_math_recovery_page(self, page_num: int, ps: PageState) -> bool:
+        """Whether the opt-in region lane owns this page instead of whole-page OCR."""
+        return bool(
+            self.config.native_first
+            and not self.config.native_only
+            and self.config.recover_corrupt_math
+            and ps.is_born_digital
+            and ps.native_text
+            and ps.has_corrupt_math
+            and not ps.native_rotated_text_shredded
+            and not self._page_has_tables(page_num, ps)
+        )
+
+    def _recover_corrupt_math_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        output_dir: Path,
+    ) -> PageOutput:
+        """Build a crop-backed native-prose/LaTeX hybrid for one damaged page.
+
+        The result deliberately remains ``WARNING``/``audit_passed=False``:
+        structural LaTeX validation rejects malformed output but cannot prove that
+        a parseable candidate matches the source mathematics.
+        """
+        from ocr_output_contract import doc_dir_for, relative_key
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
+        from socr.math.recover import recover_math_regions, splice_math
+
+        ps = state.pages[page_num]
+        native_text = ps.native_text or ""
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        crop_dir = doc_dir / "equations"
+        regions = []
+        error = ""
+        model_disabled_reason = self._corrupt_math_model_disabled_reason()
+        try:
+            with open_pdf(state.handle.path) as pdf:
+                regions = recover_math_regions(
+                    pdf[page_num - 1],
+                    model=self.config.math_model,
+                    host=self._local_backend_host(),
+                    dpi=self.config.render_dpi,
+                    crop_dir=crop_dir,
+                    crop_ref_dir="equations",
+                    page_num=page_num,
+                    model_disabled_reason=model_disabled_reason,
+                )
+                text = splice_math(pdf[page_num - 1], native_text, regions)
+        except Exception as exc:
+            error = f"corrupt-equation region recovery failed: {exc}"
+            logger.warning("%s on p%d", error, page_num)
+            text = native_text
+
+        if not regions:
+            unresolved = (
+                "[corrupt equation unresolved: page detector flagged font corruption, "
+                "but no recoverable region was retained]"
+            )
+            text = f"{text}\n\n{unresolved}" if text else unresolved
+
+        recovered = sum(1 for region in regions if region.resolved)
+        unresolved = len(regions) - recovered if regions else 1
+        crop_paths = [region.crop_path for region in regions if region.crop_path]
+        validation = [
+            {
+                "crop_path": region.crop_path,
+                "source_text_aligned": region.source_aligned,
+                "validation_ok": region.validation_ok,
+                "validation_reason": region.validation_reason,
+                "model_id": region.model_id,
+                "attempts": region.attempts,
+            }
+            for region in regions
+        ]
+        crop_detail = (
+            f"{len(crop_paths)} crop(s) retained as visual evidence"
+            if crop_paths
+            else "no crop was retained"
+        )
+        detail = (
+            f"region-only corrupt-equation recovery adopted {recovered} syntax-valid "
+            f"candidate(s) and left {unresolved} unresolved region(s); {crop_detail}; "
+            "candidates are non-authoritative"
+        )
+        call_cost_usd = 0.0 if model_disabled_reason else None
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="corrupt_math_region_recovery",
+                engine="native+math",
+                detail=detail,
+                data={
+                    "recovered_regions": recovered,
+                    "unresolved_regions": unresolved,
+                    "crop_paths": crop_paths,
+                    "regions": validation,
+                    "validation_scope": "latex_syntax_only",
+                    "semantic_fidelity_verified": False,
+                    "model_id": self.config.math_model,
+                    "backend": "ollama-compatible",
+                    "cost_usd": call_cost_usd,
+                    "model_call_skipped": bool(model_disabled_reason),
+                    "model_disabled_reason": model_disabled_reason,
+                    "error": error,
+                },
+            )
+        )
+        page_output = PageOutput(
+            page_num=page_num,
+            text=text,
+            status=PageStatus.WARNING,
+            engine="native+math",
+            failure_mode=FailureMode.AUDIT_FAILED,
+            error=error,
+            audit_passed=False,
+            audit_notes=[detail],
+            provider_id="corrupt-math-region",
+            provider_model=self.config.math_model,
+            provider_backend="ollama-compatible",
+            skip_reason=model_disabled_reason,
+            cost_usd=call_cost_usd,
+        )
+        if self.config.agentic:
+            state.engine_runs.append(
+                EngineResult(
+                    document_path=state.handle.path,
+                    engine="native+math",
+                    status=DocumentStatus.AUDIT_FAILED,
+                    pages=[page_output],
+                    model_version=self.config.math_model,
+                    cost=call_cost_usd,
+                    pages_processed=1,
+                    audit_passed=False,
+                    audit_notes=[detail],
+                )
+            )
+        return page_output
 
     # ------------------------------------------------------------------
     # PP-7: Chart-asset routing lane
@@ -2531,12 +2667,16 @@ class UnifiedPipeline:
         """PP-2 fused page-major loop: one pass over ALL pages (native + OCR).
 
         Born-digital prose takes free native text; every OCR page is routed
-        through the cost ladder.  After each page is final, a PROVISIONAL
-        fragment + sidecar (``terminal=False``) is flushed for crash recovery.
+        through the cost ladder, except an opt-in corrupt-equation page: that page
+        takes the crop-backed ``native+math`` region lane before whole-page routing.
+        After each page is final, a PROVISIONAL fragment + sidecar
+        (``terminal=False``) is flushed for crash recovery.
         The authoritative fragment bytes come from ``_rewrite_all_fragments``
         at the end of ``_phase_assemble`` (fork A / assemble-authoritative).
 
-        Per-page lifecycle (post-route):
+        Per-page lifecycle:
+          0. Eligible corrupt-equation pages run the region-only crop guardrail;
+             all other non-native pages enter ``route_page``.
           1. ``_reread_page_tables`` (PP-3) — OCR pages with tables only.
           2. Per-page equation detect+crop (GH-36a) — behind ``detect_equations``.
           3. Per-page equation LaTeX sidecar (GH-36b) — behind ``recover_clean_equations``.
@@ -2569,10 +2709,19 @@ class UnifiedPipeline:
             console.print("\n[cyan]Agentic routing[/cyan] (cost-ordered, judge-gated)")
 
         # -- Doc-scoped native-fallback list (needed by run_provider stub) --------
-        # Collect OCR pages first, to build native_fallback_pages before the loop.
+        # The corrupt-math guardrail is a separate region lane, not a whole-page
+        # OCR rung. Remove its pages before provider/resume setup so an empty
+        # provider ladder cannot suppress a crop recovery that does not use it.
+        math_recovery_pages = {
+            page_num
+            for page_num, ps in sorted(state.pages.items())
+            if self._is_corrupt_math_recovery_page(page_num, ps)
+        }
         ocr_pages: list[int] = []
         for page_num, ps in sorted(state.pages.items()):
-            if not self._is_agentic_trusted_native(page_num, ps):
+            if page_num not in math_recovery_pages and not self._is_agentic_trusted_native(
+                page_num, ps
+            ):
                 ocr_pages.append(page_num)
 
         native_fallback_pages = [
@@ -2710,10 +2859,12 @@ class UnifiedPipeline:
         _escalation_profile = self._resolve_table_escalation_provider(available)
         _escalation_degraded = False
 
+        no_ocr_provider_pages: set[int] = set()
         if not ladder and ocr_pages:
             logger.warning("agentic: no OCR providers available; OCR pages left unprocessed")
             if not self.config.quiet:
                 console.print("  [red]No OCR providers available[/red]")
+            no_ocr_provider_pages = set(ocr_pages)
             for page_num in native_fallback_pages:
                 ps = state.pages[page_num]
                 if self._page_has_tables(page_num, ps):
@@ -2729,7 +2880,7 @@ class UnifiedPipeline:
                     cost_usd=0.0,
                 )
                 ps.attempts.append(fallback)
-            return
+                ps.best_output = fallback
 
         # Snapshot the ladder for manifest provenance (B3).
         state.agentic_ladder = [
@@ -2899,13 +3050,98 @@ class UnifiedPipeline:
                     console.print(f"  p{page_num}: [dim]resumed (terminal ledger hit)[/dim]")
                 continue
 
+            # GH-271: region-only corrupt-equation lane. It owns the page before
+            # whole-page OCR and keeps surrounding native prose untouched.
+            if page_num in math_recovery_pages:
+                if not self.config.quiet:
+                    console.print(
+                        f"  p{page_num}: [cyan]corrupt-equation region lane "
+                        f"[{self.config.math_model}][/cyan]"
+                    )
+                math_out = self._recover_corrupt_math_page(state, page_num, output_dir)
+                if page_num in chart_winner_pages:
+                    from socr.core.audit_log import AuditEvent as _MathChartEvent
+
+                    chart_png_ref = ""
+                    chart_render_error = ""
+                    if _chart_figures_dir is not None:
+                        try:
+                            saved_png = self._render_chart_page_png(
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                            )
+                            chart_png_ref = (
+                                f"![Chart page {page_num}]"
+                                f"({_chart_figures_dir.name}/{Path(saved_png).name})"
+                            )
+                        except (RuntimeError, OSError) as exc:
+                            chart_render_error = str(exc)
+                    else:
+                        chart_render_error = "figures directory unavailable"
+
+                    if chart_png_ref:
+                        math_out.text = f"{math_out.text.rstrip()}\n\n{chart_png_ref}"
+                        math_out.audit_notes.append(
+                            "chart asset retained alongside corrupt-equation recovery"
+                        )
+                    else:
+                        state.events.append(
+                            _MathChartEvent(
+                                page_num=page_num,
+                                kind="chart_asset_render_failed",
+                                engine="native+math",
+                                detail=chart_render_error,
+                            )
+                        )
+
+                    state.events.append(
+                        _MathChartEvent(
+                            page_num=page_num,
+                            kind="chart_math_arbitration",
+                            engine="native+math",
+                            detail=(
+                                "both chart marks and corrupt-equation signals fired; "
+                                "the region hybrid retained the mandatory chart PNG"
+                                if chart_png_ref
+                                else "both chart marks and corrupt-equation signals fired; "
+                                "chart rendering failed and the region hybrid stayed WARNING"
+                            ),
+                            data={
+                                "winner": (
+                                    "native+math+chart_asset" if chart_png_ref else "native+math"
+                                ),
+                                "chart_png_rendered": bool(chart_png_ref),
+                                "chart_png_path": chart_png_ref,
+                            },
+                        )
+                    )
+                    state.events.append(
+                        _MathChartEvent(
+                            page_num=page_num,
+                            kind="chart_asset_page",
+                            engine="chart_asset",
+                            detail=(
+                                "visual chart semantics represented as image asset alongside "
+                                "the corrupt-equation region hybrid; data values not transcribed"
+                            ),
+                            data={
+                                "png_saved": bool(chart_png_ref),
+                                "png_path": chart_png_ref,
+                            },
+                        )
+                    )
+                ps.attempts.append(math_out)
+                ps.best_output = math_out
+                ps.corrupt_math_hybrid = math_out
+
             # PP-7: Chart-asset lane — intercept before the native-bypass branch.
             # A born-digital native page that carries vector chart marks (or an
             # embedded raster image) routes here instead of shipping as raw word-
             # salad prose.  B1 representation: native prose retained + chart PNG
             # ref embedded + explicit audit flag.  Force PNG even when --save-
             # figures is off (chart PNGs are mandatory preservation artifacts).
-            if page_num in chart_winner_pages:
+            elif page_num in chart_winner_pages:
                 if not self.config.quiet:
                     console.print(f"  p{page_num}: [cyan]chart-asset lane[/cyan]")
                 from socr.core.audit_log import AuditEvent
@@ -3019,6 +3255,24 @@ class UnifiedPipeline:
                     )
                 )
 
+            elif page_num in no_ocr_provider_pages:
+                # Born-digital fallbacks were materialized during provider setup.
+                # A scan has no native text, so make the missing provider explicit.
+                if ps.best_output is None:
+                    from socr.core.manifest import page_failed_marker
+
+                    unavailable = PageOutput(
+                        page_num=page_num,
+                        text=page_failed_marker(page_num),
+                        status=PageStatus.ERROR,
+                        engine="",
+                        failure_mode=FailureMode.MODEL_UNAVAILABLE,
+                        error="no OCR providers available",
+                        audit_passed=False,
+                    )
+                    ps.attempts.append(unavailable)
+                    ps.best_output = unavailable
+
             elif is_native:
                 # Tier 1: born-digital trusted native text — free, no OCR.
                 # GH-151 TICKET-B1 / GH-200 / #211: a page reaches here
@@ -3129,7 +3383,15 @@ class UnifiedPipeline:
                 # Route OCR page through the cost ladder.
                 remaining = None
                 if self.config.cost_budget > 0:
-                    remaining = max(self.config.cost_budget - state.total_cost, 0.0)
+                    total_cost = state.total_cost
+                    # An unmetered earlier call makes remaining paid budget
+                    # unknowable. Fail closed by admitting only free rungs; an
+                    # unknown subtotal must never be treated as zero spend.
+                    remaining = (
+                        0.0
+                        if total_cost is None
+                        else max(self.config.cost_budget - total_cost, 0.0)
+                    )
                 decision = route_page(
                     page_num,
                     ladder,
@@ -3484,7 +3746,11 @@ class UnifiedPipeline:
 
         # -- Post-loop summary ---------------------------------------------------
         if not self.config.quiet:
-            console.print(f"  total cost: ${state.total_cost:.4f}")
+            total_cost = state.total_cost
+            if total_cost is None:
+                console.print("  total cost: unknown (unmetered direct call)")
+            else:
+                console.print(f"  total cost: ${total_cost:.4f}")
             if halt_reason:
                 console.print(f"  [red]Halted: {halt_reason}[/red]")
 
@@ -4133,6 +4399,24 @@ class UnifiedPipeline:
         from socr.engines.registry import get_engine
 
         inputs: dict[str, tuple[str, str, str | None, str | None]] = {}
+        has_native_math = any(
+            {"native", "math"}
+            <= {
+                part.strip()
+                for part in str(run.engine).replace(",", "+").split("+")
+                if part.strip()
+            }
+            for run in state.engine_runs
+        )
+        if has_native_math:
+            from socr.math.recover import CORRUPT_MATH_PROMPT
+
+            inputs["native+math"] = (
+                self.config.math_model,
+                "ollama-compatible",
+                None,
+                CORRUPT_MATH_PROMPT,
+            )
         names: set[str] = set()
         for run in state.engine_runs:
             for part in str(run.engine).replace("+", ",").split(","):
@@ -5724,6 +6008,11 @@ class UnifiedPipeline:
                 and getattr(e, "page_num", 0)
             }
         )
+        corrupt_math_hybrid_pages = [
+            n
+            for n, p in sorted(state.pages.items())
+            if getattr(p, "corrupt_math_hybrid", None) is not None
+        ]
         native_fallback_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -5796,11 +6085,12 @@ class UnifiedPipeline:
             # to "OCR was tried [for a REASON OTHER THAN S1] and never
             # passed" -- S1's own bucket owns S1's own pages exclusively.
             and n not in structure_class_native_fallback_pages
+            # GH-271: the region hybrid ships, so this is not a native fallback.
+            and n not in corrupt_math_hybrid_pages
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
         ]
 
-        # Determine overall status.
         # For CLI engines that produce whole-doc output (page_num=0), pages
         # won't have per-page best_outputs.  A passing whole-doc attempt
         # covers the entire document -- treat it as success.
@@ -5867,6 +6157,9 @@ class UnifiedPipeline:
         # reporting a clean SUCCESS. AUDIT_FAILED rather than ERROR: the page
         # ships real, scored content -- the marker it replaced had none.
         pages_ok = pages_ok and not d3_model_table_pages
+        # GH-271: syntax-valid crop transcription is still mathematically
+        # unverified, so the document must not report a clean success.
+        pages_ok = pages_ok and not corrupt_math_hybrid_pages
         # NOT a page failure -- the owner was explicit that the page is not failed
         # and the table is kept. AUDIT_FAILED at the document level is the
         # "completed with warnings, output written" path, which is the honest
@@ -5901,6 +6194,7 @@ class UnifiedPipeline:
             or structure_class_model_pages
             or structure_class_native_fallback_pages
             or d3_model_table_pages
+            or corrupt_math_hybrid_pages
             or value_drift_pages
         ):
             from socr.core.audit_log import AuditEvent
@@ -5923,6 +6217,39 @@ class UnifiedPipeline:
                         detail="structured/enhancement page did not ship a passing OCR "
                         "result (OCR failed, was skipped, or ran under --native-only); "
                         "native text shipped flagged",
+                    )
+                )
+            for n in corrupt_math_hybrid_pages:
+                hybrid = state.pages[n].corrupt_math_hybrid
+                recovery_event = next(
+                    (
+                        event
+                        for event in reversed(state.events)
+                        if event.page_num == n and event.kind == "corrupt_math_region_recovery"
+                    ),
+                    None,
+                )
+                crop_paths = (
+                    list(recovery_event.data.get("crop_paths", [])) if recovery_event else []
+                )
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="corrupt_math_hybrid_shipped",
+                        engine="native+math",
+                        detail=(
+                            "native prose plus crop-backed equation candidate(s) shipped "
+                            "WARNING; LaTeX passed at most a syntax gate and mathematical "
+                            "fidelity remains unverified"
+                        ),
+                        data={
+                            "provider_id": hybrid.provider_id if hybrid else "",
+                            "provider_model": hybrid.provider_model if hybrid else "",
+                            "provider_backend": hybrid.provider_backend if hybrid else "",
+                            "cost_usd": hybrid.cost_usd if hybrid else None,
+                            "crop_paths": crop_paths,
+                            "audit_passed": False,
+                        },
                     )
                 )
             # GH-211 MAJOR-2: --native-only distrust pages get their own kind
@@ -6070,6 +6397,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
                         f"fell back to native text: {native_fallback_pages}[/yellow]"
                     )
+                if corrupt_math_hybrid_pages:
+                    console.print(
+                        f"  [yellow]{len(corrupt_math_hybrid_pages)} page(s) shipped "
+                        "crop-backed equation candidate(s); mathematical fidelity "
+                        f"remains unverified: {corrupt_math_hybrid_pages}[/yellow]"
+                    )
                 if native_only_distrust_pages:
                     console.print(
                         f"  [yellow]{len(native_only_distrust_pages)} page(s) shipped native "
@@ -6180,6 +6513,14 @@ class UnifiedPipeline:
             final_result.error = (
                 f"page(s) {', '.join(str(n) for n in failed_pages)} {LOST_CONTENT_NOTE}"
             )
+        if corrupt_math_hybrid_pages:
+            _math_note = "corrupt equation candidate unverified on page(s) " + ", ".join(
+                str(n) for n in corrupt_math_hybrid_pages
+            )
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_math_note}"
+            else:
+                final_result.error = _math_note
 
         # PP-2 cascade HALT: propagate the halt reason into the result error
         # so callers and tests can detect a partial-save due to a wedged backend.

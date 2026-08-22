@@ -25,6 +25,7 @@ stubbed or unreached here, verified by reading the source instead.
 from __future__ import annotations
 
 import dataclasses
+from unittest.mock import patch
 
 import fitz
 import pytest
@@ -50,6 +51,7 @@ _LIVE = {
     "figures_max_per_page",
     "figures_max_total",
     "max_cost_per_page",
+    "math_model",
     "native_first",
     "native_only",
     "primary_engine",
@@ -57,6 +59,7 @@ _LIVE = {
     "qwen_backend",
     "qwen_model",
     "recover_clean_equations",
+    "recover_corrupt_math",
     "render_dpi",
     "reprocess",
     "save_figures",
@@ -93,8 +96,6 @@ _INERT_BUT_FINGERPRINTED = {
 #: absent from the fingerprint they are also invisible to the resume ledger in
 #: the modes where they DO work — the same class as the judge-model gap (#133).
 _INERT_AND_UNFINGERPRINTED = {
-    "math_model",
-    "recover_corrupt_math",
     "clean_equation_model",
 }
 
@@ -256,10 +257,21 @@ def readers(tmp_path_factory):
         quiet=True,
         detect_equations=True,
         recover_clean_equations=True,
+        recover_corrupt_math=True,
         save_figures=True,
     )
     pipe = UnifiedPipeline(_Recorder(cfg, fields, calls))
 
+    detect = pipe.bd_detector.detect
+
+    def detect_with_corrupt_math(path):
+        assessment = detect(path)
+        assessment.pages[0].has_corrupt_math = True
+        assessment.pages[0].has_equations = True
+        assessment.pages[0].needs_ocr_enhancement = True
+        return assessment
+
+    pipe.bd_detector.detect = detect_with_corrupt_math
     pipe._available_engines_for_agentic = lambda: [providers.PROFILE_QWEN_LOCAL]
     pipe._build_page_judge = lambda state: _YesJudge()
     # Determinism, not convenience: _resolve_crop_vlm_model probes Ollama over
@@ -280,7 +292,8 @@ def readers(tmp_path_factory):
         for p in nums
     ]
 
-    pipe.process(_fixture_pdf(tmp / "f.pdf"), output_dir=tmp / "out")
+    with patch("socr.math.recover.recover_math_regions", return_value=[]):
+        pipe.process(_fixture_pdf(tmp / "f.pdf"), output_dir=tmp / "out")
     return calls
 
 

@@ -33,6 +33,7 @@ class PageState:
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded raster images
     has_equations: bool = False  # page contains math/equations
+    has_corrupt_math: bool = False  # native equation glyphs are positively font-corrupted
     has_unmapped_math_glyphs: bool = False  # PUA glyphs in native layer -> silent math-glyph loss
     #: #136: text layer shows COSMETIC encoding corruption (lost spaces, fused
     #: words) in the flag band. Content is trustworthy; the mark exists so the page
@@ -47,6 +48,10 @@ class PageState:
     has_unrecovered_symbol_glyphs: bool = False
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
+    #: GH-271: the opt-in corrupt-equation lane produced a region hybrid that
+    #: must ship even though it remains WARNING/audit_passed=False (syntax is
+    #: not a mathematical-fidelity oracle). Read only by final winner selection.
+    corrupt_math_hybrid: PageOutput | None = None
     judge_rejected: bool = False  # VLM judge rejected the best output
     #: GH-225: how many image references on this page had no provenance in
     #: the source document and were removed. Non-zero demotes the DOCUMENT
@@ -141,9 +146,14 @@ class PageState:
         native table-structure gate means the existing reading is semantically
         wrong, so the page must get a real repair pass instead of silently
         reverting to flat native text.
+        The explicit corrupt-math hybrid is handled but remains unverified: its
+        crop-backed region candidate must not trigger a generic whole-page repair
+        that can degrade surrounding native prose.
         The repair loop still terminates: the router excludes tried engines,
         so an audit-rejected page runs out of candidates and is skipped.
         """
+        if self.corrupt_math_hybrid is not None:
+            return False
         if self.is_born_digital and self.native_text:
             # GH-151 TICKET-B1: native_table_structure_defective is
             # DELIBERATELY absent from this condition. Adding it would force
@@ -269,6 +279,7 @@ class DocumentState:
                 ps.has_tables = pa.has_tables
                 ps.has_figures = pa.has_figures
                 ps.has_equations = pa.has_equations
+                ps.has_corrupt_math = pa.has_corrupt_math
                 ps.has_unmapped_math_glyphs = getattr(pa, "has_unmapped_math_glyphs", False)
                 ps.has_encoding_hygiene_suspect = getattr(pa, "has_encoding_hygiene_suspect", False)
                 ps.has_unrecovered_symbol_glyphs = getattr(
@@ -335,7 +346,9 @@ class DocumentState:
         texts: list[str] = []
         for i in range(1, self.handle.page_count + 1):
             p = self.pages[i]
-            if p.best_output and p.best_output.audit_passed:
+            if p.corrupt_math_hybrid is not None:
+                texts.append(p.corrupt_math_hybrid.text)
+            elif p.best_output and p.best_output.audit_passed:
                 # Prefer passing enhanced output where the native layer is known
                 # deficient; otherwise native text below is authoritative.
                 texts.append(p.best_output.text)
@@ -364,9 +377,12 @@ class DocumentState:
         return [i for i, p in sorted(self.pages.items()) if p.needs_repair]
 
     @property
-    def total_cost(self) -> float:
-        """Sum of cost across all engine runs."""
-        return sum(r.cost for r in self.engine_runs)
+    def total_cost(self) -> float | None:
+        """Sum known spend, or ``None`` when any executed run is unmetered."""
+        costs = [run.cost for run in self.engine_runs]
+        if any(cost is None for cost in costs):
+            return None
+        return sum(cost for cost in costs if cost is not None)
 
     @property
     def engines_used(self) -> list[str]:

@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from ocr_output_contract import run_fingerprint
 
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer, ScoringResult
@@ -20,6 +21,7 @@ from socr.core.result import (
 )
 from socr.core.state import DocumentState, PageState
 from socr.figures.extractor import ExtractionResult, ExtractedFigure
+from socr.math.recover import CORRUPT_MATH_PROMPT, CorruptMathRegion
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.pipeline.repair import RepairPlan, RepairRouter
 
@@ -2960,6 +2962,528 @@ class TestAgenticIntegration:
         # GLM (free) was tried and rejected, escalated to Gemini ($0.0002).
         assert result.cost == pytest.approx(0.0002)
         assert _good_text()[:25] in result.markdown  # gemini's output won
+
+    def test_agentic_corrupt_math_flag_uses_region_recovery_not_whole_page(self, tmp_path):
+        """GH-271: the opt-in crop guardrail must be live in agentic mode.
+
+        The paired runs differ only in ``recover_corrupt_math``.  With the flag
+        off, the known-deficient native page follows the existing whole-page
+        ladder and falls back to native when the judge rejects it.  With the flag
+        on, only the corrupt equation region is re-read; surrounding native prose
+        remains in the shipped hybrid output.
+        """
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+        from socr.pipeline.agentic import AcceptDecision
+
+        pdf = self._real_pdf(tmp_path, 1)
+        native = "Clean prose before.\nPðA or BÞ ¼ PðAÞ þ PðBÞ\nClean prose after."
+        assessment = DocumentAssessment(
+            path=pdf,
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text=native,
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                    has_equations=True,
+                    has_corrupt_math=True,
+                    word_count=100,
+                )
+            ],
+        )
+
+        class _RejectJudge:
+            def assess(self, output, provider):
+                return AcceptDecision(accept=False, reason="paired fixture rejection")
+
+        outcomes = {}
+        for enabled in (False, True):
+            run_dir = tmp_path / ("on" if enabled else "off")
+            crop_path = run_dir / pdf.stem / "equations" / "corrupt_math_p00001_r001.png"
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+            crop_path.write_bytes(b"retained crop fixture")
+            config = _make_config(
+                agentic=True,
+                native_first=True,
+                recover_corrupt_math=enabled,
+                ollama_host="http://math-host.test:11434",
+                judge_backend="heuristic",
+                enabled_engines=[EngineType.QWEN],
+            )
+            pipeline = UnifiedPipeline(config)
+            pipeline.bd_detector = MagicMock()
+            pipeline.bd_detector.detect.return_value = assessment
+            pipeline._available_engines_for_agentic = MagicMock(return_value=[PROFILE_QWEN_LOCAL])
+            pipeline._build_page_judge = MagicMock(return_value=_RejectJudge())
+            whole_page = _mock_engine_named("qwen", "rejected whole-page candidate")
+
+            with (
+                patch("socr.pipeline.orchestrator.get_engine", return_value=whole_page),
+                patch(
+                    "socr.math.recover.recover_math_regions",
+                    return_value=[
+                        CorruptMathRegion(
+                            rect=object(),
+                            source_text="PðA or BÞ ¼ PðAÞ þ PðBÞ",
+                            crop_path="equations/corrupt_math_p00001_r001.png",
+                            raw_latex=r"P(A \text{ or } B) = P(A) + P(B)",
+                            validation_ok=True,
+                            validation_reason="ok",
+                            model_id=config.math_model,
+                            attempts=1,
+                        )
+                    ],
+                ) as recover_regions,
+                patch.object(pipeline, "_resolve_crop_vlm_model", return_value=None),
+                patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            ):
+                result = pipeline.process(pdf, run_dir)
+
+            outcomes[enabled] = (result, whole_page, recover_regions, run_dir)
+
+        off_result, off_engine, off_recover, _off_dir = outcomes[False]
+        on_result, on_engine, on_recover, on_dir = outcomes[True]
+
+        off_engine.process_pages.assert_called_once()
+        off_recover.assert_not_called()
+        assert native in off_result.markdown
+
+        on_engine.process_pages.assert_not_called()
+        on_recover.assert_called_once()
+        assert on_recover.call_args.kwargs["host"] == "http://math-host.test:11434"
+        assert on_result.status == DocumentStatus.AUDIT_FAILED
+        assert on_result.audit_passed is False
+        assert on_result.engine == "native+math"
+        assert on_result.cost is None
+        assert on_result.error == "corrupt equation candidate unverified on page(s) 1"
+        assert len(on_result.pages) == 1
+        assert on_result.pages[0].page_num == 0
+        assert "Clean prose before." in on_result.markdown
+        assert "Clean prose after." in on_result.markdown
+        assert r"P(A \text{ or } B) = P(A) + P(B)" in on_result.markdown
+        assert "syntax only, non-authoritative" in on_result.markdown
+        assert "rejected whole-page candidate" not in on_result.markdown
+        assert "¼" not in on_result.markdown and "ð" not in on_result.markdown
+
+        import json
+
+        doc_dir = on_dir / pdf.stem
+        sidecar = json.loads((doc_dir / "pages" / "00001.json").read_text())
+        winner = sidecar["winning_output"]
+        fragment = (doc_dir / "pages" / "00001.md").read_text()
+        assert sidecar["terminal"] is True
+        assert sidecar["status"] == PageStatus.WARNING.value
+        assert winner["text"] == fragment
+        assert winner["status"] == PageStatus.WARNING.value
+        assert winner["audit_passed"] is False
+        assert winner["engine"] == "native+math"
+        assert winner["provider_id"] == "corrupt-math-region"
+        assert winner["provider_model"] == config.math_model
+        assert winner["cost_usd"] is None
+        manifest = json.loads((doc_dir / "manifest.json").read_text())
+        fingerprint = manifest["entries"]["1"]["fingerprint"]
+
+        assert fingerprint["engine"] == "native+math"
+        assert fingerprint["model_version"] == config.math_model
+        assert fingerprint["prompt_hash"] == run_fingerprint(
+            config.math_model,
+            "ollama-compatible",
+            None,
+            CORRUPT_MATH_PROMPT,
+        )
+        assert {event["kind"] for event in sidecar["audit_events"]} >= {
+            "corrupt_math_region_recovery",
+            "corrupt_math_hybrid_shipped",
+        }
+        shipped_event = next(
+            event
+            for event in sidecar["audit_events"]
+            if event["kind"] == "corrupt_math_hybrid_shipped"
+        )
+        assert shipped_event["data"] == {
+            "provider_id": "corrupt-math-region",
+            "provider_model": config.math_model,
+            "provider_backend": "ollama-compatible",
+            "cost_usd": None,
+            "crop_paths": ["equations/corrupt_math_p00001_r001.png"],
+            "audit_passed": False,
+        }
+        assert "rejected whole-page candidate" not in fragment
+
+        resume_state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        resume_state.apply_born_digital(assessment)
+        assert pipeline._load_terminal_page(resume_state, 1, on_dir) is None
+
+    @pytest.mark.parametrize("render_fails", [False, True], ids=["chart-saved", "chart-failed"])
+    def test_agentic_corrupt_math_chart_overlap_preserves_or_surfaces_chart(
+        self,
+        tmp_path,
+        render_fails,
+    ):
+        import json
+
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        pdf = self._real_pdf(tmp_path, 1)
+        native = "Clean prose.\nPðA or BÞ ¼ PðAÞ þ PðBÞ"
+        assessment = DocumentAssessment(
+            path=pdf,
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text=native,
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                    has_equations=True,
+                    has_corrupt_math=True,
+                    word_count=100,
+                )
+            ],
+        )
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            recover_corrupt_math=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.QWEN],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = assessment
+        pipeline._available_engines_for_agentic = MagicMock(return_value=[PROFILE_QWEN_LOCAL])
+        chart_path = tmp_path / pdf.stem / "figures" / "chart-page.png"
+        chart_path.parent.mkdir(parents=True, exist_ok=True)
+        chart_path.write_bytes(b"retained chart fixture")
+        render_chart = (
+            MagicMock(side_effect=OSError("chart directory unavailable"))
+            if render_fails
+            else MagicMock(return_value=chart_path)
+        )
+        region = CorruptMathRegion(
+            rect=object(),
+            source_text="PðA or BÞ ¼ PðAÞ þ PðBÞ",
+            crop_path="equations/corrupt_math_p00001_r001.png",
+            raw_latex=r"P(A \text{ or } B) = P(A) + P(B)",
+            validation_ok=True,
+            validation_reason="ok",
+            model_id=config.math_model,
+            attempts=1,
+        )
+
+        with (
+            patch("socr.math.recover.recover_math_regions", return_value=[region]),
+            patch.object(pipeline, "_is_chart_asset_page", return_value=True),
+            patch.object(pipeline, "_render_chart_page_png", render_chart),
+            patch.object(pipeline, "_resolve_crop_vlm_model", return_value=None),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        ):
+            result = pipeline.process(pdf, tmp_path)
+
+        sidecar = json.loads((tmp_path / pdf.stem / "pages" / "00001.json").read_text())
+        arbitration = next(
+            event for event in sidecar["audit_events"] if event["kind"] == "chart_math_arbitration"
+        )
+        expected_ref = "" if render_fails else "![Chart page 1](figures/chart-page.png)"
+        assert arbitration["data"] == {
+            "winner": "native+math" if render_fails else "native+math+chart_asset",
+            "chart_png_rendered": not render_fails,
+            "chart_png_path": expected_ref,
+        }
+        if render_fails:
+            assert "![Chart page 1]" not in result.markdown
+            assert any(
+                event["kind"] == "chart_asset_render_failed" for event in sidecar["audit_events"]
+            )
+        else:
+            assert expected_ref in result.markdown
+
+    def test_combined_legacy_engine_keeps_corrupt_math_fingerprint(self, tmp_path):
+        pdf = self._real_pdf(tmp_path, 1)
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        state.engine_runs.append(
+            EngineResult(
+                document_path=pdf,
+                engine="native+math+qwen",
+                status=DocumentStatus.AUDIT_FAILED,
+            )
+        )
+        pipeline = UnifiedPipeline(_make_config(math_model="fixture-math-model"))
+
+        inputs = pipeline._fingerprint_inputs(state)
+
+        assert inputs["native+math"] == (
+            "fixture-math-model",
+            "ollama-compatible",
+            None,
+            CORRUPT_MATH_PROMPT,
+        )
+
+    def test_legacy_corrupt_math_hybrid_does_not_trigger_whole_page_repair(self, tmp_path):
+        """GH-271: the shared legacy lane stays region-only after audit/repair."""
+        pdf = self._real_pdf(tmp_path, 1)
+        native = "Clean prose.\nPðA or BÞ ¼ PðAÞ þ PðBÞ"
+        assessment = DocumentAssessment(
+            path=pdf,
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text=native,
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                    has_equations=True,
+                    has_corrupt_math=True,
+                    word_count=100,
+                )
+            ],
+        )
+        config = _make_config(
+            agentic=False,
+            native_first=True,
+            recover_corrupt_math=True,
+            judge_hard_pages=False,
+            enabled_engines=[EngineType.QWEN],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = assessment
+        whole_page = _mock_engine_named("qwen", "whole-page repair must not run")
+        region = CorruptMathRegion(
+            rect=object(),
+            source_text="PðA or BÞ ¼ PðAÞ þ PðBÞ",
+            crop_path="equations/corrupt_math_p00001_r001.png",
+            raw_latex=r"P(A \text{ or } B) = P(A) + P(B)",
+            validation_ok=True,
+            validation_reason="ok",
+            model_id=config.math_model,
+            attempts=1,
+        )
+
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", return_value=whole_page),
+            patch("socr.math.recover.recover_math_regions", return_value=[region]),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        ):
+            result = pipeline.process(pdf, tmp_path)
+
+        whole_page.process_pages.assert_not_called()
+        assert result.status == DocumentStatus.AUDIT_FAILED
+        assert result.engine == "native+math"
+        assert result.cost is None
+        assert result.error == "corrupt equation candidate unverified on page(s) 1"
+        assert r"P(A \text{ or } B) = P(A) + P(B)" in result.markdown
+        assert "syntax only, non-authoritative" in result.markdown
+        import json
+
+        sidecar = json.loads((tmp_path / pdf.stem / "pages" / "00001.json").read_text())
+        assert sidecar["winning_output"]["engine"] == "native+math"
+        assert sidecar["winning_output"]["audit_passed"] is False
+
+    @pytest.mark.parametrize(
+        ("config_overrides", "reason_fragment"),
+        [
+            ({"strict_local": True}, "strict-local forbids remote model"),
+            ({"max_cost_per_page": 0.01}, "has no configured price"),
+            ({"cost_budget": 0.01}, "has no configured price"),
+        ],
+        ids=["strict-local", "page-cost-cap", "document-cost-cap"],
+    )
+    def test_agentic_corrupt_math_remote_model_policy_is_visible(
+        self,
+        tmp_path,
+        config_overrides,
+        reason_fragment,
+    ):
+        """GH-271: direct equation calls obey local-only and dollar policies."""
+        import json
+
+        pdf = self._real_pdf(tmp_path, 1)
+        native = "Native prose.\nPðA or BÞ ¼ PðAÞ þ PðBÞ"
+        assessment = DocumentAssessment(
+            path=pdf,
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text=native,
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                    has_equations=True,
+                    has_corrupt_math=True,
+                    word_count=100,
+                )
+            ],
+        )
+        config_values = {
+            "agentic": True,
+            "native_first": True,
+            "recover_corrupt_math": True,
+            "judge_backend": "heuristic",
+            "enabled_engines": [],
+        }
+        config_values.update(config_overrides)
+        config = _make_config(**config_values)
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = assessment
+        pipeline._available_engines_for_agentic = MagicMock(return_value=[])
+        region = CorruptMathRegion(
+            rect=object(),
+            source_text="PðA or BÞ ¼ PðAÞ þ PðBÞ",
+            crop_path="equations/corrupt_math_p00001_r001.png",
+            raw_latex="",
+            validation_ok=False,
+            validation_reason="fixture overwritten below",
+            model_id=config.math_model,
+            attempts=0,
+        )
+
+        def _policy_result(*args, model_disabled_reason="", **kwargs):
+            region.validation_reason = model_disabled_reason
+            return [region]
+
+        with (
+            patch(
+                "socr.math.recover.recover_math_regions",
+                side_effect=_policy_result,
+            ) as recover_regions,
+            patch.object(pipeline, "_resolve_crop_vlm_model", return_value=None),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        ):
+            result = pipeline.process(pdf, tmp_path)
+
+        reason = recover_regions.call_args.kwargs["model_disabled_reason"]
+        assert reason_fragment in reason
+        assert result.status == DocumentStatus.AUDIT_FAILED
+        sidecar = json.loads((tmp_path / pdf.stem / "pages" / "00001.json").read_text())
+        recovery_event = next(
+            event
+            for event in sidecar["audit_events"]
+            if event["kind"] == "corrupt_math_region_recovery"
+        )
+        assert recovery_event["data"]["model_call_skipped"] is True
+        assert recovery_event["data"]["model_disabled_reason"] == reason
+        assert recovery_event["data"]["regions"][0]["attempts"] == 0
+        assert sidecar["winning_output"]["cost_usd"] == 0.0
+
+    def test_agentic_corrupt_math_runs_without_whole_page_provider_and_fails_closed(self, tmp_path):
+        """GH-271: an empty whole-page ladder cannot suppress region evidence."""
+        pdf = self._real_pdf(tmp_path, 1)
+        native = "Native prose survives.\nPðA or BÞ ¼ PðAÞ þ PðBÞ\n \t\n"
+        assessment = DocumentAssessment(
+            path=pdf,
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text=native,
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                    has_equations=True,
+                    has_corrupt_math=True,
+                    word_count=100,
+                )
+            ],
+        )
+        config = _make_config(
+            agentic=True,
+            native_first=True,
+            recover_corrupt_math=True,
+            judge_backend="heuristic",
+            enabled_engines=[],
+        )
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = assessment
+        pipeline._available_engines_for_agentic = MagicMock(return_value=[])
+        whole_page = _mock_engine_named("qwen", "must not run")
+
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", return_value=whole_page),
+            patch("socr.math.recover.recover_math_regions", return_value=[]) as recover_regions,
+            patch.object(pipeline, "_resolve_crop_vlm_model", return_value=None),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        ):
+            result = pipeline.process(pdf, tmp_path)
+
+        recover_regions.assert_called_once()
+        whole_page.process_pages.assert_not_called()
+        assert result.status == DocumentStatus.AUDIT_FAILED
+        assert "Native prose survives." in result.markdown
+        assert "PðA or BÞ ¼ PðAÞ þ PðBÞ" in result.markdown
+        assert native in result.markdown
+        assert "corrupt equation unresolved" in result.markdown
+        assert result.error == "corrupt equation candidate unverified on page(s) 1"
+
+    @pytest.mark.parametrize(
+        ("config_overrides", "has_tables", "whole_page_runs"),
+        [
+            ({"native_only": True}, False, False),
+            ({"native_first": False}, False, True),
+            ({}, True, True),
+        ],
+        ids=["native-only", "no-native-first", "table-page"],
+    )
+    def test_agentic_corrupt_math_region_lane_respects_routing_safeguards(
+        self,
+        tmp_path,
+        config_overrides,
+        has_tables,
+        whole_page_runs,
+    ):
+        """GH-271: unsafe or explicitly disabled pages never use line splicing."""
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        pdf = self._real_pdf(tmp_path, 1)
+        native = "Native prose.\nPðA or BÞ ¼ PðAÞ þ PðBÞ"
+        assessment = DocumentAssessment(
+            path=pdf,
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text=native,
+                    confidence=0.9,
+                    needs_ocr_enhancement=True,
+                    has_tables=has_tables,
+                    has_equations=True,
+                    has_corrupt_math=True,
+                    word_count=100,
+                )
+            ],
+        )
+        config_values = {
+            "agentic": True,
+            "native_first": True,
+            "recover_corrupt_math": True,
+            "native_only": False,
+            "judge_backend": "heuristic",
+            "enabled_engines": [EngineType.QWEN],
+        }
+        config_values.update(config_overrides)
+        config = _make_config(**config_values)
+        pipeline = UnifiedPipeline(config)
+        pipeline.bd_detector = MagicMock()
+        pipeline.bd_detector.detect.return_value = assessment
+        pipeline._available_engines_for_agentic = MagicMock(return_value=[PROFILE_QWEN_LOCAL])
+        whole_page = _mock_engine_named("qwen", _good_text())
+
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", return_value=whole_page),
+            patch("socr.math.recover.recover_math_regions") as recover_regions,
+            patch.object(pipeline, "_resolve_crop_vlm_model", return_value=None),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        ):
+            result = pipeline.process(pdf, tmp_path)
+
+        recover_regions.assert_not_called()
+        if whole_page_runs:
+            whole_page.process_pages.assert_called_once()
+        else:
+            whole_page.process_pages.assert_not_called()
+            assert native in result.markdown
 
     def test_default_mode_writes_no_manifest(self, tmp_path):
         pdf = self._real_pdf(tmp_path, 1)

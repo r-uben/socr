@@ -518,6 +518,36 @@ class TestTextAssembly:
         # Native text should be the fallback
         assert state.text == "native fallback"
 
+    def test_corrupt_math_hybrid_is_the_nonpassing_born_digital_reading(self) -> None:
+        """The explicit region hybrid beats the deficient native snapshot."""
+        state = DocumentState(handle=_make_handle(1))
+        state.apply_born_digital(
+            DocumentAssessment(
+                path=Path("/tmp/fake.pdf"),
+                pages=[
+                    PageAssessment(
+                        page_num=1,
+                        is_born_digital=True,
+                        native_text="flattened native equation",
+                        confidence=0.9,
+                        needs_ocr_enhancement=True,
+                        has_corrupt_math=True,
+                    )
+                ],
+            )
+        )
+        hybrid = PageOutput(
+            page_num=1,
+            text="native prose plus crop-backed equation",
+            status=PageStatus.WARNING,
+            engine="native+math",
+            audit_passed=False,
+        )
+        state.pages[1].best_output = hybrid
+        state.pages[1].corrupt_math_hybrid = hybrid
+
+        assert state.text == hybrid.text
+
 
 # ---------------------------------------------------------------------------
 # pages_needing_repair
@@ -597,6 +627,18 @@ class TestTelemetry:
     def test_total_cost_zero_initially(self) -> None:
         state = DocumentState(handle=_make_handle(1))
         assert state.total_cost == 0.0
+
+    def test_total_cost_is_unknown_when_any_run_is_unmetered(self) -> None:
+        state = DocumentState(handle=_make_handle(1))
+        state.engine_runs.append(
+            EngineResult(
+                document_path=state.handle.path,
+                engine="native+math",
+                cost=None,
+            )
+        )
+
+        assert state.total_cost is None
 
     def test_engines_used_preserves_order_and_deduplicates(self) -> None:
         state = DocumentState(handle=_make_handle(1))
