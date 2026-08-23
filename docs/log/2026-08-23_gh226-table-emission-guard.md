@@ -92,5 +92,9 @@ with 2 expected xfails; full suite 2209 passed with 3 expected xfails; CI's
 pages with zero guard firings. Gemini 3.7 Flash independently reviewed the
 corrected diff and returned no findings.
 
-Next action: create and push one review-fix commit after showing its exact file
-set and message.
+Current live state: review-fix commit `d03c5bd` is pushed to PR #281. CI,
+typecheck, and Cubic are green; the PR is mergeable and awaiting merge. Issue
+#226 remains open until the PR lands.
+
+Next action: merge PR #281, then close GH-226 and remeasure/select the next
+ticket (GH-271 is the current measured follow-up candidate).
