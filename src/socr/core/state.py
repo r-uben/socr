@@ -79,6 +79,9 @@ class PageState:
     #: if they were the same field. Set once in ``apply_born_digital``, never
     #: re-derived downstream.
     native_table_structure_defective: bool = False
+    #: GH-226 exact raw-emission defect code (empty when the aggregate above
+    #: came from GH-151 grid shape instead).
+    native_table_emission_defect: str = ""
     #: GH-200: header-attribution HARD verdict (destroyed header band) found
     #: in the native markdown at extraction time. Same treatment as
     #: ``native_table_structure_defective`` immediately above: a SEPARATE
@@ -295,6 +298,9 @@ class DocumentState:
                     # TICKETS.md TICKET-B1.
                     ps.native_table_structure_defective = getattr(
                         pa, "native_table_structure_defective", False
+                    )
+                    ps.native_table_emission_defect = str(
+                        getattr(pa, "native_table_emission_defect", "") or ""
                     )
                     # GH-200: propagate the header-attribution defect flag.
                     # Same non-repair-forcing treatment as the line above.

@@ -539,6 +539,10 @@ class PageAssessment:
     #: this flag and MUST NEVER re-derive it from grid shape downstream — the
     #: same GH-147 A2 rule as ``native_table_lane_refused`` above.
     native_table_structure_defective: bool = False
+    #: GH-226 exact raw-emission defect code. The boolean above remains the
+    #: backward-compatible routing/demotion aggregate; this field prevents a
+    #: delimiter or LaTeX leak from being misreported as GH-151 grid shape.
+    native_table_emission_defect: str = ""
     #: GH-200: header-attribution HARD verdict on the native markdown (only
     #: checked when the grid-shape check above did NOT already fire -- the
     #: shape term is cheaper and, per the ratified spec, takes priority in
@@ -1231,6 +1235,7 @@ class BornDigitalDetector:
         native_table_lane_refused = False
         native_rotated_text_shredded = False
         native_table_structure_defective = False
+        native_table_emission_defect = ""
         native_table_header_unattributed = False
         if has_tables:
             if text_direction_is_rotated(direction):
@@ -1272,9 +1277,9 @@ class BornDigitalDetector:
                 from socr.tables import structure_check
 
                 reports = structure_check.check_markdown(native_text)
-                emission_defect = structure_check.table_emission_defect(native_text)
+                native_table_emission_defect = structure_check.table_emission_defect(native_text)
                 native_table_structure_defective = bool(
-                    emission_defect or structure_check.structural_gate_fires(reports)
+                    native_table_emission_defect or structure_check.structural_gate_fires(reports)
                 )
 
                 # GH-200: header-attribution term, disjunctive with the
@@ -1383,6 +1388,7 @@ class BornDigitalDetector:
             native_table_lane_refused=native_table_lane_refused,
             native_rotated_text_shredded=native_rotated_text_shredded,
             native_table_structure_defective=native_table_structure_defective,
+            native_table_emission_defect=native_table_emission_defect,
             native_table_header_unattributed=native_table_header_unattributed,
             notes=notes,
         )

@@ -148,6 +148,14 @@ _INDENTED_CODE = re.compile(r"^(?: {4,}|\t)")
 # ordinary cell math (``\\alpha``, ``\\frac``, ...) remains valid content.
 _LATEX_TABLE_COMMAND = re.compile(r"\\(?:multicolumn|multirow|cline|hline)\b")
 
+# GFM type-1 raw HTML blocks whose contents are literal/preformatted rather
+# than Markdown. Keep this emission-only: ``_markdown_content_lines`` is also
+# the provenance policy for GH-268's grid-selection decisions.
+_RAW_LITERAL_BLOCK_OPEN = re.compile(
+    r"^\s{0,3}<(?P<tag>pre|script|style|textarea)(?:[\s>]|$)", re.IGNORECASE
+)
+_INLINE_HTML_CODE = re.compile(r"<code(?:\s[^>]*)?>.*?</code\s*>", re.IGNORECASE)
+
 TABLE_EMISSION_NONE = ""
 TABLE_EMISSION_LATEX_LEAK = "table_latex_leak"
 TABLE_EMISSION_WIDTH_MISMATCH = "table_width_mismatch"
@@ -223,7 +231,70 @@ def _markdown_content_lines(markdown: str) -> list[str]:
     return ["" if _INDENTED_CODE.match(line) else line for line in lines]
 
 
-def table_emission_defect(markdown: str) -> str:
+def _strip_emission_literal_blocks(lines: list[str]) -> list[str]:
+    """Blank raw-HTML literal blocks without changing line positions."""
+    out: list[str] = []
+    tag: str | None = None
+    for line in lines:
+        if tag is None:
+            match = _RAW_LITERAL_BLOCK_OPEN.match(line)
+            if match is None:
+                out.append(line)
+                continue
+            tag = match.group("tag").lower()
+        out.append("")
+        if re.search(rf"</{re.escape(tag)}\s*>", line, re.IGNORECASE):
+            tag = None
+    return out
+
+
+def _strip_inline_code_spans(text: str) -> str:
+    """Remove Markdown/HTML inline code before scanning for live commands."""
+    chars = list(_INLINE_HTML_CODE.sub("", text))
+    i = 0
+    while i < len(chars):
+        if chars[i] != "`":
+            i += 1
+            continue
+        opener = i
+        while i < len(chars) and chars[i] == "`":
+            i += 1
+        opener_len = i - opener
+        cursor = i
+        closer: tuple[int, int] | None = None
+        while cursor < len(chars):
+            if chars[cursor] != "`":
+                cursor += 1
+                continue
+            run_start = cursor
+            while cursor < len(chars) and chars[cursor] == "`":
+                cursor += 1
+            if cursor - run_start == opener_len:
+                closer = (run_start, cursor)
+                break
+        if closer is None:
+            continue
+        for index in range(opener, closer[1]):
+            chars[index] = " "
+        i = closer[1]
+    return "".join(chars)
+
+
+def _contains_live_latex_table_command(cell: str) -> bool:
+    """Whether a cell contains an unescaped, non-literal table command."""
+    text = _strip_inline_code_spans(cell)
+    for match in _LATEX_TABLE_COMMAND.finditer(text):
+        backslashes = 0
+        cursor = match.start() - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return True
+    return False
+
+
+def table_emission_defect(markdown: str | None) -> str:
     """Return a deterministic raw-row defect in an emitted Markdown table.
 
     Unlike :func:`find_table_blocks`, this check retains the delimiter row.
@@ -238,7 +309,9 @@ def table_emission_defect(markdown: str) -> str:
     ignored.  Generic ragged bodies remain owned by the existing grid-shape
     policy (including GH-259's keep-and-flag disposition).
     """
-    lines = _markdown_content_lines(markdown)
+    if not markdown:
+        return TABLE_EMISSION_NONE
+    lines = _strip_emission_literal_blocks(_markdown_content_lines(markdown))
     i, n = 0, len(lines)
     while i < n:
         if not _is_table_line(lines[i]):
@@ -256,7 +329,7 @@ def table_emission_defect(markdown: str) -> str:
             and _row_border(block[0]) == _row_border(block[1])
             and any(cell.strip() for cell in rows[0])
         ):
-            if any(_LATEX_TABLE_COMMAND.search(line) for line in block):
+            if any(_contains_live_latex_table_command(cell) for row in rows for cell in row):
                 return TABLE_EMISSION_LATEX_LEAK
 
             content_widths = {len(row) for idx, row in enumerate(rows) if idx != 1}

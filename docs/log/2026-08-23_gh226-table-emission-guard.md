@@ -61,4 +61,36 @@ lexical guard; accidental parser behavior is not the invariant.
 - Independent review: Kimi found no parser/seam regression but surfaced the
   explicit hard-fail collateral above; Gemini 3.7 Flash returned no actionable
   findings on the current diff.
-- Next action: show the commit plan; no commit or push has been performed.
+- Initial checkpoint action: show the first-commit plan before pushing PR #281.
+
+## PR #281 review-fix round
+
+Cubic and Qodo found four distinct roots after the first commit: post-figure
+text could bypass the final guard through `saved_body`; literal command names
+inside inline code, escaped backslashes, and raw `<pre>` blocks could false
+fire; `PageOutput.text = None` could crash the guard; and born-digital audit
+provenance collapsed GH-226 defects into GH-151 `grid_shape`.
+
+Each finding was reproduced before the fix. The review round now:
+
+- masks emission-only literal regions without changing GH-268 grid-selection
+  policy;
+- normalizes missing text;
+- runs one shared guard over selected and exact post-transform page outputs;
+- keeps final Markdown, fragments, sidecars, manifest blobs, replay, document
+  status, and audit events consistent;
+- persists the exact native emission-defect code through sidecars and resume.
+
+The first full verification exposed two PP-2 tests whose spies pinned the
+established `_flush_page_sidecar` signature. After a second Kimi review, the
+signature was restored and exact final outputs are supplied through a scoped
+mapping cleared in `finally`.
+
+Final verification for this round: 25 focused tests; 243 compatibility tests
+with 2 expected xfails; full suite 2209 passed with 3 expected xfails; CI's
+`uvx ruff@0.16.0 format --check .` clean across 344 files; 40 preserved TR-3
+pages with zero guard firings. Gemini 3.7 Flash independently reviewed the
+corrected diff and returned no findings.
+
+Next action: create and push one review-fix commit after showing its exact file
+set and message.
