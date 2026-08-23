@@ -3284,112 +3284,7 @@ class UnifiedPipeline:
                     ps.best_output = unavailable
 
             elif is_native:
-                # Tier 1: born-digital trusted native text — free, no OCR.
-                # GH-151 TICKET-B1 / GH-200 / #211: a page reaches here
-                # carrying a table-distrust flag only via --native-only (the
-                # non-native-only ``is_native`` predicate already excludes
-                # has_tables pages). Demote instead of shipping SUCCESS: this
-                # is the no-reroute honouring of the flag, no extra OCR
-                # attempt is triggered here.
-                native_table_distrusted = bool(
-                    (self.config.native_only and ps.native_table_unverifiable)
-                    or getattr(ps, "native_table_structure_defective", False)
-                    or getattr(ps, "native_table_emission_defect", "")
-                    or getattr(ps, "native_table_header_unattributed", False)
-                )
-                native_out = PageOutput(
-                    page_num=page_num,
-                    text=ps.native_text,
-                    status=(PageStatus.WARNING if native_table_distrusted else PageStatus.SUCCESS),
-                    engine="native",
-                    audit_passed=not native_table_distrusted,
-                    failure_mode=(
-                        FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
-                        if native_table_distrusted
-                        else FailureMode.NONE
-                    ),
-                    cost_usd=0.0,
-                )
-                ps.attempts.append(native_out)
-                ps.best_output = native_out
-
-                # #92: born-digital page shipped as native text while carrying
-                # unmapped math glyphs (PUA / weak ToUnicode) that equation recovery
-                # did not reach. The prose is sound, but the math symbols are
-                # font-private and lost — surface it (never silent). Page stays
-                # SUCCESS (prose is usable); the event records the math-glyph gap.
-                if getattr(ps, "has_unmapped_math_glyphs", False) and not (
-                    self.config.detect_equations and self.config.recover_clean_equations
-                ):
-                    from socr.core.audit_log import AuditEvent
-
-                    state.events.append(
-                        AuditEvent(
-                            page_num=page_num,
-                            kind="native_math_unrecovered",
-                            engine="native",
-                            detail=(
-                                "born-digital native text shipped with unmapped math glyphs "
-                                "(private-use codepoints, weak ToUnicode); math symbols not "
-                                "recovered — enable --detect-equations --recover-clean-equations "
-                                "for region OCR -> LaTeX"
-                            ),
-                            data={
-                                "has_equations": ps.has_equations,
-                                "recover_clean_equations": self.config.recover_clean_equations,
-                            },
-                        )
-                    )
-
-                # #136: the text layer showed cosmetic encoding corruption (lost
-                # spaces, fused words) in the flag band. The page ships SUCCESS —
-                # the content is sound and a reader recovers "JournalofFinance" —
-                # but the mark must reach something that ships. Before this, the
-                # detector's "marked suspect so it is never silently relied on"
-                # went only into PageAssessment.notes, which nothing in the
-                # pipeline reads. Digit corruption never reaches here; it is
-                # routed to OCR at detection.
-                if getattr(ps, "has_encoding_hygiene_suspect", False):
-                    from socr.core.audit_log import AuditEvent
-
-                    state.events.append(
-                        AuditEvent(
-                            page_num=page_num,
-                            kind="native_encoding_hygiene_suspect",
-                            engine="native",
-                            detail=(
-                                "born-digital native text shipped from a suspect text layer "
-                                "(mid-word capitals / run-on tokens from dropped inter-word "
-                                "spaces); content is trusted, spacing is not"
-                            ),
-                            data={"class": "hygiene"},
-                        )
-                    )
-
-                # #217: the page's symbol font had no ToUnicode map and at least
-                # one glyph it draws has no verified recovery, so those
-                # characters are still the wrong ones. Unlike the hygiene class
-                # above, this class CAN corrupt a digit or an operator -- an
-                # unrecovered minus is a sign flip, a negative coefficient
-                # shipping as a large positive one -- so it must be visible on
-                # the page's own audit trail and not only in a log line.
-                if getattr(ps, "has_unrecovered_symbol_glyphs", False):
-                    from socr.core.audit_log import AuditEvent
-
-                    state.events.append(
-                        AuditEvent(
-                            page_num=page_num,
-                            kind="native_unrecovered_symbol_glyphs",
-                            engine="native",
-                            detail=(
-                                "born-digital native text shipped from a symbol font with no "
-                                "ToUnicode map; some drawn glyphs have no verified recovery "
-                                "and remain whatever the extractor produced (a minus can read "
-                                "as a digit, flipping a coefficient's sign)"
-                            ),
-                            data={"class": "symbol_glyph"},
-                        )
-                    )
+                self._agentic_native_page(state, page_num, ps)
             else:
                 # Route OCR page through the cost ladder.
                 remaining = None
@@ -3774,6 +3669,132 @@ class UnifiedPipeline:
         # _phase_assemble can propagate the reason into EngineResult.error.
         if halt_reason:
             state.pp2_halt_reason = halt_reason
+
+    def _agentic_native_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+    ) -> None:
+        """Finalize a trusted-native page inside the fused agentic loop.
+
+        R1 (behaviour-identical extraction): this is verbatim the
+        ``elif is_native:`` branch of ``_phase_agentic``'s page loop. It reads
+        no doc-scoped loop state -- only ``self.config``, ``state``, ``page_num``
+        and ``ps`` -- which is why it is the first slice of the decomposition
+        (see ``docs/log/2026-08-23_orchestrator-seams.md`` section 5).
+
+        Effects are mutations on objects passed in: appends the native
+        ``PageOutput`` to ``ps.attempts``, sets ``ps.best_output``, and appends
+        up to three audit events (#92 unmapped math glyphs, #136 encoding
+        hygiene, #217 unrecovered symbol glyphs) to ``state.events``.
+        """
+        # Tier 1: born-digital trusted native text — free, no OCR.
+        # GH-151 TICKET-B1 / GH-200 / #211: a page reaches here
+        # carrying a table-distrust flag only via --native-only (the
+        # non-native-only ``is_native`` predicate already excludes
+        # has_tables pages). Demote instead of shipping SUCCESS: this
+        # is the no-reroute honouring of the flag, no extra OCR
+        # attempt is triggered here.
+        native_table_distrusted = bool(
+            (self.config.native_only and ps.native_table_unverifiable)
+            or getattr(ps, "native_table_structure_defective", False)
+            or getattr(ps, "native_table_emission_defect", "")
+            or getattr(ps, "native_table_header_unattributed", False)
+        )
+        native_out = PageOutput(
+            page_num=page_num,
+            text=ps.native_text,
+            status=(PageStatus.WARNING if native_table_distrusted else PageStatus.SUCCESS),
+            engine="native",
+            audit_passed=not native_table_distrusted,
+            failure_mode=(
+                FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
+                if native_table_distrusted
+                else FailureMode.NONE
+            ),
+            cost_usd=0.0,
+        )
+        ps.attempts.append(native_out)
+        ps.best_output = native_out
+
+        # #92: born-digital page shipped as native text while carrying
+        # unmapped math glyphs (PUA / weak ToUnicode) that equation recovery
+        # did not reach. The prose is sound, but the math symbols are
+        # font-private and lost — surface it (never silent). Page stays
+        # SUCCESS (prose is usable); the event records the math-glyph gap.
+        if getattr(ps, "has_unmapped_math_glyphs", False) and not (
+            self.config.detect_equations and self.config.recover_clean_equations
+        ):
+            from socr.core.audit_log import AuditEvent
+
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="native_math_unrecovered",
+                    engine="native",
+                    detail=(
+                        "born-digital native text shipped with unmapped math glyphs "
+                        "(private-use codepoints, weak ToUnicode); math symbols not "
+                        "recovered — enable --detect-equations --recover-clean-equations "
+                        "for region OCR -> LaTeX"
+                    ),
+                    data={
+                        "has_equations": ps.has_equations,
+                        "recover_clean_equations": self.config.recover_clean_equations,
+                    },
+                )
+            )
+
+        # #136: the text layer showed cosmetic encoding corruption (lost
+        # spaces, fused words) in the flag band. The page ships SUCCESS —
+        # the content is sound and a reader recovers "JournalofFinance" —
+        # but the mark must reach something that ships. Before this, the
+        # detector's "marked suspect so it is never silently relied on"
+        # went only into PageAssessment.notes, which nothing in the
+        # pipeline reads. Digit corruption never reaches here; it is
+        # routed to OCR at detection.
+        if getattr(ps, "has_encoding_hygiene_suspect", False):
+            from socr.core.audit_log import AuditEvent
+
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="native_encoding_hygiene_suspect",
+                    engine="native",
+                    detail=(
+                        "born-digital native text shipped from a suspect text layer "
+                        "(mid-word capitals / run-on tokens from dropped inter-word "
+                        "spaces); content is trusted, spacing is not"
+                    ),
+                    data={"class": "hygiene"},
+                )
+            )
+
+        # #217: the page's symbol font had no ToUnicode map and at least
+        # one glyph it draws has no verified recovery, so those
+        # characters are still the wrong ones. Unlike the hygiene class
+        # above, this class CAN corrupt a digit or an operator -- an
+        # unrecovered minus is a sign flip, a negative coefficient
+        # shipping as a large positive one -- so it must be visible on
+        # the page's own audit trail and not only in a log line.
+        if getattr(ps, "has_unrecovered_symbol_glyphs", False):
+            from socr.core.audit_log import AuditEvent
+
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="native_unrecovered_symbol_glyphs",
+                    engine="native",
+                    detail=(
+                        "born-digital native text shipped from a symbol font with no "
+                        "ToUnicode map; some drawn glyphs have no verified recovery "
+                        "and remain whatever the extractor produced (a minus can read "
+                        "as a digit, flipping a coefficient's sign)"
+                    ),
+                    data={"class": "symbol_glyph"},
+                )
+            )
 
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
