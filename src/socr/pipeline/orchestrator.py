@@ -3266,23 +3266,7 @@ class UnifiedPipeline:
                 )
 
             elif page_num in no_ocr_provider_pages:
-                # Born-digital fallbacks were materialized during provider setup.
-                # A scan has no native text, so make the missing provider explicit.
-                if ps.best_output is None:
-                    from socr.core.manifest import page_failed_marker
-
-                    unavailable = PageOutput(
-                        page_num=page_num,
-                        text=page_failed_marker(page_num),
-                        status=PageStatus.ERROR,
-                        engine="",
-                        failure_mode=FailureMode.MODEL_UNAVAILABLE,
-                        error="no OCR providers available",
-                        audit_passed=False,
-                    )
-                    ps.attempts.append(unavailable)
-                    ps.best_output = unavailable
-
+                self._agentic_no_provider_page(page_num, ps)
             elif is_native:
                 self._agentic_native_page(state, page_num, ps)
             else:
@@ -3669,6 +3653,34 @@ class UnifiedPipeline:
         # _phase_assemble can propagate the reason into EngineResult.error.
         if halt_reason:
             state.pp2_halt_reason = halt_reason
+
+    def _agentic_no_provider_page(self, page_num: int, ps: PageState) -> None:
+        """Stamp a page that had no OCR provider available.
+
+        R2 (behaviour-identical extraction): verbatim the
+        ``elif page_num in no_ocr_provider_pages:`` branch of ``_phase_agentic``'s
+        page loop. Born-digital fallbacks were already materialized during
+        provider setup; a scan has no native text, so the missing provider is
+        made explicit here rather than left silent.
+
+        Reads no doc-scoped loop state and does not touch ``state``.
+        """
+        # Born-digital fallbacks were materialized during provider setup.
+        # A scan has no native text, so make the missing provider explicit.
+        if ps.best_output is None:
+            from socr.core.manifest import page_failed_marker
+
+            unavailable = PageOutput(
+                page_num=page_num,
+                text=page_failed_marker(page_num),
+                status=PageStatus.ERROR,
+                engine="",
+                failure_mode=FailureMode.MODEL_UNAVAILABLE,
+                error="no OCR providers available",
+                audit_passed=False,
+            )
+            ps.attempts.append(unavailable)
+            ps.best_output = unavailable
 
     def _agentic_native_page(
         self,
