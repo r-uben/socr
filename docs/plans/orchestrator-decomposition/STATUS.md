@@ -81,9 +81,17 @@ A two-model evidence-gated triage of the 56 unboarded open issues ran 2026-08-23
   cli 4, proposals 4, figures 3, born-digital 2, agentic 2, one each of pipeline, docs,
   review, structure, fabrication.
 
-**Ordering those 51 is deliberately deferred until D1 lands**, because the decomposition
-determines which of them can run in parallel. Today almost all of them serialize on one
-file; that is the actual reason the backlog cannot be parallelized.
+### Correction (2026-08-23, same day): the block is partial, not total
+
+An earlier draft of this file said ordering all 51 was deferred until D1. That was too
+strong, and the measurement contradicts it:
+
+- **30 of the 51 cite `orchestrator.py` in their triage evidence.** These genuinely
+  serialize on the file and wait for D1.
+- **21 do not.** They are orderable and workable today, independent of the refactor.
+
+The ordered 21 are in `TICKETS.md` under "W — work available now". The remaining 30 are
+still D2's job, and D2 is still blocked on D1.
 
 ## Known-stale planning artifacts (do not schedule from these)
 
