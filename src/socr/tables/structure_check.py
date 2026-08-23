@@ -62,7 +62,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from socr.tables.reconcile import find_table_blocks
+from socr.tables.reconcile import (
+    TABLE_EMISSION_LATEX_LEAK,
+    TABLE_EMISSION_WIDTH_MISMATCH,
+    find_table_blocks,
+    table_emission_defect,
+)
 
 FINDING_RAGGED = "ragged"
 FINDING_ORPHAN_ROWS = "orphan_rows"
@@ -229,6 +234,8 @@ def structural_gate_fires(reports: Sequence[GridStructureReport]) -> bool:
 DEFECT_NONE = ""
 DEFECT_GRID_SHAPE = "grid_shape"
 DEFECT_HEADER_UNATTRIBUTED = "header_unattributed"
+DEFECT_TABLE_LATEX_LEAK = TABLE_EMISSION_LATEX_LEAK
+DEFECT_TABLE_WIDTH_MISMATCH = TABLE_EMISSION_WIDTH_MISMATCH
 
 
 def table_output_defect(
@@ -238,16 +245,19 @@ def table_output_defect(
 ) -> str:
     """Whether *output_md* (the text about to ship) has a structural defect.
 
-    GH-200, extended by GH-212. A disjunction in cost order:
+    GH-200, extended by GH-212 and GH-226. A disjunction in cost order:
 
-    1. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
+    1. ``table_emission_defect`` on raw Markdown rows, before the delimiter is
+       discarded: residual LaTeX table structure or a delimiter disagreeing
+       with an otherwise rectangular header/body grid. String-only, no I/O.
+    2. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
        ragged OR detached_label_rows, unchanged -- see ``structural_gate_fires``
        docstring). String-only, no I/O.
-    2. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only
+    3. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only
        when the shape term did not already fire, and only when the caller
        supplied both native words and the page's drawn horizontal rules.
 
-    **On term 2 and the four reverts that precede it.** Earlier implementations
+    **On term 3 and the four reverts that precede it.** Earlier implementations
     of a header-attribution disjunct (GH-151 T3's token-pattern rule,
     ``062bdef``'s year-band rule, the positional rule, and the normalized
     comparison) each failed in one of two directions: abstaining on the
@@ -280,6 +290,10 @@ def table_output_defect(
     misses 27 pages TR-3 catches). Pure; no mutation, no model calls -- the
     caller precomputes ``rules``, so this never touches a page object.
     """
+    emission_defect = table_emission_defect(output_md)
+    if emission_defect:
+        return emission_defect
+
     reports = check_markdown(output_md)
     if structural_gate_fires(reports):
         return DEFECT_GRID_SHAPE

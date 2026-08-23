@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # (native text bypasses OutputNormalizer), so pages cached under v2 must reprocess.
 MANIFEST_SCHEMA_VERSION = "1"
 NORMALIZER_VERSION = "3"
-ASSEMBLY_VERSION = "2"
+ASSEMBLY_VERSION = "3"
 
 # Legacy page separator. socr now assembles bodies and replays with the
 # contract's ``assemble_pages`` (``## Page N`` headers); this constant is kept
@@ -78,6 +78,9 @@ _PAGE_FAILED_RE = re.compile(r"^\[page \d+ failed: no usable OCR output\]$")
 # with the marker, possibly with trailing whitespace and an image ref).  We match
 # on the FIRST LINE only so both formats are recognised by is_page_failed_marker.
 _PAGE_FAILED_ANY_RE = re.compile(r"^\[page \d+ failed:.*", re.MULTILINE)
+_TABLE_EMISSION_FAILED_RE = re.compile(
+    r"^\[page (?P<page>\d+) failed: invalid table emission — (?P<defect>[^\]]+)\]$"
+)
 
 
 def page_failed_marker(page_num: int) -> str:
@@ -757,7 +760,7 @@ def structure_class_native_fallback_applies(p) -> bool:
     return structure_class_grid_winner(p) is None
 
 
-def _winning_page_output(
+def _select_page_output(
     state: DocumentState,
     page_num: int,
     whole_doc: _WholeDoc | None = None,
@@ -1205,6 +1208,75 @@ def _winning_page_output(
     )
 
 
+def _apply_table_emission_guard(output: PageOutput, page_num: int) -> PageOutput:
+    """Return *output* normalized and hard-failed on a GH-226 defect."""
+    from socr.tables.reconcile import table_emission_defect
+
+    text = output.text or ""
+    if text is not output.text:
+        output = replace(output, text=text)
+    marker = _TABLE_EMISSION_FAILED_RE.fullmatch(text.strip())
+    defect = marker.group("defect") if marker else table_emission_defect(text)
+    if not defect:
+        return output
+
+    detail = f"invalid final table emission: {defect}"
+    return replace(
+        output,
+        text=(
+            text.strip()
+            if marker
+            else f"[page {page_num} failed: invalid table emission — {defect}]"
+        ),
+        status=PageStatus.ERROR,
+        audit_passed=False,
+        failure_mode=FailureMode.TABLE_EMISSION_INVALID,
+        error=detail,
+        audit_notes=[*output.audit_notes, detail],
+    )
+
+
+def _winning_page_output(
+    state: DocumentState,
+    page_num: int,
+    whole_doc: _WholeDoc | None = None,
+) -> PageOutput:
+    """Select and final-validate the exact page text that will ship.
+
+    GH-226 puts the last table-emission guard here because this seam is shared
+    by canonical fragments, assembled Markdown, manifest blobs, and replay,
+    including whole-document CLI attempts that never pass through the agentic
+    acceptance gate. Earlier checks still drive repair and routing; this one is
+    the fail-closed backstop after those choices are exhausted.
+    """
+    return _apply_table_emission_guard(
+        _select_page_output(state, page_num, whole_doc),
+        page_num,
+    )
+
+
+def finalized_page_outputs(
+    state: DocumentState,
+    saved_body: str | None = None,
+) -> list[PageOutput]:
+    """Page outputs matching the exact body that ships, with final guards.
+
+    ``saved_body`` is post-transform Markdown (phantom-ref cleanup, figures,
+    captions). When supplied, its per-page text overrides the selected text
+    *before* the same GH-226 guard is applied, closing the manifest/replay and
+    post-figure bypass without duplicating validation policy.
+    """
+    saved_pages = split_native_pages(saved_body) if saved_body is not None else None
+    whole_doc = _whole_doc_page_texts(state)
+    outputs: list[PageOutput] = []
+    for page_num in range(1, state.handle.page_count + 1):
+        output = _select_page_output(state, page_num, whole_doc)
+        if saved_pages is not None and page_num - 1 < len(saved_pages):
+            output = replace(output, text=saved_pages[page_num - 1])
+        outputs.append(_apply_table_emission_guard(output, page_num))
+    return outputs
+
+
 def _strip_leading_page_marker(text: str) -> str:
     """Drop a leading ``## Page N`` header from a per-page text, if present.
 
@@ -1231,11 +1303,7 @@ def canonical_page_texts(state: DocumentState) -> list[str]:
     pre-existing leading ``## Page N`` header stripped so ``assemble_pages`` adds
     exactly one canonical header per page. ``split_native_pages`` round-trips it.
     """
-    whole_doc = _whole_doc_page_texts(state)
-    return [
-        _strip_leading_page_marker(_winning_page_output(state, page_num, whole_doc).text)
-        for page_num in range(1, state.handle.page_count + 1)
-    ]
+    return [_strip_leading_page_marker(page.text) for page in finalized_page_outputs(state)]
 
 
 def _base_engine_name(engine: str) -> str:
@@ -1301,8 +1369,9 @@ def build_manifest(
         agentic_ladder=state.agentic_ladder if state.agentic_ladder else None,
         agentic_judge_model=getattr(state, "agentic_judge_model", ""),
     )
-    # Recover per-page text from a whole-document CLI attempt (page_num=0) so the
-    # manifest never freezes empty pages when per-page best_outputs are absent.
+    # Recover/finalize every exact page body once so the manifest, cache and
+    # replay cannot diverge from the saved Markdown or its failure status.
+    frozen_pages = finalized_page_outputs(state, saved_body)
     whole_doc = _whole_doc_page_texts(state)
     # Validate the recovered split count against the real page count: a mismatch
     # (the '---'-only legacy case, or dropped/merged markers) would silently
@@ -1318,14 +1387,7 @@ def build_manifest(
     # Model version per engine, so a model swap/drift invalidates the fingerprint.
     model_versions = {r.engine: r.model_version for r in state.engine_runs if r.model_version}
     for page_num in range(1, handle.page_count + 1):
-        page = _winning_page_output(state, page_num, whole_doc)
-        # Freeze the EXACT on-disk page text when the saved body is supplied, so
-        # replay reproduces the saved .md (post-transform); fall back to the
-        # winning page text otherwise. Engine/fingerprint metadata is unchanged.
-        if saved_pages is not None and page_num - 1 < len(saved_pages):
-            from dataclasses import replace as _dc_replace
-
-            page = _dc_replace(page, text=saved_pages[page_num - 1])
+        page = frozen_pages[page_num - 1]
         blob_ref = blobs.put_page(page)
         image_hash = ""
         if page.engine and page.engine != "native":

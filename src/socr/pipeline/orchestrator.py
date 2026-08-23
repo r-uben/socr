@@ -207,6 +207,7 @@ class UnifiedPipeline:
     # fingerprint call on such an instance must not explode on a missing
     # attribute. Assignment in ``_resolve_judge_model`` shadows it per instance.
     _judge_model_cache: str | None | bool = False
+    _final_winning_outputs: dict[int, PageOutput] | None = None
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
@@ -224,6 +225,7 @@ class UnifiedPipeline:
         # the file's parent). Threaded into every contract key so per-doc output
         # mirrors the input subtree relative to it, not the bare basename.
         self._scan_root: Path | None = None
+        self._final_winning_outputs = None
         # Set by process_batch: the contract RunOutcome that drives the exit code.
         from ocr_output_contract import RunOutcome
 
@@ -825,6 +827,10 @@ class UnifiedPipeline:
                 "native table grid structurally defective (ragged widths and/or a "
                 "detached label row)"
             ),
+            "table_latex_leak": "native table Markdown contains residual LaTeX table syntax",
+            "table_width_mismatch": (
+                "native table delimiter width disagrees with its rectangular content"
+            ),
             "header_unattributed": (
                 "native table header band not attributable to any emitted header cell "
                 "(destroyed, not merely misplaced)"
@@ -834,7 +840,10 @@ class UnifiedPipeline:
             defects: list[str] = []
             if self.config.native_only and getattr(pa, "has_unverifiable_table_region", False):
                 defects.append("unverifiable_table_region")
-            if getattr(pa, "native_table_structure_defective", False):
+            emission_defect = str(getattr(pa, "native_table_emission_defect", "") or "")
+            if emission_defect:
+                defects.append(emission_defect)
+            elif getattr(pa, "native_table_structure_defective", False):
                 defects.append("grid_shape")
             if getattr(pa, "native_table_header_unattributed", False):
                 defects.append("header_unattributed")
@@ -2512,6 +2521,7 @@ class UnifiedPipeline:
             for name in (
                 "native_table_structure_failed",
                 "native_table_structure_defective",  # GH-151 TICKET-B1
+                "native_table_emission_defect",  # GH-226 exact provenance
                 "native_table_header_unattributed",  # GH-200
                 "native_table_unverifiable",
                 "scanned_table_evidence_failed",
@@ -2521,7 +2531,7 @@ class UnifiedPipeline:
         if not cleared:
             return
         for name in cleared:
-            setattr(ps, name, False)
+            setattr(ps, name, "" if name == "native_table_emission_defect" else False)
         state.events.append(
             AuditEvent(
                 page_num=page_num,
@@ -3284,6 +3294,7 @@ class UnifiedPipeline:
                 native_table_distrusted = bool(
                     (self.config.native_only and ps.native_table_unverifiable)
                     or getattr(ps, "native_table_structure_defective", False)
+                    or getattr(ps, "native_table_emission_defect", "")
                     or getattr(ps, "native_table_header_unattributed", False)
                 )
                 native_out = PageOutput(
@@ -3451,20 +3462,19 @@ class UnifiedPipeline:
                 # GH-200: the GH-56 repair above MUTATES ps.best_output.text
                 # after the judge already accepted it -- so the shipped text
                 # is not the text the structural gate saw. Re-run the
-                # grid-shape term ONLY (string-only, no geometry, free) on
-                # whatever text ships now; if repair produced a ragged/
-                # detached-label grid, demote in place. Routing is finished
+                # string-only terms on whatever text ships now; if repair
+                # produced a ragged/detached-label grid, a raw delimiter-width
+                # mismatch, or a residual LaTeX table command, demote in place.
+                # Routing is finished
                 # by this point -- do NOT reroute, just stop shipping it as a
                 # pass. Exactly one audit event per page: this is the sole
                 # recheck site after routing, distinct from the judge's own
                 # (pre-repair) escalation event.
                 if ps.best_output and ps.best_output.text and ps.best_output.audit_passed:
-                    from socr.tables.structure_check import (
-                        check_markdown,
-                        structural_gate_fires,
-                    )
+                    from socr.tables.structure_check import table_output_defect
 
-                    if structural_gate_fires(check_markdown(ps.best_output.text)):
+                    _post_route_defect = table_output_defect(ps.best_output.text, None, None)
+                    if _post_route_defect:
                         from socr.core.audit_log import AuditEvent
 
                         ps.best_output.audit_passed = False
@@ -3476,8 +3486,14 @@ class UnifiedPipeline:
                                 page_num=page_num,
                                 kind="table_structure_failed",
                                 engine=ps.best_output.engine or "",
-                                detail="grid_shape defect found after post-route header repair",
-                                data={"defect": "grid_shape", "site": "post_route_recheck"},
+                                detail=(
+                                    f"{_post_route_defect} defect found after "
+                                    "post-route header repair"
+                                ),
+                                data={
+                                    "defect": _post_route_defect,
+                                    "site": "post_route_recheck",
+                                },
                             )
                         )
 
@@ -4661,6 +4677,11 @@ class UnifiedPipeline:
                         latest.failure_mode = FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
                         if getattr(page_state, "native_table_header_unattributed", False):
                             detail = "native table header not attributable (GH-200 gate)"
+                        elif getattr(page_state, "native_table_emission_defect", ""):
+                            detail = (
+                                "native table emission defective: "
+                                f"{page_state.native_table_emission_defect} (GH-226 gate)"
+                            )
                         elif page_state.native_table_structure_defective:
                             detail = "native table grid structurally defective (GH-151 B1 gate)"
                         else:
@@ -5205,7 +5226,10 @@ class UnifiedPipeline:
         )
 
         whole_doc = _whole_doc_page_texts(state)
-        winning_out = _winning_page_output(state, page_num, whole_doc) if ps else None
+        final_outputs = self._final_winning_outputs or {}
+        winning_out = final_outputs.get(page_num)
+        if winning_out is None:
+            winning_out = _winning_page_output(state, page_num, whole_doc) if ps else None
         winning_dict = winning_out.to_dict() if winning_out is not None else {}
         # MAJOR 7(b) on #269: persisted so a RESUMED run can re-derive
         # ``structure_class_model_pages`` membership without the full attempt
@@ -5297,6 +5321,9 @@ class UnifiedPipeline:
             # GH-151 TICKET-B1: grid-shape defect found at extraction time.
             "native_table_structure_defective": (
                 bool(getattr(ps, "native_table_structure_defective", False)) if ps else False
+            ),
+            "native_table_emission_defect": (
+                str(getattr(ps, "native_table_emission_defect", "")) if ps else ""
             ),
             # GH-200: header-attribution HARD verdict found at extraction time.
             "native_table_header_unattributed": (
@@ -5664,6 +5691,9 @@ class UnifiedPipeline:
             # survives resume instead of evaporating on a resumed run.
             ps.native_table_structure_defective = bool(
                 meta.get("native_table_structure_defective", False)
+            )
+            ps.native_table_emission_defect = str(
+                meta.get("native_table_emission_defect", "") or ""
             )
             # GH-200: restore the header-attribution defect flag so it
             # survives resume instead of evaporating on a resumed run.
@@ -6612,6 +6642,70 @@ class UnifiedPipeline:
             # replacing the provisional pre-figures entry.
             self._write_metadata(state, final_result, output_dir, has_text)
 
+        # GH-226 review round: validate the EXACT post-transform body, not only
+        # the pre-figure winner. Captions and other final transforms are model
+        # output too; the saved Markdown, authoritative fragments, sidecars and
+        # replay blobs must all freeze the same guarded page text and status.
+        final_page_outputs: list[PageOutput] | None = None
+        if has_text:
+            from ocr_output_contract import assemble_pages, split_native_pages
+
+            from socr.core.manifest import finalized_page_outputs
+
+            final_bodies = split_native_pages(final_text)
+            if len(final_bodies) == state.handle.page_count:
+                final_page_outputs = finalized_page_outputs(state, final_text)
+                emission_failures = [
+                    page
+                    for page in final_page_outputs
+                    if page.failure_mode is FailureMode.TABLE_EMISSION_INVALID
+                ]
+                if emission_failures:
+                    from socr.core.audit_log import AuditEvent
+
+                    final_text = assemble_pages(
+                        [page.text for page in final_page_outputs],
+                        page_numbers=list(range(1, state.handle.page_count + 1)),
+                    )
+                    final_result.pages[0].text = final_text
+                    final_result.status = DocumentStatus.AUDIT_FAILED
+                    final_result.audit_passed = False
+                    state.status = DocumentStatus.AUDIT_FAILED
+                    failed_nums = [page.page_num for page in emission_failures]
+                    note = "invalid final table emission on page(s) " + ", ".join(
+                        str(page_num) for page_num in failed_nums
+                    )
+                    final_result.error = (
+                        f"{final_result.error}; {note}" if final_result.error else note
+                    )
+                    existing = {
+                        (event.page_num, (getattr(event, "data", None) or {}).get("site"))
+                        for event in state.events
+                        if getattr(event, "kind", "") == "table_structure_failed"
+                    }
+                    for page in emission_failures:
+                        if (page.page_num, "final_body") in existing:
+                            continue
+                        defect = page.error.rsplit(": ", 1)[-1]
+                        state.events.append(
+                            AuditEvent(
+                                page_num=page.page_num,
+                                kind="table_structure_failed",
+                                engine=page.engine or "",
+                                detail=f"{defect} defect found in exact final page body",
+                                data={"defect": defect, "site": "final_body"},
+                            )
+                        )
+                    self._save_markdown(state, final_text, output_dir)
+                    self._write_metadata(state, final_result, output_dir, has_text)
+            else:
+                logger.warning(
+                    "GH-226 final-body guard: split yielded %d page(s), expected %d; "
+                    "leaving body unchanged for existing mismatch handling",
+                    len(final_bodies),
+                    state.handle.page_count,
+                )
+
         # PP-4: single authoritative fragment rewrite from the FINAL text (post-
         # strip_phantom_images, post-inline-figures for figure docs, plain post-
         # strip for figure-free docs).  Runs unconditionally so every pages/NNN.md
@@ -6620,6 +6714,18 @@ class UnifiedPipeline:
         # ALL pages.
         if has_text:
             self._rewrite_all_fragments(state, output_dir, final_text)
+
+        # The earlier terminal sidecar flush intentionally precedes the figure
+        # phase. Rewrite it once more from the exact final outputs so captions,
+        # failure markers, statuses and the final-body audit event cannot diverge
+        # from fragments/manifest/replay.
+        if has_text and final_page_outputs is not None:
+            self._final_winning_outputs = {page.page_num: page for page in final_page_outputs}
+            try:
+                for page in final_page_outputs:
+                    self._flush_page_sidecar(state, page.page_num, output_dir)
+            finally:
+                self._final_winning_outputs = None
 
         # Reproducibility manifest (opt-in; default-on in agentic mode). Pass the
         # FINAL saved body so the manifest blobs (and thus replay) reproduce the

@@ -55,6 +55,11 @@ class FailureMode(str, Enum):
     LOW_WORD_COUNT = "low_word_count"
     TRUNCATED = "truncated"
     NATIVE_TABLE_STRUCTURE_FAILED = "native_table_structure_failed"
+    #: GH-226: the selected page text still contains table syntax that cannot
+    #: be represented faithfully as GFM, or its raw delimiter disagrees with
+    #: an otherwise rectangular grid. This is assigned only at final winner
+    #: validation, after repair/routing has finished.
+    TABLE_EMISSION_INVALID = "table_emission_invalid"
     #: #259: the model DID produce a page, but no ladder rung was accepted
     #: and the page carries a native-table-distrust flag. The model output
     #: stays the winner (native cannot arbitrate a grid it could not parse);
