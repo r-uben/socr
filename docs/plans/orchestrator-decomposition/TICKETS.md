@@ -2,12 +2,23 @@
 
 Status keys: `READY`, `NEEDS-DESIGN`, `BLOCKED`, `WIP`, `DONE`.
 
-**Nothing here is dispatchable except D1.** This is deliberate. The seams are unknown, so
-any implementation ticket written today would be guessing at its own write set.
+**Dispatchable today: R1 and R11.** D1 has landed, so the refactor tickets below now have
+defensible write sets. D2 remains blocked on nothing but scheduling.
 
 ## D1 — Propose the seams in the two large functions
 
-Status: `READY`
+Status: `DONE` (2026-08-23) — `docs/log/2026-08-23_orchestrator-seams.md`, PR #284.
+
+Findings that changed the plan: `_phase_agentic` is five mutually exclusive lanes plus a
+shared tail, not a linear pipeline; `_phase_assemble` is an eleven-bucket page-disposition
+taxonomy written out at three sites. `CLAUDE.md`'s description of the agentic loop was
+wrong on two counts (no figure step in the loop; `route` is one lane of five, not a
+universal first step). #162 was confirmed to live in `pipeline/agentic.py`, outside every
+proposed seam.
+
+Original ticket text follows, unchanged.
+
+Status when written: `READY`
 Suggested agent: `socr-designer` (read-only; writes only `docs/log/`)
 Depends on: nothing
 Write ownership: `docs/log/2026-08-DD_orchestrator-seams.md` only. **No source edits.**
@@ -63,7 +74,7 @@ not pick unilaterally.
 
 ## D2 — Order the 51 live issues against the decomposition
 
-Status: `BLOCKED` (on D1)
+Status: `READY` (D1 landed 2026-08-23)
 Depends on: D1
 
 Once the seams are known, group the 51 remaining open issues by which post-decomposition
@@ -71,13 +82,123 @@ component they touch, and identify which sets become parallelizable. Today they 
 serialize on `orchestrator.py`; the point of D1 is to break that. This ticket produces the
 ordering that was originally asked for.
 
-## Refactor tickets
+## Refactor tickets — R1..R11
 
-Status: `BLOCKED` (on D1)
+Status: `READY` for R1; the rest gated as noted.
+Source of truth for every line range: `docs/log/2026-08-23_orchestrator-seams.md` (D1).
 
-Not written yet, by design. They cannot have a defensible write set until D1 names the
-seams. Each will carry the sequencing rule from `STATUS.md`: **behaviour-identical, no bug
+**Two passes, decided 2026-08-23.** Pass one gives every piece a name and leaves it in
+`orchestrator.py`. Pass two moves out only the pieces that move cleanly. The file will end
+up roughly 470 lines smaller, not 2,000 — see R11.
+
+Rationale for the order: you cannot safely move a 1,101-line function into a new module,
+because the move and the split happen in one commit and a broken test cannot be attributed
+to either. A 107-line one moves trivially. Pass one manufactures the units that pass two
+can move.
+
+Every R ticket carries the sequencing rule from `STATUS.md`: **behaviour-identical, no bug
 fixes riding along.**
+
+### Pass one — name the pieces in place (methods on `UnifiedPipeline`)
+
+| # | Ticket | Lines | Doc-scoped inputs | Status |
+|---|---|---|---|---|
+| R1 | Extract the trusted-native lane | 3286–3392 (107) | **none** | `READY` |
+| R2 | Extract the no-provider lane | 3268–3285 (18) | none | `BLOCKED` on R1 |
+| R3 | Extract the chart-asset lane | 3154–3267 (114) | `_chart_figures_dir` | `BLOCKED` on R1 |
+| R4 | Extract the corrupt-equation lane | 3065–3153 (89) | `_chart_figures_dir`, `chart_winner_pages` | `BLOCKED` on R1 |
+| R5 | Extract the OCR route lane | 3393–3628 (236) | 5 in, 2 out | **`HELD`** — see below |
+| R6 | Extract the shared per-page tail | 3629–3762 (134) | 8, one read-write | `BLOCKED` on R2–R4 |
+| R7 | Extract the eleven bucket derivations | 5922–6122 (201) | `state`, `self.config` only | `BLOCKED` on R1 |
+| R8 | Extract bucket → audit-event emission | 6211–6482 (272, part) | R7's return value | `BLOCKED` on R7 |
+| R9 | Extract bucket → CLI summary | 6211–6482 (272, part) | R7's return value | `BLOCKED` on R7 |
+
+**R1 is the first slice and the only ticket dispatchable today.** It is the one lane that
+reads zero doc-scoped locals; signature `(self, state, page_num, ps) -> None`; effects are
+mutations on objects already passed in. It clears all four constraints by inspection: it
+never calls `route_page` (so CI's empty ladder cannot distinguish before from after), and
+it touches no fingerprint, no ledger gate, no halt latch and no fragment writer.
+
+**R5 is HELD, not blocked.** It is the only lane that writes loop control
+(`backend_degraded`, `halt_reason`), so extracting it changes a control-flow shape rather
+than only a location — and cascade-halt has two open bugs against it (#227 fires when it
+should not, #221 cannot fire at all). Moving that code while its semantics are disputed is
+the wrong order. Revisit after #227/#221 are settled.
+
+**R7 is the valuable one.** Adding a page disposition today costs three edits 300 lines
+apart plus an exclusion clause in every sibling bucket; three recorded bugs in that block's
+own comments (GH-151 B1 r2, BLOCKING 2 on #269, #262) are all the same bug — a page counted
+under two dispositions, or none. R7 makes exclusivity a property of one function.
+
+### Pass two — move out what moves cleanly
+
+| # | Ticket | Status |
+|---|---|---|
+| R10 | Move R7/R8/R9 to `src/socr/pipeline/dispositions.py` | `BLOCKED` on R9 |
+| R11 | Rescope issue #155 to the measured reality | `READY` (docs only) |
+
+The five lanes stay methods permanently. They lean hard on `self.config`; moving them buys
+an import and costs threading configuration through every call site. Only the disposition
+group is a pure function of `DocumentState`, so only it becomes a module.
+
+**R11 exists because #155 currently promises more than this plan delivers.** It says "split
+the god-module (~5.5k LOC)". The file is 7,520 lines and this plan removes ~470 of them.
+The issue should be rewritten to match what the measurement showed: the complexity is
+inside functions, not between modules.
+
+### Acceptance, every R ticket
+
+- The assembled `.md` is byte-identical before and after. The existing golden/byte-identity
+  fixtures are the gate; do not write new ones that pin a measured value.
+- **Assert a difference of zero, never an absolute outcome.** Per `CLAUDE.md`: parametrise
+  over both provider states; a tuple measured on a Mac is not a fact about CI.
+- One commit per ticket. `uvx ruff@0.16.0 format --check .` clean.
+- CI green on the exact head SHA before merge — confirm a run exists, do not merely check
+  that nothing is red.
+
+---
+
+## How the multi-model fleet works on this
+
+Roster: **Fable, GPT, Kimi, Composer**, with Opus adjudicating. Three lanes.
+
+### The constraint that shapes all of it
+
+`socr` is installed editable, so `import socr` resolves to **this** checkout's `src/socr`
+regardless of which worktree a process runs in. Giving each model its own worktree does not
+isolate them — all four would run their tests against the same source, and four independent
+results would be quietly meaningless.
+
+`CLAUDE.md` states this directly: *"Do code work in the main checkout, one branch at a time."*
+
+The competing-implementations pattern (`agent-fanout`) is therefore **unavailable for this
+work.** That is a property of the repo, not a preference.
+
+### Lane 1 — design, PARALLEL, read-only
+
+For each ticket, all four models independently propose the exact write set, the method
+signature, and the argument list. They read; they do not edit. Opus reconciles into one
+ratified spec before any implementation starts.
+
+High value on R6 and R7, where the argument list is the whole design question. Near-zero
+value on R1 and R2, where the extraction is mechanical — do not spend a panel on those.
+
+### Lane 2 — implementation, STRICTLY SERIAL
+
+One model, one ticket, one branch, in the main checkout. The next ticket does not start
+until the previous is merged. This is the bottleneck and it cannot be parallelised.
+
+### Lane 3 — review, PARALLEL, read-only
+
+The three models that did **not** implement review the diff. Read-only, so parallel is safe.
+The doer never grades its own work.
+
+Specific things a reviewer must check, drawn from this repo's recorded failures:
+
+- Does any new assertion pin an absolute outcome measured locally? (This reverted #253.)
+- Does a negative assertion run against a `MagicMock`, making it vacuously true?
+- Does the diff touch `_run_fingerprint` inputs, silently invalidating resume?
+- Does a test drive agentic mode without patching `_available_engines_for_agentic`?
 
 ---
 
