@@ -3152,119 +3152,7 @@ class UnifiedPipeline:
             # ref embedded + explicit audit flag.  Force PNG even when --save-
             # figures is off (chart PNGs are mandatory preservation artifacts).
             elif page_num in chart_winner_pages:
-                if not self.config.quiet:
-                    console.print(f"  p{page_num}: [cyan]chart-asset lane[/cyan]")
-                from socr.core.audit_log import AuditEvent
-
-                chart_png_ref = ""
-                chart_render_failed = False
-                if _chart_figures_dir is not None:
-                    try:
-                        saved_png = self._render_chart_page_png(
-                            state.handle.path, page_num, _chart_figures_dir
-                        )
-                        # Relative image ref (from the doc's root markdown file).
-                        png_rel = Path(saved_png).name
-                        # figures/ subdir is conventional; use the relative path
-                        # within the figures dir so it renders in the markdown.
-                        try:
-                            _figures_dir_name = _chart_figures_dir.name
-                            chart_png_ref = (
-                                f"![Chart page {page_num}]({_figures_dir_name}/{png_rel})"
-                            )
-                        except Exception:
-                            chart_png_ref = f"![Chart page {page_num}]({png_rel})"
-                    except RuntimeError as render_exc:
-                        chart_render_failed = True
-                        logger.error(
-                            "PP-7 chart-lane: PNG render FAILED for p%d — %s",
-                            page_num,
-                            render_exc,
-                        )
-                        state.events.append(
-                            AuditEvent(
-                                page_num=page_num,
-                                kind="chart_asset_render_failed",
-                                engine="",
-                                detail=str(render_exc),
-                            )
-                        )
-                else:
-                    chart_render_failed = True
-                    _msg = (
-                        f"PP-7 chart-lane: figures_dir unavailable for p{page_num}; PNG not saved"
-                    )
-                    logger.error(_msg)
-                    state.events.append(
-                        AuditEvent(
-                            page_num=page_num,
-                            kind="chart_asset_render_failed",
-                            engine="",
-                            detail=_msg,
-                        )
-                    )
-
-                # B1 representation: retain native prose + embed chart PNG ref.
-                # If render failed, set status=WARNING so downstream stages know
-                # the visual payload is missing (fail-closed, never silent).
-                native_prose = ps.native_text or ""
-                if chart_png_ref:
-                    chart_body = (
-                        native_prose.rstrip() + "\n\n" + chart_png_ref
-                        if native_prose.strip()
-                        else chart_png_ref
-                    )
-                else:
-                    chart_body = native_prose
-
-                # Mirror native_table_structure_failed: set the PageState flag so
-                # _winning_page_output (manifest.py) does not re-stamp the page as
-                # engine=native / audit_passed=True / status=SUCCESS when it falls
-                # through from the non-passing best_output.  Without this the fail-
-                # closed intent is scrubbed at manifest-freeze time (bug PP-7-R1).
-                if chart_render_failed:
-                    ps.chart_asset_render_failed = True
-
-                # #263 round 2: this page's native half is confetti, so
-                # _winning_page_output will refuse ``chart_body`` and ship the
-                # failure marker instead. The PNG is the half that IS good --
-                # on a chart page the image is the content -- so hand the ref
-                # to the floor rather than re-rendering the same page. The
-                # chart lane's own behaviour is untouched for every page that
-                # is not flagged.
-                if getattr(ps, "native_rotated_text_shredded", False) and chart_png_ref:
-                    ps.rotated_shred_png_ref = chart_png_ref
-
-                chart_status = PageStatus.WARNING if chart_render_failed else PageStatus.SUCCESS
-                chart_out = PageOutput(
-                    page_num=page_num,
-                    text=chart_body,
-                    status=chart_status,
-                    engine="chart_asset",
-                    audit_passed=not chart_render_failed,
-                    cost_usd=0.0,
-                )
-                ps.attempts.append(chart_out)
-                ps.best_output = chart_out
-
-                # Durable audit event: visual chart semantics saved as image
-                # asset; data values are NOT transcribed (explicit, auditable).
-                state.events.append(
-                    AuditEvent(
-                        page_num=page_num,
-                        kind="chart_asset_page",
-                        engine="chart_asset",
-                        detail=(
-                            "visual chart semantics represented as image asset; "
-                            "data values not transcribed"
-                        ),
-                        data={
-                            "png_saved": not chart_render_failed,
-                            "png_path": chart_png_ref,
-                        },
-                    )
-                )
-
+                self._agentic_chart_asset_page(state, page_num, ps, _chart_figures_dir)
             elif page_num in no_ocr_provider_pages:
                 self._agentic_no_provider_page(page_num, ps)
             elif is_native:
@@ -3653,6 +3541,137 @@ class UnifiedPipeline:
         # _phase_assemble can propagate the reason into EngineResult.error.
         if halt_reason:
             state.pp2_halt_reason = halt_reason
+
+    def _agentic_chart_asset_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        chart_figures_dir: Path | None,
+    ) -> None:
+        """Ship a chart page as native prose plus a mandatory chart PNG.
+
+        R3 (behaviour-identical extraction): verbatim the
+        ``elif page_num in chart_winner_pages:`` branch of ``_phase_agentic``'s
+        page loop. PP-7 / GH-150 TICKET-B1 representation: native prose is
+        retained, the chart PNG ref is embedded, and the audit flag is explicit.
+        The PNG is forced even when ``--save-figures`` is off, because chart PNGs
+        are mandatory preservation artifacts.
+
+        A render failure is fail-closed, never silent: status drops to WARNING and
+        ``ps.chart_asset_render_failed`` is set so ``_winning_page_output`` cannot
+        re-stamp the page as a clean native SUCCESS at manifest-freeze time.
+
+        ``chart_figures_dir`` is the loop's ``_chart_figures_dir``; ``None`` means
+        the output contract was unavailable and is itself a render failure.
+        """
+        if not self.config.quiet:
+            console.print(f"  p{page_num}: [cyan]chart-asset lane[/cyan]")
+        from socr.core.audit_log import AuditEvent
+
+        chart_png_ref = ""
+        chart_render_failed = False
+        if chart_figures_dir is not None:
+            try:
+                saved_png = self._render_chart_page_png(
+                    state.handle.path, page_num, chart_figures_dir
+                )
+                # Relative image ref (from the doc's root markdown file).
+                png_rel = Path(saved_png).name
+                # figures/ subdir is conventional; use the relative path
+                # within the figures dir so it renders in the markdown.
+                try:
+                    _figures_dir_name = chart_figures_dir.name
+                    chart_png_ref = f"![Chart page {page_num}]({_figures_dir_name}/{png_rel})"
+                except Exception:
+                    chart_png_ref = f"![Chart page {page_num}]({png_rel})"
+            except RuntimeError as render_exc:
+                chart_render_failed = True
+                logger.error(
+                    "PP-7 chart-lane: PNG render FAILED for p%d — %s",
+                    page_num,
+                    render_exc,
+                )
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="chart_asset_render_failed",
+                        engine="",
+                        detail=str(render_exc),
+                    )
+                )
+        else:
+            chart_render_failed = True
+            _msg = f"PP-7 chart-lane: figures_dir unavailable for p{page_num}; PNG not saved"
+            logger.error(_msg)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="chart_asset_render_failed",
+                    engine="",
+                    detail=_msg,
+                )
+            )
+
+        # B1 representation: retain native prose + embed chart PNG ref.
+        # If render failed, set status=WARNING so downstream stages know
+        # the visual payload is missing (fail-closed, never silent).
+        native_prose = ps.native_text or ""
+        if chart_png_ref:
+            chart_body = (
+                native_prose.rstrip() + "\n\n" + chart_png_ref
+                if native_prose.strip()
+                else chart_png_ref
+            )
+        else:
+            chart_body = native_prose
+
+        # Mirror native_table_structure_failed: set the PageState flag so
+        # _winning_page_output (manifest.py) does not re-stamp the page as
+        # engine=native / audit_passed=True / status=SUCCESS when it falls
+        # through from the non-passing best_output.  Without this the fail-
+        # closed intent is scrubbed at manifest-freeze time (bug PP-7-R1).
+        if chart_render_failed:
+            ps.chart_asset_render_failed = True
+
+        # #263 round 2: this page's native half is confetti, so
+        # _winning_page_output will refuse ``chart_body`` and ship the
+        # failure marker instead. The PNG is the half that IS good --
+        # on a chart page the image is the content -- so hand the ref
+        # to the floor rather than re-rendering the same page. The
+        # chart lane's own behaviour is untouched for every page that
+        # is not flagged.
+        if getattr(ps, "native_rotated_text_shredded", False) and chart_png_ref:
+            ps.rotated_shred_png_ref = chart_png_ref
+
+        chart_status = PageStatus.WARNING if chart_render_failed else PageStatus.SUCCESS
+        chart_out = PageOutput(
+            page_num=page_num,
+            text=chart_body,
+            status=chart_status,
+            engine="chart_asset",
+            audit_passed=not chart_render_failed,
+            cost_usd=0.0,
+        )
+        ps.attempts.append(chart_out)
+        ps.best_output = chart_out
+
+        # Durable audit event: visual chart semantics saved as image
+        # asset; data values are NOT transcribed (explicit, auditable).
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="chart_asset_page",
+                engine="chart_asset",
+                detail=(
+                    "visual chart semantics represented as image asset; data values not transcribed"
+                ),
+                data={
+                    "png_saved": not chart_render_failed,
+                    "png_path": chart_png_ref,
+                },
+            )
+        )
 
     def _agentic_no_provider_page(self, page_num: int, ps: PageState) -> None:
         """Stamp a page that had no OCR provider available.
