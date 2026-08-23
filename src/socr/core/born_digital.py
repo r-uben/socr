@@ -1257,10 +1257,13 @@ class BornDigitalDetector:
                 notes.append("born-digital: structured extraction (tables detected)")
 
                 # GH-151 TICKET-B1: check the grid shape of the markdown this
-                # branch just produced. Set at the moment of the evidence,
+                # branch just produced. GH-226 also checks the raw delimiter
+                # and residual LaTeX before parsing discards that evidence.
+                # Set at the moment of the evidence,
                 # never re-derived downstream (the same rule GH-147 A2 states
-                # for native_table_lane_refused above). Gate narrowed to
-                # ragged / detached_label_rows only -- orphan_rows alone is
+                # for native_table_lane_refused above). The parsed-grid term
+                # remains narrowed to ragged / detached_label_rows only --
+                # orphan_rows alone is
                 # excluded because a blank-label row with values is often a
                 # legitimate standard-error / t-statistic continuation row
                 # (fires on 27/29 real table blocks if included unnarrowed).
@@ -1269,7 +1272,10 @@ class BornDigitalDetector:
                 from socr.tables import structure_check
 
                 reports = structure_check.check_markdown(native_text)
-                native_table_structure_defective = structure_check.structural_gate_fires(reports)
+                emission_defect = structure_check.table_emission_defect(native_text)
+                native_table_structure_defective = bool(
+                    emission_defect or structure_check.structural_gate_fires(reports)
+                )
 
                 # GH-200: header-attribution term, disjunctive with the
                 # grid-shape check above -- TR-3's numeric multiset and the

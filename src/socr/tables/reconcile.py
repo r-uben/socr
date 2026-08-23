@@ -142,6 +142,16 @@ _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 #: without this an indented code sample reads as table structure.
 _INDENTED_CODE = re.compile(r"^(?: {4,}|\t)")
 
+# GH-226: these commands describe LaTeX table structure, not mathematical
+# notation.  If one survives inside a Markdown table, the span/rule it encoded
+# has not been represented as GFM structure.  Keep the set deliberately narrow:
+# ordinary cell math (``\\alpha``, ``\\frac``, ...) remains valid content.
+_LATEX_TABLE_COMMAND = re.compile(r"\\(?:multicolumn|multirow|cline|hline)\b")
+
+TABLE_EMISSION_NONE = ""
+TABLE_EMISSION_LATEX_LEAK = "table_latex_leak"
+TABLE_EMISSION_WIDTH_MISMATCH = "table_width_mismatch"
+
 
 def _strip_html_comments(markdown: str) -> str:
     """Blank out HTML comments, keeping line count so nothing shifts.
@@ -200,6 +210,60 @@ def _strip_fenced_regions(lines: list[str]) -> list[str]:
                     fence = None
             out.append("")
     return out
+
+
+def _markdown_content_lines(markdown: str) -> list[str]:
+    """Markdown lines that may represent emitted page content.
+
+    Code samples and comments can legitimately show malformed-table examples;
+    they are not page readings and must never trip a shipping defect.
+    """
+    text = _strip_html_comments(markdown.replace("\r\n", "\n").replace("\r", "\n"))
+    lines = _strip_fenced_regions(text.splitlines())
+    return ["" if _INDENTED_CODE.match(line) else line for line in lines]
+
+
+def table_emission_defect(markdown: str) -> str:
+    """Return a deterministic raw-row defect in an emitted Markdown table.
+
+    Unlike :func:`find_table_blocks`, this check retains the delimiter row.
+    That closes GH-226's blind spot where the header and every body row agree
+    on a width but the delimiter alone is narrower or wider; dropping the
+    delimiter makes the parsed grid look perfectly rectangular.
+
+    A run qualifies only when its first two rows are an authored header and a
+    strict GFM delimiter with matching border style.  This is the same
+    provenance boundary used by the strict shipping predicate, and code,
+    comments, prose outside table runs, and ambiguous multi-delimiter runs are
+    ignored.  Generic ragged bodies remain owned by the existing grid-shape
+    policy (including GH-259's keep-and-flag disposition).
+    """
+    lines = _markdown_content_lines(markdown)
+    i, n = 0, len(lines)
+    while i < n:
+        if not _is_table_line(lines[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and _is_table_line(lines[j]):
+            j += 1
+        block = lines[i:j]
+        rows = [_split_emission_row(line) for line in block]
+        separator_indices = [idx for idx, cells in enumerate(rows) if _is_separator_row(cells)]
+        if (
+            len(rows) >= 2
+            and separator_indices == [1]
+            and _row_border(block[0]) == _row_border(block[1])
+            and any(cell.strip() for cell in rows[0])
+        ):
+            if any(_LATEX_TABLE_COMMAND.search(line) for line in block):
+                return TABLE_EMISSION_LATEX_LEAK
+
+            content_widths = {len(row) for idx, row in enumerate(rows) if idx != 1}
+            if len(content_widths) == 1 and len(rows[1]) != next(iter(content_widths)):
+                return TABLE_EMISSION_WIDTH_MISMATCH
+        i = j
+    return TABLE_EMISSION_NONE
 
 
 def has_strict_table_grid(markdown: str) -> bool:
@@ -292,9 +356,7 @@ def _has_table_grid(markdown: str, *, require_uniform_body: bool) -> bool:
     # fences, then indented code (a fence's CONTENT may be indented, and is
     # already blanked by then). CRLF is normalised so a trailing \r cannot
     # make a separator cell fail to match.
-    text = _strip_html_comments(markdown.replace("\r\n", "\n").replace("\r", "\n"))
-    lines = _strip_fenced_regions(text.splitlines())
-    lines = ["" if _INDENTED_CODE.match(line) else line for line in lines]
+    lines = _markdown_content_lines(markdown)
     i, n = 0, len(lines)
     while i < n:
         if not _is_table_line(lines[i]):
@@ -432,6 +494,38 @@ def _split_row(row: str) -> list[str]:
     if s.endswith("|"):
         s = s[:-1]
     return [c.strip() for c in s.split("|")]
+
+
+def _split_emission_row(row: str) -> list[str]:
+    """Split a raw row without treating an escaped pipe as a cell boundary.
+
+    The reconciliation parser predates GH-226 and deliberately remains
+    unchanged. The final emission guard only needs cell counts, and must not
+    newly reject valid GFM cells such as ``A \\| B``.
+    """
+
+    def _escaped(text: str, index: int) -> bool:
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        return backslashes % 2 == 1
+
+    s = row.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not _escaped(s, len(s) - 1):
+        s = s[:-1]
+
+    cells: list[str] = []
+    start = 0
+    for index, char in enumerate(s):
+        if char == "|" and not _escaped(s, index):
+            cells.append(s[start:index].strip())
+            start = index + 1
+    cells.append(s[start:].strip())
+    return cells
 
 
 # --------------------------------------------------------------------------

@@ -3451,20 +3451,19 @@ class UnifiedPipeline:
                 # GH-200: the GH-56 repair above MUTATES ps.best_output.text
                 # after the judge already accepted it -- so the shipped text
                 # is not the text the structural gate saw. Re-run the
-                # grid-shape term ONLY (string-only, no geometry, free) on
-                # whatever text ships now; if repair produced a ragged/
-                # detached-label grid, demote in place. Routing is finished
+                # string-only terms on whatever text ships now; if repair
+                # produced a ragged/detached-label grid, a raw delimiter-width
+                # mismatch, or a residual LaTeX table command, demote in place.
+                # Routing is finished
                 # by this point -- do NOT reroute, just stop shipping it as a
                 # pass. Exactly one audit event per page: this is the sole
                 # recheck site after routing, distinct from the judge's own
                 # (pre-repair) escalation event.
                 if ps.best_output and ps.best_output.text and ps.best_output.audit_passed:
-                    from socr.tables.structure_check import (
-                        check_markdown,
-                        structural_gate_fires,
-                    )
+                    from socr.tables.structure_check import table_output_defect
 
-                    if structural_gate_fires(check_markdown(ps.best_output.text)):
+                    _post_route_defect = table_output_defect(ps.best_output.text, None, None)
+                    if _post_route_defect:
                         from socr.core.audit_log import AuditEvent
 
                         ps.best_output.audit_passed = False
@@ -3476,8 +3475,14 @@ class UnifiedPipeline:
                                 page_num=page_num,
                                 kind="table_structure_failed",
                                 engine=ps.best_output.engine or "",
-                                detail="grid_shape defect found after post-route header repair",
-                                data={"defect": "grid_shape", "site": "post_route_recheck"},
+                                detail=(
+                                    f"{_post_route_defect} defect found after "
+                                    "post-route header repair"
+                                ),
+                                data={
+                                    "defect": _post_route_defect,
+                                    "site": "post_route_recheck",
+                                },
                             )
                         )
 

@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # (native text bypasses OutputNormalizer), so pages cached under v2 must reprocess.
 MANIFEST_SCHEMA_VERSION = "1"
 NORMALIZER_VERSION = "3"
-ASSEMBLY_VERSION = "2"
+ASSEMBLY_VERSION = "3"
 
 # Legacy page separator. socr now assembles bodies and replays with the
 # contract's ``assemble_pages`` (``## Page N`` headers); this constant is kept
@@ -757,7 +757,7 @@ def structure_class_native_fallback_applies(p) -> bool:
     return structure_class_grid_winner(p) is None
 
 
-def _winning_page_output(
+def _select_page_output(
     state: DocumentState,
     page_num: int,
     whole_doc: _WholeDoc | None = None,
@@ -1202,6 +1202,39 @@ def _winning_page_output(
         text=page_failed_marker(page_num),
         status=PageStatus.ERROR,
         audit_passed=False,
+    )
+
+
+def _winning_page_output(
+    state: DocumentState,
+    page_num: int,
+    whole_doc: _WholeDoc | None = None,
+) -> PageOutput:
+    """Select and final-validate the exact page text that will ship.
+
+    GH-226 puts the last table-emission guard here because this seam is shared
+    by canonical fragments, assembled Markdown, manifest blobs, and replay,
+    including whole-document CLI attempts that never pass through the agentic
+    acceptance gate. Earlier checks still drive repair and routing; this one is
+    the fail-closed backstop after those choices are exhausted.
+    """
+    output = _select_page_output(state, page_num, whole_doc)
+
+    from socr.tables.reconcile import table_emission_defect
+
+    defect = table_emission_defect(output.text)
+    if not defect:
+        return output
+
+    detail = f"invalid final table emission: {defect}"
+    return replace(
+        output,
+        text=f"[page {page_num} failed: invalid table emission — {defect}]",
+        status=PageStatus.ERROR,
+        audit_passed=False,
+        failure_mode=FailureMode.TABLE_EMISSION_INVALID,
+        error=detail,
+        audit_notes=[*output.audit_notes, detail],
     )
 
 
