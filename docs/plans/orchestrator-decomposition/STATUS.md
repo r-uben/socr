@@ -1,9 +1,24 @@
 # STATUS — orchestrator decomposition
 
 Last updated: 2026-08-23
-Stage: **measured, not designed.** No code written. No tickets dispatchable yet.
-Next action: dispatch the design ticket in `TICKETS.md` (D1) — read the two large
-functions and propose seams. Nothing else starts before D1 lands.
+Stage: **designed, not started.** No source code written yet. R1 is dispatchable.
+Next action: implement **R1** — extract the trusted-native lane
+(`orchestrator.py:3286-3392`, 107 lines) to a method on `UnifiedPipeline`,
+behaviour-identical. Serial, in the main checkout.
+
+D1 landed 2026-08-23 (`docs/log/2026-08-23_orchestrator-seams.md`, PR #284). Two decisions
+were ratified on the back of it:
+
+1. **Two passes.** Pass one names the pieces in place as methods; pass two moves out only
+   the disposition group to its own module. The five per-page lanes stay methods
+   permanently — they are `self.config`-heavy and moving them buys an import.
+   Honest expected shrink: **~470 lines, not 2,000.** Issue #155 overpromises and is
+   rescoped by R11.
+2. **The fleet cannot fan out on implementation.** socr is installed editable, so
+   `import socr` resolves to this checkout regardless of worktree — four models in four
+   worktrees would all test the same source. Design and review run in parallel (read-only);
+   implementation is strictly serial, one branch at a time. `agent-fanout` is unavailable
+   for this work as a property of the repo, not a preference.
 
 ## Why this plan exists
 
@@ -47,7 +62,8 @@ does not support that as the primary move.
 **Therefore: the unit of work is decomposing those two functions, and the module boundaries
 should fall out of the seams that decomposition exposes — not be chosen up front.**
 
-This is the open question D1 must answer. It is deliberately not answered here.
+D1 answered this on 2026-08-23. The answer: the disposition group in `_phase_assemble`
+does fall out as a module; the five lanes in `_phase_agentic` do not, and stay methods.
 
 ## Sequencing rule (decided 2026-08-23)
 
@@ -63,8 +79,8 @@ right way" — was considered and rejected for this codebase specifically:
   make a mixed commit especially hard to bisect.
 
 The bugs still get a vote: **they inform where the seams go.** A seam that makes #144, #151,
-#215 or #270 easier to fix is a better seam than one that does not. D1 should read the live
-issue list with that lens.
+#215 or #270 easier to fix is a better seam than one that does not. D1 did read the live
+issue list with that lens; the per-seam issue mapping is section 4 of its note.
 
 ## Relationship to the open-issue backlog
 
@@ -91,7 +107,7 @@ strong, and the measurement contradicts it:
 - **21 do not.** They are orderable and workable today, independent of the refactor.
 
 The ordered 21 are in `TICKETS.md` under "W — work available now". The remaining 30 are
-still D2's job, and D2 is still blocked on D1.
+D2's job; D2 is unblocked as of 2026-08-23.
 
 ## Known-stale planning artifacts (do not schedule from these)
 
