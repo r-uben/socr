@@ -72,7 +72,26 @@ HARD RULES:
 
 // ---------------------------------------------------------------------------
 
-const issues = Array.isArray(args) && args.length ? args : null
+// The harness renders the invoke hint for a named workflow with `args` as a
+// JSON *string*. Accept that shape as well as a real array, so a caller that
+// copies the hint verbatim does not hit the "pass them explicitly" error.
+const toIssueList = (raw) => {
+  if (Array.isArray(raw)) return raw
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) return parsed
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
+const numbers = toIssueList(args)
+  .map(Number)
+  .filter((n) => Number.isInteger(n) && n > 0)
+const issues = numbers.length ? numbers : null
 if (!issues) {
   throw new Error(
     'Pass the issue numbers explicitly, e.g. args: [127, 114, 64, 56, 51, 50, 49, 46, 39]. ' +
