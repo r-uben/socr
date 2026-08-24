@@ -386,11 +386,16 @@ class TestStructuralEscalationGate:
         assert decision.accept is False
         assert decision.reason == "table_structure_failed: grid_shape"
 
-    def test_verifier_exception_still_runs_shape_term(self, monkeypatch):
-        """Geometry raises inside the try block -> the inner judge is still
-        consulted (existing behaviour), but a ragged candidate must be
-        rejected by the (words-free) grid-shape term, not accepted by
-        delegation."""
+    def test_verifier_exception_rejects_without_consulting_inner(self, monkeypatch):
+        """Geometry raises inside the try block -> fail-closed rejection.
+
+        GH-200 originally let the exception path delegate to the inner judge and
+        leaned on the words-free grid-shape term to catch a ragged candidate.
+        GH-162 supersedes that: a raised verifier ran NO deterministic term, so
+        there is nothing to accept on and the inner judge is not consulted at
+        all. This ragged candidate is still rejected -- the point of the GH-200
+        case -- now for the stronger reason.
+        """
 
         def _raise(*a, **kw):
             raise RuntimeError("boom")
@@ -409,9 +414,10 @@ class TestStructuralEscalationGate:
             record_event=lambda evt: None,
         )
         decision = judge.assess(output, MagicMock())
-        inner.assess.assert_called_once()  # exception path still delegates
+        inner.assess.assert_not_called()  # GH-162: no accept path on a raised verifier
         assert decision.accept is False
-        assert decision.reason == "table_structure_failed: grid_shape"
+        assert decision.confidence == 0.0
+        assert decision.reason.startswith("table_verifier_error:")
 
     def test_ragged_candidate_with_clean_multiset_rejects(self):
         """Disjunction control (a): B1's own shape gate must reject even
