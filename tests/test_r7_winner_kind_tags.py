@@ -31,6 +31,27 @@ def _returns(fn: ast.FunctionDef) -> list[ast.Return]:
     return [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
 
 
+def _tag_names(ret: ast.Return) -> list[str]:
+    """The WinnerKind names an ending can yield, in source order.
+
+    Usually one. An ending whose own body already switches on a flag may yield
+    two via a conditional -- ``NATIVE_FALLBACK``/``NATIVE_CLEAN`` do, because
+    that single return ships either a demoted fallback or an ordinary native
+    success. Returning both names keeps the totality/bijection checks honest
+    instead of letting one tag quietly stand for two dispositions.
+    """
+    v = ret.value
+    assert isinstance(v, ast.Tuple) and len(v.elts) == 2, f"untagged return @{ret.lineno}"
+    tag = v.elts[1]
+    parts = [tag.body, tag.orelse] if isinstance(tag, ast.IfExp) else [tag]
+    names = []
+    for node in parts:
+        assert isinstance(node, ast.Attribute), f"non-WinnerKind tag @{ret.lineno}"
+        assert isinstance(node.value, ast.Name) and node.value.id == "WinnerKind"
+        names.append(node.attr)
+    return names
+
+
 def test_cascade_is_loop_free_so_exactly_one_ending_runs() -> None:
     """Exclusivity is a property of the code's SHAPE, not a convention.
 
@@ -45,19 +66,8 @@ def test_cascade_is_loop_free_so_exactly_one_ending_runs() -> None:
 
 def test_every_ending_carries_a_tag() -> None:
     """Totality: an untagged return would ship a page no caller can classify."""
-    untagged = []
     for r in _returns(_cascade()):
-        v = r.value
-        ok = (
-            isinstance(v, ast.Tuple)
-            and len(v.elts) == 2
-            and isinstance(v.elts[1], ast.Attribute)
-            and isinstance(v.elts[1].value, ast.Name)
-            and v.elts[1].value.id == "WinnerKind"
-        )
-        if not ok:
-            untagged.append(r.lineno)
-    assert untagged == [], f"untagged returns at lines {untagged}"
+        assert _tag_names(r), f"untagged return at line {r.lineno}"
 
 
 def test_tags_and_endings_are_in_bijection() -> None:
@@ -68,7 +78,7 @@ def test_tags_and_endings_are_in_bijection() -> None:
     the exact "counted under a disposition it does not have" bug class R7 exists
     to kill.
     """
-    used = [r.value.elts[1].attr for r in _returns(_cascade())]
+    used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
     assert len(used) == len(set(used)), "two endings share a tag"
     assert set(used) == {k.name for k in WinnerKind}
     assert len({k.value for k in WinnerKind}) == len(list(WinnerKind))
@@ -88,7 +98,7 @@ def test_tag_order_matches_enum_declaration_order() -> None:
     pair, which is the one defect the AST checks are structurally blind to.
     """
     fn = _cascade()
-    in_source = [r.value.elts[1].attr for r in sorted(_returns(fn), key=lambda r: r.lineno)]
+    in_source = [n for r in sorted(_returns(fn), key=lambda r: r.lineno) for n in _tag_names(r)]
     assert in_source == [k.name for k in WinnerKind]
 
 

@@ -770,6 +770,14 @@ class WinnerKind(str, Enum):
     alerts (``value_drift``, ``fabricated_ref``, ``text_grid_rejected``) co-occur
     with a page that ships perfectly well and are NOT members here.
 
+    **It names the ending SELECTION took, not the final shipped bytes.**
+    ``_winning_page_output`` applies ``_apply_table_emission_guard`` after the tag
+    is dropped, and that guard can replace any selected output with a failure
+    marker (``FailureMode.TABLE_EMISSION_INVALID``). A page tagged
+    ``PASSING_BEST_OUTPUT`` can therefore still ship a marker. Consumers that need
+    "what shipped" must still inspect the emitted text; the tag answers "which
+    branch chose it".
+
     The tag exists so callers stop re-deriving "which branch shipped?" with mirror
     predicates that must be kept in lockstep with this function -- the drift that
     ``_reaches_structure_class_branch`` was written to repair. It is INTERNAL:
@@ -802,8 +810,16 @@ class WinnerKind(str, Enum):
     STRUCTURE_CLASS_GRID_FLAGGED = "structure_class_grid_flagged"
     #: structure-class (iii): no attempt authored a grid -- native prose, WARNING
     STRUCTURE_CLASS_NO_GRID = "structure_class_no_grid"
-    #: native layer deficient, recovery tried and never passed: native as fallback
+    #: native layer deficient, recovery tried and never passed: native as FALLBACK,
+    #: shipped WARNING / audit_passed=False
     NATIVE_FALLBACK = "native_fallback"
+    #: the SAME ending, undemoted: a born-digital page with native text and no
+    #: distrust flag ships ordinary native SUCCESS. Split from NATIVE_FALLBACK
+    #: because that ending's ``native_demoted`` switch produces two dispositions
+    #: from one return -- tagging both as "fallback" would have made part two
+    #: count every clean --native-only page as a fallback page, flipping the
+    #: document to AUDIT_FAILED and emitting fallback warnings for healthy pages.
+    NATIVE_CLEAN = "native_clean"
     #: text recovered from a whole-document attempt, split on ``## Page N``
     WHOLE_DOC_SECTION = "whole_doc_section"
     #: a per-page attempt that failed audit still beats an empty page
@@ -1230,7 +1246,7 @@ def _select_page_output_tagged(
                 if native_table_defect and native_is_fallback
                 else FailureMode.NONE
             ),
-        ), WinnerKind.NATIVE_FALLBACK
+        ), (WinnerKind.NATIVE_FALLBACK if native_demoted else WinnerKind.NATIVE_CLEAN)
     # Whole-document CLI path: recover this page's text from the split markdown.
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
     # carries real content for this page is not shadowed (the prior ordering left
