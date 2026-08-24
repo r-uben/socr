@@ -1,10 +1,58 @@
 # STATUS — orchestrator decomposition
 
-Last updated: 2026-08-23
-Stage: **designed, not started.** No source code written yet. R1 is dispatchable.
-Next action: implement **R1** — extract the trusted-native lane
-(`orchestrator.py:3286-3392`, 107 lines) to a method on `UnifiedPipeline`,
-behaviour-identical. Serial, in the main checkout.
+Last updated: 2026-08-24
+Stage: **pass one in progress.** R1–R4 landed; R7 part one landed (#290). R5 `HELD`.
+R7 part two is **`NEEDS-DESIGN`, not ready** — its scope was falsified today, see below.
+Next action: rewrite R7 part two's scope in `TICKETS.md` before writing any more of its
+code. The mapping it assumed does not exist.
+
+## 2026-08-24
+
+**R7's design fork was ruled: option B — tag the cascade** (#288). Each of the 15 returns
+in `_select_page_output` carries an internal disposition tag; the public function drops it,
+so output stays byte-identical. Decided on Kimi's finding, not diff size:
+`corrupt_math_hybrid`'s disjointness from the model-kept buckets is only *implicit*
+(`manifest.py:411`, `:608`), so a re-deriving classifier would have to INVENT a priority
+order nothing has ever needed — a new unrecorded decision, made blind, inside a change
+contracted to change nothing. Tagging inherits the cascade's own order.
+
+**R7 part one shipped** (#290, merged). `WinnerKind` names all 15 endings; AST-verified as
+15 returns / 0 loops, so exactly one ending runs per page and exclusivity is structural.
+Two review findings fixed before merge: `NATIVE_FALLBACK` was covering two dispositions
+(GPT — it also served the ordinary clean native page, which would have made every healthy
+`--native-only` page count as a fallback), and the bijection test compared sets, so
+transposed tags passed silently (peer session). The owner also retired the `D3_` prefix on
+the new members: it names Option D3 of a 2026-06-17 design menu and carries no meaning.
+
+**R7 part two's premise is false, and this is the day's real finding.** The ticket implies
+the buckets can be swapped to read the tag. They cannot, because they do not map one-to-one:
+
+- Four buckets ARE exactly equivalent, proven over 4,096 synthetic states and pinned in
+  `tests/test_r7_bucket_tag_equivalence.py`: `flagged_model_pages`,
+  `structure_class_model_pages`, `structure_class_native_fallback_pages`,
+  `d3_model_table_pages`.
+- One tag can cover SEVERAL buckets. `NATIVE_FALLBACK` covers both `native_fallback_pages`
+  and `text_grid_rejected_pages`, which are deliberately separate lists.
+- Two buckets OVER-CLAIM — they count pages the manifest ships as something else:
+  - `corrupt_math_hybrid_pages` (#292): diverges in 1,984/4,096 states. Hides a real
+    native-fallback page behind a false exclusion, and drives a document to AUDIT_FAILED
+    over a page that ships `NATIVE_CLEAN`.
+  - `native_fallback_pages` (**unfiled**): 78 states where it claims a page that actually
+    ships `ROTATED_TEXT_SHREDDED`. Same shape as #292, distinct cause.
+
+So part two is not a swap; it is a mapping layer that must reproduce today's behaviour
+**including both bugs**, since R7 is contracted behaviour-identical. Both fixes are
+deferred: #292 filed, the second still to file.
+
+**Correction to the fan-out claim below.** Decision 2 says implementation cannot fan out
+across worktrees "as a property of the repo". That is too strong. It is a property of the
+single SHARED venv: `~/venvs/socr` carries a `.pth` pointing at this checkout, so any
+worktree using it tests main's source. A per-worktree venv (`uv venv .venv && uv pip
+install -e .`) defeats it. Two residues make it fragile rather than free: `CLAUDE.md`
+hardcodes `~/venvs/socr/bin/pytest`, so an agent following repo instructions silently tests
+the wrong source with NO detectable symptom (tests pass, against the wrong code); and
+anything driving the local VLM still serialises on one GPU. Recorded because the owner's
+parallel-sessions plan was parked on the stronger claim.
 
 D1 landed 2026-08-23 (`docs/log/2026-08-23_orchestrator-seams.md`, PR #284). Two decisions
 were ratified on the back of it:

@@ -109,9 +109,10 @@ fixes riding along.**
 | R4 | Extract the corrupt-equation lane | 3065–3153 (89) | `_chart_figures_dir`, `chart_winner_pages` | `BLOCKED` on R1 |
 | R5 | Extract the OCR route lane | 3393–3628 (236) | 5 in, 2 out | **`HELD`** — see below |
 | R6 | Extract the shared per-page tail | 3629–3762 (134) | 8, one read-write | `BLOCKED` on R2–R4 |
-| R7 | Extract the eleven bucket derivations | 5999–6300 (~300) | `state`, `page_texts`, `native_only` | `READY` — fork ruled: **tag the cascade** |
-| R8 | Extract bucket → audit-event emission | 6211–6482 (272, part) | R7's return value | `BLOCKED` on R7 |
-| R9 | Extract bucket → CLI summary | 6211–6482 (272, part) | R7's return value | `BLOCKED` on R7 |
+| R7a | Tag the 15 cascade endings (`WinnerKind`) | `manifest.py` 763–1208 | none | `DONE` (#290, 2026-08-24) |
+| R7b | Consume the tags in the bucket derivations | 5999–6300 (~300) | `state`, `page_texts`, `native_only` | **`NEEDS-DESIGN`** — premise falsified, see below |
+| R8 | Extract bucket → audit-event emission | 6211–6482 (272, part) | R7b's return value | `BLOCKED` on R7b |
+| R9 | Extract bucket → CLI summary | 6211–6482 (272, part) | R7b's return value | `BLOCKED` on R7b |
 
 **R1 is the first slice and the only ticket dispatchable today.** It is the one lane that
 reads zero doc-scoped locals; signature `(self, state, page_num, ps) -> None`; effects are
@@ -172,13 +173,41 @@ Binding constraints on the implementation:
 - `d3_floor_pages` stays a strict subset of `failed_pages`. Modelling `failed_pages` as
   `disposition == FAILED` reintroduces the exact bug this ticket exists to kill.
 
-R7 is now `READY`.
+R7 is now split. **R7a is DONE** (#290).
+
+**R7b is NOT ready, and must not be picked up as a mechanical swap.** Its premise —
+"replace each bucket predicate with `tag == X`" — was falsified on 2026-08-24 by a sweep
+over 4,096 synthetic `PageState` combinations
+(`tests/test_r7_bucket_tag_equivalence.py`, committed). The buckets do not map one-to-one
+onto the tags:
+
+- **Four are exactly equivalent** and may be swapped freely — `flagged_model_pages`,
+  `structure_class_model_pages`, `structure_class_native_fallback_pages`,
+  `d3_model_table_pages`. Proven, and the proof is pinned as a test.
+- **One tag can cover several buckets.** `NATIVE_FALLBACK` covers both
+  `native_fallback_pages` and `text_grid_rejected_pages`, which are deliberately separate
+  lists with their own events and CLI lines. A 1:1 swap would merge them.
+- **Two buckets over-claim** — they count pages the manifest ships as something else, which
+  is the very bug class R7 exists to kill, found in R7's own inputs:
+  - `corrupt_math_hybrid_pages` — **#292**. Diverges in 1,984/4,096 states, always
+    over-claiming.
+  - `native_fallback_pages` — **unfiled**. 78 states where it claims a page that ships
+    `ROTATED_TEXT_SHREDDED`. Distinct cause from #292, same shape.
+
+R7 is contracted behaviour-identical, so R7b must reproduce **both** bugs rather than fix
+them; the equivalence test pins #292 as a strict superset so the reproduction is deliberate
+and fails the moment #292 is fixed.
+
+What R7b actually needs before it is READY: a written mapping from each of the 16
+`WinnerKind` members to the bucket(s) it feeds, naming for each whether the relationship is
+equality, union, or a pinned over-claim. Without that document an implementer is making
+those calls silently, one bucket at a time.
 
 ### Pass two — move out what moves cleanly
 
 | # | Ticket | Status |
 |---|---|---|
-| R10 | Move R7/R8/R9 to `src/socr/pipeline/dispositions.py` | `BLOCKED` on R9 |
+| R10 | Move R7b/R8/R9 to `src/socr/pipeline/dispositions.py` | `BLOCKED` on R9 |
 | R11 | Rescope issue #155 to the measured reality | `READY` (docs only) |
 
 The five lanes stay methods permanently. They lean hard on `self.config`; moving them buys
