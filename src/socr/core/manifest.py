@@ -29,6 +29,7 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 
 from ocr_output_contract import (
@@ -760,11 +761,98 @@ def structure_class_native_fallback_applies(p) -> bool:
     return structure_class_grid_winner(p) is None
 
 
+class WinnerKind(str, Enum):
+    """R7: which of ``_select_page_output_tagged``'s endings shipped this page.
+
+    The cascade is 15 returns and **zero loops** (AST-verified), so exactly one
+    ending runs per page and this tag is a total, exclusive classification of the
+    SHIP axis. It is deliberately not a classification of the page: orthogonal
+    alerts (``value_drift``, ``fabricated_ref``, ``text_grid_rejected``) co-occur
+    with a page that ships perfectly well and are NOT members here.
+
+    **It names the ending SELECTION took, not the final shipped bytes.**
+    ``_winning_page_output`` applies ``_apply_table_emission_guard`` after the tag
+    is dropped, and that guard can replace any selected output with a failure
+    marker (``FailureMode.TABLE_EMISSION_INVALID``). A page tagged
+    ``PASSING_BEST_OUTPUT`` can therefore still ship a marker. Consumers that need
+    "what shipped" must still inspect the emitted text; the tag answers "which
+    branch chose it".
+
+    The tag exists so callers stop re-deriving "which branch shipped?" with mirror
+    predicates that must be kept in lockstep with this function -- the drift that
+    ``_reaches_structure_class_branch`` was written to repair. It is INTERNAL:
+    ``_select_page_output`` drops it, so every existing caller sees byte-identical
+    output.
+
+    Order of definition follows the cascade's own order, which is the only
+    authority on precedence. In particular ``CORRUPT_MATH_HYBRID`` outranks the
+    model-kept endings; nothing in the codebase had to state that before, and
+    re-deriving it elsewhere would mean inventing it.
+    """
+
+    #: native+math hybrid attempt kept over the ladder winner
+    CORRUPT_MATH_HYBRID = "corrupt_math_hybrid"
+    #: the ladder's passing best_output ships clean -- the ordinary success
+    PASSING_BEST_OUTPUT = "passing_best_output"
+    #: scanned page, source-evidence table check failed: fail-closed marker.
+    #: ("D3" in the surrounding identifiers is Option D3 of the 2026-06-17 table-repair
+    #: design menu -- a numbered choice, carrying no meaning. Named for what it does.)
+    UNVERIFIABLE_TABLE_SCANNED = "unverifiable_table_scanned"
+    #: #262: same conjunction, but an attempt authored a grid -- the model reading is
+    #: kept over the fail-closed marker, shipped flagged
+    UNVERIFIABLE_TABLE_MODEL_KEPT = "unverifiable_table_model_kept"
+    #: born-digital page whose native table failed verification: fail-closed marker
+    UNVERIFIABLE_TABLE_NATIVE = "unverifiable_table_native"
+    #: rotated-text extraction shredded the native layer: fail-closed marker
+    ROTATED_TEXT_SHREDDED = "rotated_text_shredded"
+    #: #259: ladder accepted nothing but the model produced a table -- kept flagged
+    FLAGGED_MODEL_KEPT = "flagged_model_kept"
+    #: structure-class: an attempt authored a grid and it passed audit
+    STRUCTURE_CLASS_GRID_PASSING = "structure_class_grid_passing"
+    #: structure-class: grid winner kept but demoted to WARNING
+    STRUCTURE_CLASS_GRID_FLAGGED = "structure_class_grid_flagged"
+    #: structure-class (iii): no attempt authored a grid -- native prose, WARNING
+    STRUCTURE_CLASS_NO_GRID = "structure_class_no_grid"
+    #: native layer deficient, recovery tried and never passed: native as FALLBACK,
+    #: shipped WARNING / audit_passed=False
+    NATIVE_FALLBACK = "native_fallback"
+    #: the SAME ending, undemoted: a born-digital page with native text and no
+    #: distrust flag ships ordinary native SUCCESS. Split from NATIVE_FALLBACK
+    #: because that ending's ``native_demoted`` switch produces two dispositions
+    #: from one return -- tagging both as "fallback" would have made part two
+    #: count every clean --native-only page as a fallback page, flipping the
+    #: document to AUDIT_FAILED and emitting fallback warnings for healthy pages.
+    NATIVE_CLEAN = "native_clean"
+    #: text recovered from a whole-document attempt, split on ``## Page N``
+    WHOLE_DOC_SECTION = "whole_doc_section"
+    #: a per-page attempt that failed audit still beats an empty page
+    BEST_OUTPUT_UNVERIFIED = "best_output_unverified"
+    #: best_output was cleared; the rejected text in ``attempts`` ships flagged
+    BEST_ATTEMPT_FLAGGED = "best_attempt_flagged"
+    #: nothing anywhere produced text: explicit failure marker, never a silent gap
+    NO_TEXT_MARKER = "no_text_marker"
+
+
 def _select_page_output(
     state: DocumentState,
     page_num: int,
     whole_doc: _WholeDoc | None = None,
 ) -> PageOutput:
+    """The PageOutput that should be frozen for this page.
+
+    Thin wrapper over :func:`_select_page_output_tagged` that drops the R7
+    disposition tag. Byte-identical to the pre-R7 function for every caller;
+    callers that need to know WHICH ending shipped call the tagged form rather
+    than re-deriving it.
+    """
+    return _select_page_output_tagged(state, page_num, whole_doc)[0]
+
+
+def _select_page_output_tagged(
+    state: DocumentState,
+    page_num: int,
+    whole_doc: _WholeDoc | None = None,
+) -> tuple[PageOutput, WinnerKind]:
     """The PageOutput that should be frozen for this page.
 
     Mirrors ``DocumentState.text`` selection: a passing OCR best_output wins;
@@ -808,7 +896,7 @@ def _select_page_output(
                 if math_hybrid.failure_mode is FailureMode.NONE
                 else math_hybrid.failure_mode
             ),
-        )
+        ), WinnerKind.CORRUPT_MATH_HYBRID
     if p.best_output and p.best_output.audit_passed:
         # A passing NATIVE best_output that also carries a table-distrust flag
         # is a CONTRADICTION, and the contradiction must lose to the flag
@@ -848,7 +936,7 @@ def _select_page_output(
             p, "native_rotated_text_shredded", False
         )
         if not (native_distrusted or native_text_shredded):
-            return p.best_output
+            return p.best_output, WinnerKind.PASSING_BEST_OUTPUT
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
     # hallucination is worse than an explicit failure marker — same D3 pattern.
@@ -867,7 +955,7 @@ def _select_page_output(
             engine=p.best_output.engine if p.best_output else "qwen",
             audit_passed=False,
             failure_mode=FailureMode.HALLUCINATION,
-        )
+        ), WinnerKind.UNVERIFIABLE_TABLE_SCANNED
     if p.is_born_digital and p.native_text:
         # TR-3: D3 fail-closed floor.  When the OCR ladder failed for a table
         # page AND the per-region geometry verifier flagged a hard-fail
@@ -913,7 +1001,7 @@ def _select_page_output(
                     status=PageStatus.WARNING,
                     audit_passed=False,
                     failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
-                )
+                ), WinnerKind.UNVERIFIABLE_TABLE_MODEL_KEPT
 
             # TR-3: D3 fail-closed floor text = failed-table marker + image ref.
             # The marker is always present (makes the failure loud and greppable);
@@ -933,7 +1021,7 @@ def _select_page_output(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
-            )
+            ), WinnerKind.UNVERIFIABLE_TABLE_NATIVE
 
         # #263: rotated-shredded fail-closed floor. The native layer of a
         # rotated page can come back as one glyph run per line -- 177 chars
@@ -960,7 +1048,7 @@ def _select_page_output(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TEXT_SHREDDED,
-            )
+            ), WinnerKind.ROTATED_TEXT_SHREDDED
 
         # #259: a flagged-but-PRESENT model output stays the winner. Placed
         # AFTER the D3 floor above so a hard-fail still fails closed, and before
@@ -984,7 +1072,7 @@ def _select_page_output(
                     if flagged_model.failure_mode is FailureMode.NONE
                     else flagged_model.failure_mode
                 ),
-            )
+            ), WinnerKind.FLAGGED_MODEL_KEPT
 
         # S1: the general structure-class case (C2, tables only). Originally
         # scoped to "tables or equations"; BLOCKING 1 on #269's review found
@@ -1047,7 +1135,7 @@ def _select_page_output(
                 # (``audit_passed`` already True) ships exactly as before --
                 # this adds nothing on top of an ordinary passing attempt.
                 if grid_winner.audit_passed:
-                    return grid_winner
+                    return grid_winner, WinnerKind.STRUCTURE_CLASS_GRID_PASSING
                 kept_text = grid_winner.text
                 note = kept_table_flag_note(state, page_num, kept_text)
                 if note:
@@ -1062,7 +1150,7 @@ def _select_page_output(
                         if grid_winner.failure_mode is FailureMode.NONE
                         else grid_winner.failure_mode
                     ),
-                )
+                ), WinnerKind.STRUCTURE_CLASS_GRID_FLAGGED
             # (iii) no attempt authored a grid (R3's model-rung guarantee
             # found nothing usable, or -- under --native-only -- no rung ran
             # at all). Native is the only reading left. C1: its PROSE still
@@ -1100,7 +1188,7 @@ def _select_page_output(
                     if legacy_table_defect
                     else FailureMode.STRUCTURE_CLASS_NO_MODEL_ATTEMPT
                 ),
-            )
+            ), WinnerKind.STRUCTURE_CLASS_NO_GRID
 
         # An enhancement page (native layer known deficient) whose recovery was
         # tried and never passed ships native text
@@ -1161,7 +1249,7 @@ def _select_page_output(
                 if native_table_defect and native_is_fallback
                 else FailureMode.NONE
             ),
-        )
+        ), (WinnerKind.NATIVE_FALLBACK if native_demoted else WinnerKind.NATIVE_CLEAN)
     # Whole-document CLI path: recover this page's text from the split markdown.
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
     # carries real content for this page is not shadowed (the prior ordering left
@@ -1179,11 +1267,11 @@ def _select_page_output(
             status=PageStatus.SUCCESS if whole_doc.audit_passed else PageStatus.WARNING,
             engine=whole_doc.engine,
             audit_passed=whole_doc.audit_passed,
-        )
+        ), WinnerKind.WHOLE_DOC_SECTION
     # A failed per-page attempt (content present, audit not passed) beats an
     # empty page so the manifest preserves what little we have.
     if p.best_output:
-        return p.best_output
+        return p.best_output, WinnerKind.BEST_OUTPUT_UNVERIFIED
     # The documented-but-previously-missing fallback: when scoring/judging
     # cleared ``best_output`` and repair produced nothing, the rejected text
     # still lives in ``attempts``. Ship it flagged rather than erasing the
@@ -1197,7 +1285,7 @@ def _select_page_output(
             engine=attempt.engine,
             audit_passed=False,
             failure_mode=attempt.failure_mode,
-        )
+        ), WinnerKind.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
     # a silent gap between page headers.
     return PageOutput(
@@ -1205,7 +1293,7 @@ def _select_page_output(
         text=page_failed_marker(page_num),
         status=PageStatus.ERROR,
         audit_passed=False,
-    )
+    ), WinnerKind.NO_TEXT_MARKER
 
 
 def _apply_table_emission_guard(output: PageOutput, page_num: int) -> PageOutput:
