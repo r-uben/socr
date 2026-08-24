@@ -109,7 +109,7 @@ fixes riding along.**
 | R4 | Extract the corrupt-equation lane | 3065–3153 (89) | `_chart_figures_dir`, `chart_winner_pages` | `BLOCKED` on R1 |
 | R5 | Extract the OCR route lane | 3393–3628 (236) | 5 in, 2 out | **`HELD`** — see below |
 | R6 | Extract the shared per-page tail | 3629–3762 (134) | 8, one read-write | `BLOCKED` on R2–R4 |
-| R7 | Extract the eleven bucket derivations | 5999–6300 (~300) | `state`, `page_texts`, `native_only` | **`NEEDS-DESIGN`** — fork open |
+| R7 | Extract the eleven bucket derivations | 5999–6300 (~300) | `state`, `page_texts`, `native_only` | `READY` — fork ruled: **tag the cascade** |
 | R8 | Extract bucket → audit-event emission | 6211–6482 (272, part) | R7's return value | `BLOCKED` on R7 |
 | R9 | Extract bucket → CLI summary | 6211–6482 (272, part) | R7's return value | `BLOCKED` on R7 |
 
@@ -150,7 +150,29 @@ while shipping a failure marker — the exact bug class this ticket exists to ki
 
 Full panel record, the open fork (re-derive vs tag the cascade), the convergent signature,
 and the sidecar-event-order test gap: `docs/log/2026-08-24_r7-disposition-design-panel.md`.
-**R7 is `NEEDS-DESIGN` until the owner rules on that fork.**
+**RULED (2026-08-24, owner): option B — tag the cascade.**
+
+Each of the 15 returns in `_select_page_output` carries a disposition tag; the public
+function drops it, so its output stays byte-identical and every existing caller is
+untouched. The classifier reads the tag.
+
+The deciding argument is the one Kimi found, not the smaller diff: `corrupt_math_hybrid`'s
+disjointness from the model-kept buckets is only *implicit* today (`manifest.py:411`, `:608`)
+— nothing has ever had to rank them. Option A (re-derive with own predicates) would force an
+implementer to **invent** that priority order: a new, unrecorded decision, made blind, inside
+a change whose entire contract is that it changes nothing. B inherits the cascade's own
+order, which is correct by construction.
+
+Binding constraints on the implementation:
+
+- The tag is internal. If it reaches any public return value, byte-identity is broken and the
+  ticket has failed.
+- **One ship disposition per page PLUS a set of alerts.** `value_drift`, `fabricated_ref` and
+  `text_grid_rejected` stay orthogonal — never folded into the disposition enum.
+- `d3_floor_pages` stays a strict subset of `failed_pages`. Modelling `failed_pages` as
+  `disposition == FAILED` reintroduces the exact bug this ticket exists to kill.
+
+R7 is now `READY`.
 
 ### Pass two — move out what moves cleanly
 
