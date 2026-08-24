@@ -112,6 +112,16 @@ REJECTION_AMBIGUOUS_DEFERRED = "ambiguous_deferred"
 #: whose allowlist is therefore narrower on purpose.
 REJECTION_JUDGE_ONLY = "judge_only"
 
+#: #162: the verifier itself RAISED, so no deterministic term ran and socr has
+#: no evidence about this table at all. Strictly weaker than
+#: ``REJECTION_AMBIGUOUS_DEFERRED``: AMBIGUOUS means the verifier looked and
+#: could not adjudicate; this means it never looked. Recorded so the audit trail
+#: can name the reason, and deliberately kept OUT of
+#: ``D3_SUPERSEDING_REJECTIONS`` -- a crashed verifier is not a positively-soft
+#: refusal, so it must not license shipping the reading over a fail-closed
+#: floor. The allowlists stay allowlists.
+REJECTION_VERIFIER_ERROR = "verifier_error"
+
 
 @dataclass
 class FigureInfo:

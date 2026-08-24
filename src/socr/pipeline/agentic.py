@@ -375,7 +375,74 @@ class VLMPageJudge:
         )
 
 
-class SourceEvidenceTableJudge:
+#: GH-162: exceptions that mean the PROCESS is broken, not that this page's
+#: verifier hit bad geometry. Swallowing them per-page would turn a wedged or
+#: exhausted interpreter into a quiet document-wide table rejection, hiding the
+#: real fault -- the same failure shape the VLM cascade-halt exists to prevent.
+#: ``KeyboardInterrupt``/``SystemExit`` derive from ``BaseException`` and are
+#: already outside ``except Exception``.
+_VERIFIER_FATAL = (MemoryError, RecursionError)
+
+
+class _UnverifiedTableRejection:
+    """GH-162: shared fail-closed handling for a table verifier that raised.
+
+    Both table judges run a deterministic verifier BEFORE an inner (VLM or
+    heuristic) judge, and both promise in their docstrings that an unverifiable
+    table hard-rejects rather than reaching heuristic acceptance. A raised
+    verifier is the strongest form of unverifiable: no term ran, so there is no
+    evidence either way.
+
+    The rejection is deliberately shallow. It does NOT set ``status``,
+    ``failure_mode`` or ``audit_passed``:
+
+    - ``audit_passed`` is the winner-SELECTION flag, and clearing it discards
+      the page's text (the #252 round-1 defect).
+    - a judge decides ONE ladder rung. Whether the page ends up escalated,
+      flagged, or reduced to a failed-table marker is the assembler's call,
+      made once all rungs are known.
+
+    What it does set is ``rejection_class``, so the disposition is nameable
+    downstream -- and ``REJECTION_VERIFIER_ERROR`` is deliberately absent from
+    ``D3_SUPERSEDING_REJECTIONS``, so a crashed verifier can never license
+    shipping its table over a fail-closed floor.
+    """
+
+    def _reject_unverified(self, output: PageOutput, exc: BaseException, page_num: int):
+        from socr.core.result import REJECTION_VERIFIER_ERROR
+
+        name = type(self).__name__
+        detail = f"{type(exc).__name__}: {exc}"[:500]
+        logger.warning(
+            "%s: verifier raised on p%d (%s); rejecting fail-closed (GH-162)",
+            name,
+            page_num,
+            detail,
+        )
+        self._emit_event(
+            page_num=page_num,
+            kind="table_verifier_error",
+            engine=output.engine or "",
+            detail=(
+                f"{name} verifier raised; no deterministic table term ran, so the "
+                "table is unverified. Rejected fail-closed rather than delegated "
+                f"to the inner judge. {detail}"
+            ),
+            data={
+                "judge": name,
+                "exception_type": type(exc).__name__,
+                "rejection_class": REJECTION_VERIFIER_ERROR,
+            },
+        )
+        output.rejection_class = REJECTION_VERIFIER_ERROR
+        return AcceptDecision(
+            accept=False,
+            reason=f"table_verifier_error: {name} raised ({type(exc).__name__})",
+            confidence=0.0,
+        )
+
+
+class SourceEvidenceTableJudge(_UnverifiedTableRejection):
     """Fail-closed source-evidence gate for VLM-emitted markdown tables (GH-90).
 
     Runs BEFORE the inner judge chain on ANY model output that contains markdown
@@ -420,13 +487,16 @@ class SourceEvidenceTableJudge:
                 output.text,
                 ocr_image_fn=self._ocr_image_fn,
             )
+        except _VERIFIER_FATAL:
+            raise
         except Exception as exc:
-            logger.warning(
-                "SourceEvidenceTableJudge: verifier raised on p%d (%s); delegating to inner",
-                page_num,
-                exc,
-            )
-            return self._inner.assess(output, provider)
+            # GH-162: a raised verifier produced NO evidence, so this table is
+            # unverified -- not verified-good. Delegating to an inner judge that
+            # accepts would ship a generated table under a clean status, which
+            # this class's docstring promises not to do. The scanned lane has no
+            # native reading to fall back on, so the model output is the only
+            # reading of the page and it ships on zero corroboration.
+            return self._reject_unverified(output, exc, page_num)
 
         if result.deferred:
             return self._inner.assess(output, provider)
@@ -468,7 +538,7 @@ class SourceEvidenceTableJudge:
             logger.debug("SourceEvidenceTableJudge: failed to record audit event: %s", exc)
 
 
-class NativeTableVerifierJudge:
+class NativeTableVerifierJudge(_UnverifiedTableRejection):
     """Two-tier deterministic pre-check for born-digital table pages.
 
     Runs BEFORE the inner judge (VLM or heuristic) on pages where the
@@ -536,19 +606,19 @@ class NativeTableVerifierJudge:
             rules = _horizontal_rules(fitz_page) if fitz_page is not None else None
             vr = verify_native_table(fitz_page, output.text)
             vr = self._maybe_repair_collapsed_headers(fitz_page, output, vr)
+        except _VERIFIER_FATAL:
+            raise
         except Exception as exc:
-            logger.warning(
-                "NativeTableVerifierJudge: verifier raised on p%d (%s); delegating to inner judge",
-                page_num,
-                exc,
-            )
-            # GH-200: geometry failed, so the header-attribution term cannot
-            # run -- but the grid-shape term (structural_gate_fires) is
-            # string-only and needs no words. Run it anyway so a ragged
-            # candidate is still rejected rather than accepted by silent
-            # delegation to the inner judge.
-            decision = self._inner.assess(output, provider)
-            return self._apply_structural_gate(decision, output, page_num, words=None)
+            # GH-162: supersedes the GH-200 partial hardening. That fix ran the
+            # string-only grid-shape term over the inner judge's decision, which
+            # caught a ragged candidate but still let a well-formed one through
+            # on an accepting inner judge -- the value-guard and
+            # header-attribution terms never ran. A raised verifier means no
+            # deterministic term ran at all, so there is nothing to accept on.
+            # The native layer still exists as a checkable reference here, which
+            # is why the floor may later prefer a native reading; that is the
+            # assembler's call, not this judge's.
+            return self._reject_unverified(output, exc, page_num)
 
         # #259 round 3: the value guard found a numeric multiset mismatch but a
         # row-count discrepancy made the pairing unreliable, so it is AMBIGUOUS
