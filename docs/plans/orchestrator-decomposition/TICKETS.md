@@ -109,7 +109,7 @@ fixes riding along.**
 | R4 | Extract the corrupt-equation lane | 3065–3153 (89) | `_chart_figures_dir`, `chart_winner_pages` | `BLOCKED` on R1 |
 | R5 | Extract the OCR route lane | 3393–3628 (236) | 5 in, 2 out | **`HELD`** — see below |
 | R6 | Extract the shared per-page tail | 3629–3762 (134) | 8, one read-write | `BLOCKED` on R2–R4 |
-| R7 | Extract the eleven bucket derivations | 5922–6122 (201) | `state`, `self.config` only | `BLOCKED` on R1 |
+| R7 | Extract the eleven bucket derivations | 5999–6300 (~300) | `state`, `page_texts`, `native_only` | **`NEEDS-DESIGN`** — fork open |
 | R8 | Extract bucket → audit-event emission | 6211–6482 (272, part) | R7's return value | `BLOCKED` on R7 |
 | R9 | Extract bucket → CLI summary | 6211–6482 (272, part) | R7's return value | `BLOCKED` on R7 |
 
@@ -128,7 +128,29 @@ the wrong order. Revisit after #227/#221 are settled.
 **R7 is the valuable one.** Adding a page disposition today costs three edits 300 lines
 apart plus an exclusion clause in every sibling bucket; three recorded bugs in that block's
 own comments (GH-151 B1 r2, BLOCKING 2 on #269, #262) are all the same bug — a page counted
-under two dispositions, or none. R7 makes exclusivity a property of one function.
+under two dispositions, or none.
+
+**CORRECTION (2026-08-24, design panel).** This ticket previously said R7 "makes exclusivity
+a property of one function", implying the twelve buckets partition the pages. **They do not.**
+A three-model read (GPT / Fable / Kimi, all grounded) found the same counter-evidence
+independently, and it was then verified directly:
+
+- The **ship** buckets are exclusive, and already structurally so — `_select_page_output`
+  (`manifest.py:763-1208`) is a 15-return, **zero-loop** cascade, so exactly one branch
+  ships per page. Not a convention; a property of the code's shape.
+- `value_drift`, `fabricated_ref` and `text_grid_rejected` are **not** ship buckets. They
+  are orthogonal alerts derived from events/flags that co-occur with a page shipping fine.
+- `d3_floor_pages` is a **deliberate strict subset** of `failed_pages`
+  (`orchestrator.py:6004-6006`), double-surfaced on purpose: two events, two CLI lines, and
+  the lost-content note.
+
+So the shape is **one ship disposition per page + a set of alerts**, not a single partition.
+An implementer who collapses that to one enum makes a D3-floor-only document report SUCCESS
+while shipping a failure marker — the exact bug class this ticket exists to kill.
+
+Full panel record, the open fork (re-derive vs tag the cascade), the convergent signature,
+and the sidecar-event-order test gap: `docs/log/2026-08-24_r7-disposition-design-panel.md`.
+**R7 is `NEEDS-DESIGN` until the owner rules on that fork.**
 
 ### Pass two — move out what moves cleanly
 
