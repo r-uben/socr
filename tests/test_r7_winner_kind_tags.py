@@ -74,13 +74,48 @@ def test_tags_and_endings_are_in_bijection() -> None:
     assert len({k.value for k in WinnerKind}) == len(list(WinnerKind))
 
 
-def test_public_wrapper_drops_the_tag_only() -> None:
-    """The tag is INTERNAL: the public signature must be unchanged.
+def test_tag_order_matches_enum_declaration_order() -> None:
+    """Precedence lives in the cascade's order, so the enum must mirror it.
 
-    If ``_select_page_output`` ever returned the tuple, every existing caller
-    would silently receive a tuple where it expects a PageOutput.
+    ``WinnerKind``'s docstring makes definition order load-bearing: it is the
+    record of which ending outranks which, and part two is told to treat it as
+    the authority. A set comparison cannot see order, so on its own it would let
+    two tags be transposed -- or the enum reordered by an alphabetising autofix --
+    while totality, exclusivity and bijection all still hold. That failure is
+    silent and hands every downstream caller a systematically wrong disposition.
+
+    Pinning source order against declaration order also catches a hand-transposed
+    pair, which is the one defect the AST checks are structurally blind to.
     """
-    src = inspect.getsource(manifest._select_page_output)
-    assert "_select_page_output_tagged(state, page_num, whole_doc)[0]" in src
+    fn = _cascade()
+    in_source = [r.value.elts[1].attr for r in sorted(_returns(fn), key=lambda r: r.lineno)]
+    assert in_source == [k.name for k in WinnerKind]
+
+
+def test_public_wrapper_returns_the_output_not_the_tuple() -> None:
+    """The tag is INTERNAL: the public function must still yield a bare PageOutput.
+
+    Checked by CALLING the wrapper, not by matching its source text: a substring
+    assertion breaks on harmless reformatting and passes if the string only ever
+    appears in a comment. Patching the tagged form proves the wrapper really
+    delegates and really drops element 1.
+    """
+    sentinel = object()
+    calls: list[tuple] = []
+
+    def _fake(state, page_num, whole_doc=None):
+        calls.append((state, page_num, whole_doc))
+        return sentinel, WinnerKind.PASSING_BEST_OUTPUT
+
+    original = manifest._select_page_output_tagged
+    manifest._select_page_output_tagged = _fake
+    try:
+        got = manifest._select_page_output("STATE", 7, "WHOLE")
+    finally:
+        manifest._select_page_output_tagged = original
+
+    assert got is sentinel, "wrapper did not delegate, or did not drop the tag"
+    assert calls == [("STATE", 7, "WHOLE")], "wrapper dropped or reordered arguments"
+
     ann = inspect.signature(manifest._select_page_output).return_annotation
     assert ann in ("PageOutput", manifest.PageOutput)
