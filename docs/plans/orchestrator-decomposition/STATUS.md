@@ -37,12 +37,12 @@ the buckets can be swapped to read the tag. They cannot, because they do not map
   - `corrupt_math_hybrid_pages` (#292): diverges in 1,984/4,096 states. Hides a real
     native-fallback page behind a false exclusion, and drives a document to AUDIT_FAILED
     over a page that ships `NATIVE_CLEAN`.
-  - `native_fallback_pages` (**unfiled**): 78 states where it claims a page that actually
+  - `native_fallback_pages` (**#293**): 78 states where it claims a page that actually
     ships `ROTATED_TEXT_SHREDDED`. Same shape as #292, distinct cause.
 
 So part two is not a swap; it is a mapping layer that must reproduce today's behaviour
 **including both bugs**, since R7 is contracted behaviour-identical. Both fixes are
-deferred: #292 filed, the second still to file.
+deferred out of the refactor: #292 and #293.
 
 **Correction to the fan-out claim below.** Decision 2 says implementation cannot fan out
 across worktrees "as a property of the repo". That is too strong. It is a property of the

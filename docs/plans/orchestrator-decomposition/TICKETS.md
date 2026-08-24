@@ -191,7 +191,7 @@ onto the tags:
   is the very bug class R7 exists to kill, found in R7's own inputs:
   - `corrupt_math_hybrid_pages` — **#292**. Diverges in 1,984/4,096 states, always
     over-claiming.
-  - `native_fallback_pages` — **unfiled**. 78 states where it claims a page that ships
+  - `native_fallback_pages` — **#293**. 78 states where it claims a page that ships
     `ROTATED_TEXT_SHREDDED`. Distinct cause from #292, same shape.
 
 R7 is contracted behaviour-identical, so R7b must reproduce **both** bugs rather than fix
