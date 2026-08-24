@@ -794,12 +794,15 @@ class WinnerKind(str, Enum):
     CORRUPT_MATH_HYBRID = "corrupt_math_hybrid"
     #: the ladder's passing best_output ships clean -- the ordinary success
     PASSING_BEST_OUTPUT = "passing_best_output"
-    #: scanned page, source-evidence table check failed: fail-closed marker
-    D3_FLOOR_SCANNED = "d3_floor_scanned"
-    #: #262: an attempt authored a grid, so the model reading is kept over the floor
-    D3_FLOOR_KEPT_MODEL = "d3_floor_kept_model"
-    #: born-digital D3 fail-closed floor: unverifiable table marker
-    D3_FLOOR_NATIVE = "d3_floor_native"
+    #: scanned page, source-evidence table check failed: fail-closed marker.
+    #: ("D3" in the surrounding identifiers is Option D3 of the 2026-06-17 table-repair
+    #: design menu -- a numbered choice, carrying no meaning. Named for what it does.)
+    UNVERIFIABLE_TABLE_SCANNED = "unverifiable_table_scanned"
+    #: #262: same conjunction, but an attempt authored a grid -- the model reading is
+    #: kept over the fail-closed marker, shipped flagged
+    UNVERIFIABLE_TABLE_MODEL_KEPT = "unverifiable_table_model_kept"
+    #: born-digital page whose native table failed verification: fail-closed marker
+    UNVERIFIABLE_TABLE_NATIVE = "unverifiable_table_native"
     #: rotated-text extraction shredded the native layer: fail-closed marker
     ROTATED_TEXT_SHREDDED = "rotated_text_shredded"
     #: #259: ladder accepted nothing but the model produced a table -- kept flagged
@@ -952,7 +955,7 @@ def _select_page_output_tagged(
             engine=p.best_output.engine if p.best_output else "qwen",
             audit_passed=False,
             failure_mode=FailureMode.HALLUCINATION,
-        ), WinnerKind.D3_FLOOR_SCANNED
+        ), WinnerKind.UNVERIFIABLE_TABLE_SCANNED
     if p.is_born_digital and p.native_text:
         # TR-3: D3 fail-closed floor.  When the OCR ladder failed for a table
         # page AND the per-region geometry verifier flagged a hard-fail
@@ -998,7 +1001,7 @@ def _select_page_output_tagged(
                     status=PageStatus.WARNING,
                     audit_passed=False,
                     failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
-                ), WinnerKind.D3_FLOOR_KEPT_MODEL
+                ), WinnerKind.UNVERIFIABLE_TABLE_MODEL_KEPT
 
             # TR-3: D3 fail-closed floor text = failed-table marker + image ref.
             # The marker is always present (makes the failure loud and greppable);
@@ -1018,7 +1021,7 @@ def _select_page_output_tagged(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
-            ), WinnerKind.D3_FLOOR_NATIVE
+            ), WinnerKind.UNVERIFIABLE_TABLE_NATIVE
 
         # #263: rotated-shredded fail-closed floor. The native layer of a
         # rotated page can come back as one glyph run per line -- 177 chars
