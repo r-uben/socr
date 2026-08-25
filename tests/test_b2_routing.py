@@ -205,17 +205,17 @@ class TestRunFingerprintIncludesStrictLocal:
 class TestCLIFlags:
     """Smoke test that the new flags are wired into the click commands."""
 
-    def test_legacy_routing_flag_recognized(self) -> None:
-        """socr process --legacy-routing should not error on flag parsing."""
+    def test_legacy_routing_flag_hidden_from_help(self) -> None:
+        """socr process --help must not advertise the legacy routing entry point."""
         from click.testing import CliRunner
 
         from socr.cli import process
 
         runner = CliRunner()
-        # Invoke with --help to see if the flag is listed; no real file needed.
+        # Invoke with --help to inspect advertised options; no real file needed.
         result = runner.invoke(process, ["--help"])
         assert result.exit_code == 0
-        assert "--legacy-routing" in result.output
+        assert "--legacy-routing" not in result.output
 
     def test_strict_local_flag_recognized(self) -> None:
         """socr process --strict-local should appear in --help."""

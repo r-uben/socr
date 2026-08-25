@@ -171,16 +171,16 @@ def common_options(f):
         help="YAML config file",
     )(f)
     f = click.option("--profile", type=str, help="Load ~/.config/socr/{profile}.yaml")(f)
-    # Agentic cost-aware routing (now the default; use --legacy-routing to opt out)
+    # Agentic cost-aware routing is the sole default product path.
     f = click.option(
         "--agentic",
         is_flag=True,
-        help="Cost-aware routing: cheapest-first, judge escalates (default; kept for compat)",
+        help="Use cost-aware routing (default; retained for command compatibility)",
     )(f)
     f = click.option(
         "--legacy-routing",
         is_flag=True,
-        help="Use old deterministic pipeline (backbone → audit → repair) instead of agentic",
+        hidden=True,
     )(f)
     f = click.option(
         "--strict-local",
@@ -191,7 +191,7 @@ def common_options(f):
         "--judge-backend",
         type=click.Choice(["auto", "vlm", "heuristic"]),
         default="auto",
-        help="Quality judge for agentic mode",
+        help="Quality judge for agentic routing",
     )(f)
     f = click.option(
         "--judge-model",
@@ -393,8 +393,8 @@ def process(
 ) -> None:
     """Process a single PDF document.
 
-    Uses cascading fallback: primary engine first, quality audit,
-    then fallback engine for failed documents.
+    Uses cost-aware agentic routing: the judge accepts each page or escalates
+    through the provider ladder.
 
     Example:
         socr process paper.pdf -o ./results/
