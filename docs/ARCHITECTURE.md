@@ -1,37 +1,30 @@
 # socr Architecture
 
 socr turns a PDF into Markdown by routing each page to an OCR engine, checking
-the result, and re-trying on a different engine when the result is poor. It runs
-in two modes that differ only in **how the engine for a page is chosen**.
+the result, and re-trying on a different engine when the result is poor. The
+default product path is the agentic, cost-aware router.
 
-## Two routing modes
+## Agentic, cost-aware routing
 
-### Deterministic (default — `socr paper.pdf`)
-The engine is chosen **up front** by predicting page difficulty:
-1. Born-digital prose -> native text (no OCR, free).
-2. "Easy" pages -> the cheap local engine (`config.local_engine`).
-3. "Hard" pages -> the primary engine (`config.primary_engine`, e.g. cloud).
-
-Easy/hard comes from `core/difficulty.py` (tables, equations, multi-column
-layout, drawings, image density). Quality is checked by heuristics
-(`audit/heuristics.py`); failed pages are re-OCR'd by `pipeline/repair.py`
-(`RepairRouter`), which picks the next engine by **failure mode**.
-
-### Agentic, cost-aware (`socr paper.pdf --agentic`)
-The engine is chosen **dynamically** by cost while judging the real output:
+Running `socr paper.pdf` chooses providers **dynamically** by cost while judging
+the real output:
 1. Born-digital prose -> native text (free; skip with `--no-native-first`).
 2. Every other page -> a **cost-ordered provider ladder** (cheapest first). Run
    the cheapest; a **judge** accepts the output or escalates to the next-cheapest;
    stop at the first accepted output. Bounded by `max_retries` / `cost_budget`.
 
-This mode records the winning provider + cost per page and writes a replayable
+The router records the winning provider + cost per page and writes a replayable
 manifest. See `docs/log/2026-05-30_cost-aware-agentic-ocr.md`.
 
+A deprecated deterministic path (backbone -> score -> judge -> repair) remains
+reachable through the hidden `--legacy-routing` flag pending deletion. It
+chooses the initial engine from page difficulty, checks output with heuristics,
+then uses `RepairRouter` to select another engine by failure mode.
+
 ## Extraction method: extract / verify / escalate
-Both modes are instances of one general method for getting structured content
-(tables, figures) out of a page. The three layers are **separable** — conflating
-them is what makes high-fidelity extraction look like it needs an expensive agentic
-loop on every page. It does not.
+Agentic routing uses one general method for getting structured content (tables,
+figures) out of a page. The three layers are **separable** — the agentic path
+does not require an expensive model loop on every page.
 
 | Layer | Question | Cost |
 |-------|----------|------|
@@ -41,24 +34,24 @@ loop on every page. It does not.
 
 - **Single-pass is the default extract step.** Validated 2026-06-14 on a dense
   forecaster table (`qwen3-vl:30b-a3b-instruct`, one call): 120/120 summary cells
-  exact. Agentic crop-reconcile is the tail (escalation), not the trunk.
+  exact. Crop-reconcile is the tail (escalation), not the trunk.
 - **Verify is free, not a second model.** On born-digital pages PyMuPDF knows the
   column x-positions and the header fixes the column count, so a value outside its
   lane is a zero-cost red flag. This deterministic check sits *ahead* of the VLM
-  judge (`judge/ollama_judge.py`), which is itself a paid call — so the judge and any
+  judge (`judge/ollama_judge.py`), which can run locally. The judge and any provider
   escalation fire only when the cheap check disagrees.
 - **Scope:** holds for **born-digital** PDFs (≈the whole corpus). **Pure scans** have
   no text layer to verify against, so there the only checks are a second VLM pass or
-  self-consistency voting — closer to agentic. Default: single-pass VLM + free native
-  verification; agentic reserved for scans-with-disagreement, never every page.
+  self-consistency voting. The agentic router defaults to a single-pass VLM + free
+  native verification and escalates only when a signal fires.
 
 See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
 
 ## Modules
 - `cli.py`: Click commands — `process` (default, PDF-path shorthand), `batch`,
-  `engines`, `replay`, `judge-benchmark`. Agentic flags: `--agentic`,
-  `--judge-backend`, `--judge-model`, `--max-cost-per-page`, `--cost-budget`,
-  `--write-manifest`.
+  `engines`, `replay`, `judge-benchmark`. Agentic routing controls:
+  `--strict-local`, `--judge-backend`, `--judge-model`, `--max-cost-per-page`,
+  `--cost-budget`, `--write-manifest`.
 - `core/`:
   - `config.py`: `PipelineConfig` (single flat config), `EngineType`,
     `ENGINE_PRIORITY`, agentic flags.
@@ -66,13 +59,15 @@ See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
   - `result.py`: `PageOutput` (now with `cost_usd`), `EngineResult`, enums,
     `to_dict`/`from_dict` for caching.
   - `state.py`: `DocumentState` blackboard — per-page `PageState` with `attempts`
-    and `best_output`. The spine both modes mutate.
+    and `best_output`. All routing branches mutate this shared state.
   - `providers.py`: provider cost registry + `provider_ladder()` (cheapest-first).
   - `manifest.py` + `cache.py`: content-addressed blob store + per-document
     manifest. `build_manifest()` freezes the winning output per page; `replay()`
     reconstructs the document from cache with **no engine calls**.
-  - `difficulty.py`, `born_digital.py`: page classification used by deterministic
-    routing and native-text extraction.
+  - `difficulty.py`: classifies tables, equations, multi-column layouts,
+    drawings, and image density during `UnifiedPipeline._phase_analyze`; every
+    routing branch consumes that analysis. `born_digital.py` handles native-text
+    extraction.
 - `engines/`: one adapter per CLI engine implementing `BaseEngine`
   (`gemini`, `deepseek`, `marker`, `glm`, `nougat`, `mistral`) + HPC vLLM engines.
   `registry.py` resolves/probes engines.
@@ -81,13 +76,16 @@ See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
   labeled pages). Prompt lives in `prompts/judge_page.md` (policy as data).
 - `audit/`: heuristic checks (`HeuristicsChecker`) + failure-mode scoring.
 - `pipeline/`:
-  - `orchestrator.py`: `UnifiedPipeline` — the single pipeline. Phases:
-    analyze -> backbone -> score -> repair -> assemble (deterministic), or
-    analyze -> `_phase_agentic` -> assemble (agentic). Writes the manifest.
+  - `orchestrator.py`: `UnifiedPipeline` — the shared orchestrator. Every run
+    analyzes first, then dispatches to the default agentic branch, the
+    multi-engine branch, or the deprecated deterministic branch before
+    assembly. Writes the manifest.
   - `agentic.py`: `route_page()` (Python-owned per-page loop) + `PageJudge`
     adapters (`VLMPageJudge`, `HeuristicPageJudge`).
-  - `repair.py`, `consensus.py`, `reconciler.py`, `hpc_pipeline.py`: repair
-    routing, multi-engine consensus, and the HPC/vLLM path.
+  - `repair.py`: `RepairRouter` selects another engine by failure mode in the
+    deprecated deterministic branch; pending deletion.
+  - `consensus.py`, `reconciler.py`, `hpc_pipeline.py`: multi-engine consensus,
+    reconciliation, and the HPC/vLLM path.
 - `figures/`: `FigureExtractor` (PyMuPDF embedded-image extraction + VLM captions).
 - `ui/`: Rich console/progress/panels.
 
