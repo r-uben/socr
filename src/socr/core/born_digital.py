@@ -1803,7 +1803,7 @@ class BornDigitalDetector:
         future escalation path (TR-5 VLM confirm/split) can use these counts
         to decide when geometry-led segmentation has failed.
         """
-        from socr.tables.reconstruct import _NUM_TOKEN_RE, _NUMERIC_RE
+        from socr.core.table_grid import NUM_TOKEN_RE, NUMERIC_RE
 
         try:
             words = page.get_text("words")
@@ -1818,7 +1818,7 @@ class BornDigitalDetector:
 
         for w in words:
             x0, y0, _, _, text = w[0], w[1], w[2], w[3], w[4]
-            if not (_NUM_TOKEN_RE.match(text) and _NUMERIC_RE.search(text)):
+            if not (NUM_TOKEN_RE.match(text) and NUMERIC_RE.search(text)):
                 continue
 
             hits = sum(1 for r in region_rects if r.x0 <= x0 <= r.x1 and r.y0 <= y0 <= r.y1)

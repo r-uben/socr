@@ -44,6 +44,13 @@ import re
 import statistics
 from collections import defaultdict
 
+from socr.core.table_grid import NUM_TOKEN_RE as _NUM_TOKEN_RE
+from socr.core.table_grid import NUMERIC_RE as _NUMERIC_RE
+
+# Private aliases so same-package callers (native_verifier, header_repair)
+# keep importing ``_NUM_TOKEN_RE`` from here. Canonical names live in
+# ``socr.core.table_grid`` (#175).
+
 logger = logging.getLogger(__name__)
 
 # GH-144 review finding 4: rejecting a text-strategy grid for destroying a
@@ -72,10 +79,6 @@ _MIN_NUMERIC_FRAC = 0.20
 # text-strategy grid to be trusted. Rejects whole-page over-capture on
 # prose/references pages that merely contain a small embedded table.
 _MIN_DATA_ROW_FRAC = 0.5
-
-_NUMERIC_RE = re.compile(r"-?\d")
-# A token that is essentially a number (table value): 0.253, (0.014), 1,204, 45%.
-_NUM_TOKEN_RE = re.compile(r"^[\(\[]?-?\d[\d.,]*[\)\]%]?$")
 
 # The structural table gate. A real data table puts numbers in vertical lanes and
 # each data ROW populates several lanes at once (FabPr | 0.253 | 0.124 | 0.179 |

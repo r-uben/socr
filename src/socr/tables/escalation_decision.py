@@ -69,7 +69,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from socr.benchmark.table_exactness import score_page
+from socr.core.table_grid import score_page
 from socr.tables.escalation_canary import judge_escalation
 
 # How the decision was reached. Recorded per page so a reader can tell a

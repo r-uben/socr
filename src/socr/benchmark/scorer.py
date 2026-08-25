@@ -23,6 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from socr.core.result import EngineResult
+from socr.core.table_grid import (
+    NUMERIC_CELL_RE,
+    is_numeric_cell,
+    markdown_table_cells,
+    normalize_cell,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -426,37 +432,23 @@ class BenchmarkScorer:
     # Table fidelity (vs hand-verified grid GT)
     # ------------------------------------------------------------------
 
-    # Sign may be ASCII hyphen, Unicode minus (U+2212), or en-dash (U+2013) —
-    # GT typed by hand and engine output legitimately differ here, so cells
-    # are normalized before detection AND comparison. Stars/percent/dagger
-    # significance markers and currency prefixes stay part of the cell.
-    _NUMERIC_CELL_RE = re.compile(r"[-+(]?\s*[$€£]?\s*\d[\d,]*(?:\.\d+)?\s*[)%*†]*")
-    # An escaped pipe (``a\|b``, the form core/html_tables emits inside
-    # cells) is content, not a column separator.
-    _CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
+    # Canonical definitions live in ``socr.core.table_grid`` (#175). Kept as
+    # class attributes / methods so existing ``BenchmarkScorer._…`` call sites
+    # (tests, older scoring code) keep working.
+    _NUMERIC_CELL_RE = NUMERIC_CELL_RE
 
     @classmethod
     def _norm_cell(cls, cell: str) -> str:
-        return cell.replace("−", "-").replace("–", "-").replace("\\|", "|").strip()
+        return normalize_cell(cell)
 
     @classmethod
     def _markdown_table_cells(cls, text: str) -> list[list[str]]:
         """Cell grid from the markdown pipe-table rows in *text*."""
-        rows: list[list[str]] = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            if not stripped.startswith("|"):
-                continue
-            inner = stripped.strip("|")
-            # Skip separator rows (|---|---|)
-            if set(inner.replace("|", "").strip()) <= set("-: "):
-                continue
-            rows.append([cls._norm_cell(c) for c in cls._CELL_SPLIT_RE.split(inner)])
-        return rows
+        return markdown_table_cells(text)
 
     @classmethod
     def _is_numeric_cell(cls, cell: str) -> bool:
-        return bool(cls._NUMERIC_CELL_RE.fullmatch(cell.strip()))
+        return is_numeric_cell(cell)
 
     @classmethod
     def score_table_cells(cls, predicted: str, gt_table_md: str) -> tuple[float, bool]:

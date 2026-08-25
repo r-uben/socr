@@ -16,12 +16,13 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from socr.benchmark.scorer import BenchmarkScorer
+from socr.core.table_grid import is_numeric_cell, rows_establish_grid as rows_establish_grid
 from socr.tables.native_verifier import strip_presentation
 
 # A row whose label is only a hierarchy marker ("of which:") introduces children of
 # the preceding labelled row; it carries no values of its own.
 _MARKER_RE = re.compile(r"^\s*of\s+which\s*:?\s*$", re.IGNORECASE)
+MARKER_RE = _MARKER_RE
 
 _FOOTNOTE_SUFFIX_RE = re.compile(r"(?<=[a-z\)])[0-9](?:[0-9,]{0,5})$")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
@@ -31,12 +32,15 @@ def _is_value(cell: str) -> bool:
     """True when *cell* is a table value.
 
     Emphasis is stripped first (GH-103's lesson, in a second tokenizer):
-    ``BenchmarkScorer._is_numeric_cell`` anchors its regex and does not tolerate
-    markdown, so a bold cell like ``**43.2**`` reads as non-numeric. Engines emit
-    section-total rows bold, so leaving this unstripped silently discards every
-    parent row — it under-scored a candidate by 39 points before this was found.
+    ``is_numeric_cell`` anchors its regex and does not tolerate markdown, so a
+    bold cell like ``**43.2**`` reads as non-numeric. Engines emit section-total
+    rows bold, so leaving this unstripped silently discards every parent row —
+    it under-scored a candidate by 39 points before this was found.
     """
-    return bool(cell) and BenchmarkScorer._is_numeric_cell(strip_presentation(cell))
+    return bool(cell) and is_numeric_cell(strip_presentation(cell))
+
+
+is_value = _is_value
 
 
 # Footnote markers, in every spelling encountered. Each engine writes them
@@ -406,34 +410,6 @@ def _total_dispersion(
     return total
 
 
-def rows_establish_grid(rows: list[LabeledRow]) -> bool:
-    """GH-113: True when *rows* look like a table grid, not prose or chart labels.
-
-    The row parser above will happily read two numeric lines of prose, or a
-    chart's axis labels and legend, as if they were table rows — on the OBR
-    reference document that fabricated rows from a cover date
-    ("November=['2022']"), a fragment of "4 per cent" ("cent=['4']"), and a fan
-    chart's axes and legend (page 54, scored 0.0% against ground truth that was
-    never a table). ``rows`` alone cannot discriminate; the shape can: a grid
-    needs at least two value columns, and at least two rows sharing that width.
-    Both are minimums that follow from what a table is, not tuned cutoffs.
-
-    Deliberately not "most rows share the modal width": a real +89-point
-    recovery on the reference document has only 7 of 17 rows at its modal
-    width, and a majority rule would have refused it.
-
-    Shared by the GH-96 exactness metric (ground truth must be scorable) and the
-    GH-113 escalation trigger (don't pay for a cloud call to compare an empty
-    result against an empty result) — one predicate, not two copies drifting
-    apart.
-    """
-    widths = collections.Counter(len(r.values) for r in rows)
-    if not widths:
-        return False
-    modal_width, rows_at_modal = widths.most_common(1)[0]
-    return modal_width >= 2 and rows_at_modal >= 2
-
-
 def _rows_in_region(page, bbox) -> list[tuple[tuple[str, ...], list[tuple[float, float, str]]]]:
     """Labelled rows from the words falling inside one table bbox.
 
@@ -794,6 +770,9 @@ def _superscript_tokens(page, bbox) -> set[tuple[int, str]]:
             if size < row_size and _is_value(text):
                 markers.add((round(x), text))
     return markers
+
+
+superscript_tokens = _superscript_tokens
 
 
 def _drop_footnote_markers(
