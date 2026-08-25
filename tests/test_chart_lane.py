@@ -12,6 +12,8 @@ Covers:
 from __future__ import annotations
 
 import io
+import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -643,6 +645,62 @@ def _make_state_with_page(
     state._last_assessment = DocumentAssessment(path=pdf_path, pages=pages_assess)
 
     return state
+
+
+def test_chart_eligibility_recursion_failure_preserves_table_route_and_audit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """GH-181: chart eligibility failure is visible without changing table routing."""
+    from socr.core.audit_log import build_run_audit
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.agentic import PageDecision
+
+    pdf = _make_vector_chart_pdf(tmp_path)
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf, has_tables=True, native_text="Table 1 data")
+    pipeline._last_assessment = state._last_assessment
+    routed_output = PageOutput(
+        page_num=1,
+        text="| Col A | Col B |\n|---|---|\n| 1.0 | 2.0 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+    )
+    routed_decision = PageDecision(page_num=1, final_output=routed_output, accepted=True)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="socr.pipeline.orchestrator"),
+        patch(
+            "socr.pipeline.orchestrator.has_chart_marks",
+            side_effect=RecursionError("chart detector recursion exhausted"),
+        ),
+        patch("socr.pipeline.orchestrator.route_page", return_value=routed_decision) as mock_route,
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+    ):
+        pipeline._phase_agentic(state, tmp_path)
+
+    mock_route.assert_called_once()
+    assert state.pages[1].best_output is routed_output
+    assert state.pages[1].best_output.text == routed_output.text
+    assert state.pages[1].best_output.engine == routed_output.engine
+
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "chart eligibility" in warnings[0].getMessage().lower()
+
+    failures = [e for e in state.events if e.kind == "chart_asset_detection_failed"]
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure.page_num == 1
+    assert failure.data["error_type"] == "RecursionError"
+
+    audit = build_run_audit(state)
+    payload = json.loads(json.dumps(audit.to_dict()))
+    saved_failures = [e for e in payload["events"] if e["kind"] == "chart_asset_detection_failed"]
+    assert len(saved_failures) == 1
+    assert saved_failures[0]["page_num"] == 1
+    assert saved_failures[0]["data"]["error_type"] == "RecursionError"
 
 
 class TestAgenticChartLaneRouting:

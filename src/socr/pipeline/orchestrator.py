@@ -1743,24 +1743,19 @@ class UnifiedPipeline:
 
         Do NOT call this predicate when ``_is_native_eligible_without_ocr`` returns False
         (i.e. the page would go to the OCR ladder anyway); there is nothing to intercept.
+
+        Exceptions from open_pdf or has_chart_marks propagate to the sole caller
+        (_phase_agentic's chart-eligibility scan) for audited fail-soft handling.
         """
         # Must be native-eligible first (chart lane is a sub-case of native).
         if not self._is_native_eligible_without_ocr(page_num, ps):
             return False
         # Open the PDF page and run the vector detector.
-        try:
-            from socr.core.pdf import open_pdf
+        from socr.core.pdf import open_pdf
 
-            with open_pdf(pdf_path) as doc:
-                page = doc[page_num - 1]
-                return has_chart_marks(page)
-        except Exception as exc:
-            logger.debug(
-                "_is_chart_asset_page p%d: fitz open/detect failed (%s); defaulting to False",
-                page_num,
-                exc,
-            )
-            return False
+        with open_pdf(pdf_path) as doc:
+            page = doc[page_num - 1]
+            return has_chart_marks(page)
 
     def _render_chart_page_png(
         self,
@@ -2787,7 +2782,31 @@ class UnifiedPipeline:
         for pn, ps in sorted(state.pages.items()):
             if pn in resumed_pages:
                 continue
-            if not self._is_chart_asset_page(pn, ps, state.handle.path):
+            try:
+                if not self._is_chart_asset_page(pn, ps, state.handle.path):
+                    continue
+            except Exception as exc:
+                logger.warning(
+                    "chart eligibility detection failed for p%d: %s: %s",
+                    pn,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                from socr.core.audit_log import AuditEvent
+
+                state.events.append(
+                    AuditEvent(
+                        page_num=pn,
+                        kind="chart_asset_detection_failed",
+                        engine="chart_asset",
+                        detail="chart eligibility detection failed; page proceeds through non-chart route",
+                        data={
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    )
+                )
                 continue
             if self._page_has_tables(pn, ps):
                 chart_mixed_pages.add(pn)
