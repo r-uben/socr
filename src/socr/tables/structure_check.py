@@ -21,7 +21,7 @@ Callers are expected to have already stripped markdown separator rows (the
 ``check_grid`` itself performs no markdown parsing and never drops rows that
 look like separators; see ``test_separator_free_contract`` for the pin.
 
-Inherited blind spot (documented here, not fixed — handed to TICKET-B1):
+Inherited parser blind spot (documented here, deliberately unchanged):
 ``reconcile._parse_grid`` treats an all-blank pipe row (e.g. ``"|  |  |  |"``)
 as a separator row, because its separator test is
 ``all(_SEP_CELL.match(c.strip()) for c in cells if c.strip())``, which is
@@ -32,8 +32,11 @@ before ``check_grid`` ever sees them. Verified against the real parser:
 ``"| a | b |\\n| --- | --- |\\n|  |  |\\n| c | d |"`` parses to
 ``[["a", "b"], ["c", "d"]]`` — the all-blank row in the middle vanishes rather
 than surfacing as, say, an orphan or an empty body row. This module does not
-and cannot see the missing row, so it cannot flag it; a fix belongs in
-``reconcile._parse_grid``, not here.
+and cannot see the missing row in its parsed-grid diagnostics. GH-190 closes
+the shipping consequence of this blind spot by having ``table_output_defect``
+inspect raw rows before parsing. ``_parse_grid`` itself and reconciliation diffs
+remain blind to the dropped row and are deliberately unchanged; a parser-level
+fix is outside this gate.
 
 Row indices are zero-based into the parsed, separator-free grid. Row 0 is
 always the header row.
@@ -63,9 +66,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from socr.tables.reconcile import (
+    TABLE_CONTENT_EMPTY,
     TABLE_EMISSION_LATEX_LEAK,
     TABLE_EMISSION_WIDTH_MISMATCH,
     find_table_blocks,
+    table_content_defect,
     table_emission_defect,
 )
 
@@ -204,10 +209,12 @@ def check_markdown(page_md: str) -> list[GridStructureReport]:
     """Report structure for every table block on a page, in document order.
 
     Thin wrapper only: delegates parsing entirely to
-    ``reconcile.find_table_blocks`` (no second markdown parser). Inherits that
-    parser's documented blind spot: an all-blank pipe row is treated as a
+    ``reconcile.find_table_blocks`` (no second markdown parser). It inherits
+    the parser's documented blind spot: an all-blank pipe row is treated as a
     separator and silently dropped before it ever reaches ``check_grid`` — see
-    the module docstring. That gap is left for TICKET-B1 to address.
+    the module docstring. The shipping gate closes the consequence through its
+    separate raw-row ``table_content_defect`` term; this parsed-grid path is
+    deliberately unchanged.
     """
     return [check_grid(block.grid) for block in find_table_blocks(page_md)]
 
@@ -228,14 +235,15 @@ def structural_gate_fires(reports: Sequence[GridStructureReport]) -> bool:
     return any(r.ragged or r.detached_label_rows for r in reports)
 
 
-# GH-200: the escalation-gate defect codes. A disjunction, evaluated in cost
-# order -- the grid-shape term is string-only and free; the header term needs
-# native word geometry and runs only when the shape term did not already fire.
+# GH-200: the escalation-gate defect codes. A disjunction, evaluated in
+# precedence order: emission defects, raw-row content defects, parsed
+# grid-shape defects, then the header term, which needs native word geometry.
 DEFECT_NONE = ""
 DEFECT_GRID_SHAPE = "grid_shape"
 DEFECT_HEADER_UNATTRIBUTED = "header_unattributed"
 DEFECT_TABLE_LATEX_LEAK = TABLE_EMISSION_LATEX_LEAK
 DEFECT_TABLE_WIDTH_MISMATCH = TABLE_EMISSION_WIDTH_MISMATCH
+DEFECT_TABLE_CONTENT_EMPTY = TABLE_CONTENT_EMPTY
 
 
 def table_output_defect(
@@ -245,19 +253,25 @@ def table_output_defect(
 ) -> str:
     """Whether *output_md* (the text about to ship) has a structural defect.
 
-    GH-200, extended by GH-212 and GH-226. A disjunction in cost order:
+    GH-200, extended by GH-190, GH-212, and GH-226. A disjunction in stable
+    precedence order:
 
     1. ``table_emission_defect`` on raw Markdown rows, before the delimiter is
        discarded: residual LaTeX table structure or a delimiter disagreeing
        with an otherwise rectangular header/body grid. String-only, no I/O.
-    2. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
+    2. ``table_content_defect`` on raw Markdown rows, before ``_parse_grid``
+       can erase all-blank rows. GH-190 closes the shipping consequence of
+       that parser blind spot by inspecting raw rows; ``_parse_grid`` itself
+       and reconciliation diffs remain blind and deliberately unchanged.
+    3. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
        ragged OR detached_label_rows, unchanged -- see ``structural_gate_fires``
        docstring). String-only, no I/O.
-    3. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only
-       when the shape term did not already fire, and only when the caller
-       supplied both native words and the page's drawn horizontal rules.
+    4. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only
+       when the shape and preceding terms did not already fire, and only when
+       the caller supplied both native words and the page's drawn horizontal
+       rules.
 
-    **On term 3 and the four reverts that precede it.** Earlier implementations
+    **On term 4 and the four reverts that precede it.** Earlier implementations
     of a header-attribution disjunct (GH-151 T3's token-pattern rule,
     ``062bdef``'s year-band rule, the positional rule, and the normalized
     comparison) each failed in one of two directions: abstaining on the
@@ -277,11 +291,12 @@ def table_output_defect(
     unchanged: they still produce the advisory SOFT signal and the abstain rate
     that ``header_cut`` deliberately does not report.
 
-    **rules=None abstains.** A caller with no ``fitz`` page (the verifier
-    exception path, and ``born_digital``'s native-lane check, which flags the
-    native text layer rather than a model-emitted table) passes nothing and gets
-    the shape term alone. That is the intended behaviour for those callers, not
-    an oversight.
+    **rules=None abstains.** Exception-path callers execute
+    ``table_output_defect`` with no page geometry and receive the raw emission,
+    raw content, and parsed shape terms. ``born_digital`` computes those three
+    terms directly for its aggregate, then invokes ``table_output_defect``
+    separately only for the header-attribution term. That division is intended,
+    not an oversight.
 
     Deliberately NOT nested with TR-3 (``native_verifier.verify_native_table``)
     -- TR-3 is evaluated by the caller as a separate disjunct. Measured in
@@ -293,6 +308,10 @@ def table_output_defect(
     emission_defect = table_emission_defect(output_md)
     if emission_defect:
         return emission_defect
+
+    content_defect = table_content_defect(output_md)
+    if content_defect:
+        return content_defect
 
     reports = check_markdown(output_md)
     if structural_gate_fires(reports):

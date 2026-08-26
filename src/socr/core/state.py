@@ -71,16 +71,15 @@ class PageState:
     #: silent loss the cardinal rule forbids.
     native_rotated_text_shredded: bool = False
     native_table_structure_failed: bool = False  # native table text lost its grid
-    #: GH-151 TICKET-B1: grid-shape defect (ragged / detached-label row pair)
-    #: found in the native markdown at extraction time. Deliberately a
-    #: SEPARATE field from ``native_table_structure_failed`` above:
-    #: ``_score_per_page`` clears that flag on a passing heuristic score
-    #: (orchestrator.py), which would silently erase this structural verdict
-    #: if they were the same field. Set once in ``apply_born_digital``, never
-    #: re-derived downstream.
+    #: Backward-compatible aggregate of GH-226 raw emission, GH-190 raw
+    #: content, and GH-151 parsed grid-shape defects. Deliberately a SEPARATE
+    #: field from ``native_table_structure_failed`` above: ``_score_per_page``
+    #: clears that flag on a passing heuristic score (orchestrator.py), which
+    #: would silently erase this verdict if they were the same field. Set once
+    #: in ``apply_born_digital``, never re-derived downstream.
     native_table_structure_defective: bool = False
-    #: GH-226 exact raw-emission defect code (empty when the aggregate above
-    #: came from GH-151 grid shape instead).
+    #: GH-226 exact raw-emission defect code, kept separate from the aggregate
+    #: above so it remains exact emission provenance.
     native_table_emission_defect: str = ""
     #: GH-200: header-attribution HARD verdict (destroyed header band) found
     #: in the native markdown at extraction time. Same treatment as
@@ -291,7 +290,8 @@ class DocumentState:
                 if pa.is_born_digital:
                     ps.native_text = pa.native_text
                     ps.needs_ocr_enhancement = pa.needs_ocr_enhancement
-                    # GH-151 TICKET-B1: propagate the grid-shape defect flag.
+                    # Propagate the backward-compatible native-table aggregate
+                    # (raw emission, raw content, and parsed shape defects).
                     # Deliberately NOT added to needs_repair (state.py `needs_repair`
                     # property) so it can never force OCR under --native-only —
                     # that ruling is settled, see docs/plans/gh151-structural-gate/
@@ -299,6 +299,8 @@ class DocumentState:
                     ps.native_table_structure_defective = getattr(
                         pa, "native_table_structure_defective", False
                     )
+                    # Preserve the exact GH-226 raw-emission provenance
+                    # separately; content and shape defects do not populate it.
                     ps.native_table_emission_defect = str(
                         getattr(pa, "native_table_emission_defect", "") or ""
                     )

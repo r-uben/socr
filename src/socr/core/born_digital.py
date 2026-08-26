@@ -528,25 +528,25 @@ class PageAssessment:
     #: cells legitimately tile along the reading axis, which is the geometry
     #: the shred predicate reads as damage.
     native_rotated_text_shredded: bool = False
-    #: GH-151 TICKET-B1: set ONLY inside the non-rotated, has_tables branch of
-    #: ``_assess_page_signals`` (the structured-extraction branch, not the
-    #: refusal branch, and never for non-table pages), from
-    #: ``structure_check.check_markdown`` run on the resulting native markdown.
-    #: True iff any table block on the page has ``ragged`` or
-    #: ``detached_label_rows`` findings (never ``defective`` as a whole, never
-    #: ``orphan_rows`` alone — see the design note at
+    #: Backward-compatible aggregate set ONLY inside the non-rotated,
+    #: has_tables branch of ``_assess_page_signals`` (the structured-extraction
+    #: branch, not the refusal branch, and never for non-table pages). It
+    #: aggregates raw emission defects (GH-226), raw content defects (GH-190),
+    #: and parsed shape defects (GH-151 TICKET-B1). The parsed-shape term is
+    #: ``ragged`` or ``detached_label_rows`` only (never ``defective`` as a
+    #: whole, never ``orphan_rows`` alone — see the design note at
     #: ``docs/log/2026-08-13_gh151-b1-design.md``). Audit code MUST key off
-    #: this flag and MUST NEVER re-derive it from grid shape downstream — the
-    #: same GH-147 A2 rule as ``native_table_lane_refused`` above.
+    #: this flag and MUST NEVER re-derive it downstream — the same GH-147 A2
+    #: rule as ``native_table_lane_refused`` above.
     native_table_structure_defective: bool = False
-    #: GH-226 exact raw-emission defect code. The boolean above remains the
-    #: backward-compatible routing/demotion aggregate; this field prevents a
-    #: delimiter or LaTeX leak from being misreported as GH-151 grid shape.
+    #: GH-226 exact raw-emission defect code. This remains separate from the
+    #: aggregate above, so a raw content or parsed shape defect cannot be
+    #: misreported as emission provenance.
     native_table_emission_defect: str = ""
     #: GH-200: header-attribution HARD verdict on the native markdown (only
-    #: checked when the grid-shape check above did NOT already fire -- the
-    #: shape term is cheaper and, per the ratified spec, takes priority in
-    #: cost order). True iff ``header_attribution.header_attribution`` found
+    #: checked when the aggregate above did NOT already fire -- the emission,
+    #: content, and shape terms are cheaper and take priority in cost order).
+    #: True iff ``header_attribution.header_attribution`` found
     #: a data lane whose native header words are absent from the emitted
     #: header row entirely (destroyed, not merely misplaced -- see
     #: ``header_attribution``'s module docstring for SOFT vs HARD). SOFT and
@@ -1261,9 +1261,10 @@ class BornDigitalDetector:
                 native_text, _, _ = clean_native_text(self.extract_structured(page))
                 notes.append("born-digital: structured extraction (tables detected)")
 
-                # GH-151 TICKET-B1: check the grid shape of the markdown this
-                # branch just produced. GH-226 also checks the raw delimiter
-                # and residual LaTeX before parsing discards that evidence.
+                # Compute the three terms of the backward-compatible native
+                # table aggregate independently: GH-226 raw emission, GH-190
+                # raw content, and GH-151 TICKET-B1 parsed shape. The raw terms
+                # must be checked before parsing can discard their evidence.
                 # Set at the moment of the evidence,
                 # never re-derived downstream (the same rule GH-147 A2 states
                 # for native_table_lane_refused above). The parsed-grid term
@@ -1278,8 +1279,11 @@ class BornDigitalDetector:
 
                 reports = structure_check.check_markdown(native_text)
                 native_table_emission_defect = structure_check.table_emission_defect(native_text)
+                native_table_content_defect = structure_check.table_content_defect(native_text)
                 native_table_structure_defective = bool(
-                    native_table_emission_defect or structure_check.structural_gate_fires(reports)
+                    native_table_emission_defect
+                    or native_table_content_defect
+                    or structure_check.structural_gate_fires(reports)
                 )
 
                 # GH-200: header-attribution term, disjunctive with the
