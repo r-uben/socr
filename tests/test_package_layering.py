@@ -28,7 +28,6 @@ _ALLOWED_PRIVATE_IMPORTS = {
     ("pipeline/agentic.py", "socr.tables.locate", "_horizontal_rules"),
     ("pipeline/orchestrator.py", "socr.core.manifest", "_whole_doc_page_texts"),
     ("pipeline/orchestrator.py", "socr.core.manifest", "_winning_page_output"),
-    ("pipeline/repair.py", "socr.engines.registry", "_ENGINES"),
 }
 
 _MODULE_IMPORT = "<module>"

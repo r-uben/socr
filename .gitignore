@@ -72,3 +72,6 @@ hpc/
 
 # Local HPC runbook (not versioned)
 HPC.md
+
+# troupe run artifacts (multi-model workflow scratch)
+.troupe/

@@ -1,14 +1,7 @@
 """Unified OCR pipeline orchestrator.
 
-Drives DocumentState through:
-  1. Analyze    -- born-digital detection
-  2. Backbone   -- primary engine OCR
-  3. Score      -- heuristic quality audit
-  4. Repair     -- selective fallback on failed pages
-  4b. Consensus -- multi-engine best-output selection (optional)
-  5. Assemble   -- stitch final output and save
-
-Replaces StandardPipeline's ad-hoc primary/audit/fallback stages with a
+Drives DocumentState through analysis, cost-aware agentic per-page extraction,
+and assembly. Replaces StandardPipeline's ad-hoc extraction stages with a
 structured loop that operates on the DocumentState blackboard.
 """
 
@@ -44,8 +37,6 @@ from socr.core.state import DocumentState, PageState
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.pipeline.agentic import route_page
-from socr.pipeline.consensus import ConsensusEngine
-from socr.pipeline.repair import RepairRouter
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 
 logger = logging.getLogger(__name__)
@@ -164,7 +155,7 @@ def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_
     fingerprint match and its output still exists: re-running the identical
     config cannot improve a partial result, and without this rule every doc
     demoted to AUDIT_FAILED (flagged native fallback, lost pages) would be
-    re-processed at full judge/repair cost on EVERY batch resume, forever.
+    re-processed at full provider cost on EVERY batch resume, forever.
     ``--reprocess`` still forces a retry (checked by the callers).
     """
     if index.is_completed(rel_key, checksum, fingerprint=fingerprint):
@@ -186,7 +177,7 @@ def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_
 
 
 class UnifiedPipeline:
-    """5-phase OCR pipeline orchestrator.
+    """OCR pipeline orchestrator.
 
     Usage::
 
@@ -213,7 +204,6 @@ class UnifiedPipeline:
         self.config = config
         self.heuristics = HeuristicsChecker(min_word_count=config.audit_min_words)
         self.scorer = FailureModeScorer(checker=self.heuristics)
-        self.repair_router = RepairRouter(config)
         self.bd_detector = BornDigitalDetector()
         # GH-222: swappable liveness probe for the local VLM backend. ``None``
         # means "use the resolved-host Ollama probe" (see ``_probe_backend_idle``);
@@ -304,9 +294,9 @@ class UnifiedPipeline:
     def _engine_determinants(self, engine_type: EngineType) -> dict[str, str | None]:
         """Resolved ``{model, backend, task}`` for an engine, never raising.
 
-        Used to fold the model/backend/task of EVERY engine that can contribute
-        text (primary, local, fallback-chain, multi-engine members) into the run
-        fingerprint. A swap of a SECONDARY engine's model/task/backend changes
+        Used to fold the model/backend/task of every configured engine that can
+        contribute text (primary, local, or fallback-chain) into the run
+        fingerprint. A swap of a secondary engine's model/task/backend changes
         the saved output (the orchestrator routes pages to it), so it must
         invalidate the resume cache just like a primary-engine swap. Degrades to
         the engine name on any error so fingerprinting never breaks a run.
@@ -329,21 +319,18 @@ class UnifiedPipeline:
 
         Captures what changes *what output an input produces*: the resolved
         primary engine's model id, backend, and task, the resolved determinants
-        of every SECONDARY engine that can contribute text (local, fallback
-        chain, multi-engine members — codex round-3: a secondary-engine model
-        swap changes output without changing the primary), and socr's
+        of every secondary engine that can contribute text (local and fallback
+        chain), and socr's
         output-affecting orchestration flags. Stored in
         :class:`DocMetadata.fingerprint` and consulted by
         :meth:`RootIndex.is_completed`, so a re-run under a different model / task
         / flag reprocesses instead of silently reusing the cached output.
 
         Round-3 expansion (HIGH): the prior ``extra`` omitted ``save_figures``
-        (and figure limits), the figures/consensus/judge model+backend knobs,
+        (and figure limits), the figures/judge model+backend knobs,
         ``fallback_chain``, ``local_engine``, ``tiered`` routing, and chunking
         thresholds — all of which change the saved ``.md``/figures. Toggling any
-        of them now invalidates the cache. ``multi_engine`` is fingerprinted in
-        USER ORDER (not sorted) so a reordering that changes consensus tie-break
-        / first-best selection reprocesses (codex round-3 under-invalidation).
+        of them now invalidates the cache.
 
         Knobs deliberately EXCLUDED (do not change selected output bytes):
         display/scripting (``quiet``/``verbose``/``dry_run``), force-run
@@ -364,13 +351,10 @@ class UnifiedPipeline:
             "primary_engine": engine_type.value,
             "local_engine": cfg.local_engine.value,
             "fallback_chain": [e.value for e in cfg.fallback_chain],
-            # User order, NOT sorted: order affects consensus/first-best output.
-            "multi_engine": [e.value for e in cfg.multi_engine],
             # Resolved model/backend/task of every secondary engine, so a swap of
-            # a local/fallback/multi member's model invalidates the cache too.
+            # a local/fallback member's model invalidates the cache too.
             "local_engine_determinants": self._engine_determinants(cfg.local_engine),
             "fallback_determinants": [self._engine_determinants(e) for e in cfg.fallback_chain],
-            "multi_engine_determinants": [self._engine_determinants(e) for e in cfg.multi_engine],
             # PP-5: the agentic provider ladder is built from ``enabled_engines``
             # and pruned by ``max_cost_per_page`` / ``cost_budget`` — all three
             # change which provider produces (or is even tried on) a page, so a
@@ -383,8 +367,8 @@ class UnifiedPipeline:
             "enabled_engines": sorted(e.value for e in cfg.enabled_engines),
             # And the RESOLVED model/backend/task of EVERY enabled engine, NOT
             # just its name: an enabled engine drives the agentic ladder, so a
-            # provider present ONLY through ``enabled_engines`` (not also via
-            # primary/local/fallback/multi) would otherwise let a model/backend/
+            # provider present only through ``enabled_engines`` (not also via
+            # primary/local/fallback) would otherwise let a model/backend/
             # task swap reuse a stale terminal sidecar on resume.  Keyed by engine
             # value and SORTED for determinism (the ladder is cost-ordered, not
             # list-ordered, so member identity — not position — drives output).
@@ -405,7 +389,7 @@ class UnifiedPipeline:
             "tiered": cfg.tiered,
             "chunk_threshold": cfg.chunk_threshold,
             "chunk_size": cfg.chunk_size,
-            # --- quality gates / repair / routing ---
+            # --- quality gates / routing ---
             "agentic": cfg.agentic,
             "strict_local": cfg.strict_local,
             "audit": cfg.audit_enabled,
@@ -432,17 +416,10 @@ class UnifiedPipeline:
             # #229: ``auto_patch_tables`` rewrites table cells in the saved page.
             # Toggling it changed the .md without changing the fingerprint, so a
             # resumed run mixed patched and unpatched pages under one document
-            # status. It is read ONLY inside ``_reread_page_tables``, whose two
-            # callers both sit behind ``dual_pass_tables`` (the extractor at
-            # :2390 and ``_phase_dual_pass_tables`` at :593), so it cannot move
-            # output while dual-pass is off -- recorded only there.
+            # status. It is read only by the in-loop ``_reread_page_tables`` call,
+            # which is itself behind ``dual_pass_tables``; recording it only when
+            # that lane is enabled avoids invalidation when the lane is inactive.
             "auto_patch_tables": cfg.auto_patch_tables if cfg.dual_pass_tables else None,
-            "truncation_retries": cfg.truncation_retries,
-            "max_retries": cfg.max_retries,
-            # --- consensus ---
-            "consensus": cfg.consensus_enabled,
-            "consensus_use_llm": cfg.consensus_use_llm,
-            "consensus_ollama_model": cfg.consensus_ollama_model,
             # --- figures ---
             # ``save_figures`` controls PNG extraction + image-ref embedding.
             # ``describe_figures`` is the separate opt-in for VLM captions.
@@ -518,7 +495,7 @@ class UnifiedPipeline:
         output_dir: Path | None = None,
         scan_root: Path | None = None,
     ) -> EngineResult:
-        """Process a single PDF through the 5-phase loop.
+        """Process a single PDF through analysis, agentic extraction, and assembly.
 
         Returns an EngineResult summarising the best extraction.
 
@@ -559,62 +536,12 @@ class UnifiedPipeline:
             console.print(f"[blue]Processing:[/blue] {doc.filename}")
             console.print(f"[dim]{doc.page_count} pages, {doc.size_mb:.1f} MB[/dim]")
 
-        is_multi = bool(self.config.multi_engine)
-
-        # Phase 1: Analyze
+        # Analyze the document before entering the per-page agentic lane.
         self._phase_analyze(state)
+        # The fused loop owns all per-page extraction, including its optional
+        # in-loop table reread, before final assembly.
+        self._phase_agentic(state, out_dir)
 
-        if self.config.agentic and not is_multi:
-            # Cost-aware agentic routing replaces backbone + score + repair:
-            # per page, try the cheapest provider and let the judge escalate.
-            self._phase_agentic(state, out_dir)
-        elif is_multi:
-            # Multi-engine mode: run all engines, score all, consensus
-            backbone_results = self._backbone_multi_engine(state, out_dir)
-
-            # Phase 3: Score all engine outputs
-            if self.config.audit_enabled:
-                self._phase_score_multi(state, backbone_results)
-
-            # Phase 4: Repair — skip (multiple engines already provide coverage)
-            if not self.config.quiet:
-                console.print("\n[cyan]Phase 4:[/cyan] Repair (skipped — multi-engine mode)")
-
-            # Phase 4b: Consensus — always run in multi-engine mode
-            self._phase_consensus(state)
-        else:
-            # Single-engine mode: original flow
-            # Phase 2: Backbone OCR
-            backbone_result = self._phase_backbone(state, out_dir)
-
-            # Phase 3: Score
-            if backbone_result and backbone_result.success and self.config.audit_enabled:
-                self._phase_score(state, backbone_result)
-
-            # Phase 3b: VLM judge on HARD pages — catch semantic corruption
-            # (wrong digits/signs/columns) the heuristics miss; rejects re-route
-            # through repair.
-            if self.config.audit_enabled and self.config.judge_hard_pages:
-                self._phase_judge_hard_pages(state)
-
-            # Phase 4: Selective Repair (loops up to max_retries)
-            if self.config.audit_enabled:
-                self._phase_repair(state, out_dir)
-
-            # Phase 4b: Consensus (optional, after repair)
-            if self.config.consensus_enabled:
-                self._phase_consensus(state)
-
-        # Phase 4c: Dual-pass table extraction — crop precisely-located tables,
-        # re-read each crop with the judge VLM, and patch the authoritative crop
-        # reading back into the page on disagreement. Runs for every mode, on the
-        # final per-page text, just before assembly.
-        # PP-2: skip in agentic mode — tables are handled per-page inside
-        # _phase_agentic's fused loop (avoids re-reading tables twice).
-        if self.config.dual_pass_tables and not (self.config.agentic and not is_multi):
-            self._phase_dual_pass_tables(state)
-
-        # Phase 5: Assemble
         final_result = self._phase_assemble(state, out_dir)
 
         if not self.config.quiet:
@@ -817,7 +744,7 @@ class UnifiedPipeline:
         # structure_check or re-derive any predicate here (the design note is
         # explicit: the flag is authoritative, this loop does not re-inspect
         # the grid).
-        _DEFECT_DETAIL = {
+        defect_detail = {
             "unverifiable_table_region": (
                 "native table region failed deterministic geometry verification; "
                 "--native-only kept the native text without OCR and marked the page "
@@ -849,7 +776,7 @@ class UnifiedPipeline:
                 defects.append("header_unattributed")
             if not defects:
                 continue
-            causes = "; ".join(_DEFECT_DETAIL[d] for d in defects)
+            causes = "; ".join(defect_detail[d] for d in defects)
             state.events.append(
                 AuditEvent(
                     page_num=pa.page_num,
@@ -946,7 +873,7 @@ class UnifiedPipeline:
                 console.print("  No born-digital pages detected")
 
     # ------------------------------------------------------------------
-    # Phase 2: Backbone OCR
+    # Analysis helpers
     # ------------------------------------------------------------------
 
     def _emit_tr3_detection_events(self, state: DocumentState, assessment) -> None:
@@ -1006,371 +933,6 @@ class UnifiedPipeline:
                     data={"detection_only": True, "native_only": bool(self.config.native_only)},
                 )
             )
-
-    def _phase_backbone(self, state: DocumentState, output_dir: Path) -> EngineResult | None:
-        """Run the primary engine on the document.
-
-        When ``native_first`` is enabled and the document is mostly
-        born-digital, uses native text for prose pages and sends only
-        complex/scanned pages to a CLI engine via a temp PDF.
-
-        For CLI engines, if the document exceeds ``config.chunk_threshold``
-        pages, split it into chunks and process each chunk independently via
-        :meth:`_backbone_chunked`.
-        """
-        # Native-first: use native text for born-digital prose, CLI only
-        # for complex/scanned pages.
-        if self.config.native_first:
-            bd_pages = [p for p in state.pages.values() if p.is_born_digital]
-            bd_ratio = len(bd_pages) / max(len(state.pages), 1)
-            if bd_ratio >= 0.5:
-                return self._backbone_native_first(state, output_dir)
-
-        engine = get_engine(self.config.primary_engine)
-
-        if not self.config.quiet:
-            console.print(f"\n[cyan]Phase 2:[/cyan] Backbone OCR [{engine.name}]")
-
-        if not engine.is_available():
-            logger.warning(f"Primary engine {engine.name} not available")
-            if not self.config.quiet:
-                console.print(f"[red]Engine {engine.name} not available[/red]")
-            err_result = EngineResult(
-                document_path=state.handle.path,
-                engine=engine.name,
-                status=DocumentStatus.ERROR,
-                error=(
-                    f"Engine {engine.name} not available (CLI not installed or missing API key)"
-                ),
-            )
-            state.apply_result(err_result)
-            return err_result
-
-        # Per-page processing: render all pages to images → CLI
-        all_pages = list(range(1, state.handle.page_count + 1))
-        if not self.config.quiet:
-            console.print(f"  Processing {len(all_pages)} pages (per-page)...")
-
-        start_time = time.time()
-        page_outputs = engine.process_pages(
-            pdf_path=state.handle.path,
-            page_nums=all_pages,
-            config=self.config,
-            dpi=self.config.render_dpi,
-        )
-        elapsed = time.time() - start_time
-
-        success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
-        overall_status = DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR
-
-        if not self.config.quiet:
-            console.print(f"  {success_count}/{len(all_pages)} pages succeeded")
-
-        result = EngineResult(
-            document_path=state.handle.path,
-            engine=engine.name,
-            status=overall_status,
-            pages=page_outputs,
-            pages_processed=state.handle.page_count,
-            processing_time=elapsed,
-            model_version=engine.resolved_model_version(self.config),
-        )
-        state.apply_result(result)
-        return result
-
-    def _backbone_native_first(self, state: DocumentState, output_dir: Path) -> EngineResult:
-        """3-tier routing: native → local → cloud.
-
-        Tier 1: Born-digital trusted native text (free, instant)
-        Tier 2: Easy scanned pages → local engine (free, fast)
-        Tier 3: Hard pages (tables, multi-column, degraded) → primary engine (cloud)
-
-        When tiered=False or no local engine is available, tiers 2+3 collapse
-        into a single pass using the primary engine (same as before).
-        """
-        from socr.core.difficulty import PageDifficulty, classify_pages
-        from socr.engines.registry import resolve_local_engine
-
-        # Classify pages
-        prose_pages: list[int] = []
-        enhancement_pages: list[int] = []
-        scanned_pages: list[int] = []
-        # Born-digital pages whose prose is clean but whose math is font-corrupted:
-        # keep native prose, recover only the equation regions to LaTeX (Tier 1).
-        math_recovery_pages: set[int] = set()
-
-        for page_num, ps in sorted(state.pages.items()):
-            if self._is_corrupt_math_recovery_page(page_num, ps):
-                # Trust the native prose layer; math is spliced in Tier 1. This
-                # also avoids whole-page VLM OCR that would degrade the prose.
-                prose_pages.append(page_num)
-                math_recovery_pages.add(page_num)
-            elif self._is_trusted_native_without_ocr(page_num, ps):
-                prose_pages.append(page_num)
-            elif ps.is_born_digital and ps.native_text:
-                enhancement_pages.append(page_num)
-            else:
-                scanned_pages.append(page_num)
-
-        total = len(state.pages)
-        ocr_pages = enhancement_pages + scanned_pages
-
-        # Tier 2/3 split: classify difficulty of OCR pages
-        easy_pages: list[int] = []
-        hard_pages: list[int] = []
-
-        # Resolve local engine for tiered routing
-        local_engine_type = None
-        if self.config.tiered and ocr_pages:
-            if self.config.local_engine == EngineType.AUTO:
-                local_engine_type = resolve_local_engine()
-            elif self.config.local_engine != self.config.primary_engine:
-                local_engine_type = self.config.local_engine
-
-        if local_engine_type and ocr_pages:
-            # Build hints from PageState content-type vector (propagated by
-            # apply_born_digital; no need to re-read _last_assessment here).
-            page_hints: dict[int, dict] = {}
-            for page_num in ocr_pages:
-                ps = state.pages[page_num]
-                if ps.has_tables or ps.has_equations:
-                    page_hints[page_num] = {
-                        "has_tables": ps.has_tables,
-                        "has_equations": ps.has_equations,
-                    }
-                elif ps.needs_ocr_enhancement:
-                    # Fallback: if needs enhancement, assume hard
-                    page_hints[page_num] = {
-                        "has_tables": True,
-                        "has_equations": False,
-                    }
-
-            # Classify page difficulty with hints
-            difficulty_map = classify_pages(
-                str(state.handle.path),
-                ocr_pages,
-                page_hints=page_hints,
-            )
-            for page_num in ocr_pages:
-                da = difficulty_map.get(page_num)
-                if da and da.difficulty == PageDifficulty.EASY:
-                    easy_pages.append(page_num)
-                else:
-                    hard_pages.append(page_num)
-        else:
-            # No tiered routing — all OCR pages go to primary
-            hard_pages = ocr_pages
-
-        if not self.config.quiet:
-            label = "native-first" if not local_engine_type else "tiered"
-            console.print(f"\n[cyan]Phase 2:[/cyan] Text extraction ({label})")
-            if prose_pages:
-                console.print(
-                    f"  {len(prose_pages)}/{total} pages: native text (born-digital prose)"
-                )
-            if easy_pages:
-                console.print(
-                    f"  {len(easy_pages)}/{total} pages: "
-                    f"local OCR [{local_engine_type.value}] (easy)"
-                )
-            if hard_pages:
-                console.print(
-                    f"  {len(hard_pages)}/{total} pages: "
-                    f"cloud OCR [{self.config.primary_engine.value}] (hard)"
-                )
-            if not ocr_pages:
-                console.print("  All pages born-digital")
-
-        start_time = time.time()
-        page_outputs: list[PageOutput] = []
-
-        # Tier 1: Native text for prose pages (with math recovery where flagged)
-        if math_recovery_pages and not self.config.quiet:
-            console.print(
-                f"  [cyan]{len(math_recovery_pages)} page(s): recovering "
-                f"corrupt math -> LaTeX [{self.config.math_model}][/cyan]"
-            )
-
-        math_done = 0
-        math_total = len(math_recovery_pages)
-        for page_num in prose_pages:
-            ps = state.pages[page_num]
-            if page_num in math_recovery_pages:
-                math_out = self._recover_corrupt_math_page(state, page_num, output_dir)
-                ps.best_output = math_out
-                ps.corrupt_math_hybrid = math_out
-                page_outputs.append(math_out)
-                math_done += 1
-                if not self.config.quiet:
-                    console.print(
-                        f"    [yellow]math {math_done}/{math_total}: p{page_num} "
-                        "crop-backed candidate(s) retained; mathematical fidelity "
-                        "unverified[/yellow]"
-                    )
-                continue
-
-            text = ps.native_text
-            engine = "native"
-            # GH-151 TICKET-B1 / GH-200 / #211: a page can reach prose_pages
-            # carrying a table-distrust flag only via --native-only (the
-            # non-native-only eligibility predicate already excludes has_tables
-            # pages). Demote instead of shipping SUCCESS/audit_passed=True --
-            # this is the no-reroute honouring of the flag: no extra OCR
-            # attempt is triggered, the native text still ships, just flagged.
-            # The TR-3 unverifiable mark stays explicitly scoped to
-            # --native-only (#211); B1's grid/header flags are set only on that
-            # path anyway.
-            native_table_distrusted = bool(
-                (self.config.native_only and ps.native_table_unverifiable)
-                or getattr(ps, "native_table_structure_defective", False)
-                or getattr(ps, "native_table_header_unattributed", False)
-            )
-            page_outputs.append(
-                PageOutput(
-                    page_num=page_num,
-                    text=text,
-                    status=(PageStatus.WARNING if native_table_distrusted else PageStatus.SUCCESS),
-                    engine=engine,
-                    audit_passed=not native_table_distrusted,
-                    failure_mode=(
-                        FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
-                        if native_table_distrusted
-                        else FailureMode.NONE
-                    ),
-                )
-            )
-
-        # GH-36a: Deterministic display-equation region detection (model-free).
-        # Runs on born-digital prose pages that carry the ``has_equations`` signal
-        # and are NOT already handled by the corrupt-math recovery path.  Default-
-        # off; gated by ``config.detect_equations``.  Saves crop PNGs beside
-        # figures and records provenance in ``state.events`` — no text is modified.
-        if self.config.detect_equations and self._last_assessment:
-            clean_eq_pages = {
-                pa.page_num
-                for pa in self._last_assessment.pages
-                if pa.has_equations and not pa.has_corrupt_math and pa.is_born_digital
-            }
-            eq_prose_pages = [p for p in prose_pages if p in clean_eq_pages]
-            if eq_prose_pages:
-                self._detect_and_crop_equations(state, eq_prose_pages, output_dir)
-
-        # GH-36b: Clean-equation → LaTeX via local VLM + 1A structural gate + 1C sidecar.
-        # Runs AFTER GH-36a detection (so crop paths are in state.events) and BEFORE
-        # state.apply_result (so we can append sidecar blocks to prose page_outputs).
-        # Gated by config.recover_clean_equations (default False).
-        # Requires detect_equations to have run (no detected regions → no-op).
-        if self.config.recover_clean_equations and self.config.detect_equations:
-            self._attach_equation_latex_sidecars(state, page_outputs)
-
-        # Tier 2: Local engine for easy pages
-        escalated_pages: list[int] = []
-        escalated_reasons: dict[int, str] = {}
-        local_engine_name = ""
-        if easy_pages and local_engine_type:
-            local_outputs = self._run_engine_on_pages(
-                state,
-                easy_pages,
-                enhancement_pages,
-                local_engine_type,
-                "local",
-            )
-
-            # Per-page quality scoring on local outputs → auto-escalate failures
-            passed_outputs: list[PageOutput] = []
-            local_engine_name = get_engine(local_engine_type).name
-            for po in local_outputs:
-                # Native passthrough — born-digital prose, keep as-is
-                if po.engine == "native":
-                    if po.status == PageStatus.SUCCESS and po.audit_passed:
-                        passed_outputs.append(po)
-                    else:
-                        escalated_pages.append(po.page_num)
-                        escalated_reasons[po.page_num] = po.failure_mode.value
-                    continue
-                # Engine error — escalate rather than ship a blank page
-                if po.status != PageStatus.SUCCESS:
-                    escalated_pages.append(po.page_num)
-                    escalated_reasons[po.page_num] = "engine_error"
-                    logger.info(
-                        "Page %d errored on local engine — escalating to cloud",
-                        po.page_num,
-                    )
-                    continue
-                scoring = self.scorer.score(
-                    po.text, engine=po.engine, sparse_ok=self._sparse_page_ok(po.page_num)
-                )
-                if scoring.passed:
-                    po.audit_passed = True
-                    passed_outputs.append(po)
-                else:
-                    # Quality failure — escalate to cloud
-                    escalated_pages.append(po.page_num)
-                    escalated_reasons[po.page_num] = scoring.primary_failure.value
-                    logger.info(
-                        "Page %d failed local audit (%s) — escalating to cloud",
-                        po.page_num,
-                        scoring.primary_failure.value,
-                    )
-
-            page_outputs.extend(passed_outputs)
-
-            if escalated_pages and not self.config.quiet:
-                console.print(
-                    f"  [yellow]{len(escalated_pages)} page(s) failed "
-                    f"local audit → escalating to cloud[/yellow]"
-                )
-                for pn in escalated_pages:
-                    console.print(f"    p{pn}: {escalated_reasons[pn]}")
-
-        # Tier 3: Primary (cloud) engine for hard pages + escalated pages
-        cloud_pages = hard_pages + escalated_pages
-        if cloud_pages:
-            cloud_outputs = self._run_engine_on_pages(
-                state,
-                cloud_pages,
-                enhancement_pages,
-                self.config.primary_engine,
-                "cloud",
-            )
-            # Tag escalated pages so metadata tracks the promotion
-            for co in cloud_outputs:
-                if co.page_num in escalated_pages:
-                    co.escalated_from = local_engine_name
-            page_outputs.extend(cloud_outputs)
-
-        elapsed = time.time() - start_time
-
-        success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
-        overall_status = DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR
-
-        engines_used = set()
-        for p in page_outputs:
-            if p.engine and p.engine != "native":
-                engines_used.update(part for part in p.engine.split("+") if part != "native")
-        if engines_used:
-            engine_name = "native+" + "+".join(sorted(engines_used))
-        else:
-            engine_name = "native"
-
-        page_costs = [page.cost_usd for page in page_outputs]
-        run_cost = (
-            None
-            if any(cost is None for cost in page_costs)
-            else sum(cost for cost in page_costs if cost is not None)
-        )
-
-        result = EngineResult(
-            document_path=state.handle.path,
-            engine=engine_name,
-            status=overall_status,
-            pages=page_outputs,
-            pages_processed=total,
-            processing_time=elapsed,
-            cost=run_cost,
-        )
-        state.apply_result(result)
-        return result
 
     def _run_engine_on_pages(
         self,
@@ -1784,8 +1346,9 @@ class UnifiedPipeline:
         figures_dir.mkdir(parents=True, exist_ok=True)
         try:
             import fitz
-            from socr.core.pdf import open_pdf
             from PIL import Image
+
+            from socr.core.pdf import open_pdf
 
             with open_pdf(pdf_path) as doc:
                 page = doc[page_num - 1]
@@ -1844,8 +1407,8 @@ class UnifiedPipeline:
 
         try:
             import fitz
-            from socr.core.pdf import open_pdf
 
+            from socr.core.pdf import open_pdf
             from socr.figures.extractor import RENDER_DPI
             from socr.tables.reconstruct import chart_region_bboxes
 
@@ -2128,10 +1691,10 @@ class UnifiedPipeline:
     def _guard_fabricated_image_refs_document(
         self, state: DocumentState, final_text: str, doc_dir: Path | None
     ) -> str:
-        """Document-level provenance sweep for the phase-major lanes (GH-225).
+        """Document-level provenance sweep during assembly (GH-225).
 
-        The page-major agentic loop demotes the individual page; these lanes have
-        no equivalent per-page seam at this point, so the signal is recorded
+        The page-level agentic loop demotes the individual page; the assembly
+        pass also records the document-level signal
         against page 0 (the document) and surfaces through ``metadata.json`` via
         ``_fabricated_url_note``.  Stated plainly because it is a real gap: on
         these lanes the fabrication is caught and removed, and the document is
@@ -2189,8 +1752,8 @@ class UnifiedPipeline:
         pages = sorted({e.page_num for e in events if e.kind == "fabricated_image_ref"})
         if not pages:
             return None
-        # page 0 is the document-level sweep on the phase-major lanes, which has
-        # no page to name; render it as such rather than as a page called "0".
+        # Page 0 is the document-level sweep, which has no page to name; render
+        # it as such rather than as a page called "0".
         labels = ["document" if n == 0 else str(n) for n in pages]
         return (
             f"page(s) {', '.join(labels)}: "
@@ -2562,11 +2125,9 @@ class UnifiedPipeline:
         doc-level signal.
 
         Scope is deliberately the agentic path only. The observed runaway, and every
-        instance found since, came from the per-page VLM loop; the phase-major paths
-        (single-engine, multi-engine, consensus, repair) have never produced one in
-        this corpus. Extending the guard there would mean re-deriving its bound on
-        output nobody has measured, so they are left to ``OutputNormalizer``'s
-        generic rule until there is evidence they need more.
+        instance found since, came from the per-page VLM loop. Native page text is
+        left to ``OutputNormalizer``'s generic rule because repeated native rows
+        can be legitimate content.
 
         Removal is content-safe: every dropped line is byte-identical to one
         that is kept. The event is recorded unconditionally so the failure is
@@ -2670,7 +2231,7 @@ class UnifiedPipeline:
                 return AcceptDecision(accept=False, reason="judge timeout")
 
     # ------------------------------------------------------------------
-    # Agentic: cost-aware per-page routing (replaces backbone+score+repair)
+    # Agentic: cost-aware per-page routing
     # ------------------------------------------------------------------
 
     def _phase_agentic(self, state: DocumentState, output_dir: Path) -> None:
@@ -2706,8 +2267,8 @@ class UnifiedPipeline:
             final ``EngineResult`` carries ``error="PARTIAL_SAVE_VLM_TIMEOUT"`` so
             callers and tests can detect the HALT condition unambiguously.
 
-        Phase 4c (dual-pass tables) is gated OFF for agentic mode in
-        ``process()`` so tables are never re-read twice.
+        Optional dual-pass table rereads run inside this fused loop, so each table
+        is handled before the page is flushed and assembled.
 
         ``_classify`` remains doc-wide (``_phase_analyze``); the fused loop
         handles only the post-classification per-page lifecycle (fork C2).
@@ -3116,7 +2677,6 @@ class UnifiedPipeline:
                 if ps.best_output and ps.best_output.text and self._page_has_tables(page_num, ps):
                     try:
                         from socr.core.pdf import open_pdf
-
                         from socr.tables.header_repair import repair_table_headers_on_page
 
                         with open_pdf(state.handle.path) as _hdr_doc:
@@ -3333,7 +2893,6 @@ class UnifiedPipeline:
             ):
                 try:
                     from socr.core.pdf import open_pdf
-
                     from socr.tables import locate_tables
 
                     with open_pdf(state.handle.path) as _doc:
@@ -3946,100 +3505,6 @@ class UnifiedPipeline:
             return self.config.judge_model
         return self._resolve_judge_model()
 
-    def _phase_judge_hard_pages(self, state: DocumentState) -> None:
-        """Run a VLM judge on HARD pages (tables/equations) to catch semantic
-        corruption the heuristic audit cannot see. Rejected pages lose their
-        best_output, so the repair phase re-routes them to another engine.
-        """
-        from socr.judge.ollama_judge import OllamaVisionJudge
-        from socr.pipeline.agentic import VLMPageJudge
-
-        model = self._resolve_judge_model()
-        if not model:
-            return  # no vision judge available; heuristic audit already ran
-
-        # Which pages are worth the extra call: those with tables or equations,
-        # where wrong digits/signs/columns are both likely and costly.
-        # Primary source: PageState content-type vector (propagated by apply_born_digital).
-        # Fallback: _last_assessment for callers that set it directly without going
-        # through apply_born_digital (e.g. unit tests, partial pipeline runs).
-        hard_pages = {
-            page_num for page_num, ps in state.pages.items() if ps.has_tables or ps.has_equations
-        }
-        if not hard_pages and self._last_assessment:
-            hard_pages = {
-                pa.page_num
-                for pa in self._last_assessment.pages
-                if pa.has_tables or pa.has_equations
-            }
-        if not hard_pages:
-            return
-
-        try:
-            judge = VLMPageJudge(OllamaVisionJudge(model=model), self._make_page_renderer(state))
-        except Exception as exc:
-            logger.warning("hard-page judge unavailable (%s)", exc)
-            return
-
-        if not self.config.quiet:
-            console.print(f"\n[cyan]Phase 3b:[/cyan] VLM judge on hard pages [{model}]")
-
-        judged = rejected = 0
-        for page_num in sorted(state.pages):
-            if page_num not in hard_pages:
-                continue
-            ps = state.pages[page_num]
-            bo = ps.best_output
-            # Only judge model-produced OCR (native text is character-exact; the
-            # corruption risk lives in the VLM transcription). "native+math" is
-            # native prose with equation regions already recovered to LaTeX via
-            # image-OCR — authoritative; the image-vs-text judge spuriously flags
-            # its reading order and would revert the LaTeX to raw mojibake.
-            if not bo or not bo.text or (bo.engine or "").startswith("native"):
-                continue
-            judged += 1
-            try:
-                # VLMPageJudge.assess(output, provider); provider is unused here.
-                decision = judge.assess(bo, None)
-            except Exception as exc:  # a judge failure must never drop the page
-                logger.warning("judge errored on p%d (%s); keeping output", page_num, exc)
-                continue
-            if decision.accept:
-                continue
-            rejected += 1
-            issues = decision.reason if decision.reason and decision.reason != "faithful" else ""
-            bo.audit_passed = False
-            bo.failure_mode = FailureMode.AUDIT_FAILED
-            bo.error = "VLM judge rejected (image mismatch)" + (f": {issues}" if issues else "")
-            from socr.core.audit_log import AuditEvent
-
-            state.events.append(
-                AuditEvent(
-                    page_num=page_num,
-                    kind="judge_reject",
-                    engine=bo.engine,
-                    detail=issues or "image mismatch",
-                    data={"issues": issues, "judge_model": model},
-                )
-            )
-            ps.best_output = None  # -> needs_repair -> repair escalates
-            # Without this flag, born-digital pages are exempt from repair once
-            # any attempt exists (the anti-loop rule), so a judge rejection
-            # silently reverted to flat native text while reporting SUCCESS.
-            ps.judge_rejected = True
-            if not self.config.quiet:
-                console.print(
-                    f"  [yellow]p{page_num}: judge rejected — re-routing to repair"
-                    + (f" ({issues})" if issues else "")
-                    + "[/yellow]"
-                )
-
-        if not self.config.quiet:
-            if judged == 0:
-                console.print("  No model-OCR'd hard pages to judge")
-            else:
-                console.print(f"  {judged} judged, {rejected} rejected")
-
     def _reread_page_tables(
         self,
         state: DocumentState,
@@ -4049,7 +3514,7 @@ class UnifiedPipeline:
     ) -> tuple[int, int]:
         """Reconcile crop readings against whole-page OCR for one page.
 
-        Called by ``_phase_dual_pass_tables`` AFTER ``locate_tables`` and
+        Called by the fused agentic loop AFTER ``locate_tables`` and
         ``extractor.extract`` have already run (those are inside the caller's
         narrow fail-open ``try/except``). This method starts from the raw crop
         list, handles the timeout-sentinel split, reconciles, patches, and emits
@@ -4220,119 +3685,6 @@ class UnifiedPipeline:
                 console.print(f"  [{color}]p{page_num}: {d.action} — {d.summary()}[/{color}]")
 
         return patched_delta, flagged_delta
-
-    def _phase_dual_pass_tables(self, state: DocumentState) -> None:
-        """Crop precisely-located tables, re-read each with the judge VLM, and
-        reconcile against the whole-page OCR.
-
-        On disagreement the crop reading (higher-resolution, table-focused) is
-        authoritative and patched into the page; the disagreement is surfaced and
-        recorded in the page's audit notes. Tables whose count can't be safely
-        mapped, or whose crop reading is malformed, are flagged but never edited.
-        Fail-open throughout: any error keeps the page's existing text.
-
-        Each VLM crop call is wrapped in a ThreadPoolExecutor wall-clock guard
-        (``TableCropExtractor._read_with_deadline``). On timeout an audit event
-        of kind ``dualpass_crop_timeout`` is appended to ``state.events`` and the
-        cascade guard is consulted before issuing the next crop call.
-
-        The per-page reconcile/patch/audit body is delegated to
-        ``_reread_page_tables`` so that the progressive-pages loop (PP-2) can
-        call it independently per page. The narrow fail-open guard covering
-        ``fitz.open + locate_tables + extractor.extract`` stays in this loop,
-        matching the pre-refactor exception boundary exactly.
-        """
-        from socr.tables import locate_tables
-        from socr.tables.extract import TableCropExtractor, make_table_reader
-
-        model = self._resolve_crop_vlm_model()
-        if not model:
-            return  # no vision model available; nothing to do
-
-        # Table pages: primary source is PageState content-type vector (propagated by
-        # apply_born_digital).  Fall back to _last_assessment for partial pipeline runs
-        # and unit tests that set the assessment directly without apply_born_digital.
-        table_pages = {page_num for page_num, ps in state.pages.items() if ps.has_tables}
-        if not table_pages and self._last_assessment:
-            table_pages = {pa.page_num for pa in self._last_assessment.pages if pa.has_tables}
-        if not table_pages:
-            return
-
-        # Derive crop-read httpx timeout from the calibrated agentic provider timeouts
-        # so slow models (e.g. qwen3-vl:30b-a3b-instruct at 91-125 s on dense tables)
-        # don't trip the I/O timeout before they finish. This is the httpx scalar timeout
-        # on the network call; a SEPARATE ThreadPoolExecutor wall-clock deadline
-        # (crop_wall_clock_deadline) is computed from this value inside TableCropExtractor.
-        from socr.core.config import EngineType
-        from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
-
-        _qwen_family = ("qwen",)
-        crop_timeout = (
-            DEFAULT_PROVIDER_TIMEOUTS.get(EngineType.QWEN, 120.0)
-            if any(model.lower().startswith(p) for p in _qwen_family)
-            else 120.0
-        )
-
-        try:
-            # Reader and extractor are built ONCE at doc scope; reused per page.
-            extractor = TableCropExtractor(
-                make_table_reader(
-                    backend=self.config.qwen_backend,
-                    model=model,
-                    timeout=crop_timeout,
-                    vllm_url=self.config.qwen_vllm_url,
-                )
-            )
-        except Exception as exc:
-            logger.warning("dual-pass extractor unavailable (%s)", exc)
-            return
-
-        if not self.config.quiet:
-            console.print(f"\n[cyan]Phase 4c:[/cyan] dual-pass table extraction [{model}]")
-
-        from socr.core.pdf import open_pdf
-
-        pdf_path = state.handle.path
-        scanned = patched = flagged = 0
-        for page_num in sorted(state.pages):
-            if page_num not in table_pages:
-                continue
-            ps = state.pages[page_num]
-            bo = ps.best_output
-            # Only model-OCR'd pages carry transcription corruption risk; native
-            # text is character-exact and its tables come straight from the PDF.
-            if not bo or not bo.text or bo.engine == "native":
-                continue
-            scanned += 1
-            # Narrow fail-open guard: covers only fitz.open + locate_tables +
-            # extractor.extract (the bad-PDF/bad-page cases). Reconcile, patch,
-            # and audit-event emission run OUTSIDE this catch via
-            # _reread_page_tables, matching the pre-refactor boundary exactly.
-            try:
-                with open_pdf(pdf_path) as doc:
-                    boxes = locate_tables(doc[page_num - 1])
-                if not boxes:
-                    continue
-                # extract() applies the per-crop wall-clock deadline internally
-                # and marks timed-out crops with _timed_out=True so the helper
-                # can record an audit event and apply the cascade guard.
-                raw_crops = extractor.extract(pdf_path, page_num, boxes)
-            except Exception as exc:  # a dual-pass failure must never drop a page
-                logger.warning("dual-pass errored on p%d (%s); keeping text", page_num, exc)
-                continue
-            # _reread_page_tables runs outside the try/except above so that any
-            # exception in reconcile->patch->audit propagates (not swallowed).
-            page_patched, page_flagged = self._reread_page_tables(
-                state, page_num, raw_crops, extractor
-            )
-            patched += page_patched
-            flagged += page_flagged
-
-        if not self.config.quiet:
-            if scanned == 0:
-                console.print("  No model-OCR'd table pages to re-read")
-            else:
-                console.print(f"  {scanned} pages scanned, {patched} patched, {flagged} flagged")
 
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics.
@@ -4511,7 +3863,10 @@ class UnifiedPipeline:
             for part in str(run.engine).replace("+", ",").split(","):
                 part = part.strip()
                 if part and part != "native":
-                    # Strip a consensus(...) wrapper to the underlying engine.
+                    # Historical manifests may label a run consensus(<engine>).
+                    # Strip that compatibility wrapper to the underlying engine
+                    # so cached manifests remain replayable after consensus was
+                    # removed from the active pipeline.
                     if part.startswith("consensus(") and part.endswith(")"):
                         part = part[len("consensus(") : -1]
                     names.add(part)
@@ -4559,133 +3914,6 @@ class UnifiedPipeline:
         except Exception as exc:
             logger.warning("manifest write failed (non-fatal): %s", exc)
 
-    # ------------------------------------------------------------------
-    # Phase 2 (multi-engine): Backbone OCR with multiple engines
-    # ------------------------------------------------------------------
-
-    def _backbone_multi_engine(
-        self,
-        state: DocumentState,
-        output_dir: Path,
-    ) -> list[EngineResult]:
-        """Run multiple CLI engines on the document and collect all results.
-
-        Each engine's output is applied to DocumentState via
-        ``state.apply_result()``, so per-page attempts accumulate across
-        engines.  Returns the list of EngineResults for downstream scoring.
-        """
-        engines = self.config.multi_engine
-        engine_names = [e.value for e in engines]
-
-        if not self.config.quiet:
-            console.print(f"\n[cyan]Phase 2:[/cyan] Multi-engine OCR [{', '.join(engine_names)}]")
-
-        results: list[EngineResult] = []
-
-        for idx, engine_type in enumerate(engines, 1):
-            if not self.config.quiet:
-                console.print(
-                    f"  Engine {idx}/{len(engines)}: {engine_type.value}",
-                    end="",
-                )
-
-            try:
-                engine = get_engine(engine_type)
-            except ValueError:
-                if not self.config.quiet:
-                    console.print(" [red]not supported[/red]")
-                continue
-
-            if not engine.is_available():
-                if not self.config.quiet:
-                    console.print(" [yellow]not available[/yellow]")
-                continue
-
-            # Per-page processing for all engines
-            all_pages = list(range(1, state.handle.page_count + 1))
-            page_outputs = engine.process_pages(
-                pdf_path=state.handle.path,
-                page_nums=all_pages,
-                config=self.config,
-                dpi=self.config.render_dpi,
-            )
-            success_count = sum(1 for p in page_outputs if p.status == PageStatus.SUCCESS)
-            result = EngineResult(
-                document_path=state.handle.path,
-                engine=engine.name,
-                status=(DocumentStatus.SUCCESS if success_count > 0 else DocumentStatus.ERROR),
-                pages=page_outputs,
-                pages_processed=state.handle.page_count,
-                model_version=engine.resolved_model_version(self.config),
-            )
-            state.apply_result(result)
-
-            word_count = sum(p.word_count for p in result.pages)
-            if not self.config.quiet:
-                if result.success:
-                    console.print(f"... [green]{word_count} words[/green]")
-                else:
-                    console.print(f"... [red]{result.error or result.status.value}[/red]")
-
-            results.append(result)
-
-        return results
-
-    # ------------------------------------------------------------------
-    # Phase 3: Score
-    # ------------------------------------------------------------------
-
-    def _phase_score(self, state: DocumentState, backbone_result: EngineResult) -> None:
-        """Run quality scoring on engine outputs.
-
-        For CLI engines that produce page_num=0 (whole-doc), score the
-        combined text and propagate the result to the whole-doc PageOutput.
-        For per-page outputs, score each page individually.
-        """
-        if not self.config.quiet:
-            console.print("\n[cyan]Phase 3:[/cyan] Score (quality audit)")
-
-        has_whole_doc = any(p.page_num == 0 for p in backbone_result.pages)
-
-        if has_whole_doc:
-            self._score_whole_doc(state, backbone_result)
-        else:
-            self._score_per_page(state)
-
-    def _score_whole_doc(self, state: DocumentState, result: EngineResult) -> None:
-        """Score a whole-document output (CLI engine, page_num=0)."""
-        whole_doc_page = next((p for p in result.pages if p.page_num == 0), None)
-        if not whole_doc_page:
-            return
-
-        # When the backbone used chunking, each chunk was small enough to
-        # avoid truncation.  Skip the doc-level truncation check because
-        # dividing chunk output by total pages gives a misleadingly low
-        # words-per-page ratio.
-        was_chunked = state.handle.page_count > self.config.chunk_threshold
-        scoring = self.scorer.score(
-            whole_doc_page.text,
-            engine=result.engine,
-            expected_pages=0 if was_chunked else state.handle.page_count,
-        )
-
-        if scoring.passed:
-            whole_doc_page.audit_passed = True
-            whole_doc_page.failure_mode = FailureMode.NONE
-            result.audit_passed = True
-            if not self.config.quiet:
-                console.print("  [green]Passed[/green]")
-        else:
-            whole_doc_page.audit_passed = False
-            whole_doc_page.failure_mode = scoring.primary_failure
-            result.audit_passed = False
-            result.status = DocumentStatus.AUDIT_FAILED
-            result.failure_mode = scoring.primary_failure
-            if not self.config.quiet:
-                console.print(f"  [red]FAIL:[/red] {scoring.primary_failure.value}")
-                for mode, detail in scoring.details.items():
-                    console.print(f"    {detail}")
-
     def _sparse_page_ok(self, page_num: int) -> bool:
         """Whether low word count is expected on this page.
 
@@ -4708,491 +3936,8 @@ class UnifiedPipeline:
             return False
         return (pa.word_count or 0) < self.config.audit_min_words
 
-    def _native_table_structure_gate_applies(
-        self, page_num: int, output: PageOutput, ps: PageState | None = None
-    ) -> bool:
-        """Whether a native output should be audited for table grid loss."""
-        if not (output.engine or "").startswith("native"):
-            return False
-        return self._page_has_tables(page_num, ps)
-
-    def _score_per_page(self, state: DocumentState) -> None:
-        """Score each page's best output individually."""
-        failures = 0
-        for page_num in sorted(state.pages):
-            page_state = state.pages[page_num]
-            if not page_state.attempts:
-                continue
-
-            # Score the most recent attempt
-            latest = page_state.attempts[-1]
-            if page_state.is_born_digital and page_state.native_text:
-                latest_is_native = (latest.engine or "").startswith("native")
-                if latest_is_native:
-                    tr3_distrust = bool(
-                        self.config.native_only and page_state.native_table_unverifiable
-                    )
-                    shape_distrust = page_state.native_table_structure_defective or getattr(
-                        page_state, "native_table_header_unattributed", False
-                    )
-                    if tr3_distrust or shape_distrust:
-                        # GH-151 TICKET-B1 / GH-200 / GH-211: the defect was
-                        # found at EXTRACTION time and is authoritative -- do
-                        # NOT run the heuristic scorer over it (that scorer is
-                        # exactly what missed p26: it tolerates the
-                        # ragged/orphan shapes this gate targets, and it would
-                        # overwrite TR-3's hard-fail with a pass). Force the
-                        # demotion and skip straight past the heuristic path
-                        # below so it cannot re-promote this attempt to
-                        # audit_passed=True. No OCR is requested either way.
-                        latest.audit_passed = False
-                        latest.status = PageStatus.WARNING
-                        latest.failure_mode = FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
-                        if getattr(page_state, "native_table_header_unattributed", False):
-                            detail = "native table header not attributable (GH-200 gate)"
-                        elif getattr(page_state, "native_table_emission_defect", ""):
-                            detail = (
-                                "native table emission defective: "
-                                f"{page_state.native_table_emission_defect} (GH-226 gate)"
-                            )
-                        elif page_state.native_table_structure_defective:
-                            detail = "native table grid structurally defective (GH-151 B1 gate)"
-                        else:
-                            detail = "native table region unverifiable (TR-3, --native-only)"
-                        latest.error = detail
-                        latest.audit_notes.append(detail)
-                        failures += 1
-                        if page_state.best_output is latest:
-                            page_state.best_output = None
-                        continue
-                    if self._native_table_structure_gate_applies(page_num, latest, page_state):
-                        scoring = self.scorer.score_native_table_structure(latest.text)
-                        latest.audit_passed = scoring.passed
-                        if not scoring.passed:
-                            latest.failure_mode = scoring.primary_failure
-                            detail = scoring.details.get(scoring.primary_failure, "")
-                            if detail:
-                                latest.error = detail
-                                latest.audit_notes.append(detail)
-                            page_state.native_table_structure_failed = True
-                            page_state.needs_ocr_enhancement = True
-                            failures += 1
-                            if page_state.best_output is latest:
-                                page_state.best_output = None
-                        else:
-                            latest.failure_mode = FailureMode.NONE
-                            page_state.native_table_structure_failed = False
-                    # Preserve the native-text exemption unless the narrow
-                    # table-structure gate above rejected this exact attempt.
-                    continue
-                if not page_state.needs_ocr_enhancement and not self._page_has_tables(
-                    page_num, page_state
-                ):
-                    continue
-
-            scoring = self.scorer.score(
-                latest.text, engine=latest.engine, sparse_ok=self._sparse_page_ok(page_num)
-            )
-
-            latest.audit_passed = scoring.passed
-            if not scoring.passed:
-                latest.failure_mode = scoring.primary_failure
-                if self._page_has_tables(page_num, page_state):
-                    page_state.native_table_structure_failed = True
-                failures += 1
-                # If this was the best_output but now fails, clear it
-                if page_state.best_output is latest:
-                    page_state.best_output = None
-            else:
-                latest.failure_mode = FailureMode.NONE
-                if self._page_has_tables(page_num, page_state):
-                    page_state.native_table_structure_failed = False
-                # Promote to best if none set
-                if not page_state.best_output:
-                    page_state.best_output = latest
-
-        if not self.config.quiet:
-            if failures:
-                console.print(f"  {failures} page(s) failed audit")
-            else:
-                console.print("  [green]All pages passed[/green]")
-
-    def _phase_score_multi(
-        self,
-        state: DocumentState,
-        backbone_results: list[EngineResult],
-    ) -> None:
-        """Score all engine outputs from multi-engine mode.
-
-        For each engine result, runs scoring (whole-doc or per-page as
-        appropriate) and prints a per-engine summary.
-        """
-        if not self.config.quiet:
-            console.print("\n[cyan]Phase 3:[/cyan] Score (quality audit)")
-
-        for result in backbone_results:
-            if not result.success:
-                if not self.config.quiet:
-                    console.print(f"  {result.engine}: [red]skipped (engine failed)[/red]")
-                continue
-
-            has_whole_doc = any(p.page_num == 0 for p in result.pages)
-
-            if has_whole_doc:
-                whole_page = next(p for p in result.pages if p.page_num == 0)
-                was_chunked = state.handle.page_count > self.config.chunk_threshold
-                scoring = self.scorer.score(
-                    whole_page.text,
-                    engine=result.engine,
-                    expected_pages=(0 if was_chunked else state.handle.page_count),
-                )
-                whole_page.audit_passed = scoring.passed
-                if scoring.passed:
-                    whole_page.failure_mode = FailureMode.NONE
-                    result.audit_passed = True
-                else:
-                    whole_page.failure_mode = scoring.primary_failure
-                    result.audit_passed = False
-
-                if not self.config.quiet:
-                    if scoring.passed:
-                        console.print(f"  {result.engine}: [green]passed[/green]")
-                    else:
-                        console.print(
-                            f"  {result.engine}: [red]{scoring.primary_failure.value}[/red]"
-                        )
-            else:
-                # Per-page outputs: score each page
-                passed = 0
-                failed = 0
-                for page_out in result.pages:
-                    scoring = self.scorer.score(page_out.text, engine=result.engine)
-                    page_out.audit_passed = scoring.passed
-                    if scoring.passed:
-                        page_out.failure_mode = FailureMode.NONE
-                        passed += 1
-                        # Promote to best if none set for this page
-                        page_state = state.pages.get(page_out.page_num)
-                        if page_state and not page_state.best_output:
-                            page_state.best_output = page_out
-                    else:
-                        page_out.failure_mode = scoring.primary_failure
-                        failed += 1
-
-                if not self.config.quiet:
-                    console.print(
-                        f"  {result.engine}: "
-                        f"[green]{passed} passed[/green], "
-                        f"[red]{failed} failed[/red]"
-                    )
-
     # ------------------------------------------------------------------
-    # Phase 4: Selective Repair
-    # ------------------------------------------------------------------
-
-    def _phase_repair(self, state: DocumentState, output_dir: Path) -> None:
-        """Repair loop: plan repairs, execute, re-score, repeat.
-
-        Loops up to ``config.max_retries`` times. Each iteration:
-          1. Ask RepairRouter for a plan.
-          2. For each engine group in the plan, run the engine.
-          3. Apply results and re-score.
-          4. Stop if no pages need repair or plan is empty.
-        """
-        # If a CLI engine produced a passing whole-doc output, per-page
-        # states won't have best_outputs but the document is covered.
-        # Skip repair entirely in that case.
-        has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
-        # Also check if there's a failing whole-doc attempt that needs
-        # document-level retry (e.g. truncated output).
-        has_failing_whole_doc = any(not w.audit_passed for w in state.whole_doc_attempts)
-        needs_whole_doc_retry = has_failing_whole_doc and not has_passing_whole_doc
-
-        if has_passing_whole_doc and not state.pages_needing_repair:
-            if not self.config.quiet:
-                console.print("\n[cyan]Phase 4:[/cyan] Repair (not needed)")
-            return
-
-        # Retry-on-truncation: if the latest whole-doc attempt failed
-        # specifically with TRUNCATED, retry the same engine before
-        # falling through to the fallback chain.  Gemini's truncation
-        # is non-deterministic, so a simple retry often succeeds.
-        if (
-            needs_whole_doc_retry
-            and self.config.truncation_retries > 0
-            and state.whole_doc_attempts
-        ):
-            latest_whole = state.whole_doc_attempts[-1]
-            if not latest_whole.audit_passed and latest_whole.failure_mode == FailureMode.TRUNCATED:
-                # Identify which engine produced the truncated output
-                truncated_engine_name = latest_whole.engine
-                truncated_engine_type = None
-                for et in EngineType:
-                    if et.value == truncated_engine_name:
-                        truncated_engine_type = et
-                        break
-
-                if truncated_engine_type is not None:
-                    for retry_idx in range(self.config.truncation_retries):
-                        if not self.config.quiet:
-                            console.print(
-                                f"\n[cyan]Phase 4:[/cyan] Repair "
-                                f"(truncation retry {retry_idx + 1}/"
-                                f"{self.config.truncation_retries}) "
-                                f"[{truncated_engine_name}]"
-                            )
-                        engine = get_engine(truncated_engine_type)
-                        if not engine.is_available():
-                            break
-                        all_pages = list(range(1, state.handle.page_count + 1))
-                        page_outputs = engine.process_pages(
-                            state.handle.path,
-                            all_pages,
-                            self.config,
-                            dpi=self.config.render_dpi,
-                        )
-                        retry_result = EngineResult(
-                            document_path=state.handle.path,
-                            engine=engine.name,
-                            status=DocumentStatus.SUCCESS
-                            if any(p.status == PageStatus.SUCCESS for p in page_outputs)
-                            else DocumentStatus.ERROR,
-                            pages=page_outputs,
-                            pages_processed=state.handle.page_count,
-                        )
-                        state.apply_result(retry_result)
-                        if retry_result.success:
-                            self._score_repair_result(state, retry_result, [])
-                        # Check if per-page results pass
-                        ok = sum(
-                            1
-                            for p in page_outputs
-                            if p.status == PageStatus.SUCCESS and p.audit_passed
-                        )
-                        if ok == state.handle.page_count:
-                            needs_whole_doc_retry = False
-                            has_passing_whole_doc = True
-                            break
-
-                    # If truncation retry resolved it, we're done
-                    if not needs_whole_doc_retry:
-                        if not self.config.quiet:
-                            console.print("  [green]Truncation retry succeeded[/green]")
-                        return
-
-        for attempt in range(self.config.max_retries):
-            plan = self.repair_router.plan_repairs(state)
-
-            # If per-page plan is empty but whole-doc retry is needed,
-            # try the next engine in the fallback chain on the whole doc.
-            if plan.is_empty and needs_whole_doc_retry:
-                tried = {r.engine for r in state.engine_runs}
-                next_engine = None
-                for et in self.config.fallback_chain:
-                    if et.value not in tried:
-                        next_engine = et
-                        break
-                if next_engine:
-                    if not self.config.quiet:
-                        console.print(
-                            f"\n[cyan]Phase 4:[/cyan] Repair "
-                            f"(attempt {attempt + 1}/{self.config.max_retries}) "
-                            f"[{next_engine.value}] (whole-doc retry)"
-                        )
-                    engine = get_engine(next_engine)
-                    if engine.is_available():
-                        all_pages = list(range(1, state.handle.page_count + 1))
-                        page_outputs = engine.process_pages(
-                            state.handle.path,
-                            all_pages,
-                            self.config,
-                            dpi=self.config.render_dpi,
-                        )
-                        repair_result = EngineResult(
-                            document_path=state.handle.path,
-                            engine=engine.name,
-                            status=DocumentStatus.SUCCESS
-                            if any(p.status == PageStatus.SUCCESS for p in page_outputs)
-                            else DocumentStatus.ERROR,
-                            pages=page_outputs,
-                            pages_processed=state.handle.page_count,
-                        )
-                        state.apply_result(repair_result)
-                        if repair_result.success:
-                            self._score_repair_result(state, repair_result, [])
-                            if not state.pages_needing_repair:
-                                needs_whole_doc_retry = False
-                                break
-                    continue
-
-            if plan.is_empty:
-                if not self.config.quiet and attempt == 0:
-                    if state.pages_needing_repair:
-                        console.print(
-                            "\n[cyan]Phase 4:[/cyan] Repair (all engines exhausted, skipping)"
-                        )
-                    else:
-                        console.print("\n[cyan]Phase 4:[/cyan] Repair (not needed)")
-                break
-
-            if not self.config.quiet:
-                engines_str = ", ".join(e.value for e in plan.by_engine.keys())
-                console.print(
-                    f"\n[cyan]Phase 4:[/cyan] Repair "
-                    f"(attempt {attempt + 1}/{self.config.max_retries}) "
-                    f"[{engines_str}]"
-                )
-                console.print(f"  {len(plan.repairs)} page(s) to repair")
-                # Surface RECITATION refusals explicitly: a Gemini copyright-filter
-                # refusal must never be silent — name the reason and the recovery
-                # engine so the user knows the page was refused, not just retried.
-                for r in plan.repairs:
-                    ps = state.pages.get(r.page_num)
-                    if ps and any(a.failure_mode == FailureMode.RECITATION for a in ps.attempts):
-                        console.print(
-                            f"  [yellow]p{r.page_num}: Gemini refused "
-                            f"(RECITATION — copyright/recitation filter) "
-                            f"→ recovering via {r.engine.value}[/yellow]"
-                        )
-                if plan.pages_skipped:
-                    console.print(
-                        f"  {len(plan.pages_skipped)} page(s) skipped (engines exhausted)"
-                    )
-
-            # Execute repairs grouped by engine
-            for engine_type, repairs in plan.by_engine.items():
-                # A routing bug must skip one engine, never kill the document
-                # run (get_engine raises ValueError on non-CLI engine types).
-                try:
-                    engine = get_engine(engine_type)
-                except ValueError as exc:
-                    logger.warning("repair: skipping %s (%s)", engine_type.value, exc)
-                    continue
-
-                if not engine.is_available():
-                    if not self.config.quiet:
-                        console.print(f"  [yellow]{engine.name} not available, skipping[/yellow]")
-                    continue
-
-                # Only process the failed pages, not the whole document
-                failed_pages = [r.page_num for r in repairs]
-                page_outputs = engine.process_pages(
-                    state.handle.path,
-                    failed_pages,
-                    self.config,
-                    dpi=self.config.render_dpi,
-                )
-                repair_result = EngineResult(
-                    document_path=state.handle.path,
-                    engine=engine.name,
-                    status=DocumentStatus.SUCCESS
-                    if any(p.status == PageStatus.SUCCESS for p in page_outputs)
-                    else DocumentStatus.ERROR,
-                    pages=page_outputs,
-                    pages_processed=len(failed_pages),
-                )
-                state.apply_result(repair_result)
-
-                if repair_result.success:
-                    self._score_repair_result(state, repair_result, repairs)
-
-            # If nothing left to repair, stop early
-            if not state.pages_needing_repair:
-                break
-
-    def _score_repair_result(
-        self,
-        state: DocumentState,
-        result: EngineResult,
-        repairs: list,
-    ) -> None:
-        """Score a repair engine's output.
-
-        For CLI engines (whole-doc, page_num=0): score the whole text and
-        update the corresponding whole_doc_attempt.  For per-page outputs,
-        score each relevant page.
-        """
-        has_whole_doc = any(p.page_num == 0 for p in result.pages)
-
-        if has_whole_doc:
-            whole_page = next(p for p in result.pages if p.page_num == 0)
-            scoring = self.scorer.score(
-                whole_page.text,
-                engine=result.engine,
-                expected_pages=state.handle.page_count,
-            )
-            whole_page.audit_passed = scoring.passed
-            if not scoring.passed:
-                whole_page.failure_mode = scoring.primary_failure
-            else:
-                whole_page.failure_mode = FailureMode.NONE
-        else:
-            repair_page_nums = {r.page_num for r in repairs}
-            for page_out in result.pages:
-                if page_out.page_num not in repair_page_nums:
-                    continue
-                scoring = self.scorer.score(
-                    page_out.text,
-                    engine=result.engine,
-                    sparse_ok=self._sparse_page_ok(page_out.page_num),
-                )
-                page_out.audit_passed = scoring.passed
-                if not scoring.passed:
-                    page_out.failure_mode = scoring.primary_failure
-                else:
-                    page_out.failure_mode = FailureMode.NONE
-
-    # ------------------------------------------------------------------
-    # Phase 4b: Consensus
-    # ------------------------------------------------------------------
-
-    def _phase_consensus(self, state: DocumentState) -> None:
-        """Run multi-engine consensus on pages/docs with multiple attempts.
-
-        Handles both per-page attempts (HTTP engines) and whole-doc
-        attempts (CLI engines).
-        """
-        has_multi_pages = any(
-            len(state.pages[pn].attempts) >= 2
-            and not (state.pages[pn].is_born_digital and state.pages[pn].native_text)
-            for pn in state.pages
-        )
-        has_multi_whole_doc = len(state.whole_doc_attempts) >= 2
-
-        if not has_multi_pages and not has_multi_whole_doc:
-            if not self.config.quiet:
-                console.print(
-                    "\n[cyan]Phase 4b:[/cyan] Consensus (not needed — no multi-attempt pages)"
-                )
-            return
-
-        if not self.config.quiet:
-            parts = []
-            if has_multi_whole_doc:
-                parts.append(f"{len(state.whole_doc_attempts)} whole-doc attempts")
-            if has_multi_pages:
-                count = sum(1 for pn in state.pages if len(state.pages[pn].attempts) >= 2)
-                parts.append(f"{count} multi-attempt pages")
-            console.print(f"\n[cyan]Phase 4b:[/cyan] Consensus ({', '.join(parts)})")
-
-        engine = ConsensusEngine(
-            use_llm=self.config.consensus_use_llm,
-            ollama_model=self.config.consensus_ollama_model,
-            quiet=self.config.quiet,
-        )
-        results = engine.reconcile_document(state)
-
-        if not self.config.quiet:
-            for cr in results:
-                disc_str = f" [{len(cr.discrepancies)} discrepancies]" if cr.discrepancies else ""
-                label = "Whole doc" if cr.page_num == 0 else f"Page {cr.page_num}"
-                console.print(
-                    f"  {label}: selected {cr.selected_engine} "
-                    f"(agreement={cr.agreement_score:.2f}){disc_str}"
-                )
-
-    # ------------------------------------------------------------------
-    # Phase 5: Assemble — fragment/sidecar/stitch helpers (PP-1)
+    # Assembly persistence helpers (PP-1)
     # ------------------------------------------------------------------
 
     def _page_fragment_path(self, output_dir: Path, state: DocumentState, page_num: int) -> Path:
@@ -5289,8 +4034,8 @@ class UnifiedPipeline:
         # ``winning_output.status``: a flagged native-fallback page kept
         # status="success" and was SKIPPED on re-run, silently erasing its
         # audit-failed signal.  We compute ``whole_doc`` exactly as the manifest
-        # and fragment do (None in the agentic path — no whole-doc CLI attempts —
-        # but real for non-agentic CLI runs) so the sidecar matches both paths.
+        # and fragment do so the sidecar remains consistent with the selected
+        # output, including historical or reconstructed state.
         from socr.core.manifest import (
             _whole_doc_page_texts,
             _winning_page_output,
@@ -5340,7 +4085,7 @@ class UnifiedPipeline:
             # no output exists.
             "status": winning_dict.get("status", "missing"),
             # terminal: True when this is the definitive sidecar written at
-            # phase-5 assemble time; False for a provisional mid-run incremental
+            # assembly time; False for a provisional mid-run incremental
             # flush from PP-2 that may be superseded by the authoritative write.
             "terminal": terminal,
             # Engine / provider provenance.
@@ -5876,7 +4621,7 @@ class UnifiedPipeline:
         return assemble_pages(texts, page_numbers=page_numbers)
 
     # ------------------------------------------------------------------
-    # Phase 5: Assemble
+    # Assemble
     # ------------------------------------------------------------------
 
     def _canonical_body(self, state: DocumentState) -> tuple[str, bool]:
@@ -5930,7 +4675,7 @@ class UnifiedPipeline:
         (fail-open, byte-identity invariant preserved via fallback).
         """
         if not self.config.quiet:
-            console.print("\n[cyan]Phase 5:[/cyan] Assemble")
+            console.print("\n[cyan]Assemble:[/cyan]")
 
         final_text, has_text = self._canonical_body(state)
 
@@ -6080,9 +4825,9 @@ class UnifiedPipeline:
         # S1 case (iii): the same branch, resolved the OTHER way -- a real
         # rung ran but authored no usable grid, so native's PROSE ships
         # (C1), demoted to WARNING/audit_passed=False. Nothing upstream in
-        # ``_score_per_page`` ever flips ``p.best_output.audit_passed`` for
-        # this shape (a clean-looking native table is exactly what that
-        # scorer is blind to), so this needs its OWN bucket -- folding it
+        # The page-routing checks do not flip ``p.best_output.audit_passed`` for
+        # this shape (a clean-looking native table is exactly what the scorer is
+        # blind to), so this needs its OWN bucket -- folding it
         # into ``native_fallback_pages`` above would silently miss every
         # page here, since that list's final clause reads
         # ``p.best_output.audit_passed`` and this branch never touches it.
@@ -6140,7 +4885,7 @@ class UnifiedPipeline:
             # geometry check runs independently of B1's grid-shape check)
             # without being a D3 floor page, because D3 requires
             # ``native_table_structure_failed`` too -- which B1's
-            # short-circuit in ``_score_per_page`` never sets (it returns
+            # short-circuit in page analysis never sets (it returns
             # before the heuristic scorer that sets it ever runs). Excluding
             # on ``native_table_unverifiable`` alone silently dropped that
             # page from BOTH lists, so it never surfaced as a document
@@ -6194,9 +4939,9 @@ class UnifiedPipeline:
             and not (p.best_output and p.best_output.audit_passed)
         ]
 
-        # For CLI engines that produce whole-doc output (page_num=0), pages
-        # won't have per-page best_outputs.  A passing whole-doc attempt
-        # covers the entire document -- treat it as success.
+        # A reconstructed or historical state may contain a whole-document
+        # attempt (page_num=0) without per-page winners. Treat a passing one as
+        # covering the document for status calculation.
         has_passing_whole_doc = any(w.audit_passed for w in state.whole_doc_attempts)
         # GH-225: a page the model invented content on must not leave the run
         # reporting a clean SUCCESS.  Because the fabrication demotion keeps the
@@ -6209,7 +4954,7 @@ class UnifiedPipeline:
         # written" path is the honest one, not a hard failure.
         # Strip phantom image references, and sweep for fabricated ones, BEFORE
         # the status calculation below (#252 review, blocking).  This block used
-        # to sit after the status was already frozen, so a phase-major document
+        # to sit after the status was already frozen, so a document
         # whose ONLY defect was a fabricated link had the ref removed and an
         # error note appended while still finishing SUCCESS / audit_passed=True —
         # the document-status surface the issue requires, silently absent on
@@ -6223,17 +4968,15 @@ class UnifiedPipeline:
         doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         if has_text:
             final_text = normalizer.strip_phantom_images(final_text, output_dir=doc_dir)
-            # The phase-major lanes (single-engine, multi-engine, consensus,
-            # repair) never reach the agentic per-page seam, and the engines that
-            # invent image refs — Gemini, Mistral, any VLM — run on those lanes
-            # too.  Idempotent for agentic runs: the per-page seam already cleaned
-            # them, so this finds nothing.
+            # The per-page seam already cleans refs emitted during routing; this
+            # assembly-time pass is idempotent and also covers any refs introduced
+            # by later document-level transformations.
             final_text = self._guard_fabricated_image_refs_document(state, final_text, doc_dir)
 
         fabricated_ref_pages = sorted(
             n for n, p in state.pages.items() if getattr(p, "fabricated_image_refs", 0)
         )
-        # The phase-major sweep has no PageState to increment, so its removals
+        # The document-level sweep has no PageState to increment, so its removals
         # ride on the page-0 document event it records.  Without this term the
         # sweep could redact a fabricated ref and still leave the run SUCCESS.
         doc_fabrication = any(
@@ -7180,9 +5923,8 @@ class UnifiedPipeline:
         This method is a no-op (logs a debug line and returns) on any error, to ensure
         the describe-path cannot be disrupted by a label-recovery failure.
         """
-        from socr.core.pdf import open_pdf
-
         from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
 
         if fig_info.bbox is None:
             return
@@ -7253,10 +5995,10 @@ class UnifiedPipeline:
         No text is modified, no model is called.  This is DETECTION + EVIDENCE
         only; the engine/validation/splice layer is GH-36b.
         """
-        from socr.core.pdf import open_pdf
         from ocr_output_contract import doc_dir_for, relative_key
 
         from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
         from socr.math.detect_equations import (
             EquationDetectionResult,
             detect_display_equations,
@@ -7580,11 +6322,7 @@ class UnifiedPipeline:
         else:
             status_str = f"[red]{result.status.value}[/red]"
 
-        engine_str = result.engine
-        if self.config.multi_engine:
-            engine_str = "+".join(e.value for e in self.config.multi_engine) + " (consensus)"
-
-        console.print(f"\n{status_str} | {engine_str} | {result.processing_time:.1f}s")
+        console.print(f"\n{status_str} | {result.engine} | {result.processing_time:.1f}s")
         if state.pages_needing_repair:
             console.print(
                 f"[yellow]{len(state.pages_needing_repair)} page(s) still failing[/yellow]"

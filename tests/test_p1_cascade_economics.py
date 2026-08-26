@@ -264,13 +264,6 @@ class TestSparseRoutingEndToEnd:
 
 
 class TestTruncatedRoutsToCapable:
-    def test_repair_router_maps_truncated_to_capable_engine(self) -> None:
-        from socr.pipeline.repair import _CAPABLE_ENGINES, RepairRouter
-
-        router = RepairRouter(PipelineConfig(quiet=True))
-        engine = router.select_repair_engine(FailureMode.TRUNCATED, tried_engines=set())
-        assert engine in _CAPABLE_ENGINES
-
     def test_truncated_output_not_promoted_to_best(self) -> None:
         """_create_error_result must set audit_passed=False so apply_result
         never promotes a truncated/error page as clean."""

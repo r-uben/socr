@@ -385,37 +385,6 @@ def _bare_handle(pages: int = 1) -> DocumentHandle:
 
 
 class TestWiringUnits:
-    def test_score_per_page_forces_demotion_without_erasing_the_flag(self) -> None:
-        """(1) ``_score_per_page`` must not erase the flag or re-promote the
-        demoted attempt to ``audit_passed=True`` -- even though the grid it
-        is judging is otherwise clean and would pass the heuristic scorer if
-        the flag-check were skipped."""
-        state = DocumentState(handle=_bare_handle())
-        ps = state.pages[1]
-        ps.is_born_digital = True
-        clean_md = (
-            "| Forecast | 2026 | 2027 |\n| --- | --- | --- |\n| A | 1.2 | 1.3 |\n| B | 2.1 | 2.2 |"
-        )
-        ps.native_text = clean_md
-        ps.native_table_structure_defective = True
-        bo = PageOutput(
-            page_num=1,
-            text=clean_md,
-            status=PageStatus.SUCCESS,
-            engine="native",
-            audit_passed=True,
-        )
-        ps.attempts.append(bo)
-        ps.best_output = bo
-
-        pipe = UnifiedPipeline(PipelineConfig(quiet=True))
-        pipe._score_per_page(state)
-
-        assert bo.audit_passed is False
-        assert bo.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
-        assert ps.best_output is None
-        assert ps.native_table_structure_defective is True  # not erased
-
     def test_needs_repair_stays_false_on_the_flag_alone(self) -> None:
         """(2) The flag alone must never force ``PageState.needs_repair`` --
         that would trigger a real repair pass (and OCR spend) even under

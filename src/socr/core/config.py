@@ -102,7 +102,6 @@ _FROM_FILE_EXPLICIT_FIELDS: frozenset[str] = frozenset(
         "fallback_chain",
         "figures_engine",
         "enabled_engines",
-        "multi_engine",
         "output_dir",
         "hpc",
     }
@@ -196,8 +195,6 @@ class PipelineConfig:
     # explicitly sets it. A user-set value (incl. -o) is honored verbatim.
     output_dir: Path = field(default_factory=lambda: Path("output"))
     timeout: int = 1800  # Single timeout for all engine subprocesses
-    max_retries: int = 2
-    truncation_retries: int = 1  # Retry same engine on truncation before fallback
     chunk_threshold: int = 30  # Chunk PDFs longer than this many pages
     chunk_size: int = 20  # Pages per chunk
     render_dpi: int = 300  # DPI for page rendering; 300 resolves small table digits/parens
@@ -247,9 +244,10 @@ class PipelineConfig:
     auto_patch_tables: bool = False
 
     # --- Agentic cost-aware routing ---
-    # Agentic is now the DEFAULT mode: per-page cheapest-first routing with
-    # judge-gated escalation. Use --legacy-routing to opt out of agentic and
-    # run the old deterministic backbone → audit → repair pipeline.
+    # Agentic is the ONLY mode: per-page cheapest-first routing with judge-gated
+    # escalation. R174b deleted the deterministic backbone -> audit -> repair
+    # pipeline and the --legacy-routing flag that reached it; this field is kept
+    # only because the run fingerprint and a small number of call sites read it.
     agentic: bool = True  # per-page: try cheapest provider, judge escalates
     strict_local: bool = False  # if True, agentic ladder uses only local/free rungs
     judge_backend: str = "auto"  # "auto" | "vlm" | "heuristic"
@@ -257,14 +255,6 @@ class PipelineConfig:
     max_cost_per_page: float = 0.0  # 0 = no per-page price cap
     cost_budget: float = 0.0  # 0 = unlimited total budget per document
     write_manifest: bool = False  # write reproducibility manifest + blob cache
-
-    # --- Multi-engine ---
-    multi_engine: list[EngineType] = field(default_factory=list)  # empty = single engine mode
-
-    # --- Consensus ---
-    consensus_enabled: bool = False
-    consensus_use_llm: bool = False
-    consensus_ollama_model: str = ""
 
     # --- Batch flags ---
     reprocess: bool = False
@@ -347,8 +337,6 @@ class PipelineConfig:
             config.figures_engine = EngineType(data["figures_engine"])
         if "enabled_engines" in data:
             config.enabled_engines = [EngineType(e) for e in data["enabled_engines"]]
-        if "multi_engine" in data:
-            config.multi_engine = [EngineType(e) for e in data["multi_engine"]]
 
         # Everything else: restored generically from the dataclass definition, so
         # a field added to PipelineConfig persists through a config file without
