@@ -341,7 +341,6 @@ class TestFingerprintInvalidation:
                 primary_engine=EngineType.DEEPSEEK,
                 local_engine=EngineType.DEEPSEEK,
                 fallback_chain=[],
-                multi_engine=[],
                 enabled_engines=[EngineType.QWEN],
                 **overrides,
             )
@@ -402,7 +401,6 @@ class TestFingerprintInvalidation:
                 primary_engine=EngineType.DEEPSEEK,
                 local_engine=EngineType.DEEPSEEK,
                 fallback_chain=[],
-                multi_engine=[],
                 enabled_engines=[EngineType.QWEN, EngineType.GEMINI],
             )
         )._run_fingerprint()
@@ -411,7 +409,6 @@ class TestFingerprintInvalidation:
                 primary_engine=EngineType.DEEPSEEK,
                 local_engine=EngineType.DEEPSEEK,
                 fallback_chain=[],
-                multi_engine=[],
                 enabled_engines=[EngineType.GEMINI, EngineType.QWEN],
             )
         )._run_fingerprint()
@@ -426,7 +423,6 @@ class TestFingerprintInvalidation:
                 primary_engine=EngineType.DEEPSEEK,
                 local_engine=EngineType.DEEPSEEK,
                 fallback_chain=[],
-                multi_engine=[],
                 enabled_engines=[EngineType.GEMINI],
             )
         )._run_fingerprint()

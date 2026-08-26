@@ -22,7 +22,6 @@ UNPROBED_FIELDS = {
     "hpc",  # nested dataclass, not a scalar -- see test_hpc_block_round_trips
     "enabled_engines",  # list[EngineType] -- see test_engine_fields_round_trip
     "fallback_chain",  # list[EngineType] -- see test_engine_fields_round_trip
-    "multi_engine",  # list[EngineType] -- see test_engine_fields_round_trip
 }
 
 # The 14 fields the hand-maintained list forgot. Listed explicitly so this file
@@ -168,7 +167,6 @@ class TestExplicitlyHandledFields:
                     "figures_engine": "gemini",
                     "fallback_chain": ["nougat", "marker"],
                     "enabled_engines": ["qwen", "glm"],
-                    "multi_engine": ["qwen", "gemini"],
                 },
             )
         )
@@ -178,7 +176,6 @@ class TestExplicitlyHandledFields:
         assert config.figures_engine == EngineType.GEMINI
         assert config.fallback_chain == [EngineType.NOUGAT, EngineType.MARKER]
         assert config.enabled_engines == [EngineType.QWEN, EngineType.GLM]
-        assert config.multi_engine == [EngineType.QWEN, EngineType.GEMINI]
 
     def test_legacy_fallback_engine_alias_still_accepted(self, tmp_path):
         config = PipelineConfig.from_file(_write(tmp_path, {"fallback_engine": "mistral"}))

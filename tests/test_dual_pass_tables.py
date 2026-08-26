@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import fitz
 import pytest
@@ -369,72 +370,6 @@ def _wire_reader(monkeypatch, reader):
     monkeypatch.setattr(extract_mod, "OllamaTableReader", lambda *a, **k: reader)
 
 
-def test_phase_flag_only_by_default_does_not_edit(tmp_path, monkeypatch):
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))  # auto_patch_tables default False
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, bo = _state_with_table_page(pdf, _PAGE_MD)  # contains the (0.0l0) misread
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
-    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
-
-    pipe._phase_dual_pass_tables(state)
-
-    assert bo.text == _PAGE_MD  # corpus untouched
-    assert any("dual-pass flagged" in n for n in bo.audit_notes)  # but recorded
-    assert any(e.kind == "dualpass_flagged" for e in state.events)
-
-
-def test_phase_patches_when_auto_patch_enabled(tmp_path, monkeypatch):
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, bo = _state_with_table_page(pdf, _PAGE_MD)  # contains the (0.0l0) misread
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
-    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
-
-    pipe._phase_dual_pass_tables(state)
-
-    assert "(0.010)" in bo.text and "(0.0l0)" not in bo.text
-    assert any("dual-pass patched" in n for n in bo.audit_notes)
-
-
-def test_phase_noop_without_vision_model(tmp_path, monkeypatch):
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, bo = _state_with_table_page(pdf, _PAGE_MD)
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: None)
-
-    pipe._phase_dual_pass_tables(state)
-    assert bo.text == _PAGE_MD  # untouched
-
-
-def test_phase_skips_native_pages(tmp_path, monkeypatch):
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, bo = _state_with_table_page(pdf, _PAGE_MD, engine="native")
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
-    reader = _StubReader(_CROP_MD)
-    _wire_reader(monkeypatch, reader)
-
-    pipe._phase_dual_pass_tables(state)
-    assert reader.calls == 0  # native text is char-exact; not re-read
-    assert bo.text == _PAGE_MD
-
-
 def test_phase_disabled_flag_default():
     assert PipelineConfig().dual_pass_tables is True
     assert PipelineConfig(dual_pass_tables=False).dual_pass_tables is False
@@ -496,49 +431,6 @@ def test_extractor_releases_within_deadline(tmp_path):
     assert len(crops) == 1
     assert getattr(crops[0], "_timed_out", False), "timed-out crop must carry _timed_out=True"
     assert crops[0].markdown == ""
-
-
-def test_timeout_produces_audit_event(tmp_path, monkeypatch):
-    """A timed-out crop must produce a dualpass_crop_timeout AuditEvent in
-    state.events with the correct page_num."""
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    # Monkeypatch extract() to return a pre-built timed-out sentinel so we
-    # don't need to wait for a real deadline in the orchestrator test.
-    from socr.tables.extract import CropTable
-
-    sentinel = CropTable(markdown="", source="booktabs", bbox=(0.0, 0.0, 1.0, 1.0))
-    sentinel._timed_out = True  # type: ignore[attr-defined]
-
-    class _TimedOutReader:
-        timeout = 120.0
-
-        def read(self, _p: Path) -> str:  # never called; extractor is monkeypatched
-            return ""  # pragma: no cover
-
-    import socr.tables.extract as extract_mod
-
-    monkeypatch.setattr(
-        extract_mod.TableCropExtractor,
-        "extract",
-        lambda self, *a, **k: [sentinel],
-    )
-    monkeypatch.setattr(extract_mod, "OllamaTableReader", lambda *a, **k: _TimedOutReader())
-
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, bo = _state_with_table_page(pdf, _PAGE_MD)
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "qwen3-vl:30b-a3b-instruct")
-
-    pipe._phase_dual_pass_tables(state)
-
-    timeout_events = [e for e in state.events if e.kind == "dualpass_crop_timeout"]
-    assert timeout_events, "Expected a dualpass_crop_timeout AuditEvent"
-    assert timeout_events[0].page_num == 1
-    # The corpus must be untouched: degrade to flag-only.
-    assert bo.text == _PAGE_MD
 
 
 def test_cascade_guard_stops_next_crop_after_timeout(tmp_path):
@@ -620,59 +512,6 @@ def test_no_fitz_doc_handle_leak(tmp_path):
     assert len(crops2) == 1
 
 
-def test_mixed_timeout_and_success_does_not_patch(tmp_path, monkeypatch):
-    """REGRESSION — BLOCKER 1: a page where SOME crops time out and SOME succeed
-    must NOT auto-patch bo.text even when auto_patch_tables=True.
-
-    Partial crop coverage means we cannot safely assert the remaining crops
-    represent the full table set; patching on incomplete evidence risks data loss.
-    The page must be flag-only (existing text preserved).
-    """
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    # Build two crops: one timed-out sentinel and one successful read.
-    from socr.tables.extract import CropTable
-
-    sentinel = CropTable(markdown="", source="booktabs", bbox=(0.0, 0.0, 1.0, 1.0))
-    sentinel._timed_out = True  # type: ignore[attr-defined]
-    good_crop = CropTable(markdown=_CROP_MD, source="booktabs", bbox=(0.0, 0.0, 1.0, 1.0))
-
-    import socr.tables.extract as extract_mod
-
-    # Inject a mixed list: one timeout sentinel + one successful crop.
-    monkeypatch.setattr(
-        extract_mod.TableCropExtractor,
-        "extract",
-        lambda self, *a, **k: [sentinel, good_crop],
-    )
-
-    class _FakeReader:
-        timeout = 120.0
-
-        def read(self, _p):  # pragma: no cover
-            return ""
-
-    monkeypatch.setattr(extract_mod, "OllamaTableReader", lambda *a, **k: _FakeReader())
-
-    # auto_patch_tables=True; should be suppressed because of the timeout sentinel.
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, bo = _state_with_table_page(pdf, _PAGE_MD)
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "qwen3-vl:30b-a3b-instruct")
-
-    pipe._phase_dual_pass_tables(state)
-
-    # Must NOT patch: existing text preserved despite auto_patch_tables=True.
-    assert bo.text == _PAGE_MD, (
-        "auto_patch must be suppressed on pages with crop timeouts; bo.text was modified"
-    )
-    # Timeout audit event must be present.
-    timeout_events = [e for e in state.events if e.kind == "dualpass_crop_timeout"]
-    assert timeout_events, "Expected a dualpass_crop_timeout AuditEvent"
-
-
 def test_fitz_page_judge_handle_closes_between_calls(tmp_path):
     """The get_fitz_page closure in _build_page_judge must close the previous
     fitz Doc before opening a new one, preventing N open handles for N pages.
@@ -727,88 +566,6 @@ class _CountingReader:
         return self.value
 
 
-def test_pp3_parity_flagged(tmp_path, monkeypatch):
-    """_reread_page_tables must produce the SAME dualpass_flagged AuditEvent
-    and leave bo.text untouched (flag-only default) as the pre-refactor inline
-    loop body did.  This is the primary parity assertion for PP-3.
-    """
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))  # auto_patch_tables=False
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, bo = _state_with_table_page(pdf, _PAGE_MD)
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
-    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
-
-    pipe._phase_dual_pass_tables(state)
-
-    # PARITY: same outcome as before the refactor.
-    assert bo.text == _PAGE_MD, "bo.text must be unchanged in flag-only mode"
-    assert any("dual-pass flagged" in n for n in bo.audit_notes), (
-        "audit_notes must record the disagreement"
-    )
-    events = [e for e in state.events if e.kind == "dualpass_flagged"]
-    assert events, "dualpass_flagged AuditEvent must be emitted"
-    assert events[0].page_num == 1, "AuditEvent page_num must match the table page"
-
-
-def test_pp3_parity_patched(tmp_path, monkeypatch):
-    """_reread_page_tables must produce the SAME patch and dualpass_patched
-    AuditEvent as the pre-refactor inline loop body when auto_patch_tables=True.
-    """
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, bo = _state_with_table_page(pdf, _PAGE_MD)
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
-    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
-
-    pipe._phase_dual_pass_tables(state)
-
-    # PARITY: misread corrected, same as pre-refactor.
-    assert "(0.010)" in bo.text and "(0.0l0)" not in bo.text, (
-        "bo.text must be patched to the crop reading"
-    )
-    events = [e for e in state.events if e.kind == "dualpass_patched"]
-    assert events, "dualpass_patched AuditEvent must be emitted"
-    assert events[0].page_num == 1, "AuditEvent page_num must match the table page"
-
-
-def test_pp3_reader_built_once_not_per_crop(tmp_path, monkeypatch):
-    """OllamaTableReader must be instantiated ONCE at doc scope, not once per
-    crop or per page.  Verified by counting constructor calls via a shared list.
-    """
-    doc, _ = _build_page("booktabs")
-    pdf = tmp_path / "doc.pdf"
-    doc.save(pdf)
-
-    instance_counter: list[int] = []
-    reader = _CountingReader(_CROP_MD, instance_counter)
-
-    import socr.tables.extract as extract_mod
-
-    # Patch OllamaTableReader so its construction is tracked.
-    monkeypatch.setattr(extract_mod, "OllamaTableReader", lambda *a, **k: reader)
-
-    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
-    pipe._last_assessment = _assessment(has_tables=True)
-    state, _bo = _state_with_table_page(pdf, _PAGE_MD)
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
-
-    pipe._phase_dual_pass_tables(state)
-
-    # Reader must be built exactly once — doc scope, not per crop.
-    assert len(instance_counter) == 1, (
-        f"OllamaTableReader was constructed {len(instance_counter)} time(s); "
-        "expected exactly 1 (doc-scoped singleton)"
-    )
-
-
 def test_pp3_reread_page_tables_direct(tmp_path):
     """_reread_page_tables can be called directly with pre-computed raw_crops;
     it must return (patched_delta, flagged_delta) matching the expected outcome.
@@ -845,54 +602,128 @@ def test_pp3_reread_page_tables_direct(tmp_path):
     assert events and events[0].page_num == 1
 
 
-def test_pp3_boundary_audit_exception_propagates(tmp_path, monkeypatch):
-    """REGRESSION guard (codex merge gate): if an exception occurs in the
-    patch/audit-event path AFTER bo.text has been patched, the exception must
-    propagate to the caller -- it must NOT be silently swallowed into a
-    'keeping text' continue that leaves the page half-patched (bo.text updated,
-    dualpass_patched event missing).
+# ---------------------------------------------------------------------------
+# R174b: restored guards.
+#
+# These five covered BOTH the deleted `_phase_dual_pass_tables` and the SURVIVING
+# per-page `_reread_page_tables` path. Removing them with the phase would have left
+# the survivor unguarded, so they are rewritten against the helper directly.
+# ---------------------------------------------------------------------------
 
-    We inject the failure via a ``d.summary()`` method that raises on the
-    disagreement object returned by a monkeypatched ``reconcile_page_tables``.
-    Because ``bo.text = result.text`` runs BEFORE the loop over disagreements,
-    the exception fires after the patch is applied.  The exception must escape
-    ``_phase_dual_pass_tables``, not be swallowed.
+
+def test_r174b_reread_patch_and_audit_event_are_atomic(tmp_path, monkeypatch):
+    """REGRESSION guard: once ``bo.text`` is patched, a failure in the audit-event
+    path must PROPAGATE, never be swallowed.
+
+    The contract is documented on ``_reread_page_tables`` itself: the patch, the
+    counter increment and the AuditEvent emission run OUTSIDE any try/except, so a
+    page is never left with patched text and a missing event. Swallowing here would
+    mutate shipped content with no audit trail — the failure mode CLAUDE.md forbids.
+
+    NOTE: the agentic in-loop CALLER wraps this helper in a broad
+    ``except Exception`` and logs a warning, which defeats the contract at the call
+    site. That is pre-existing (identical on origin/main) and out of scope for R174b;
+    it is reported in the R174b log, not fixed here. This test pins the helper's own
+    half of the contract so the guarantee is not lost entirely.
     """
     from types import SimpleNamespace
+
+    import fitz as _fitz
+
+    from socr.tables.extract import TableCropExtractor
+    from socr.tables.locate import locate_tables as _locate_tables
 
     doc, _ = _build_page("booktabs")
     pdf = tmp_path / "doc.pdf"
     doc.save(pdf)
 
+    reader = _StubReader(_CROP_MD)
+    extractor = TableCropExtractor(reader)
     pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
-    pipe._last_assessment = _assessment(has_tables=True)
     state, bo = _state_with_table_page(pdf, _PAGE_MD)
-    monkeypatch.setattr(pipe, "_resolve_judge_model", lambda: "mock")
-    _wire_reader(monkeypatch, _StubReader(_CROP_MD))
 
-    # A disagreement whose summary() raises — simulates a contract violation in
-    # the audit-event construction path that fires AFTER bo.text is patched.
+    with _fitz.open(pdf) as fitz_doc:
+        boxes = _locate_tables(fitz_doc[0])
+    raw_crops = extractor.extract(pdf, 1, boxes)
+
     def _raise_summary():
         raise RuntimeError("injected audit-event construction failure")
 
-    broken_disagreement = SimpleNamespace(
-        action="patched",
-        source="booktabs",
-        note="",
-        changed_cells=[],
-        summary=_raise_summary,
+    broken = SimpleNamespace(
+        action="patched", source="booktabs", note="", changed_cells=[], summary=_raise_summary
     )
 
     class _FakeResult:
         patched = True
-        text = _PAGE_MD.replace("(0.0l0)", "(0.010)")  # the patched text
-        disagreements = [broken_disagreement]
+        text = _PAGE_MD.replace("(0.0l0)", "(0.010)")
+        disagreements = [broken]
 
     import socr.tables as tables_mod
 
     monkeypatch.setattr(tables_mod, "reconcile_page_tables", lambda *a, **k: _FakeResult())
 
-    # The exception must propagate out of _phase_dual_pass_tables, not be logged
-    # and swallowed (which would leave bo.text patched without the event).
     with pytest.raises(RuntimeError, match="injected audit-event construction failure"):
-        pipe._phase_dual_pass_tables(state)
+        pipe._reread_page_tables(state, 1, raw_crops, extractor)
+
+
+def test_r174b_reread_builds_reader_once_not_per_crop(tmp_path):
+    """The table reader is document-scoped: one construction, not one per crop.
+
+    Guards the surviving document-scoped reader construction.
+    """
+    import fitz as _fitz
+
+    from socr.tables.extract import TableCropExtractor
+    from socr.tables.locate import locate_tables as _locate_tables
+
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    instance_counter = []
+
+    class _CountingReader(_StubReader):
+        def __init__(self, *a, **k):
+            instance_counter.append(1)
+            super().__init__(_CROP_MD)
+
+    reader = _CountingReader()
+    extractor = TableCropExtractor(reader)
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    state, _bo = _state_with_table_page(pdf, _PAGE_MD)
+
+    with _fitz.open(pdf) as fitz_doc:
+        boxes = _locate_tables(fitz_doc[0])
+    raw_crops = extractor.extract(pdf, 1, boxes)
+    pipe._reread_page_tables(state, 1, raw_crops, extractor)
+
+    assert len(instance_counter) == 1, "reader was constructed more than once"
+
+
+def test_r174b_reread_auto_patch_applies_the_correction(tmp_path):
+    """Positive guard for auto_patch_tables=True: the misread IS corrected in place.
+
+    The surviving suite only covered flag-only mode; without this, the patching
+    branch has no positive assertion.
+    """
+    import fitz as _fitz
+
+    from socr.tables.extract import TableCropExtractor
+    from socr.tables.locate import locate_tables as _locate_tables
+
+    doc, _ = _build_page("booktabs")
+    pdf = tmp_path / "doc.pdf"
+    doc.save(pdf)
+
+    reader = _StubReader(_CROP_MD)
+    extractor = TableCropExtractor(reader)
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True, auto_patch_tables=True))
+    state, bo = _state_with_table_page(pdf, _PAGE_MD)
+
+    with _fitz.open(pdf) as fitz_doc:
+        boxes = _locate_tables(fitz_doc[0])
+    raw_crops = extractor.extract(pdf, 1, boxes)
+    patched_delta, _flagged = pipe._reread_page_tables(state, 1, raw_crops, extractor)
+
+    assert patched_delta == 1
+    assert "(0.010)" in bo.text and "(0.0l0)" not in bo.text

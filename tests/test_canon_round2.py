@@ -64,9 +64,9 @@ def _config(**overrides) -> PipelineConfig:
         judge_hard_pages=False,
         save_figures=False,
         write_manifest=False,
-        # These tests pre-date the agentic default change and test the deterministic
-        # backbone/audit/repair pipeline rather than agentic routing.
-        agentic=False,
+        # R174b: agentic is the only lane. These tests patch _phase_agentic as a seam
+        # to avoid real OCR; their subject is batch metadata and resume, not routing.
+        agentic=True,
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)
@@ -83,9 +83,9 @@ def _real_pdf(path: Path, n_pages: int = 2) -> Path:
 
 
 def _backbone_writing_pages(text_by_page):
-    """Return a ``_phase_backbone`` replacement that populates per-page best_output.
+    """Return a ``_phase_agentic`` replacement that populates per-page best_output.
 
-    Mirrors what a real CLI backbone run leaves on the state: each page gets a
+    Mirrors what a real agentic run leaves on the state: each page gets a
     passing ``best_output``. ``text_by_page`` maps 1-based page_num -> text.
     """
 
@@ -98,12 +98,8 @@ def _backbone_writing_pages(text_by_page):
                 engine="deepseek",
                 audit_passed=True,
             )
-        return EngineResult(
-            document_path=state.handle.path,
-            engine="deepseek",
-            status=DocumentStatus.SUCCESS,
-            pages_processed=state.handle.page_count,
-        )
+        # R174b: _phase_agentic returns None; the state IS the result.
+        return None
 
     return _fake
 
@@ -145,7 +141,7 @@ class TestBatchMetadataAuthoritative:
         pipeline = UnifiedPipeline(_config())
         with patch.object(
             UnifiedPipeline,
-            "_phase_backbone",
+            "_phase_agentic",
             _backbone_writing_pages({1: "alpha one", 2: "alpha two"}),
         ):
             pipeline.process_batch(in_dir, out)
@@ -174,7 +170,7 @@ class TestBatchMetadataAuthoritative:
         pipeline = UnifiedPipeline(_config())
         with patch.object(
             UnifiedPipeline,
-            "_phase_backbone",
+            "_phase_agentic",
             _backbone_writing_pages({1: "x", 2: "y"}),
         ):
             pipeline.process_batch(in_dir, out)
@@ -197,7 +193,7 @@ class TestFingerprintWrittenAndConsulted:
     def _run_once(self, pipeline, pdf, out):
         with patch.object(
             UnifiedPipeline,
-            "_phase_backbone",
+            "_phase_agentic",
             _backbone_writing_pages({1: "content one", 2: "content two"}),
         ):
             return pipeline.process(pdf, out)
@@ -223,7 +219,7 @@ class TestFingerprintWrittenAndConsulted:
 
         # Same config -> resume gate skips (no backbone call needed).
         pipeline2 = UnifiedPipeline(_config())
-        with patch.object(UnifiedPipeline, "_phase_backbone") as backbone:
+        with patch.object(UnifiedPipeline, "_phase_agentic") as backbone:
             skipped = pipeline2.process(pdf, out)
         assert skipped.status == DocumentStatus.SKIPPED
         backbone.assert_not_called()
@@ -242,7 +238,7 @@ class TestFingerprintWrittenAndConsulted:
 
         with patch.object(
             UnifiedPipeline,
-            "_phase_backbone",
+            "_phase_agentic",
             _backbone_writing_pages({1: "first model text"}),
         ):
             UnifiedPipeline(_config()).process_batch(in_dir, out)
@@ -259,7 +255,7 @@ class TestFingerprintWrittenAndConsulted:
         with (
             patch.object(
                 UnifiedPipeline,
-                "_phase_backbone",
+                "_phase_agentic",
                 _backbone_writing_pages({1: "second model text"}),
             ),
             patch.object(UnifiedPipeline, "process", _counting_process),
@@ -274,7 +270,7 @@ class TestFingerprintWrittenAndConsulted:
 
         with patch.object(
             UnifiedPipeline,
-            "_phase_backbone",
+            "_phase_agentic",
             _backbone_writing_pages({1: "text"}),
         ):
             UnifiedPipeline(_config()).process_batch(in_dir, out)
@@ -301,15 +297,12 @@ class TestStatusNotFabricated:
 
         def _empty_backbone(self, state, output_dir):
             # No best_output set on any page -> document has no text.
-            return EngineResult(
-                document_path=state.handle.path,
-                engine="deepseek",
-                status=DocumentStatus.ERROR,
-                error="all pages failed",
-            )
+            # R174b: _phase_agentic returns None; leaving every page without a
+            # best_output is what makes the document fail.
+            return None
 
         pipeline = UnifiedPipeline(_config())
-        with patch.object(UnifiedPipeline, "_phase_backbone", _empty_backbone):
+        with patch.object(UnifiedPipeline, "_phase_agentic", _empty_backbone):
             pipeline.process_batch(in_dir, out)
 
         entry = _root_index(out)["files"]["bad.pdf"]
@@ -467,7 +460,7 @@ class TestBatchConformance:
         pipeline = UnifiedPipeline(_config())
         with patch.object(
             UnifiedPipeline,
-            "_phase_backbone",
+            "_phase_agentic",
             _backbone_writing_pages({1: "conformant one", 2: "conformant two"}),
         ):
             pipeline.process_batch(in_dir, out)

@@ -1,8 +1,9 @@
-"""Tests for TICKET-B2: agentic-as-default + --legacy-routing + --strict-local.
+"""Tests for TICKET-B2: agentic-as-default + --strict-local.
 
 Coverage:
-- PipelineConfig().agentic is True (new default)
-- --legacy-routing flag disables agentic (config.agentic = False)
+- PipelineConfig().agentic is True (the only mode)
+- --legacy-routing does NOT exist: R174b deleted it along with the lane it reached,
+  so the surviving test asserts help does not advertise it
 - --strict-local filters cloud rungs from the agentic ladder
 - strict_local is included in the run fingerprint
 """
@@ -40,22 +41,6 @@ def test_strict_local_default_false() -> None:
 # ---------------------------------------------------------------------------
 # 2. CLI flag wiring — test via build_config()
 # ---------------------------------------------------------------------------
-
-
-def test_legacy_routing_disables_agentic() -> None:
-    """--legacy-routing should set config.agentic = False."""
-    from socr.cli import build_config
-
-    config = build_config(legacy_routing=True)
-    assert config.agentic is False
-
-
-def test_legacy_routing_overrides_explicit_agentic() -> None:
-    """--legacy-routing wins even when --agentic is also passed."""
-    from socr.cli import build_config
-
-    config = build_config(agentic=True, legacy_routing=True)
-    assert config.agentic is False
 
 
 def test_agentic_flag_keeps_agentic_true() -> None:

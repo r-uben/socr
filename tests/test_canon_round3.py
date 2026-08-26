@@ -87,7 +87,7 @@ def _real_pdf(path: Path, n_pages: int = 2) -> Path:
 
 
 def _backbone_writing_pages(text_by_page):
-    """Return a ``_phase_backbone`` replacement that populates per-page best_output."""
+    """Return a ``_phase_agentic`` replacement that populates per-page best_output."""
 
     def _fake(self, state, output_dir):
         for page_num, text in text_by_page.items():
@@ -98,12 +98,8 @@ def _backbone_writing_pages(text_by_page):
                 engine="deepseek",
                 audit_passed=True,
             )
-        return EngineResult(
-            document_path=state.handle.path,
-            engine="deepseek",
-            status=DocumentStatus.SUCCESS,
-            pages_processed=state.handle.page_count,
-        )
+        # R174b: _phase_agentic returns None; the state IS the result.
+        return None
 
     return _fake
 
@@ -146,14 +142,14 @@ class TestLimitOutputPersists:
 
         with patch.object(
             UnifiedPipeline,
-            "_phase_backbone",
+            "_phase_agentic",
             _backbone_writing_pages({1: "limited one", 2: "limited two"}),
         ):
             result = CliRunner().invoke(
                 socr_cli.cli,
-                # --legacy-routing opts out of agentic-default so _phase_backbone
-                # is still the entry point (this test patches it for predictable output).
-                ["batch", str(in_dir), "--limit", "2", "--primary", "deepseek", "--legacy-routing"],
+                # R174b: agentic is the only lane; _phase_agentic is patched above
+                # for predictable output.
+                ["batch", str(in_dir), "--limit", "2", "--primary", "deepseek"],
                 catch_exceptions=False,
             )
 
@@ -191,7 +187,7 @@ class TestFingerprintCoversOutputAffectingFlags:
     def _run_once(self, pipeline, pdf, out):
         with patch.object(
             UnifiedPipeline,
-            "_phase_backbone",
+            "_phase_agentic",
             _backbone_writing_pages({1: "content one", 2: "content two"}),
         ):
             return pipeline.process(pdf, out)
@@ -207,7 +203,7 @@ class TestFingerprintCoversOutputAffectingFlags:
         assert first.status == DocumentStatus.SUCCESS
 
         # Same config -> resume gate SKIPS (sanity: the gate works at all).
-        with patch.object(UnifiedPipeline, "_phase_backbone") as backbone:
+        with patch.object(UnifiedPipeline, "_phase_agentic") as backbone:
             skipped = UnifiedPipeline(_config(save_figures=False)).process(pdf, out)
         assert skipped.status == DocumentStatus.SKIPPED
         backbone.assert_not_called()
@@ -230,25 +226,12 @@ class TestFingerprintCoversOutputAffectingFlags:
             dict(local_engine=EngineType.GEMINI),
             dict(fallback_chain=[EngineType.MISTRAL]),
             dict(tiered=False),
-            dict(consensus_use_llm=True),
-            dict(consensus_ollama_model="llama3"),
             dict(judge_backend="vlm"),
             dict(judge_model="qwen2-vl:7b"),
         ]
         for override in toggles:
             fp = UnifiedPipeline(_config(**override))._run_fingerprint()
             assert fp != base_fp, f"fingerprint did not change for {override}"
-
-    def test_multi_engine_order_changes_fingerprint(self, tmp_path):
-        """multi_engine is fingerprinted in USER ORDER, so reordering members
-        (which can change consensus tie-break / first-best output) reprocesses."""
-        fp_ab = UnifiedPipeline(
-            _config(multi_engine=[EngineType.GEMINI, EngineType.MISTRAL])
-        )._run_fingerprint()
-        fp_ba = UnifiedPipeline(
-            _config(multi_engine=[EngineType.MISTRAL, EngineType.GEMINI])
-        )._run_fingerprint()
-        assert fp_ab != fp_ba
 
 
 # ---------------------------------------------------------------------------
@@ -312,21 +295,13 @@ class TestFailureRecordConformance:
                         engine="deepseek",
                         audit_passed=True,
                     )
-                return EngineResult(
-                    document_path=state.handle.path,
-                    engine="deepseek",
-                    status=DocumentStatus.SUCCESS,
-                    pages_processed=state.handle.page_count,
-                )
-            return EngineResult(
-                document_path=state.handle.path,
-                engine="deepseek",
-                status=DocumentStatus.ERROR,
-                error="all pages failed",
-            )
+                return None
+            # R174b: _phase_agentic returns None; leaving every page without a
+            # best_output is what makes the document fail.
+            return None
 
         pipeline = UnifiedPipeline(_config())
-        with patch.object(UnifiedPipeline, "_phase_backbone", _selective_backbone):
+        with patch.object(UnifiedPipeline, "_phase_agentic", _selective_backbone):
             pipeline.process_batch(in_dir, out)
 
         # The FAILED doc's recorded checksum is a valid sha256: sentinel/digest,

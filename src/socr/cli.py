@@ -178,11 +178,6 @@ def common_options(f):
         help="Use cost-aware routing (default; retained for command compatibility)",
     )(f)
     f = click.option(
-        "--legacy-routing",
-        is_flag=True,
-        hidden=True,
-    )(f)
-    f = click.option(
         "--strict-local",
         is_flag=True,
         help="Agentic routing: only local/free rungs, no cloud escalation",
@@ -249,7 +244,6 @@ def build_config(
     profile: str | None = None,
     output_dir: Path | None = None,
     agentic: bool = False,
-    legacy_routing: bool = False,
     strict_local: bool = False,
     judge_backend: str = "auto",
     judge_model: str = "",
@@ -324,15 +318,8 @@ def build_config(
     config.quiet = quiet
     config.verbose = verbose
 
-    # Agentic cost-aware routing.
-    # --legacy-routing overrides the new default (agentic=True) back to False.
-    # --agentic is kept for backward compatibility: if passed explicitly, honor it.
-    # --legacy-routing takes precedence over --agentic.
-    if legacy_routing:
-        config.agentic = False
-    elif agentic:
-        config.agentic = True
-    # else: keep the config default (True from PipelineConfig or loaded YAML)
+    # Agentic cost-aware routing is the sole default; --agentic is a backward-compatibility no-op.
+    # The config default (True from PipelineConfig or loaded YAML) is always used.
     if strict_local:
         config.strict_local = True
     config.judge_backend = judge_backend
@@ -370,25 +357,13 @@ def cli(ctx: click.Context) -> None:
 @click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
 @click.option("--hpc-sequential", is_flag=True, help="Use HPC sequential pipeline (vLLM)")
-@click.option("--unified", is_flag=True, help="Use UnifiedPipeline (5-phase orchestrator)")
-@click.option(
-    "--multi-engine",
-    "multi_engine_str",
-    type=str,
-    default="",
-    help="Comma-separated engines to run (e.g. gemini,mistral)",
-)
-@click.option(
-    "--consensus-llm", type=str, default="", help="Ollama model for LLM consensus (e.g. qwen3.5:4b)"
-)
+@click.option("--unified", is_flag=True, help="Agentic orchestrator (compatibility)")
 @common_options
 def process(
     pdf_path: Path,
     output_dir: Path | None,
     hpc_sequential: bool = False,
     unified: bool = False,
-    multi_engine_str: str = "",
-    consensus_llm: str = "",
     **kwargs,
 ) -> None:
     """Process a single PDF document.
@@ -401,24 +376,8 @@ def process(
         socr paper.pdf --primary gemini --quiet
         socr paper.pdf --hpc-sequential --save-figures
         socr paper.pdf --unified
-        socr paper.pdf --multi-engine gemini,mistral
-        socr paper.pdf --multi-engine gemini,mistral --consensus-llm qwen3.5:4b
     """
     config = build_config(output_dir=output_dir, **kwargs)
-
-    # Multi-engine mode
-    if multi_engine_str:
-        try:
-            config.multi_engine = [
-                EngineType(e.strip()) for e in multi_engine_str.split(",") if e.strip()
-            ]
-        except ValueError as exc:
-            raise click.ClickException(f"Unknown engine: {exc}")
-        # Multi-engine implies consensus (pipeline is always UnifiedPipeline now)
-        config.consensus_enabled = True
-        if consensus_llm:
-            config.consensus_use_llm = True
-            config.consensus_ollama_model = consensus_llm
 
     # Resolve AUTO engine early so we can route to the right pipeline
     if config.primary_engine == EngineType.AUTO:
@@ -435,9 +394,8 @@ def process(
         config.hpc.sequential = True
         pipeline = HPCPipeline(config)
     else:
-        # UnifiedPipeline is the single default pipeline (analyze -> backbone ->
-        # score -> repair -> assemble on DocumentState). --unified is kept as a
-        # backwards-compatible no-op; multi-engine mode also runs here.
+        # UnifiedPipeline is the sole orchestrator: analyze -> agentic -> assemble.
+        # --unified is kept as a backwards-compatible no-op.
         from socr.pipeline.orchestrator import UnifiedPipeline
 
         pipeline = UnifiedPipeline(config)
@@ -477,21 +435,13 @@ def process(
 @click.argument("pdf_dir", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), help="Output directory")
 @click.option("--limit", type=int, help="Maximum number of PDFs to process")
-@click.option("--unified", is_flag=True, help="Use UnifiedPipeline (5-phase orchestrator)")
-@click.option(
-    "--multi-engine",
-    "multi_engine_str",
-    type=str,
-    default="",
-    help="Comma-separated engines (e.g. gemini,mistral)",
-)
+@click.option("--unified", is_flag=True, help="Agentic orchestrator (compatibility)")
 @common_options
 def batch(
     pdf_dir: Path,
     output_dir: Path | None,
     limit: int | None,
     unified: bool = False,
-    multi_engine_str: str = "",
     **kwargs,
 ) -> None:
     """Process all PDFs in a directory.
@@ -503,19 +453,8 @@ def batch(
         socr batch ~/Papers/ -o ./results/
         socr batch ~/Papers/ --dry-run
         socr batch ~/Papers/ --unified
-        socr batch ~/Papers/ --multi-engine gemini,mistral
     """
     config = build_config(output_dir=output_dir, **kwargs)
-
-    # Multi-engine mode
-    if multi_engine_str:
-        try:
-            config.multi_engine = [
-                EngineType(e.strip()) for e in multi_engine_str.split(",") if e.strip()
-            ]
-        except ValueError as exc:
-            raise click.ClickException(f"Unknown engine: {exc}")
-        config.consensus_enabled = True
 
     # Resolve AUTO engine
     if config.primary_engine == EngineType.AUTO:
@@ -525,8 +464,8 @@ def batch(
         if not config.quiet:
             console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
 
-    # UnifiedPipeline is the single pipeline. --unified is a no-op kept for
-    # backwards compatibility.
+    # UnifiedPipeline is the sole orchestrator: analyze -> agentic -> assemble.
+    # --unified is a no-op kept for backwards compatibility.
     from socr.pipeline.orchestrator import UnifiedPipeline
 
     pipeline = UnifiedPipeline(config)

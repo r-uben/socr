@@ -65,13 +65,16 @@ _LIVE = {
     "save_figures",
     "strict_local",
     "write_manifest",
-    "multi_engine",
 }
 
-#: Hashed into the run fingerprint but never acted on in agentic mode. Each is
-#: consumed only by `_phase_repair`, `_backbone_native_first`, `_phase_consensus`,
-#: `_phase_judge_hard_pages`, or the single-/multi-engine branches of `process` —
-#: none of which the agentic path calls.
+#: Hashed into the run fingerprint but never acted on. R174b DELETED every consumer
+#: named here (`_phase_repair`, `_backbone_native_first`, `_phase_consensus`,
+#: `_phase_judge_hard_pages`, and the single-/multi-engine branches of `process`),
+#: so these are no longer merely inert — they are DEAD. Five former members
+#: (consensus_enabled, consensus_ollama_model, consensus_use_llm, max_retries,
+#: truncation_retries) were deleted outright as config fields. The survivors below
+#: still over-invalidate the fingerprint; #142 should be revisited now that the
+#: lane that justified them is gone.
 #:
 #: These are not harmless: the fingerprint OVER-invalidates, so toggling a flag
 #: that changes nothing reprocesses an entire corpus.
@@ -79,15 +82,10 @@ _INERT_BUT_FINGERPRINTED = {
     "audit_enabled",  # #139 — the flag this whole issue started from
     "chunk_size",
     "chunk_threshold",
-    "consensus_enabled",
-    "consensus_ollama_model",
-    "consensus_use_llm",
     "fallback_chain",
     "judge_hard_pages",
     "local_engine",
-    "max_retries",
     "tiered",
-    "truncation_retries",
     "figures_engine",
 }
 

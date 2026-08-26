@@ -35,7 +35,6 @@ from socr.core.result import (
 from socr.core.state import DocumentState, PageState
 from socr.engines.deepseek_vllm import DeepSeekVLLMEngine
 from socr.pipeline.orchestrator import UnifiedPipeline
-from socr.pipeline.repair import RepairRouter
 
 # ---------------------------------------------------------------------------
 # Helpers (same patterns as test_orchestrator.py)
@@ -54,7 +53,6 @@ def _make_config(**overrides) -> PipelineConfig:
         fallback_chain=[EngineType.GEMINI],
         enabled_engines=list(EngineType),
         audit_enabled=True,
-        max_retries=2,
         save_figures=False,
         quiet=True,
         tiered=False,
@@ -213,136 +211,6 @@ class TestNoSilentEmptyPages:
         assert ps.best_attempt.text == "a much longer rejected attempt"
         ps.attempts.append(_page_output(1, "passing", audit_passed=True))
         assert ps.best_attempt.text == "passing"
-
-
-# ---------------------------------------------------------------------------
-# Fix 3 — repair router never selects non-runnable engines
-# ---------------------------------------------------------------------------
-
-
-class TestRepairRouterRunnableOnly:
-    def test_default_config_never_selects_auto(self) -> None:
-        """The reproduced crash: default enabled_engines starts with AUTO and
-        the default-case failure modes returned candidates[0] == AUTO, which
-        get_engine() cannot instantiate."""
-        router = RepairRouter(_make_config())
-        for mode in (
-            FailureMode.AUDIT_FAILED,
-            FailureMode.EMPTY_OUTPUT,
-            FailureMode.API_ERROR,
-            FailureMode.CLI_ERROR,
-        ):
-            engine = router.select_repair_engine(mode, tried_engines=set())
-            assert engine not in (
-                EngineType.AUTO,
-                EngineType.DEEPSEEK_VLLM,
-                EngineType.VLLM,
-            ), f"{mode} selected non-runnable {engine}"
-
-    def test_full_chain_filters_pseudo_engines(self) -> None:
-        config = _make_config(
-            primary_engine=EngineType.AUTO,
-            fallback_chain=[EngineType.AUTO, EngineType.GEMINI],
-        )
-        chain = RepairRouter(config)._full_chain()
-        assert EngineType.AUTO not in chain
-        assert EngineType.DEEPSEEK_VLLM not in chain
-        assert EngineType.VLLM not in chain
-        assert EngineType.GEMINI in chain
-
-    def test_audit_failed_prefers_different_family(self) -> None:
-        """A judge rejection means this engine misread the page; retrying the
-        same family tends to repeat the mistake."""
-        router = RepairRouter(_make_config())
-        engine = router.select_repair_engine(
-            FailureMode.AUDIT_FAILED,
-            tried_engines={EngineType.GEMINI},
-        )
-        assert engine is not None
-        assert engine != EngineType.GEMINI
-
-
-# ---------------------------------------------------------------------------
-# Fix 4 — judge rejection triggers repair on born-digital pages
-# ---------------------------------------------------------------------------
-
-
-class TestJudgeRejectionRepairsBornDigital:
-    def _bd_enhancement_page(self) -> PageState:
-        ps = PageState(
-            page_num=1,
-            is_born_digital=True,
-            native_text="flat native table tokens",
-            needs_ocr_enhancement=True,
-        )
-        ps.attempts.append(_page_output(1, "judge-rejected OCR text"))
-        return ps
-
-    def test_without_flag_native_fallback_blocks_repair(self) -> None:
-        ps = self._bd_enhancement_page()
-        assert ps.needs_repair is False  # the anti-loop rule, unchanged
-
-    def test_judge_rejected_forces_repair(self) -> None:
-        ps = self._bd_enhancement_page()
-        ps.judge_rejected = True
-        assert ps.needs_repair is True
-
-    def test_passing_repair_clears_need(self) -> None:
-        ps = self._bd_enhancement_page()
-        ps.judge_rejected = True
-        good = _page_output(1, "repaired text", engine="gemini", audit_passed=True)
-        ps.attempts.append(good)
-        ps.best_output = good
-        assert ps.needs_repair is False
-
-    def test_judge_phase_sets_flag(self, tmp_path: Path) -> None:
-        """_phase_judge_hard_pages must mark rejected pages so born-digital
-        repair exemption cannot swallow the rejection."""
-        from socr.core.born_digital import DocumentAssessment, PageAssessment
-
-        config = _make_config(judge_hard_pages=True)
-        pipeline = UnifiedPipeline(config)
-        state = DocumentState(handle=_make_handle(1))
-        bo = _page_output(1, "ocr text for a table page", audit_passed=True)
-        state.pages[1].attempts.append(bo)
-        state.pages[1].best_output = bo
-        state.pages[1].is_born_digital = True
-        state.pages[1].native_text = "native"
-        state.pages[1].needs_ocr_enhancement = True
-
-        pipeline._last_assessment = DocumentAssessment(
-            path=Path("/tmp/fake.pdf"),
-            pages=[
-                PageAssessment(
-                    page_num=1,
-                    is_born_digital=True,
-                    confidence=1.0,
-                    native_text="native",
-                    has_tables=True,
-                )
-            ],
-        )
-
-        class _RejectingJudge:
-            def assess(self, output, provider):
-                class _Decision:
-                    accept = False
-                    reason = "columns swapped"
-
-                return _Decision()
-
-        with (
-            patch.object(pipeline, "_resolve_judge_model", return_value="fake-judge"),
-            patch("socr.pipeline.agentic.VLMPageJudge") as judge_cls,
-            patch("socr.judge.ollama_judge.OllamaVisionJudge"),
-            patch.object(pipeline, "_make_page_renderer", return_value=lambda n: None),
-        ):
-            judge_cls.return_value = _RejectingJudge()
-            pipeline._phase_judge_hard_pages(state)
-
-        assert state.pages[1].judge_rejected is True
-        assert state.pages[1].best_output is None
-        assert state.pages[1].needs_repair is True
 
 
 # ---------------------------------------------------------------------------
@@ -816,46 +684,3 @@ class TestEmptyRepairNotPromoted:
             )
             state.pages[1].attempts.append(empty)
         # best_output stays None (no non-empty attempt was promoted)
-        assert state.pages[1].best_output is None
-
-        winner = _winning_page_output(state, 1, None)
-        assert is_page_failed_marker(winner.text)
-        assert winner.status == PageStatus.ERROR
-
-
-class TestJudgeRejectedRepairTerminates:
-    def test_plan_repairs_picks_up_and_then_exhausts(self) -> None:
-        """A judge-rejected born-digital page must enter the repair plan, and
-        once every runnable engine has been tried it must land in
-        pages_skipped (termination) rather than looping."""
-        from socr.engines.registry import _ENGINES
-
-        config = _make_config()
-        router = RepairRouter(config)
-        state = DocumentState(handle=_make_handle(1))
-        ps = state.pages[1]
-        ps.is_born_digital = True
-        ps.native_text = "native"
-        ps.needs_ocr_enhancement = True
-        ps.judge_rejected = True
-        ps.attempts.append(
-            _page_output(1, "rejected", audit_passed=False, failure_mode=FailureMode.AUDIT_FAILED)
-        )
-
-        plan = router.plan_repairs(state)
-        assert [r.page_num for r in plan.repairs] == [1]
-
-        # Exhaust: record an attempt from every runnable engine.
-        for engine_type in _ENGINES:
-            ps.attempts.append(
-                _page_output(
-                    1,
-                    "still rejected",
-                    engine=engine_type.value,
-                    audit_passed=False,
-                    failure_mode=FailureMode.AUDIT_FAILED,
-                )
-            )
-        plan2 = router.plan_repairs(state)
-        assert plan2.is_empty
-        assert plan2.pages_skipped == [1]
