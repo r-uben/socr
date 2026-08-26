@@ -159,6 +159,18 @@ _INLINE_HTML_CODE = re.compile(r"<code(?:\s[^>]*)?>.*?</code\s*>", re.IGNORECASE
 TABLE_EMISSION_NONE = ""
 TABLE_EMISSION_LATEX_LEAK = "table_latex_leak"
 TABLE_EMISSION_WIDTH_MISMATCH = "table_width_mismatch"
+TABLE_CONTENT_EMPTY = "table_content_empty"
+
+# A body cell is a placeholder when, after whitespace is removed, it contains
+# only one or more of these Unicode Dash-property characters.  Keep this
+# grammar explicit: symbol-only cells such as ``$``, ``*``, and ``†`` are
+# content, not blanks.
+_TABLE_CONTENT_PLACEHOLDER_DASHES = frozenset(
+    "\u002d\u058a\u05be\u1400\u1806"
+    "\u2010\u2011\u2012\u2013\u2014\u2015\u2053"
+    "\u207b\u208b\u2212\u2e17\u2e1a\u2e3a\u2e3b\u2e40"
+    "\u301c\u3030\u30a0\ufe31\ufe32\ufe58\ufe63\uff0d\U00010ead"
+)
 
 
 def _strip_html_comments(markdown: str) -> str:
@@ -337,6 +349,77 @@ def table_emission_defect(markdown: str | None) -> str:
                 return TABLE_EMISSION_WIDTH_MISMATCH
         i = j
     return TABLE_EMISSION_NONE
+
+
+def _is_table_content_placeholder(cell: str) -> bool:
+    """Whether *cell* is blank, dash-only, or a strict GFM alignment marker.
+
+    Colon-only and ratio-like cells remain content, as do non-GFM forms such as
+    ``:-:`` and colon-wrapped Unicode dashes.
+    """
+    compact = "".join(cell.split())
+    return (
+        not compact
+        or all(char in _TABLE_CONTENT_PLACEHOLDER_DASHES for char in compact)
+        or (":" in compact and _STRICT_SEP_CELL.match(compact) is not None)
+    )
+
+
+def table_content_defect(markdown: str | None) -> str:
+    """Return a defect when a structurally valid table has no body content.
+
+    This is a raw-row predicate, separate from :func:`table_emission_defect`.
+    A candidate is a consecutive pipe-line run whose first row is a header,
+    whose second row is a strict delimiter.  The header and delimiter must use
+    the same outer-pipe style.  Body width is deliberately ignored for this
+    content-only term; shape and width defects retain their existing owners.
+    The body may contain more separator-looking rows: under the content grammar
+    they are simply rows of dash placeholders.
+
+    Body-cell content has a named grammar rather than a density heuristic:
+    whitespace-only cells and cells containing only the dash characters in
+    ``_TABLE_CONTENT_PLACEHOLDER_DASHES``, plus strict GFM alignment markers
+    such as ``:---``, ``:---:``, and ``---:``, are placeholders; every other
+    nonblank cell carries content.  In particular, colon-only and ratio-like
+    cells remain content.  The existing raw-Markdown provenance helpers
+    exclude comments, fenced or indented code, and literal HTML.
+    """
+    if not markdown:
+        return ""
+
+    lines = _strip_emission_literal_blocks(_markdown_content_lines(markdown))
+    i, n = 0, len(lines)
+    while i < n:
+        if not _is_table_line(lines[i]):
+            i += 1
+            continue
+
+        j = i
+        while j < n and _is_table_line(lines[j]):
+            j += 1
+        block = lines[i:j]
+        rows = [_split_emission_row(line) for line in block]
+        if len(rows) < 2:
+            i = j
+            continue
+
+        header, delimiter = rows[0], rows[1]
+        width = len(header)
+        if (
+            width <= 0
+            or len(delimiter) != width
+            or not _is_separator_row(delimiter)
+            or _row_border(block[0]) != _row_border(block[1])
+        ):
+            i = j
+            continue
+
+        body = rows[2:]
+        if all(_is_table_content_placeholder(cell) for row in body for cell in row):
+            return TABLE_CONTENT_EMPTY
+        i = j
+
+    return ""
 
 
 def has_strict_table_grid(markdown: str) -> bool:
