@@ -41,6 +41,25 @@ def sanitize_filename(name: str) -> str:
     return "".join(c if c.isalnum() or c in "._- " else "_" for c in name).strip()
 
 
+def _upright_rotation_for(page) -> int:
+    """Rotation in degrees that makes ``page``'s dominant text read horizontally.
+
+    Returns 0 whenever the page is already horizontal, has no directional
+    evidence, or cannot be inspected -- rendering unrotated is the status quo, so
+    a failure here must never be worse than not having tried (fail-open by
+    design; the caller has no fallback if this raises mid-render).
+    """
+    from socr.core.born_digital import dominant_text_direction, upright_rotation_degrees
+
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+    except Exception:
+        return 0
+    if not blocks:
+        return 0
+    return upright_rotation_degrees(dominant_text_direction(blocks))
+
+
 class BaseEngine(ABC):
     """Abstract base class for CLI-based OCR engines.
 
@@ -234,11 +253,20 @@ class BaseEngine(ABC):
             # Render pages to numbered PNG images
             page_num_to_stem: dict[int, str] = {}
             with open_pdf(pdf_path) as doc:
-                mat = fitz.Matrix(dpi / 72, dpi / 72)
                 for page_num in page_nums:
                     stem = f"page_{page_num:04d}"
                     page_num_to_stem[page_num] = stem
-                    pix = doc[page_num - 1].get_pixmap(matrix=mat)
+                    page = doc[page_num - 1]
+                    # GH-304: a landscape table typeset sideways is handed to the model
+                    # rotated, and it reads the axes wrong -- on the reference page qwen
+                    # returned the table TRANSPOSED, using row-group labels as column
+                    # headers. socr already detects the rotation; it just never acted on
+                    # it here. The angle is derived from the page's own writing direction.
+                    mat = fitz.Matrix(dpi / 72, dpi / 72)
+                    rotation = _upright_rotation_for(page)
+                    if rotation:
+                        mat = mat.prerotate(rotation)
+                    pix = page.get_pixmap(matrix=mat)
                     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                     img.save(images_dir / f"{stem}.png")
 

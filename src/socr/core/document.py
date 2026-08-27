@@ -9,6 +9,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def _upright_rotation_for(page) -> int:
+    """Rotation in degrees making ``page``'s dominant text read horizontally.
+
+    Fails open to 0 (render unchanged) when the page cannot be inspected: a
+    failure here must never be worse than not having tried.
+    """
+    from socr.core.born_digital import dominant_text_direction, upright_rotation_degrees
+
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+    except Exception:
+        return 0
+    if not blocks:
+        return 0
+    return upright_rotation_degrees(dominant_text_direction(blocks))
+
+
 @dataclass
 class DocumentHandle:
     """Lazy handle to a PDF document. No PIL rendering, no page images in memory."""
@@ -64,6 +81,13 @@ class DocumentHandle:
         with open_pdf(self.path) as pdf:
             page = pdf[page_num - 1]
             mat = fitz.Matrix(dpi / 72, dpi / 72)
+            # GH-304: same de-rotation the OCR render applies. The VLM judge reads
+            # this image, so leaving it sideways here while the OCR sees an upright
+            # page makes the judge compare a rotated picture against a correctly
+            # transcribed table -- it cannot agree, and times out or rejects.
+            rotation = _upright_rotation_for(page)
+            if rotation:
+                mat = mat.prerotate(rotation)
             pix = page.get_pixmap(matrix=mat)
             return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
