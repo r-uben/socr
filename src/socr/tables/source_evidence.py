@@ -151,8 +151,14 @@ def _merge_evidence(
 def _render_crop_pixmap(page, bbox: tuple[float, float, float, float], dpi: int):
     import fitz
 
+    from socr.core.born_digital import upright_rotation_for
+
     rect = fitz.Rect(bbox)
+    # GH-304b: derive clip-local rotation; keep bbox and clip in page space, rotate only raster pixels.
+    rotation = upright_rotation_for(page, clip=rect)
     mat = fitz.Matrix(dpi / 72, dpi / 72)
+    if rotation != 0:
+        mat.prerotate(rotation)
     return page.get_pixmap(matrix=mat, clip=rect)
 
 
@@ -211,7 +217,13 @@ def build_scanned_evidence(
         try:
             import fitz
 
+            from socr.core.born_digital import upright_rotation_for
+
+            # GH-304b: derive page-level rotation; rotate raster pixels only.
+            rotation = upright_rotation_for(page)
             mat = fitz.Matrix(_EVIDENCE_OCR_DPI / 72, _EVIDENCE_OCR_DPI / 72)
+            if rotation != 0:
+                mat.prerotate(rotation)
             pix = page.get_pixmap(matrix=mat)
             page_text = ocr_fn(pix)
             n_page, c_page = _tokens_from_plain_text(page_text)

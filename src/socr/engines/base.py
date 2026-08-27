@@ -49,15 +49,9 @@ def _upright_rotation_for(page) -> int:
     a failure here must never be worse than not having tried (fail-open by
     design; the caller has no fallback if this raises mid-render).
     """
-    from socr.core.born_digital import dominant_text_direction, upright_rotation_degrees
+    from socr.core.born_digital import upright_rotation_for
 
-    try:
-        blocks = page.get_text("dict").get("blocks", [])
-    except Exception:
-        return 0
-    if not blocks:
-        return 0
-    return upright_rotation_degrees(dominant_text_direction(blocks))
+    return upright_rotation_for(page)
 
 
 class BaseEngine(ABC):
