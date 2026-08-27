@@ -75,3 +75,6 @@ HPC.md
 
 # troupe run artifacts (multi-model workflow scratch)
 .troupe/
+
+# troupe run artifacts
+.troupe/

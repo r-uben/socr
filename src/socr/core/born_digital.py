@@ -157,6 +157,57 @@ def upright_rotation_degrees(direction: tuple[float, float]) -> int:
     return int(round(-bearing / 90.0) * 90) % 360
 
 
+def upright_rotation_for(page, clip=None) -> int:
+    """Rotation in degrees making ``page``'s text read horizontally.
+
+    With ``clip=None``, inspects the whole page's text direction. With a clip
+    (a fitz.Rect or tuple bbox), inspects text direction within that region.
+
+    When a clip is provided:
+    - If the clip contains text lines, returns the rotation for the clip's
+      dominant direction, ignoring the page-wide direction.
+    - If the clip contains no text lines, falls back to the page-level rotation.
+    - If clipped inspection raises an exception, returns 0 immediately (fail-open)
+      rather than falling back to the page-derived rotation.
+
+    Returns 0 whenever the page/clip is uninspectable, has no directional
+    evidence, or cannot be inspected -- rendering unrotated is the status quo, so
+    a failure here must never be worse than not having tried (fail-open by design).
+    """
+    try:
+        if clip is None:
+            blocks = page.get_text("dict").get("blocks", [])
+        else:
+            blocks = page.get_text("dict", clip=clip).get("blocks", [])
+    except Exception:
+        if clip is not None:
+            return 0
+        else:
+            return 0
+
+    if clip is not None:
+        has_clipped_line = False
+        for block in blocks:
+            for line in block.get("lines", []) or []:
+                text = "".join(span.get("text", "") for span in line.get("spans", []) or [])
+                if text.strip():
+                    has_clipped_line = True
+                    break
+            if has_clipped_line:
+                break
+
+        if not has_clipped_line:
+            try:
+                blocks = page.get_text("dict").get("blocks", [])
+            except Exception:
+                return 0
+
+    if not blocks:
+        return 0
+
+    return upright_rotation_degrees(dominant_text_direction(blocks))
+
+
 def text_direction_is_rotated(direction: tuple[float, float]) -> bool:
     """True when a page's dominant text direction runs off the horizontal axis.
 
