@@ -1,10 +1,85 @@
 # STATUS — orchestrator decomposition
 
-Last updated: 2026-08-23
-Stage: **designed, not started.** No source code written yet. R1 is dispatchable.
-Next action: implement **R1** — extract the trusted-native lane
-(`orchestrator.py:3286-3392`, 107 lines) to a method on `UnifiedPipeline`,
-behaviour-identical. Serial, in the main checkout.
+Last updated: 2026-08-27
+Stage: **the decomposition's goal was achieved by DELETION, not by carving.**
+`#174` shipped: the legacy deterministic pipeline is gone from `main`, and with it
+~6,400 lines. `process()` is now analyze → agentic → assemble.
+
+Next action: **`#293`** — see "Where this actually stands" below. The branch
+`fix/293-native-fallback-overclaim` exists off `main` and is empty; the analysis and a
+verified reproduction are on the issue.
+
+> **This file was two days and six merged PRs out of date until 2026-08-27.** It read
+> "designed, not started. No source code written yet." while R1–R4, R7a and the entire
+> `#174` deletion had already shipped. The updates existed — on branches that were never
+> merged (`docs/plan-174-sequencing`, 8 commits; `refactor/r7-part2-disposition-classifier`,
+> 3). Plan state written on a feature branch is invisible to everyone reading `main`.
+> That is the failure `docs/adr/0002-claims-that-matter-get-a-test.md` describes, in the
+> plan file that is supposed to prevent it.
+
+## Where this actually stands (2026-08-27)
+
+### Shipped to `main`
+
+| PR | What | Closes |
+|---|---|---|
+| #295 | broke the `tables`↔`benchmark` import cycle; layering guard covers relative, dynamic and private-symbol evasions | #175 |
+| #296 | `ARCHITECTURE.md` and CLI help state agentic as the sole default | R174a |
+| #298 | **deleted the legacy deterministic pipeline** — 13 orchestrator methods, `consensus.py`, `repair.py`, 6 config fields, and `--legacy-routing` / `--multi-engine` / `--consensus-llm` | #174 |
+| #299 | empty-table gate — a grammar, not a threshold | #190 |
+| #305 | de-rotate pages before OCR **and before judging** | #304 |
+| #309 | de-rotate table crops; boxes stay in page space | #304b |
+
+`main` at `f086f4a`. ADR 0001 and 0002 and the `#174` ruling all reached `main` via #298.
+
+### The `#155` question is settled
+
+`#155` asked to split the god-module. The measurement said the module split yields ~470
+lines while the deletion yields ~6,400 — so **`#174` delivered `#155`'s goal**, and the
+R-tickets are the remainder. Do not schedule R-tickets expecting them to shrink the file
+much further.
+
+### Cross-repo fallout from #298 — deleting a flag reaches outside this repo
+
+`--multi-engine` and friends were named in two other repos, and nothing here could detect
+it. `ai-skills#39` (merged) fixed the `/ocr` skill *before* #298 landed, so nothing broke.
+`disputatio#62` fixes the last reference. Tracked as `#300`.
+
+**Before deleting any user-facing flag, grep the skills repo and `disputatio`.**
+
+### `#293` — the next action, and what it needs
+
+`native_fallback_pages` claims pages that ship a failure marker rather than native text.
+78 of 4,096 synthetic states diverge. A verified reproduction is on the issue.
+
+**The oracle is not on `main`.** `tests/test_r7_bucket_tag_equivalence.py` — the 4,096-state
+sweep that found this — lives on `refactor/r7-part2-disposition-classifier`, unmerged.
+Cherry-pick or merge it first; re-deriving it by hand is the expensive path.
+
+The assemble-time buckets now sit around `orchestrator.py:4744-4800` (they moved when #298
+removed ~1,150 lines). Every one of those predicates carries a comment about a past
+double-counting bug caused by drift from what `_winning_page_output` actually ships. The
+exclusion must match the ship disposition **exactly**.
+
+Then `#292` (same shape, `corrupt_math_hybrid_pages`, 1,984 divergent states), then R7b
+becomes the trivial tag swap it was always meant to be, then R8/R9/R10 — which finally
+unblocks `#176`.
+
+### Known open, not scheduled
+
+- `#297` figures clustering — another session's PR
+- The VLM judge logs a timeout on rotated pages even when they now succeed. Bound is
+  `max(DEFAULT_PROVIDER_TIMEOUTS)` = 300s; judging one page should not approach it.
+  Observed, never diagnosed.
+- `--fallback`, `--no-audit`, `--no-judge-hard-pages` still advertise behaviour they can
+  no longer change. `#142`'s `_INERT_BUT_FINGERPRINTED` list is now *dead*, not inert.
+
+### Running socr at scale
+
+`docs/hpc/` is **gitignored** by repo convention, so the verified vLLM runbook lives in
+`ai-skills#40` instead — corrected partitions (the ones this skill named do not exist),
+the 175 G/180 G home quota, and the trap where a missing `PATH` entry makes socr fall off
+the VLM and write `model: none` **at exit 0**.
 
 D1 landed 2026-08-23 (`docs/log/2026-08-23_orchestrator-seams.md`, PR #284). Two decisions
 were ratified on the back of it:
