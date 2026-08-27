@@ -130,6 +130,33 @@ def block_is_page_furniture(block: dict, dominant: tuple[float, float]) -> bool:
     return all(d != dominant and d != _HORIZONTAL for d in dirs)
 
 
+def upright_rotation_degrees(direction: tuple[float, float]) -> int:
+    """Degrees to rotate a page so its dominant text reads horizontally.
+
+    DERIVED from the page's own writing direction, never guessed. ``direction``
+    is the unit vector ``dominant_text_direction`` returns, so the angle that
+    restores it to ``(1, 0)`` is simply its negated bearing. A guess is not an
+    acceptable substitute: on the reference document ``(0, -1)`` needs 90 and
+    ``prerotate(270)`` yields an upside-down page, which is no better for a model
+    than the sideways original.
+
+    Returns 0 for horizontal text and for the all-zero vector, matching
+    :func:`text_direction_is_rotated`: absence of directional evidence must not
+    cause a rotation (#145).
+
+    Snapped to a right angle. Text set at a slight skew shares this code path,
+    and rotating by an arbitrary angle would resample the glyphs for no gain --
+    the model tolerates a few degrees of skew, and only the quadrant matters.
+    """
+    import math
+
+    dx, dy = float(direction[0]), float(direction[1])
+    if dx == 0.0 and dy == 0.0:
+        return 0
+    bearing = math.degrees(math.atan2(dy, dx))
+    return int(round(-bearing / 90.0) * 90) % 360
+
+
 def text_direction_is_rotated(direction: tuple[float, float]) -> bool:
     """True when a page's dominant text direction runs off the horizontal axis.
 
