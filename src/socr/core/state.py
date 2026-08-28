@@ -97,6 +97,14 @@ class PageState:
     #: apart.
     rotated_shred_png_ref: str = ""
     chart_asset_render_failed: bool = False  # PP-7: chart-lane PNG render failed
+    #: GH-318: chart ELIGIBILITY detection raised and the page fell through to
+    #: the non-chart route. Distinct from ``chart_asset_render_failed`` above,
+    #: which means the page WAS a chart and its PNG failed to render; here the
+    #: pipeline never learned whether the page is a chart at all, so the routing
+    #: decision is unresolved rather than wrong. Deliberately absent from
+    #: ``needs_repair`` (below): a detector crash must not force the chart lane
+    #: or a repair pass — it is honoured downstream at the document buckets.
+    chart_asset_detection_failed: bool = False
     #: S1/MAJOR-7(b): persisted answer to ``structure_class_grid_winner(p) is
     #: not None`` from the run that produced the terminal sidecar, restored by
     #: ``_restore_terminal_page_state`` on resume. Needed because resume
