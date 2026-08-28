@@ -6,8 +6,9 @@ Stage: **the decomposition's goal was achieved by DELETION, not by carving.**
 ~6,400 lines. `process()` is now analyze → agentic → assemble.
 
 Next action: **`#293`** — see "Where this actually stands" below. The branch
-`fix/293-native-fallback-overclaim` exists off `main` and is empty; the analysis and a
-verified reproduction are on the issue.
+The analysis and a verified reproduction are on issue #293. **There is no branch** — an
+earlier version of this file sent readers to `fix/293-native-fallback-overclaim`, which was
+never pushed and 404s.
 
 > **This file was two days and six merged PRs out of date until 2026-08-27.** It read
 > "designed, not started. No source code written yet." while R1–R4, R7a and the entire
@@ -21,14 +22,24 @@ verified reproduction are on the issue.
 
 ### Shipped to `main`
 
-| PR | What | Closes |
+| PR | What | Ticket / issue |
 |---|---|---|
-| #295 | broke the `tables`↔`benchmark` import cycle; layering guard covers relative, dynamic and private-symbol evasions | #175 |
+| #286 | R1 — extract the trusted-native lane | R1 |
+| #287 | R2–R4 | R2–R4 |
+| #290 | R7a — tag the 15 cascade endings (`WinnerKind`) | R7a |
+| #295 | broke the `tables`↔`benchmark` import cycle; layering guard covers relative, dynamic and private-symbol evasions | closed #175 |
 | #296 | `ARCHITECTURE.md` and CLI help state agentic as the sole default | R174a |
-| #298 | **deleted the legacy deterministic pipeline** — 13 orchestrator methods, `consensus.py`, `repair.py`, 6 config fields, and `--legacy-routing` / `--multi-engine` / `--consensus-llm` | #174 |
-| #299 | empty-table gate — a grammar, not a threshold | #190 |
-| #305 | de-rotate pages before OCR **and before judging** | #304 |
-| #309 | de-rotate table crops; boxes stay in page space | #304b |
+| #298 | **deleted the legacy deterministic pipeline** — 13 orchestrator methods, `consensus.py`, `repair.py`, 6 config fields, and `--legacy-routing` / `--multi-engine` / `--consensus-llm` | #174 (still OPEN — see below) |
+| #299 | empty-table gate — a grammar, not a threshold | closed #190 |
+| #305 | de-rotate pages before OCR **and before judging** | closed #304 |
+| #309 | de-rotate table crops; boxes stay in page space | the deferred half of #304, not an issue |
+
+**"Shipped" here means the LEVER moved, not that GitHub closed the issue.** `#174` and `#155`
+are both still **open**: the code is gone, but `ARCHITECTURE.md`, `README.md` and `CLAUDE.md`
+still advertise the corpse. Closing them needs that documentation pass — tracked by `#156`.
+
+`#309` left its own residue: **#310, #311, #312** — including one where a `docs/log/` note
+contradicts the code it describes.
 
 `main` at `f086f4a`. ADR 0001 and 0002 and the `#174` ruling all reached `main` via #298.
 
@@ -52,14 +63,27 @@ it. `ai-skills#39` (merged) fixed the `/ocr` skill *before* #298 landed, so noth
 `native_fallback_pages` claims pages that ship a failure marker rather than native text.
 78 of 4,096 synthetic states diverge. A verified reproduction is on the issue.
 
-**The oracle is not on `main`.** `tests/test_r7_bucket_tag_equivalence.py` — the 4,096-state
-sweep that found this — lives on `refactor/r7-part2-disposition-classifier`, unmerged.
-Cherry-pick or merge it first; re-deriving it by hand is the expensive path.
+**There is no failing test for #293 today, and the sweep is not one.**
+`tests/test_r7_bucket_tag_equivalence.py` (on `refactor/r7-part2-disposition-classifier`,
+unmerged) proves four buckets equivalent to their tags and pins #292 as a strict superset.
+It does **not** assert the 78-state `native_fallback_pages` / `ROTATED_TEXT_SHREDDED`
+overclaim. Cherry-pick the harness for its shape — but expect to *write* the #293 case, not
+to find it already failing. An earlier version of this file called that sweep "the oracle"
+for #293; that was wrong.
 
-The assemble-time buckets now sit around `orchestrator.py:4744-4800` (they moved when #298
-removed ~1,150 lines). Every one of those predicates carries a comment about a past
-double-counting bug caused by drift from what `_winning_page_output` actually ships. The
-exclusion must match the ship disposition **exactly**.
+**Line pins on `main`@3d8522f** (`orchestrator.py`, 6,331 lines):
+
+| | line |
+|---|---|
+| `failed_pages` | 4744 |
+| `corrupt_math_hybrid_pages` (#292) | 4859 |
+| `native_fallback_pages` (#293) | **4864** |
+| `native_fallback_pages` (routing-time, in `_phase_agentic` — NOT the bug) | 2298 |
+
+An earlier version pinned "4744-4800", which is `failed_pages`, not the #293 predicate.
+Every one of these carries a comment about a past double-counting bug caused by drift from
+what `_winning_page_output` actually ships; the exclusion must match the ship disposition
+**exactly**.
 
 Then `#292` (same shape, `corrupt_math_hybrid_pages`, 1,984 divergent states), then R7b
 becomes the trivial tag swap it was always meant to be, then R8/R9/R10 — which finally
@@ -101,7 +125,20 @@ were ratified on the back of it:
 ordering the 51 live issues, we measured it. The measurement changed the framing, so it
 is recorded here rather than left in a chat log.
 
-## Measured facts (main@bc194e9, 2026-08-23)
+## Measured facts
+
+> **Restated against `main`@3d8522f, 2026-08-28.** The table below the divider is the
+> ORIGINAL 2026-08-23 measurement at `bc194e9`, kept because the decomposition argument was
+> built on it. It is history, not current state — `#298` has since removed ~1,150 lines and
+> `_phase_repair` no longer exists. Do not schedule from it.
+
+| Fact | 2026-08-23 (`bc194e9`) | now (`3d8522f`) |
+|---|---|---|
+| `orchestrator.py` | 7,520 lines | **6,331** |
+| `_phase_repair` | 209 lines | **deleted** (#298) |
+| `_phase_backbone`, `_phase_consensus`, `_phase_score*`, `_backbone_*` | present | **deleted** (#298) |
+
+### Original measurement (main@bc194e9, 2026-08-23) — historical
 
 | Fact | Value |
 |---|---|
@@ -186,7 +223,7 @@ D2's job; D2 is unblocked as of 2026-08-23.
 
 ## Known-stale planning artifacts (do not schedule from these)
 
-- `docs/plans/TICKETS.md` / `STATUS.md` — last touched 2026-08-10. Covers 4 of the
+- `docs/plans/TICKETS.md` — last touched 2026-08-10. Covers 4 of the
   55 open issues. Issue #156 tracks this drift.
 - `docs/plans/gh144-rowizer-destroys-values/STATUS.md` — dated 2026-08-11, still reads
   "Scaffolded, not dispatched" with A1/A2/A2b/A3 all TODO, while its fixes (d645b24,
