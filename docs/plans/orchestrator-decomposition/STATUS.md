@@ -5,7 +5,7 @@ Stage: **the decomposition's goal was achieved by DELETION, not by carving.**
 `#174` shipped: the legacy deterministic pipeline is gone from `main`, and with it
 ~6,400 lines. `process()` is now analyze → agentic → assemble.
 
-Next action: **`#293`** — see "Where this actually stands" below. The branch
+Next action: **`#293`** — see "Where this actually stands" below.
 The analysis and a verified reproduction are on issue #293. **There is no branch** — an
 earlier version of this file sent readers to `fix/293-native-fallback-overclaim`, which was
 never pushed and 404s.
