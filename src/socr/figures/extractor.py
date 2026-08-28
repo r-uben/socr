@@ -688,9 +688,10 @@ def _cluster_drawings(
     parent = {i: i for i, _ in valid}
 
     def find(x: int) -> int:
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
     def union(a: int, b: int) -> None:
         ra, rb = find(a), find(b)
