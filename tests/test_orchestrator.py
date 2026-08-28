@@ -478,10 +478,17 @@ class TestFullPipeline:
         mock_engine.process_document.return_value = good_result
         _setup_mock_engine(mock_engine, result=good_result, name=mock_engine.name)
 
+        # GH-318: this test's PDF path is a stand-in -- DocumentHandle is mocked,
+        # but chart-eligibility detection opens the real path and raises
+        # FileNotFoundError. That crash now flags the document (a detector that
+        # cannot read the source never decided the page's routing), which is the
+        # intended new behaviour and unrelated to what this test covers. Patch the
+        # detector off so the test exercises born-digital skipping, not file IO.
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             with patch.object(DocumentHandle, "from_path") as mock_from_path:
-                mock_from_path.return_value = _make_handle(2)
-                result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
+                with patch.object(pipeline, "_is_chart_asset_page", return_value=False):
+                    mock_from_path.return_value = _make_handle(2)
+                    result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
 
         assert result.success
         # The born-digital pages don't need repair

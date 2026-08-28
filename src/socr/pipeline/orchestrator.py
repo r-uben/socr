@@ -1755,6 +1755,28 @@ class UnifiedPipeline:
             "fabricated image reference(s) removed (no provenance in the source document)"
         )
 
+    @staticmethod
+    def _chart_detection_failed_note(state) -> str | None:
+        """Document-level one-liner naming pages whose chart routing never resolved.
+
+        Mirrors ``_fabricated_url_note``: a consumer gating on ``metadata.json``
+        must see that a page's chart-vs-table routing decision was never made,
+        without parsing the full audit log.  Read from the PageState flag rather
+        than ``state.events`` because the flag survives resume
+        (``_restore_terminal_page_state``) while the events list does not.
+        ``None`` on a clean run.
+        """
+        pages = sorted(
+            n for n, p in state.pages.items() if getattr(p, "chart_asset_detection_failed", False)
+        )
+        if not pages:
+            return None
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: "
+            "chart eligibility detection failed; page took the non-chart route with "
+            "its chart-vs-table routing unresolved (content preserved)"
+        )
+
     # ------------------------------------------------------------------
     # GH-96: table escalation lane
     # ------------------------------------------------------------------
@@ -2368,6 +2390,15 @@ class UnifiedPipeline:
                         },
                     )
                 )
+                # GH-318: the audit event alone is not enough. #297 made this
+                # route fail SOFT and durable, but page status, document status,
+                # metadata and the CLI all still reported a clean SUCCESS, so the
+                # skip was invisible unless someone opened audit_log.json — the
+                # #252 / #211 class. Flag the page so the document buckets in
+                # _phase_assemble can demote the run to AUDIT_FAILED
+                # ("completed with warnings, output written") without discarding
+                # the text or forcing the chart lane.
+                ps.chart_asset_detection_failed = True
                 continue
             if self._page_has_tables(pn, ps):
                 chart_mixed_pages.add(pn)
@@ -2995,6 +3026,23 @@ class UnifiedPipeline:
             # assembly (unlike OutputNormalizer) and before the flush, so the
             # fragment, the sidecar and the stitched body all see one text.
             self._guard_agentic_page_table_repetition(state, page_num, bo, is_native)
+
+            # GH-318: this page's chart-vs-table routing was never decided --
+            # the eligibility detector raised and the page fell through to the
+            # non-chart route. Demote the page's STATUS only; ``audit_passed``
+            # is the winner-SELECTION flag and flipping it would discard this
+            # page's content (manifest.py: the #252 round-1 defect), which is
+            # exactly what the fail-soft route of #297 exists to avoid.
+            #
+            # Deliberate consequence: the resume ledger accepts terminal pages
+            # only at SUCCESS, so a WARNING page is re-processed on every resume
+            # rather than skipped. That is the correct trade here -- the routing
+            # decision is unresolved, so re-deciding it next run is the point --
+            # but it does mean a deterministically-failing detector re-runs this
+            # page every time.
+            if bo is not None and getattr(ps, "chart_asset_detection_failed", False):
+                if bo.status == PageStatus.SUCCESS:
+                    bo.status = PageStatus.WARNING
 
             # Write-through blob cache (replay-cache continuity).
             if _page_blob_store is not None:
@@ -4175,6 +4223,10 @@ class UnifiedPipeline:
             "chart_asset_render_failed": (
                 bool(ps.chart_asset_render_failed) if ps else False  # PP-7
             ),
+            # GH-318: chart eligibility never resolved for this page.
+            "chart_asset_detection_failed": (
+                bool(getattr(ps, "chart_asset_detection_failed", False)) if ps else False
+            ),
             "judge_rejected": bool(ps.judge_rejected) if ps else False,
             # MAJOR 7(b): S1 case (i) resume-idempotency flag (see above).
             "structure_class_model_kept": structure_class_model_kept,
@@ -4545,6 +4597,13 @@ class UnifiedPipeline:
             # silently degrading to a bare marker.
             ps.rotated_shred_png_ref = str(meta.get("rotated_shred_png_ref", ""))
             ps.chart_asset_render_failed = bool(meta.get("chart_asset_render_failed", False))
+            # GH-318: OR, never assign. OCR pages can resume BEFORE chart
+            # eligibility runs, while native pages detect first and only then
+            # restore their sidecar — a plain assignment would let an older
+            # clean sidecar erase a failure this run has already recorded.
+            ps.chart_asset_detection_failed = bool(
+                getattr(ps, "chart_asset_detection_failed", False)
+            ) or bool(meta.get("chart_asset_detection_failed", False))
             ps.judge_rejected = bool(meta.get("judge_rejected", False))
             # MAJOR 7(b): restore the S1 resume-idempotency flag so
             # ``_reaches_structure_class_branch`` can re-derive the bucket
@@ -5040,6 +5099,16 @@ class UnifiedPipeline:
             n for n, p in state.pages.items() if getattr(p, "text_grid_rejected", False)
         )
         pages_ok = pages_ok and not text_grid_rejected_pages
+        # GH-318: chart eligibility raised and the page took the non-chart route
+        # without the pipeline ever learning whether it was a chart. The text it
+        # shipped may be right, but the routing decision behind it was never made,
+        # so the run must not report a clean SUCCESS. AUDIT_FAILED, not ERROR: the
+        # fail-soft route is deliberate (#297) and the content is kept, so this is
+        # the "completed with warnings, output written" path.
+        chart_detection_failed_pages = sorted(
+            n for n, p in state.pages.items() if getattr(p, "chart_asset_detection_failed", False)
+        )
+        pages_ok = pages_ok and not chart_detection_failed_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -5422,6 +5491,16 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_fab_note}"
             else:
                 final_result.error = _fab_note
+        # GH-318: surface an unresolved chart-routing decision at document level,
+        # for the same reason GH-225 does above — the audit event is durable but
+        # a consumer reading metadata.json must not have to open audit_log.json
+        # to learn that a page's routing was never decided.
+        _chart_note = self._chart_detection_failed_note(state)
+        if _chart_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_chart_note}"
+            else:
+                final_result.error = _chart_note
         _trust_note = self._tables_trust_note(state)
         if _trust_note:
             if final_result.error:

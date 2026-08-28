@@ -703,6 +703,130 @@ def test_chart_eligibility_recursion_failure_preserves_table_route_and_audit(
     assert saved_failures[0]["data"]["error_type"] == "RecursionError"
 
 
+def _run_chart_detection_case(tmp_path: Path, *, fail_detector: bool):
+    """GH-318 helper: one agentic+assemble run, differing only in detector outcome."""
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.agentic import PageDecision
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    pdf = _make_vector_chart_pdf(tmp_path)
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf, has_tables=True, native_text="Table 1 data")
+    pipeline._last_assessment = state._last_assessment
+    routed_output = PageOutput(
+        page_num=1,
+        text="| Col A | Col B |\n|---|---|\n| 1.0 | 2.0 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+    )
+    routed_decision = PageDecision(page_num=1, final_output=routed_output, accepted=True)
+
+    marks = (
+        patch(
+            "socr.pipeline.orchestrator.has_chart_marks",
+            side_effect=RecursionError("chart detector recursion exhausted"),
+        )
+        if fail_detector
+        else patch("socr.pipeline.orchestrator.has_chart_marks", return_value=False)
+    )
+
+    with (
+        marks,
+        patch("socr.pipeline.orchestrator.route_page", return_value=routed_decision),
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+    ):
+        pipeline._phase_agentic(state, tmp_path)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        result = pipeline._phase_assemble(state, out_dir)
+    return state, result
+
+
+def test_gh318_chart_detection_failure_is_visible_at_page_and_document_status(
+    tmp_path: Path,
+) -> None:
+    """GH-318: a swallowed chart-detection failure must not ship a clean SUCCESS.
+
+    Pins a DIFFERENCE, never an absolute tuple: the same pipeline runs twice and
+    only the detector's behaviour changes. Absolute statuses here are
+    provider-dependent (CLAUDE.md), so asserting a measured tuple would pass
+    locally and fail in CI on a correctly-behaving page.
+    """
+    from socr.core.result import DocumentStatus, PageStatus
+
+    state_bad, res_bad = _run_chart_detection_case(tmp_path / "failed", fail_detector=True)
+    state_ok, res_ok = _run_chart_detection_case(tmp_path / "clean", fail_detector=False)
+
+    # 1. The content still wins -- the fail-soft route of #297 is preserved and
+    #    audit_passed is NOT used as a quality flag (flipping it would discard
+    #    the page's text: the #252 round-1 defect).
+    assert "Col A" in res_bad.markdown
+    assert state_bad.pages[1].best_output.text == state_ok.pages[1].best_output.text
+    assert state_bad.pages[1].best_output.audit_passed is True
+
+    # 2. Page status differs: the failed run is no longer a clean SUCCESS.
+    assert state_ok.pages[1].best_output.status == PageStatus.SUCCESS
+    assert state_bad.pages[1].best_output.status != state_ok.pages[1].best_output.status
+    assert state_bad.pages[1].best_output.status == PageStatus.WARNING
+
+    # 3. Document status differs -- AUDIT_FAILED is the "completed with
+    #    warnings, output written" path the CLI already reports.
+    assert res_ok.status == DocumentStatus.SUCCESS
+    assert res_bad.status != res_ok.status
+    assert res_bad.status == DocumentStatus.AUDIT_FAILED
+
+    # 4. The signal reaches metadata, not just audit_log.json.
+    assert res_bad.error and "chart eligibility detection failed" in res_bad.error
+    assert not (res_ok.error and "chart eligibility" in res_ok.error)
+
+    # 5. The flag is on the page, so it survives into the sidecar and resume.
+    assert state_bad.pages[1].chart_asset_detection_failed is True
+    assert state_ok.pages[1].chart_asset_detection_failed is False
+
+
+def test_gh318_detection_flag_survives_resume_restore(tmp_path: Path) -> None:
+    """GH-318: a clean sidecar must never erase a failure recorded this run.
+
+    Exercises the real ``_restore_terminal_page_state``. OCR pages can resume
+    BEFORE chart eligibility runs, so restoring with a plain assignment would let
+    a stale clean sidecar clear a live failure. The restore ORs instead; this
+    test fails if that is ever weakened back to assignment.
+    """
+    import json as _json
+
+    from ocr_output_contract import doc_dir_for, relative_key
+
+    from socr.core.result import PageOutput, PageStatus
+
+    pdf = _make_vector_chart_pdf(tmp_path)
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf)
+    out_dir = tmp_path / "out"
+
+    # A terminal sidecar from an EARLIER run, in which detection was clean.
+    doc_dir = doc_dir_for(out_dir, relative_key(pdf, pdf.parent))
+    pages_dir = doc_dir / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    (pages_dir / "00001.json").write_text(
+        _json.dumps({"chart_asset_detection_failed": False}), encoding="utf-8"
+    )
+
+    # THIS run has already recorded a detection failure for the same page.
+    state.pages[1].chart_asset_detection_failed = True
+    pipeline._scan_root = pdf.parent
+
+    resumed = PageOutput(
+        page_num=1, text="body", status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
+    )
+    pipeline._restore_terminal_page_state(state, 1, resumed, out_dir)
+
+    assert state.pages[1].chart_asset_detection_failed is True, (
+        "a clean sidecar from an earlier run must not clear a failure recorded this run"
+    )
+
+
 class TestAgenticChartLaneRouting:
     """Integration tests for chart lane in the PP-2 fused agentic loop."""
 
