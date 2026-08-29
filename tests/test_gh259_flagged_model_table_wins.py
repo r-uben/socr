@@ -303,7 +303,6 @@ def test_document_status_audit_event_and_cli_surface_the_kept_page(tmp_path: Pat
             judge_backend="heuristic",
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=True,
             save_figures=False,
             write_manifest=False,
         )
@@ -736,7 +735,6 @@ def test_drift_reaches_document_metadata_and_cli(tmp_path: Path, capsys) -> None
             judge_backend="heuristic",
             enabled_engines=[EngineType.QWEN],
             quiet=False,
-            audit_enabled=True,
             save_figures=False,
             write_manifest=False,
         )

@@ -46,7 +46,6 @@ def _make_pipeline() -> UnifiedPipeline:
             detect_equations=False,
             recover_clean_equations=False,
             quiet=True,
-            audit_enabled=False,
             write_manifest=False,
         )
     )

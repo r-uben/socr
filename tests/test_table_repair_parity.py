@@ -988,7 +988,6 @@ class TestEndToEndParity:
             judge_backend="heuristic",
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=False,
             save_figures=False,
             write_manifest=False,
         )

@@ -430,7 +430,6 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
         judge_backend="heuristic",
         enabled_engines=[EngineType.QWEN],
         quiet=True,
-        audit_enabled=True,
         save_figures=False,
         write_manifest=True,
         native_first=False,

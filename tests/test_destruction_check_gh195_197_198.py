@@ -268,7 +268,6 @@ def test_real_rejection_reaches_a_surface(table_page) -> None:
             detect_equations=False,
             recover_clean_equations=False,
             quiet=True,
-            audit_enabled=False,
             write_manifest=False,
         )
     )
@@ -315,7 +314,6 @@ def test_clean_page_emits_no_rejection_event(tmp_path) -> None:
             primary_engine=EngineType.DEEPSEEK,
             save_figures=False,
             quiet=True,
-            audit_enabled=False,
             write_manifest=False,
         )
     )
@@ -416,7 +414,6 @@ def test_rejection_demotes_page_and_document_status(table_page) -> None:
             detect_equations=False,
             recover_clean_equations=False,
             quiet=True,
-            audit_enabled=False,
             write_manifest=False,
         )
     )
@@ -483,7 +480,6 @@ def test_clean_page_is_not_demoted(tmp_path) -> None:
             primary_engine=EngineType.DEEPSEEK,
             save_figures=False,
             quiet=True,
-            audit_enabled=False,
             write_manifest=False,
         )
     )

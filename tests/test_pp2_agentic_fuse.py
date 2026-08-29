@@ -69,7 +69,6 @@ def _make_config(
         detect_equations=detect_equations,
         recover_clean_equations=recover_clean_equations,
         quiet=True,
-        audit_enabled=False,
         save_figures=False,
         write_manifest=False,
         **overrides,
@@ -461,7 +460,7 @@ class TestCascadeHalt:
         )
 
         # audit_log.json must be present (the AuditEvent is appended to state.events
-        # regardless of config.audit_enabled) and carry the halt event.
+        # regardless of audit configuration) and carry the halt event.
         audit_log = doc_dir / "audit_log.json"
         assert audit_log.exists(), (
             f"audit_log.json must be written after partial_save_vlm_timeout; "

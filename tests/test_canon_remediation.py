@@ -53,7 +53,6 @@ def _config(**overrides) -> PipelineConfig:
         enabled_engines=list(EngineType),
         quiet=True,
         tiered=False,
-        audit_enabled=False,
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)

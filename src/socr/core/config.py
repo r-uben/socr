@@ -110,6 +110,21 @@ _FROM_FILE_EXPLICIT_FIELDS: frozenset[str] = frozenset(
 # Keys accepted in YAML that are not PipelineConfig fields (legacy aliases).
 _FROM_FILE_LEGACY_KEYS: frozenset[str] = frozenset({"fallback_engine"})
 
+# Fields DELETED from PipelineConfig, mapped to why. A stale config file naming one
+# would otherwise hit the generic "unrecognised key" error, which says a typo was
+# made rather than that the setting is gone -- so each gets its own explanation.
+_FROM_FILE_REMOVED_FIELDS: dict[str, str] = {
+    "audit_enabled": (
+        "the quality audit is not a removable stage and this field had no consumer "
+        "(GH-139). In agentic mode -- the default -- the judge IS the routing "
+        "algorithm: escalation happens because a judge rejected a rung, so with no "
+        "gate there is no accept/escalate signal for the ladder to act on. The "
+        "legacy branches that once honoured it were removed in #298. Remove the "
+        "key; to reduce model spend use strict_local, max_cost_per_page or "
+        "cost_budget"
+    ),
+}
+
 
 @dataclass
 class PipelineConfig:
@@ -211,7 +226,11 @@ class PipelineConfig:
     figures_max_per_page: int = 3
 
     # --- Audit ---
-    audit_enabled: bool = True
+    # GH-139: `audit_enabled` was DELETED here. #298 removed every gate that read
+    # it, leaving a field that changed nothing but still hashed into the run
+    # fingerprint. `--no-audit` (its CLI setter) is now rejected in cli.py, and a
+    # config file naming it gets an explanation via ``_FROM_FILE_REMOVED_FIELDS``.
+    # ``HPCConfig.audit_enabled`` is a DIFFERENT field and is still live.
     audit_min_words: int = 50
     # VLM judge on HARD pages (tables/equations): a vision model checks the OCR
     # against the page image to catch SEMANTIC corruption the heuristics can't —
@@ -367,6 +386,16 @@ class PipelineConfig:
         # Keys are stringified before sorting: YAML permits non-string keys, and a
         # bare ``1:`` would otherwise crash on the sort/join while building the very
         # message meant to explain the problem.
+        # A field socr has DELETED is reported by name, not as a typo (see
+        # ``_FROM_FILE_REMOVED_FIELDS``). Same doctrine as the unknown-key error
+        # below: never let a setting a user believes is in force vanish silently.
+        removed = sorted(k for k in data if k in _FROM_FILE_REMOVED_FIELDS)
+        if removed:
+            detail = "; ".join(f"'{k}': {_FROM_FILE_REMOVED_FIELDS[k]}" for k in removed)
+            raise ValueError(
+                f"Removed setting(s) in config file {path}: {', '.join(removed)}. {detail}."
+            )
+
         known = {f.name for f in dataclasses.fields(cls)} | _FROM_FILE_LEGACY_KEYS
         unknown = sorted(str(k) for k in data if k not in known) + unknown_hpc
         if unknown:

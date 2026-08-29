@@ -79,7 +79,6 @@ _LIVE = {
 #: These are not harmless: the fingerprint OVER-invalidates, so toggling a flag
 #: that changes nothing reprocesses an entire corpus.
 _INERT_BUT_FINGERPRINTED = {
-    "audit_enabled",  # #139 — the flag this whole issue started from
     "chunk_size",
     "chunk_threshold",
     "fallback_chain",
