@@ -1368,7 +1368,14 @@ def _promote_stub_lanes(lane_centers: list[float], seg_ys, rows_by_y) -> list[fl
         lo, hi = lane_centers[j] + snap, lane_centers[j + 1] - snap
         if lo >= hi:
             break
-        if not any(lo < w[0] < hi and not _is_numeric_word(w) for row in data_rows for w in row):
+        # Recurrence, not one sighting: a lone stray word between two data lanes
+        # (a footnote marker, a loose glyph) must not move the boundary, or a real
+        # data column is swallowed into the label. Reuses `_MIN_TABLE_ROWS`, the
+        # existing minimum evidence for a table, rather than a new constant.
+        rows_with_text = sum(
+            1 for row in data_rows if any(lo < w[0] < hi and not _is_numeric_word(w) for w in row)
+        )
+        if rows_with_text < _MIN_TABLE_ROWS:
             break
         j += 1
     return lane_centers[j:]

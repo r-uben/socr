@@ -99,3 +99,34 @@ def test_a_table_with_no_intervening_labels_is_untouched():
     flat = " ".join(c for row in grid for c in row)
     for val in ("1.11", "2.22", "3.33"):
         assert val in flat
+
+
+def test_a_single_stray_word_does_not_promote_a_data_column():
+    """Recurrence, not one sighting.
+
+    A lone non-numeric word between two data lanes -- a footnote marker, a loose
+    glyph -- must not move the boundary, or a real data column is swallowed into
+    the label. Reuses `_MIN_TABLE_ROWS`, the existing minimum evidence for a
+    table, rather than a new constant.
+
+    Pinned as a DIFFERENCE: the same geometry with and without the stray word must
+    produce the same shape.
+    """
+
+    def _plain(stray: bool):
+        words: list = []
+        y = 100.0
+        for i in range(5):
+            for c, val in enumerate(("1.11", "2.22", "3.33")):
+                words.append(_w(200.0 + c * 70.0, y, val))
+            if stray and i == 0:
+                words.append(_w(245.0, y, "a"))
+            y += 16.0
+        return _cells(rowize_from_word_list(words)[0][1])
+
+    with_stray, without = _plain(True), _plain(False)
+    widths_with = {len(r) for r in with_stray}
+    widths_without = {len(r) for r in without}
+    assert widths_with == widths_without, (
+        f"one stray word changed the column count: {widths_with} vs {widths_without}"
+    )
