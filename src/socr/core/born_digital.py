@@ -367,6 +367,152 @@ def _rect_coverage(inner, outer) -> float:
     return overlap.get_area() / area
 
 
+#: Fraction of a span that must lie inside a link rectangle before the span is
+#: treated as carrying that link. Same midpoint reasoning as
+#: ``_REGION_COVERAGE_DROP`` above: most of the span is inside the rectangle, so
+#: the link genuinely covers it. A link rect is drawn around its anchor text by
+#: the producing application, so partial overlap is the ordinary case at the
+#: edges of a wrapped line, not evidence of a different link.
+_LINK_COVERAGE_MIN = 0.5
+
+
+def _uri_links(page) -> list[tuple[object, str, str]]:
+    """External URI links on a page, as ``(rect, uri, anchor_text)``.
+
+    GH-127: ``page.get_links()`` was never called, so every hyperlink in the text
+    layer was dropped — 1,103 of them across half the sampled corpus. For a
+    citation corpus a DOI present in the source and absent from the output is
+    outright content loss, not formatting loss.
+
+    ``anchor_text`` is resolved from the page's WORDS, not its spans. PyMuPDF
+    routinely returns a whole uniform-font line as a single span, so a link drawn
+    around a phrase inside that line ("Smith 2020" in "See Smith 2020 for
+    details.") covers only a fraction of the span and matches nothing at span
+    granularity. Words carry their own boxes, so the anchor is recoverable
+    exactly; wrapping then happens by substring, which leaves every original
+    character untouched and inserts only the markdown brackets.
+
+    Internal links (``LINK_GOTO`` page jumps, named destinations) are excluded:
+    they address a position in the PDF, not a resource, and have no meaning once
+    the page is markdown. Guarded like every other page access in this module —
+    a damaged link table must degrade to "no links", never raise out of
+    extraction (#145's absence-of-evidence precedent).
+    """
+    try:
+        raw = page.get_links() or []
+    except Exception:
+        return []
+    if not raw:
+        return []
+    try:
+        words = page.get_text("words") or []
+    except Exception:
+        words = []
+
+    out: list[tuple[object, str, str]] = []
+    for link in raw:
+        uri = (link.get("uri") or "").strip()
+        if not uri:
+            continue
+        try:
+            rect = fitz.Rect(link["from"])
+        except Exception:
+            continue
+        if rect.is_empty or not rect.is_valid:
+            continue
+        covered = [
+            w[4]
+            for w in words
+            if _rect_coverage(fitz.Rect(w[0], w[1], w[2], w[3]), rect) >= _LINK_COVERAGE_MIN
+        ]
+        out.append((rect, uri, " ".join(covered).strip()))
+    return out
+
+
+def _apply_links_to_flat_text(text: str, links: list[tuple[object, str, str]]) -> str:
+    """Wrap resolved link anchors inside an already-flattened page string.
+
+    GH-127: ``extract_structured`` short-circuits a page with no tables to raw
+    ``get_text("text")`` and never walks the span dict — which is EVERY prose
+    page, i.e. the majority of the corpus. Routing those pages through the dict
+    walk instead would change their text for reasons unrelated to links (line
+    stripping, furniture relegation) and churn every golden fragment, so links
+    are applied to the flat string instead.
+
+    Substring replacement, first occurrence per link, left to right. Every
+    original character survives; only the brackets are inserted. An anchor that
+    does not appear verbatim in the flattened text is skipped rather than
+    guessed at — a link is not worth corrupting the prose for.
+    """
+    if not links or not text:
+        return text
+    for _rect, uri, anchor_text in links:
+        if not anchor_text or anchor_text == uri:
+            continue
+        idx = text.find(anchor_text)
+        if idx < 0:
+            continue
+        # Already wrapped by an earlier, overlapping link.
+        if idx > 0 and text[idx - 1] == "[":
+            continue
+        text = text[:idx] + _emit_run(anchor_text, uri) + text[idx + len(anchor_text) :]
+    return text
+
+
+def _emit_run(text: str, uri: str) -> str:
+    """Wrap ``text`` as a markdown link. Whitespace stays outside the brackets."""
+    inner = text.strip()
+    if not uri or not inner:
+        return text
+    # A visible URL that links to itself needs no anchor -- "[http://x](http://x)"
+    # is noise, and the address is already readable in the text.
+    if inner == uri:
+        return text
+    lead = text[: len(text) - len(text.lstrip())]
+    trail = text[len(text.rstrip()) :]
+    return f"{lead}[{inner}]({uri}){trail}"
+
+
+def _line_text(spans, links: list[tuple[object, str, str]]) -> str:
+    """Join a line's spans, wrapping link anchors in markdown links.
+
+    With no links on the page this is byte-identical to the previous
+    ``"".join(...)`` — the golden fragment tests depend on that.
+
+    Anchors are wrapped by SUBSTRING so the span's own characters and spacing
+    survive verbatim; only the brackets are inserted. A link whose anchor text
+    could not be resolved from the words falls back to wrapping any span the
+    rectangle genuinely covers, so the URI is still recovered.
+    """
+    if not links:
+        return "".join(s.get("text", "") for s in spans)
+
+    parts: list[str] = []
+    for span in spans:
+        text = span.get("text", "")
+        if not text.strip():
+            parts.append(text)
+            continue
+        try:
+            span_rect = fitz.Rect(span["bbox"])
+        except Exception:
+            parts.append(text)
+            continue
+
+        for rect, uri, anchor in links:
+            if not span_rect.intersects(rect):
+                continue
+            if anchor and anchor in text:
+                idx = text.index(anchor)
+                text = text[:idx] + _emit_run(anchor, uri) + text[idx + len(anchor) :]
+                break
+            if _rect_coverage(span_rect, rect) >= _LINK_COVERAGE_MIN:
+                text = _emit_run(text, uri)
+                break
+        parts.append(text)
+    return "".join(parts)
+
+
 # A slash that BEGINS a token and is immediately followed by a digit: "(/997)",
 # "/55-84", "pp. /23". This is the eaten-leading-digit signature — a stroke glyph
 # decoded as '/' where a digit belongs, so "(1997)" ships as "(/997)".
@@ -1597,11 +1743,25 @@ class BornDigitalDetector:
         For pages with tables, replaces table regions with markdown table
         representations while keeping surrounding prose as plain text.
         For pages without tables, returns plain text (same as get_text()).
+
+        GH-127: hyperlinks in the text layer are emitted as markdown links.
+        Resolved once per page and applied to prose and page furniture alike --
+        a journal footer is exactly where a DOI lives. A page with no links
+        produces byte-identical output to before.
+
+        NOTE: the ``find_tables`` failure path below returns raw ``get_text``
+        and therefore still drops links. That is the pre-existing degraded
+        path for a damaged page; recovering links there needs the dict walk
+        this function does after it, and is deliberately out of scope here.
         """
         try:
             tables_result = page.find_tables()
         except Exception:
             return page.get_text("text").strip()
+
+        # GH-127: resolved once, not per line -- get_links() parses the page's
+        # link table on every call.
+        _links = _uri_links(page)
 
         # Collect table bounding boxes and their markdown representations.
         # For each table returned by find_tables(), detect lane-stacking: a
@@ -1677,7 +1837,9 @@ class BornDigitalDetector:
             table_regions = rowize_from_words_chart_aware(page, page_num=page_num)
 
         if not table_regions:
-            return page.get_text("text").strip()
+            # GH-127: this is the prose-page path -- no dict walk happens here,
+            # so links are applied to the flat string (see the helper's note).
+            return _apply_links_to_flat_text(page.get_text("text").strip(), _links)
 
         # Sort regions top-to-bottom by their y0 coordinate (reading order).
         # Column-aware ordering (x-band then y) would be needed for multi-column
@@ -1740,7 +1902,9 @@ class BornDigitalDetector:
             # Direction is evidence about layout, never about value (#145 review).
             if block_is_page_furniture(block, dominant):
                 for line in block.get("lines", []) or []:
-                    text = "".join(s.get("text", "") for s in line.get("spans", []) or [])
+                    # GH-127: furniture carries links too -- a journal footer is
+                    # exactly where a DOI lives, so it must not lose them.
+                    text = _line_text(line.get("spans", []) or [], _links)
                     if text.strip():
                         relegated_parts.append(text.strip())
                 continue
@@ -1798,7 +1962,7 @@ class BornDigitalDetector:
 
             for line in lines:
                 spans = line.get("spans", [])
-                line_text = "".join(s.get("text", "") for s in spans)
+                line_text = _line_text(spans, _links)
                 if line_text.strip():
                     output_parts.append(line_text.strip())
 
