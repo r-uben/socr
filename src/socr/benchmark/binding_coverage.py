@@ -1,10 +1,9 @@
 """Content-free native self-binding coverage measurements.
 
-The sweep calls :func:`socr.tables.reconstruct.reconstruct_table_regions` directly so
-the candidate and the production extraction path cannot drift apart.  The
-returned report keeps every strict region in ``regions`` and one selected
-primary grid per bindable page in ``pages``.  Neither collection contains PDF
-text, markdown, labels, coordinates, or rejection payloads.
+The sweep mirrors :meth:`BornDigitalDetector.extract_structured`'s exclusive
+region-discovery chain.  It keeps every strict region in ``regions`` and one
+selected primary grid per bindable page in ``pages``.  Neither collection
+contains PDF text, markdown, labels, coordinates, or rejection payloads.
 """
 
 from __future__ import annotations
@@ -21,25 +20,24 @@ from typing import Any, NamedTuple
 
 import fitz
 
-from socr.core.born_digital import BornDigitalDetector
+from socr.core.born_digital import BornDigitalDetector, _is_lane_stacked
+from socr.core.pdf import open_pdf
+from socr.tables.binding import BindingResult, Grid, bind, parse_grid
 
 
 class NativeExtractionRegion(NamedTuple):
     """One native table region: its extent, its markdown, and what produced it.
 
-    GH-330. ``reconstruct_table_regions`` already returns ``(rect, markdown)`` pairs,
-    so the candidate has always arrived paired with its own extent. This wrapper just
-    names the pair for the sweep; it deliberately does not live in ``born_digital`` so
-    the harness adds no surface to the extraction path it measures.
+    Every discovery stage returns ``(rect, markdown)`` pairs, so the candidate
+    arrives paired with its own extent. This wrapper just names the pair for the
+    sweep; it deliberately does not live in ``born_digital`` so the harness adds
+    no surface to the extraction path it measures.
     """
 
     rect: Any
     content: str
     provenance: str
 
-
-from socr.core.pdf import open_pdf
-from socr.tables.binding import BindingResult, Grid, bind, parse_grid
 
 _RECONSTRUCT_LOGGER_NAME = "socr.tables.reconstruct"
 _TABLE_KIND = "table"
@@ -74,9 +72,17 @@ class CoverageRecord:
     ambiguous_count: int
     candidate_valueless_unbound: int
     native_valueless_unbound: int
-    contradiction_count: int
     native_unbound_count: int
     model_unbound_count: int
+    cell_contradiction_count: int = 0
+    row_label_contradiction_count: int = 0
+    contradiction_count: int = 0
+
+    def __post_init__(self) -> None:
+        """Keep the old combined record count as a derived compatibility view."""
+        split_count = self.cell_contradiction_count + self.row_label_contradiction_count
+        if split_count or self.contradiction_count == 0:
+            object.__setattr__(self, "contradiction_count", split_count)
 
 
 @dataclass(frozen=True)
@@ -223,16 +229,75 @@ def select_primary_grid(
     return min(regions, key=lambda item: (-len(item[1].content), item[0]))
 
 
-def _count(result: BindingResult, name: str) -> int:
-    value = getattr(result, name, 0)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if value is None:
-        return 0
+def _is_chart_placeholder(content: str) -> bool:
+    """Return whether *content* is the chart-aware rowizer's image marker."""
+    return content.lstrip().startswith("![")
+
+
+def _discover_native_regions(
+    page: fitz.Page, detector: BornDigitalDetector
+) -> list[NativeExtractionRegion] | None:
+    """Mirror ``extract_structured``'s exclusive table discovery chain.
+
+    ``None`` means the initial ``find_tables`` call failed.  That distinction
+    matters: production returns plain text immediately for that failure, so
+    the benchmark must not continue into either fallback stage.
+    """
     try:
-        return len(value)
-    except TypeError:
-        return 0
+        tables_result = page.find_tables()
+    except Exception:
+        return None
+
+    table_regions: list[NativeExtractionRegion] = []
+    lane_stacked_regions: list[NativeExtractionRegion] = []
+    from socr.tables.reconstruct import rowize_from_word_list
+
+    for table in tables_result.tables:
+        if _is_lane_stacked(table):
+            bbox = fitz.Rect(table.bbox)
+            region_words = [
+                word
+                for word in page.get_text("words")
+                if bbox.contains(fitz.Point(word[0], word[1]))
+            ]
+            from socr.core.born_digital import upright_rotation_for
+
+            rotation = upright_rotation_for(page, clip=bbox)
+            for rect, content in (
+                rowize_from_word_list(region_words, rotation=rotation, page_rect=page.rect) or []
+            ):
+                lane_stacked_regions.append(NativeExtractionRegion(rect, content, "lane_stacked"))
+        else:
+            content = detector._table_to_markdown(table)
+            if content:
+                table_regions.append(
+                    NativeExtractionRegion(fitz.Rect(table.bbox), content, "find_tables_lines")
+                )
+
+    # This is intentionally a fall-through, not a union: one successful stage
+    # suppresses every later stage exactly as in extract_structured.
+    table_regions.extend(lane_stacked_regions)
+    if not table_regions:
+        from socr.tables.reconstruct import reconstruct_table_regions
+
+        table_regions = [
+            NativeExtractionRegion(rect, content, "reconstruct_table_regions")
+            for rect, content in (reconstruct_table_regions(page) or [])
+        ]
+
+    if not table_regions:
+        from socr.tables.reconstruct import rowize_from_words_chart_aware
+
+        page_num = getattr(page, "number", 0) + 1
+        table_regions = [
+            NativeExtractionRegion(rect, content, "rowize_chart_aware")
+            for rect, content in (rowize_from_words_chart_aware(page, page_num=page_num) or [])
+        ]
+
+    # Production uses a stable top-to-bottom sort.  Python's stable sort keeps
+    # same-y regions in the order emitted by the successful stage.
+    table_regions.sort(key=lambda region: region.rect.y0)
+    return table_regions
 
 
 def _record(
@@ -256,13 +321,15 @@ def _record(
         row_binding_unverifiable=bool(result.row_binding_unverifiable),
         column_binding_unverifiable=bool(result.column_binding_unverifiable),
         row_label_unverifiable=bool(result.row_label_unverifiable),
-        row_labels_checked=_count(result, "row_labels_checked"),
+        row_labels_checked=result.row_labels_checked,
         ambiguous_count=int(result.ambiguous_count),
-        candidate_valueless_unbound=_count(result, "candidate_valueless_unbound"),
-        native_valueless_unbound=_count(result, "native_valueless_unbound"),
+        candidate_valueless_unbound=result.candidate_valueless_unbound,
+        native_valueless_unbound=result.native_valueless_unbound,
         contradiction_count=len(result.contradicted_cells) + len(result.row_label_contradictions),
         native_unbound_count=len(result.native_unbound),
         model_unbound_count=len(result.model_unbound),
+        cell_contradiction_count=len(result.contradicted_cells),
+        row_label_contradiction_count=len(result.row_label_contradictions),
     )
 
 
@@ -283,6 +350,12 @@ def _aggregate(records: tuple[CoverageRecord, ...], denominator: int) -> dict[st
             record.candidate_valueless_unbound for record in records
         ),
         "native_valueless_unbound": sum(record.native_valueless_unbound for record in records),
+        "cell_contradiction_nonempty": sum(
+            record.cell_contradiction_count > 0 for record in records
+        ),
+        "row_label_contradiction_nonempty": sum(
+            record.row_label_contradiction_count > 0 for record in records
+        ),
         "contradiction_nonempty": sum(record.contradiction_count > 0 for record in records),
         "native_unbound_nonempty": sum(record.native_unbound_count > 0 for record in records),
         "model_unbound_nonempty": sum(record.model_unbound_count > 0 for record in records),
@@ -296,6 +369,7 @@ def measure_manifest(manifest: Path, pdf_root: Path) -> CoverageReport:
     detector = BornDigitalDetector()
     region_records: list[CoverageRecord] = []
     page_records: list[CoverageRecord] = []
+    placeholder_region_count = 0
 
     with suppress_reconstruct_logger():
         documents: dict[str, fitz.Document] = {}
@@ -326,14 +400,19 @@ def measure_manifest(manifest: Path, pdf_root: Path) -> CoverageReport:
                         message=r"Consider using the pymupdf_layout package.*",
                         category=UserWarning,
                     )
-                    from socr.tables.reconstruct import reconstruct_table_regions
-
-                    extracted = [
-                        NativeExtractionRegion(rect, md, "reconstruct_table_regions")
-                        for rect, md in (reconstruct_table_regions(page) or [])
-                    ]
+                    extracted = _discover_native_regions(page, detector)
+                # ``None`` is the production early fallback for a failed
+                # initial find_tables call.  It must not be mistaken for an
+                # empty successful probe, which is what enables reconstruction.
+                if extracted is None:
+                    extracted = []
                 strict_regions: list[tuple[int, NativeExtractionRegion, Grid]] = []
+                placeholder_region_count += sum(
+                    _is_chart_placeholder(region.content) for region in extracted
+                )
                 for ordinal, region in enumerate(extracted, start=1):
+                    if _is_chart_placeholder(region.content):
+                        continue
                     grid = parse_grid(region.content)
                     if grid is not None:
                         strict_regions.append((ordinal, region, grid))
@@ -374,11 +453,18 @@ def measure_manifest(manifest: Path, pdf_root: Path) -> CoverageReport:
     selected_pages = tuple(sorted(page_records, key=lambda record: (record.paper, record.page)))
     total_pages = len(pages)
     bindable_pages = sum(record.selected_primary for record in selected_pages)
+    stage_pages: dict[str, set[tuple[str, int]]] = {}
+    for record in regions:
+        stage_pages.setdefault(record.source_stage, set()).add((record.paper, record.page))
     summary = {
         "total_pages": total_pages,
         "bindable_pages": bindable_pages,
         "strict_grids": len(regions),
+        "placeholder_regions": placeholder_region_count,
         "no_grid_pages": total_pages - bindable_pages,
+        "bindable_pages_by_stage": {
+            stage: len(stage_pages[stage]) for stage in sorted(stage_pages)
+        },
         "region_scoped": _aggregate(regions, len(regions)),
         "whole_page": _aggregate(selected_pages, total_pages),
     }
@@ -399,10 +485,20 @@ def summary_text(report: CoverageReport) -> str:
         f"Total pages: {summary['total_pages']}",
         f"Bindable pages: {summary['bindable_pages']}",
         f"Strict grids: {summary['strict_grids']}",
+        f"Chart placeholders: {summary['placeholder_regions']}",
         f"No-grid pages: {summary['no_grid_pages']}",
+        "Bindable pages by stage:",
+        *[f"  {stage}: {count}" for stage, count in summary["bindable_pages_by_stage"].items()],
         "Region-scoped strict-grid results:",
         f"  fully checked: {region['fully_checked']}/{region['denominator']}",
         f"  structural agreement: {region['structural_agreement']}/{region['denominator']}",
+        f"  row binding unverifiable: {region['row_binding_unverifiable']}",
+        f"  column binding unverifiable: {region['column_binding_unverifiable']}",
+        f"  ambiguity non-empty: {region['ambiguity_nonempty']}",
+        f"  model unbound non-empty: {region['model_unbound_nonempty']}",
+        f"  native unbound non-empty: {region['native_unbound_nonempty']}",
+        f"  cell contradiction non-empty: {region['cell_contradiction_nonempty']}",
+        f"  row-label contradiction non-empty: {region['row_label_contradiction_nonempty']}",
         "Selected whole-page results:",
         f"  fully checked: {whole['fully_checked']}/{whole['denominator']}",
         f"  structural agreement: {whole['structural_agreement']}/{whole['denominator']}",

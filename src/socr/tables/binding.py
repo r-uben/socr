@@ -211,6 +211,70 @@ def parse_grid(markdown: str) -> Grid | None:
     return None
 
 
+def _project_candidate_data_columns(grid: Grid) -> Grid:
+    """Keep candidate columns that contain a genuine numeric data token.
+
+    The rowizer emits a fixed lane grid before ``_clean_grid`` sees it.  A
+    lane can consequently remain in the markdown when its header is populated
+    but every body cell is empty; spec-number decorations such as ``(1)`` have
+    the same header-only shape.  Such a column has no numeric binding claim.
+    Projecting it out keeps the binder's column space aligned with the
+    candidate's numeric data space without selecting a native lane by value.
+    """
+    numeric_columns_by_row: list[set[int]] = []
+    for column in range(1, grid.n_cols):
+        for row_number, row in enumerate(grid.rows):
+            if len(numeric_columns_by_row) <= row_number:
+                numeric_columns_by_row.append(set())
+            if column >= len(row):
+                continue
+            if any(
+                is_numeric_token(token) and not _SPEC_NUMBER_RE.match(strip_presentation(token))
+                for token in re.split(r"\s+", row[column].strip())
+                if token
+            ):
+                numeric_columns_by_row[row_number].add(column)
+
+    if not numeric_columns_by_row:
+        return grid
+    widest_rows = max(len(columns) for columns in numeric_columns_by_row)
+    data_columns = sorted(
+        set().union(*(columns for columns in numeric_columns_by_row if len(columns) == widest_rows))
+    )
+    if not data_columns:
+        return grid
+    keep = (0, *data_columns)
+    return Grid(
+        header_rows=tuple(tuple(row[column] for column in keep) for row in grid.header_rows),
+        rows=tuple(tuple(row[column] for column in keep) for row in grid.rows),
+    )
+
+
+def _candidate_data_column_indices(grid: Grid) -> tuple[int, ...]:
+    """Return original indexes for the projected candidate data columns."""
+    numeric_columns_by_row: list[set[int]] = []
+    for row in grid.rows:
+        columns = set()
+        for column, cell in enumerate(row[1:], start=1):
+            if any(
+                is_numeric_token(token) and not _SPEC_NUMBER_RE.match(strip_presentation(token))
+                for token in re.split(r"\s+", cell.strip())
+                if token
+            ):
+                columns.add(column)
+        numeric_columns_by_row.append(columns)
+    if not numeric_columns_by_row:
+        return tuple()
+    widest_rows = max(len(columns) for columns in numeric_columns_by_row)
+    return tuple(
+        sorted(
+            set().union(
+                *(columns for columns in numeric_columns_by_row if len(columns) == widest_rows)
+            )
+        )
+    )
+
+
 # --------------------------------------------------------------------------
 # Native geometry — row bands, lanes, row paths
 # --------------------------------------------------------------------------
@@ -241,23 +305,104 @@ def _row_label(words_in_band: list, lane_of: dict[float, int]) -> str:
 
 
 def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
-    """Cluster all word y0 values into row bands. Reuses the generic clusterer."""
-    ys = sorted({round(w[1], 1) for w in words})
-    if not ys:
+    """Assign rowizer-compatible y groups without chaining adjacent rows.
+
+    ``rowize_from_word_list`` uses ``round(y0)`` as its row key.  Keep that
+    exact partition here: unlike x-lane clustering, it cannot make a run of
+    nearby printed rows collapse into one band.
+
+    A superscript or marker can have a different y0 from the number it
+    annotates.  Such a numeric-free group is folded only when its PyMuPDF
+    ``(block_no, line_no)`` metadata points to exactly one numeric-bearing
+    y-group; exact bbox intersection is only a corroborating guard against
+    synthetic or stale metadata on distant prose. No distance tolerance is
+    used as row evidence.
+    """
+    rows_by_y: dict[int, list] = {}
+    for word in words:
+        rows_by_y.setdefault(round(word[1]), []).append(word)
+
+    if not rows_by_y:
         return [], {}
-    centers = _cluster_x_positions(ys)
-    y_to_band: dict[float, int] = {}
-    for y in ys:
-        idx = min(range(len(centers)), key=lambda i: abs(centers[i] - y))
-        y_to_band[y] = idx
-    return centers, y_to_band
+
+    numeric_y_keys = {
+        y_key
+        for y_key, row_words in rows_by_y.items()
+        if any(is_numeric_token(word[4]) for word in row_words)
+    }
+    numeric_words_by_y = {
+        y_key: [word for word in rows_by_y[y_key] if is_numeric_token(word[4])]
+        for y_key in numeric_y_keys
+    }
+
+    # A metadata line may contain words in more than one y-group.  Retain all
+    # such groups so that folding is allowed only when the line identity has a
+    # unique numeric-bearing destination.
+    line_to_numeric_groups: dict[tuple[object, object], set[int]] = {}
+    for y_key in numeric_y_keys:
+        for word in rows_by_y[y_key]:
+            line_key = (word[5], word[6])
+            line_to_numeric_groups.setdefault(line_key, set()).add(y_key)
+
+    y_to_group_key = {y_key: y_key for y_key in rows_by_y}
+    for y_key, row_words in rows_by_y.items():
+        if y_key in numeric_y_keys:
+            continue
+        destinations = set()
+        for word in row_words:
+            for destination in line_to_numeric_groups.get((word[5], word[6]), ()):
+                # A displaced marker is part of the same printed line when
+                # its extracted box intersects the numeric word's box. This
+                # exact geometry guard keeps default/synthetic metadata on
+                # distant headers and panel rows from being treated as line
+                # evidence; no proximity radius is introduced.
+                if any(
+                    word[1] < numeric_word[3] and numeric_word[1] < word[3]
+                    for numeric_word in numeric_words_by_y[destination]
+                ):
+                    destinations.add(destination)
+        if len(destinations) == 1:
+            y_to_group_key[y_key] = destinations.pop()
+
+    group_keys = sorted(set(y_to_group_key.values()))
+    group_to_band = {group_key: idx for idx, group_key in enumerate(group_keys)}
+    y_to_band = {y_key: group_to_band[group_key] for y_key, group_key in y_to_group_key.items()}
+    return [float(group_key) for group_key in group_keys], y_to_band
 
 
-def _band_well_separated(centers: list[float], idx: int) -> bool:
+def _lane_well_separated(centers: list[float], idx: int) -> bool:
     if len(centers) < 2:
         return True
     neighbours = [abs(centers[idx] - c) for j, c in enumerate(centers) if j != idx]
     return min(neighbours) >= _WELL_SEPARATED_GAP_PT
+
+
+def _ambiguous_bands(bands: dict[int, list], ordered_band_idxs: list[int]) -> set[int]:
+    """Return bands whose word extents overlap an adjacent band's extent.
+
+    Row ambiguity is a property of the extracted word boxes, not of their
+    center pitch.  Compare only consecutive bands in reading order and use a
+    strict overlap test, so boxes that merely touch are still unambiguous.
+    Numeric-bearing bands use their numeric words for the extent: a displaced
+    annotation marker folded into its owning line must not extend that line's
+    binding band into a neighbouring row.  A value-less band uses all of its
+    words because it has no numeric binding extent.
+    """
+    extents = {}
+    for bidx in ordered_band_idxs:
+        numeric_words = [word for word in bands[bidx] if is_numeric_token(word[4])]
+        extent_words = numeric_words or bands[bidx]
+        extents[bidx] = (
+            min(word[1] for word in extent_words),
+            max(word[3] for word in extent_words),
+        )
+    ambiguous: set[int] = set()
+    for left_idx, right_idx in zip(ordered_band_idxs, ordered_band_idxs[1:]):
+        left_y0, left_y1 = extents[left_idx]
+        right_y0, right_y1 = extents[right_idx]
+        if min(left_y1, right_y1) > max(left_y0, right_y0):
+            ambiguous.update((left_idx, right_idx))
+    return ambiguous
 
 
 def _presentation_normalized_for_lanes(words: list) -> list:
@@ -328,7 +473,7 @@ def _native_lane_geometry(
     _band_centers, y_to_band = _assign_bands(words)
     bands: dict[int, list] = {}
     for w in words:
-        bands.setdefault(y_to_band[round(w[1], 1)], []).append(w)
+        bands.setdefault(y_to_band[round(w[1])], []).append(w)
 
     always_leftmost: dict[int, bool] = {}
     for band_words in bands.values():
@@ -346,28 +491,40 @@ def _native_lane_geometry(
 
     stub_candidates = {li for li, always in always_leftmost.items() if always}
 
-    # "Always leftmost in its own row" is necessary but NOT sufficient
-    # evidence of a stub: in a table with no row-label text at all, the
-    # leftmost genuine DATA lane is trivially "always leftmost" too (there
-    # is nothing to its left in any row), and would be misclassified the
-    # same way a real numeric stub is. Only actually remove a lane when
-    # doing so is both NECESSARY and SUFFICIENT to reconcile the raw native
-    # lane count with the candidate's own data-column count — the same
-    # "native geometry proves it AND candidate confirms it" pattern this
-    # module already uses for header spans (A4), applied here to lane
-    # exclusion instead. If the raw count already matches what the
-    # candidate needs, nothing is a stub. If more than one lane would need
-    # removing, or exactly one candidate can't be identified, removing
-    # nothing (and deferring to the ordinary lane_count-mismatch
-    # unverifiable path in ``bind()``) is safer than guessing which lane to
-    # drop.
-    if n_cand_cols is not None and raw_count == n_cand_cols + 1 and len(stub_candidates) == 1:
-        stub_lanes = stub_candidates
-    else:
-        stub_lanes = set()
+    # The rowizer discovers lanes from every numeric word in its segment, but
+    # its emitted grid is subsequently cleaned.  A numeric word that occurs in
+    # an isolated band (for example a page number in a captured running head)
+    # therefore has no data-cell counterpart: it cannot make a rowizer data
+    # column.  Keep only lanes that participate in a band with at least two
+    # numeric lanes.  The multi-lane requirement is structural evidence of a
+    # table row, not a distance or density threshold; if no such band exists,
+    # retain all lanes so a legitimate one-column table still binds.
+    data_lanes: set[int] = set(range(raw_count))
+    if n_cand_cols is not None and raw_count > n_cand_cols:
+        data_lanes = set()
+        for band_words in bands.values():
+            band_lanes = {
+                raw_lane_of[word[0]]
+                for word in band_words
+                if is_numeric_token(word[4]) and word[0] in raw_lane_of
+            }
+            if len(band_lanes) > 1:
+                data_lanes.update(band_lanes)
+        if not data_lanes:
+            data_lanes = set(range(raw_count))
+
+    # Lanes outside a multi-lane data band are the native equivalent of the
+    # all-empty columns removed by ``_clean_grid``.  This is geometry-only
+    # exclusion: candidate width may confirm the resulting count, but never
+    # identifies one lane among several otherwise plausible lanes.
+    surviving_raw = [i for i in range(raw_count) if i in data_lanes]
+    if n_cand_cols is not None and len(surviving_raw) > n_cand_cols:
+        surviving_set = set(surviving_raw)
+        remaining_stub_candidates = stub_candidates & surviving_set
+        if len(surviving_raw) == n_cand_cols + 1 and len(remaining_stub_candidates) == 1:
+            surviving_raw = [i for i in surviving_raw if i not in remaining_stub_candidates]
 
     all_centers = _cluster_x_positions(sorted(set(raw_lane_of.keys())))
-    surviving_raw = [i for i in range(raw_count) if i not in stub_lanes]
     remap = {raw: new for new, raw in enumerate(surviving_raw)}
     centers = [all_centers[i] for i in surviving_raw]
     lane_of = {x: remap[li] for x, li in raw_lane_of.items() if li in remap}
@@ -395,7 +552,7 @@ def _native_rows(
 
     bands: dict[int, list] = {}
     for w in words:
-        y_key = round(w[1], 1)
+        y_key = round(w[1])
         bands.setdefault(y_to_band[y_key], []).append(w)
     for b in bands.values():
         b.sort(key=lambda w: w[0])
@@ -425,6 +582,7 @@ def _native_rows(
 
     header_positions = ordered_band_idxs[:data_start]
     data_positions = ordered_band_idxs[data_start:]
+    ambiguous_bands = _ambiguous_bands(bands, ordered_band_idxs)
 
     rows: list[_NativeRow] = []
     prefix_stack: list[tuple[float, str]] = []  # (indent x0, label)
@@ -434,7 +592,7 @@ def _native_rows(
         numeric_words = [w for w in band_words if is_numeric_token(w[4])]
         data_words = [w for w in band_words if lane_of.get(w[0]) is not None]
         label = _row_label(band_words, lane_of)
-        band_ambiguous = not _band_well_separated(band_centers, bidx)
+        band_ambiguous = bidx in ambiguous_bands
 
         if not data_words and label:
             # value-less parent/panel row: push onto the indent stack and
@@ -468,7 +626,7 @@ def _native_rows(
             # lone data token isn't ambiguous merely because it's alone in
             # its row. Fall back to whether ITS lane is well separated from
             # its neighbours in the page-wide lane grid instead.
-            clean_lanes = {li for li in row_lane_ids if _band_well_separated(lane_centers, li)}
+            clean_lanes = {li for li in row_lane_ids if _lane_well_separated(lane_centers, li)}
 
         lane_tokens: dict[int, tuple[str, bool]] = {}
         multiset: Counter = Counter()
@@ -504,7 +662,7 @@ def _native_header_words(
     """Return the raw word tuples belonging to header bands, in reading order."""
     out = []
     for w in words:
-        y_key = round(w[1], 1)
+        y_key = round(w[1])
         idx = min(range(len(band_centers)), key=lambda i: abs(band_centers[i] - y_key))
         if idx in header_band_idxs:
             out.append(w)
@@ -589,7 +747,7 @@ def build_column_header_paths(
     # Group header words by band (row), top to bottom = root to leaf.
     band_groups: dict[float, list] = {}
     for w in header_band_words:
-        band_groups.setdefault(round(w[1], 1), []).append(w)
+        band_groups.setdefault(round(w[1]), []).append(w)
     ordered_bands = [band_groups[y] for y in sorted(band_groups)]
 
     per_lane_path: list[list[str]] = [[] for _ in range(n_lanes)]
@@ -654,26 +812,46 @@ def _bind_rows(
 ) -> dict[int, int]:
     """Return {candidate_row_idx: native_row_idx} for rows A2 can bind.
 
-    Rows outside the returned mapping are ``row_binding_unverifiable``.
+    Numeric rows are anchored and interpolated in compressed sequences that
+    omit value-less rows.  Once an interval's numeric order is established,
+    value-less rows in the corresponding original-row interval may be paired
+    by order only when both sides have the same number of value-less rows.
+    This keeps an empty candidate row from being used as padding for a native
+    numeric row (or vice versa).
+
+    Rows outside the returned mapping are reported by :func:`bind`; whether
+    that makes row binding unverifiable is determined from numeric-row
+    coverage, while the two value-less row populations are exposed as
+    content-free counters.
     """
     cand_multisets = [_candidate_row_multiset(r) for r in grid_rows]
     native_multisets = [nr.multiset for nr in native_rows]
 
-    # Index native multisets by their canonical (sorted) tuple form.
+    # Compress both sequences before doing any anchoring or interpolation.
+    # An empty multiset is a panel, units, note, or other value-less row; it
+    # has no numeric identity with which to establish an interval boundary.
+    cand_numeric_idxs = [idx for idx, multiset in enumerate(cand_multisets) if multiset]
+    native_numeric_idxs = [idx for idx, multiset in enumerate(native_multisets) if multiset]
+    cand_numeric_multisets = [cand_multisets[idx] for idx in cand_numeric_idxs]
+    native_numeric_multisets = [native_multisets[idx] for idx in native_numeric_idxs]
+
+    # Index numeric multisets by their canonical (sorted) tuple form.
     native_by_key: dict[tuple, list[int]] = {}
-    for i, ms in enumerate(native_multisets):
+    for i, ms in enumerate(native_numeric_multisets):
         key = tuple(sorted(ms.items()))
         native_by_key.setdefault(key, []).append(i)
 
     cand_by_key: dict[tuple, list[int]] = {}
-    for i, ms in enumerate(cand_multisets):
+    for i, ms in enumerate(cand_numeric_multisets):
         key = tuple(sorted(ms.items()))
         cand_by_key.setdefault(key, []).append(i)
 
-    anchors: list[tuple[int, int]] = []  # (cand_idx, native_idx), sorted by cand_idx
-    for i, ms in enumerate(cand_multisets):
-        if not ms:
-            continue  # empty multiset can't anchor uniquely (parent rows, etc.)
+    # Coordinates here are positions in the compressed numeric sequences,
+    # not positions in the original row lists.  This is the key distinction:
+    # an inserted candidate units row must not change which numeric rows are
+    # in the interval between two anchors.
+    anchors: list[tuple[int, int]] = []  # (compressed cand idx, compressed native idx)
+    for i, ms in enumerate(cand_numeric_multisets):
         key = tuple(sorted(ms.items()))
         native_matches = native_by_key.get(key, [])
         cand_matches = cand_by_key.get(key, [])
@@ -690,22 +868,87 @@ def _bind_rows(
             monotonic.append((cand_idx, native_idx))
             last_native = native_idx
 
-    binding: dict[int, int] = {}
-    for cand_idx, native_idx in monotonic:
-        binding[cand_idx] = native_idx
+    binding: dict[int, int] = {
+        cand_numeric_idxs[cand_idx]: native_numeric_idxs[native_idx]
+        for cand_idx, native_idx in monotonic
+    }
 
-    n_cand = len(grid_rows)
-    n_native = len(native_rows)
-    boundaries = [(-1, -1)] + monotonic + [(n_cand, n_native)]
+    n_cand_numeric = len(cand_numeric_idxs)
+    n_native_numeric = len(native_numeric_idxs)
+    boundaries = [(-1, -1)] + monotonic + [(n_cand_numeric, n_native_numeric)]
     for k in range(len(boundaries) - 1):
         c0, nv0 = boundaries[k]
         c1, nv1 = boundaries[k + 1]
-        cand_interval = range(c0 + 1, c1)
-        native_interval = range(nv0 + 1, nv1)
-        if len(cand_interval) == len(native_interval):
-            for off, ci in enumerate(cand_interval):
-                binding[ci] = native_interval[off]
-        # else: leave unbound -> row_binding_unverifiable for this interval
+        cand_numeric_interval = range(c0 + 1, c1)
+        native_numeric_interval = range(nv0 + 1, nv1)
+        numeric_interval_is_ordered = len(cand_numeric_interval) == len(native_numeric_interval)
+        if numeric_interval_is_ordered:
+            for off, ci in enumerate(cand_numeric_interval):
+                binding[cand_numeric_idxs[ci]] = native_numeric_idxs[native_numeric_interval[off]]
+
+        # The compressed interval's endpoints are numeric rows in the
+        # original sequences.  The slices between those endpoints therefore
+        # contain only value-less rows.  Pairing is allowed only after the
+        # numeric interval itself has an order-preserving interpretation and
+        # the value-less populations have the same cardinality.  In
+        # particular, an empty candidate row can never consume a native row
+        # that carries numbers just to make the original row counts equal.
+        cand_start = -1 if c0 < 0 else cand_numeric_idxs[c0]
+        cand_end = len(grid_rows) if c1 == n_cand_numeric else cand_numeric_idxs[c1]
+        native_start = -1 if nv0 < 0 else native_numeric_idxs[nv0]
+        native_end = len(native_rows) if nv1 == n_native_numeric else native_numeric_idxs[nv1]
+        cand_valueless_interval = [
+            idx for idx in range(cand_start + 1, cand_end) if not cand_multisets[idx]
+        ]
+        native_valueless_interval = [
+            idx for idx in range(native_start + 1, native_end) if not native_multisets[idx]
+        ]
+        if numeric_interval_is_ordered and len(cand_valueless_interval) == len(
+            native_valueless_interval
+        ):
+            for cand_idx, native_idx in zip(cand_valueless_interval, native_valueless_interval):
+                binding[cand_idx] = native_idx
+        # Otherwise the value-less rows stay unbound and are counted by bind().
+
+    # A candidate parent can contain invented values even though the native
+    # parent is value-less.  Preserve the existing parent-row invention
+    # diagnostic for that narrow, label-confirmed shape when the compressed
+    # numeric sequences have different lengths because of the candidate's
+    # lane layout.  This is not a general row-count equalisation fallback:
+    # every pair must be label-compatible, and an empty candidate row is
+    # explicitly never allowed to consume a numeric native row.
+    remaining_candidates = [idx for idx in range(len(grid_rows)) if idx not in binding]
+    remaining_native = [idx for idx in range(len(native_rows)) if idx not in binding.values()]
+    if len(remaining_candidates) == len(remaining_native):
+        fallback_pairs = list(zip(remaining_candidates, remaining_native))
+
+        def _fallback_pair_allowed(cand_idx: int, native_idx: int) -> bool:
+            candidate_multiset = cand_multisets[cand_idx]
+            native_row = native_rows[native_idx]
+            candidate_label = grid_rows[cand_idx][0].strip()
+            native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
+            labels_match = bool(candidate_label and native_label) and normalize_label(
+                candidate_label
+            ) == normalize_label(native_label)
+            if not labels_match:
+                return False
+            if not candidate_multiset:
+                # In particular, do not pair a value-less candidate with a
+                # numeric native merely because the unresolved lists align.
+                return bool(not native_row.multiset)
+            return bool(native_row.multiset or native_row.is_parent)
+
+        has_parent_invention = any(
+            cand_multisets[cand_idx]
+            and not native_rows[native_idx].multiset
+            and native_rows[native_idx].is_parent
+            for cand_idx, native_idx in fallback_pairs
+        )
+        if has_parent_invention and all(
+            _fallback_pair_allowed(cand_idx, native_idx) for cand_idx, native_idx in fallback_pairs
+        ):
+            for cand_idx, native_idx in fallback_pairs:
+                binding[cand_idx] = native_idx
 
     return binding
 
@@ -745,6 +988,16 @@ class UnboundCell:
 
 @dataclass
 class BindingResult:
+    """Cell, row, and coverage observations from one binding attempt.
+
+    ``candidate_valueless_unbound`` and ``native_valueless_unbound`` count
+    unmatched rows whose numeric multiset is empty on the respective side.
+    They are diagnostic counters and do not make complete numeric coverage
+    unverifiable. ``row_labels_checked`` counts every row in the binding map,
+    including value-less parent rows; all three fields are populated directly
+    so reporting callers need no fallback attribute handling.
+    """
+
     matched_cells: list[MatchedCell] = field(default_factory=list)
     contradicted_cells: list[ContradictedCell] = field(default_factory=list)
     row_label_contradictions: list[RowLabelContradiction] = field(default_factory=list)
@@ -755,6 +1008,11 @@ class BindingResult:
     row_label_unverifiable: bool = False
     column_binding_unverifiable: bool = True
     column_header_paths: list[ColumnHeaderPath] = field(default_factory=list)
+    # Content-free row coverage diagnostics.  Keep these as explicit counters
+    # so callers do not have to infer them from optional result attributes.
+    candidate_valueless_unbound: int = 0
+    native_valueless_unbound: int = 0
+    row_labels_checked: int = 0
 
     @property
     def fully_checked(self) -> bool:
@@ -961,6 +1219,18 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     if grid is None:
         return result
 
+    candidate_grid = grid
+    physical_n_cand_cols = candidate_grid.n_cols - 1
+    raw_lane_count = _lane_count_from_words(_presentation_normalized_for_lanes(words))[0]
+    if raw_lane_count < physical_n_cand_cols:
+        candidate_data_columns = _candidate_data_column_indices(candidate_grid)
+        grid = _project_candidate_data_columns(candidate_grid)
+        if not candidate_data_columns:
+            candidate_data_columns = tuple(range(1, physical_n_cand_cols + 1))
+            grid = candidate_grid
+    else:
+        candidate_data_columns = tuple(range(1, physical_n_cand_cols + 1))
+        grid = candidate_grid
     n_cand_cols = grid.n_cols - 1  # exclude the stub column
 
     native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols)
@@ -978,8 +1248,26 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     # lane/column check (an early `return` used to) silently swallowed
     # every row-level drop/invention signal whenever column geometry was
     # ALSO unverifiable — this is exactly what HIGH 1 and HIGH 2 reported.
-    row_binding = _bind_rows(native_rows, grid.rows)
-    result.row_binding_unverifiable = len(row_binding) != len(grid.rows)
+    row_binding = _bind_rows(native_rows, candidate_grid.rows)
+    bound_candidate_idxs = set(row_binding)
+    bound_native_idxs = set(row_binding.values())
+    result.candidate_valueless_unbound = sum(
+        1
+        for idx, row in enumerate(candidate_grid.rows)
+        if idx not in bound_candidate_idxs and not _candidate_row_multiset(row)
+    )
+    result.native_valueless_unbound = sum(
+        1
+        for idx, native_row in enumerate(native_rows)
+        if idx not in bound_native_idxs and not native_row.multiset
+    )
+    candidate_numeric_idxs = {
+        idx for idx, row in enumerate(candidate_grid.rows) if _candidate_row_multiset(row)
+    }
+    native_numeric_idxs = {idx for idx, native_row in enumerate(native_rows) if native_row.multiset}
+    result.row_binding_unverifiable = bool(
+        candidate_numeric_idxs - bound_candidate_idxs or native_numeric_idxs - bound_native_idxs
+    )
 
     # GH-273: numeric content and order establish row identity; only then may
     # the candidate stub verify that binding. Labels never choose a row (they
@@ -989,7 +1277,8 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     # normalizer deliberately erases presentation and punctuation, so a
     # punctuation-only non-empty label must not collapse into an empty stub.
     for cand_idx, native_idx in row_binding.items():
-        candidate_label = grid.rows[cand_idx][0].strip()
+        result.row_labels_checked += 1
+        candidate_label = candidate_grid.rows[cand_idx][0].strip()
         native_row = native_rows[native_idx]
         native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
         same_presence = bool(candidate_label) == bool(native_label)
@@ -1011,7 +1300,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
                 )
             )
 
-    # BLOCKING 1: a native DATA row that no candidate row ever bound to is not
+    # BLOCKING 1: a native NUMERIC row that no candidate row ever bound to is not
     # merely "unverifiable" in the abstract — it is C4's dropped-digit signal
     # for the whole row. `_bind_rows` only tracks candidate coverage; a
     # dropped native row can still leave every candidate row bound (e.g. the
@@ -1021,7 +1310,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     unbound_native_rows = [
         (idx, nr)
         for idx, nr in enumerate(native_rows)
-        if not nr.is_parent and idx not in bound_native_idxs
+        if nr.multiset and idx not in bound_native_idxs
     ]
     if unbound_native_rows:
         result.row_binding_unverifiable = True
@@ -1047,7 +1336,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     # per-cell walk below (it isn't a key in `row_binding`), so its values
     # must be reported here or they vanish — C4's invented-digit signal,
     # dropped instead of surfaced.
-    for cand_idx, cand_row in enumerate(grid.rows):
+    for cand_idx, cand_row in enumerate(candidate_grid.rows):
         if cand_idx in row_binding:
             continue
         row_path = (cand_row[0],) if cand_row and cand_row[0] else ()
@@ -1063,7 +1352,8 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
             )
 
     result.column_binding_unverifiable = lane_count == 0 or n_cand_cols != lane_count
-    if result.column_binding_unverifiable:
+    walk_column_binding_unverifiable = lane_count == 0 or physical_n_cand_cols != lane_count
+    if walk_column_binding_unverifiable:
         # HIGH 1: column geometry itself is unverifiable, but that is not
         # licence to drop every cell signal for the whole table — only to
         # stop CLAIMING a binding for it. `_best_lane_column_map` salvages
@@ -1071,21 +1361,30 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
         # any lane/column the map could not place anywhere (under ANY
         # admissible assignment) is unbound content, not an unknown.
         lane_to_col = _best_lane_column_map(
-            native_rows, grid.rows, row_binding, lane_count, n_cand_cols
+            native_rows,
+            grid.rows,
+            row_binding,
+            lane_count,
+            n_cand_cols,
         )
+        lane_to_col = {
+            lane: candidate_data_columns[col_idx] - 1
+            for lane, col_idx in lane_to_col.items()
+            if col_idx < len(candidate_data_columns)
+        }
         mapped_lanes = set(lane_to_col.keys())
         mapped_cols = set(lane_to_col.values())
         col_to_lane = {col: lane for lane, col in lane_to_col.items()}
 
         for cand_idx, native_idx in row_binding.items():
             native_row = native_rows[native_idx]
-            cand_row = grid.rows[cand_idx]
+            cand_row = candidate_grid.rows[cand_idx]
             if native_row.is_parent:
                 _record_inventions_on_parent_row(
                     result,
                     native_row,
                     cand_row,
-                    n_cand_cols,
+                    physical_n_cand_cols,
                     header_paths_by_lane,
                     col_to_lane,
                 )
@@ -1120,7 +1419,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
                     UnboundCell(row_path=native_row.row_path, col_path=col_path, token=text)
                 )
 
-            for col_idx in range(n_cand_cols):
+            for col_idx in range(physical_n_cand_cols):
                 if col_idx in mapped_cols:
                     continue
                 col = col_idx + 1
