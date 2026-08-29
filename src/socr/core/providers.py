@@ -241,6 +241,18 @@ def cost_of(
     return prof.cost_per_page_usd * max(0, n_pages)
 
 
+def is_cloud_qwen(profile: ProviderProfile | None) -> bool:
+    """Whether *profile* is the Ollama-Cloud Qwen rung.
+
+    One predicate so the two places that must treat that rung specially -- the
+    config overrides below and the availability probe in
+    ``UnifiedPipeline._run_engine_on_pages`` -- cannot drift apart. Keyed on the
+    profile ``id`` rather than the descriptive ``backend`` label, so the rung's
+    identity (not a transport string that may be reworded) is what decides.
+    """
+    return profile is not None and profile.id == PROFILE_QWEN_CLOUD.id
+
+
 def execution_overrides(profile: ProviderProfile) -> dict[str, object]:
     """Config fields that must be forced so *profile* actually runs as declared.
 
@@ -267,10 +279,16 @@ def execution_overrides(profile: ProviderProfile) -> dict[str, object]:
       ``qwen_backend`` is the operator's deliberate choice and the config-derived
       model is already correct.
 
-    The profile registry stays the single source of truth: the values come from the
-    profile, never from a literal here.
+    ``qwen_backend`` is the one literal here, and deliberately so: it is not the
+    profile's ``backend`` field. That field carries the DESCRIPTIVE label
+    ``"ollama-cloud"``, which is not a value ``PipelineConfig.qwen_backend`` accepts
+    ("auto", "ollama", "vllm", "api"). Ollama Cloud is served by the local Ollama
+    runtime under a ``:cloud`` model tag, so the executed backend really is
+    ``ollama`` -- the translation cannot be sourced from the registry because the
+    registry records what the rung IS, not which transport runs it. The model, which
+    the registry can answer for, does come from the profile.
     """
-    if profile.engine is EngineType.QWEN and profile.backend == "ollama-cloud":
+    if is_cloud_qwen(profile):
         return {
             "qwen_backend": "ollama",
             "qwen_model": profile.model,

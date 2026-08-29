@@ -26,7 +26,7 @@ from socr.core.normalizer import (
     OutputNormalizer,
     collapse_repeated_table_rows,
 )
-from socr.core.providers import ProviderProfile, execution_overrides
+from socr.core.providers import ProviderProfile, execution_overrides, is_cloud_qwen
 from socr.core.result import (
     DocumentStatus,
     EngineResult,
@@ -998,7 +998,24 @@ class UnifiedPipeline:
                 audit_passed=False,
             )
 
-        if not engine.is_available():
+        # GH-159: `is_available()` probes the LOCAL tier -- `VLLM_BASE_URL` or the
+        # local instruct build -- so it returns False on a machine that can only
+        # reach Ollama Cloud. Asking it about the cloud rung would refuse that rung
+        # before its pinned config ever ran, which is the "cloud-only environments
+        # successfully use the qwen-cloud rung" acceptance criterion. The two probes
+        # are deliberately separate (see `qwen.cloud_model_available`); pick the one
+        # that answers for the rung actually being executed.
+        if is_cloud_qwen(profile):
+            from socr.engines.qwen import cloud_model_available
+
+            try:
+                available = cloud_model_available()
+            except Exception:  # a probe must never crash routing
+                available = False
+        else:
+            available = engine.is_available()
+
+        if not available:
             logger.warning(f"{engine.name} not available for {label} OCR")
             if not self.config.quiet:
                 console.print(
