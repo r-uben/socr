@@ -914,14 +914,47 @@ def _record_inventions_on_parent_row(
         )
 
 
-def bind(words: list, markdown: str) -> BindingResult:
+def _words_in_region(words: list, region: tuple | None) -> list:
+    """Filter *words* to those whose top-left corner lies inside *region*.
+
+    GH-330. ``bind`` was only ever called with a whole page's words, so on a page
+    with prose above the table and notes below it, lane clustering ran over text
+    that is not in the table at all — which is why column binding was unverifiable
+    on every real page measured. Every native table region already arrives as a
+    ``(rect, markdown)`` pair, so the rect was available all along and simply never
+    passed in.
+
+    Top-left containment (not intersection) matches how ``extract_structured``
+    assigns a word to a region, so the two agree on which words belong to a table.
+    Kept here rather than imported so ``binding`` stays free of ``fitz``.
+
+    ``region=None`` returns *words* unchanged — byte-for-byte the old behaviour.
+    """
+    if region is None:
+        return words
+    try:
+        x0, y0, x1, y1 = (float(v) for v in region)
+    except (TypeError, ValueError):
+        return words  # a malformed region is an absence of scoping, not a conviction
+    if not (x0 <= x1 and y0 <= y1):
+        return words
+    return [w for w in words if x0 <= w[0] <= x1 and y0 <= w[1] <= y1]
+
+
+def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingResult:
     """Bind *markdown*'s candidate grid to the native geometry in *words*.
 
     Never raises on malformed input: a markdown block that fails the A1
     strict parse, or a page with no numeric lanes, binds nothing and returns
     an (empty) :class:`BindingResult` — an absence of evidence, not a
     conviction of either side.
+
+    *region*, when given, is the candidate's own ``(x0, y0, x1, y1)`` extent; words
+    outside it are dropped before any geometry is computed (GH-330). Omitting it is
+    the unscoped whole-page fallback, whose column binding is expected to be
+    unverifiable on any page that carries text outside the table.
     """
+    words = _words_in_region(words, region)
     result = BindingResult()
 
     grid = parse_grid(markdown)

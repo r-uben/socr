@@ -1,5 +1,11 @@
 """Benchmark suite for OCR quality evaluation."""
 
+from socr.benchmark.binding_coverage import (
+    CoverageRecord,
+    CoverageReport,
+    measure_manifest,
+    select_primary_grid,
+)
 from socr.benchmark.calibrate import CalibrationReport, EngineProfile, RepairCalibrator
 from socr.benchmark.dataset import BenchmarkPaper, BenchmarkSet, build_benchmark_set
 from socr.benchmark.ground_truth import (
@@ -14,6 +20,8 @@ from socr.benchmark.scorer import BenchmarkScorer, DocumentScore, PageScore
 
 __all__ = [
     "BenchmarkPaper",
+    "CoverageRecord",
+    "CoverageReport",
     "BenchmarkResults",
     "BenchmarkRunner",
     "BenchmarkScorer",
@@ -30,4 +38,6 @@ __all__ = [
     "PaperRasterizer",
     "RepairCalibrator",
     "build_benchmark_set",
+    "measure_manifest",
+    "select_primary_grid",
 ]
