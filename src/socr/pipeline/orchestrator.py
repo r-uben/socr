@@ -729,68 +729,7 @@ class UnifiedPipeline:
                     )
                 )
 
-        # GH-151 TICKET-B1 / GH-200 / GH-211: surface every table-structure
-        # defect as a durable audit event -- EXACTLY ONE per affected page.
-        #
-        # Three independent flags can demote the same page: TR-3's per-region
-        # geometry hard-fail, B1's grid-shape defect, and GH-200's header
-        # attribution. They are genuinely independent (a header can be
-        # destroyed on a perfectly rectangular grid, and TR-3's region check
-        # runs separately from B1's grid check), so a page can carry more than
-        # one. Emitting one event per flag double-counts that page in the CLI
-        # failure totals and in any consumer counting events, so the causes are
-        # collected and reported together in ``data["defects"]`` instead.
-        #
-        # Keyed SOLELY on the flags stamped by born_digital.py -- do NOT re-run
-        # structure_check or re-derive any predicate here (the design note is
-        # explicit: the flag is authoritative, this loop does not re-inspect
-        # the grid).
-        defect_detail = {
-            "unverifiable_table_region": (
-                "native table region failed deterministic geometry verification; "
-                "--native-only kept the native text without OCR and marked the page "
-                "untrusted"
-            ),
-            "grid_shape": (
-                "native table grid structurally defective (ragged widths and/or a "
-                "detached label row)"
-            ),
-            "table_latex_leak": "native table Markdown contains residual LaTeX table syntax",
-            "table_width_mismatch": (
-                "native table delimiter width disagrees with its rectangular content"
-            ),
-            "header_unattributed": (
-                "native table header band not attributable to any emitted header cell "
-                "(destroyed, not merely misplaced)"
-            ),
-        }
-        for pa in assessment.pages:
-            defects: list[str] = []
-            if self.config.native_only and getattr(pa, "has_unverifiable_table_region", False):
-                defects.append("unverifiable_table_region")
-            emission_defect = str(getattr(pa, "native_table_emission_defect", "") or "")
-            if emission_defect:
-                defects.append(emission_defect)
-            elif getattr(pa, "native_table_structure_defective", False):
-                defects.append("grid_shape")
-            if getattr(pa, "native_table_header_unattributed", False):
-                defects.append("header_unattributed")
-            if not defects:
-                continue
-            causes = "; ".join(defect_detail[d] for d in defects)
-            state.events.append(
-                AuditEvent(
-                    page_num=pa.page_num,
-                    kind="table_structure_failed",
-                    engine="native",
-                    detail=(
-                        f"{causes}. The native attempt is demoted to flagged WARNING "
-                        "and can no longer pass as a trusted native page (a non-native "
-                        "winner, if any, is unaffected)."
-                    ),
-                    data={"defects": defects},
-                )
-            )
+        self._emit_native_table_structure_events(state, assessment)
 
         # GH-195: surface a rejected text-strategy grid. GH-144 A2 rejects a
         # find_tables(strategy="text") grid when a lane boundary split a native
@@ -1081,6 +1020,94 @@ class UnifiedPipeline:
             console.print(f"  {ok}/{len(page_nums)} pages succeeded")
 
         return final
+
+    def _emit_native_table_structure_events(self, state, assessment) -> None:
+        """Record one durable audit event per page with a native table defect.
+
+        Extracted from ``_phase_analyze`` (GH-303) so the defect-name mapping can
+        be exercised directly. Pure move: same flags read, same event emitted.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        # GH-151 TICKET-B1 / GH-200 / GH-211: surface every table-structure
+        # defect as a durable audit event -- EXACTLY ONE per affected page.
+        #
+        # Three independent flags can demote the same page: TR-3's per-region
+        # geometry hard-fail, B1's grid-shape defect, and GH-200's header
+        # attribution. They are genuinely independent (a header can be
+        # destroyed on a perfectly rectangular grid, and TR-3's region check
+        # runs separately from B1's grid check), so a page can carry more than
+        # one. Emitting one event per flag double-counts that page in the CLI
+        # failure totals and in any consumer counting events, so the causes are
+        # collected and reported together in ``data["defects"]`` instead.
+        #
+        # Keyed SOLELY on the flags stamped by born_digital.py -- do NOT re-run
+        # structure_check or re-derive any predicate here (the design note is
+        # explicit: the flag is authoritative, this loop does not re-inspect
+        # the grid).
+        defect_detail = {
+            "unverifiable_table_region": (
+                "native table region failed deterministic geometry verification; "
+                "--native-only kept the native text without OCR and marked the page "
+                "untrusted"
+            ),
+            "grid_shape": (
+                "native table grid structurally defective (ragged widths and/or a "
+                "detached label row)"
+            ),
+            "table_content_empty": (
+                "native table has a valid header and delimiter but no body content "
+                "(every body cell is a placeholder)"
+            ),
+            "table_latex_leak": "native table Markdown contains residual LaTeX table syntax",
+            "table_width_mismatch": (
+                "native table delimiter width disagrees with its rectangular content"
+            ),
+            "header_unattributed": (
+                "native table header band not attributable to any emitted header cell "
+                "(destroyed, not merely misplaced)"
+            ),
+        }
+        for pa in assessment.pages:
+            defects: list[str] = []
+            if self.config.native_only and getattr(pa, "has_unverifiable_table_region", False):
+                defects.append("unverifiable_table_region")
+            emission_defect = str(getattr(pa, "native_table_emission_defect", "") or "")
+            content_defect = str(getattr(pa, "native_table_content_defect", "") or "")
+            if emission_defect:
+                defects.append(emission_defect)
+            elif content_defect:
+                # GH-303. The GH-190 content term feeds the
+                # `native_table_structure_defective` aggregate, so an empty native
+                # table reached the `elif` below and was reported as `grid_shape` --
+                # GH-151's ragged-widths / detached-label defect, whose
+                # `defect_detail` text describes something that did not happen.
+                # Anyone counting GH-151 against GH-190 mis-attributed the page.
+                #
+                # Named on its own term, exactly as emission defects already are.
+                # Disposition is unchanged: still demoted, never restamped SUCCESS,
+                # and `--native-only` is not overridden.
+                defects.append(content_defect)
+            elif getattr(pa, "native_table_structure_defective", False):
+                defects.append("grid_shape")
+            if getattr(pa, "native_table_header_unattributed", False):
+                defects.append("header_unattributed")
+            if not defects:
+                continue
+            causes = "; ".join(defect_detail[d] for d in defects)
+            state.events.append(
+                AuditEvent(
+                    page_num=pa.page_num,
+                    kind="table_structure_failed",
+                    engine="native",
+                    detail=(
+                        f"{causes}. The native attempt is demoted to flagged WARNING "
+                        "and can no longer pass as a trusted native page (a non-native "
+                        "winner, if any, is unaffected)."
+                    ),
+                    data={"defects": defects},
+                )
+            )
 
     def _assessment_for_page(self, page_num: int):
         if not self._last_assessment:

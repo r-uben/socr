@@ -855,6 +855,9 @@ class PageAssessment:
     #: aggregate above, so a raw content or parsed shape defect cannot be
     #: misreported as emission provenance.
     native_table_emission_defect: str = ""
+    # GH-303: reported on its own term rather than collapsing into `grid_shape`,
+    # which names GH-151's ragged-widths defect and describes the wrong failure.
+    native_table_content_defect: str = ""
     #: GH-200: header-attribution HARD verdict on the native markdown (only
     #: checked when the aggregate above did NOT already fire -- the emission,
     #: content, and shape terms are cheaper and take priority in cost order).
@@ -1548,6 +1551,7 @@ class BornDigitalDetector:
         native_rotated_text_shredded = False
         native_table_structure_defective = False
         native_table_emission_defect = ""
+        native_table_content_defect = ""
         native_table_header_unattributed = False
         if has_tables:
             if text_direction_is_rotated(direction):
@@ -1705,6 +1709,7 @@ class BornDigitalDetector:
             native_rotated_text_shredded=native_rotated_text_shredded,
             native_table_structure_defective=native_table_structure_defective,
             native_table_emission_defect=native_table_emission_defect,
+            native_table_content_defect=native_table_content_defect,
             native_table_header_unattributed=native_table_header_unattributed,
             notes=notes,
         )
