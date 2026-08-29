@@ -183,8 +183,19 @@ def test_the_cloud_rung_reaches_the_engine_with_its_own_backend_and_model(monkey
     """The guard: revert the orchestrator wiring and this goes red.
 
     Pins the DIFFERENCE at the real call site -- the config the engine is handed
-    for the cloud rung versus the local rung. Nothing here contacts ollama.
+    for the cloud rung versus the local rung.
+
+    `cloud_model_available` MUST be patched. The cloud rung's availability probe is
+    no longer `engine.is_available()` -- that IS the GH-159 fix -- so leaving the
+    probe live makes this test depend on whether ollama happens to be installed. It
+    passed on a workstation and failed in CI, where the probe returns False, the
+    cloud call never reaches the engine, and `spy.configs` has one entry instead of
+    two. Exactly the local-passes/CI-fails trap CLAUDE.md documents.
     """
+    from socr.engines import qwen as qwen_engine
+
+    monkeypatch.setattr(qwen_engine, "cloud_model_available", lambda: True)
+
     spy = _SpyEngine()
     pipe = _pipeline_with(spy, monkeypatch)
 
