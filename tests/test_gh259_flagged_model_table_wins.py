@@ -266,10 +266,33 @@ def test_document_status_audit_event_and_cli_surface_the_kept_page(tmp_path: Pat
     pdf_path = tmp_path / "table_page.pdf"
     doc = fitz.open()
     page = doc.new_page()
-    y = 72
-    for line in NATIVE_TABLE.splitlines():
-        page.insert_text((54, y), line or " ")
-        y += 14
+
+    # GH-248: laid out with REAL column x-positions rather than by writing the
+    # markdown pipe syntax of ``NATIVE_TABLE`` as literal text lines at one x.
+    # That older fixture had no column geometry at all -- its "columns" were
+    # character offsets inside a line like ``| 2 | -1.96 | -0.94 |`` -- so the page
+    # was a paragraph of markdown that only registered as a table because
+    # ``has_numeric_columns`` accepted numeric tokens co-occupying lanes without
+    # requiring those lanes to RECUR. That is the very false positive GH-248 fixes.
+    #
+    # This page carries the same values in the same shape, positioned as a real
+    # borderless table, so what the test exercises (a structure-class page reaching
+    # the ladder, and the flagged model reading winning) is unchanged and no longer
+    # depends on a gate that should never have fired.
+    page.insert_text((54, 60), "Table 1. Regressions of 1-year excess returns on all forward rates")
+    _cols = (54.0, 120.0, 190.0, 260.0, 330.0)
+    _rows = (
+        ("n", "const.", "y(1)", "f(1->2)", "R2"),
+        ("2", "-1.96", "-0.94", "0.74", "0.34"),
+        ("Large T", "(0.64)", "(0.18)", "(0.43)", ""),
+        ("Small T", "(0.81)", "(0.30)", "(0.50)", ""),
+        ("EH", "(0.92)", "(0.41)", "(0.55)", ""),
+    )
+    for r, cells in enumerate(_rows):
+        y = 90 + r * 16
+        for x, cell in zip(_cols, cells):
+            if cell:
+                page.insert_text((x, y), cell, fontsize=9)
     doc.save(str(pdf_path))
     doc.close()
 

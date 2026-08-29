@@ -558,7 +558,28 @@ def has_numeric_columns(page) -> bool:
     row_lanes: dict[float, set] = {}
     for x, y in nums:
         row_lanes.setdefault(y, set()).add(lane_of[x])
-    grid_rows = sum(1 for ls in row_lanes.values() if len(ls) >= _MIN_LANES_PER_ROW)
+
+    # GH-248: a lane only counts if it behaves like a COLUMN -- i.e. it recurs down
+    # the page. A borderless table reuses the same x positions row after row; a
+    # corrupt text layer manufactures numeric-looking tokens that scatter into many
+    # nearly-unique lanes, and the co-occupancy count alone read that scatter as a
+    # grid. Measured on the mirrored-OCR reproduction (Glaeser/Sacerdote/Scheinkman
+    # pp. 6, 17, 36, 38): 43-66 spurious tokens across 22-30 lanes, roughly two per
+    # lane, versus a real regression table putting one token in each of a handful of
+    # lanes on every data row.
+    #
+    # Deliberately NO new constant: a lane is column-like when it appears on at least
+    # ``_MIN_TABLE_ROWS`` rows -- the same count already required of the grid itself.
+    # The gate then asks for ``_MIN_TABLE_ROWS`` rows that each populate
+    # ``_MIN_LANES_PER_ROW`` *column-like* lanes, which is the original predicate with
+    # "lane" tightened to "column".
+    lane_rows: dict[int, set] = {}
+    for y, lanes_here in row_lanes.items():
+        for lane in lanes_here:
+            lane_rows.setdefault(lane, set()).add(y)
+    column_lanes = {lane for lane, ys in lane_rows.items() if len(ys) >= _MIN_TABLE_ROWS}
+
+    grid_rows = sum(1 for ls in row_lanes.values() if len(ls & column_lanes) >= _MIN_LANES_PER_ROW)
     return grid_rows >= _MIN_TABLE_ROWS
 
 
