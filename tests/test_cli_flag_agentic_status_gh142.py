@@ -279,7 +279,7 @@ def readers(tmp_path_factory):
     # this test's first CI run on `qwen_vllm_url`. Pinned to None so the fixture
     # takes the same branch everywhere.
     pipe._resolve_crop_vlm_model = lambda: None
-    pipe._run_engine_on_pages = lambda state, nums, nat, eng, phase: [
+    pipe._run_engine_on_pages = lambda state, nums, nat, eng, phase, profile=None: [
         PageOutput(
             page_num=p,
             text=f"| a | b |\n| --- | --- |\n| 1 | 2 |\n\ntext {p}",

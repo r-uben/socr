@@ -11,6 +11,7 @@ import logging
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from rich.console import Console
@@ -25,6 +26,7 @@ from socr.core.normalizer import (
     OutputNormalizer,
     collapse_repeated_table_rows,
 )
+from socr.core.providers import ProviderProfile, execution_overrides
 from socr.core.result import (
     DocumentStatus,
     EngineResult,
@@ -940,6 +942,7 @@ class UnifiedPipeline:
         enhancement_pages: list[int],
         engine_type: EngineType,
         label: str,
+        profile: ProviderProfile | None = None,
     ) -> list[PageOutput]:
         """Render pages to images and run a CLI engine per-page.
 
@@ -953,11 +956,31 @@ class UnifiedPipeline:
             enhancement_pages: Pages that have native text fallback.
             engine_type: Which engine to use.
             label: Label for log messages ("local" or "cloud").
+            profile: The ladder rung being executed, when there is one. Supplies
+                the backend/model overrides that make an ambiguous engine run as
+                the rung declares (GH-159) — without it, the cloud Qwen rung
+                silently executed the local build. ``None`` keeps the pure
+                config-derived behaviour used by the non-agentic phases.
 
         Returns:
             List of PageOutput, one per page_num, with per-page text.
         """
         engine = get_engine(engine_type)
+
+        # GH-159: a rung's declared (backend, model) must actually run, not merely
+        # be recorded as provenance. Overrides are empty for every unambiguous
+        # profile, so this is a no-op except on the cloud Qwen rung.
+        run_config = self.config
+        if profile is not None:
+            overrides = execution_overrides(profile)
+            if overrides:
+                run_config = replace(self.config, **overrides)
+                logger.info(
+                    "[GH-159] provider %s pins backend=%r model=%r for this call",
+                    profile.id or engine_type.value,
+                    overrides.get("qwen_backend"),
+                    overrides.get("qwen_model"),
+                )
 
         def native_fallback(
             page_num: int, failure_mode: FailureMode, error: str = ""
@@ -1014,8 +1037,8 @@ class UnifiedPipeline:
         page_outputs = engine.process_pages(
             pdf_path=state.handle.path,
             page_nums=page_nums,
-            config=self.config,
-            dpi=self.config.render_dpi,
+            config=run_config,
+            dpi=run_config.render_dpi,
         )
 
         # For enhancement pages where OCR failed, fall back to native text
@@ -1974,7 +1997,7 @@ class UnifiedPipeline:
                 # must not.
                 deadline = float(getattr(self.config, "escalation_timeout_sec", 120.0))
                 ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                future = ex.submit(run_provider, profile.engine, page_num)
+                future = ex.submit(run_provider, profile, page_num)
                 try:
                     out = future.result(timeout=deadline)
                     ex.shutdown(wait=False)
@@ -2536,9 +2559,14 @@ class UnifiedPipeline:
             ladder_str = " -> ".join(f"{p.engine.value}(${p.cost_per_page_usd:g})" for p in ladder)
             console.print(f"  ladder: {ladder_str}")
 
-        def run_provider(engine: EngineType, page_num: int) -> PageOutput:
+        def run_provider(profile: ProviderProfile, page_num: int) -> PageOutput:
             outs = self._run_engine_on_pages(
-                state, [page_num], native_fallback_pages, engine, "agentic"
+                state,
+                [page_num],
+                native_fallback_pages,
+                profile.engine,
+                "agentic",
+                profile=profile,
             )
             return outs[0]
 

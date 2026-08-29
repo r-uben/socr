@@ -239,3 +239,41 @@ def cost_of(
     if prof is None:
         return 0.0
     return prof.cost_per_page_usd * max(0, n_pages)
+
+
+def execution_overrides(profile: ProviderProfile) -> dict[str, object]:
+    """Config fields that must be forced so *profile* actually runs as declared.
+
+    GH-159. ``ProviderProfile`` carries ``(engine, backend, model)``, but until now
+    only ``engine`` reached execution: ``route_page`` passed ``prof.engine`` into
+    ``run_provider`` and the backend/model were recorded as provenance only. For
+    every engine whose ``EngineType`` maps 1:1 to a deployment that is fine. For
+    QWEN it is not — ``PROFILE_QWEN_LOCAL`` and ``PROFILE_QWEN_CLOUD`` share
+    ``EngineType.QWEN``, so the cloud rung executed whatever
+    ``resolve_qwen_intent`` derived from ``PipelineConfig`` (normally the local
+    instruct build) while the manifest recorded ``backend="ollama-cloud"``.
+
+    Returned overrides are deliberately MINIMAL — only the ambiguous case is
+    touched:
+
+    - **Cloud Qwen** pins the model and forces the Ollama backend. Ollama Cloud is
+      served by the local Ollama runtime under a ``:cloud`` tag, so the backend is
+      ``ollama``, not the profile's descriptive ``ollama-cloud`` label. Pinning is
+      required because ``resolve_qwen_intent`` rewrites any unpinned model back to
+      ``OLLAMA_MODEL`` on a local backend — the exact clobber that made this rung
+      inert.
+    - **Everything else** returns ``{}``. In particular the LOCAL Qwen rung is left
+      alone: forcing its Ollama tag would break a vLLM/HPC deployment, where
+      ``qwen_backend`` is the operator's deliberate choice and the config-derived
+      model is already correct.
+
+    The profile registry stays the single source of truth: the values come from the
+    profile, never from a literal here.
+    """
+    if profile.engine is EngineType.QWEN and profile.backend == "ollama-cloud":
+        return {
+            "qwen_backend": "ollama",
+            "qwen_model": profile.model,
+            "qwen_model_pinned": True,
+        }
+    return {}

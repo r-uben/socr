@@ -38,12 +38,13 @@ FULL_LADDER = provider_ladder(
 
 
 def _run(text="some ocr text"):
-    def run(engine: EngineType, page_num: int) -> PageOutput:
+    def run(profile, page_num: int) -> PageOutput:
+        # GH-159: the router passes the whole ProviderProfile, not a bare EngineType.
         return PageOutput(
             page_num=page_num,
             text=text,
             status=PageStatus.SUCCESS,
-            engine=engine.value,
+            engine=profile.engine.value,
             audit_passed=True,
             confidence=0.5,
         )

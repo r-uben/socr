@@ -9,9 +9,11 @@ Control flow lives in Python (the panel was unanimous: the LLM is a stateless
 per-page decision function, not the orchestrator). ``route_page`` is pure given
 its two injected dependencies:
 
-  - ``run_provider(engine, page_num) -> PageOutput`` — actually OCR one page with
-    one engine. The orchestrator wires the real implementation (render + engine
-    call); tests pass a stub.
+  - ``run_provider(profile, page_num) -> PageOutput`` — actually OCR one page with
+    one provider. It takes the whole ``ProviderProfile``, not just its
+    ``EngineType``: local and cloud Qwen share ``EngineType.QWEN``, so an engine
+    alone cannot say which backend/model must run (GH-159). The orchestrator wires
+    the real implementation (render + engine call); tests pass a stub.
   - a ``PageJudge`` — accept/escalate verdict for one page's output. Either the
     VLM judge (``VLMPageJudge``) or the heuristic fallback (``HeuristicPageJudge``)
     so the loop still works with no model available.
@@ -54,7 +56,7 @@ DEFAULT_PROVIDER_TIMEOUTS: dict[EngineType, float] = {
     EngineType.GEMINI: 240.0,
 }
 
-RunProvider = Callable[[EngineType, int], PageOutput]
+RunProvider = Callable[[ProviderProfile, int], PageOutput]
 
 
 @dataclass
@@ -162,7 +164,7 @@ def route_page(
     Args:
         page_num: 1-indexed page.
         ladder: providers ordered cheapest-first (see ``provider_ladder``).
-        run_provider: runs one engine on one page.
+        run_provider: runs one provider profile on one page.
         judge: accept/escalate decision per output.
         max_attempts: optional cap on providers tried (0 = whole ladder, the
             default). Kept for explicit user overrides and tests only.
@@ -218,7 +220,7 @@ def route_page(
         try:
             if timeout_sec is not None:
                 ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                future = ex.submit(run_provider, prof.engine, page_num)
+                future = ex.submit(run_provider, prof, page_num)
                 try:
                     output = future.result(timeout=timeout_sec)
                 except concurrent.futures.TimeoutError:
@@ -250,7 +252,7 @@ def route_page(
                 else:
                     ex.shutdown(wait=False)
             else:
-                output = run_provider(prof.engine, page_num)
+                output = run_provider(prof, page_num)
         except Exception as exc:  # a provider blowing up must not kill the page
             logger.warning("provider %s failed on page %s: %s", prof.engine.value, page_num, exc)
             attempts.append(
