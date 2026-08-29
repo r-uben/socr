@@ -376,7 +376,7 @@ def _rect_coverage(inner, outer) -> float:
 _LINK_COVERAGE_MIN = 0.5
 
 
-def _uri_links(page) -> list[tuple[object, str, str]]:
+def _uri_links(page) -> list[tuple[object, str, str, tuple[int, ...]]]:
     """External URI links on a page, as ``(rect, uri, anchor_text)``.
 
     GH-127: ``page.get_links()`` was never called, so every hyperlink in the text
@@ -409,53 +409,122 @@ def _uri_links(page) -> list[tuple[object, str, str]]:
     except Exception:
         words = []
 
-    out: list[tuple[object, str, str]] = []
+    out: list[tuple[object, str, str, tuple[int, ...]]] = []
     for link in raw:
-        uri = (link.get("uri") or "").strip()
-        if not uri:
-            continue
+        # One damaged entry must not cost the page every other link. The whole
+        # per-link body is inside the boundary -- URI, rectangle AND word coverage
+        # -- because a malformed word tuple raised from the coverage scan, outside
+        # the narrower guard this replaces (GH-127 review). Extraction degrades to
+        # fewer links, never to an exception.
         try:
+            uri = (link.get("uri") or "").strip()
+            if not uri:
+                continue
             rect = fitz.Rect(link["from"])
+            if rect.is_empty or not rect.is_valid:
+                continue
+            covered = [
+                (i, w[4])
+                for i, w in enumerate(words)
+                if _rect_coverage(fitz.Rect(w[0], w[1], w[2], w[3]), rect) >= _LINK_COVERAGE_MIN
+            ]
         except Exception:
             continue
-        if rect.is_empty or not rect.is_valid:
-            continue
-        covered = [
-            w[4]
-            for w in words
-            if _rect_coverage(fitz.Rect(w[0], w[1], w[2], w[3]), rect) >= _LINK_COVERAGE_MIN
-        ]
-        out.append((rect, uri, " ".join(covered).strip()))
+        anchor = " ".join(t for _i, t in covered).strip()
+        idxs = [i for i, _t in covered]
+        out.append((rect, uri, anchor, tuple(idxs)))
     return out
 
 
-def _apply_links_to_flat_text(text: str, links: list[tuple[object, str, str]]) -> str:
+def _word_char_spans(text: str, words: list) -> dict[int, tuple[int, int]]:
+    """Map each word index to its ``(start, end)`` offsets in the flat page text.
+
+    GH-127 review. Anchors used to be located with ``text.find(anchor)``, which
+    binds by CONTENT: a paper citing "Smith 2020" in the body and again in the
+    bibliography -- where the DOI actually lives -- had the URI attached to the
+    in-text mention instead. A wrong URI on the wrong citation is worse than a
+    dropped link, and this is a citation corpus.
+
+    Words come back from ``get_text("words")`` in reading order, which is the order
+    ``get_text("text")`` lays them out, so a single left-to-right cursor pass
+    recovers each occurrence's own offsets. A word that cannot be located from the
+    cursor onward (hyphenation, a ligature the two extractors spell differently) is
+    skipped rather than guessed at, and its link simply resolves no span.
+    """
+    spans: dict[int, tuple[int, int]] = {}
+    cursor = 0
+    for i, w in enumerate(words):
+        token = w[4]
+        if not token:
+            continue
+        idx = text.find(token, cursor)
+        if idx < 0:
+            continue
+        spans[i] = (idx, idx + len(token))
+        cursor = idx + len(token)
+    return spans
+
+
+def _apply_links_to_flat_text(text: str, links: list, words: list | None = None) -> str:
     """Wrap resolved link anchors inside an already-flattened page string.
 
     GH-127: ``extract_structured`` short-circuits a page with no tables to raw
-    ``get_text("text")`` and never walks the span dict — which is EVERY prose
+    ``get_text("text")`` and never walks the span dict -- which is EVERY prose
     page, i.e. the majority of the corpus. Routing those pages through the dict
     walk instead would change their text for reasons unrelated to links (line
     stripping, furniture relegation) and churn every golden fragment, so links
     are applied to the flat string instead.
 
-    Substring replacement, first occurrence per link, left to right. Every
-    original character survives; only the brackets are inserted. An anchor that
-    does not appear verbatim in the flattened text is skipped rather than
-    guessed at — a link is not worth corrupting the prose for.
+    Anchors are located by WORD POSITION, not by ``text.find(anchor)``. Content
+    matching bound every link to the first textual occurrence, so a "Smith 2020"
+    appearing in both the body and the bibliography put the bibliography's DOI on
+    the in-text mention (GH-127 review). It also produced malformed nested output
+    when one anchor was a substring of another already-wrapped one:
+    ``[Smith [2020](b) for details](a)``.
+
+    Replacements are applied right-to-left so earlier offsets stay valid, and any
+    link whose span overlaps one already applied is skipped rather than nested.
+    Every original character survives; only the brackets are inserted.
     """
     if not links or not text:
         return text
-    for _rect, uri, anchor_text in links:
-        if not anchor_text or anchor_text == uri:
+
+    char_spans = _word_char_spans(text, words or [])
+
+    resolved: list[tuple[int, int, str, str]] = []
+    for link in links:
+        uri = link[1]
+        anchor = link[2]
+        idxs = link[3] if len(link) > 3 else ()
+        if not anchor or anchor == uri:
             continue
-        idx = text.find(anchor_text)
-        if idx < 0:
-            continue
-        # Already wrapped by an earlier, overlapping link.
-        if idx > 0 and text[idx - 1] == "[":
-            continue
-        text = text[:idx] + _emit_run(anchor_text, uri) + text[idx + len(anchor_text) :]
+        bounds = [char_spans[i] for i in idxs if i in char_spans]
+        if bounds:
+            start_c = min(b[0] for b in bounds)
+            end_c = max(b[1] for b in bounds)
+        else:
+            # No word geometry (a damaged text layer, or words the two extractors
+            # spell differently). Fall back to the first textual occurrence -- the
+            # old behaviour, now only for links that would otherwise be lost.
+            idx = text.find(anchor)
+            if idx < 0:
+                continue
+            start_c, end_c = idx, idx + len(anchor)
+        resolved.append((start_c, end_c, uri, text[start_c:end_c]))
+
+    # Left-to-right so the FIRST link wins a contested span, then applied in
+    # reverse so each splice leaves the earlier offsets untouched.
+    resolved.sort(key=lambda r: (r[0], r[1]))
+    kept: list[tuple[int, int, str, str]] = []
+    last_end = -1
+    for start_c, end_c, uri, anchor in resolved:
+        if start_c < last_end:
+            continue  # overlaps an already-accepted anchor; never nest
+        kept.append((start_c, end_c, uri, anchor))
+        last_end = end_c
+
+    for start_c, end_c, uri, anchor in reversed(kept):
+        text = text[:start_c] + _emit_run(anchor, uri) + text[end_c:]
     return text
 
 
@@ -499,16 +568,35 @@ def _line_text(spans, links: list[tuple[object, str, str]]) -> str:
             parts.append(text)
             continue
 
-        for rect, uri, anchor in links:
+        # Every intersecting link, not just the first: a uniform-font line is one
+        # span, so a references line can carry several DOIs and `break` dropped all
+        # but one (GH-127 review). Applied right-to-left so earlier offsets survive,
+        # and an anchor overlapping one already wrapped here is skipped, never
+        # nested.
+        hits: list[tuple[int, int, str, str]] = []
+        for link in links:
+            rect, uri, anchor = link[0], link[1], link[2]
             if not span_rect.intersects(rect):
                 continue
-            if anchor and anchor in text:
-                idx = text.index(anchor)
-                text = text[:idx] + _emit_run(anchor, uri) + text[idx + len(anchor) :]
-                break
-            if _rect_coverage(span_rect, rect) >= _LINK_COVERAGE_MIN:
-                text = _emit_run(text, uri)
-                break
+            if not anchor or anchor not in text:
+                # No whole-span fallback. Wrapping the span on rectangle coverage
+                # alone marked an ENTIRE line for a phrase-sized link, because a
+                # uniform-font line is a single span -- the behaviour this
+                # anchor-resolution replaced (GH-127 review).
+                continue
+            hits.append((text.index(anchor), text.index(anchor) + len(anchor), uri, anchor))
+
+        hits.sort(key=lambda h: (h[0], h[1]))
+        kept: list[tuple[int, int, str, str]] = []
+        last_end = -1
+        for start_c, end_c, uri, anchor in hits:
+            if start_c < last_end:
+                continue
+            kept.append((start_c, end_c, uri, anchor))
+            last_end = end_c
+
+        for start_c, end_c, uri, anchor in reversed(kept):
+            text = text[:start_c] + _emit_run(anchor, uri) + text[end_c:]
         parts.append(text)
     return "".join(parts)
 
@@ -1839,7 +1927,11 @@ class BornDigitalDetector:
         if not table_regions:
             # GH-127: this is the prose-page path -- no dict walk happens here,
             # so links are applied to the flat string (see the helper's note).
-            return _apply_links_to_flat_text(page.get_text("text").strip(), _links)
+            try:
+                _flat_words = page.get_text("words") or []
+            except Exception:
+                _flat_words = []
+            return _apply_links_to_flat_text(page.get_text("text").strip(), _links, _flat_words)
 
         # Sort regions top-to-bottom by their y0 coordinate (reading order).
         # Column-aware ordering (x-band then y) would be needed for multi-column
