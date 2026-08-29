@@ -1,5 +1,19 @@
 # socr v1.0 Refactor — Tickets
 
+> **HISTORICAL RECORD — not the live backlog (GH-156).**
+>
+> Last substantive update 2026-06-07. It predates the extraction-defect and table
+> programmes entirely, and its ticket statuses below are **not** maintained.
+>
+> The live backlog is **GitHub issues**, with wave order and file ownership in
+> [`docs/plans/`](docs/plans/) (canonical ticket list:
+> [`docs/plans/TICKETS.md`](docs/plans/TICKETS.md)).
+>
+> This file is kept, rather than deleted, because 18 `TICKET-NN` references in
+> `docs/log/` point into it and `docs/plans/TICKETS.md` records that "older root
+> `TICKETS.md` entries remain useful". Deleting it would break that history. Do not
+> add new tickets here.
+
 ## CLI Command Reference
 
 | Engine | Command | Key Flags |
@@ -388,8 +402,10 @@ be one commit on `refactor/unified-page-contract`.
   - [x] Corrupted text layers flagged; pervasive ones routed to OCR
   - [x] Dual-pass flag-only by default; opt-in auto-patch
   - [x] Full suite green (541); new code lint-clean
-- **Next (see TODO.md):** per-page provenance by default; firing-rate validation;
-  `model_version` in fingerprints; judge spot-check on native table pages.
+- **Next:** per-page provenance by default and `model_version` in fingerprints are
+  [#158](https://github.com/r-uben/socr/issues/158); firing-rate validation is
+  [#328](https://github.com/r-uben/socr/issues/328). (`TODO.md`, which this line used
+  to point at, was deleted in GH-156 — GitHub issues are the live queue.)
 
 ---
 
@@ -400,7 +416,7 @@ born-digital, clean text layer; local-first, no cloud). Evidence and reproducers
 in `docs/log/2026-06-07_math-textbook-failures.md`.
 
 ### [TICKET-19] `extract_structured()` shreds prose/reference pages into fake grids
-- **Status:** open
+- **Status:** CLOSED — [#32](https://github.com/r-uben/socr/issues/32) (verified 2026-08-29, GH-156)
 - **Priority:** highest (corrupts clean native text)
 - **Files:** `core/born_digital.py` (`extract_structured`), `tables/reconstruct.py`, `tables/locate.py`
 - **Description:** A born-digital exercises+references page with one small embedded
@@ -417,7 +433,7 @@ in `docs/log/2026-06-07_math-textbook-failures.md`.
   - [ ] Firing-rate check confirms no new false-negatives on real booktabs tables
 
 ### [TICKET-20] Born-digital pages over-classified as "complex"
-- **Status:** open
+- **Status:** CLOSED — [#33](https://github.com/r-uben/socr/issues/33) (verified 2026-08-29, GH-156)
 - **Priority:** high
 - **Files:** `core/born_digital.py` (`needs_ocr_enhancement`), `pipeline/orchestrator.py`
 - **Description:** `has_tables or has_figures or has_equations` flagged 129/203 pages
@@ -430,7 +446,7 @@ in `docs/log/2026-06-07_math-textbook-failures.md`.
   - [ ] Figures still extracted without forcing whole-page OCR
 
 ### [TICKET-21] Local-only run hard-errors on a fully-written output
-- **Status:** open
+- **Status:** CLOSED — [#34](https://github.com/r-uben/socr/issues/34) (verified 2026-08-29, GH-156)
 - **Priority:** high (offline UX)
 - **Files:** `pipeline/orchestrator.py` (escalation + exit-status logic)
 - **Description:** With no cloud key, a page that fails local audit has escalation
@@ -443,7 +459,7 @@ in `docs/log/2026-06-07_math-textbook-failures.md`.
   - [ ] "recovered" requires non-empty output; empty fallback is reported as a failure not a recovery
 
 ### [TICKET-22] "Scanned" over-count on full-page-figure / sparse pages
-- **Status:** open
+- **Status:** CLOSED — [#35](https://github.com/r-uben/socr/issues/35) (verified 2026-08-29, GH-156)
 - **Priority:** medium
 - **Files:** `core/born_digital.py` (`MIN_WORDS_PER_PAGE`, `MIN_CHARS_FOR_TEXT_LAYER`)
 - **Description:** Detector reported 13 scanned pages; only 4 are truly image-only
@@ -454,7 +470,7 @@ in `docs/log/2026-06-07_math-textbook-failures.md`.
   - [ ] Scanned-count on Dougherty matches ground truth (≈4)
 
 ### [TICKET-23] No math-aware (equation→LaTeX) extraction path
-- **Status:** open
+- **Status:** CLOSED — [#36](https://github.com/r-uben/socr/issues/36) (verified 2026-08-29, GH-156)
 - **Priority:** high (the central gap for math textbooks)
 - **Files:** new `engines/` math step; `pipeline/orchestrator.py` routing
 - **Description:** Detected math pages (`_MATH_FONT_RE`) route only to general VLMs
@@ -468,7 +484,7 @@ in `docs/log/2026-06-07_math-textbook-failures.md`.
   - [ ] Throughput measured on M3 Max MPS for 200 pp and 1220 pp (region-only vs full-page)
 
 ### [TICKET-24] No native-only / enhancement-threshold CLI knob
-- **Status:** open
+- **Status:** CLOSED — [#37](https://github.com/r-uben/socr/issues/37) (verified 2026-08-29, GH-156)
 - **Priority:** medium
 - **Files:** `cli.py`, `core/config.py`, `core/born_digital.py`
 - **Description:** To trust a clean text layer and OCR only genuine scans we had to
