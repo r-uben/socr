@@ -231,6 +231,67 @@ def native_value_counts(page) -> Counter:
     return Counter(_normalize_numeric_token(v) for row in rows for v in row.values)
 
 
+def native_text_value_counts(native_text: str) -> Counter:
+    """Numeric tokens in a page's own extracted text, with multiplicity.
+
+    The word-layer oracle needs a ``fitz`` page, which the disposition site does
+    not have -- ``PageState`` carries only ``native_text``. That turns out not to
+    matter, and the reason is the point of this whole gate: **presence needs
+    tokens, not layout.** ``native_text`` contains every number on the page even
+    when their arrangement is wrong, and arrangement is exactly what the
+    measurement disqualified native from asserting.
+
+    So this is the same oracle read off a different surface, not a weaker one.
+    """
+    import re as _re
+
+    from socr.tables.source_evidence import collect_table_tokens
+
+    tokens = collect_table_tokens(native_text or "")
+    if tokens and tokens.numeric:
+        return Counter(_normalize_numeric_token(t) for t in tokens.numeric)
+    # No table markup in the native text: fall back to every numeric token in it.
+    # A page whose native reading lost its grid still has its numbers, and this
+    # gate only ever claims presence.
+    raw = _re.findall(r"[-\u2212]?\d[\d,]*\.?\d*", native_text or "")
+    return Counter(_normalize_numeric_token(t) for t in raw)
+
+
+def presence_verdict_from_text(
+    native_text: str, candidate_markdown: str, *, encoding_suspect: bool = False
+) -> PresenceVerdict:
+    """As :func:`presence_verdict`, but against a page's extracted text rather
+    than its word layer -- for callers holding ``PageState``, not a ``fitz`` page.
+    """
+    oracle = native_text_value_counts(native_text)
+    if not oracle:
+        return PresenceVerdict(PRESENCE_UNVERIFIABLE, reason="no numeric tokens in native text")
+    if encoding_suspect:
+        return PresenceVerdict(
+            PRESENCE_UNVERIFIABLE,
+            oracle_size=len(oracle),
+            reason="text layer shows decode damage; absence is not evidence here",
+        )
+    candidate = table_value_tokens(candidate_markdown)
+    invented, lost = candidate - oracle, oracle - candidate
+    if invented:
+        return PresenceVerdict(
+            PRESENCE_INVENTED,
+            invented=tuple(sorted(invented.elements())),
+            lost=tuple(sorted(lost.elements())),
+            oracle_size=len(oracle),
+            reason=f"{sum(invented.values())} value(s) not present in the page text",
+        )
+    if lost:
+        return PresenceVerdict(
+            PRESENCE_LOST,
+            lost=tuple(sorted(lost.elements())),
+            oracle_size=len(oracle),
+            reason=f"{sum(lost.values())} page value(s) absent from the candidate",
+        )
+    return PresenceVerdict(PRESENCE_OK, oracle_size=len(oracle), reason="every value accounted for")
+
+
 def presence_verdict(
     page, candidate_markdown: str, *, encoding_suspect: bool = False
 ) -> PresenceVerdict:

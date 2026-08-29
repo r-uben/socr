@@ -421,8 +421,45 @@ def flagged_model_page_output(p) -> PageOutput | None:
     # "paired/spanning headers — deferring to VLM". Keeping the former would
     # replace native with a table socr knows is corrupt. Unless the refusal was
     # positively identified as the soft kind, behave exactly as before.
-    if getattr(bo, "rejection_class", "") != REJECTION_AMBIGUOUS_DEFERRED:
+    # GH-322 / GH-326: the allowlist widens from one soft rejection to both, but
+    # only behind the presence gate.
+    #
+    # It was narrowed to AMBIGUOUS_DEFERRED alone because a hard rejection mutates
+    # nothing observable on the PageOutput, so "not ERROR and not HALLUCINATION"
+    # could not tell a table the value guard positively disproved from one it
+    # merely deferred on. `rejection_class` was the only available proxy for "is
+    # this model reading trustworthy".
+    #
+    # It is no longer the only one. The presence gate answers that question
+    # directly from the page's own numbers, and measurement says it should be
+    # trusted over the alternative: native was the LEAST accurate of three
+    # readings (8/13 rows exact against a free local model's 12/13), so keeping a
+    # correct model table out on the strength of a rejection label -- while
+    # substituting a reading that loses row labels -- is the failure GH-259 named.
+    #
+    # JUDGE_ONLY is admitted because a judge refusal is a model's opinion, not
+    # evidence; the page's own numbers outrank it. Everything else still falls
+    # back, and an EMPTY rejection_class stays out: it is indistinguishable from
+    # "never judged", and absence of evidence is not evidence.
+    rejection = getattr(bo, "rejection_class", "")
+    if rejection not in D3_SUPERSEDING_REJECTIONS:
         return None
+    if rejection != REJECTION_AMBIGUOUS_DEFERRED:
+        from socr.tables.escalation_canary import presence_verdict_from_text
+
+        verdict = presence_verdict_from_text(
+            p.native_text or "",
+            bo.text or "",
+            encoding_suspect=bool(
+                getattr(p, "has_encoding_hygiene_suspect", False)
+                or getattr(p, "has_corrupt_math", False)
+            ),
+        )
+        # Only invention blocks. UNVERIFIABLE does not: a page whose text layer is
+        # too damaged to adjudicate is exactly the page where native is least able
+        # to arbitrate, which is this predicate's whole premise.
+        if verdict.blocks_success:
+            return None
     # "The model produced nothing" — the case that must still fall back.
     if not (bo.text or "").strip():
         return None
