@@ -1336,6 +1336,44 @@ def _extend_scope_for_header(tight, words: list):
     return fitz.Rect(tight.x0, new_y0, tight.x1, tight.y1)
 
 
+def _promote_stub_lanes(lane_centers: list[float], seg_ys, rows_by_y) -> list[float]:
+    """Drop leading lanes that are row-identifier STUBS, not data columns.
+
+    GH-331. The label boundary was the leftmost NUMERIC lane, which assumes that
+    lane is the first data column. On a table with a numeric stub -- Cochrane's
+    ``n`` column holding 2, 3, 4, 5 -- it is not, so every row label sits to its
+    RIGHT, is snapped into the first data lane, and displaces the row. Measured
+    across the corpus: 18/18 orphaned-stub rows on one page, 37/51 on another,
+    the signature on 5 separate papers.
+
+    The discriminator is the bug's own evidence. A numeric STUB has row-label text
+    physically to its right; a numeric DATA lane never has label text between it
+    and the next lane on a row that carries data. So promote the leftmost lane
+    into the label region exactly when a non-numeric word sits strictly between it
+    and the next lane, clear of both by the snap radius.
+
+    Rows with no numeric token are skipped: a header band floats stray glyphs
+    mid-gap (measured on Cochrane p15) and would otherwise promote a real data
+    lane.
+
+    No new constant. "Strictly between" is the existing snap geometry, and when
+    adjacent lanes sit closer than twice the snap margin the interval is empty and
+    the rule is inert by construction -- which is what leaves densely-spaced tables
+    untouched.
+    """
+    snap = _LANE_X_TOL_PT * _LANE_SNAP_MULT
+    data_rows = [rows_by_y[y] for y in seg_ys if any(_is_numeric_word(w) for w in rows_by_y[y])]
+    j = 0
+    while j + 1 < len(lane_centers) and len(lane_centers) - (j + 1) >= _MIN_COLS:
+        lo, hi = lane_centers[j] + snap, lane_centers[j + 1] - snap
+        if lo >= hi:
+            break
+        if not any(lo < w[0] < hi and not _is_numeric_word(w) for row in data_rows for w in row):
+            break
+        j += 1
+    return lane_centers[j:]
+
+
 def _prepend_header_band(
     grid: list[list[str]],
     x0: float,
@@ -1368,6 +1406,11 @@ def _prepend_header_band(
     lane_centers = _numeric_lane_centers(num_words)
     if lane_centers is None or not prev_seg_ys:
         return grid, x0, y0, x1, y1
+    # GH-331: must match `_rowize_segment`'s promotion exactly, or the header band
+    # is built one column wider than the data rows it sits above.
+    lane_centers = _promote_stub_lanes(
+        lane_centers, sorted({round(w[1]) for w in seg_words}), rows_by_y
+    )
 
     snap_radius = _LANE_X_TOL_PT * _LANE_SNAP_MULT
 
@@ -1437,6 +1480,7 @@ def _rowize_segment(
     lane_centers = _numeric_lane_centers(num_words)
     if lane_centers is None:
         return None
+    lane_centers = _promote_stub_lanes(lane_centers, seg_ys, rows_by_y)
     data_start_x = lane_centers[0]
 
     # Words further left than (data_start_x − snap_margin) form the label cell
