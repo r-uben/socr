@@ -19,6 +19,7 @@ dummy rung identities instead of reading bare constants. This file pins:
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -26,6 +27,7 @@ from click.testing import CliRunner
 
 from socr.cli import build_config, cli
 from socr.core.config import TABLE_JUDGE_TIMEOUT_SEC_DEFAULT, PipelineConfig
+from socr.core.result import DocumentStatus, EngineResult
 
 
 @pytest.fixture
@@ -37,6 +39,26 @@ def dummy_pdf(tmp_path: Path) -> Path:
     doc.save(str(pdf_path))
     doc.close()
     return pdf_path
+
+
+class _StubPipeline:
+    """Stand-in for `UnifiedPipeline`: never touches an engine, a judge, or the
+    network. `process()` returns a canned SUCCESS.
+
+    Mirrors the `_PipelineStub` seam in `test_gh190_empty_table_surfacing.py`:
+    patching `socr.pipeline.orchestrator.UnifiedPipeline` itself is the only
+    way to make a `process()` CLI invocation hermetic here, because
+    `--dry-run` is a `batch`-only guard (`process_batch` in orchestrator.py)
+    and is silently INERT for the single-file `process` command — the bug
+    that made the flag-off exit-0 test above look hermetic locally (ollama
+    present) and fail in CI (no provider -> real routing was attempted).
+    """
+
+    def __init__(self, config: PipelineConfig) -> None:
+        pass
+
+    def process(self, pdf_path: Path, output_dir: Path | None = None) -> EngineResult:
+        return EngineResult(document_path=pdf_path, engine="stub", status=DocumentStatus.SUCCESS)
 
 
 class TestDefaults:
@@ -75,10 +97,67 @@ class TestCLIFlag:
         assert result.exit_code == 0
         assert "--table-judge-ladder" in result.output
 
-    def test_flag_absent_from_dry_run_leaves_ladder_off(self, dummy_pdf: Path):
+    def test_flag_absent_leaves_ladder_off_end_to_end(self, dummy_pdf: Path, tmp_path: Path):
+        """The `process` CLI path, with the pipeline stubbed at the same seam
+        `test_gh190_empty_table_surfacing.py` uses, actually builds a config
+        with `table_judge_ladder is False` when the flag is never passed.
+
+        `--primary qwen` avoids `EngineType.AUTO` -> `resolve_auto_engine()`,
+        the other real-provider probe on this path; between that and the
+        stubbed pipeline, nothing here can touch an engine, a judge, or the
+        network.
+        """
         runner = CliRunner()
-        result = runner.invoke(cli, ["process", str(dummy_pdf), "--dry-run"])
+        with patch(
+            "socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline
+        ) as mock_pipeline_cls:
+            result = runner.invoke(
+                cli,
+                [
+                    "process",
+                    str(dummy_pdf),
+                    "--primary",
+                    "qwen",
+                    "-o",
+                    str(tmp_path / "out"),
+                    "-q",
+                ],
+            )
+
         assert result.exit_code == 0, result.output
+        mock_pipeline_cls.assert_called_once()
+        (built_config,) = mock_pipeline_cls.call_args.args
+        assert built_config.table_judge_ladder is False
+
+    def test_flag_absent_leaves_ladder_off_with_ollama_unreachable(
+        self, dummy_pdf: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Proves the above hermeticity claim: point `OLLAMA_HOST` at a dead
+        port before invoking. If anything on this path made a live call, it
+        would time out or raise a connection error instead of returning
+        exit 0 — this must pass exactly like the reachable case.
+        """
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+        runner = CliRunner()
+        with patch(
+            "socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline
+        ) as mock_pipeline_cls:
+            result = runner.invoke(
+                cli,
+                [
+                    "process",
+                    str(dummy_pdf),
+                    "--primary",
+                    "qwen",
+                    "-o",
+                    str(tmp_path / "out"),
+                    "-q",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        (built_config,) = mock_pipeline_cls.call_args.args
+        assert built_config.table_judge_ladder is False
 
     def test_build_config_flag_on(self):
         config = build_config(table_judge_ladder=True)
