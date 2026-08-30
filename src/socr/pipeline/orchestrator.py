@@ -4623,6 +4623,22 @@ class UnifiedPipeline:
             "judge_rejected": bool(ps.judge_rejected) if ps else False,
             # MAJOR 7(b): S1 case (i) resume-idempotency flag (see above).
             "structure_class_model_kept": structure_class_model_kept,
+            # GH-353 TICKET-D1a: the table judge ladder's durable page-level
+            # disposition (set by B1's gate, read by C3's manifest guard and
+            # C2's document aggregation). ``None`` when the page never
+            # reached a ladder terminal (flag off, ladder ACCEPTED, or no
+            # tables on the page). Persisted as the bare ``FailureMode``
+            # value string so a resumed run's ``_restore_terminal_page_state``
+            # can rebuild the SAME disposition without re-judging -- without
+            # this, a skipped page would silently lose its REJECTED/UNVERIFIED
+            # verdict on resume (``page_events`` below already carries the
+            # per-table audit trail; this field is the page-level reduction
+            # ``reduce_page_ladder`` produced from it).
+            "table_ladder_disposition": (
+                ps.table_ladder_disposition.value
+                if ps and ps.table_ladder_disposition is not None
+                else None
+            ),
             # Audit log subset for this page.
             "audit_events": page_events,
             # Table-pass and figure refs.
@@ -5005,6 +5021,34 @@ class UnifiedPipeline:
             ps.structure_class_model_kept_on_resume = bool(
                 meta.get("structure_class_model_kept", False)
             )
+            # GH-353 TICKET-D1a: restore the table judge ladder's durable
+            # disposition AND replay its per-table audit events into
+            # ``state.events``. Without this, a resumed page's REJECTED /
+            # UNVERIFIED verdict would evaporate from ``ps`` (silently
+            # reverting the page to un-demoted at C3's manifest guard) and
+            # its ``table_ladder_*`` events would be missing from
+            # ``state.events`` (silently dropping the page from
+            # ``tables_trust.json`` and the assemble-time metadata note,
+            # both of which derive from ``state.events`` -- see
+            # ``_tables_trust_note`` / ``build_tables_trust``). Restoring the
+            # events, never re-judging: no rung is invoked here.
+            disposition_raw = meta.get("table_ladder_disposition")
+            ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
+            from socr.core.audit_log import AuditEvent
+            from socr.judge.table_verdict import TABLE_LADDER_EVENT_KINDS
+
+            for ev in meta.get("audit_events", []) or []:
+                if not isinstance(ev, dict) or ev.get("kind") not in TABLE_LADDER_EVENT_KINDS:
+                    continue
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=str(ev.get("kind", "")),
+                        engine=str(ev.get("engine", "") or ""),
+                        detail=str(ev.get("detail", "") or ""),
+                        data=dict(ev.get("data") or {}),
+                    )
+                )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
 

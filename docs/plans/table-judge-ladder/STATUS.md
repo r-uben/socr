@@ -33,7 +33,7 @@ dispatched yet.
 | C3 | status | DONE | C1 | 2 |
 | C2 | status | DONE | C1, C3, G1 | 3 |
 | B1 | gate | DONE | A2, A3, A4, B0, B2, C1, C3, G1 | 4 |
-| D1a | resume | TODO | B1 | 5 |
+| D1a | resume | DONE | B1 | 5 |
 | D1b | resume | TODO | D1a | 6 |
 | E1 | binding | TODO | B1 | 7 |
 | H1 | e2e | TODO | D1b, E1 | 8 |
@@ -52,10 +52,15 @@ dispatched yet.
 | C3 | impl-C1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_ticket-c3.md` |
 | C2 | impl-C2 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_ticket-c2.md` |
 | B1 | impl-B1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-B1.md` |
+| D1a | impl-B1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-D1a.md` |
 
 ## Next action
-Wave 4 (B1, the gate) DONE. Dispatch wave 5 (D1a, resume, `orchestrator.py`) next — its
-dep (B1) is now satisfied. Note for the reviewer/D1a dispatcher: B1's decision log flags
-one deferred item — a live smoke against the real `gemini` CLI and a real ollama host was
-explicitly out of scope for B1 (hermetic-only per the ticket) and should happen before this
-branch merges to `main`.
+Wave 5 (D1a, sidecar persist/restore) DONE. Dispatch wave 6 (D1b, resume skip policy,
+`orchestrator.py`) next — its dep (D1a) is now satisfied. D1a made
+`ps.table_ladder_disposition` and the ladder's audit events survive resume; D1b still
+needs to add the positive early-return in `_load_terminal_page` (~`:4315`) so a
+REJECTED page (status=WARNING via C3's guard) is skipped-and-kept rather than falling
+through the existing `status == SUCCESS` gate, while UNVERIFIED never skips. Note for
+the reviewer/D1a dispatcher (unchanged from B1's log): a live smoke against the real
+`gemini` CLI and a real ollama host is still outstanding and belongs to whoever merges
+this branch, not to any single ticket.

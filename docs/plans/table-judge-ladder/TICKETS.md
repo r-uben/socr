@@ -193,7 +193,7 @@ disposition + audit events). Includes a native-only defective-table case (the fo
 F1). Fail-open probes: missing crop, render error, parser error, HTTP error, missing
 binary ⇒ UNVERIFIED. Flag-off run makes zero crop/HTTP/subprocess calls (sentinel).
 
-### TICKET-D1a — sidecar persistence + restore · TODO · depends-on: B1 · wave 5
+### TICKET-D1a — sidecar persistence + restore · DONE · depends-on: B1 · wave 5
 **Problem:** `_restore_terminal_page_state` (`:4605`) does not restore audit events —
 a skipped page would lose its ladder events, trust entry, and metadata note on resume.
 **Do:** Persist a `table_ladder` record (per-table results + disposition) in
