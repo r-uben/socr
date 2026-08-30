@@ -1,0 +1,50 @@
+# STATUS — table judge ladder (GH-353)
+
+Last updated: 2026-08-30
+
+## Stage
+Plan created and panel-reviewed (codex gpt-5.6-sol / gemini / grok-4.6 advisory,
+2026-08-30). Design ratified in `docs/log/2026-08-30_table-judge-ladder.md`; CLI₁ seat
+decided by the GH-356 bake-off (`docs/log/2026-08-30_gh356-bakeoff.md`): rung 1 =
+glm-5.3-flash:cloud via ollama `/api/chat`, rung 2 = gemini CLI. No implementation
+dispatched yet.
+
+## Base state (clean before tickets)
+- Repo: socr, branch per ticket off `origin/main`; flag `table_judge_ladder` defaults
+  OFF so golden/byte-identity tests stay untouched until the flip.
+- CI has no ollama/gemini; every ticket's tests are hermetic (see TICKETS.md standing
+  constraints).
+- Panel findings folded in: gate sits post-repetition-guard (~`orchestrator.py:3099`);
+  manifest winner-selection preservation is its own ticket (C3); witness prep is B0;
+  native lane folded into B1's acceptance tests; fenced JSON is not ¬S1.
+
+## Ticket board
+| Ticket | Stream | Status | depends-on | Wave |
+|--------|--------|--------|------------|------|
+| A0 | prompt | TODO | — | 1 |
+| A1 | judge core | TODO | — | 1 |
+| C1 | status | TODO | — | 1 |
+| G1 | config | TODO | — | 1 |
+| A2 | judge core | TODO | A0, A1, G1 | 2 |
+| A3 | judge core | TODO | A0, A1, G1 | 2 |
+| A4 | judge core | TODO | A1 | 2 |
+| B0 | witnesses | TODO | A1 | 2 |
+| B2 | trust | TODO | A1 | 2 |
+| C3 | status | TODO | C1 | 2 |
+| C2 | status | TODO | C1, C3, G1 | 3 |
+| B1 | gate | TODO | A2, A3, A4, B0, B2, C1, C3, G1 | 4 |
+| D1a | resume | TODO | B1 | 5 |
+| D1b | resume | TODO | D1a | 6 |
+| E1 | binding | TODO | B1 | 7 |
+| H1 | e2e | TODO | D1b, E1 | 8 |
+
+## Dispatch waves
+- Wave 1: A0, A1, C1, G1 (disjoint files, no deps)
+- Wave 2: A2, A3, A4, B0, B2, C3 (disjoint files)
+- Wave 3: C2 (orchestrator.py + cli.py)
+- Wave 4: B1 (orchestrator.py — the gate)
+- Waves 5–8: D1a → D1b → E1 → H1 (serialized on orchestrator.py)
+
+## Next action
+Dispatch wave 1 (A0, A1, C1, G1) via `/plan next` — four parallel implementer+reviewer
+pairs, disjoint files.
