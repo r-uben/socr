@@ -30,7 +30,7 @@ Standing constraints (every ticket):
 returns the template with and without a findings payload; prompt file contains all six
 finding codes verbatim.
 
-### TICKET-A1 — verdict schema, rung contract, event kinds · TODO · depends-on: none · wave 1
+### TICKET-A1 — verdict schema, rung contract, event kinds · DONE · depends-on: none · wave 1
 **Problem:** The ladder needs one owned contract: verdict schema, an S1-failure
 representation distinct from FAIL, a standard rung signature, and audit-event kinds.
 **Do:** New `src/socr/judge/table_verdict.py`: `TableJudgeVerdict` (`verdict: PASS|FAIL`,

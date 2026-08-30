@@ -22,7 +22,7 @@ dispatched yet.
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
 | A0 | prompt | DONE | — | 1 |
-| A1 | judge core | TODO | — | 1 |
+| A1 | judge core | DONE | — | 1 |
 | C1 | status | DONE | — | 1 |
 | G1 | config | TODO | — | 1 |
 | A2 | judge core | TODO | A0, A1, G1 | 2 |
