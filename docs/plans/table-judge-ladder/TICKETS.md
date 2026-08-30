@@ -20,7 +20,7 @@ Standing constraints (every ticket):
 
 ## Stream A — judge core (new files, no orchestrator surgery)
 
-### TICKET-A0 — judge prompt policy file · TODO · depends-on: none · wave 1
+### TICKET-A0 — judge prompt policy file · DONE · depends-on: none · wave 1
 **Problem:** A2/A3 have nothing to send; the design left prompt wording open.
 **Do:** Write `src/socr/prompts/table_judge.md` (schema instructions, empty-cell rule,
 "judge only the table region", tiebreak-findings injection slot) + a loader mirroring
