@@ -74,11 +74,12 @@ PAGE_SEPARATOR = "\n\n---\n\n"
 
 # Matches the canonical failure marker `[page N failed: no usable OCR output]`.
 _PAGE_FAILED_RE = re.compile(r"^\[page \d+ failed: no usable OCR output\]$")
-# TR-3: also matches the D3 fail-closed marker `[page N failed: unverifiable table …]`
-# which may be followed by a PNG image ref on a second block (the full text starts
-# with the marker, possibly with trailing whitespace and an image ref).  We match
-# on the FIRST LINE only so both formats are recognised by is_page_failed_marker.
-_PAGE_FAILED_ANY_RE = re.compile(r"^\[page \d+ failed:.*", re.MULTILINE)
+# TR-3 and the other page floors use a closed, single-line marker.  Keep the
+# reason generic because rotated-text and table-emission floors have their own
+# marker text, but do not let a malformed/truncated first line pass as a page
+# failure.
+_PAGE_FAILED_ANY_RE = re.compile(r"^\[page \d+ failed:[^\]\r\n]+\]$")
+_PAGE_FAILED_IMAGE_RE = re.compile(r"^!\[[^\]\r\n]*\]\([^\)\r\n]+\)$")
 _TABLE_EMISSION_FAILED_RE = re.compile(
     r"^\[page (?P<page>\d+) failed: invalid table emission — (?P<defect>[^\]]+)\]$"
 )
@@ -104,13 +105,26 @@ def is_page_failed_marker(text: str) -> bool:
     Matches both the original ``[page N failed: no usable OCR output]`` marker
     AND the TR-3 D3 fail-closed variant ``[page N failed: unverifiable table …]``
     (which may be followed by a PNG image ref block).
+
+    GH-371: Returns False if the text contains substantial prose beyond the marker
+    and optional image reference, indicating a regional splice with preserved content.
     """
     stripped = text.strip()
-    # Fast path: exact original marker.
-    if _PAGE_FAILED_RE.match(stripped):
-        return True
-    # TR-3 D3 variant: text starts with `[page N failed: ...]` on its first line.
-    return bool(_PAGE_FAILED_ANY_RE.match(stripped))
+    lines = stripped.splitlines()
+    if not lines:
+        return False
+
+    # A whole-page body is exactly one closed marker, optionally followed by
+    # one Markdown image block.  Blank lines are formatting around the optional
+    # block; any other text means the marker is a regional splice or malformed
+    # output and therefore represents usable page content (or an unknown body).
+    marker = lines[0].strip()
+    if not _PAGE_FAILED_ANY_RE.fullmatch(marker):
+        return False
+    content_lines = [line.strip() for line in lines[1:] if line.strip()]
+    return len(content_lines) <= 1 and (
+        not content_lines or _PAGE_FAILED_IMAGE_RE.fullmatch(content_lines[0]) is not None
+    )
 
 
 def compute_image_hash(handle: DocumentHandle, page_num: int, dpi: int) -> str:
@@ -984,7 +998,26 @@ def _select_page_output_tagged(
     ):
         d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
         png_ref = getattr(p, "d3_floor_png_ref", "")
-        d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+
+        best_output_text = (p.best_output.text or "") if p.best_output else ""
+        d3_text = None
+        if best_output_text:
+            from socr.tables.reconcile import find_table_blocks
+
+            blocks = find_table_blocks(best_output_text)
+            if blocks:
+                all_ordinals = list(range(len(blocks)))
+                d3_text = splice_failed_table_regions(
+                    best_output_text,
+                    failed_ordinals=all_ordinals,
+                    expected_count=len(blocks),
+                    marker_line=d3_marker,
+                    png_ref=png_ref,
+                )
+
+        if d3_text is None:
+            d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+
         return PageOutput(
             page_num=page_num,
             text=d3_text,
@@ -1040,17 +1073,28 @@ def _select_page_output_tagged(
                     failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
                 ), WinnerKind.UNVERIFIABLE_TABLE_MODEL_KEPT
 
-            # TR-3: D3 fail-closed floor text = failed-table marker + image ref.
-            # The marker is always present (makes the failure loud and greppable);
-            # the PNG image ref lets a human SEE the table without transcription.
-            # ``ps.d3_floor_png_ref`` is set by ``_render_d3_floor_png`` in
-            # ``_phase_agentic`` right after ``native_table_structure_failed``
-            # is set.  If the render failed (or no figures_dir was available),
-            # d3_floor_png_ref is "" and only the marker is shipped — still
-            # fail-closed, still no plausible-but-wrong table text.
+            # TR-3: D3 fail-closed floor. Try regional splice if ordinals/counts are
+            # available; fall back to whole-page marker if isolation is unprovable.
+            native_text = p.native_text or ""
             d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
             png_ref = getattr(p, "d3_floor_png_ref", "")
-            d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+
+            failed_ordinals = getattr(p, "native_table_unverifiable_ordinals", None)
+            region_count = getattr(p, "native_table_region_count", None)
+
+            d3_text = None
+            if failed_ordinals is not None and region_count is not None:
+                d3_text = splice_failed_table_regions(
+                    native_text,
+                    failed_ordinals=failed_ordinals,
+                    expected_count=region_count,
+                    marker_line=d3_marker,
+                    png_ref=png_ref,
+                )
+
+            if d3_text is None:
+                d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+
             return PageOutput(
                 page_num=page_num,
                 text=d3_text,
@@ -1652,3 +1696,77 @@ def stale_pages(manifest: Manifest, blobs: BlobStore) -> list[int]:
         for pn in range(1, manifest.page_count + 1)
         if pn not in manifest.entries or not blobs.has(manifest.entries[pn].blob_ref)
     ]
+
+
+def splice_failed_table_regions(
+    page_text: str,
+    failed_ordinals: list[int],
+    expected_count: int,
+    marker_line: str,
+    png_ref: str = "",
+) -> str | None:
+    """Replace only failed markdown-table blocks in page text, preserving surrounding prose.
+
+    GH-371: when the D3 fail-closed floor (or GH-90 scanned floor) fires on a
+    native table region, preserve the page's surrounding prose by splicing out only
+    the failed table blocks instead of replacing the entire page with a marker.
+
+    Args:
+        page_text: Full page markdown text containing tables and prose.
+        failed_ordinals: Zero-based ordinal indices of table blocks to remove.
+        expected_count: Expected number of markdown table blocks in the text.
+        marker_line: The visible failed-table marker to insert (e.g.
+            "[page N failed: unverifiable table — see image]").
+        png_ref: Optional full-page PNG reference (e.g. "![ref](figures/p1.png)").
+            Included only once, at the first failed position (in document order).
+
+    Returns:
+        Spliced text with failed blocks removed and markers inserted, or None if
+        validation fails (empty ordinals, count mismatch, out-of-range/duplicate
+        ordinals, or no parsed tables). Fail-closed: any ambiguity returns None.
+    """
+    from socr.tables.reconcile import find_table_blocks
+
+    if type(expected_count) is not int or expected_count <= 0:
+        return None
+
+    if not failed_ordinals or not isinstance(failed_ordinals, list):
+        return None
+
+    if any(type(ordinal) is not int for ordinal in failed_ordinals):
+        return None
+
+    if len(failed_ordinals) != len(set(failed_ordinals)):
+        return None
+
+    if any(ordinal < 0 or ordinal >= expected_count for ordinal in failed_ordinals):
+        return None
+
+    blocks = find_table_blocks(page_text)
+    if len(blocks) != expected_count:
+        # Identity assumption: ordinal N in the caller's region enumeration
+        # (born_digital's y0-sorted table_regions) names the Nth markdown table
+        # block that find_table_blocks parses out of the assembled text. Count
+        # equality is the only check tying the two enumerations together — a
+        # divergence (a region emitted without pipes, prose that parses as a
+        # table) normally breaks the count and lands here (fail closed), but an
+        # equal-count identity swap would mis-splice silently. If that case is
+        # ever observed, the region spans must be threaded through instead.
+        return None
+
+    lines = page_text.splitlines(keepends=True)
+
+    first_failed_ordinal = min(failed_ordinals)
+    for ordinal in sorted(failed_ordinals, reverse=True):
+        block = blocks[ordinal]
+        start_line = block.start
+        end_line = block.end
+
+        replacement = marker_line
+        if ordinal == first_failed_ordinal and png_ref:
+            replacement = f"{marker_line}\n\n{png_ref}"
+
+        lines[start_line : end_line + 1] = [f"{replacement}\n"]
+
+    result = "".join(lines).rstrip() + "\n"
+    return result

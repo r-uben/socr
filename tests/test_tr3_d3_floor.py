@@ -541,6 +541,76 @@ class TestVerifyRegionsReturnValue:
         doc.close()
         assert result is True, f"Expected True (hard-fail detected); got {result!r}"
 
+    def test_verify_regions_records_failed_ordinals_and_count(self) -> None:
+        """GH-371: _verify_regions records the zero-based ordinals of failed regions
+        and the total count of examined table regions."""
+        import fitz
+        from socr.core.born_digital import BornDigitalDetector
+        from socr.tables.native_verifier import VerifierResult
+
+        doc = fitz.open()
+        page = doc.new_page()
+        regions = [
+            (fitz.Rect(0, 50, 200, 100), "| col1 | col2 |\n| --- | --- |\n| 1.0 | 2.0 |"),
+            (fitz.Rect(0, 150, 200, 200), "| col3 | col4 |\n| --- | --- |\n| 3.0 | 4.0 |"),
+        ]
+
+        def _mock_verify(p, text, rect):
+            if rect.y0 > 100:
+                return VerifierResult(
+                    hard_fail=True, warn=False, reason="geometry_impossible_collapse"
+                )
+            return VerifierResult(hard_fail=False, warn=False, reason="ok")
+
+        detector = BornDigitalDetector()
+        with patch(
+            "socr.tables.native_verifier.verify_native_table_region",
+            side_effect=_mock_verify,
+        ):
+            result = detector._verify_regions(page, regions)
+        doc.close()
+        assert result is True
+        failed_ordinals = getattr(detector, "_last_extraction_failed_ordinals", None)
+        region_count = getattr(detector, "_last_extraction_table_count", None)
+        if failed_ordinals is not None:
+            assert failed_ordinals == [1]
+        if region_count is not None:
+            assert region_count == 2
+
+    def test_verify_regions_two_identical_markdown_tables_second_fails(self) -> None:
+        """GH-371: When two tables have identical markdown text and only the second fails,
+        identity is recorded by zero-based ordinal [1], not by string equality."""
+        import fitz
+        from socr.core.born_digital import BornDigitalDetector
+        from socr.tables.native_verifier import VerifierResult
+
+        doc = fitz.open()
+        page = doc.new_page()
+        identical_md = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        regions = [
+            (fitz.Rect(0, 50, 200, 100), identical_md),
+            (fitz.Rect(0, 150, 200, 200), identical_md),
+        ]
+
+        def _mock_verify(p, text, rect):
+            if rect.y0 > 100:
+                return VerifierResult(
+                    hard_fail=True, warn=False, reason="geometry_impossible_collapse"
+                )
+            return VerifierResult(hard_fail=False, warn=False, reason="ok")
+
+        detector = BornDigitalDetector()
+        with patch(
+            "socr.tables.native_verifier.verify_native_table_region",
+            side_effect=_mock_verify,
+        ):
+            result = detector._verify_regions(page, regions)
+        doc.close()
+        assert result is True
+        failed_ordinals = getattr(detector, "_last_extraction_failed_ordinals", None)
+        if failed_ordinals is not None:
+            assert failed_ordinals == [1]
+
 
 # ---------------------------------------------------------------------------
 # 7. Multi-page state-leak guard

@@ -811,6 +811,14 @@ class PageAssessment:
     #: that ships, which is the same gap #136 was filed for.
     has_unrecovered_symbol_glyphs: bool = False
     has_unverifiable_table_region: bool = False  # TR-3: per-region geometry hard-fail
+    #: GH-371: zero-based ordinals of separator-bearing table regions whose
+    #: per-region geometry verifier hard-failed.  The ordinal is relative to
+    #: the sorted regions interleaved into ``native_text``; it is deliberately
+    #: not derived from markdown text, since table contents may repeat.
+    native_table_unverifiable_ordinals: list[int] = field(default_factory=list)
+    #: GH-371: number of separator-bearing table regions examined by the
+    #: per-region verifier.  Zero also covers pages that never enter that lane.
+    native_table_region_count: int = 0
     #: GH-195: one record per text-strategy grid rejected because a lane boundary
     #: split a native numeric token. The word-geometry fallback that replaced it
     #: is lossless, so this is a VISIBILITY signal, not a defect flag — the page
@@ -1060,6 +1068,12 @@ class BornDigitalDetector:
         #: Report from the most recent symbol-font recovery (#217). ``None``
         #: until a document has been assessed.
         self.last_glyph_repair: GlyphRepairReport | None = None
+        # Per-extraction side channels.  They are reset at _assess_page entry
+        # and populated by _verify_regions so an assessment cannot inherit a
+        # previous page's verifier result.
+        self._last_extraction_had_unverifiable: bool = False
+        self._last_extraction_failed_ordinals: list[int] = []
+        self._last_extraction_table_count: int = 0
 
     def detect(self, pdf_path: Path | str) -> DocumentAssessment:
         """Analyze all pages of a PDF for born-digital content.
@@ -1198,6 +1212,13 @@ class BornDigitalDetector:
         absence-of-evidence precedent (#145): no directional evidence must not
         route a page as rotated.
         """
+        # TR-3/GH-371: reset extraction side channels before any page-specific
+        # work, including pages that take an early return and never call
+        # extract_structured/_verify_regions.
+        self._last_extraction_had_unverifiable = False
+        self._last_extraction_failed_ordinals = []
+        self._last_extraction_table_count = 0
+
         try:
             blocks = page.get_text("dict").get("blocks", [])
         except Exception:
@@ -1205,6 +1226,8 @@ class BornDigitalDetector:
         direction = dominant_text_direction(blocks)
         assessment = self._assess_page_signals(page, page_num, direction)
         assessment.dominant_text_direction = direction
+        assessment.native_table_unverifiable_ordinals = list(self._last_extraction_failed_ordinals)
+        assessment.native_table_region_count = self._last_extraction_table_count
         if text_direction_is_rotated(direction):
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment
@@ -1537,11 +1560,6 @@ class BornDigitalDetector:
         encoding_hygiene_suspect = encoding_corruption > self.ENCODING_CORRUPTION_FLAG
         if encoding_hygiene_suspect:
             notes.append(f"text-layer encoding suspect ({encoding_corruption:.1%})")
-
-        # TR-3: reset the per-extraction unverifiable flag so _assess_page can
-        # read it after calling extract_structured.  Initialise to False so pages
-        # without tables (which never call _verify_regions) are not flagged.
-        self._last_extraction_had_unverifiable: bool = False
 
         # GH-195: same side-channel shape as the TR-3 flag above — reset per
         # page so a rejection on page 7 is never attributed to page 8.
@@ -2102,10 +2120,14 @@ class BornDigitalDetector:
         from socr.tables.native_verifier import verify_native_table_region
 
         any_hard_fail = False
+        failed_ordinals: list[int] = []
+        table_count = 0
         for region_rect, region_text in regions:
             # Skip non-table regions (chart image refs, prose blocks)
             if "| --- |" not in region_text and "| --- " not in region_text:
                 continue
+            ordinal = table_count
+            table_count += 1
             try:
                 vr = verify_native_table_region(page, region_text, region_rect)
             except Exception as exc:
@@ -2114,6 +2136,7 @@ class BornDigitalDetector:
 
             if vr.hard_fail:
                 any_hard_fail = True
+                failed_ordinals.append(ordinal)
                 logger.warning(
                     "per-region verifier: geometry_impossible_collapse in region y=%.0f..%.0f — %s",
                     region_rect.y0,
@@ -2127,6 +2150,8 @@ class BornDigitalDetector:
                     region_rect.y1,
                     vr.reason,
                 )
+        self._last_extraction_failed_ordinals = failed_ordinals
+        self._last_extraction_table_count = table_count
         return any_hard_fail
 
     def _check_token_coverage(

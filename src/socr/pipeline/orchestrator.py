@@ -1671,6 +1671,35 @@ class UnifiedPipeline:
             )
             return ""
 
+    def _apply_scanned_table_floor(
+        self,
+        ps: PageState,
+        pdf_path: Path,
+        page_num: int,
+        figures_dir: Path | None,
+    ) -> None:
+        """GH-90: mark a scanned page whose table evidence failed for the D3 floor.
+
+        Sets the flags and demotes ``best_output`` — nothing else. The demotion
+        is what lets ``_select_page_output_tagged`` fall past its passing-winner
+        return into the GH-90 branch, which is the SOLE writer of the floor text
+        (regional splice, whole-page marker fallback). GH-371: mutating
+        ``best_output.text`` here too would strip the tables before that branch
+        re-reads them, so its splice would find no blocks and fall back to the
+        whole-page marker, discarding the prose.
+        """
+        ps.scanned_table_evidence_failed = True
+        if figures_dir is not None:
+            ps.d3_floor_png_ref = self._render_d3_floor_png(
+                pdf_path,
+                page_num,
+                figures_dir,
+            )
+        if ps.best_output is not None:
+            ps.best_output.status = PageStatus.ERROR
+            ps.best_output.audit_passed = False
+            ps.best_output.failure_mode = FailureMode.HALLUCINATION
+
     # ------------------------------------------------------------------
     # GH-86: per-page VLM placeholder cleanup (agentic pre-flush seam)
     # ------------------------------------------------------------------
@@ -3435,21 +3464,9 @@ class UnifiedPipeline:
                     "source_evidence_table" in (att.reason or "") for att in decision.attempts
                 )
                 if _source_ev_rejected and not ps.is_born_digital:
-                    ps.scanned_table_evidence_failed = True
-                    if _chart_figures_dir is not None:
-                        ps.d3_floor_png_ref = self._render_d3_floor_png(
-                            state.handle.path,
-                            page_num,
-                            _chart_figures_dir,
-                        )
-                    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
-                    png_ref = ps.d3_floor_png_ref
-                    floor_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
-                    if ps.best_output is not None:
-                        ps.best_output.text = floor_text
-                        ps.best_output.status = PageStatus.ERROR
-                        ps.best_output.audit_passed = False
-                        ps.best_output.failure_mode = FailureMode.HALLUCINATION
+                    self._apply_scanned_table_floor(
+                        ps, state.handle.path, page_num, _chart_figures_dir
+                    )
 
                 # #263: rotated-shredded floor PNG. The page's native layer is
                 # confetti and the OCR ladder accepted nothing, so the marker
@@ -4861,8 +4878,18 @@ class UnifiedPipeline:
             "native_table_unverifiable": (
                 bool(getattr(ps, "native_table_unverifiable", False)) if ps else False
             ),
+            # GH-371: native failed-region identity and the expected number of
+            # regions, used to preserve surrounding prose on D3 resume.
+            "native_table_unverifiable_ordinals": (
+                list(getattr(ps, "native_table_unverifiable_ordinals", [])) if ps else []
+            ),
+            "native_table_region_count": (getattr(ps, "native_table_region_count", 0) if ps else 0),
             # TR-3: image ref for the D3 floor PNG (empty string when not rendered).
             "d3_floor_png_ref": (str(getattr(ps, "d3_floor_png_ref", "")) if ps else ""),
+            # GH-90: scanned-table evidence check failed; D3 floor applies (prose splice).
+            "scanned_table_evidence_failed": (
+                bool(getattr(ps, "scanned_table_evidence_failed", False)) if ps else False
+            ),
             "chart_asset_render_failed": (
                 bool(ps.chart_asset_render_failed) if ps else False  # PP-7
             ),
@@ -5291,7 +5318,27 @@ class UnifiedPipeline:
             )
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
+            # GH-371: restore failed-region identity for the regional splice.
+            # Validate the complete list: one malformed entry invalidates the
+            # identity rather than allowing a partial list to select a table.
+            raw_ords = meta.get("native_table_unverifiable_ordinals")
+            if isinstance(raw_ords, list) and all(
+                type(ordinal) is int and ordinal >= 0 for ordinal in raw_ords
+            ):
+                ps.native_table_unverifiable_ordinals = list(raw_ords)
+            else:
+                ps.native_table_unverifiable_ordinals = []
+            # Validate the expected region count independently; old sidecars
+            # have no key and therefore restore the safe zero default.
+            raw_count = meta.get("native_table_region_count")
+            ps.native_table_region_count = (
+                raw_count if type(raw_count) is int and raw_count >= 0 else 0
+            )
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
+            # GH-90: restore scanned-table evidence failure so the scanned floor applies on resume.
+            ps.scanned_table_evidence_failed = bool(
+                meta.get("scanned_table_evidence_failed", False)
+            )
             # #263: restore the shredded-page image ref too, so a resumed run's
             # floor ships marker + image exactly as the first run did instead of
             # silently degrading to a bare marker.
@@ -5551,9 +5598,10 @@ class UnifiedPipeline:
         # TR-3: D3 fail-closed floor pages — born-digital table pages where the
         # per-region geometry verifier hard-failed AND the OCR ladder also failed.
         # These ship the explicit failed-table marker (not the collapsed native) so
-        # no plausible-but-wrong table is ever emitted.  They are a STRICT SUBSET
-        # of failed_pages (every D3 page is also a failed page), counted separately
-        # for the distinct audit event and CLI summary.
+        # no plausible-but-wrong table is ever emitted.  Whole-page fallbacks are
+        # also in failed_pages, while regional splices retain usable prose and are
+        # deliberately absent from that page-failure bucket.  Count D3 pages
+        # separately for the distinct audit event and CLI summary.
         # GH-200: widened identically to manifest.py's D3 conjunction -- a
         # header-only defect (native_table_header_unattributed, TR-3 is blind
         # to header loss by construction) is a D3 floor page too, else it is
