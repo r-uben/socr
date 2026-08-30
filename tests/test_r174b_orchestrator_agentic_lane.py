@@ -151,6 +151,15 @@ class TestOrchestratorAgenticLane:
             "socr_source_digest",
             "enabled_engines",
             "enabled_engine_determinants",
+            # GH-353 TICKET-B1: the table judge ladder's fingerprint extras
+            # (deferred from G1) -- flag, both rung identities, timeout, and
+            # the prompt-policy digest all change output bytes when the
+            # ladder is on, so resume/skip must key off them.
+            "table_judge_ladder",
+            "table_judge_rung1_model",
+            "table_judge_rung2_binary",
+            "table_judge_timeout_sec",
+            "table_judge_prompt_digest",
         }
         missing_live = live_keys - dict_keys
         assert not missing_live, (

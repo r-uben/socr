@@ -172,7 +172,7 @@ YAML round-trip persists the new fields (generic sweep in `test_config_from_file
 
 ## Stream D/E/B — the gate and its sequels (orchestrator.py, serialized)
 
-### TICKET-B1 — the gate · TODO · depends-on: A2, A3, A4, B0, B2, C1, C3, G1 · wave 4
+### TICKET-B1 — the gate · DONE · depends-on: A2, A3, A4, B0, B2, C1, C3, G1 · wave 4
 **Problem:** The single choke point does not exist; five sites finalize a table today.
 **Do:** In `_phase_agentic`, AFTER `_guard_agentic_page_table_repetition` (~`:3099`,
 so the judged table is the shipped table), behind the flag: B0 witnesses → A4 ladder

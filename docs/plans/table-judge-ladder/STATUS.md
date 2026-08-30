@@ -32,7 +32,7 @@ dispatched yet.
 | B2 | trust | DONE | A1 | 2 |
 | C3 | status | DONE | C1 | 2 |
 | C2 | status | DONE | C1, C3, G1 | 3 |
-| B1 | gate | TODO | A2, A3, A4, B0, B2, C1, C3, G1 | 4 |
+| B1 | gate | DONE | A2, A3, A4, B0, B2, C1, C3, G1 | 4 |
 | D1a | resume | TODO | B1 | 5 |
 | D1b | resume | TODO | D1a | 6 |
 | E1 | binding | TODO | B1 | 7 |
@@ -51,7 +51,11 @@ dispatched yet.
 |--------|-------|--------|
 | C3 | impl-C1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_ticket-c3.md` |
 | C2 | impl-C2 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_ticket-c2.md` |
+| B1 | impl-B1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-B1.md` |
 
 ## Next action
-Wave 3 (C2) DONE. Dispatch wave 4 (B1, the gate, `orchestrator.py`) next — its own
-deps (A2/A3/A4/B0/B2/C1/C3/G1) are all satisfied.
+Wave 4 (B1, the gate) DONE. Dispatch wave 5 (D1a, resume, `orchestrator.py`) next — its
+dep (B1) is now satisfied. Note for the reviewer/D1a dispatcher: B1's decision log flags
+one deferred item — a live smoke against the real `gemini` CLI and a real ollama host was
+explicitly out of scope for B1 (hermetic-only per the ticket) and should happen before this
+branch merges to `main`.

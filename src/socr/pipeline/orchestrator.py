@@ -149,6 +149,39 @@ def _socr_source_digest() -> str:
     return _SOURCE_DIGEST_CACHE
 
 
+def _table_judge_prompt_digest() -> str:
+    """SHA-256 of the table-judge prompt policy file, read at call time.
+
+    GH-353 TICKET-B1: a wording-only edit to ``prompts/table_judge.md``
+    (A0) changes what every rung is asked without moving
+    ``table_judge_rung1_model`` / ``table_judge_rung2_binary`` /
+    ``table_judge_timeout_sec`` — those are identity/timeout knobs, not the
+    prompt itself. Without this, a prompt-wording fix would leave
+    already-terminal ladder-judged pages resumable under the OLD wording
+    (the same GH-214 gap ``_socr_source_digest`` closes for the rest of the
+    package, narrowed to the one file that is data, not code, and therefore
+    outside the source-tree hash). Not cached process-wide (unlike
+    ``_socr_source_digest``): the file is a few KB, read once per document,
+    and tests routinely monkeypatch ``load_table_judge_prompt``/the file
+    itself, so a permanent module-global cache would go stale across runs
+    in the same process.
+    """
+    import hashlib
+
+    from socr.judge.table_prompt import load_table_judge_prompt
+
+    try:
+        return hashlib.sha256(load_table_judge_prompt().encode("utf-8")).hexdigest()
+    except OSError:
+        # An unreadable prompt file must not silently degrade to "no prompt
+        # identity" (the ``_socr_source_digest`` precedent): tag with a
+        # per-call sentinel so a run under a missing/corrupt prompt file
+        # never resumes a page a readable prompt produced.
+        import uuid
+
+        return f"unreadable-table-judge-prompt:{uuid.uuid4().hex}"
+
+
 def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_dir: Path) -> bool:
     """Whether a doc can be skipped by the resume gate.
 
@@ -459,6 +492,28 @@ class UnifiedPipeline:
             # which is itself behind ``dual_pass_tables``; recording it only when
             # that lane is enabled avoids invalidation when the lane is inactive.
             "auto_patch_tables": cfg.auto_patch_tables if cfg.dual_pass_tables else None,
+            # --- GH-353: table judge ladder ---
+            # Flag + both rung identities + the per-call timeout, all recorded
+            # only while the gate is on: it rewrites PageState.table_ladder_
+            # disposition (and, via the manifest guard, the shipped
+            # audit_passed/failure_mode), so a resumed run under a different
+            # rung, model, or timeout must not reuse a terminal sidecar the
+            # OTHER configuration produced. The prompt file digest catches a
+            # wording-only edit to prompts/table_judge.md, which changes what
+            # the judges are asked without moving any of the scalars above.
+            "table_judge_ladder": cfg.table_judge_ladder,
+            "table_judge_rung1_model": (
+                cfg.table_judge_rung1_model if cfg.table_judge_ladder else None
+            ),
+            "table_judge_rung2_binary": (
+                cfg.table_judge_rung2_binary if cfg.table_judge_ladder else None
+            ),
+            "table_judge_timeout_sec": (
+                cfg.table_judge_timeout_sec if cfg.table_judge_ladder else None
+            ),
+            "table_judge_prompt_digest": (
+                _table_judge_prompt_digest() if cfg.table_judge_ladder else None
+            ),
             # --- figures ---
             # ``save_figures`` controls PNG extraction + image-ref embedding.
             # ``describe_figures`` is the separate opt-in for VLM captions.
@@ -2348,6 +2403,179 @@ class UnifiedPipeline:
         )
 
     # ------------------------------------------------------------------
+    # GH-353 TICKET-B1: the table judge ladder gate.
+    #
+    # One choke point, post-repetition-guard (so the judged table is the
+    # shipped table): B0 witnesses -> A4 ladder (A2/A3 rungs injected) ->
+    # A1 audit-event kinds -> PageState.table_ladder_disposition, which C3's
+    # manifest guard and C2's document aggregation both read. Native lane
+    # included (design doc: "the native-lane-unwitnessed hole"); only
+    # ``engine == "chart_asset"`` pages skip the gate entirely.
+    # ------------------------------------------------------------------
+
+    def _build_table_judge_rungs(self) -> list:
+        """Construct the ladder's rung sequence once per document.
+
+        Returns ``[]`` when the ladder flag is off, or when ``strict_local``
+        is set: both rungs are cloud (ollama-cloud, gemini CLI), so
+        ``strict_local and table_judge_ladder`` makes every rung unavailable
+        BEFORE the first call (G1's documented interaction) -- an empty rung
+        list is the fail-open signal ``_run_table_judge_gate`` reads to
+        UNVERIFY every witnessed table on this run without ever attempting
+        cloud egress, rather than constructing a rung that would immediately
+        refuse. A separate method (not inlined in ``_phase_agentic``) so
+        tests can override it to inject fake ``RungCallable``s without a
+        live ollama daemon or a ``gemini`` binary on disk.
+        """
+        if not self.config.table_judge_ladder or self.config.strict_local:
+            return []
+
+        from socr.judge.table_rung_gemini import make_gemini_rung
+        from socr.judge.table_rung_ollama import build_ollama_rung
+
+        return [
+            build_ollama_rung(
+                self.config.table_judge_rung1_model,
+                self.config.table_judge_rung1_host,
+                self.config.table_judge_timeout_sec,
+            ),
+            make_gemini_rung(self.config),
+        ]
+
+    def _run_table_judge_gate(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        bo: PageOutput,
+        rungs: list,
+    ) -> None:
+        """Judge every table this page emits against its own page crop.
+
+        Never raises and never silently passes: a table whose witness could
+        not be located (AMBIGUOUS/MISSING), or any infra error while
+        preparing witnesses or running the ladder, demotes that table to
+        UNVERIFIED rather than being skipped. Sets
+        ``ps.table_ladder_disposition`` -- NEVER ``bo.audit_passed`` (the
+        winner-selection trap) and never mutates ``bo.failure_mode`` in
+        place (the #252 round-1 rule: a finalized copy is demoted later, at
+        the manifest guard, so the shipped attempt itself is never touched
+        here).
+        """
+        if bo.engine == "chart_asset" or not bo.text:
+            return
+
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.table_ladder import (
+            TableLadderOutcome,
+            TableLadderResult,
+            reduce_page_ladder,
+            run_table_ladder,
+        )
+        from socr.judge.table_verdict import (
+            TABLE_LADDER_ACCEPTED_KIND,
+            TABLE_LADDER_REJECTED_KIND,
+            TABLE_LADDER_UNVERIFIED_KIND,
+        )
+        from socr.tables.witness import WitnessStatus, prepare_table_witnesses
+
+        try:
+            with prepare_table_witnesses(state.handle.path, page_num, bo.text) as witnesses:
+                if not witnesses:
+                    return
+                table_results: list[TableLadderResult] = []
+                for witness in witnesses:
+                    if witness.status is not WitnessStatus.LOCATED or witness.crop_path is None:
+                        # AMBIGUOUS/MISSING: not S1-shaped -- nobody could
+                        # confidently look at this table at all.
+                        table_results.append(
+                            TableLadderResult(
+                                table_id=witness.table_id,
+                                outcome=TableLadderOutcome.UNVERIFIED,
+                            )
+                        )
+                        continue
+                    if not rungs:
+                        # Ladder off, or strict_local made every rung
+                        # unavailable before the first call -- fail open.
+                        table_results.append(
+                            TableLadderResult(
+                                table_id=witness.table_id,
+                                outcome=TableLadderOutcome.UNVERIFIED,
+                            )
+                        )
+                        continue
+                    try:
+                        table_results.append(
+                            run_table_ladder(
+                                rungs, witness.crop_path, witness.markdown, witness.table_id
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "table judge ladder errored on p%d table %s (%s: %s); UNVERIFIED",
+                            page_num,
+                            witness.table_id,
+                            type(exc).__name__,
+                            exc,
+                            exc_info=True,
+                        )
+                        table_results.append(
+                            TableLadderResult(
+                                table_id=witness.table_id,
+                                outcome=TableLadderOutcome.UNVERIFIED,
+                            )
+                        )
+        except Exception as exc:
+            # Witness preparation itself is documented never to raise (B0),
+            # but a page whose crop/witness machinery fails entirely must
+            # still demote -- belt-and-braces against the no-silent-loss
+            # rule, not a case this repo's own contract expects to hit.
+            logger.warning(
+                "table witness preparation errored on p%d (%s: %s); page UNVERIFIED",
+                page_num,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_LADDER_UNVERIFIED_KIND,
+                    engine=bo.engine or "",
+                    detail=f"table witness preparation failed: {type(exc).__name__}: {exc}",
+                )
+            )
+            ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+            return
+
+        for result in table_results:
+            if result.outcome is TableLadderOutcome.ACCEPTED:
+                kind = TABLE_LADDER_ACCEPTED_KIND
+                detail = f"table {result.table_id} accepted by the judge ladder"
+            elif result.outcome is TableLadderOutcome.REJECTED:
+                kind = TABLE_LADDER_REJECTED_KIND
+                detail = f"table {result.table_id} rejected by the judge ladder (content problem, not retryable)"
+            else:
+                kind = TABLE_LADDER_UNVERIFIED_KIND
+                detail = f"table {result.table_id} unverified by the judge ladder (infra problem, retryable on resume)"
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=kind,
+                    engine=bo.engine or "",
+                    detail=detail,
+                    data={"table_id": result.table_id},
+                )
+            )
+
+        page_result = reduce_page_ladder(table_results)
+        if page_result.outcome is TableLadderOutcome.REJECTED:
+            ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
+        elif page_result.outcome is TableLadderOutcome.UNVERIFIED:
+            ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+
+    # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
     # contract unchanged). Wraps any PageJudge in a wall-clock deadline so a
     # wedged VLM judge cannot block the orchestrator thread indefinitely.
@@ -2721,6 +2949,12 @@ class UnifiedPipeline:
                 logger.warning(
                     "agentic: table extractor unavailable (%s); skipping in-loop tables", exc
                 )
+
+        # -- Doc-scoped table judge ladder rungs (GH-353 TICKET-B1) -------------
+        # Constructed once per document, injected into every page's gate call.
+        # [] when the flag is off or strict_local forbids the (cloud-only)
+        # rungs; the gate reads an empty list as "fail open to UNVERIFIED".
+        _table_judge_rungs = self._build_table_judge_rungs()
 
         # -- Doc-scoped equation flags -------------------------------------------
         _detect_eq = bool(self.config.detect_equations)
@@ -3177,6 +3411,14 @@ class UnifiedPipeline:
             # assembly (unlike OutputNormalizer) and before the flush, so the
             # fragment, the sidecar and the stitched body all see one text.
             self._guard_agentic_page_table_repetition(state, page_num, bo, is_native)
+
+            # GH-353 TICKET-B1: the table judge ladder gate. Behind the flag;
+            # placed AFTER the repetition guard so the judged table is the
+            # exact text that ships. Runs on native AND OCR pages alike (the
+            # design's "native lane ships unwitnessed" hole); the gate itself
+            # skips chart_asset pages.
+            if self.config.table_judge_ladder:
+                self._run_table_judge_gate(state, page_num, ps, bo, _table_judge_rungs)
 
             # GH-318: this page's chart-vs-table routing was never decided --
             # the eligibility detector raised and the page fell through to the

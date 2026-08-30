@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 from socr.core.born_digital import DocumentAssessment
 from socr.core.document import DocumentHandle
-from socr.core.result import DocumentStatus, EngineResult, PageOutput
+from socr.core.result import DocumentStatus, EngineResult, FailureMode, PageOutput
 
 
 @dataclass
@@ -120,6 +120,16 @@ class PageState:
     #: ``structure_class_model_pages`` on the second run even though the same
     #: input produced it on the first.
     structure_class_model_kept_on_resume: bool = False
+    #: GH-353 TICKET-B1: the table judge ladder's page-level disposition
+    #: (``FailureMode.TABLE_REJECTED`` / ``TABLE_UNVERIFIED`` / ``None``).
+    #: This is the durable, pre-guard signal C3's manifest guard
+    #: (``_apply_ladder_disposition_guard``) reads to demote a page AFTER
+    #: winner selection, and C2's ``_table_ladder_terminal`` reads for
+    #: document aggregation. Set once, in the agentic loop, by the gate;
+    #: never derived from ``best_output`` (mutating a shipped attempt's
+    #: ``audit_passed``/``failure_mode`` in place would make assemble
+    #: discard the page's text -- the #252 round-1 rule).
+    table_ladder_disposition: FailureMode | None = None
 
     def is_structure_class(self) -> bool:
         """C2: pages whose native branch may never author a GRID.

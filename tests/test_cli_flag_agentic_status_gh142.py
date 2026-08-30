@@ -65,6 +65,11 @@ _LIVE = {
     "save_figures",
     "strict_local",
     "write_manifest",
+    # GH-353 TICKET-B1: read unconditionally by `_build_table_judge_rungs`
+    # (doc-scoped, called once per page-major run before the per-page loop)
+    # to decide whether to construct the ladder's rung sequence at all --
+    # acted on even when False, since that is the branch that returns `[]`.
+    "table_judge_ladder",
 }
 
 #: Hashed into the run fingerprint but never acted on. R174b DELETED every consumer
@@ -94,16 +99,6 @@ _INERT_BUT_FINGERPRINTED = {
 #: the modes where they DO work — the same class as the judge-model gap (#133).
 _INERT_AND_UNFINGERPRINTED = {
     "clean_equation_model",
-    # GH-353 table judge ladder (TICKET-G1): config surface only. Neither read nor
-    # fingerprinted yet — the gate that consumes them (TICKET-B1) and the
-    # fingerprint extras that hash their identity into the resume ledger
-    # (TICKET-B1's own "Do") have not landed. Reclassify to _LIVE once B1 wires
-    # the gate into `_phase_agentic`.
-    "table_judge_ladder",
-    "table_judge_rung1_model",
-    "table_judge_rung1_host",
-    "table_judge_rung2_binary",
-    "table_judge_timeout_sec",
 }
 
 #: NOT a deadness claim. Consumers are stubbed or unreached by this fixture:
@@ -151,6 +146,16 @@ _UNEXERCISED = {
     "workers",
     "timeout",
     "output_dir",
+    # GH-353 TICKET-B1: read and conditionally fingerprinted only when
+    # `table_judge_ladder` is True (inside `_build_table_judge_rungs` /
+    # `_run_fingerprint`'s ternary, which short-circuits the untaken branch).
+    # This fixture's config leaves the flag at its False default, so these
+    # never get touched here -- covered directly by
+    # tests/test_table_judge_gate.py, which turns the flag on.
+    "table_judge_rung1_model",
+    "table_judge_rung1_host",
+    "table_judge_rung2_binary",
+    "table_judge_timeout_sec",
 }
 
 _BOOKKEEPING = {"_run_fingerprint", "_engine_determinants", "_write_metadata"}
