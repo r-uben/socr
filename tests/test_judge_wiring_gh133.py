@@ -120,7 +120,9 @@ class _AcceptingJudge:
         return AcceptDecision(accept=True, reason="stub")
 
 
-def _run_provider(engine: EngineType, page_num: int) -> PageOutput:
+def _run_provider(profile, page_num: int) -> PageOutput:
+    # GH-159: the router passes the whole ProviderProfile, not a bare EngineType.
+    engine = profile.engine
     return PageOutput(
         page_num=page_num,
         text=f"text from {engine.value}",

@@ -38,7 +38,12 @@ def _run(audit=None, conf=None, text=None):
     conf = conf or {}
     text = text or {}
 
-    def run(engine: EngineType, page_num: int) -> PageOutput:
+    def run(profile, page_num: int) -> PageOutput:
+        # GH-159: the router hands over the whole ProviderProfile, not a bare
+        # EngineType — local and cloud Qwen share one engine, so the engine alone
+        # cannot say which backend/model must run. These fixtures key off the
+        # engine, which the profile still carries.
+        engine = profile.engine
         return PageOutput(
             page_num=page_num,
             text=text.get(engine, f"ocr from {engine.value}"),
@@ -115,7 +120,8 @@ def test_max_attempts_bounds_cost():
 
 
 def test_provider_exception_is_recorded_and_skipped():
-    def run(engine, page_num):
+    def run(profile, page_num):
+        engine = profile.engine  # GH-159: profiles, not bare engines
         if engine == EngineType.GLM:
             raise RuntimeError("ollama down")
         return PageOutput(
@@ -197,7 +203,8 @@ def test_slow_provider_timeout_escalates():
       (3) total elapsed < 2 s.
     """
 
-    def run(engine: EngineType, page_num: int) -> PageOutput:
+    def run(profile, page_num: int) -> PageOutput:
+        engine = profile.engine  # GH-159: profiles, not bare engines
         if engine == EngineType.GLM:
             time.sleep(10)  # simulate a stall
         return PageOutput(

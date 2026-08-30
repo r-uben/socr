@@ -239,3 +239,59 @@ def cost_of(
     if prof is None:
         return 0.0
     return prof.cost_per_page_usd * max(0, n_pages)
+
+
+def is_cloud_qwen(profile: ProviderProfile | None) -> bool:
+    """Whether *profile* is the Ollama-Cloud Qwen rung.
+
+    One predicate so the two places that must treat that rung specially -- the
+    config overrides below and the availability probe in
+    ``UnifiedPipeline._run_engine_on_pages`` -- cannot drift apart. Keyed on the
+    profile ``id`` rather than the descriptive ``backend`` label, so the rung's
+    identity (not a transport string that may be reworded) is what decides.
+    """
+    return profile is not None and profile.id == PROFILE_QWEN_CLOUD.id
+
+
+def execution_overrides(profile: ProviderProfile) -> dict[str, object]:
+    """Config fields that must be forced so *profile* actually runs as declared.
+
+    GH-159. ``ProviderProfile`` carries ``(engine, backend, model)``, but until now
+    only ``engine`` reached execution: ``route_page`` passed ``prof.engine`` into
+    ``run_provider`` and the backend/model were recorded as provenance only. For
+    every engine whose ``EngineType`` maps 1:1 to a deployment that is fine. For
+    QWEN it is not — ``PROFILE_QWEN_LOCAL`` and ``PROFILE_QWEN_CLOUD`` share
+    ``EngineType.QWEN``, so the cloud rung executed whatever
+    ``resolve_qwen_intent`` derived from ``PipelineConfig`` (normally the local
+    instruct build) while the manifest recorded ``backend="ollama-cloud"``.
+
+    Returned overrides are deliberately MINIMAL — only the ambiguous case is
+    touched:
+
+    - **Cloud Qwen** pins the model and forces the Ollama backend. Ollama Cloud is
+      served by the local Ollama runtime under a ``:cloud`` tag, so the backend is
+      ``ollama``, not the profile's descriptive ``ollama-cloud`` label. Pinning is
+      required because ``resolve_qwen_intent`` rewrites any unpinned model back to
+      ``OLLAMA_MODEL`` on a local backend — the exact clobber that made this rung
+      inert.
+    - **Everything else** returns ``{}``. In particular the LOCAL Qwen rung is left
+      alone: forcing its Ollama tag would break a vLLM/HPC deployment, where
+      ``qwen_backend`` is the operator's deliberate choice and the config-derived
+      model is already correct.
+
+    ``qwen_backend`` is the one literal here, and deliberately so: it is not the
+    profile's ``backend`` field. That field carries the DESCRIPTIVE label
+    ``"ollama-cloud"``, which is not a value ``PipelineConfig.qwen_backend`` accepts
+    ("auto", "ollama", "vllm", "api"). Ollama Cloud is served by the local Ollama
+    runtime under a ``:cloud`` model tag, so the executed backend really is
+    ``ollama`` -- the translation cannot be sourced from the registry because the
+    registry records what the rung IS, not which transport runs it. The model, which
+    the registry can answer for, does come from the profile.
+    """
+    if is_cloud_qwen(profile):
+        return {
+            "qwen_backend": "ollama",
+            "qwen_model": profile.model,
+            "qwen_model_pinned": True,
+        }
+    return {}
