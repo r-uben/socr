@@ -959,6 +959,23 @@ def _union_find_clusters(
     return merged
 
 
+# GH-372: a stroke whose bbox is many times longer than it is thick is a RULE
+# (a booktabs \toprule/\midrule, a tabular frame line), not a data mark.
+# LaTeX's heaviest table rule (\heavyrulewidth = 0.08em ≈ 1pt at text sizes)
+# spanning even half a column (≥ 200pt) gives a thickness/span ratio ≤ 0.005,
+# and a stroked line's bbox is thinner still; the flattest thick stroke that
+# should count as a chart mark on its own (a drawn line segment with real
+# vertical extent) sits well above 0.02. Only the thick-stroke branch consults
+# this — fills and coloured strokes are deliberately untouched, so a chart
+# whose axis is a thick rule still qualifies through its other marks.
+# Known limitation, accepted: a chart whose ONLY mark is a single flat
+# axis-aligned thick stroke (no fill, no colour, no frame for GH-150 A1's
+# framed-cluster path) is geometrically indistinguishable from a table rule
+# and is now missed — that shape is judged rarer than the booktabs tables
+# this gate protects (GH-372).
+_RULE_THINNESS_RATIO: float = 0.02
+
+
 def _has_filled_rects_or_thick_strokes(page, bbox: tuple[float, float, float, float]) -> bool:
     """Return True if the drawing cluster in *bbox* contains chart-like marks.
 
@@ -992,10 +1009,18 @@ def _has_filled_rects_or_thick_strokes(page, bbox: tuple[float, float, float, fl
         color = d.get("color") or d.get("stroke_color")
         if color and color != (0, 0, 0) and color != (0.0, 0.0, 0.0):
             return True
-        # Thick stroke (> 1pt width)
+        # Thick stroke (> 1pt width) — unless it is rule-shaped.  GH-372: a
+        # booktabs table's own >1pt rules cleared this branch, reclassifying
+        # the whole table as a chart and starving the rowizer of every word in
+        # it (Cochrane–Piazzesi p18).  A rule-shaped stroke must not qualify
+        # the cluster by itself; a genuine chart still qualifies via fills,
+        # colour, or thick strokes with real two-dimensional extent.
         width = d.get("width", 0.0) or 0.0
         if width > 1.0:
-            return True
+            span = max(rect.x1 - rect.x0, rect.y1 - rect.y0)
+            thickness = min(rect.x1 - rect.x0, rect.y1 - rect.y0)
+            if span > 0.0 and thickness / span > _RULE_THINNESS_RATIO:
+                return True
     return False
 
 
