@@ -204,7 +204,7 @@ a skipped page would lose its ladder events, trust entry, and metadata note on r
 sidecar round-trips byte-stable; restored state reproduces `tables_trust` and the
 metadata note without re-judging.
 
-### TICKET-D1b — resume skip policy · TODO · depends-on: D1a · wave 6
+### TICKET-D1b — resume skip policy · DONE · depends-on: D1a · wave 6
 **Problem:** `_load_terminal_page` (`:4315`) requires SUCCESS to skip; REJECTED must
 skip-and-keep (deliberate exception to doubt⇒reprocess) while UNVERIFIED reprocesses.
 **Do:** Positive early-return for a terminal REJECTED page after fingerprint + checksum

@@ -34,7 +34,7 @@ dispatched yet.
 | C2 | status | DONE | C1, C3, G1 | 3 |
 | B1 | gate | DONE | A2, A3, A4, B0, B2, C1, C3, G1 | 4 |
 | D1a | resume | DONE | B1 | 5 |
-| D1b | resume | TODO | D1a | 6 |
+| D1b | resume | DONE | D1a | 6 |
 | E1 | binding | TODO | B1 | 7 |
 | H1 | e2e | TODO | D1b, E1 | 8 |
 
@@ -53,14 +53,15 @@ dispatched yet.
 | C2 | impl-C2 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_ticket-c2.md` |
 | B1 | impl-B1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-B1.md` |
 | D1a | impl-B1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-D1a.md` |
+| D1b | impl-D1a (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-D1b.md` |
 
 ## Next action
-Wave 5 (D1a, sidecar persist/restore) DONE. Dispatch wave 6 (D1b, resume skip policy,
-`orchestrator.py`) next — its dep (D1a) is now satisfied. D1a made
-`ps.table_ladder_disposition` and the ladder's audit events survive resume; D1b still
-needs to add the positive early-return in `_load_terminal_page` (~`:4315`) so a
-REJECTED page (status=WARNING via C3's guard) is skipped-and-kept rather than falling
-through the existing `status == SUCCESS` gate, while UNVERIFIED never skips. Note for
-the reviewer/D1a dispatcher (unchanged from B1's log): a live smoke against the real
-`gemini` CLI and a real ollama host is still outstanding and belongs to whoever merges
-this branch, not to any single ticket.
+Wave 6 (D1b, resume skip policy) DONE — `_load_terminal_page` now grants a positive,
+disposition-gated early return: a terminal REJECTED page (`table_ladder_disposition ==
+TABLE_REJECTED` in the sidecar, checked after fingerprint + input-checksum validation)
+skips the SUCCESS/`audit_passed` checks and is skipped-and-kept; UNVERIFIED still
+reprocesses like before. Dispatch wave 7 (E1, mechanical binding evidence,
+`orchestrator.py`) next — its dep (B1) was already satisfied; H1 (wave 8) still needs
+E1 in addition to D1b (now DONE). Note for the reviewer/E1 dispatcher (unchanged from
+B1/D1a's logs): a live smoke against the real `gemini` CLI and a real ollama host is
+still outstanding and belongs to whoever merges this branch, not to any single ticket.

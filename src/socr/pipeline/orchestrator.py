@@ -4703,14 +4703,34 @@ class UnifiedPipeline:
             where only this inner check stands between us and stale-output reuse).
           * The winning output's status is exactly ``SUCCESS`` and the body is
             NOT a page-failure marker (a timed-out / ERROR / lossy-fallback page
-            written terminal at assemble must be RE-OCR'd, never skipped).
+            written terminal at assemble must be RE-OCR'd, never skipped) --
+            UNLESS the page carries a GH-353 table-judge-ladder ``REJECTED``
+            disposition (see below), the ONE deliberate exception.
           * The winning output's ``audit_passed`` is exactly ``True`` (GH-161).
             Status says the extraction succeeded as an OPERATION; only the audit
             verdict says the CONTENT was accepted.  A judge-rejected scanned page
-            keeps status SUCCESS with ``audit_passed=False`` and must be re-OCR'd.
+            keeps status SUCCESS with ``audit_passed=False`` and must be re-OCR'd
+            -- again subject to the same ``REJECTED``-disposition exception.
           * ``pages/NNN.md`` exists and is readable.
           * The serialised ``winning_output`` is present and rebuilds into a
             ``PageOutput`` without error.
+
+        GH-353 TICKET-D1b, the one deliberate exception: a page whose sidecar
+        ``table_ladder_disposition`` is ``FailureMode.TABLE_REJECTED`` skips
+        the two checks above and IS skip-and-kept even though C3's
+        ``_apply_ladder_disposition_guard`` demotes such a page's finalized
+        output to ``status=WARNING, audit_passed=False``. REJECTED is a
+        corroborated CONTENT verdict (both ladder rungs looked and said no),
+        not an infra doubt, so under the SAME input+config it is final --
+        unlike every other condition here, which reprocesses on ANY doubt.
+        ``FailureMode.TABLE_UNVERIFIED`` gets NO such exception: the ladder
+        ran out of witnesses/rungs without an answer, which IS infra-shaped
+        doubt, so an UNVERIFIED page falls through the SUCCESS/audit checks
+        like any other unresolved page and is reprocessed. Both dispositions
+        are covered by ``run_fingerprint`` above, which already binds B1's
+        ladder extras (flag, rung identities, timeout, prompt digest) -- a
+        changed rung config forces reprocessing before either disposition is
+        ever consulted.
 
         The fragment is body-only (no ``## Page N`` header), so its text is used
         verbatim as ``PageOutput.text``; the sidecar restores status / engine /
@@ -4762,35 +4782,56 @@ class UnifiedPipeline:
             if not recorded_checksum or recorded_checksum != current_checksum:
                 return None
 
+            # GH-353 TICKET-D1b: the table judge ladder's REJECTED terminal is a
+            # DELIBERATE exception to "doubt reprocesses" -- a REJECTED verdict is
+            # a corroborated CONTENT judgment (rung 1 + rung 2 both looked and
+            # said no; see ``judge/table_ladder.py``), not an infra doubt, so it
+            # is final for the SAME input+config and must skip-and-keep rather
+            # than fall through the SUCCESS/audit_passed checks below (which a
+            # REJECTED page's finalized output never satisfies -- C3's
+            # ``_apply_ladder_disposition_guard`` demotes it to
+            # ``status=WARNING, audit_passed=False`` precisely so a naive resume
+            # gate would refuse to skip it). UNVERIFIED is the opposite case: the
+            # ladder ran out of witnesses/rungs without an answer, which IS an
+            # infra-shaped doubt, so it deliberately gets NO exception here and
+            # falls through to reprocess like any other non-SUCCESS page.
+            # ``run_fingerprint`` above already binds B1's ladder extras (flag,
+            # rung identities, timeout, prompt digest), so a changed rung
+            # config already forced reprocessing before this line is reached --
+            # this check never needs to re-verify rung identity itself.
+            disposition_raw = meta.get("table_ladder_disposition")
+            is_ladder_rejected = disposition_raw == FailureMode.TABLE_REJECTED.value
+
             # The full winning PageOutput dict must be present and rebuildable.
             winning = meta.get("winning_output")
             if not isinstance(winning, dict) or not winning:
                 return None
 
-            # Status MUST be SUCCESS.  A page written terminal at assemble time
-            # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
-            # whose best_output is the ERROR attempt, or a flagged native fallback)
-            # is NOT a clean result — re-OCR it, never skip it.
-            if winning.get("status") != PageStatus.SUCCESS.value:
-                return None
+            if not is_ladder_rejected:
+                # Status MUST be SUCCESS.  A page written terminal at assemble time
+                # with an ERROR / WARNING / timed-out output (e.g. a cascade-halt page
+                # whose best_output is the ERROR attempt, or a flagged native fallback)
+                # is NOT a clean result — re-OCR it, never skip it.
+                if winning.get("status") != PageStatus.SUCCESS.value:
+                    return None
 
-            # GH-161: the audit verdict MUST be an explicit pass.  Status alone is
-            # not a quality signal — it says the extraction SUCCEEDED as an
-            # operation, not that the content was accepted.  Agentic best-effort
-            # (``_best_effort`` in pipeline/agentic.py, reached when the judge
-            # accepted nothing) keeps the most trustworthy attempt with its
-            # provider status still SUCCESS while ``att.output.audit_passed =
-            # att.accepted`` makes it False; on a SCANNED page no native fallback
-            # exists to demote that winner, so ``_winning_page_output`` returns it
-            # verbatim and the sidecar records status="success" beside
-            # audit_passed=false.  Skipping there restores text that EVERY judge
-            # rejected — silent corpus poisoning on resume, and the one gate
-            # condition that the born-digital sibling of this shape (demoted to
-            # WARNING) never needed.  Exactly ``True``, mirroring ``terminal``: a
-            # missing key or a non-bool is doubt, and doubt re-OCRs.
-            if winning.get("audit_passed") is not True:
-                self._record_ledger_audit_reject(state, page_num, winning)
-                return None
+                # GH-161: the audit verdict MUST be an explicit pass.  Status alone is
+                # not a quality signal — it says the extraction SUCCEEDED as an
+                # operation, not that the content was accepted.  Agentic best-effort
+                # (``_best_effort`` in pipeline/agentic.py, reached when the judge
+                # accepted nothing) keeps the most trustworthy attempt with its
+                # provider status still SUCCESS while ``att.output.audit_passed =
+                # att.accepted`` makes it False; on a SCANNED page no native fallback
+                # exists to demote that winner, so ``_winning_page_output`` returns it
+                # verbatim and the sidecar records status="success" beside
+                # audit_passed=false.  Skipping there restores text that EVERY judge
+                # rejected — silent corpus poisoning on resume, and the one gate
+                # condition that the born-digital sibling of this shape (demoted to
+                # WARNING) never needed.  Exactly ``True``, mirroring ``terminal``: a
+                # missing key or a non-bool is doubt, and doubt re-OCRs.
+                if winning.get("audit_passed") is not True:
+                    self._record_ledger_audit_reject(state, page_num, winning)
+                    return None
 
             # Read the authoritative body fragment.
             try:
