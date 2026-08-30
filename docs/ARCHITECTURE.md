@@ -69,8 +69,10 @@ See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
     routing branch consumes that analysis. `born_digital.py` handles native-text
     extraction.
 - `engines/`: one adapter per CLI engine implementing `BaseEngine`
-  (`gemini`, `deepseek`, `marker`, `glm`, `nougat`, `mistral`) + HPC vLLM engines.
-  `registry.py` resolves/probes engines.
+  (`qwen`, `gemini`, `deepseek`, `marker`, `glm`, `nougat`, `mistral`) + HPC vLLM
+  engines. `qwen` is listed first because it is the primary local workhorse --
+  `qwen3-vl:30b-a3b-instruct`, the model `CLAUDE.md` names as *the* local OCR model,
+  and the engine most runs actually use. `registry.py` resolves/probes engines.
 - `judge/`: the OCR-faithfulness judge. `judge.py` (`JudgeVerdict`, prompt loader,
   parser), `ollama_judge.py` (local VLM), `benchmark.py` (score a judge against
   labeled pages). Prompt lives in `prompts/judge_page.md` (policy as data).
@@ -108,5 +110,7 @@ run headless/HPC.
 
 ## Testing
 - Install (editable, venv off iCloud): `uv pip install -e ".[dev]" --python ~/venvs/socr/bin/python`
-- Run: `pytest -q`. Key suites: `test_providers.py`, `test_agentic.py`,
+- Run: `~/venvs/socr/bin/pytest -q` (the canonical command in `CLAUDE.md`; a bare
+  `pytest` may resolve to a different interpreter). Key suites:
+  `test_providers.py`, `test_agentic.py`,
   `test_manifest_replay.py`, `test_judge_benchmark.py`, `test_orchestrator.py`.

@@ -81,6 +81,9 @@ class PageState:
     #: GH-226 exact raw-emission defect code, kept separate from the aggregate
     #: above so it remains exact emission provenance.
     native_table_emission_defect: str = ""
+    # GH-303: the GH-190 empty-body term, carried separately so the audit can name
+    # it instead of reporting it as GH-151's `grid_shape`.
+    native_table_content_defect: str = ""
     #: GH-200: header-attribution HARD verdict (destroyed header band) found
     #: in the native markdown at extraction time. Same treatment as
     #: ``native_table_structure_defective`` immediately above: a SEPARATE
@@ -311,6 +314,10 @@ class DocumentState:
                     # separately; content and shape defects do not populate it.
                     ps.native_table_emission_defect = str(
                         getattr(pa, "native_table_emission_defect", "") or ""
+                    )
+                    # GH-303: same treatment for the GH-190 content term.
+                    ps.native_table_content_defect = str(
+                        getattr(pa, "native_table_content_defect", "") or ""
                     )
                     # GH-200: propagate the header-attribution defect flag.
                     # Same non-repair-forcing treatment as the line above.
