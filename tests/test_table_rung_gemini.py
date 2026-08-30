@@ -76,13 +76,12 @@ def test_build_gemini_argv_pins_exact_shape(tmp_path: Path):
     assert argv == [
         "gemini",
         "--skip-trust",
-        "--approval-mode",
-        "plan",
         "--include-directories",
         str(crop.parent),
         "-p",
         f"Image crop: @{crop}\n\n{prompt}",
     ]
+    assert "--approval-mode" not in argv
 
 
 def test_build_gemini_argv_uses_configured_binary(tmp_path: Path):
@@ -108,9 +107,10 @@ def test_judge_table_gemini_pass_is_s1_and_s2(tmp_path: Path):
         result = judge_table_gemini(crop, "| a |\n|---|\n| 1 |", None, config)
 
     mock_run.assert_called_once()
-    argv, timeout_sec = mock_run.call_args[0]
+    argv, timeout_sec, cwd = mock_run.call_args[0]
     assert argv[0] == config.table_judge_rung2_binary
     assert timeout_sec == config.table_judge_timeout_sec
+    assert cwd == crop.parent
     assert isinstance(result, RungResult)
     assert result.rung == RUNG_ID
     assert result.ok is True
@@ -144,7 +144,7 @@ def test_prior_findings_reach_the_prompt(tmp_path: Path):
     ) as mock_run:
         judge_table_gemini(crop, "| a |\n|---|\n| 1 |", prior, config)
 
-    argv, _ = mock_run.call_args[0]
+    argv, _, _ = mock_run.call_args[0]
     prompt_arg = argv[argv.index("-p") + 1]
     assert "WRONG_BINDING" in prompt_arg
     assert "shifted" in prompt_arg
@@ -160,9 +160,31 @@ def test_first_look_prompt_has_no_prior_findings_leak(tmp_path: Path):
     ) as mock_run:
         judge_table_gemini(crop, "| a |\n|---|\n| 1 |", None, config)
 
-    argv, _ = mock_run.call_args[0]
+    argv, _, _ = mock_run.call_args[0]
     prompt_arg = argv[argv.index("-p") + 1]
     assert "no prior findings" in prompt_arg
+
+
+def test_subprocess_cwd_is_the_crop_scratch_dir_not_the_repo(tmp_path: Path):
+    """The CLI must never see this repo's checkout as its workspace root —
+    otherwise it loads GEMINI.md/.gemini/ context and MCP servers, breaking
+    the "crop + markdown, nothing else" judge-input isolation."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    crop = scratch / "crop.png"
+    crop.write_bytes(b"fake-png")
+    config = _config()
+
+    with patch(
+        "socr.judge.table_rung_gemini._run_gemini_cli",
+        return_value=_completed(PASS_STDOUT),
+    ) as mock_run:
+        judge_table_gemini(crop, "md", None, config)
+
+    call = mock_run.call_args
+    cwd = call.kwargs.get("cwd", call.args[2] if len(call.args) > 2 else None)
+    assert cwd == scratch
+    assert cwd != Path.cwd()
 
 
 # --------------------------------------------------------------------------
@@ -288,5 +310,6 @@ def test_make_gemini_rung_binds_config_not_closure_over_call_site(tmp_path: Path
     ) as mock_run:
         rung(crop, "md", None)
 
-    argv, _ = mock_run.call_args[0]
+    argv, _, cwd = mock_run.call_args[0]
     assert argv[0] == "fast-gemini"
+    assert cwd == crop.parent

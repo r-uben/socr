@@ -16,8 +16,21 @@ its documented mechanism for pulling a local file into a headless turn is an
 `--include-directories` grants read access to the crop's parent directory
 (a scratch/temp dir, not necessarily under the CLI's default trusted
 workspace); `--skip-trust` avoids an interactive workspace-trust prompt that
-would otherwise hang the subprocess past its timeout; `--approval-mode plan`
-keeps the call read-only (the judge never needs write/execute tools).
+would otherwise hang the subprocess past its timeout. The subprocess `cwd`
+is pinned to the crop's parent directory (a scratch dir) rather than left as
+this repo's checkout — otherwise the CLI would treat the process cwd as
+workspace root and load this repo's `GEMINI.md`/`.gemini/` context and MCP
+servers, breaking the design's "crop + markdown, nothing else" judge-input
+isolation.
+
+Deliberately does NOT pass `--approval-mode plan`: verified against the
+bundled CLI source, `ApprovalMode.PLAN` injects a planning workflow into the
+system prompt (an Inquiry-vs-Directive classification) — a directive-shaped
+task like "judge this crop, emit strict JSON" risks being classified a
+Directive, making the model draft a plan file instead of answering (a
+silent ¬S1 for the wrong reason, plus a stray write attempt). The judge task
+invokes no tools, so the default approval mode never blocks on a
+confirmation prompt either.
 
 S1 classification ("the judge answered") is TICKET-A1's job
 (`rung_result_from_output` / `parse_table_verdict`). This module's only
@@ -45,11 +58,16 @@ RUNG_ID = "gemini"
 _STDERR_ERROR_CHARS = 500
 
 
-def _run_gemini_cli(argv: list[str], timeout_sec: float) -> subprocess.CompletedProcess[str]:
+def _run_gemini_cli(
+    argv: list[str], timeout_sec: float, cwd: Path
+) -> subprocess.CompletedProcess[str]:
     """Module-local subprocess seam.
 
-    Tests patch THIS function (not `PATH`, not `shutil.which`) so the argv
-    and timeout handling are exercised without a real `gemini` binary.
+    Tests patch THIS function (not `PATH`, not `shutil.which`) so the argv,
+    cwd, and timeout handling are exercised without a real `gemini` binary.
+    `cwd` is the crop's (scratch) parent directory — see the module
+    docstring for why the CLI must not run with this repo's checkout as its
+    workspace root.
     """
     return subprocess.run(
         argv,
@@ -57,6 +75,7 @@ def _run_gemini_cli(argv: list[str], timeout_sec: float) -> subprocess.Completed
         text=True,
         timeout=timeout_sec,
         check=False,
+        cwd=cwd,
     )
 
 
@@ -78,8 +97,6 @@ def build_gemini_argv(binary: str, crop_path: Path, prompt: str) -> list[str]:
     return [
         binary,
         "--skip-trust",
-        "--approval-mode",
-        "plan",
         "--include-directories",
         str(crop_path.parent),
         "-p",
@@ -112,7 +129,7 @@ def judge_table_gemini(
 
     start = time.monotonic()
     try:
-        completed = _run_gemini_cli(argv, timeout_sec)
+        completed = _run_gemini_cli(argv, timeout_sec, crop_path.parent)
     except FileNotFoundError as exc:
         return RungResult(
             rung=RUNG_ID,
