@@ -10,11 +10,11 @@ seam: tests monkeypatch THIS function, never `httpx` globally, so the exact
 outgoing JSON payload (built by `_build_payload`, kept separate so it can be
 asserted on without a real request) stays independently verifiable.
 
-Every failure mode this module can produce — timeout, connection error, HTTP
-error status, or a verdict that fails strict parsing — becomes
-`RungResult(ok=False)` (¬S1, `socr.judge.table_verdict`). It never raises and
-never synthesizes a FAIL verdict; a substitute rung must see fresh eyes, not
-a verdict nobody actually produced.
+Every failure mode this module can produce — a missing/unreadable crop file,
+timeout, connection error, HTTP error status, or a verdict that fails strict
+parsing — becomes `RungResult(ok=False)` (¬S1, `socr.judge.table_verdict`).
+It never raises and never synthesizes a FAIL verdict; a substitute rung must
+see fresh eyes, not a verdict nobody actually produced.
 """
 
 from __future__ import annotations
@@ -86,20 +86,19 @@ def build_ollama_rung(model: str, host: str | None, timeout: float):
         markdown: str,
         prior_findings: list[Finding] | None,
     ) -> RungResult:
-        prompt = build_table_judge_prompt(
-            markdown,
-            [
-                {"code": finding.code.value, "where": finding.where, "detail": finding.detail}
-                for finding in (prior_findings or [])
-            ],
-        )
-        image_b64 = base64.b64encode(Path(crop_path).read_bytes()).decode("ascii")
-        payload = _build_payload(model, prompt, image_b64)
-
         start = time.monotonic()
         try:
+            prompt = build_table_judge_prompt(
+                markdown,
+                [
+                    {"code": finding.code.value, "where": finding.where, "detail": finding.detail}
+                    for finding in (prior_findings or [])
+                ],
+            )
+            image_b64 = base64.b64encode(Path(crop_path).read_bytes()).decode("ascii")
+            payload = _build_payload(model, prompt, image_b64)
             text = _post_chat(resolved_host, payload, timeout)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, OSError) as exc:
             latency_sec = time.monotonic() - start
             return RungResult(
                 rung=rung,

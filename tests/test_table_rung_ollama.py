@@ -194,6 +194,25 @@ class TestBuildOllamaRung:
         assert result.ok is False
         assert result.verdict is None
 
+    def test_missing_crop_file_is_s1_failure_not_an_exception(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """The crop read (`Path.read_bytes`) sits inside the same try/except
+        as the network call — a missing/unreadable crop must classify as ¬S1
+        like any other rung failure, never propagate as OSError."""
+        monkeypatch.setattr(
+            "socr.judge.table_rung_ollama._post_chat",
+            lambda host, payload, timeout: PASS_JSON,
+        )
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        missing_crop = tmp_path / "does-not-exist.png"
+
+        result = rung(missing_crop, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.verdict is None
+        assert result.error
+
     def test_host_resolves_through_the_shared_gh222_resolver(
         self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
     ):

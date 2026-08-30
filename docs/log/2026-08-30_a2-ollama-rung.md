@@ -66,3 +66,22 @@ belongs to the concurrent A4 ticket and was left untouched).
 None. B1 (the gate) constructs this rung once via `build_ollama_rung` using
 the G1 config fields (`table_judge_rung1_model`, `table_judge_rung1_host`,
 `table_judge_timeout_sec`) and injects it into A4's ladder state machine.
+
+## Revision (2026-08-30, reviewer follow-up)
+
+Reviewer caught a real bug at commit `59674c5`: `Path(crop_path).read_bytes()`
+and the prompt build sat BEFORE the `try` block, so a missing/unreadable crop
+raised `FileNotFoundError`/`OSError` uncaught — contradicting the module
+docstring's "never raises" claim and the ANY-infra-error⇒¬S1 contract every
+other rung failure mode in this file honours.
+
+Fix: moved the prompt build and the base64 crop read inside the same `try` as
+`_post_chat`, and widened the except clause to `(httpx.HTTPError, OSError)`.
+Added `test_missing_crop_file_is_s1_failure_not_an_exception`, pointing
+`crop_path` at a nonexistent file and asserting `RungResult(ok=False)` with a
+populated `error`, not a raised exception. Updated the module docstring's
+failure-mode list to name the crop-read case explicitly.
+
+Re-ran `~/venvs/socr/bin/pytest tests/test_table_rung_ollama.py -q` — 13
+passed (12 + the new regression test). `uvx ruff@0.16.0 format --check
+src/socr/judge/table_rung_ollama.py tests/test_table_rung_ollama.py` — clean.
