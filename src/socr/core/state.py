@@ -92,6 +92,11 @@ class PageState:
     #: property's docstring -- forcing repair under --native-only is barred).
     native_table_header_unattributed: bool = False
     native_table_unverifiable: bool = False  # TR-3: per-region verifier flagged hard-fail
+    #: GH-371: zero-based ordinals of native table regions whose per-region
+    #: verifier hard-failed.  Empty when no failed region identity is available.
+    native_table_unverifiable_ordinals: list[int] = field(default_factory=list)
+    #: GH-371: number of native table regions examined by the per-region verifier.
+    native_table_region_count: int = 0
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
     #: #263: image ref for the shredded-rotated-page floor. Deliberately NOT
@@ -338,6 +343,12 @@ class DocumentState:
                     # D3 selection in _winning_page_output can route to the floor.
                     if getattr(pa, "has_unverifiable_table_region", False):
                         ps.native_table_unverifiable = True
+                    # GH-371: preserve failed-region identity for the regional
+                    # D3 splice and its sidecar resume path.
+                    ps.native_table_unverifiable_ordinals = list(
+                        getattr(pa, "native_table_unverifiable_ordinals", []) or []
+                    )
+                    ps.native_table_region_count = getattr(pa, "native_table_region_count", 0)
                     # GH-195: carry the text-strategy grid rejection onto the page
                     # so it can reach page status and document status.
                     if getattr(pa, "text_grid_rejections", None):
