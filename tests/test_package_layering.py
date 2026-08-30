@@ -24,6 +24,12 @@ SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "socr"
 # Do not add entries. Remove one only when its owning ticket lands.
 _ALLOWED_PRIVATE_IMPORTS = {
     ("benchmark/runner.py", "socr.engines.registry", "_ENGINES"),
+    # GH-330. The coverage harness exists to measure the native extraction path, so it
+    # must enumerate regions the SAME way `extract_structured` does -- including the
+    # lane-stacked branch. Re-implementing the predicate publicly would let the
+    # instrument drift from the thing it measures, which is exactly the failure this
+    # harness was built to rule out.
+    ("benchmark/binding_coverage.py", "socr.core.born_digital", "_is_lane_stacked"),
     ("math/detect_equations.py", "socr.core.born_digital", "_MATH_FONT_RE"),
     ("pipeline/agentic.py", "socr.tables.locate", "_horizontal_rules"),
     ("pipeline/orchestrator.py", "socr.core.manifest", "_whole_doc_page_texts"),

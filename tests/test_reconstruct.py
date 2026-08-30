@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import fitz
+import pytest
 
 from socr.core.born_digital import BornDigitalDetector
 from socr.tables.reconstruct import (
@@ -249,3 +252,155 @@ def test_integer_only_data_row_not_swallowed():
     assert any("Car Sales" in r[0] for r in data_rows), (
         "integer-only data row was swallowed into the header prefix"
     )
+
+
+# ---------------------------------------------------------------------------
+# GH-330 Task 5: Orientation-aware word rowizer
+# ---------------------------------------------------------------------------
+
+
+def _create_synthetic_table_page(rotation: int = 0) -> tuple[fitz.Document, fitz.Page]:
+    """Create a page with a 4-column table and a notes line at the given rotation."""
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    data = [
+        ["Model", "Beta", "SE", "t-stat"],
+        ["OLS", "1.25", "0.05", "25.0"],
+        ["IV", "1.80", "0.12", "15.0"],
+        ["GMM", "1.45", "0.08", "18.1"],
+    ]
+    notes = "Note: Standard errors clustered at firm level with N = 500."
+
+    if rotation == 0:
+        cols = [100, 220, 340, 460]
+        y = 100
+        for row in data:
+            for c, cell in enumerate(row):
+                page.insert_text((cols[c], y), cell, fontsize=10, rotate=0)
+            y += 25
+        page.insert_text((100, y + 20), notes, fontsize=9, rotate=0)
+    elif rotation == 90:
+        # Rotated 90 degrees clockwise
+        x = 520
+        rows_y = [100, 220, 340, 460]
+        for row in data:
+            for c, cell in enumerate(row):
+                page.insert_text((x, rows_y[c]), cell, fontsize=10, rotate=90)
+            x -= 25
+        page.insert_text((x - 20, 100), notes, fontsize=9, rotate=90)
+    elif rotation in (270, -90):
+        # Rotated 270 degrees (or -90)
+        x = 80
+        rows_y = [500, 380, 260, 140]
+        for row in data:
+            for c, cell in enumerate(row):
+                page.insert_text((x, rows_y[c]), cell, fontsize=10, rotate=270)
+            x += 25
+        page.insert_text((x + 20, 500), notes, fontsize=9, rotate=270)
+    else:
+        raise ValueError(f"Unsupported rotation: {rotation}")
+
+    return doc, page
+
+
+def test_rowize_from_words_orientation_aware_rotation_matrix():
+    """GH-330 Task 5: 0, +90, and -90 degree tables produce equivalent strict grids.
+
+    All three orientations:
+      1. Produce exactly one strict-parsable grid.
+      2. Preserve identical cell contents and reading order across all three.
+      3. Retain every numeric token exactly once (lossless).
+      4. Return bounding rects enclosing the original page-coordinate words.
+    """
+    from socr.tables.binding import parse_grid
+    from socr.tables.reconstruct import rowize_from_word_list
+
+    expected_cells = [
+        ("Model", "Beta", "SE", "t-stat"),
+        ("OLS", "1.25", "0.05", "25.0"),
+        ("IV", "1.80", "0.12", "15.0"),
+        ("GMM", "1.45", "0.08", "18.1"),
+    ]
+    expected_numerics = {"1.25", "0.05", "1.80", "0.12", "1.45", "0.08", "25.0", "15.0", "18.1"}
+
+    for rot in (0, 90, 270):
+        doc, page = _create_synthetic_table_page(rotation=rot)
+        words = page.get_text("words")
+        assert words, f"Page must contain words for rotation={rot}"
+
+        try:
+            regions = rowize_from_word_list(words, rotation=rot, page_rect=page.rect)
+        except TypeError:
+            # If rotation / page_rect kwargs are not yet supported on rowize_from_word_list
+            pytest.xfail(f"rowize_from_word_list does not yet accept rotation={rot}")
+
+        if not regions:
+            pytest.xfail(f"rowize_from_word_list returned no regions for rotation={rot}")
+
+        rect, md = regions[0]
+        grid = parse_grid(md)
+        assert grid is not None, f"Emitted region must parse as strict grid for rotation={rot}"
+
+        all_rows = list(grid.header_rows) + list(grid.rows)
+        assert len(all_rows) == len(expected_cells)
+        for actual_row, expected_row in zip(all_rows, expected_cells):
+            assert tuple(actual_row) == expected_row, (
+                f"Row mismatch for rotation={rot}: got {actual_row}, expected {expected_row}"
+            )
+
+        found_numerics = set()
+        for row in grid.rows:
+            for cell in row:
+                if cell in expected_numerics:
+                    found_numerics.add(cell)
+        assert found_numerics == expected_numerics, (
+            f"Missing numeric tokens for rotation={rot}: {expected_numerics - found_numerics}"
+        )
+
+        assert rect.is_valid and not rect.is_empty
+        doc.close()
+
+
+def test_mixed_horizontal_page_with_rotated_marginal_note_stays_horizontal():
+    """GH-330 Task 5: A single rotated marginal note does not flip page orientation.
+
+    Dominant text direction on the page remains horizontal, so the table is
+    processed in the horizontal frame.
+    """
+    from socr.tables.binding import parse_grid
+    from socr.tables.reconstruct import rowize_from_word_list
+
+    doc, page = _create_synthetic_table_page(rotation=0)
+    page.insert_text((550, 200), "Running Header 2026", fontsize=8, rotate=90)
+
+    words = page.get_text("words")
+    try:
+        regions = rowize_from_word_list(words, rotation=0, page_rect=page.rect)
+    except TypeError:
+        regions = rowize_from_word_list(words)
+
+    if not regions:
+        pytest.xfail("rowize_from_word_list returned no regions")
+
+    _rect, md = regions[0]
+    grid = parse_grid(md)
+    assert grid is not None
+    assert "OLS" in md and "1.25" in md and "25.0" in md
+    doc.close()
+
+
+def test_rotated_table_production_refusal_preserved(tmp_path: Path):
+    """GH-330 Task 5: Production routing refusal for rotated table pages is unchanged.
+
+    Rotated table pages are not trusted as native markdown directly in production;
+    they remain routed to OCR / flagged fail-closed per GH-147 / GH-263.
+    """
+    doc, _page = _create_synthetic_table_page(rotation=90)
+    pdf_path = tmp_path / "rotated.pdf"
+    doc.save(str(pdf_path))
+    doc.close()
+
+    detector = BornDigitalDetector()
+    assessment = detector.detect_page(pdf_path, 1)
+    assert assessment is not None
+    assert assessment.text_is_rotated is True

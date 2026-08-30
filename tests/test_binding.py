@@ -967,5 +967,380 @@ def test_diagonal_slide_into_empty_cells_is_model_unbound_not_matched():
     _assert_bidirectional_coverage(result, native_total=5, candidate_total=8)
 
 
+# ---------------------------------------------------------------------------
+# 9. GH-330 Task 2: _assign_bands groups without chaining tight rows
+# ---------------------------------------------------------------------------
+
+
+def test_assign_bands_groups_by_round_y0_without_chaining_adjacent_rows():
+    """GH-330 Task 2: _assign_bands must group by round(y0) and avoid fusing adjacent rows.
+
+    Two numeric rows at 7 pt pitch (y0=100.0 and y0=107.0) must form 2 distinct
+    bands rather than being collapsed by a 6 pt x-lane chaining heuristic.
+    """
+    from socr.tables.binding import _assign_bands
+
+    words = [
+        w(50, 100, 90, 106, "RowA"),
+        w(150, 100, 180, 106, "1.0"),
+        w(50, 107, 90, 113, "RowB"),
+        w(150, 107, 180, 113, "2.0"),
+    ]
+    centers, _ = _assign_bands(words)
+    assert len(centers) == 2
+
+    md = """
+|      | Val |
+|------|-----|
+| RowA | 1.0 |
+| RowB | 2.0 |
+"""
+    result = bind(words, md)
+    assert result.row_binding_unverifiable is False
+    assert len(result.matched_cells) == 2
+
+
+def test_superscript_same_line_marker_folds_into_numeric_group_using_metadata():
+    """GH-330 Task 2: A displaced marker on the same line folds into its numeric row.
+
+    A superscript marker '*' with identical block/line identity folds into Row B,
+    yielding 2 bands. A marker with distinct line identity remains separate.
+    """
+    from socr.tables.binding import _assign_bands
+
+    words_with_same_line_marker = [
+        (50, 100, 90, 106, "RowA", 0, 0, 0),
+        (150, 100, 180, 106, "1.0", 0, 0, 1),
+        (50, 107, 90, 113, "RowB", 0, 1, 0),
+        (150, 107, 180, 113, "2.0", 0, 1, 1),
+        (185, 104, 190, 108, "*", 0, 1, 2),  # same line_no=1 as Row B
+    ]
+    words_clean = [
+        (50, 100, 90, 106, "RowA", 0, 0, 0),
+        (150, 100, 180, 106, "1.0", 0, 0, 1),
+        (50, 107, 90, 113, "RowB", 0, 1, 0),
+        (150, 107, 180, 113, "2.0", 0, 1, 1),
+    ]
+    centers_marker, _ = _assign_bands(words_with_same_line_marker)
+    centers_clean, _ = _assign_bands(words_clean)
+
+    assert len(centers_marker) == 2
+    assert len(centers_clean) == 2
+
+    md = """
+|      | Val |
+|------|-----|
+| RowA | 1.0 |
+| RowB | 2.0 |
+"""
+    result_marker = bind(words_with_same_line_marker, md)
+    result_clean = bind(words_clean, md)
+    assert result_marker.row_binding_unverifiable is False
+    assert result_clean.row_binding_unverifiable is False
+    assert len(result_marker.matched_cells) == len(result_clean.matched_cells)
+
+
+def test_marker_with_distinct_line_identity_remains_separate_row():
+    """GH-330 Task 2: A marker with distinct line identity must not be swallowed."""
+    from socr.tables.binding import _assign_bands
+
+    words_distinct_line = [
+        (50, 100, 90, 106, "RowA", 0, 0, 0),
+        (150, 100, 180, 106, "1.0", 0, 0, 1),
+        (50, 104, 90, 108, "Note", 0, 99, 0),  # distinct line 99
+        (50, 107, 90, 113, "RowB", 0, 1, 0),
+        (150, 107, 180, 113, "2.0", 0, 1, 1),
+    ]
+    centers, _ = _assign_bands(words_distinct_line)
+    assert len(centers) == 3
+
+
+# ---------------------------------------------------------------------------
+# 10. GH-330 Task 3: Vertical band ambiguity from word extents
+# ---------------------------------------------------------------------------
+
+
+def test_vertical_band_ambiguity_from_word_extents_not_lane_gap_constant():
+    """GH-330 Task 3: Vertical band ambiguity uses adjacent word vertical overlap.
+
+    1. Rows at 10 pt pitch with 8 pt tall non-overlapping boxes have ambiguous_count == 0.
+    2. Rows with vertically overlapping bounding boxes have ambiguous_count > 0.
+    """
+    # Non-overlapping rows (pitch 10 pt, height 8 pt)
+    words_non_overlapping = [
+        w(150, 70, 180, 78, "Val"),
+        w(50, 100, 90, 108, "RowA"),
+        w(150, 100, 180, 108, "1.0"),
+        w(50, 110, 90, 118, "RowB"),
+        w(150, 110, 180, 118, "2.0"),
+    ]
+    md = """
+|      | Val |
+|------|-----|
+| RowA | 1.0 |
+| RowB | 2.0 |
+"""
+    result_clean = bind(words_non_overlapping, md)
+    assert result_clean.ambiguous_count == 0
+    assert result_clean.column_binding_unverifiable is False
+    assert result_clean.row_binding_unverifiable is False
+
+    # Overlapping rows (y spans [100, 112] and [108, 120] overlap by 4 pt)
+    words_overlapping = [
+        w(150, 70, 180, 78, "Val"),
+        w(50, 100, 90, 112, "RowA"),
+        w(150, 100, 180, 112, "1.0"),
+        w(50, 108, 90, 120, "RowB"),
+        w(150, 108, 180, 120, "2.0"),
+    ]
+    result_overlapping = bind(words_overlapping, md)
+    assert result_overlapping.ambiguous_count > 0
+
+
+# ---------------------------------------------------------------------------
+# 11. GH-330 Task 4: Numeric vs value-less rows binding
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_valueless_units_row_absorbed_in_header_preserves_numeric_row_binding():
+    """GH-330 Task 4: Value-less candidate rows do not invalidate numeric row binding."""
+    words = [
+        w(150, 70, 180, 80, "Col1"),
+        w(250, 70, 280, 80, "Col2"),
+        w(50, 100, 90, 110, "Row1"),
+        w(150, 100, 180, 110, "1.0"),
+        w(250, 100, 280, 110, "2.0"),
+        w(50, 130, 90, 140, "Row2"),
+        w(150, 130, 180, 140, "3.0"),
+        w(250, 130, 280, 140, "4.0"),
+    ]
+    md = """
+|              | Col1 | Col2 |
+|--------------|------|------|
+| Row1         | 1.0  | 2.0  |
+| ($ Millions) |      |      |
+| Row2         | 3.0  | 4.0  |
+"""
+    result = bind(words, md)
+    assert result.row_binding_unverifiable is False
+    assert result.candidate_valueless_unbound == 1
+    assert len(result.matched_cells) == 4
+
+
+def test_unmatched_native_parent_row_reports_native_valueless_unbound():
+    """GH-330 Task 4: Value-less native parent row surfaces without invalidating numeric binding."""
+    words = [
+        w(150, 70, 180, 80, "Col1"),
+        w(250, 70, 280, 80, "Col2"),
+        w(50, 100, 100, 110, "Panel A"),
+        w(50, 130, 90, 140, "Row1"),
+        w(150, 130, 180, 140, "1.0"),
+        w(250, 130, 280, 140, "2.0"),
+        w(50, 160, 90, 170, "Row2"),
+        w(150, 160, 180, 170, "3.0"),
+        w(250, 160, 280, 170, "4.0"),
+    ]
+    md = """
+|      | Col1 | Col2 |
+|------|------|------|
+| Row1 | 1.0  | 2.0  |
+| Row2 | 3.0  | 4.0  |
+"""
+    result = bind(words, md)
+    assert result.row_binding_unverifiable is False
+    assert result.native_valueless_unbound == 1
+    assert len(result.matched_cells) == 4
+
+
+def test_valueless_candidate_opposite_numeric_native_row_never_binds():
+    """GH-330 Task 4: Value-less candidate opposite a numeric native row does not bind."""
+    words = [
+        w(150, 70, 180, 80, "Col1"),
+        w(250, 70, 280, 80, "Col2"),
+        w(50, 100, 90, 110, "Row1"),
+        w(150, 100, 180, 110, "1.0"),
+        w(250, 100, 280, 110, "2.0"),
+        w(50, 130, 90, 140, "Row2"),
+        w(150, 130, 180, 140, "3.0"),
+        w(250, 130, 280, 140, "4.0"),
+    ]
+    md = """
+|      | Col1 | Col2 |
+|------|------|------|
+| Row1 | 1.0  | 2.0  |
+| Row2 |      |      |
+"""
+    result = bind(words, md)
+    native_tokens = {u.token for u in result.native_unbound}
+    assert native_tokens == {"3.0", "4.0"}
+    assert result.row_binding_unverifiable is True
+
+
+def test_bound_parent_row_increments_row_labels_checked():
+    """GH-330 Task 4: A bound parent row verifies its label and increments row_labels_checked."""
+    words = [
+        w(150, 70, 180, 80, "Col1"),
+        w(250, 70, 280, 80, "Col2"),
+        w(50, 100, 100, 110, "Panel A"),
+        w(50, 130, 90, 140, "Row1"),
+        w(150, 130, 180, 140, "1.0"),
+        w(250, 130, 280, 140, "2.0"),
+    ]
+    md = """
+|         | Col1 | Col2 |
+|---------|------|------|
+| Panel A |      |      |
+| Row1    | 1.0  | 2.0  |
+"""
+    result = bind(words, md)
+    assert result.row_label_contradictions == []
+    assert result.row_labels_checked >= 2
+
+
+# ---------------------------------------------------------------------------
+# 12. GH-330 Task 6: Reconcile binder data-lane geometry with rowizer columns
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_stub_column_excluded_from_data_lanes_when_candidate_has_matching_data_cols():
+    """GH-330 Task 6: Numeric stub column (e.g. Years) is not counted as a data lane."""
+    words = [
+        w(150, 70, 180, 80, "ColA"),
+        w(250, 70, 280, 80, "ColB"),
+        w(50, 100, 90, 110, "1990"),
+        w(150, 100, 180, 110, "10.5"),
+        w(250, 100, 280, 110, "20.5"),
+        w(50, 130, 90, 140, "1991"),
+        w(150, 130, 180, 140, "11.5"),
+        w(250, 130, 280, 140, "21.5"),
+    ]
+    md = """
+| Year | ColA | ColB |
+|------|------|------|
+| 1990 | 10.5 | 20.5 |
+| 1991 | 11.5 | 21.5 |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert result.row_binding_unverifiable is False
+    assert len(result.matched_cells) == 4
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="GH-330 Task 6: label-free table geometry reconciliation not implemented. "
+    "strict=True so this turns RED when it starts passing, instead of sitting green.",
+)
+def test_label_free_table_first_numeric_lane_not_dropped_as_stub():
+    """GH-330 Task 6: In a table with no stub column, first data lane must not be dropped."""
+    words = [
+        w(50, 70, 80, 80, "ColA"),
+        w(150, 70, 180, 80, "ColB"),
+        w(50, 100, 80, 110, "1.0"),
+        w(150, 100, 180, 110, "2.0"),
+        w(50, 130, 80, 140, "3.0"),
+        w(150, 130, 180, 140, "4.0"),
+    ]
+    md = """
+| ColA | ColB |
+|------|------|
+| 1.0  | 2.0  |
+| 3.0  | 4.0  |
+"""
+    result = bind(words, md)
+    assert result.column_binding_unverifiable is False
+    assert len(result.matched_cells) == 4
+
+
+def test_raw_lane_outside_region_does_not_break_scoped_column_binding():
+    """GH-330 Task 6: Words outside the table region do not pollute lane geometry."""
+    words = [
+        # Table region (0, 0, 300, 200)
+        w(150, 70, 180, 80, "ColA"),
+        w(250, 70, 280, 80, "ColB"),
+        w(50, 100, 90, 110, "Row1"),
+        w(150, 100, 180, 110, "1.0"),
+        w(250, 100, 280, 110, "2.0"),
+        # Extraneous numbers in prose outside table
+        w(400, 100, 450, 110, "999.0"),
+        w(400, 130, 450, 140, "888.0"),
+    ]
+    # Candidate emits flat header
+    md = """
+|      | ColA | ColB |
+|------|------|------|
+| Row1 | 1.0  | 2.0  |
+"""
+    result_scoped = bind(words, md, region=(0, 0, 300, 200))
+    result_unscoped = bind(words, md)
+
+    assert result_scoped.column_binding_unverifiable is False
+    assert result_unscoped.column_binding_unverifiable is True
+
+
+# ---------------------------------------------------------------------------
+# 13. GH-330 Task 7: Zero false model_unbound on self-bind grids
+# ---------------------------------------------------------------------------
+
+
+def test_self_bind_header_depth_discrepancy_zero_model_unbound():
+    """GH-330 Task 7: Self-bind with header depth difference reports zero model_unbound."""
+    words = [
+        w(150, 50, 280, 60, "Spanning Header"),
+        w(150, 70, 180, 80, "ColA"),
+        w(250, 70, 280, 80, "ColB"),
+        w(50, 100, 90, 110, "Row1"),
+        w(150, 100, 180, 110, "1.0"),
+        w(250, 100, 280, 110, "2.0"),
+    ]
+    md = """
+|      | ColA | ColB |
+|------|------|------|
+| Row1 | 1.0  | 2.0  |
+"""
+    result = bind(words, md)
+    assert result.model_unbound == []
+
+
+def test_self_bind_parent_row_labels_zero_model_unbound():
+    """GH-330 Task 7: Self-bind with panel parent rows reports zero model_unbound."""
+    words = [
+        w(150, 70, 180, 80, "ColA"),
+        w(250, 70, 280, 80, "ColB"),
+        w(50, 100, 110, 110, "Panel Header"),
+        w(50, 130, 90, 140, "Row1"),
+        w(150, 130, 180, 140, "1.0"),
+        w(250, 130, 280, 140, "2.0"),
+    ]
+    md = """
+|              | ColA | ColB |
+|--------------|------|------|
+| Panel Header |      |      |
+| Row1         | 1.0  | 2.0  |
+"""
+    result = bind(words, md)
+    assert result.model_unbound == []
+
+
+def test_genuine_invented_value_in_cell_still_convicted():
+    """GH-330 Task 7: Genuine invented candidate rows remain detected in model_unbound."""
+    words = [
+        w(150, 70, 180, 80, "ColA"),
+        w(250, 70, 280, 80, "ColB"),
+        w(50, 100, 90, 110, "Row1"),
+        w(150, 100, 180, 110, "1.0"),
+        w(250, 100, 280, 110, "2.0"),
+    ]
+    md = """
+|          | ColA | ColB |
+|----------|------|------|
+| Row1     | 1.0  | 2.0  |
+| Invented | 99.9 | 88.8 |
+"""
+    result = bind(words, md)
+    unbound_tokens = {u.token for u in result.model_unbound}
+    assert unbound_tokens == {"99.9", "88.8"}
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

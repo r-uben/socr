@@ -255,7 +255,10 @@ def reconstruct_table_regions(
             # as unreachable code behind a warning that can never fire.
             tight = _extend_scope_for_header(numeric_scope, words)
             scoped_words = [w for w in words if tight.contains(fitz.Point(w[0], w[1]))]
-            rowized = rowize_from_word_list(scoped_words)
+            from socr.core.born_digital import upright_rotation_for
+
+            rotation = upright_rotation_for(page, clip=tight)
+            rowized = rowize_from_word_list(scoped_words, rotation=rotation, page_rect=page.rect)
             if rowized:
                 out.extend(rowized)
             # Whether or not the scoped fallback found anything usable, this
@@ -709,6 +712,62 @@ def _esc(cell: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Coordinate transformation helpers (orientation-aware rowizer)
+# ---------------------------------------------------------------------------
+
+
+def _rotate_point(px: float, py: float, cx: float, cy: float, degrees: int) -> tuple[float, float]:
+    """Rotate point (px, py) around center (cx, cy) by given degrees.
+
+    Degrees must be a multiple of 90.
+    """
+    import math
+
+    if degrees == 0:
+        return px, py
+    radians = math.radians(degrees)
+    cos_a = math.cos(radians)
+    sin_a = math.sin(radians)
+    dx, dy = px - cx, py - cy
+    nx = cos_a * dx - sin_a * dy + cx
+    ny = sin_a * dx + cos_a * dy + cy
+    return nx, ny
+
+
+def _rotate_word_bbox(word: tuple, cx: float, cy: float, degrees: int) -> tuple:
+    """Rotate word tuple's bbox corners and return word with rotated coords.
+
+    Preserves all metadata (text, block_no, line_no, word_no).
+    """
+    if degrees == 0:
+        return word
+    x0, y0, x1, y1, text = word[0], word[1], word[2], word[3], word[4]
+    nx0, ny0 = _rotate_point(x0, y0, cx, cy, degrees)
+    nx1, ny1 = _rotate_point(x1, y1, cx, cy, degrees)
+    min_x, max_x = min(nx0, nx1), max(nx0, nx1)
+    min_y, max_y = min(ny0, ny1), max(ny0, ny1)
+    return (min_x, min_y, max_x, max_y, text, *word[5:])
+
+
+def _rotate_rect(rect: object, cx: float, cy: float, degrees: int) -> object:
+    """Rotate fitz.Rect by given degrees around center (cx, cy)."""
+    import fitz
+
+    if degrees == 0:
+        return rect
+    x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
+    corners = [
+        _rotate_point(x0, y0, cx, cy, degrees),
+        _rotate_point(x1, y0, cx, cy, degrees),
+        _rotate_point(x0, y1, cx, cy, degrees),
+        _rotate_point(x1, y1, cx, cy, degrees),
+    ]
+    xs = [c[0] for c in corners]
+    ys = [c[1] for c in corners]
+    return fitz.Rect(min(xs), min(ys), max(xs), max(ys))
+
+
+# ---------------------------------------------------------------------------
 # Word-geometry rowizer (TR-1)
 # ---------------------------------------------------------------------------
 # Gap threshold multiplier: an inter-row gap > (SPLIT_GAP_MULT × median row gap)
@@ -1064,7 +1123,10 @@ def rowize_from_words(page) -> list[tuple[object, str]]:
     except Exception:
         return []
 
-    return rowize_from_word_list(words)
+    from socr.core.born_digital import upright_rotation_for
+
+    rotation = upright_rotation_for(page)
+    return rowize_from_word_list(words, rotation=rotation, page_rect=page.rect)
 
 
 def rowize_from_words_chart_aware(
@@ -1119,7 +1181,10 @@ def rowize_from_words_chart_aware(
     non_chart_words = [w for w in all_words if not _word_in_any_bbox(w, chart_bboxes)]
 
     # Rowize the non-chart words.
-    table_regions = rowize_from_word_list(non_chart_words)
+    from socr.core.born_digital import upright_rotation_for
+
+    rotation = upright_rotation_for(page)
+    table_regions = rowize_from_word_list(non_chart_words, rotation=rotation, page_rect=page.rect)
 
     # Build placeholder entries for each chart cluster.
     chart_regions: list[tuple[object, str]] = []
@@ -1136,6 +1201,8 @@ def rowize_from_words_chart_aware(
 
 def rowize_from_word_list(
     words: list,
+    rotation: int = 0,
+    page_rect: object | None = None,
 ) -> list[tuple[object, str]]:
     """Build ``(rect, markdown)`` pairs from a flat list of PyMuPDF word tuples.
 
@@ -1153,6 +1220,11 @@ def rowize_from_word_list(
     that row. A lane with no token in a given row becomes a blank (``""``)
     cell — never dropped.
 
+    When ``rotation`` is non-zero, word coordinates are rotated into an upright
+    frame before rowization; returned region rects are rotated back to the
+    original orientation. ``page_rect`` (a fitz.Rect) provides the center point
+    for rotation; if not supplied, rotation defaults to unrotated behaviour.
+
     Never raises. Returns ``[]`` if no valid table segment is found.
     """
     try:
@@ -1162,6 +1234,27 @@ def rowize_from_word_list(
 
     if not words:
         return []
+
+    if rotation == 0 or not page_rect:
+        rotation = 0
+
+    if rotation != 0:
+        if words:
+            xs = [w[0] for w in words]
+            ys = [w[1] for w in words]
+            cx = (min(xs) + max(xs)) / 2
+            cy = (min(ys) + max(ys)) / 2
+        else:
+            cx = (page_rect.x0 + page_rect.x1) / 2
+            cy = (page_rect.y0 + page_rect.y1) / 2
+        words = [_rotate_word_bbox(w, cx, cy, -rotation) for w in words]
+
+    # Save the rotation center if rotating, so we can use it for output rect rotation
+    if rotation != 0:
+        _rotation_center_x = cx
+        _rotation_center_y = cy
+    else:
+        _rotation_center_x = _rotation_center_y = None
 
     # ------------------------------------------------------------------
     # 1. Group words into y-rows (round y0 to nearest point to merge
@@ -1235,7 +1328,10 @@ def rowize_from_word_list(
             continue
         md = _grid_to_markdown(cleaned)
         if md:
-            out.append((fitz.Rect(x0, y0, x1, y1), md))
+            rect = fitz.Rect(x0, y0, x1, y1)
+            if rotation != 0 and _rotation_center_x is not None:
+                rect = _rotate_rect(rect, _rotation_center_x, _rotation_center_y, rotation)
+            out.append((rect, md))
             consumed.add(i)
 
     return out

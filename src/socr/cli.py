@@ -838,6 +838,48 @@ def benchmark_score(results_file: Path) -> None:
     _print_results_summary(results)
 
 
+@benchmark.command("binding-coverage")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Content-free self-bind coverage manifest",
+)
+@click.option(
+    "--pdf-root",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Directory containing PDFs referenced by the manifest",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "summary"]),
+    default="json",
+    show_default=True,
+    help="Output format",
+)
+def benchmark_binding_coverage(manifest_path: Path, pdf_root: Path, output_format: str) -> None:
+    """Measure native self-binding coverage without emitting document content."""
+    from socr.benchmark.binding_coverage import measure_manifest, summary_text
+
+    if not manifest_path.exists() or not manifest_path.is_file():
+        raise click.ClickException(f"manifest is not a file: {manifest_path}")
+    if not pdf_root.exists() or not pdf_root.is_dir():
+        raise click.ClickException(f"PDF root is not a directory: {pdf_root}")
+
+    try:
+        report = measure_manifest(manifest_path, pdf_root)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if output_format == "json":
+        click.echo(report.to_json(), nl=False)
+    else:
+        click.echo(summary_text(report), nl=False)
+
+
 @benchmark.command("calibrate")
 @click.option(
     "--results-file",
