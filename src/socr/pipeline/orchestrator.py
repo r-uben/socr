@@ -178,6 +178,44 @@ def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_
     return p.exists()
 
 
+#: GH-353: the two table judge ladder terminals. Local to this module,
+#: deliberately not imported from ``core.manifest``'s
+#: ``_LADDER_TERMINAL_FAILURE_MODES`` -- that name is private to C3's guard
+#: and this predicate reads a different (pre-guard) surface, see
+#: ``_table_ladder_terminal`` below.
+_LADDER_TERMINAL_MODES = (FailureMode.TABLE_REJECTED, FailureMode.TABLE_UNVERIFIED)
+
+
+def _table_ladder_terminal(p) -> FailureMode | None:
+    """GH-353 C2 review fix: the ladder terminal a page carries, disposition-first.
+
+    C3's decision log (``docs/log/2026-08-30_ticket-c3.md``) contracts B1 to
+    set ``PageState.table_ladder_disposition`` and rely on
+    ``_apply_ladder_disposition_guard`` (``core/manifest.py``) to enforce it.
+    That guard demotes only the finalized COPY it returns from
+    ``_winning_page_output``/``finalized_page_outputs`` -- it deliberately
+    never mutates ``best_output`` in place (the #252 round-1 rule: flipping a
+    shipped attempt's ``audit_passed``/``failure_mode`` in place would make
+    assemble discard the page's text). So reading only
+    ``best_output.failure_mode`` here is blind to every ladder terminal
+    whenever no OTHER, more specific guard already demoted the kept attempt
+    -- exactly the silent-miss this ticket exists to prevent. ``PageState``
+    is the durable, pre-guard signal (mirrors every other bucket in
+    ``_phase_assemble``, which all read ``PageState`` flags rather than
+    re-deriving from a finalized copy), so it is read FIRST here; the
+    finalized-output failure_mode is kept as a belt-and-braces fallback for
+    the case where the disposition attribute is unset but a more specific
+    caller already stamped the terminal directly onto ``best_output``. A
+    page can therefore land in exactly one bucket: when both are set, the
+    disposition wins.
+    """
+    disposition = getattr(p, "table_ladder_disposition", None)
+    if disposition in _LADDER_TERMINAL_MODES:
+        return disposition
+    fm = p.best_output.failure_mode if p.best_output else None
+    return fm if fm in _LADDER_TERMINAL_MODES else None
+
+
 class UnifiedPipeline:
     """OCR pipeline orchestrator.
 
@@ -1849,24 +1887,24 @@ class UnifiedPipeline:
 
         Mirrors ``_chart_detection_failed_note``: a consumer gating on
         ``metadata.json`` must see a REJECTED/UNVERIFIED table without parsing
-        the full audit log. Read from ``best_output.failure_mode``, NOT
-        ``.status`` -- the same reason ``table_rejected_pages`` /
-        ``table_unverified_pages`` are computed that way in ``_phase_assemble``
-        (GH-161: a page can be SUCCESS/audit_passed=False with only
-        failure_mode carrying the disposition). Names both terminal modes by
-        their ``FailureMode`` value so the CLI summary (which prints
-        ``result.error`` verbatim) surfaces the exact terminal, not a
-        paraphrase. ``None`` on a clean run.
+        the full audit log. Uses ``_table_ladder_terminal`` -- the same
+        disposition-first, ``best_output.failure_mode``-fallback predicate the
+        ``table_rejected_pages``/``table_unverified_pages`` buckets in
+        ``_phase_assemble`` use, so the note and the document-status
+        aggregation can never disagree about which pages are affected. Names
+        both terminal modes by their ``FailureMode`` value so the CLI summary
+        (which prints ``result.error`` verbatim) surfaces the exact terminal,
+        not a paraphrase. ``None`` on a clean run.
         """
         rejected = sorted(
             n
             for n, p in state.pages.items()
-            if p.best_output and p.best_output.failure_mode == FailureMode.TABLE_REJECTED
+            if _table_ladder_terminal(p) == FailureMode.TABLE_REJECTED
         )
         unverified = sorted(
             n
             for n, p in state.pages.items()
-            if p.best_output and p.best_output.failure_mode == FailureMode.TABLE_UNVERIFIED
+            if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
         )
         if not rejected and not unverified:
             return None
@@ -5224,26 +5262,30 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not chart_detection_failed_pages
 
         # GH-353: table judge ladder terminals (C2). Keyed off
-        # ``best_output.failure_mode``, NOT ``best_output.status`` -- a page
-        # can legitimately arrive as SUCCESS/audit_passed=False (GH-161,
-        # ``:4347``), and C3's manifest guard only backfills failure_mode in
-        # that state, leaving ``.status`` textually SUCCESS. Reading .status
-        # here would let a REJECTED/UNVERIFIED page slip through aggregation
-        # silently -- exactly the no-silent-loss failure this ticket exists
-        # to close. TABLE_REJECTED (content problem, not retryable) and
-        # TABLE_UNVERIFIED (infra problem, retryable on resume) are kept as
-        # separate buckets -- same reasoning as every other pairing above:
-        # one bucket per disposition, because they need distinct audit
-        # kinds, CLI wording and (D1b, later) distinct resume policy.
+        # ``PageState.table_ladder_disposition`` FIRST -- the durable field
+        # C3 built for exactly this consumer -- with ``best_output.failure_mode``
+        # as a belt-and-braces fallback (see ``_table_ladder_terminal`` above
+        # for why ``best_output`` alone is blind to the disposition in
+        # production: the manifest guard demotes only the finalized copy it
+        # returns, never ``best_output`` itself). NOT keyed off
+        # ``best_output.status`` either way -- a page can legitimately arrive
+        # as SUCCESS/audit_passed=False (GH-161, ``:4347``), and neither the
+        # disposition guard nor a direct failure_mode stamp ever rewrites
+        # ``.status`` to match. TABLE_REJECTED (content problem, not
+        # retryable) and TABLE_UNVERIFIED (infra problem, retryable on
+        # resume) are kept as separate, mutually exclusive buckets -- same
+        # reasoning as every other pairing above: one bucket per disposition,
+        # because they need distinct audit kinds, CLI wording and (D1b,
+        # later) distinct resume policy.
         table_rejected_pages = sorted(
             n
             for n, p in state.pages.items()
-            if p.best_output and p.best_output.failure_mode == FailureMode.TABLE_REJECTED
+            if _table_ladder_terminal(p) == FailureMode.TABLE_REJECTED
         )
         table_unverified_pages = sorted(
             n
             for n, p in state.pages.items()
-            if p.best_output and p.best_output.failure_mode == FailureMode.TABLE_UNVERIFIED
+            if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
         )
         pages_ok = pages_ok and not table_rejected_pages and not table_unverified_pages
 

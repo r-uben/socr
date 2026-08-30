@@ -1,18 +1,26 @@
 """TICKET-C2 (GH-353): table judge ladder terminals surface at every level.
 
-No-silent-loss guard: a page carrying ``FailureMode.TABLE_REJECTED`` /
-``FailureMode.TABLE_UNVERIFIED`` (the two ladder terminals, B1's job to set —
-this ticket injects them directly at the ``_phase_assemble`` seam, mirroring
-the chart-lane test pattern in ``test_chart_lane.py``) must flip:
+No-silent-loss guard: a page carrying the ladder's REJECTED/UNVERIFIED
+terminal must flip:
 
 1. ``pages_ok`` -> document status ``AUDIT_FAILED`` (never a silent SUCCESS).
 2. ``metadata.json`` -> ``Status.PARTIAL`` with an error note naming the mode.
 3. ``_print_summary`` CLI output -> both terminal names visible.
 
-Keyed off ``best_output.failure_mode``, NOT ``.status`` -- a page can
-legitimately arrive as SUCCESS/audit_passed=False (GH-161), so a test that
-only varied ``.status`` would not catch a regression that reads the wrong
-field (the C3 reviewer note this ticket was built against).
+Review fix (post-3673a07): the PRIMARY seam is ``PageState.table_ladder_disposition``,
+not ``best_output.failure_mode``. C3's decision log
+(``docs/log/2026-08-30_ticket-c3.md``) contracts B1 to set that attribute and
+rely on ``_apply_ladder_disposition_guard`` (``core/manifest.py``) to enforce
+it -- and that guard demotes only the finalized COPY it returns from
+``_winning_page_output``/``finalized_page_outputs``, never ``best_output``
+itself (the #252 round-1 rule: mutating a shipped attempt in place would make
+assemble discard the page's text). A test that only ever injects
+``failure_mode`` onto ``best_output`` -- exactly where production will NOT
+write it -- cannot catch a regression that reads the wrong field. The tests
+below inject at the production seam (the disposition attribute on
+``PageState``, exactly as B1's gate will) as the primary case, keep one
+failure_mode-only test for the documented secondary/fallback path, and add a
+both-set test proving disposition precedence and no double-count.
 """
 
 from __future__ import annotations
@@ -52,7 +60,33 @@ def _make_state(tmp_path: Path, page_count: int = 1) -> DocumentState:
     return state
 
 
-def _inject_terminal(
+def _inject_clean_output(state: DocumentState, page_num: int) -> PageOutput:
+    """A normal, passing kept attempt -- what B1's gate leaves on ``best_output``
+    when the ladder terminal is recorded only via the disposition attribute
+    (the guard demotes a COPY, never this object, per #252)."""
+    out = PageOutput(
+        page_num=page_num,
+        text=f"page {page_num} kept text",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+        cost_usd=0.0,
+    )
+    ps = state.pages[page_num]
+    ps.attempts.append(out)
+    ps.best_output = out
+    return out
+
+
+def _inject_disposition(state: DocumentState, page_num: int, disposition: FailureMode) -> None:
+    """Production seam: set ``PageState.table_ladder_disposition`` (B1's job),
+    leaving ``best_output`` an ordinary passing attempt untouched -- exactly
+    the shape the manifest guard's own "inert today" tests (C3) exercise."""
+    _inject_clean_output(state, page_num)
+    state.pages[page_num].table_ladder_disposition = disposition
+
+
+def _inject_failure_mode_only(
     state: DocumentState,
     page_num: int,
     failure_mode: FailureMode,
@@ -60,12 +94,9 @@ def _inject_terminal(
     page_status: PageStatus = PageStatus.WARNING,
     audit_passed: bool = False,
 ) -> None:
-    """Mirrors the chart-lane injection pattern: set attempts + best_output directly.
-
-    ``page_status``/``audit_passed`` are overridable so a test can reproduce
-    the GH-161 shape (status=SUCCESS, audit_passed=False) and prove
-    aggregation still keys off ``failure_mode``.
-    """
+    """Secondary/fallback seam: the terminal stamped directly onto
+    ``best_output.failure_mode`` with no disposition attribute set at all.
+    Proves the fallback path still surfaces the terminal on its own."""
     out = PageOutput(
         page_num=page_num,
         text=f"page {page_num} kept text",
@@ -81,37 +112,60 @@ def _inject_terminal(
 
 
 class TestPagesOkAndDocumentStatus:
-    def test_table_rejected_flips_document_status(self, tmp_path: Path) -> None:
+    def test_disposition_rejected_flips_document_status(self, tmp_path: Path) -> None:
+        """Production seam: disposition set, best_output stays a clean SUCCESS."""
         pipeline = _make_pipeline()
         state = _make_state(tmp_path)
-        _inject_terminal(state, 1, FailureMode.TABLE_REJECTED)
+        _inject_disposition(state, 1, FailureMode.TABLE_REJECTED)
 
         result = pipeline._phase_assemble(state, tmp_path)
 
         assert result.status == DocumentStatus.AUDIT_FAILED
 
-    def test_table_unverified_flips_document_status(self, tmp_path: Path) -> None:
+    def test_disposition_unverified_flips_document_status(self, tmp_path: Path) -> None:
         pipeline = _make_pipeline()
         state = _make_state(tmp_path)
-        _inject_terminal(state, 1, FailureMode.TABLE_UNVERIFIED)
+        _inject_disposition(state, 1, FailureMode.TABLE_UNVERIFIED)
 
         result = pipeline._phase_assemble(state, tmp_path)
 
         assert result.status == DocumentStatus.AUDIT_FAILED
 
-    def test_gh161_shape_still_flips_status_when_keyed_off_failure_mode(
+    def test_disposition_alone_is_sufficient_even_with_passing_best_output(
         self, tmp_path: Path
     ) -> None:
-        """GH-161: status=SUCCESS + audit_passed=False must not slip through.
-
-        The manifest can legitimately ship this combination (C3's guard only
-        backfills ``failure_mode``, never rewrites ``.status``). Aggregation
-        must still catch it because it reads ``failure_mode``, not
-        ``.status``.
-        """
+        """Regression guard for the exact bug the review fix closes: a page
+        whose best_output is untouched (SUCCESS/audit_passed=True, the shape
+        the manifest guard always leaves it in) must still demote the
+        document once its disposition names a terminal."""
         pipeline = _make_pipeline()
         state = _make_state(tmp_path)
-        _inject_terminal(
+        out = _inject_clean_output(state, 1)
+        assert out.status == PageStatus.SUCCESS
+        assert out.audit_passed is True
+        assert out.failure_mode == FailureMode.NONE
+        state.pages[1].table_ladder_disposition = FailureMode.TABLE_REJECTED
+
+        result = pipeline._phase_assemble(state, tmp_path)
+
+        assert result.status == DocumentStatus.AUDIT_FAILED
+
+    def test_failure_mode_fallback_still_flips_status(self, tmp_path: Path) -> None:
+        """Secondary path: no disposition attribute at all, only failure_mode."""
+        pipeline = _make_pipeline()
+        state = _make_state(tmp_path)
+        _inject_failure_mode_only(state, 1, FailureMode.TABLE_REJECTED)
+
+        result = pipeline._phase_assemble(state, tmp_path)
+
+        assert result.status == DocumentStatus.AUDIT_FAILED
+
+    def test_gh161_shape_still_flips_status_via_fallback(self, tmp_path: Path) -> None:
+        """GH-161: status=SUCCESS + audit_passed=False must not slip through
+        even on the fallback (failure_mode-only) path."""
+        pipeline = _make_pipeline()
+        state = _make_state(tmp_path)
+        _inject_failure_mode_only(
             state,
             1,
             FailureMode.TABLE_REJECTED,
@@ -127,16 +181,7 @@ class TestPagesOkAndDocumentStatus:
         """Control: a document with no ladder terminal ships clean SUCCESS."""
         pipeline = _make_pipeline()
         state = _make_state(tmp_path)
-        clean = PageOutput(
-            page_num=1,
-            text="page 1 prose",
-            status=PageStatus.SUCCESS,
-            engine="native",
-            audit_passed=True,
-            cost_usd=0.0,
-        )
-        state.pages[1].attempts.append(clean)
-        state.pages[1].best_output = clean
+        _inject_clean_output(state, 1)
 
         result = pipeline._phase_assemble(state, tmp_path)
 
@@ -145,11 +190,28 @@ class TestPagesOkAndDocumentStatus:
         assert not (result.error and "table_unverified" in result.error)
 
 
+class TestDispositionPrecedence:
+    def test_disposition_wins_over_conflicting_failure_mode(self, tmp_path: Path) -> None:
+        """When both are set and disagree, the disposition (the durable,
+        pre-guard signal) wins, and the page lands in exactly one bucket."""
+        pipeline = _make_pipeline()
+        state = _make_state(tmp_path)
+        _inject_failure_mode_only(state, 1, FailureMode.TABLE_REJECTED)
+        state.pages[1].table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+
+        result = pipeline._phase_assemble(state, tmp_path)
+
+        assert result.status == DocumentStatus.AUDIT_FAILED
+        assert result.error is not None
+        assert "table_unverified" in result.error
+        assert "table_rejected" not in result.error
+
+
 class TestMetadataNote:
     def test_rejected_note_reaches_metadata_json(self, tmp_path: Path) -> None:
         pipeline = _make_pipeline()
         state = _make_state(tmp_path)
-        _inject_terminal(state, 1, FailureMode.TABLE_REJECTED)
+        _inject_disposition(state, 1, FailureMode.TABLE_REJECTED)
 
         pipeline._phase_assemble(state, tmp_path)
 
@@ -161,7 +223,7 @@ class TestMetadataNote:
     def test_unverified_note_reaches_metadata_json(self, tmp_path: Path) -> None:
         pipeline = _make_pipeline()
         state = _make_state(tmp_path)
-        _inject_terminal(state, 1, FailureMode.TABLE_UNVERIFIED)
+        _inject_disposition(state, 1, FailureMode.TABLE_UNVERIFIED)
 
         pipeline._phase_assemble(state, tmp_path)
 
@@ -175,8 +237,8 @@ class TestCliSummary:
     def test_print_summary_names_both_terminals(self, tmp_path: Path, capsys) -> None:
         pipeline = _make_pipeline()
         state = _make_state(tmp_path, page_count=2)
-        _inject_terminal(state, 1, FailureMode.TABLE_REJECTED)
-        _inject_terminal(state, 2, FailureMode.TABLE_UNVERIFIED)
+        _inject_disposition(state, 1, FailureMode.TABLE_REJECTED)
+        _inject_disposition(state, 2, FailureMode.TABLE_UNVERIFIED)
 
         result = pipeline._phase_assemble(state, tmp_path)
         pipeline._print_summary(result, state)
@@ -196,8 +258,8 @@ class TestPagesOkBucketsAreSeparate:
         """
         pipeline = _make_pipeline()
         state = _make_state(tmp_path, page_count=2)
-        _inject_terminal(state, 1, FailureMode.TABLE_REJECTED)
-        _inject_terminal(state, 2, FailureMode.TABLE_UNVERIFIED)
+        _inject_disposition(state, 1, FailureMode.TABLE_REJECTED)
+        _inject_disposition(state, 2, FailureMode.TABLE_UNVERIFIED)
 
         result = pipeline._phase_assemble(state, tmp_path)
 
