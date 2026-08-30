@@ -128,6 +128,8 @@ def test_a_low_then_b_rejects():
 
 
 def test_a_low_then_not_s1_unverifies():
+    """Symmetric pin: a real low-confidence PASS witness followed by a ¬S1 substitute
+    still exhausts to UNVERIFIED — the failed last rung leaves no corroboration."""
     rung1 = _rung(_pass("rung1", "low"))
     rung2 = _rung(_not_s1("rung2"))
 
@@ -138,11 +140,37 @@ def test_a_low_then_not_s1_unverifies():
     assert len(result.rung_results) == 2
 
 
-def test_a_low_at_last_rung_accepts_unanimous_so_far():
-    """A single low-confidence PASS with no rung left to confirm still accepts."""
+def test_lone_low_confidence_pass_with_no_corroboration_is_unverified():
+    """A single low-confidence PASS with no preceding real-PASS witness cannot verify
+    the table on its own — one weak witness is not consensus."""
     rung1 = _rung(_pass("rung1", "low"))
 
     result = run_table_ladder([rung1], CROP, MARKDOWN, table_id="t0")
+
+    assert result.outcome is TableLadderOutcome.UNVERIFIED
+    assert result.final_verdict is None
+
+
+def test_not_s1_then_low_confidence_pass_at_last_rung_is_unverified():
+    """A substituted ¬S1 provides no corroboration: the following low-confidence PASS
+    is still a lone witness and must not silently accept."""
+    rung1 = _rung(_not_s1("rung1"))
+    rung2 = _rung(_pass("rung2", "low"))
+
+    result = run_table_ladder([rung1, rung2], CROP, MARKDOWN, table_id="t0")
+
+    assert result.outcome is TableLadderOutcome.UNVERIFIED
+    assert result.final_verdict is None
+    assert len(result.rung_results) == 2
+
+
+def test_low_confidence_pass_then_low_confidence_pass_accepts():
+    """Two real low-confidence PASS witnesses in agreement are sufficient
+    corroboration and accept."""
+    rung1 = _rung(_pass("rung1", "low"))
+    rung2 = _rung(_pass("rung2", "low"))
+
+    result = run_table_ladder([rung1, rung2], CROP, MARKDOWN, table_id="t0")
 
     assert result.outcome is TableLadderOutcome.ACCEPTED
     assert result.final_verdict.confidence == "low"

@@ -17,18 +17,25 @@ Per-rung outcome vocabulary (design: ``docs/log/2026-08-30_table-judge-ladder.md
 Per-table resolution:
 
 - **A, high confidence** — accept immediately at the current rung.
-- **A, low confidence** — needs confirmation: escalate to the next rung
-  with no findings (nothing to complain about). If that was the last rung,
-  the unanimous-PASS-so-far result stands and the table is accepted.
+- **A, low confidence** — needs corroboration from a *real PASS witness*
+  (any confidence): escalate to the next rung with no findings (nothing to
+  complain about). If that was the last rung, the table is accepted only
+  if the immediately preceding rung was itself a real PASS — a low-
+  confidence PASS is not, by itself, sufficient evidence. A lone
+  low-confidence PASS (no preceding rung, or a preceding ¬S1/FAIL that
+  substituted/tied-break into it) exhausts the ladder to
+  ``TABLE_UNVERIFIED``: one weak, uncorroborated witness is not consensus.
 - **B** — escalate as tiebreak. Exhausting the ladder on B (no more rungs)
   is a content problem: ``TABLE_REJECTED``.
 - **C** — escalate as substitute. Exhausting the ladder on C is an infra
   problem: ``TABLE_UNVERIFIED``.
 
-Any rung's outright PASS (high or low confidence) reached with rungs still
-available to confirm, or reached at the last rung, ends the ladder in
-``TABLE_ACCEPTED`` — a table is never held hostage by an earlier B or C once
-a later rung actually looked and approved.
+A high-confidence PASS at any rung ends the ladder in ``TABLE_ACCEPTED``
+immediately — a table is never held hostage by an earlier B or C once a
+later rung actually looked and approved with confidence. A low-confidence
+PASS only accepts when a preceding rung already answered PASS (any
+confidence): two real witnesses in agreement, never one weak witness
+standing in for a corroboration that an infra failure could not provide.
 """
 
 from __future__ import annotations
@@ -108,6 +115,11 @@ def run_table_ladder(
 
     rung_results: list[RungResult] = []
     prior_findings: list[Finding] | None = None
+    # Whether the immediately preceding rung answered with a real PASS
+    # verdict (any confidence) — the corroboration a low-confidence PASS
+    # needs at the last rung. False before the first rung: there is no
+    # preceding witness yet.
+    prior_was_pass = False
     last_index = len(rungs) - 1
 
     for index, rung in enumerate(rungs):
@@ -125,23 +137,41 @@ def run_table_ladder(
                     final_verdict=None,
                 )
             prior_findings = None
+            prior_was_pass = False
             continue
 
         verdict = result.verdict
         assert verdict is not None  # ok=True guarantees a verdict (A1 contract)
 
         if verdict.passed:
-            # A — PASS. High confidence (or the last rung, unanimous so
-            # far) accepts outright; low confidence with rungs remaining
-            # needs one more confirmation, carrying no findings.
-            if verdict.confidence == "high" or is_last:
+            # A — PASS. High confidence accepts outright at any rung. Low
+            # confidence needs corroboration: at the last rung it accepts
+            # only if the PRECEDING rung was already a real PASS (two
+            # witnesses in agreement); otherwise a lone, uncorroborated
+            # weak PASS cannot verify the table on its own.
+            if verdict.confidence == "high":
                 return TableLadderResult(
                     table_id=table_id,
                     outcome=TableLadderOutcome.ACCEPTED,
                     rung_results=rung_results,
                     final_verdict=verdict,
                 )
+            if is_last:
+                if prior_was_pass:
+                    return TableLadderResult(
+                        table_id=table_id,
+                        outcome=TableLadderOutcome.ACCEPTED,
+                        rung_results=rung_results,
+                        final_verdict=verdict,
+                    )
+                return TableLadderResult(
+                    table_id=table_id,
+                    outcome=TableLadderOutcome.UNVERIFIED,
+                    rung_results=rung_results,
+                    final_verdict=None,
+                )
             prior_findings = None
+            prior_was_pass = True
             continue
 
         # B — FAIL. Tiebreak at the next rung with findings attached;
@@ -154,6 +184,7 @@ def run_table_ladder(
                 final_verdict=verdict,
             )
         prior_findings = verdict.findings
+        prior_was_pass = False
         continue
 
     # Unreachable: the loop always returns on its last iteration.
