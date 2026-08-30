@@ -239,3 +239,102 @@ def test_rejection_demotes_rather_than_discards(fake_page):
     page = fake_page(["1.02"])
     v = table_acceptance(page, _table("1.02 | 9.99"))
     assert not v.accepted and v.demote_only
+
+
+# ---------------------------------------------------------------------------
+# GH-322 wiring: the allowlist widens to both soft rejections, but only behind
+# the presence gate. Before this, a JUDGE_ONLY refusal sent the page to native
+# regardless of whether the model's numbers were right -- and measurement says
+# native is the less accurate reading.
+# ---------------------------------------------------------------------------
+
+
+def _flagged_page(rejection, model_md, native_text):
+    """A born-digital table page whose ladder accepted nothing."""
+    from socr.core.result import FailureMode, PageOutput, PageStatus
+
+    bo = PageOutput(
+        page_num=1,
+        text=model_md,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+        failure_mode=FailureMode.NONE,
+    )
+    bo.rejection_class = rejection
+
+    class _P:
+        is_born_digital = True
+        native_table_structure_failed = True
+        native_table_unverifiable = False
+        native_table_header_unattributed = False
+        native_table_structure_defective = False
+        scanned_table_evidence_failed = False
+        has_encoding_hygiene_suspect = False
+        has_corrupt_math = False
+
+    p = _P()
+    p.native_text = native_text
+    p.best_output = bo
+    return p
+
+
+_GOOD = "| a | b |\n| --- | --- |\n| 1.02 | 1.30 |\n"
+_INVENTS = "| a | b |\n| --- | --- |\n| 1.02 | 9.99 |\n"
+_PAGE_TEXT = "coefficients 1.02 and 1.30 appear here"
+
+
+def test_a_judge_only_refusal_now_keeps_a_model_table_whose_numbers_check_out():
+    """The widening: a judge's opinion no longer outranks the page's own numbers."""
+    from socr.core.manifest import REJECTION_JUDGE_ONLY, flagged_model_page_output
+
+    page = _flagged_page(REJECTION_JUDGE_ONLY, _GOOD, _PAGE_TEXT)
+    assert flagged_model_page_output(page) is not None
+
+
+def test_a_judge_only_refusal_still_falls_back_when_the_model_invented():
+    """The gate is what makes the widening safe -- pinned as a DIFFERENCE.
+
+    Same rejection class, same page, same everything except whether the model
+    wrote a number the page does not contain.
+    """
+    from socr.core.manifest import REJECTION_JUDGE_ONLY, flagged_model_page_output
+
+    good = _flagged_page(REJECTION_JUDGE_ONLY, _GOOD, _PAGE_TEXT)
+    invents = _flagged_page(REJECTION_JUDGE_ONLY, _INVENTS, _PAGE_TEXT)
+
+    assert flagged_model_page_output(good) is not None
+    assert flagged_model_page_output(invents) is None
+
+
+def test_the_original_soft_rejection_is_unchanged_by_the_widening():
+    """AMBIGUOUS_DEFERRED keeps its existing behaviour, gate or no gate.
+
+    It was already trusted before this change, so routing it through a new check
+    could only remove pages that used to ship. The no-op guarantee.
+    """
+    from socr.core.manifest import REJECTION_AMBIGUOUS_DEFERRED, flagged_model_page_output
+
+    for md in (_GOOD, _INVENTS):
+        page = _flagged_page(REJECTION_AMBIGUOUS_DEFERRED, md, _PAGE_TEXT)
+        assert flagged_model_page_output(page) is not None
+
+
+def test_an_unjudged_output_still_falls_back():
+    """An empty rejection class is indistinguishable from 'never judged'."""
+    from socr.core.manifest import flagged_model_page_output
+
+    assert flagged_model_page_output(_flagged_page("", _GOOD, _PAGE_TEXT)) is None
+
+
+def test_a_damaged_text_layer_does_not_block_the_model():
+    """UNVERIFIABLE must not act as guilt.
+
+    A page whose text layer cannot adjudicate is exactly the page where native is
+    least able to arbitrate -- which is this predicate's whole premise.
+    """
+    from socr.core.manifest import REJECTION_JUDGE_ONLY, flagged_model_page_output
+
+    page = _flagged_page(REJECTION_JUDGE_ONLY, _INVENTS, _PAGE_TEXT)
+    page.has_encoding_hygiene_suspect = True
+    assert flagged_model_page_output(page) is not None
