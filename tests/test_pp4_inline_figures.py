@@ -50,7 +50,6 @@ def _make_pipeline(**overrides) -> UnifiedPipeline:
     defaults = dict(
         primary_engine=EngineType.DEEPSEEK,
         quiet=True,
-        audit_enabled=False,
         save_figures=True,
         describe_figures=False,
         write_manifest=False,

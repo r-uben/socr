@@ -49,7 +49,6 @@ def _make_pipeline() -> UnifiedPipeline:
     cfg = PipelineConfig(
         primary_engine=EngineType.DEEPSEEK,
         quiet=True,
-        audit_enabled=False,
         save_figures=False,
         write_manifest=False,
         agentic=False,

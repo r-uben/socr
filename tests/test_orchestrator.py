@@ -43,7 +43,6 @@ def _make_config(**overrides) -> PipelineConfig:
         primary_engine=EngineType.DEEPSEEK,
         fallback_chain=[EngineType.GEMINI],
         enabled_engines=list(EngineType),
-        audit_enabled=True,
         save_figures=False,
         quiet=True,
         tiered=False,  # Disable tiered routing in tests (avoids fitz.open on fake PDFs)

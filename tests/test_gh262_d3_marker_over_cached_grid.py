@@ -896,7 +896,6 @@ def test_document_audit_metadata_and_trust_sidecar_surface_the_superseded_floor(
             agentic=True,
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=True,
             save_figures=False,
             write_manifest=False,
         )
@@ -946,7 +945,6 @@ def test_cli_reports_the_superseded_floor(tmp_path: Path, capsys) -> None:
             agentic=True,
             enabled_engines=[EngineType.QWEN],
             quiet=False,
-            audit_enabled=True,
             save_figures=False,
             write_manifest=False,
         )

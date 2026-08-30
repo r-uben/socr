@@ -308,7 +308,6 @@ class TestAuditEventDistinctness:
             agentic=False,
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=False,
             save_figures=False,
             write_manifest=False,
         )
@@ -431,7 +430,6 @@ class TestDocumentStatusDemotion:
             agentic=False,
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=False,
             save_figures=False,
             write_manifest=False,
         )
@@ -662,7 +660,6 @@ class TestSidecarSerialization:
             agentic=False,
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=False,
             save_figures=False,
             write_manifest=False,
         )
@@ -701,7 +698,6 @@ class TestSidecarSerialization:
             agentic=False,
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=False,
             save_figures=False,
             write_manifest=False,
         )

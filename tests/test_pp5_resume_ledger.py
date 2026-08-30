@@ -81,7 +81,6 @@ def _make_config(*, enabled_engines=None, **overrides) -> PipelineConfig:
         detect_equations=False,
         recover_clean_equations=False,
         quiet=True,
-        audit_enabled=False,
         write_manifest=False,
         **overrides,
     )

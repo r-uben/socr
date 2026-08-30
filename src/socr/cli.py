@@ -33,7 +33,14 @@ def common_options(f):
     """Options shared between process and batch."""
     f = click.option("--primary", type=click.Choice(ENGINE_CHOICES), help="Primary OCR engine")(f)
     f = click.option("--fallback", type=click.Choice(ENGINE_CHOICES), help="Fallback OCR engine")(f)
-    f = click.option("--no-audit", is_flag=True, help="Skip quality audit stage")(f)
+    f = click.option(
+        "--no-audit",
+        is_flag=True,
+        help=(
+            "REMOVED — rejected with an error. This flag controlled no path "
+            "(GH-139); for the HPC lane use 'hpc.audit_enabled' in a config file."
+        ),
+    )(f)
     f = click.option(
         "--no-judge-hard-pages", is_flag=True, help="Disable VLM judge on hard pages (tables/math)"
     )(f)
@@ -265,7 +272,46 @@ def build_config(
     if fallback:
         config.fallback_engine = EngineType(fallback)
     if no_audit:
-        config.audit_enabled = False
+        # GH-139. `--no-audit` advertised "skip quality audit stage" and set
+        # `audit_enabled=False`, but every consumer of that field is gone: the four
+        # gates the issue cited (multi-engine scoring, single-engine scoring, the
+        # hard-page judge, repair) lived in the legacy branches that #298 deleted.
+        # `PipelineConfig.audit_enabled` has since been DELETED outright, so there
+        # is no longer even a field to set.
+        #
+        # So the flag does not merely fail on the agentic path, as the issue
+        # originally framed it: it is inert in EVERY mode -- including HPC, which
+        # `@common_options` also exposes it on. HPC's audit IS separable, but it is
+        # gated by `config.hpc.audit_enabled` (hpc_pipeline.py:199), a different
+        # field this flag never wrote to. Silently accepting it
+        # would leave a user believing a constraint is in force and scripting
+        # around it, which is the exact failure #142 calls "a flag that lies is
+        # worse than a missing flag".
+        #
+        # Resolution 1 of the issue's own preference order: reject it, loudly.
+        # The flag is kept (rather than deleted) so existing scripts get this
+        # explanation instead of click's bare "no such option".
+        raise click.UsageError(
+            "--no-audit no longer does anything and has been rejected rather than "
+            "silently ignored (GH-139).\n"
+            "\n"
+            "It set PipelineConfig.audit_enabled, a field with no remaining "
+            "consumer: the gates that once read it (multi-engine scoring, "
+            "single-engine scoring, the hard-page judge, repair) were removed in "
+            "#298, and the field itself is now deleted.\n"
+            "\n"
+            "In agentic mode -- the default -- there is no audit stage to skip: the "
+            "judge IS the routing algorithm. Escalation happens because a judge "
+            "rejected a rung, so with no gate there is no accept/escalate signal "
+            "for the ladder to act on.\n"
+            "\n"
+            "The HPC lane does have a separable audit stage, gated by the DIFFERENT "
+            "setting 'hpc.audit_enabled' -- which this flag never wrote to. Set it "
+            "in a config file if that is what you wanted.\n"
+            "\n"
+            "To reduce model spend, use --strict-local (no cloud egress), "
+            "--max-cost-per-page, or --cost-budget."
+        )
     if no_judge_hard_pages:
         config.judge_hard_pages = False
     if no_dual_pass_tables:

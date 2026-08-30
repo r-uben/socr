@@ -234,7 +234,6 @@ class TestNonBornDigitalRotatedTableNoRefusalAudit:
             agentic=True,
             enabled_engines=[EngineType.GEMINI],
             quiet=True,
-            audit_enabled=False,
             save_figures=False,
             write_manifest=False,
         )
@@ -276,7 +275,6 @@ def _make_config(*, native_only: bool) -> PipelineConfig:
         native_first=True,
         native_only=native_only,
         quiet=True,
-        audit_enabled=False,
         save_figures=False,
         write_manifest=False,
     )
@@ -372,7 +370,6 @@ class TestHermeticProcessRefusal:
             judge_backend="heuristic",
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=False,
             save_figures=False,
             write_manifest=False,
         )

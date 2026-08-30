@@ -46,7 +46,6 @@ def _make_config(**overrides) -> PipelineConfig:
         enabled_engines=[EngineType.GLM, EngineType.GEMINI],
         quiet=True,
         tiered=False,
-        audit_enabled=False,
     )
     defaults.update(overrides)
     return PipelineConfig(**defaults)

@@ -392,7 +392,6 @@ class UnifiedPipeline:
             # --- quality gates / routing ---
             "agentic": cfg.agentic,
             "strict_local": cfg.strict_local,
-            "audit": cfg.audit_enabled,
             "audit_min_words": cfg.audit_min_words,
             "judge_hard_pages": cfg.judge_hard_pages,
             "judge_backend": cfg.judge_backend,

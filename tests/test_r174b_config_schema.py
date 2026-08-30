@@ -70,7 +70,6 @@ class TestPipelineConfigSchema:
             "native_first": True,
             "native_only": False,
             "tiered": True,
-            "audit_enabled": True,
             "judge_hard_pages": True,
             "escalate_ambiguous_tables": True,
             "dual_pass_tables": True,
@@ -94,7 +93,6 @@ class TestPipelineConfigSchema:
         assert cfg.native_first is True
         assert cfg.native_only is False
         assert cfg.tiered is True
-        assert cfg.audit_enabled is True
         assert cfg.judge_hard_pages is True
         assert cfg.escalate_ambiguous_tables is True
         assert cfg.dual_pass_tables is True

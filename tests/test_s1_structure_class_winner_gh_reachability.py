@@ -543,7 +543,6 @@ def test_orchestrator_assemble_surfaces_case_iii_pages_document_wide(
             agentic=True,
             enabled_engines=[EngineType.QWEN],
             quiet=True,
-            audit_enabled=True,
             save_figures=False,
             write_manifest=False,
         )
@@ -1166,7 +1165,6 @@ def _run_assemble_with_real_sidecars(state: DocumentState, output_dir: Path):
         agentic=False,
         enabled_engines=[EngineType.QWEN],
         quiet=True,
-        audit_enabled=False,
         save_figures=False,
         write_manifest=False,
     )
@@ -1345,7 +1343,6 @@ def test_structure_class_bucket_membership_survives_resume(tmp_path: Path) -> No
         agentic=False,
         enabled_engines=[EngineType.QWEN],
         quiet=True,
-        audit_enabled=False,
         save_figures=False,
         write_manifest=False,
     )

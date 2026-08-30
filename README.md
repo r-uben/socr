@@ -144,7 +144,7 @@ socr process <PDF> [OPTIONS]
   -o, --output-dir PATH       Output directory
   --primary ENGINE             Primary OCR engine (gemini, marker, deepseek, etc.)
   --fallback ENGINE            Fallback engine
-  --no-audit                   Skip quality audit
+  --no-audit                   REMOVED - rejected with an error (GH-139)
   --no-native-first            OCR every page (don't use native text for prose)
   --save-figures               Extract figure PNGs + inline image refs (no captions)
   --describe-figures           Also add VLM captions (opt-in, non-authoritative)
@@ -205,7 +205,6 @@ primary_engine: gemini
 fallback_engine: marker
 timeout: 300
 save_figures: false
-audit_enabled: true
 audit_min_words: 50
 ```
 

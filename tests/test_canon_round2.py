@@ -58,7 +58,6 @@ def _config(**overrides) -> PipelineConfig:
     defaults = dict(
         primary_engine=EngineType.DEEPSEEK,  # configurable model (deepseek_*)
         quiet=True,
-        audit_enabled=False,
         native_first=False,
         dual_pass_tables=False,
         judge_hard_pages=False,
