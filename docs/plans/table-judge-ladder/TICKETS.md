@@ -60,7 +60,7 @@ tests mock the seam, not httpx globally. Do NOT reuse `OllamaVisionJudge.is_avai
 tests assert the exact JSON payload (model, format, images, stream=False); timeout
 exception → ¬S1 without sleeping; a network-must-not-run sentinel guards every test.
 
-### TICKET-A3 — CLI₂ rung: gemini CLI invoker · TODO · depends-on: A0, A1, G1 · wave 2
+### TICKET-A3 — CLI₂ rung: gemini CLI invoker · DONE · depends-on: A0, A1, G1 · wave 2
 **Problem:** Rung 2 needs a per-crop subprocess invoker; `GeminiEngine` is a
 document-level engine, not reusable.
 **Do:** New `src/socr/judge/table_rung_gemini.py`: invoke the configured gemini binary
