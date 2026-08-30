@@ -132,6 +132,120 @@ def test_located_two_blocks_two_boxes_pair_in_order(tmp_path):
         assert top.crop_path != bottom.crop_path
 
 
+def _two_ruled_boxes_pdf(tmp_path, top_values: list[str] | None, bottom_values: list[str] | None):
+    """Two ruled tables (non-overlapping x-spans, see ``two_ruled`` above),
+    with each cell's text controlled explicitly (``None`` -> blank interior,
+    rules only, so the box has zero native words for corroboration tests)."""
+    doc = fitz.open()
+    page = doc.new_page()
+    top_cols = [100, 220]
+    bottom_cols = [340, 460]
+    top_rows = [100 + i * 22 for i in range(2)]
+    bottom_rows = [320 + i * 22 for i in range(2)]
+    for cols, rows, values in (
+        (top_cols, top_rows, top_values),
+        (bottom_cols, bottom_rows, bottom_values),
+    ):
+        x0, x1 = cols[0], cols[-1] + 80
+        if values is not None:
+            it = iter(values)
+            for y in rows:
+                for x in cols:
+                    page.insert_text((x + 4, y + 12), next(it), fontsize=9)
+        for yy in rows:
+            page.draw_line((x0, yy), (x1, yy))
+        for xx in cols + [x1]:
+            page.draw_line((xx, rows[0]), (xx, rows[-1]))
+    pdf_path = tmp_path / "doc.pdf"
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
+def test_corroboration_neutral_ships_normal_order(tmp_path):
+    """Corroborated case: native content matches the identity pairing ->
+    ships LOCATED with the correct (unchanged) pairing."""
+    top_values = ["111", "222", "333", "444"]
+    bottom_values = ["555", "666", "777", "888"]
+    pdf_path = _two_ruled_boxes_pdf(tmp_path, top_values, bottom_values)
+    md = (
+        "| a | b |\n| --- | --- |\n| 111 | 222 |\n| 333 | 444 |\n"
+        "\n"
+        "prose between the two tables\n"
+        "\n"
+        "| c | d |\n| --- | --- |\n| 555 | 666 |\n| 777 | 888 |\n"
+    )
+    with prepare_table_witnesses(pdf_path, page_num=1, markdown=md) as witnesses:
+        assert len(witnesses) == 2
+        top, bottom = witnesses
+        assert top.status is WitnessStatus.LOCATED
+        assert bottom.status is WitnessStatus.LOCATED
+        assert top.box.bbox[1] < bottom.box.bbox[1]
+        assert "111" in top.markdown
+        assert "555" in bottom.markdown
+
+
+def test_corroboration_contradicted_swapped_content_demotes_to_ambiguous(tmp_path):
+    """The swap case: markdown emitted in reverse content order of geometry --
+    block 0's numbers actually belong to the geometrically BOTTOM box and
+    block 1's numbers to the geometrically TOP box. Both members' evidence
+    strictly favors the alternate assignment -> positive contradiction ->
+    both demote to AMBIGUOUS (never a silent auto-swap)."""
+    top_values = ["111", "222", "333", "444"]
+    bottom_values = ["555", "666", "777", "888"]
+    pdf_path = _two_ruled_boxes_pdf(tmp_path, top_values, bottom_values)
+    # First emitted block (index 0, would pair with the TOP box by identity)
+    # actually carries the BOTTOM table's numbers, and vice versa.
+    md = (
+        "| c | d |\n| --- | --- |\n| 555 | 666 |\n| 777 | 888 |\n"
+        "\n"
+        "prose between the two tables\n"
+        "\n"
+        "| a | b |\n| --- | --- |\n| 111 | 222 |\n| 333 | 444 |\n"
+    )
+    with prepare_table_witnesses(pdf_path, page_num=1, markdown=md) as witnesses:
+        assert len(witnesses) == 2
+        for w in witnesses:
+            assert w.status is WitnessStatus.AMBIGUOUS
+            assert w.box is None
+            assert w.crop_path is None
+            assert "corroboration" in w.note
+
+
+def test_corroboration_neutral_no_native_words_ships_index_pairing(tmp_path):
+    """No mass-demotion: boxes exist (rules detected) but carry zero native
+    words (a scanned-looking / sparse table). Absent evidence is NEUTRAL, not
+    contradiction, so the plain index pairing still ships LOCATED."""
+    pdf_path = _two_ruled_boxes_pdf(tmp_path, None, None)
+    with prepare_table_witnesses(pdf_path, page_num=1, markdown=_MD_TWO_TABLES) as witnesses:
+        assert len(witnesses) == 2
+        for w in witnesses:
+            assert w.status is WitnessStatus.LOCATED
+            assert w.box is not None
+            assert w.crop_path is not None
+
+
+def test_corroboration_tie_identical_tables_ships_index_pairing(tmp_path):
+    """Identical-content tables: evidence ties for every pairing (a swap
+    would score identically) -> neutral, not a strict majority -> the
+    identity pairing ships (harmless either way)."""
+    values = ["111", "222", "333", "444"]
+    pdf_path = _two_ruled_boxes_pdf(tmp_path, values, list(values))
+    md = (
+        "| a | b |\n| --- | --- |\n| 111 | 222 |\n| 333 | 444 |\n"
+        "\n"
+        "prose between the two tables\n"
+        "\n"
+        "| c | d |\n| --- | --- |\n| 111 | 222 |\n| 333 | 444 |\n"
+    )
+    with prepare_table_witnesses(pdf_path, page_num=1, markdown=md) as witnesses:
+        assert len(witnesses) == 2
+        for w in witnesses:
+            assert w.status is WitnessStatus.LOCATED
+            assert w.box is not None
+            assert w.crop_path is not None
+
+
 def test_ambiguous_two_blocks_one_merged_box(tmp_path):
     pdf_path = _build_pdf(tmp_path, "stacked_booktabs")
     # Sanity: the locator really does over-merge these into one band.

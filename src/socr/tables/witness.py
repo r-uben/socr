@@ -24,10 +24,43 @@ block ``i`` gets box ``i`` — after both lists are already in each source's own
 in the same top-to-bottom order the page geometry does, which holds for the
 single-column layouts this has been exercised against. It is UNVERIFIED for
 side-by-side (multi-column / multi-panel) layouts, where two tables can share
-a ``y0`` band and ``(y0, x0)`` order need not match emission order — that
-misalignment would currently ship as a false ``LOCATED`` pairing rather than
-degrading to ``AMBIGUOUS``. Tracked for the ladder design panel; not resolved
-by this module today.
+a ``y0`` band and ``(y0, x0)`` order need not match emission order.
+
+## Pairing corroboration (consilium decision, 2026-08-30, 3 rounds)
+
+The panel considered — and rejected — strict per-page verification of the
+index pairing: E1's mechanical binding check (``tables/binding.py bind()``)
+is deliberately CONTRADICTION-ONLY, NEUTRAL on missing coverage (binding
+coverage was measured incomplete on 12/13 corpus table pages), so witness
+pairing cannot lean on it as a general-purpose safety net; and a strict
+"prove the assignment" gate would mass-demote count-matched pages under
+ordinary matching noise (sparse native text, tables with few numeric values)
+— the same failure mode E1's own NEUTRAL-on-no-coverage rule exists to avoid.
+
+Instead, count-matched pairs get lightweight CORROBORATION: for every pair of
+indices ``(i, j)`` (``n >= 2``), compare each box's native numeric-token
+evidence against BOTH candidate blocks' emitted numeric tokens
+(``_native_numeric_multisets`` / ``_numeric_multiset_from_tokens``, the same
+primitives ``native_verifier.py`` and ``source_evidence.py`` already use).
+Three outcomes, in order of how much evidence is required:
+
+- **Neutral (default, ships)** — no matched-token evidence favors a swap
+  (identical evidence, a tie, or no native words in one/both boxes at all).
+  Neutral is NOT contradiction; the identity pairing ships ``LOCATED``. This
+  is what prevents the mass-demotion failure mode above — most real pages
+  have thin or absent native-numeric coverage in at least one table and must
+  not be punished for it.
+- **Corroborated** — box ``i``'s matched evidence favors block ``i`` (its own
+  paired block) over block ``j``, or box ``i`` has no matched evidence at
+  all. Ships ``LOCATED``.
+- **Positively contradicted** — a *structural majority test*, not a
+  score-difference threshold: swap ``(i, j)`` is a contradiction ONLY when
+  BOTH box ``i``'s matched evidence strictly favors block ``j`` over its own
+  block ``i``, AND box ``j``'s matched evidence strictly favors block ``i``
+  over its own block ``j``. Two-sided, strict-inequality agreement, no float
+  cutoff. Both ``i`` and ``j`` demote to ``AMBIGUOUS`` (no crop, no auto-swap
+  — a demonstrated wrong pairing must never silently self-correct into
+  another guess).
 
 Crops are rendered into temp files with caller-owned lifetime scoped to a
 context manager (mirrors ``TableCropExtractor._render_crop``'s caller-owned
@@ -39,6 +72,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -48,6 +82,7 @@ from typing import Iterator
 from socr.core.pdf import open_pdf
 from socr.tables.extract import _CROP_PADDING_PT, DEFAULT_CROP_DPI
 from socr.tables.locate import TableBox, locate_tables
+from socr.tables.native_verifier import _numeric_multiset_from_tokens, _numeric_tokens_from_text
 from socr.tables.reconcile import find_table_blocks
 
 logger = logging.getLogger(__name__)
@@ -113,9 +148,10 @@ def prepare_table_witnesses(
     when the context exits, whether it exits normally or via exception —
     callers must not keep ``crop_path`` beyond this block.
 
-    On a block/box count match, pairing is index-order (see module docstring
-    for the residual "same reading order" assumption — unverified for
-    side-by-side/multi-column table layouts).
+    On a block/box count match, pairing is index-order, checked pairwise
+    against native numeric-token evidence ("pairing corroboration" — see
+    module docstring): a demonstrated swap demotes the pair to ``AMBIGUOUS``;
+    absent or tied evidence is NEUTRAL and ships the index pairing.
     """
     blocks = find_table_blocks(markdown)
     witnesses: list[TableWitness] = []
@@ -124,10 +160,27 @@ def prepare_table_witnesses(
         if blocks:
             boxes, page_open_error = _locate_boxes(pdf_path, page_num)
             status = _classify(len(blocks), len(boxes))
-            for idx, block in enumerate(blocks):
+            block_mds = [_block_markdown(markdown, b.start, b.end) for b in blocks]
+            contradicted: set[int] = set()
+            if status is WitnessStatus.LOCATED and len(blocks) >= 2:
+                contradicted = _corroboration_contradicted_indices(
+                    pdf_path, page_num, boxes, block_mds
+                )
+            for idx, block_md in enumerate(block_mds):
                 table_id = f"p{page_num}-t{idx}"
-                block_md = _block_markdown(markdown, block.start, block.end)
-                if status is WitnessStatus.LOCATED:
+                if status is WitnessStatus.LOCATED and idx in contradicted:
+                    witnesses.append(
+                        TableWitness(
+                            table_id=table_id,
+                            page_num=page_num,
+                            block_index=idx,
+                            markdown=block_md,
+                            status=WitnessStatus.AMBIGUOUS,
+                            boxes_found_on_page=len(boxes),
+                            note="pairing corroboration contradicted the index pairing (swap evidence)",
+                        )
+                    )
+                elif status is WitnessStatus.LOCATED:
                     box = boxes[idx]
                     crop_path = _render_crop_safe(pdf_path, page_num, box, crop_dpi)
                     if crop_path is None:
@@ -247,3 +300,65 @@ def _render_crop_safe(pdf_path: Path, page_num: int, box: TableBox, crop_dpi: in
         path.unlink(missing_ok=True)
         return None
     return path
+
+
+def _corroboration_contradicted_indices(
+    pdf_path: Path, page_num: int, boxes: list[TableBox], block_mds: list[str]
+) -> set[int]:
+    """Pairwise swap-contradiction check for a count-matched page (n >= 2).
+
+    See "Pairing corroboration" in the module docstring for the panel
+    rationale. Never raises: any failure to read native words yields empty
+    evidence for every box, which is NEUTRAL by construction (no matched
+    evidence can ever exceed 0), so the index pairing ships unchanged.
+    """
+    native = _native_numeric_multisets(pdf_path, page_num, boxes)
+    output = [_numeric_multiset_from_tokens(_numeric_tokens_from_text(md)) for md in block_mds]
+    n = len(boxes)
+    overlap = [[_multiset_overlap(native[i], output[j]) for j in range(n)] for i in range(n)]
+    contradicted: set[int] = set()
+    for i in range(n):
+        for j in range(i + 1, n):
+            # Structural majority test: BOTH members' own matched evidence
+            # must strictly prefer the OTHER block over their own paired
+            # block. A tie, or evidence favoring only one side, is neutral.
+            if overlap[i][j] > overlap[i][i] and overlap[j][i] > overlap[j][j]:
+                contradicted.add(i)
+                contradicted.add(j)
+    return contradicted
+
+
+def _multiset_overlap(a: Counter, b: Counter) -> int:
+    return sum((a & b).values())
+
+
+def _native_numeric_multisets(
+    pdf_path: Path, page_num: int, boxes: list[TableBox]
+) -> list[Counter]:
+    """Best-effort per-box native numeric-token multiset. Never raises.
+
+    Mirrors ``native_verifier.verify_native_table_region``'s word-clipping
+    (top-left corner of each word inside the box), reading the page's native
+    text layer once for all boxes rather than once per box.
+    """
+    empty = [Counter() for _ in boxes]
+    try:
+        doc = open_pdf(pdf_path)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("table witness: cannot open %s for corroboration (%s)", pdf_path, exc)
+        return empty
+    try:
+        page = doc[page_num - 1]
+        words = page.get_text("words")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("table witness: get_text failed p%d (%s)", page_num, exc)
+        return empty
+    finally:
+        doc.close()
+
+    out: list[Counter] = []
+    for box in boxes:
+        x0, y0, x1, y1 = box.bbox
+        region_words = [w for w in words if x0 <= w[0] <= x1 and y0 <= w[1] <= y1]
+        out.append(_numeric_multiset_from_tokens([w[4] for w in region_words]))
+    return out
