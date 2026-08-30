@@ -126,6 +126,20 @@ def _accept_rung(confidence: str = "high") -> _QueueRung:
     return _QueueRung([RungResult(rung="fake1", ok=True, verdict=_pass_verdict(confidence))])
 
 
+def _fail_verdict(confidence: str = "high") -> TableJudgeVerdict:
+    from socr.judge.table_verdict import Finding, FindingCode
+
+    return TableJudgeVerdict(
+        verdict="FAIL",
+        confidence=confidence,
+        findings=[Finding(code=FindingCode.FABRICATED_VALUE, where="cell", detail="bad value")],
+    )
+
+
+def _reject_rung() -> _QueueRung:
+    return _QueueRung([RungResult(rung="fake1", ok=True, verdict=_fail_verdict("high"))])
+
+
 # ---------------------------------------------------------------------------
 # Pipeline / state helpers (mirrors test_table_judge_gate.py's own)
 # ---------------------------------------------------------------------------
@@ -199,12 +213,18 @@ class TestNoNativeWordsStaysNeutral:
 
 
 class TestRowLabelShiftComposesWithLadder:
-    def test_shifted_labels_seed_prior_findings_on_the_real_rung(self, tmp_path: Path) -> None:
-        """The mechanical FAIL is prepended as rung 0 and tiebreaks into the
-        real rung with the contradiction's findings attached -- proving the
-        composition (not a post-hoc overwrite) actually happened, even
-        though a subsequent high-confidence PASS still wins per A4's own
-        "never held hostage by an earlier B" rule."""
+    def test_shifted_labels_seed_prior_findings_but_cap_at_unverified(self, tmp_path: Path) -> None:
+        """CONSILIUM (panel #3): the mechanical FAIL is prepended as rung 0
+        and tiebreaks into the real rung with the contradiction's findings
+        attached -- proving the composition (not a post-hoc overwrite)
+        actually happened -- but a genuine mechanical contradiction now
+        caps the table at UNVERIFIED even when the real rung answers a
+        high-confidence PASS: mechanical evidence is a different, near-
+        zero-false-positive evidence class than judge-vs-judge
+        disagreement, so a fallible judge can no longer silently overrule
+        it (that was the exact GH-273 failure). It still does not demote
+        content outright (the native text layer itself can be the culprit
+        -- GH-334), so the outcome is UNVERIFIED, not REJECTED."""
         pipeline = _make_pipeline()
         pdf_path = _row_shift_pdf(tmp_path)
         state = _make_state(pdf_path)
@@ -218,13 +238,16 @@ class TestRowLabelShiftComposesWithLadder:
         _crop_path, _markdown, prior_findings = rung.calls[0]
         assert prior_findings, "the real rung must see the mechanical contradiction's findings"
         assert all(f.code.value == "WRONG_BINDING" for f in prior_findings)
-        # A4's own contract: a later high-confidence PASS still accepts.
-        assert ps.table_ladder_disposition is None
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        events = _events_of_kind(state, "table_ladder_unverified")
+        assert len(events) == 1
+        assert "mechanical binding check found a contradiction" in events[0].detail
 
     def test_shifted_labels_with_weak_real_pass_stays_unverified(self, tmp_path: Path) -> None:
         """A LOW-confidence PASS after the mechanical tiebreak is not
         corroboration (A4: "a lone weak witness is not consensus") -- the
-        page lands UNVERIFIED, neither silently accepted nor REJECTED."""
+        page lands UNVERIFIED, neither silently accepted nor REJECTED --
+        the same terminal the clamp would have produced anyway."""
         pipeline = _make_pipeline()
         pdf_path = _row_shift_pdf(tmp_path)
         state = _make_state(pdf_path)
@@ -235,6 +258,24 @@ class TestRowLabelShiftComposesWithLadder:
         pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
 
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+
+    def test_shifted_labels_with_rejecting_real_rung_stays_rejected(self, tmp_path: Path) -> None:
+        """The clamp is a ceiling on acceptance, not a floor on rejection:
+        when the real (last) rung independently answers FAIL, the ladder's
+        own REJECTED terminal is untouched by the mechanical clamp."""
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_SHIFTED_MD)
+
+        rung = _reject_rung()
+        pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
+        events = _events_of_kind(state, "table_ladder_rejected")
+        assert len(events) == 1
+        assert "mechanical binding check found a contradiction" not in events[0].detail
 
     def test_shifted_labels_with_no_rungs_available_forces_rejected(self, tmp_path: Path) -> None:
         """No CLI available at all (strict_local, or every rung otherwise

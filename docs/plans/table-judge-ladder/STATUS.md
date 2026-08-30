@@ -63,12 +63,15 @@ Wave 7 (E1, mechanical binding evidence) DONE — `_run_table_judge_gate` now ru
 than `no_known_contradiction`, which also flips on mere coverage gaps and would have
 violated the ticket's own "no native words is not demoted" criterion), prepends a
 synthetic FAIL rung carrying the contradiction as `prior_findings` for A4's ladder.
-Both dependencies of H1 (D1b, E1) are now DONE — dispatch wave 8 (H1, end-to-end +
-committed fixture) next. Flag for the H1 dispatcher: E1's log notes a real design
-tension between "binding must overrule a judge PASS" and A4's own "never held hostage
-by an earlier B" rule (a confident real-rung PASS after seeing binding evidence still
-wins) — check GH-359 before H1 locks in the e2e fixture's expected terminals, since it
-looks like it may already be tracking the same last-rung-PASS question. Note
+Panel #3 (codex + gemini, unanimous) then resolved the "must overrule a judge PASS"
+tension flagged in E1's first log: a mechanically-contradicted table is now clamped to
+UNVERIFIED (never REJECTED by the clamp, never re-ACCEPTED by any later judge PASS) —
+`docs/log/2026-08-30_TICKET-E1.md`'s addendum. Both dependencies of H1 (D1b, E1) are
+now DONE — dispatch wave 8 (H1, end-to-end + committed fixture) next. Flag for the H1
+dispatcher: the clamp has no lift path yet (a mechanically-contradicted table stays
+UNVERIFIED forever on resume until a future adjudication ticket exists) — a known,
+accepted limitation, not a bug, but H1's e2e fixture should exercise the clamped
+UNVERIFIED terminal explicitly. Note
 (unchanged from B1/D1a/D1b's logs): a live smoke against the real `gemini` CLI and a
 real ollama host is still outstanding and belongs to whoever merges this branch, not
 to any single ticket.

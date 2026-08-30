@@ -2619,7 +2619,16 @@ class UnifiedPipeline:
         composes with A4's own tiebreak semantics instead of overwriting
         the ladder's outcome, and can force REJECTED even when ``rungs`` is
         empty (the mechanical check needs no cloud egress, so
-        ``strict_local`` does not exempt it).
+        ``strict_local`` does not exempt it). CONSILIUM (panel #3): a
+        genuine contradiction also CAPS that table's outcome at
+        UNVERIFIED -- a later judge PASS (any confidence) can no longer
+        resolve it to ACCEPTED, only a ladder REJECTED can still finish
+        REJECTED. Mechanical evidence is a different, near-zero-false-
+        positive evidence class than judge-vs-judge disagreement (letting
+        a fallible judge silently overrule it repeats GH-273), but it does
+        not demote content outright either (the native text layer itself
+        can be the culprit -- GH-334); it withholds acceptance, it does
+        not force rejection.
         """
         if bo.engine == "chart_asset" or not bo.text:
             return
@@ -2722,6 +2731,34 @@ class UnifiedPipeline:
             ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
             return
 
+        # GH-353 TICKET-E1 CONSILIUM (panel #3, unanimous): a genuine
+        # mechanical contradiction is a different evidence class than
+        # judge-vs-judge disagreement -- objective, localized, and
+        # near-zero-false-positive by design -- so letting a later judge
+        # PASS silently erase it would repeat the exact GH-273 failure
+        # (two frontier judges both blessed the wrong-binding table).
+        # Straight REJECTED was rejected too: the native text layer itself
+        # can be the culprit (GH-334), so mechanical evidence must not
+        # demote content outright -- it can only withhold acceptance. This
+        # caps any table the mechanical rung fired for at UNVERIFIED: a
+        # subsequent judge PASS (at ANY confidence) can no longer resolve
+        # it to ACCEPTED. A REJECTED outcome is untouched -- the clamp is
+        # a ceiling on acceptance, not a floor on rejection. The prepended
+        # synthetic rung (above) still lets the real judges SEE the
+        # evidence -- that improves a genuine FAIL's own findings -- the
+        # clamp composes on top as a final backstop, not a replacement.
+        clamped_table_ids: set[str] = set()
+        clamped_results: list[TableLadderResult] = []
+        for result in table_results:
+            if (
+                forced_by_binding.get(result.table_id)
+                and result.outcome is TableLadderOutcome.ACCEPTED
+            ):
+                result = replace(result, outcome=TableLadderOutcome.UNVERIFIED)
+                clamped_table_ids.add(result.table_id)
+            clamped_results.append(result)
+        table_results = clamped_results
+
         for result in table_results:
             if result.outcome is TableLadderOutcome.ACCEPTED:
                 kind = TABLE_LADDER_ACCEPTED_KIND
@@ -2729,6 +2766,13 @@ class UnifiedPipeline:
             elif result.outcome is TableLadderOutcome.REJECTED:
                 kind = TABLE_LADDER_REJECTED_KIND
                 detail = f"table {result.table_id} rejected by the judge ladder (content problem, not retryable)"
+            elif result.table_id in clamped_table_ids:
+                kind = TABLE_LADDER_UNVERIFIED_KIND
+                detail = (
+                    f"table {result.table_id} unverified: mechanical binding check found a "
+                    "contradiction the judge ladder's PASS did not address (acceptance "
+                    "withheld pending an adjudication that disproves it; retryable on resume)"
+                )
             else:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
                 detail = f"table {result.table_id} unverified by the judge ladder (infra problem, retryable on resume)"
