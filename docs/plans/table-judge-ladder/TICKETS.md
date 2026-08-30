@@ -88,7 +88,7 @@ one-PASS+one-¬S1).
 
 ## Stream B — witnesses and trust
 
-### TICKET-B0 — table witness preparation · TODO · depends-on: A1 · wave 2
+### TICKET-B0 — table witness preparation · DONE · depends-on: A1 · wave 2
 **Problem:** Nothing maps emitted markdown tables to located regions: the locator
 over-merges stacked tables (`tables/locate.py:132`), borderless tables can yield no
 box, `binding.parse_grid` reads only the first grid, and `_render_crop` is private
@@ -103,7 +103,7 @@ exception.
 1 block/1 box, 2 blocks/1 merged box (ambiguous), 1 block/0 boxes (missing witness),
 temp files removed after the context exits.
 
-### TICKET-B2 — table-scoped trust events · TODO · depends-on: A1 · wave 2
+### TICKET-B2 — table-scoped trust events · DONE · depends-on: A1 · wave 2
 **Problem:** `tables_trust` resolves by page number (`core/tables_trust.py:216`): one
 resolving event erases every distrust event on the page, so one PASS could erase
 another table's REJECTED.

@@ -28,8 +28,8 @@ dispatched yet.
 | A2 | judge core | DONE | A0, A1, G1 | 2 |
 | A3 | judge core | DONE | A0, A1, G1 | 2 |
 | A4 | judge core | DONE | A1 | 2 |
-| B0 | witnesses | TODO | A1 | 2 |
-| B2 | trust | TODO | A1 | 2 |
+| B0 | witnesses | DONE | A1 | 2 |
+| B2 | trust | DONE | A1 | 2 |
 | C3 | status | TODO | C1 | 2 |
 | C2 | status | TODO | C1, C3, G1 | 3 |
 | B1 | gate | TODO | A2, A3, A4, B0, B2, C1, C3, G1 | 4 |
