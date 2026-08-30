@@ -35,7 +35,7 @@ dispatched yet.
 | B1 | gate | DONE | A2, A3, A4, B0, B2, C1, C3, G1 | 4 |
 | D1a | resume | DONE | B1 | 5 |
 | D1b | resume | DONE | D1a | 6 |
-| E1 | binding | TODO | B1 | 7 |
+| E1 | binding | DONE | B1 | 7 |
 | H1 | e2e | TODO | D1b, E1 | 8 |
 
 ## Dispatch waves
@@ -54,14 +54,21 @@ dispatched yet.
 | B1 | impl-B1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-B1.md` |
 | D1a | impl-B1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-D1a.md` |
 | D1b | impl-D1a (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-D1b.md` |
+| E1 | impl-E1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-E1.md` |
 
 ## Next action
-Wave 6 (D1b, resume skip policy) DONE — `_load_terminal_page` now grants a positive,
-disposition-gated early return: a terminal REJECTED page (`table_ladder_disposition ==
-TABLE_REJECTED` in the sidecar, checked after fingerprint + input-checksum validation)
-skips the SUCCESS/`audit_passed` checks and is skipped-and-kept; UNVERIFIED still
-reprocesses like before. Dispatch wave 7 (E1, mechanical binding evidence,
-`orchestrator.py`) next — its dep (B1) was already satisfied; H1 (wave 8) still needs
-E1 in addition to D1b (now DONE). Note for the reviewer/E1 dispatcher (unchanged from
-B1/D1a's logs): a live smoke against the real `gemini` CLI and a real ollama host is
-still outstanding and belongs to whoever merges this branch, not to any single ticket.
+Wave 7 (E1, mechanical binding evidence) DONE — `_run_table_judge_gate` now runs
+`tables/binding.py:bind()` per witnessed table and, on a genuine contradiction
+(`contradicted_cells` or `row_label_contradictions` non-empty — deliberately narrower
+than `no_known_contradiction`, which also flips on mere coverage gaps and would have
+violated the ticket's own "no native words is not demoted" criterion), prepends a
+synthetic FAIL rung carrying the contradiction as `prior_findings` for A4's ladder.
+Both dependencies of H1 (D1b, E1) are now DONE — dispatch wave 8 (H1, end-to-end +
+committed fixture) next. Flag for the H1 dispatcher: E1's log notes a real design
+tension between "binding must overrule a judge PASS" and A4's own "never held hostage
+by an earlier B" rule (a confident real-rung PASS after seeing binding evidence still
+wins) — check GH-359 before H1 locks in the e2e fixture's expected terminals, since it
+looks like it may already be tracking the same last-rung-PASS question. Note
+(unchanged from B1/D1a/D1b's logs): a live smoke against the real `gemini` CLI and a
+real ollama host is still outstanding and belongs to whoever merges this branch, not
+to any single ticket.

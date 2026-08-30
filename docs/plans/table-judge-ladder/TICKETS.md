@@ -214,7 +214,7 @@ validation but before the SUCCESS/audit checks; UNVERIFIED never skips.
 REJECTED + matching fingerprint → skipped, sidecar bytes unchanged; REJECTED + changed
 rung identity → reprocessed; UNVERIFIED + matching fingerprint → reprocessed.
 
-### TICKET-E1 — mechanical binding evidence · TODO · depends-on: B1 · wave 7
+### TICKET-E1 — mechanical binding evidence · DONE · depends-on: B1 · wave 7
 **Problem:** Judges provably miss binding-only shifts under adverse conditions (kimi in
 the bake-off; two frontier judges in GH-273); `bind()` is benchmark-only.
 **Do:** At the gate, run `tables/binding.py:bind()` per witnessed table;

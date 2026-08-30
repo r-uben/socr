@@ -2442,6 +2442,156 @@ class UnifiedPipeline:
             make_gemini_rung(self.config),
         ]
 
+    # ------------------------------------------------------------------
+    # GH-353 TICKET-E1: mechanical binding evidence at the gate.
+    #
+    # ``tables/binding.py bind()`` is a pure, local, cloud-free geometric
+    # check that catches exactly the failure shape judges have been
+    # measured to miss: a value multiset that is completely correct but
+    # bound to the wrong row/column (GH-273 -- two frontier judges both
+    # blessed that exact defect; kimi missed it too in the GH-356 bake-off).
+    #
+    # Deliberately CONTRADICTION-ONLY (``tables/witness.py``'s own module
+    # docstring already names this ticket and this exact contract):
+    # ``BindingResult.no_known_contradiction`` is NOT used as the forcing
+    # signal, because it is also False whenever coverage is merely
+    # incomplete (``native_unbound``/``model_unbound`` -- a dropped- or
+    # invented-*digit count*, not a *conflict*) -- which fires on almost
+    # every real table (binding coverage was measured incomplete on 12/13
+    # corpus table pages) and on any page with sparse or no native text at
+    # all (confirmed empirically: a fully wordless page still populates
+    # ``model_unbound`` for every candidate value, with
+    # ``no_known_contradiction is False``). Forcing on that signal would be
+    # exactly the mass-demotion trap the design log warns against, and
+    # would also falsely convict every existing gate-test fixture (built
+    # only to exercise crop/witness plumbing, never to BE a correct table).
+    # Only ``contradicted_cells``/``row_label_contradictions`` -- a value or
+    # label that WAS checked and disagreed -- forces demotion; absence of
+    # coverage stays NEUTRAL, matching the ticket's own acceptance
+    # criterion (a no-native-words fixture must not be demoted by binding
+    # alone).
+    # ------------------------------------------------------------------
+
+    #: Rung identifier for the synthetic mechanical-binding "rung" (see
+    #: ``_binding_contradiction_findings``/``_run_table_judge_gate`` below).
+    #: Never a real ``RungCallable`` reaching a socket or subprocess -- it
+    #: is injected directly into A4's ``run_table_ladder`` rung sequence so
+    #: a mechanical contradiction composes with the ladder's own accepted
+    #: B/tiebreak semantics (escalate with findings attached) rather than
+    #: post-hoc overwriting whatever outcome the real rungs reached.
+    _MECHANICAL_BINDING_RUNG = "mechanical:binding"
+
+    @staticmethod
+    def _binding_contradiction_findings(binding_result) -> list:
+        """Turn a contradicted ``BindingResult`` into judge ``Finding``s.
+
+        Only ever called when ``contradicted_cells`` or
+        ``row_label_contradictions`` is non-empty (the gate's own
+        contradiction check), so the returned list is always non-empty --
+        required by the verdict schema's "FAIL must carry >= 1 finding"
+        rule. Both sources map to ``WRONG_BINDING``: a value present on
+        both sides but disagreeing, or a row's label not matching its
+        anchored native row, are both binding (not perception) defects --
+        the same taxonomy slot the design doc assigns the GH-273 case.
+        """
+        from socr.judge.table_verdict import Finding, FindingCode
+
+        findings = []
+        for rlc in binding_result.row_label_contradictions:
+            where = "/".join(rlc.row_path) or "row"
+            findings.append(
+                Finding(
+                    code=FindingCode.WRONG_BINDING,
+                    where=where,
+                    detail=(
+                        f"mechanical binding check: native row {rlc.row_path!r} "
+                        f"anchored by value, but candidate labeled it {rlc.candidate_label!r}"
+                    ),
+                )
+            )
+        for cc in binding_result.contradicted_cells:
+            where = "/".join(cc.row_path + cc.col_path) or "cell"
+            findings.append(
+                Finding(
+                    code=FindingCode.WRONG_BINDING,
+                    where=where,
+                    detail=(
+                        f"mechanical binding check: native value {cc.native_token!r} "
+                        f"vs candidate value {cc.model_token!r} at the same anchored cell"
+                    ),
+                )
+            )
+        return findings
+
+    def _binding_contradiction_rung(self, findings: list):
+        """Build a ``RungCallable`` that always answers a fixed FAIL.
+
+        Ignores ``crop_path``/``markdown``/``prior_findings`` entirely (the
+        verdict was already produced by ``bind()``, not by looking at the
+        crop) -- it exists only so the mechanical evidence can be prepended
+        to a table's own rung sequence and run through A4's
+        ``run_table_ladder`` unmodified: a FAIL at rung 0 that is not the
+        last rung always escalates as a tiebreak carrying these findings,
+        matching the B outcome real judge rungs already produce.
+        """
+        from socr.judge.table_verdict import RungResult, TableJudgeVerdict
+
+        def _rung(crop_path, markdown, prior_findings):
+            return RungResult(
+                rung=self._MECHANICAL_BINDING_RUNG,
+                ok=True,
+                verdict=TableJudgeVerdict(verdict="FAIL", confidence="high", findings=findings),
+            )
+
+        return _rung
+
+    def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
+        """Run the mechanical binding check for one LOCATED witness.
+
+        Returns the contradiction ``Finding`` list, or ``None`` when
+        nothing about the check forces demotion (no box, no native words,
+        an unparseable candidate block, or nothing checkable disagreed).
+        Never raises: a page-open/geometry failure is logged and treated
+        as an absence of evidence, same as the design's own "fails closed"
+        contract for ``bind()`` itself.
+        """
+        if witness.box is None:
+            return None
+
+        from socr.core.pdf import open_pdf
+        from socr.tables.binding import bind
+
+        try:
+            with open_pdf(state.handle.path) as doc:
+                words = doc[page_num - 1].get_text("words")
+        except Exception as exc:
+            logger.warning(
+                "mechanical binding check: could not read native words on p%d (%s: %s)",
+                page_num,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        if not words:
+            return None
+
+        try:
+            binding_result = bind(words, witness.markdown, region=witness.box.bbox)
+        except Exception as exc:
+            logger.warning(
+                "mechanical binding check errored on p%d table %s (%s: %s); ignored",
+                page_num,
+                witness.table_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        if not binding_result.contradicted_cells and not binding_result.row_label_contradictions:
+            return None
+        return self._binding_contradiction_findings(binding_result)
+
     def _run_table_judge_gate(
         self,
         state: DocumentState,
@@ -2461,6 +2611,15 @@ class UnifiedPipeline:
         place (the #252 round-1 rule: a finalized copy is demoted later, at
         the manifest guard, so the shipped attempt itself is never touched
         here).
+
+        GH-353 TICKET-E1: a LOCATED witness also gets the mechanical
+        binding check (see the block comment above
+        ``_MECHANICAL_BINDING_RUNG``). A genuine contradiction is injected
+        as a synthetic rung-0 FAIL ahead of the real rungs -- it therefore
+        composes with A4's own tiebreak semantics instead of overwriting
+        the ladder's outcome, and can force REJECTED even when ``rungs`` is
+        empty (the mechanical check needs no cloud egress, so
+        ``strict_local`` does not exempt it).
         """
         if bo.engine == "chart_asset" or not bo.text:
             return
@@ -2479,6 +2638,12 @@ class UnifiedPipeline:
         )
         from socr.tables.witness import WitnessStatus, prepare_table_witnesses
 
+        # table_id -> True iff that table's ladder run had the mechanical
+        # rung prepended, so the rung_trail loop below (which runs after
+        # this whole try/except) knows to offset its rung1/rung2 identity
+        # lookup by one for that table only.
+        forced_by_binding: dict[str, bool] = {}
+
         try:
             with prepare_table_witnesses(state.handle.path, page_num, bo.text) as witnesses:
                 if not witnesses:
@@ -2495,9 +2660,17 @@ class UnifiedPipeline:
                             )
                         )
                         continue
-                    if not rungs:
-                        # Ladder off, or strict_local made every rung
-                        # unavailable before the first call -- fail open.
+
+                    table_rungs = rungs
+                    findings = self._binding_contradiction_for_witness(state, page_num, witness)
+                    if findings:
+                        table_rungs = [self._binding_contradiction_rung(findings), *rungs]
+                        forced_by_binding[witness.table_id] = True
+
+                    if not table_rungs:
+                        # Ladder off, strict_local made every rung
+                        # unavailable before the first call, and the
+                        # mechanical check found nothing -- fail open.
                         table_results.append(
                             TableLadderResult(
                                 table_id=witness.table_id,
@@ -2508,7 +2681,7 @@ class UnifiedPipeline:
                     try:
                         table_results.append(
                             run_table_ladder(
-                                rungs, witness.crop_path, witness.markdown, witness.table_id
+                                table_rungs, witness.crop_path, witness.markdown, witness.table_id
                             )
                         )
                     except Exception as exc:
@@ -2569,14 +2742,25 @@ class UnifiedPipeline:
             # guess what actually produced a verdict. Deliberately minimal:
             # no latencies, no verdict duplication -- ``detail`` above
             # already says what happened; this only says who executed it.
+            #
+            # GH-353 TICKET-E1: when the mechanical binding rung was
+            # prepended for this table, it occupies index 0 and every real
+            # rung's own index shifts up by one -- offset the rung1/rung2
+            # lookup accordingly rather than mislabeling the mechanical
+            # entry as rung 1's model (or rung 1 as rung 2's binary).
+            offset = 1 if forced_by_binding.get(result.table_id) else 0
             rung_trail = [
                 {
                     "rung": rr.rung,
                     "ok": rr.ok,
                     "executing": (
-                        self.config.table_judge_rung1_model
-                        if idx == 0
-                        else self.config.table_judge_rung2_binary
+                        "mechanical binding check"
+                        if offset and idx == 0
+                        else (
+                            self.config.table_judge_rung1_model
+                            if idx - offset == 0
+                            else self.config.table_judge_rung2_binary
+                        )
                     ),
                 }
                 for idx, rr in enumerate(result.rung_results)
