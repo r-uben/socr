@@ -1361,6 +1361,65 @@ def _apply_table_emission_guard(output: PageOutput, page_num: int) -> PageOutput
     )
 
 
+#: GH-353 C3: the two ladder terminals a page's disposition may carry. Kept as
+#: its own frozenset (rather than reusing D3_SUPERSEDING_REJECTIONS's shape)
+#: because these are OUTCOMES the ladder reducer writes on ``PageState``, not
+#: an allowlist of soft-refusal dispositions on a single attempt.
+_LADDER_TERMINAL_FAILURE_MODES: frozenset[FailureMode] = frozenset(
+    {FailureMode.TABLE_REJECTED, FailureMode.TABLE_UNVERIFIED}
+)
+
+
+def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> PageOutput:
+    """Enforce the table-judge ladder's page-level disposition (GH-353 C3).
+
+    ``_select_page_output_tagged`` has many endings, and several of them --
+    the native-only reconstruction chief among them (the ``NATIVE_CLEAN``
+    ending) -- ship plain SUCCESS / ``audit_passed=True`` whenever no OTHER
+    distrust flag happened to fire on THIS page. The ladder's REJECTED /
+    UNVERIFIED verdict is judged AFTER routing (B1, not yet wired), so no
+    cascade branch above can see it and a rejected table could otherwise be
+    reconstructed as clean SUCCESS downstream of selection. Read via
+    ``getattr`` with no default flag on ``PageState`` yet -- B1 owns adding
+    and setting the attribute; until then this is inert for every page.
+
+    Semantics: a REJECTED/UNVERIFIED candidate can still lose SELECTION to a
+    better attempt -- this guard never touches which text ships, only the
+    PAGE's final status/audit flag. What it forbids is the page regaining
+    SUCCESS while its disposition says otherwise. An output already demoted
+    for some other, more specific reason keeps that reason; the disposition's
+    own failure mode is written only when nothing more specific already
+    explains the demotion (e.g. GH-226's table-emission guard, applied first,
+    wins on its own more precise diagnosis).
+    """
+    disposition = getattr(p, "table_ladder_disposition", None)
+    if disposition not in _LADDER_TERMINAL_FAILURE_MODES:
+        return output
+    if output.audit_passed:
+        return replace(
+            output,
+            status=PageStatus.WARNING,
+            audit_passed=False,
+            failure_mode=disposition,
+        )
+    if output.failure_mode is FailureMode.NONE:
+        return replace(output, failure_mode=disposition)
+    return output
+
+
+def _finalize_page_output(state: DocumentState, output: PageOutput, page_num: int) -> PageOutput:
+    """Apply every final-validation guard a selected page output must pass.
+
+    Single seam for both callers below so the ladder disposition guard (C3)
+    and the GH-226 table-emission guard can never drift apart between the
+    manifest/replay path and the assembled-Markdown path -- the exact drift
+    ``_reaches_structure_class_branch``'s own docstring warns against.
+    """
+    output = _apply_table_emission_guard(output, page_num)
+    p = state.pages.get(page_num)
+    return _apply_ladder_disposition_guard(output, page_num, p) if p is not None else output
+
+
 def _winning_page_output(
     state: DocumentState,
     page_num: int,
@@ -1372,9 +1431,11 @@ def _winning_page_output(
     by canonical fragments, assembled Markdown, manifest blobs, and replay,
     including whole-document CLI attempts that never pass through the agentic
     acceptance gate. Earlier checks still drive repair and routing; this one is
-    the fail-closed backstop after those choices are exhausted.
+    the fail-closed backstop after those choices are exhausted. GH-353 C3 adds
+    the ladder disposition guard at the same seam for the same reason.
     """
-    return _apply_table_emission_guard(
+    return _finalize_page_output(
+        state,
         _select_page_output(state, page_num, whole_doc),
         page_num,
     )
@@ -1388,8 +1449,9 @@ def finalized_page_outputs(
 
     ``saved_body`` is post-transform Markdown (phantom-ref cleanup, figures,
     captions). When supplied, its per-page text overrides the selected text
-    *before* the same GH-226 guard is applied, closing the manifest/replay and
-    post-figure bypass without duplicating validation policy.
+    *before* the same GH-226 / GH-353 guards are applied, closing the
+    manifest/replay and post-figure bypass without duplicating validation
+    policy.
     """
     saved_pages = split_native_pages(saved_body) if saved_body is not None else None
     whole_doc = _whole_doc_page_texts(state)
@@ -1398,7 +1460,7 @@ def finalized_page_outputs(
         output = _select_page_output(state, page_num, whole_doc)
         if saved_pages is not None and page_num - 1 < len(saved_pages):
             output = replace(output, text=saved_pages[page_num - 1])
-        outputs.append(_apply_table_emission_guard(output, page_num))
+        outputs.append(_finalize_page_output(state, output, page_num))
     return outputs
 
 

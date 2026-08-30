@@ -30,7 +30,7 @@ dispatched yet.
 | A4 | judge core | DONE | A1 | 2 |
 | B0 | witnesses | DONE | A1 | 2 |
 | B2 | trust | DONE | A1 | 2 |
-| C3 | status | TODO | C1 | 2 |
+| C3 | status | DONE | C1 | 2 |
 | C2 | status | TODO | C1, C3, G1 | 3 |
 | B1 | gate | TODO | A2, A3, A4, B0, B2, C1, C3, G1 | 4 |
 | D1a | resume | TODO | B1 | 5 |
@@ -45,6 +45,14 @@ dispatched yet.
 - Wave 4: B1 (orchestrator.py — the gate)
 - Waves 5–8: D1a → D1b → E1 → H1 (serialized on orchestrator.py)
 
+## Active Agents
+
+| Ticket | Agent | Status |
+|--------|-------|--------|
+| C3 | impl-C1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_ticket-c3.md` |
+
 ## Next action
-Dispatch wave 1 (A0, A1, C1, G1) via `/plan next` — four parallel implementer+reviewer
-pairs, disjoint files.
+Wave 2 (A2, A3, A4, B0, B2, C3) all DONE. Dispatch wave 3 (C2, `orchestrator.py` +
+`cli.py`) next; wave 4 (B1, the gate) is serialized after it on `orchestrator.py`
+(dispatch order, not a `depends-on` — B1's own deps are A2/A3/A4/B0/B2/C1/C3/G1, all
+satisfied once wave 2 lands).

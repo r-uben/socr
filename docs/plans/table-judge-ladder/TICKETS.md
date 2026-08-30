@@ -125,7 +125,7 @@ event survives in `tables_trust`.
 **Done when:** `~/venvs/socr/bin/pytest tests/test_result_table_terminals.py -q` exits
 0; both modes round-trip `PageOutput.to_dict`/`from_dict`.
 
-### TICKET-C3 — manifest: disposition survives winner selection · TODO · depends-on: C1 · wave 2
+### TICKET-C3 — manifest: disposition survives winner selection · DONE · depends-on: C1 · wave 2
 **Problem:** Final winner selection can substitute native text or another attempt after
 the gate (`core/manifest.py:937/996/1156`), and native-only can reconstruct a demoted
 page as clean SUCCESS (`:1271`) — a REJECTED verdict could silently vanish.
