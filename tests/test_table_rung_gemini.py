@@ -1,7 +1,7 @@
-"""GH-353 TICKET-A3: CLI2 rung — gemini CLI table judge invoker.
+"""GH-353 TICKET-A3: CLI2 rung — Gemini-family table judge invoker (via `agy`).
 
 All tests patch the module-local `_run_gemini_cli` subprocess seam — never
-`PATH`/`shutil.which` — so nothing here shells out to a real `gemini`
+`PATH`/`shutil.which` — so nothing here shells out to a real `agy`/`gemini`
 binary. A guard fixture asserts `subprocess.run` is never reached
 unpatched.
 """
@@ -71,23 +71,24 @@ def test_build_gemini_argv_pins_exact_shape(tmp_path: Path):
     crop.write_bytes(b"fake-png")
     prompt = "JUDGE THIS TABLE"
 
-    argv = build_gemini_argv("gemini", crop, prompt)
+    argv = build_gemini_argv("agy", crop, prompt)
 
     assert argv == [
-        "gemini",
-        "--skip-trust",
-        "--include-directories",
-        str(crop.parent),
+        "agy",
         "-p",
         f"Image crop: @{crop}\n\n{prompt}",
+        "--add-dir",
+        str(crop.parent),
     ]
     assert "--approval-mode" not in argv
+    assert "--skip-trust" not in argv
+    assert "--include-directories" not in argv
 
 
 def test_build_gemini_argv_uses_configured_binary(tmp_path: Path):
     crop = tmp_path / "crop.png"
-    argv = build_gemini_argv("/opt/custom/gemini-cli", crop, "x")
-    assert argv[0] == "/opt/custom/gemini-cli"
+    argv = build_gemini_argv("/opt/custom/agy", crop, "x")
+    assert argv[0] == "/opt/custom/agy"
 
 
 # --------------------------------------------------------------------------

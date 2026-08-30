@@ -1,36 +1,39 @@
-"""GH-353 TICKET-A3: CLI2 rung — gemini CLI table judge invoker.
+"""GH-353 TICKET-A3: CLI2 rung — Gemini-family table judge invoker.
 
-Rung 2 of the ladder: a per-crop subprocess call to the `gemini` CLI (the
-Google One AI Pro headless surface), the off-family, non-qwen, non-ollama
-judge (design: `docs/log/2026-08-30_table-judge-ladder.md`). `GeminiEngine`
+Rung 2 of the ladder: a per-crop subprocess call to a Gemini-family headless
+CLI, the off-family, non-qwen, non-ollama judge (design:
+`docs/log/2026-08-30_table-judge-ladder.md`). `GeminiEngine`
 (`socr.engines.gemini`) wraps a *document-level* OCR CLI (`gemini-ocr`) and
 is not reusable here — this module owns its own per-crop subprocess
-invocation of the actual `gemini` agent CLI.
+invocation.
+
+**Binary: `agy` (Antigravity CLI), not the bare `gemini` CLI.** The design
+originally specified the `gemini` CLI; the pre-merge B1 live smoke
+(2026-08-30) found it can no longer authenticate headlessly on this
+machine — Google retired the "Gemini Code Assist for individuals" free tier
+that backed it (`IneligibleTierError`, migration message points at
+Antigravity). `agy` reaches the same model family through a live, working
+headless surface (smoke: schema-perfect unfenced JSON, all six decoy
+defects caught — see `docs/log/2026-08-30_gh353-ticket-a3.md`). `RUNG_ID`
+stays `"gemini"` — it names the judge model *family* for the audit trail,
+not the literal binary; `config.table_judge_rung2_binary` (default `"agy"`)
+is what actually runs.
 
 Image handoff: the crop is a temp file owned by the B0 witness module (this
-module must never delete it — cleanup is the caller's context manager).
-Headless gemini CLI (`-p/--prompt`) has no dedicated "attach image" flag;
-its documented mechanism for pulling a local file into a headless turn is an
-`@<path>` reference inside the prompt text, which the CLI resolves and loads
-(binary/image content included) before sending the turn to the model.
-`--include-directories` grants read access to the crop's parent directory
-(a scratch/temp dir, not necessarily under the CLI's default trusted
-workspace); `--skip-trust` avoids an interactive workspace-trust prompt that
-would otherwise hang the subprocess past its timeout. The subprocess `cwd`
-is pinned to the crop's parent directory (a scratch dir) rather than left as
-this repo's checkout — otherwise the CLI would treat the process cwd as
-workspace root and load this repo's `GEMINI.md`/`.gemini/` context and MCP
-servers, breaking the design's "crop + markdown, nothing else" judge-input
-isolation.
-
-Deliberately does NOT pass `--approval-mode plan`: verified against the
-bundled CLI source, `ApprovalMode.PLAN` injects a planning workflow into the
-system prompt (an Inquiry-vs-Directive classification) — a directive-shaped
-task like "judge this crop, emit strict JSON" risks being classified a
-Directive, making the model draft a plan file instead of answering (a
-silent ¬S1 for the wrong reason, plus a stray write attempt). The judge task
-invokes no tools, so the default approval mode never blocks on a
-confirmation prompt either.
+module must never delete it — cleanup is the caller's context manager). Both
+`gemini` and `agy` headless print modes (`-p`) lack a dedicated "attach
+image" flag; the shared mechanism for pulling a local file into a headless
+turn is an `@<path>` reference inside the prompt text, which the CLI
+resolves and loads (binary/image content included) before sending the turn
+to the model — proven for `agy` by the live smoke above. `--add-dir` grants
+read access to the crop's parent directory (a scratch/temp dir, not
+necessarily under the CLI's default workspace); `agy` has no `--skip-trust`
+/ `--include-directories` equivalent to `gemini`'s, so those flags are
+dropped for this binary. The subprocess `cwd` is pinned to the crop's parent
+directory (a scratch dir) rather than left as this repo's checkout —
+`agy`, like `gemini`, reads ambient context from cwd, and running with this
+repo's checkout as cwd would leak repo context into the judge call, breaking
+the design's "crop + markdown, nothing else" judge-input isolation.
 
 S1 classification ("the judge answered") is TICKET-A1's job
 (`rung_result_from_output` / `parse_table_verdict`). This module's only
@@ -38,6 +41,15 @@ responsibility is: build argv, run it under a bounded timeout, and turn
 every non-answer outcome (timeout, missing binary, non-zero exit, transport
 OSError) into `RungResult(ok=False, ...)` — never an exception, never a
 synthesized verdict.
+
+**Known gap:** `agy` has no per-call model-selection flag (the machine-known
+`agy-set-model` route is a dead symlink); it answers with whichever model
+its encrypted local state currently has active. Rung-2 model identity is
+therefore UNCONFIRMED per-call — weaker provenance than rung 1's
+config-pinned `table_judge_rung1_model`. The fingerprint records the binary
+name only (`table_judge_rung2_binary`), which is accurate to what this
+module actually controls; a future `agy` model-pinning fix should tighten
+this.
 """
 
 from __future__ import annotations
@@ -50,7 +62,8 @@ from socr.core.config import PipelineConfig
 from socr.judge.table_prompt import build_table_judge_prompt
 from socr.judge.table_verdict import Finding, RungResult, rung_result_from_output
 
-#: Rung identifier recorded on every `RungResult` this module produces.
+#: Rung identifier recorded on every `RungResult` this module produces —
+#: names the judge model FAMILY (gemini), not the literal binary (`agy`).
 RUNG_ID = "gemini"
 
 #: Bytes of stderr kept in the error message on a non-zero exit — enough for
@@ -64,10 +77,9 @@ def _run_gemini_cli(
     """Module-local subprocess seam.
 
     Tests patch THIS function (not `PATH`, not `shutil.which`) so the argv,
-    cwd, and timeout handling are exercised without a real `gemini` binary.
-    `cwd` is the crop's (scratch) parent directory — see the module
-    docstring for why the CLI must not run with this repo's checkout as its
-    workspace root.
+    cwd, and timeout handling are exercised without a real binary. `cwd` is
+    the crop's (scratch) parent directory — see the module docstring for why
+    the CLI must not run with this repo's checkout as its workspace root.
     """
     return subprocess.run(
         argv,
@@ -87,20 +99,21 @@ def _findings_as_mappings(findings: list[Finding] | None) -> list[dict[str, str]
 
 
 def build_gemini_argv(binary: str, crop_path: Path, prompt: str) -> list[str]:
-    """Build the gemini CLI argv for one headless table-judge call.
+    """Build the `agy` argv for one headless table-judge call.
 
     The crop is attached via an `@<path>` reference inside the prompt text
-    (gemini CLI's file-inclusion syntax) so the model sees the actual image,
-    not just its path as a string.
+    (proven for `agy` print mode by the 2026-08-30 live smoke) so the model
+    sees the actual image, not just its path as a string. `--add-dir` grants
+    read access to the crop's (scratch) parent directory — `agy`'s flag
+    surface has no `--skip-trust`/`--include-directories` equivalent.
     """
     full_prompt = f"Image crop: @{crop_path}\n\n{prompt}"
     return [
         binary,
-        "--skip-trust",
-        "--include-directories",
-        str(crop_path.parent),
         "-p",
         full_prompt,
+        "--add-dir",
+        str(crop_path.parent),
     ]
 
 
@@ -135,21 +148,21 @@ def judge_table_gemini(
             rung=RUNG_ID,
             ok=False,
             latency_sec=time.monotonic() - start,
-            error=f"gemini binary not found: {exc}",
+            error=f"gemini rung binary {binary!r} not found: {exc}",
         )
     except subprocess.TimeoutExpired:
         return RungResult(
             rung=RUNG_ID,
             ok=False,
             latency_sec=time.monotonic() - start,
-            error=f"gemini CLI timed out after {timeout_sec}s",
+            error=f"gemini rung ({binary}) timed out after {timeout_sec}s",
         )
     except OSError as exc:
         return RungResult(
             rung=RUNG_ID,
             ok=False,
             latency_sec=time.monotonic() - start,
-            error=f"gemini CLI transport error: {exc}",
+            error=f"gemini rung ({binary}) transport error: {exc}",
         )
     latency_sec = time.monotonic() - start
 
@@ -159,7 +172,7 @@ def judge_table_gemini(
             rung=RUNG_ID,
             ok=False,
             latency_sec=latency_sec,
-            error=f"gemini CLI exited {completed.returncode}: {stderr_tail}",
+            error=f"gemini rung ({binary}) exited {completed.returncode}: {stderr_tail}",
         )
 
     return rung_result_from_output(RUNG_ID, completed.stdout, latency_sec)

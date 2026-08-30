@@ -301,9 +301,18 @@ class PipelineConfig:
     # rather than hardcoding localhost, which would misfire on any non-default
     # ollama deployment.
     table_judge_rung1_host: str | None = None
-    # CLI2 rung: subprocess binary name/path for the gemini CLI invoker (A3). A
-    # missing binary is a normal ¬S1 substitution, not a config error.
-    table_judge_rung2_binary: str = "gemini"
+    # CLI2 rung: subprocess binary name/path for the gemini-family CLI invoker
+    # (A3). Default is ``agy`` (Antigravity CLI), not ``gemini`` — the pre-merge
+    # B1 live smoke (2026-08-30) found the bare `gemini` binary can no longer
+    # authenticate headlessly on this machine ("Gemini Code Assist for
+    # individuals" free tier retired; Google's own IneligibleTierError message
+    # says to migrate to Antigravity). `agy` reaches the same model family
+    # through a live, working headless surface (smoke: schema-perfect,
+    # unfenced JSON, all six decoy defects caught — transcript referenced in
+    # docs/log/2026-08-30_gh353-ticket-a3.md). A missing binary is still a
+    # normal ¬S1 substitution, not a config error, whichever binary is
+    # configured.
+    table_judge_rung2_binary: str = "agy"
     # Per-call wall-clock budget for EITHER rung (see TABLE_JUDGE_TIMEOUT_SEC_DEFAULT
     # for the bake-off measurement behind the default). A timeout is ¬S1
     # (escalate-as-substitute to the next rung / terminal), never treated as a

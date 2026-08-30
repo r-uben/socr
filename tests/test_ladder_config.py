@@ -47,7 +47,11 @@ class TestDefaults:
         config = PipelineConfig()
         assert config.table_judge_rung1_model == "glm-5.3-flash:cloud"
         assert config.table_judge_rung1_host is None
-        assert config.table_judge_rung2_binary == "gemini"
+        # "agy" (Antigravity CLI), not the bare "gemini" CLI: the pre-merge B1
+        # live smoke (2026-08-30) found the free-tier "gemini" headless auth
+        # is dead (docs/log/2026-08-30_gh353-ticket-a3.md); agy reaches the
+        # same model family through a live, working headless surface.
+        assert config.table_judge_rung2_binary == "agy"
 
     def test_timeout_defaults_to_the_named_bakeoff_constant(self):
         config = PipelineConfig()
