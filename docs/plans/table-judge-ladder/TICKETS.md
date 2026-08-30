@@ -154,7 +154,7 @@ and `_print_summary` output contains both terminal names; flag-off control uncha
 
 ## Stream G — config
 
-### TICKET-G1 — flag, config, fingerprint prep · TODO · depends-on: none · wave 1
+### TICKET-G1 — flag, config, fingerprint prep · DONE · depends-on: none · wave 1
 **Problem:** The ladder needs a default-off switch and all knobs config-visible so tests
 and H1 can inject dummies (no bare constants).
 **Do:** `PipelineConfig` fields: `table_judge_ladder: bool = False`, rung-1 model

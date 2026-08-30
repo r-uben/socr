@@ -94,6 +94,16 @@ _INERT_BUT_FINGERPRINTED = {
 #: the modes where they DO work — the same class as the judge-model gap (#133).
 _INERT_AND_UNFINGERPRINTED = {
     "clean_equation_model",
+    # GH-353 table judge ladder (TICKET-G1): config surface only. Neither read nor
+    # fingerprinted yet — the gate that consumes them (TICKET-B1) and the
+    # fingerprint extras that hash their identity into the resume ledger
+    # (TICKET-B1's own "Do") have not landed. Reclassify to _LIVE once B1 wires
+    # the gate into `_phase_agentic`.
+    "table_judge_ladder",
+    "table_judge_rung1_model",
+    "table_judge_rung1_host",
+    "table_judge_rung2_binary",
+    "table_judge_timeout_sec",
 }
 
 #: NOT a deadness claim. Consumers are stubbed or unreached by this fixture:

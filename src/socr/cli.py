@@ -218,6 +218,17 @@ def common_options(f):
         is_flag=True,
         help="Write a replayable manifest + blob cache",
     )(f)
+    f = click.option(
+        "--table-judge-ladder",
+        is_flag=True,
+        help=(
+            "GH-353: gate emitted table pages behind a two-rung acceptance judge "
+            "(ollama-cloud glm-5.3-flash, then the gemini CLI) before shipping. "
+            "Default off. --strict-local + this flag makes both rungs unavailable, "
+            "so every table page is demoted to UNVERIFIED rather than shipped "
+            "unjudged."
+        ),
+    )(f)
     return f
 
 
@@ -257,6 +268,7 @@ def build_config(
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
     write_manifest: bool = False,
+    table_judge_ladder: bool = False,
 ) -> PipelineConfig:
     """Build PipelineConfig from CLI options."""
     if config_path or profile:
@@ -373,6 +385,14 @@ def build_config(
     config.max_cost_per_page = max_cost_per_page
     config.cost_budget = cost_budget
     config.write_manifest = write_manifest
+    # is_flag default is False, matching PipelineConfig's own default — only ever
+    # flip it on, never clobber a YAML-config True with an unset CLI flag (the
+    # cli.py:371-area unconditional-override trap this ticket calls out for
+    # judge_backend/judge_model/max_cost_per_page/cost_budget/write_manifest
+    # above, which DOES clobber YAML because those options carry non-None
+    # defaults of their own).
+    if table_judge_ladder:
+        config.table_judge_ladder = True
 
     if output_dir:
         config.output_dir = output_dir
