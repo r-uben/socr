@@ -17,6 +17,18 @@ module makes that uncertainty a first-class, representable state
 (``WitnessStatus.AMBIGUOUS`` / ``MISSING``) instead of raising or silently
 picking one.
 
+**Residual assumption when counts match (LOCATED):** pairing is by index —
+block ``i`` gets box ``i`` — after both lists are already in each source's own
+"reading order" (``find_table_blocks`` walks the markdown top to bottom;
+``locate_tables`` sorts by ``(y0, x0)``). This assumes the model emits tables
+in the same top-to-bottom order the page geometry does, which holds for the
+single-column layouts this has been exercised against. It is UNVERIFIED for
+side-by-side (multi-column / multi-panel) layouts, where two tables can share
+a ``y0`` band and ``(y0, x0)`` order need not match emission order — that
+misalignment would currently ship as a false ``LOCATED`` pairing rather than
+degrading to ``AMBIGUOUS``. Tracked for the ladder design panel; not resolved
+by this module today.
+
 Crops are rendered into temp files with caller-owned lifetime scoped to a
 context manager (mirrors ``TableCropExtractor._render_crop``'s caller-owned
 cleanup, but guarantees the unlink here so a gate that raises mid-ladder never
@@ -77,6 +89,8 @@ def _block_markdown(markdown: str, start: int, end: int) -> str:
 
 
 def _classify(n_blocks: int, n_boxes: int) -> WitnessStatus:
+    """Count-only classification. See module docstring for the residual
+    index-pairing assumption this implies for the ``LOCATED`` case."""
     if n_boxes == 0:
         return WitnessStatus.MISSING
     if n_boxes != n_blocks:
@@ -98,6 +112,10 @@ def prepare_table_witnesses(
     rather than aborting. Rendered crop files are guaranteed to be removed
     when the context exits, whether it exits normally or via exception —
     callers must not keep ``crop_path`` beyond this block.
+
+    On a block/box count match, pairing is index-order (see module docstring
+    for the residual "same reading order" assumption — unverified for
+    side-by-side/multi-column table layouts).
     """
     blocks = find_table_blocks(markdown)
     witnesses: list[TableWitness] = []

@@ -49,6 +49,28 @@ def _build_pdf(tmp_path, style: str):
         for r, y in enumerate(rows):
             for c, x in enumerate(cols):
                 page.insert_text((x + 4, y + 12), f"{r}{c}", fontsize=9)
+    elif style == "two_ruled":
+        # Two separate ruled tables, vertically non-overlapping AND with
+        # deliberately non-overlapping x-spans, each with its own verticals so
+        # find_tables() reports two distinct boxes. The x-offset matters:
+        # _booktabs_tables independently scans ALL horizontal rules on the
+        # page (including a ruled table's own row lines) and groups them by
+        # x-overlap (>= 0.6 shared width, tables/locate.py _RULE_X_OVERLAP) --
+        # same-column ruled tables would have their rules merged into one
+        # spurious extra booktabs band spanning both tables.
+        top_cols = [100, 220, 300, 380]
+        bottom_cols = [340, 460, 540, 620]
+        top_rows = [100 + i * 22 for i in range(4)]
+        bottom_rows = [320 + i * 22 for i in range(4)]
+        for cols, rows in ((top_cols, top_rows), (bottom_cols, bottom_rows)):
+            x0, x1 = cols[0], cols[-1] + 80
+            for r, y in enumerate(rows):
+                for c, x in enumerate(cols):
+                    page.insert_text((x + 4, y + 12), f"{r}{c}", fontsize=9)
+            for yy in rows:
+                page.draw_line((x0, yy), (x1, yy))
+            for xx in cols + [x1]:
+                page.draw_line((xx, rows[0]), (xx, rows[-1]))
     elif style == "stacked_booktabs":
         # Two booktabs tables sharing the same x-span. The locator's rule
         # grouping is x-overlap only (no vertical-gap check, documented
@@ -77,6 +99,37 @@ def test_located_single_block_single_box(tmp_path):
         assert w.markdown.strip() == _MD_ONE_TABLE.strip()
     # Guaranteed cleanup: the crop file is gone once the context exits.
     assert not w.crop_path.exists()
+
+
+def test_located_two_blocks_two_boxes_pair_in_order(tmp_path):
+    """The most common real multi-table page shape: two emitted blocks, two
+    distinct non-overlapping boxes -> both LOCATED, paired top-to-bottom in
+    the SAME order as they were emitted (index pairing after each source's
+    own reading-order sort -- see witness.py's module docstring for the
+    residual assumption this rests on)."""
+    pdf_path = _build_pdf(tmp_path, "two_ruled")
+    doc = fitz.open(str(pdf_path))
+    boxes = locate_tables(doc[0])
+    doc.close()
+    assert len(boxes) == 2
+    assert boxes[0].bbox[1] < boxes[1].bbox[1]  # sanity: top box first
+
+    with prepare_table_witnesses(pdf_path, page_num=1, markdown=_MD_TWO_TABLES) as witnesses:
+        assert len(witnesses) == 2
+        top, bottom = witnesses
+        assert top.status is WitnessStatus.LOCATED
+        assert bottom.status is WitnessStatus.LOCATED
+        assert top.box is not None and bottom.box is not None
+        # Correct pairing: the FIRST emitted block (top.markdown has "a|b")
+        # gets the geometrically TOP box; the second gets the bottom box.
+        assert top.box.bbox[1] < bottom.box.bbox[1]
+        assert "a" in top.markdown and "b" in top.markdown
+        assert "c" in bottom.markdown and "d" in bottom.markdown
+        assert top.table_id == "p1-t0"
+        assert bottom.table_id == "p1-t1"
+        assert top.crop_path is not None and top.crop_path.exists()
+        assert bottom.crop_path is not None and bottom.crop_path.exists()
+        assert top.crop_path != bottom.crop_path
 
 
 def test_ambiguous_two_blocks_one_merged_box(tmp_path):
