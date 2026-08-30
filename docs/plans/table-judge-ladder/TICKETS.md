@@ -138,7 +138,7 @@ regain SUCCESS while its disposition is REJECTED).
 exits 0; injection goes through `_winning_page_output` (not merely `best_output`), and
 the native-only reconstruction path (`:1271`) preserves the demotion.
 
-### TICKET-C2 — document aggregation + CLI surfacing · TODO · depends-on: C1, C3, G1 · wave 3
+### TICKET-C2 — document aggregation + CLI surfacing · DONE · depends-on: C1, C3, G1 · wave 3
 **Problem:** The terminals must surface at document status, metadata, and CLI (the
 no-silent-loss rule), through the hand-maintained `pages_ok` chain.
 **Do:** `pages_ok` terms + document-status handling in `_phase_assemble`

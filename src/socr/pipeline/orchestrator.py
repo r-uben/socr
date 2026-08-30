@@ -1843,6 +1843,48 @@ class UnifiedPipeline:
             "its chart-vs-table routing unresolved (content preserved)"
         )
 
+    @staticmethod
+    def _table_judge_ladder_note(state) -> str | None:
+        """GH-353: document-level one-liner naming the table judge ladder terminals.
+
+        Mirrors ``_chart_detection_failed_note``: a consumer gating on
+        ``metadata.json`` must see a REJECTED/UNVERIFIED table without parsing
+        the full audit log. Read from ``best_output.failure_mode``, NOT
+        ``.status`` -- the same reason ``table_rejected_pages`` /
+        ``table_unverified_pages`` are computed that way in ``_phase_assemble``
+        (GH-161: a page can be SUCCESS/audit_passed=False with only
+        failure_mode carrying the disposition). Names both terminal modes by
+        their ``FailureMode`` value so the CLI summary (which prints
+        ``result.error`` verbatim) surfaces the exact terminal, not a
+        paraphrase. ``None`` on a clean run.
+        """
+        rejected = sorted(
+            n
+            for n, p in state.pages.items()
+            if p.best_output and p.best_output.failure_mode == FailureMode.TABLE_REJECTED
+        )
+        unverified = sorted(
+            n
+            for n, p in state.pages.items()
+            if p.best_output and p.best_output.failure_mode == FailureMode.TABLE_UNVERIFIED
+        )
+        if not rejected and not unverified:
+            return None
+        parts = []
+        if rejected:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in rejected)}: "
+                f"{FailureMode.TABLE_REJECTED.value} (table judge ladder rejected; "
+                "not retryable)"
+            )
+        if unverified:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in unverified)}: "
+                f"{FailureMode.TABLE_UNVERIFIED.value} (table judge ladder exhausted "
+                "without an answer; retryable on resume)"
+            )
+        return "; ".join(parts)
+
     # ------------------------------------------------------------------
     # GH-96: table escalation lane
     # ------------------------------------------------------------------
@@ -5181,6 +5223,30 @@ class UnifiedPipeline:
         )
         pages_ok = pages_ok and not chart_detection_failed_pages
 
+        # GH-353: table judge ladder terminals (C2). Keyed off
+        # ``best_output.failure_mode``, NOT ``best_output.status`` -- a page
+        # can legitimately arrive as SUCCESS/audit_passed=False (GH-161,
+        # ``:4347``), and C3's manifest guard only backfills failure_mode in
+        # that state, leaving ``.status`` textually SUCCESS. Reading .status
+        # here would let a REJECTED/UNVERIFIED page slip through aggregation
+        # silently -- exactly the no-silent-loss failure this ticket exists
+        # to close. TABLE_REJECTED (content problem, not retryable) and
+        # TABLE_UNVERIFIED (infra problem, retryable on resume) are kept as
+        # separate buckets -- same reasoning as every other pairing above:
+        # one bucket per disposition, because they need distinct audit
+        # kinds, CLI wording and (D1b, later) distinct resume policy.
+        table_rejected_pages = sorted(
+            n
+            for n, p in state.pages.items()
+            if p.best_output and p.best_output.failure_mode == FailureMode.TABLE_REJECTED
+        )
+        table_unverified_pages = sorted(
+            n
+            for n, p in state.pages.items()
+            if p.best_output and p.best_output.failure_mode == FailureMode.TABLE_UNVERIFIED
+        )
+        pages_ok = pages_ok and not table_rejected_pages and not table_unverified_pages
+
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
         elif has_text:
@@ -5201,6 +5267,8 @@ class UnifiedPipeline:
             or d3_model_table_pages
             or corrupt_math_hybrid_pages
             or value_drift_pages
+            or table_rejected_pages
+            or table_unverified_pages
         ):
             from socr.core.audit_log import AuditEvent
 
@@ -5457,6 +5525,18 @@ class UnifiedPipeline:
                         f" floor (unverifiable region → explicit failure marker): "
                         f"{d3_floor_pages}[/red]"
                     )
+                if table_rejected_pages:
+                    console.print(
+                        f"  [red]{len(table_rejected_pages)} table page(s) failed the judge "
+                        f"ladder — TABLE_REJECTED (models looked and said no; not retryable): "
+                        f"{table_rejected_pages}[/red]"
+                    )
+                if table_unverified_pages:
+                    console.print(
+                        f"  [yellow]{len(table_unverified_pages)} table page(s) could not be "
+                        f"judged — TABLE_UNVERIFIED (ladder exhausted without an answer; "
+                        f"retryable on resume): {table_unverified_pages}[/yellow]"
+                    )
 
         # MAJOR 6(a) on #269: only the SIDECAR flush belongs here, after the
         # bucket derivation and audit-event-append block above.
@@ -5578,6 +5658,14 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_trust_note}"
             else:
                 final_result.error = _trust_note
+        # GH-353: surface the table judge ladder terminals at document level,
+        # for the same no-silent-loss reason GH-318/GH-225 do above.
+        _ladder_note = self._table_judge_ladder_note(state)
+        if _ladder_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_ladder_note}"
+            else:
+                final_result.error = _ladder_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
