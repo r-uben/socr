@@ -52,13 +52,27 @@ RESOLVING_KINDS: frozenset[str] = frozenset(
         # import. Unlike ``table_escalation_accepted`` (always page-wide),
         # a ``table_ladder_accepted`` event carries a per-table
         # ``data["table_id"]`` and resolves ONLY that table -- see
-        # ``build_tables_trust``'s table-scoped resolution. A page-wide
-        # resolve (no ``table_id``) still falls back to the legacy
-        # whole-page behavior, for a caller that emits one summary event
-        # when the ladder accepted every table on the page.
+        # ``build_tables_trust``'s table-scoped resolution. It has NO
+        # whole-page fallback (unlike ``table_escalation_accepted``): a
+        # ``table_ladder_accepted`` with no ``table_id`` is a no-op, not a
+        # page-wide clear. A blanket "no table_id -> clear the whole page"
+        # rule would let one table's accept silently erase a DIFFERENT
+        # table's REJECTED/UNVERIFIED on the same page whenever a caller
+        # forgets to attach ``table_id`` -- the exact bug this ticket exists
+        # to fix, just moved one level up. A genuine page-wide-accept
+        # summary, if ever wanted, needs its own distinct kind and its own
+        # test, not a piggyback on optional ``table_id``.
         "table_ladder_accepted",
     }
 )
+
+# Resolving kinds that keep the legacy whole-page-clear behavior when they
+# carry no ``table_id`` (see ``build_tables_trust``). Deliberately a strict
+# allowlist, not "every kind not otherwise scoped": ``table_escalation_accepted``
+# is the only kind with a real emit site that never carries ``table_id`` and
+# was always page-wide by design. New resolving kinds default to no table_id
+# meaning no-op, not whole-page -- opt IN to whole-page semantics here.
+WHOLE_PAGE_RESOLVING_KINDS: frozenset[str] = frozenset({"table_escalation_accepted"})
 
 TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
     {
@@ -256,25 +270,33 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
     # Pages whose table was superseded by a measurably better read. Collected first
     # because the resolving event is emitted AFTER the distrust events it resolves.
     #
-    # GH-353 TICKET-B2: a resolving event that carries ``data["table_id"]``
-    # resolves ONLY that table, not the whole page -- a multi-table page's
-    # PASS on table 0 must not erase a FAIL/¬S1 recorded for table 1
-    # (`core/tables_trust.py:216`, pre-fix, was page-number-only). A
-    # resolving event with no ``table_id`` keeps the legacy whole-page
-    # behavior (``table_escalation_accepted`` never carries one; a future
-    # caller may also emit a page-wide ladder-accepted summary the same way,
-    # when the reducer accepted every table on the page).
+    # GH-353 TICKET-B2 (revised after review): a resolving event that carries
+    # ``data["table_id"]`` resolves ONLY that table, not the whole page -- a
+    # multi-table page's PASS on table 0 must not erase a FAIL/¬S1 recorded
+    # for table 1 (`core/tables_trust.py:216`, pre-fix, was page-number-only).
+    # A resolving event with NO ``table_id`` clears the whole page ONLY when
+    # its kind is in ``WHOLE_PAGE_RESOLVING_KINDS``; every other resolving
+    # kind without a ``table_id`` is a no-op. The reviewer's repro: a
+    # table-scoped ``table_ladder_rejected(table_id="1")`` followed by a
+    # page-wide ``table_ladder_accepted`` (no ``table_id``) must NOT clear
+    # the page -- treating every ``RESOLVING_KINDS`` member the same in the
+    # no-table_id branch made B1's emission discipline (always attach
+    # table_id) load-bearing for correctness, with no test or contract
+    # actually requiring it. Fail closed instead: no-op, not erase.
     resolved_pages: set[int] = set()
     resolved_tables: set[tuple[int, str]] = set()
     for event in events:
-        if getattr(event, "kind", "") not in RESOLVING_KINDS:
+        kind = getattr(event, "kind", "")
+        if kind not in RESOLVING_KINDS:
             continue
         page_num = getattr(event, "page_num", 0)
         table_id = (getattr(event, "data", None) or {}).get("table_id")
         if table_id is not None:
             resolved_tables.add((page_num, str(table_id)))
-        else:
+        elif kind in WHOLE_PAGE_RESOLVING_KINDS:
             resolved_pages.add(page_num)
+        # else: a resolving kind with neither a table_id nor whole-page
+        # opt-in resolves nothing -- see the module comment above.
     trust.resolved_pages = sorted(resolved_pages)
 
     for event in events:

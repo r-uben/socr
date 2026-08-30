@@ -25,6 +25,7 @@ from socr.core.tables_trust import (
     RESOLVING_KINDS,
     TABLE_DISTRUST_KINDS,
     TRUST_NOTE_PREFIX,
+    WHOLE_PAGE_RESOLVING_KINDS,
     build_tables_trust,
     trust_note,
 )
@@ -506,14 +507,37 @@ def test_a_table_scoped_accept_still_resolves_its_own_table():
     assert trust.untrusted_pages == []
 
 
-def test_a_page_wide_ladder_accept_with_no_table_id_still_resolves_the_whole_page():
-    """Back-compat with the pre-existing whole-page ``RESOLVING_KINDS`` contract:
-    a caller that emits one summary accept (no ``table_id``) when every table on
-    the page passed still clears the whole page, same as
-    ``table_escalation_accepted``."""
+def test_a_page_wide_ladder_accept_with_no_table_id_is_a_no_op():
+    """Reviewer repro (6543c1c review): a table-scoped REJECTED for one table
+    must not be silently erased by a page-wide accept (no ``table_id``) for a
+    DIFFERENT table. Unlike ``table_escalation_accepted``, a
+    ``table_ladder_accepted`` with no ``table_id`` clears nothing -- treating
+    every ``RESOLVING_KINDS`` member the same in the no-table_id branch made
+    B1's discipline (always attach table_id) load-bearing for correctness
+    with no contract enforcing it. Fail closed: no-op, not erase.
+    """
+    events = [
+        _ladder_event(5, "table_ladder_rejected", table_id="1", detail="WRONG_BINDING row 3"),
+        AuditEvent(page_num=5, kind="table_ladder_accepted"),  # no table_id
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == [5], "a no-table_id accept must not clear a different table"
+    assert "table_ladder_rejected" in trust.to_dict()["pages"]["5"]["reasons"]
+    assert trust.resolved_pages == []
+
+
+def test_table_escalation_accepted_keeps_its_legacy_whole_page_clear():
+    """``table_escalation_accepted`` is the one kind allowed to clear a whole
+    page with no ``table_id`` -- it is the only kind with a real emit site
+    that never carries one, and was always page-wide by design (GH-96).
+    Regression guard for the fix above: the allowlist must not also silence
+    this legacy behavior.
+    """
     events = [
         _flagged(7),
-        AuditEvent(page_num=7, kind="table_ladder_accepted"),
+        AuditEvent(page_num=7, kind="table_escalation_accepted"),
     ]
 
     trust = build_tables_trust("doc.pdf", events)
@@ -566,5 +590,8 @@ def test_ladder_kinds_match_judge_table_verdict():
         "table_ladder_unverified",
     }
     assert TABLE_LADDER_ACCEPTED_KIND in RESOLVING_KINDS
+    assert TABLE_LADDER_ACCEPTED_KIND not in WHOLE_PAGE_RESOLVING_KINDS, (
+        "table_ladder_accepted must stay table-scoped-only; no whole-page opt-in"
+    )
     assert TABLE_LADDER_REJECTED_KIND in TABLE_DISTRUST_KINDS
     assert TABLE_LADDER_UNVERIFIED_KIND in TABLE_DISTRUST_KINDS
