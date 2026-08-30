@@ -1,0 +1,132 @@
+"""GH-331: a numeric stub column must not eat the row labels.
+
+``_rowize_segment`` set the label boundary from the leftmost NUMERIC lane, which
+assumes that lane is the first data column. On a table with a numeric stub —
+Cochrane's ``n`` column holding 2, 3, 4, 5 — it is not, so every row label sits to
+its right, gets snapped into the first data lane, and displaces the row.
+
+Measured on the corpus: 18/18 orphaned-stub rows on one page, 37/51 on another,
+the signature on 5 separate papers.
+
+Hermetic: synthetic word geometry, no PDF read and no provider.
+"""
+
+from __future__ import annotations
+
+from socr.tables.reconstruct import rowize_from_word_list
+
+
+def _w(x: float, y: float, text: str) -> tuple:
+    return (x, y, x + 22.0, y + 8.0, text, 0, 0, 0)
+
+
+def _stub_table(with_labels: bool = True) -> list:
+    """A numeric stub at x=60, text labels at x=100, data lanes from x=200.
+
+    Shaped like the real failure: the stub carries row identifiers on block-start
+    rows only, and the labels sit BETWEEN the stub and the first data column.
+    """
+    words: list = []
+    y = 100.0
+    for block, ident in enumerate(("2", "3", "4")):
+        words.append(_w(60.0, y, ident))  # numeric stub
+        for c, val in enumerate(("1.11", "2.22", "3.33")):
+            words.append(_w(200.0 + c * 70.0, y, val))
+        y += 16.0
+        for label in ("Large", "Small"):
+            if with_labels:
+                words.append(_w(100.0, y, label))
+                words.append(_w(140.0, y, "T"))
+            for c, val in enumerate(("0.44", "0.55", "0.66")):
+                words.append(_w(200.0 + c * 70.0, y, val))
+            y += 16.0
+    return words
+
+
+def _cells(md: str) -> list[list[str]]:
+    return [
+        [c.strip() for c in line.strip().strip("|").split("|")]
+        for line in md.splitlines()
+        if line.lstrip().startswith("|") and "---" not in line
+    ]
+
+
+def test_row_labels_survive_a_numeric_stub_column():
+    """The regression: labels were snapped into the first data lane and lost."""
+    regions = rowize_from_word_list(_stub_table())
+    assert regions, "fixture must produce a table region"
+    grid = _cells(regions[0][1])
+
+    labels = [row[0] for row in grid]
+    assert any("Large" in c for c in labels), f"'Large T' never reached a label cell: {labels}"
+    assert any("Small" in c for c in labels), f"'Small T' never reached a label cell: {labels}"
+
+
+def test_no_word_is_silently_dropped():
+    """The house rule, pinned. Today's failure mode is silent loss, not misplacement."""
+    words = _stub_table()
+    grid = _cells(rowize_from_word_list(words)[0][1])
+    emitted = " ".join(c for row in grid for c in row)
+    for w in words:
+        assert w[4] in emitted, f"token {w[4]!r} vanished from the grid"
+
+
+def test_promotion_touches_only_the_label_column():
+    """Pinned as a DIFFERENCE: the data sub-grid is identical with and without
+    the stub-and-label words, so promotion can never move a data cell."""
+    with_labels = _cells(rowize_from_word_list(_stub_table(with_labels=True))[0][1])
+    without = _cells(rowize_from_word_list(_stub_table(with_labels=False))[0][1])
+
+    data_with = [row[1:] for row in with_labels]
+    data_without = [row[1:] for row in without]
+    assert data_with == data_without
+
+
+def test_a_table_with_no_intervening_labels_is_untouched():
+    """Inertness. The rule fires only on the evidence of the bug — label text
+    between two numeric lanes — so an ordinary table must be unaffected."""
+    words: list = []
+    y = 100.0
+    for _ in range(4):
+        for c, val in enumerate(("1.11", "2.22", "3.33")):
+            words.append(_w(200.0 + c * 70.0, y, val))
+        y += 16.0
+
+    regions = rowize_from_word_list(words)
+    assert regions
+    grid = _cells(regions[0][1])
+    # Every data value still present, and no value displaced into a label cell.
+    flat = " ".join(c for row in grid for c in row)
+    for val in ("1.11", "2.22", "3.33"):
+        assert val in flat
+
+
+def test_a_single_stray_word_does_not_promote_a_data_column():
+    """Recurrence, not one sighting.
+
+    A lone non-numeric word between two data lanes -- a footnote marker, a loose
+    glyph -- must not move the boundary, or a real data column is swallowed into
+    the label. Reuses `_MIN_TABLE_ROWS`, the existing minimum evidence for a
+    table, rather than a new constant.
+
+    Pinned as a DIFFERENCE: the same geometry with and without the stray word must
+    produce the same shape.
+    """
+
+    def _plain(stray: bool):
+        words: list = []
+        y = 100.0
+        for i in range(5):
+            for c, val in enumerate(("1.11", "2.22", "3.33")):
+                words.append(_w(200.0 + c * 70.0, y, val))
+            if stray and i == 0:
+                words.append(_w(245.0, y, "a"))
+            y += 16.0
+        return _cells(rowize_from_word_list(words)[0][1])
+
+    with_stray, without = _plain(True), _plain(False)
+    widths_with = {len(r) for r in with_stray}
+    widths_without = {len(r) for r in without}
+    assert widths_with == widths_without, (
+        f"one stray word changed the column count: {widths_with} vs {widths_without}"
+    )
