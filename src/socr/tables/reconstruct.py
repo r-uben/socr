@@ -1361,6 +1361,69 @@ def _numeric_lane_centers(num_words: list) -> list[float] | None:
     return [sum(xs) / len(xs) for xs in lanes_x]
 
 
+_OPENERS = {"[": "]", "(": ")", "\u27e8": "\u27e9", "{": "}"}
+
+
+def _merge_unclosed_bracket_words(row_ws: list) -> list:
+    """Rejoin a bracketed value that PyMuPDF split across word boundaries.
+
+    GH-331. ``get_text("words")`` splits on whitespace, so a confidence interval
+    printed as ``[0.01, 0.35]`` arrives as two words -- ``[0.01,`` and ``0.35]``.
+    Lane assignment then places them by their own x positions and they land in
+    different columns, so the interval ships torn in half with a blank between:
+
+        | Small T | (0.15) | (0.34) | [0.01, |  | 0.35] |
+
+    A reader taking ``[0.01,`` as the value gets a truncated number with no signal
+    that anything is missing, which is the silent-loss class this repo forbids.
+
+    The rule is bracket balance, not punctuation: a word carrying an unclosed
+    opener absorbs following words on the same row until the bracket closes. That
+    covers ``[a, b]`` intervals, ``(a, b)`` pairs and angle-bracket p-values alike
+    without special-casing the comma, and it cannot run away -- an opener that
+    never closes on the row is left exactly as it was.
+    """
+    merged: list = []
+    i = 0
+    while i < len(row_ws):
+        w = row_ws[i]
+        text = w[4]
+        depth = sum(text.count(o) - text.count(c) for o, c in _OPENERS.items())
+        if depth <= 0:
+            merged.append(w)
+            i += 1
+            continue
+        # Only a run whose every word is numeric may merge. An unclosed bracket in
+        # PROSE -- a table note reading "(as in Gertler and Karadi, 2015)." -- would
+        # otherwise be swallowed into one token and lost, which is silent content
+        # loss and strictly worse than the split this repairs. A numeric interval
+        # like `[0.01,` + `0.35]` qualifies; a sentence never does.
+        if not _is_numeric_word(w):
+            merged.append(w)
+            i += 1
+            continue
+        j = i + 1
+        parts = [text]
+        numeric_run = True
+        while j < len(row_ws) and depth > 0:
+            nxt_w = row_ws[j]
+            if not _is_numeric_word(nxt_w):
+                numeric_run = False
+                break
+            parts.append(nxt_w[4])
+            depth += sum(nxt_w[4].count(o) - nxt_w[4].count(c) for o, c in _OPENERS.items())
+            j += 1
+        if depth > 0 or not numeric_run:  # unclosed, or prose -- leave untouched
+            merged.append(w)
+            i += 1
+            continue
+        # One word spanning the whole run, positioned at the opener's x.
+        last = row_ws[j - 1]
+        merged.append((w[0], w[1], last[2], max(w[3], last[3]), " ".join(parts), *w[5:]))
+        i = j
+    return merged
+
+
 def _is_numeric_word(word: tuple) -> bool:
     """True if a PyMuPDF word tuple's text is a numeric token (``0.67``,
     ``(0.14)``, ``45%``)."""
@@ -1543,7 +1606,7 @@ def _prepend_header_band(
     header_rows: list[list[str]] = []
     band_words: list = []
     for y in eligible_ys:
-        row_ws = sorted(rows_by_y[y], key=lambda w: w[0])
+        row_ws = _merge_unclosed_bracket_words(sorted(rows_by_y[y], key=lambda w: w[0]))
         band_words.extend(row_ws)
         row_cells = [""] * len(lane_centers)
         for w in row_ws:
@@ -1603,7 +1666,7 @@ def _rowize_segment(
     bbox_y1 = max(w[3] for w in seg_words)
 
     for y in seg_ys:
-        row_ws = sorted(rows_by_y[y], key=lambda w: w[0])
+        row_ws = _merge_unclosed_bracket_words(sorted(rows_by_y[y], key=lambda w: w[0]))
 
         # Label: concatenate all words to the left of the data boundary
         label_words = [w[4] for w in row_ws if w[0] < data_start_x - snap_margin]
