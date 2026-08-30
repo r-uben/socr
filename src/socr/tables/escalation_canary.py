@@ -159,3 +159,235 @@ def judge_escalation(page, incumbent_markdown: str, candidate_markdown: str) -> 
         oracle_size=len(oracle),
         multiset_surplus=surplus,
     )
+
+
+# ---------------------------------------------------------------------------
+# GH-326: the presence gate.
+#
+# This is what the native text layer is still allowed to say about a model's
+# table, and nothing more.
+#
+# Measurement forced the narrowing. On 13 rows transcribed blind from the page
+# images (``docs/log/2026-08-30_model-vs-native-table-rows.md``), native was the
+# LEAST accurate of three readings -- 8/13 rows exact against qwen's 12/13 and
+# gemini's 11/13, losing row labels where neither model did. Its positional
+# assertions are therefore inadmissible: a checker that grades a model against
+# native's row geometry convicts correct output, which is exactly what happened
+# ten times on a page later verified cell by cell.
+#
+# What survives is presence. The word layer can still say "this number is on the
+# page" or "this number is not", because that claim needs no rows, no columns and
+# no labels -- only the tokens themselves.
+# ---------------------------------------------------------------------------
+
+#: The gate's possible answers. UNVERIFIABLE is a first-class outcome, not a
+#: failure: an absence of evidence must never be reported as a conviction.
+PRESENCE_OK = "ok"
+PRESENCE_INVENTED = "invented"
+PRESENCE_LOST = "lost"
+PRESENCE_UNVERIFIABLE = "unverifiable"
+
+
+@dataclass(frozen=True)
+class PresenceVerdict:
+    """What the word layer can attest about a candidate's numbers.
+
+    Deliberately says nothing about WHERE any value sits. There is no row, column
+    or label field on this class, and adding one would reintroduce the assertion
+    the measurement disqualified.
+    """
+
+    status: str
+    invented: tuple[str, ...] = ()  # in the candidate, not on the page
+    lost: tuple[str, ...] = ()  # on the page, absent from the candidate
+    oracle_size: int = 0
+    reason: str = ""
+
+    @property
+    def blocks_success(self) -> bool:
+        """Only invention blocks. Loss flags, absence of evidence does neither.
+
+        Asymmetric on purpose. A value the model wrote that is nowhere on the page
+        is the failure #270 documents and cannot be explained away. A value the
+        page has and the candidate lacks may be a real omission OR a table the
+        candidate legitimately split, so it is surfaced and not gated on.
+        """
+        return self.status == PRESENCE_INVENTED
+
+
+def native_value_counts(page) -> Counter:
+    """Numeric tokens on *page*'s word layer, WITH multiplicity.
+
+    Counts rather than the set :func:`native_value_oracle` returns, because the
+    #270 failure is a substitution: one occurrence of a coefficient becomes two,
+    or one value is overwritten by its neighbour. Set containment nets those to
+    zero -- ``{1.02} ⊆ {1.02}`` however many times the model wrote it -- so a
+    set-based gate is blind to the very failure this gate exists to catch.
+    """
+    try:
+        rows = native_rows_from_page(page)
+    except Exception:
+        return Counter()
+    return Counter(_normalize_numeric_token(v) for row in rows for v in row.values)
+
+
+def presence_verdict(
+    page, candidate_markdown: str, *, encoding_suspect: bool = False
+) -> PresenceVerdict:
+    """Judge a candidate's numbers against the page, on presence alone.
+
+    ``encoding_suspect`` must be passed when the page's text layer shows decode
+    damage (``PageAssessment.has_encoding_hygiene_suspect`` /
+    ``has_corrupt_math``). A token can then be "absent from the word layer"
+    because the layer misdecoded it -- the corpus contains ``⟨0.00⟩`` arriving as
+    ``h0.00i`` -- and reporting that as invention would convict the model for the
+    text layer's own failure. Such a page is UNVERIFIABLE, which is a different
+    fact from clean.
+    """
+    oracle = native_value_counts(page)
+    if not oracle:
+        return PresenceVerdict(PRESENCE_UNVERIFIABLE, reason="no native value oracle on this page")
+    if encoding_suspect:
+        return PresenceVerdict(
+            PRESENCE_UNVERIFIABLE,
+            oracle_size=len(oracle),
+            reason="text layer shows decode damage; absence is not evidence here",
+        )
+
+    candidate = table_value_tokens(candidate_markdown)
+    invented = candidate - oracle  # multiset difference: catches substitutions
+    lost = oracle - candidate
+
+    if invented:
+        return PresenceVerdict(
+            PRESENCE_INVENTED,
+            invented=tuple(sorted(invented.elements())),
+            lost=tuple(sorted(lost.elements())),
+            oracle_size=len(oracle),
+            reason=f"{sum(invented.values())} value(s) not present on the page",
+        )
+    if lost:
+        return PresenceVerdict(
+            PRESENCE_LOST,
+            lost=tuple(sorted(lost.elements())),
+            oracle_size=len(oracle),
+            reason=f"{sum(lost.values())} page value(s) absent from the candidate",
+        )
+    return PresenceVerdict(PRESENCE_OK, oracle_size=len(oracle), reason="every value accounted for")
+
+
+# ---------------------------------------------------------------------------
+# GH-326: the acceptance gate.
+#
+# Composes three witnesses in COST order -- free deterministic checks first, the
+# paid image judge last -- so the expensive one runs only on candidates the free
+# ones could not settle. That ordering is the cost premise of the whole router,
+# not an optimisation bolted on afterwards.
+#
+# What is deliberately NOT a witness here: native row geometry. It was the
+# reference the previous gate graded against, and measurement disqualified it --
+# 8/13 rows exact against a free local model's 12/13, and it convicted a
+# cell-perfect page ten times. See docs/log/2026-08-30_model-vs-native-table-rows.md.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AcceptanceVerdict:
+    """Whether a candidate table may ship SUCCESS, and on whose authority."""
+
+    accepted: bool
+    reason: str
+    witness: str  # which check decided: "structure" | "presence" | "image" | "default"
+    presence: PresenceVerdict | None = None
+    judged: bool = False  # whether the image judge actually ran
+
+    @property
+    def demote_only(self) -> bool:
+        """True when the page must not ship SUCCESS but its content is still usable.
+
+        The #322 disposition: a rejected candidate is demoted, not discarded. Only
+        a candidate with no usable content at all should lose its text.
+        """
+        return not self.accepted
+
+
+def table_acceptance(
+    page,
+    candidate_markdown: str,
+    *,
+    encoding_suspect: bool = False,
+    image_judge=None,
+    page_image=None,
+) -> AcceptanceVerdict:
+    """Decide whether *candidate_markdown* may ship SUCCESS for *page*.
+
+    Three witnesses, cheapest first:
+
+    1. **Candidate-side structure** (free, no reference). A grid that is ragged or
+       carries detached label rows is malformed on its own terms -- this needs
+       nothing to compare against, so it cannot be poisoned by a bad reference.
+    2. **Presence** (free, page-grounded). A value that appears nowhere in the
+       page's word layer is the #270 failure and blocks. See
+       :func:`presence_verdict` for why this is counts, not sets, and why a
+       damaged text layer yields UNVERIFIABLE rather than a conviction.
+    3. **The image judge** (paid, positional). The only witness that can answer
+       "is this value in the right cell", and the only one that has ever caught
+       #270's diagonal misplacement -- twice, independently. Runs last, and only
+       when the free checks have not already decided.
+
+    An absent judge does not block: refusing to ship because no judge was
+    configured would make the gate a availability test rather than a quality one.
+    The verdict records ``judged=False`` so the caller can tell "passed" from
+    "never asked".
+    """
+    from socr.tables import structure_check
+
+    # 1. Structure -- free, and needs no reference at all.
+    reports = structure_check.check_markdown(candidate_markdown)
+    if structure_check.structural_gate_fires(reports):
+        return AcceptanceVerdict(
+            accepted=False,
+            reason="candidate grid is ragged or has detached label rows",
+            witness="structure",
+        )
+
+    # 2. Presence -- free, and grounded in the page rather than in a reconstruction.
+    presence = presence_verdict(page, candidate_markdown, encoding_suspect=encoding_suspect)
+    if presence.blocks_success:
+        return AcceptanceVerdict(
+            accepted=False, reason=presence.reason, witness="presence", presence=presence
+        )
+
+    # 3. The image judge -- paid, and the only positional witness.
+    if image_judge is not None and page_image is not None:
+        try:
+            verdict = image_judge.judge(page_image, candidate_markdown)
+        except Exception as exc:  # a judge that errors must not convict
+            return AcceptanceVerdict(
+                accepted=True,
+                reason=f"image judge unavailable ({type(exc).__name__}); free checks passed",
+                witness="default",
+                presence=presence,
+            )
+        if not verdict.is_good:
+            return AcceptanceVerdict(
+                accepted=False,
+                reason="; ".join(verdict.issues) or "image judge rejected the transcription",
+                witness="image",
+                presence=presence,
+                judged=True,
+            )
+        return AcceptanceVerdict(
+            accepted=True,
+            reason="image judge accepted",
+            witness="image",
+            presence=presence,
+            judged=True,
+        )
+
+    return AcceptanceVerdict(
+        accepted=True,
+        reason="free checks passed; no image judge available",
+        witness="default",
+        presence=presence,
+    )
