@@ -2559,13 +2559,35 @@ class UnifiedPipeline:
             else:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
                 detail = f"table {result.table_id} unverified by the judge ladder (infra problem, retryable on resume)"
+            # GH-353 review fix (post-A3 "agy" amendment): ``RungResult.rung``
+            # names the judge model FAMILY ("gemini"), not the literal binary
+            # that ran it (``agy``, per config) -- and rung 1's model is
+            # exactly as config-dependent as rung 2's binary. Record BOTH
+            # rungs' configured executing identity, positionally (index 0 =
+            # rung 1, index 1 = rung 2 -- the only shape ``_build_table_judge
+            # _rungs`` ever constructs), so a sidecar reader never has to
+            # guess what actually produced a verdict. Deliberately minimal:
+            # no latencies, no verdict duplication -- ``detail`` above
+            # already says what happened; this only says who executed it.
+            rung_trail = [
+                {
+                    "rung": rr.rung,
+                    "ok": rr.ok,
+                    "executing": (
+                        self.config.table_judge_rung1_model
+                        if idx == 0
+                        else self.config.table_judge_rung2_binary
+                    ),
+                }
+                for idx, rr in enumerate(result.rung_results)
+            ]
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
                     kind=kind,
                     engine=bo.engine or "",
                     detail=detail,
-                    data={"table_id": result.table_id},
+                    data={"table_id": result.table_id, "rung_trail": rung_trail},
                 )
             )
 

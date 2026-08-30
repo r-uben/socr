@@ -113,7 +113,20 @@ def _seed_ladder_page(state: DocumentState, disposition: FailureMode, engine: st
             kind=TABLE_LADDER_ACCEPTED_KIND,
             engine=engine,
             detail="table p1-t1 accepted by the judge ladder",
-            data={"table_id": "p1-t1"},
+            data={
+                "table_id": "p1-t1",
+                # Mirrors what _run_table_judge_gate actually emits (GH-353
+                # rung-trail follow-up): rung 1's configured model tag and
+                # rung 2's configured EXECUTING binary ("agy"), not the
+                # ambiguous model-family label ("gemini") alone.
+                "rung_trail": [
+                    {
+                        "rung": "ollama:glm-5.3-flash:cloud",
+                        "ok": True,
+                        "executing": "glm-5.3-flash:cloud",
+                    }
+                ],
+            },
         )
     )
     kind = (
@@ -127,7 +140,17 @@ def _seed_ladder_page(state: DocumentState, disposition: FailureMode, engine: st
             kind=kind,
             engine=engine,
             detail="table p1-t2 demoted by the judge ladder",
-            data={"table_id": "p1-t2"},
+            data={
+                "table_id": "p1-t2",
+                "rung_trail": [
+                    {
+                        "rung": "ollama:glm-5.3-flash:cloud",
+                        "ok": False,
+                        "executing": "glm-5.3-flash:cloud",
+                    },
+                    {"rung": "gemini", "ok": True, "executing": "agy"},
+                ],
+            },
         )
     )
     # An unrelated, non-ladder event on the SAME page: must never be picked
@@ -240,6 +263,44 @@ class TestSidecarRestore:
         # The unrelated event from the ORIGINAL run is not replayed by this
         # ladder-scoped restore -- other tickets own their own resume fields.
         assert not any(e.kind == "native_fallback" for e in resumed_state.events)
+
+        # GH-353 rung-trail follow-up: the per-rung executing identity
+        # (rung1's configured model, rung2's configured binary) round-trips
+        # verbatim -- a resumed page must not lose WHO produced a verdict.
+        by_table = {
+            e.data.get("table_id"): e.data.get("rung_trail") for e in restored_ladder_events
+        }
+        assert by_table["p1-t1"] == [
+            {"rung": "ollama:glm-5.3-flash:cloud", "ok": True, "executing": "glm-5.3-flash:cloud"}
+        ]
+        assert by_table["p1-t2"] == [
+            {"rung": "ollama:glm-5.3-flash:cloud", "ok": False, "executing": "glm-5.3-flash:cloud"},
+            {"rung": "gemini", "ok": True, "executing": "agy"},
+        ]
+
+    def test_flush_preserves_rung_trail_verbatim(self, tmp_path: Path) -> None:
+        """The sidecar's own audit_events serialisation is the sole channel
+        for the rung trail -- flush must not drop or reshape it."""
+        pdf_path = _pdf(tmp_path / "doc")
+        pipeline = _make_pipeline()
+        state = _make_state(pdf_path)
+        _seed_ladder_page(state, FailureMode.TABLE_REJECTED)
+        out_dir = tmp_path / "out"
+        sidecar = pipeline._flush_page_sidecar(state, 1, out_dir)
+
+        meta = json.loads(_sidecar_path(pipeline, state, out_dir).read_text())
+        ladder_events = [
+            ev
+            for ev in meta.get("audit_events", [])
+            if ev.get("kind") in (TABLE_LADDER_ACCEPTED_KIND, TABLE_LADDER_REJECTED_KIND)
+        ]
+        assert len(ladder_events) == 2
+        rejected = next(ev for ev in ladder_events if ev["data"]["table_id"] == "p1-t2")
+        assert rejected["data"]["rung_trail"] == [
+            {"rung": "ollama:glm-5.3-flash:cloud", "ok": False, "executing": "glm-5.3-flash:cloud"},
+            {"rung": "gemini", "ok": True, "executing": "agy"},
+        ]
+        assert sidecar is not None
 
     def test_restore_reproduces_tables_trust_and_note(self, tmp_path: Path) -> None:
         pipeline, original_state, out_dir = self._flush_original(

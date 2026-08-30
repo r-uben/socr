@@ -281,7 +281,9 @@ class TestWitnessFailOpen:
         assert rung.calls == []  # never reached: witness never LOCATED
         events = _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
         assert len(events) == 1
-        assert events[0].data == {"table_id": "p1-t0"}
+        # No rung ever ran for a witness that was never LOCATED -- an empty
+        # rung trail, not an absent one (GH-353 rung-trail follow-up).
+        assert events[0].data == {"table_id": "p1-t0", "rung_trail": []}
 
     def test_ambiguous_witness_is_unverified(self, tmp_path: Path) -> None:
         """1 box, 2 emitted blocks -> count mismatch -> AMBIGUOUS -> UNVERIFIED."""
@@ -339,7 +341,8 @@ class TestWitnessFailOpen:
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         events = _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
         assert len(events) == 1
-        assert events[0].data == {"table_id": "p1-t0"}
+        # rungs=[] -- fail-open before any rung is ever called.
+        assert events[0].data == {"table_id": "p1-t0", "rung_trail": []}
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +372,14 @@ class TestRungFailOpen:
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         events = _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
         assert len(events) == 1
-        assert events[0].data == {"table_id": "p1-t0"}
+        # The rung DID run (¬S1 -- an answer that failed to parse/transport,
+        # not "never called"), so it names the configured rung-1 identity.
+        assert events[0].data == {
+            "table_id": "p1-t0",
+            "rung_trail": [
+                {"rung": "fake1", "ok": False, "executing": pipeline.config.table_judge_rung1_model}
+            ],
+        }
 
     def test_run_table_ladder_exception_is_unverified_not_raised(self, tmp_path: Path) -> None:
         pipeline = _make_pipeline()
@@ -408,7 +418,12 @@ class TestLadderOutcomes:
         assert ps.table_ladder_disposition is None
         events = _events_of_kind(state, TABLE_LADDER_ACCEPTED_KIND)
         assert len(events) == 1
-        assert events[0].data == {"table_id": "p1-t0"}
+        assert events[0].data == {
+            "table_id": "p1-t0",
+            "rung_trail": [
+                {"rung": "fake1", "ok": True, "executing": pipeline.config.table_judge_rung1_model}
+            ],
+        }
 
     def test_rejected_sets_disposition_and_emits_rejected_event(self, tmp_path: Path) -> None:
         pipeline = _make_pipeline()
@@ -423,7 +438,12 @@ class TestLadderOutcomes:
         assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
         events = _events_of_kind(state, TABLE_LADDER_REJECTED_KIND)
         assert len(events) == 1
-        assert events[0].data == {"table_id": "p1-t0"}
+        assert events[0].data == {
+            "table_id": "p1-t0",
+            "rung_trail": [
+                {"rung": "fake1", "ok": True, "executing": pipeline.config.table_judge_rung1_model}
+            ],
+        }
 
     def test_reduce_page_ladder_rejected_wins_over_unverified(self, tmp_path: Path) -> None:
         """Two tables, one REJECTED one UNVERIFIED: page disposition is REJECTED
