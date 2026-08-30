@@ -25,9 +25,9 @@ dispatched yet.
 | A1 | judge core | DONE | — | 1 |
 | C1 | status | DONE | — | 1 |
 | G1 | config | DONE | — | 1 |
-| A2 | judge core | TODO | A0, A1, G1 | 2 |
+| A2 | judge core | DONE | A0, A1, G1 | 2 |
 | A3 | judge core | TODO | A0, A1, G1 | 2 |
-| A4 | judge core | TODO | A1 | 2 |
+| A4 | judge core | DONE | A1 | 2 |
 | B0 | witnesses | TODO | A1 | 2 |
 | B2 | trust | TODO | A1 | 2 |
 | C3 | status | TODO | C1 | 2 |

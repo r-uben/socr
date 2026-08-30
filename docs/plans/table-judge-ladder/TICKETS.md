@@ -46,7 +46,7 @@ non-JSON as S1 failure; audit-event kind constants for ladder verdicts.
 cover: exact JSON, fenced JSON (accepted), PASS⇔empty findings, missing `verdict`,
 unknown `code`, prose-wrapped JSON, empty output.
 
-### TICKET-A2 — CLI₁ rung: ollama HTTP judge · TODO · depends-on: A0, A1, G1 · wave 2
+### TICKET-A2 — CLI₁ rung: ollama HTTP judge · DONE · depends-on: A0, A1, G1 · wave 2
 **Problem:** Rung 1 (glm-5.3-flash:cloud) needs a client. `OllamaVisionJudge` POSTs
 `/api/generate`; the bake-off integration path is `/api/chat` + `format=json`
 (`ollama run --images` does not exist on 0.32.15).
@@ -72,7 +72,7 @@ strict-parse stdout via A1; timeout / missing binary / non-zero exit → ¬S1.
 tests patch the module-local subprocess helper (not PATH / not `shutil.which`), pin the
 exact argv, and prove timeout → ¬S1 without sleeping.
 
-### TICKET-A4 — ladder state machine + page reducer · TODO · depends-on: A1 · wave 2
+### TICKET-A4 — ladder state machine + page reducer · DONE · depends-on: A1 · wave 2
 **Problem:** The S1/S2 transition logic and the multi-table→page reduction are unowned.
 **Do:** New `src/socr/judge/table_ladder.py`, pure functions over injected rung
 callables: per-table ladder — A(high-conf PASS)→accept; A(low-conf PASS)→confirm at
