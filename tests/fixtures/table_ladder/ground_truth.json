@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "fixture": "binding_shift_doc.pdf",
+  "description": "Synthesized two-page fixture for TICKET-H1 (GH-353): page 1 is a clean, unambiguous ruled table; page 2 reproduces the GH-273 shape (identical value multiset, row labels permutable without changing any value) for the mechanical binding check.",
+  "regions": [
+    {
+      "id": "clean_table",
+      "page": 1,
+      "kind": "table",
+      "columns": [
+        "Value"
+      ],
+      "row_labels": [
+        "Revenue",
+        "Costs",
+        "Margin"
+      ],
+      "cells": {
+        "Revenue|Value": "120",
+        "Costs|Value": "45",
+        "Margin|Value": "75"
+      }
+    },
+    {
+      "id": "shift_table",
+      "page": 2,
+      "kind": "table",
+      "columns": [
+        "OLS",
+        "IV"
+      ],
+      "row_labels": [
+        "RowA",
+        "RowB",
+        "RowC",
+        "RowD"
+      ],
+      "cells": {
+        "RowA|OLS": "11",
+        "RowA|IV": "21",
+        "RowB|OLS": "32",
+        "RowB|IV": "42",
+        "RowC|OLS": "53",
+        "RowC|IV": "63",
+        "RowD|OLS": "74",
+        "RowD|IV": "84"
+      },
+      "shifted_row_label_order": [
+        "RowB",
+        "RowC",
+        "RowD",
+        "RowA"
+      ]
+    }
+  ]
+}

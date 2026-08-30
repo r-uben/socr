@@ -228,7 +228,7 @@ FAIL when there are no native words.
 (row-label contradiction from `bind()`) demotes with the flag on and ships with it off;
 a no-native-words fixture is NOT demoted by binding alone.
 
-### TICKET-H1 — end-to-end + committed fixture · TODO · depends-on: D1b, E1 · wave 8
+### TICKET-H1 — end-to-end + committed fixture · DONE · depends-on: D1b, E1 · wave 8
 **Problem:** No committed fixture reproduces the GH-273 shape (bake-off artifacts live
 in scratch), and no test walks both terminals through every surface.
 **Do:** A deterministic generated fixture (generator alongside

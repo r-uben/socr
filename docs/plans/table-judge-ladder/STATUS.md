@@ -36,7 +36,7 @@ dispatched yet.
 | D1a | resume | DONE | B1 | 5 |
 | D1b | resume | DONE | D1a | 6 |
 | E1 | binding | DONE | B1 | 7 |
-| H1 | e2e | TODO | D1b, E1 | 8 |
+| H1 | e2e | DONE | D1b, E1 | 8 |
 
 ## Dispatch waves
 - Wave 1: A0, A1, C1, G1 (disjoint files, no deps)
@@ -55,23 +55,20 @@ dispatched yet.
 | D1a | impl-B1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-D1a.md` |
 | D1b | impl-D1a (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-D1b.md` |
 | E1 | impl-E1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-E1.md` |
+| H1 | impl-H1 (this session, table-judge-ladder team) | DONE — `docs/log/2026-08-30_TICKET-H1.md` |
 
 ## Next action
-Wave 7 (E1, mechanical binding evidence) DONE — `_run_table_judge_gate` now runs
-`tables/binding.py:bind()` per witnessed table and, on a genuine contradiction
-(`contradicted_cells` or `row_label_contradictions` non-empty — deliberately narrower
-than `no_known_contradiction`, which also flips on mere coverage gaps and would have
-violated the ticket's own "no native words is not demoted" criterion), prepends a
-synthetic FAIL rung carrying the contradiction as `prior_findings` for A4's ladder.
-Panel #3 (codex + gemini, unanimous) then resolved the "must overrule a judge PASS"
-tension flagged in E1's first log: a mechanically-contradicted table is now clamped to
-UNVERIFIED (never REJECTED by the clamp, never re-ACCEPTED by any later judge PASS) —
-`docs/log/2026-08-30_TICKET-E1.md`'s addendum. Both dependencies of H1 (D1b, E1) are
-now DONE — dispatch wave 8 (H1, end-to-end + committed fixture) next. Flag for the H1
-dispatcher: the clamp has no lift path yet (a mechanically-contradicted table stays
-UNVERIFIED forever on resume until a future adjudication ticket exists) — a known,
-accepted limitation, not a bug, but H1's e2e fixture should exercise the clamped
-UNVERIFIED terminal explicitly. Note
-(unchanged from B1/D1a/D1b's logs): a live smoke against the real `gemini` CLI and a
-real ollama host is still outstanding and belongs to whoever merges this branch, not
-to any single ticket.
+TICKET-H1 DONE — **the board is CLOSED**: all 16 tickets across 8 waves are
+DONE. `tests/fixtures/table_ladder/` (+ `generate_fixture.py`) is a committed,
+deterministic two-page fixture (a clean control table + a GH-273-shape
+row-label-rotation table) driving `tests/test_ladder_e2e.py`'s full
+`UnifiedPipeline.process()` sweep of all three terminals the ladder can reach
+(REJECTED, plain infra UNVERIFIED, and E1's CLAMPED-UNVERIFIED), each
+asserted flag-off-vs-on at all four no-silent-loss surfaces (page
+disposition, document status, `metadata.json` note, CLI summary). Resume
+interaction was deliberately left to D1b's own tests (`test_ladder_resume.py`)
+rather than duplicated — see `docs/log/2026-08-30_TICKET-H1.md`.
+Outstanding, not owned by any single ticket (repeated from every prior
+ticket's log): a live smoke test against the real `gemini` CLI and a real
+ollama host, which belongs to whoever merges `feat/353-judge-ladder`.
+
