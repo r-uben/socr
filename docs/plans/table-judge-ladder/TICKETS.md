@@ -20,7 +20,7 @@ Standing constraints (every ticket):
 
 ## Stream A — judge core (new files, no orchestrator surgery)
 
-### TICKET-A0 — judge prompt policy file · TODO · depends-on: none · wave 1
+### TICKET-A0 — judge prompt policy file · DONE · depends-on: none · wave 1
 **Problem:** A2/A3 have nothing to send; the design left prompt wording open.
 **Do:** Write `src/socr/prompts/table_judge.md` (schema instructions, empty-cell rule,
 "judge only the table region", tiebreak-findings injection slot) + a loader mirroring
@@ -30,7 +30,7 @@ Standing constraints (every ticket):
 returns the template with and without a findings payload; prompt file contains all six
 finding codes verbatim.
 
-### TICKET-A1 — verdict schema, rung contract, event kinds · TODO · depends-on: none · wave 1
+### TICKET-A1 — verdict schema, rung contract, event kinds · DONE · depends-on: none · wave 1
 **Problem:** The ladder needs one owned contract: verdict schema, an S1-failure
 representation distinct from FAIL, a standard rung signature, and audit-event kinds.
 **Do:** New `src/socr/judge/table_verdict.py`: `TableJudgeVerdict` (`verdict: PASS|FAIL`,
@@ -46,7 +46,7 @@ non-JSON as S1 failure; audit-event kind constants for ladder verdicts.
 cover: exact JSON, fenced JSON (accepted), PASS⇔empty findings, missing `verdict`,
 unknown `code`, prose-wrapped JSON, empty output.
 
-### TICKET-A2 — CLI₁ rung: ollama HTTP judge · TODO · depends-on: A0, A1, G1 · wave 2
+### TICKET-A2 — CLI₁ rung: ollama HTTP judge · DONE · depends-on: A0, A1, G1 · wave 2
 **Problem:** Rung 1 (glm-5.3-flash:cloud) needs a client. `OllamaVisionJudge` POSTs
 `/api/generate`; the bake-off integration path is `/api/chat` + `format=json`
 (`ollama run --images` does not exist on 0.32.15).
@@ -60,7 +60,7 @@ tests mock the seam, not httpx globally. Do NOT reuse `OllamaVisionJudge.is_avai
 tests assert the exact JSON payload (model, format, images, stream=False); timeout
 exception → ¬S1 without sleeping; a network-must-not-run sentinel guards every test.
 
-### TICKET-A3 — CLI₂ rung: gemini CLI invoker · TODO · depends-on: A0, A1, G1 · wave 2
+### TICKET-A3 — CLI₂ rung: gemini CLI invoker · DONE · depends-on: A0, A1, G1 · wave 2
 **Problem:** Rung 2 needs a per-crop subprocess invoker; `GeminiEngine` is a
 document-level engine, not reusable.
 **Do:** New `src/socr/judge/table_rung_gemini.py`: invoke the configured gemini binary
@@ -72,7 +72,7 @@ strict-parse stdout via A1; timeout / missing binary / non-zero exit → ¬S1.
 tests patch the module-local subprocess helper (not PATH / not `shutil.which`), pin the
 exact argv, and prove timeout → ¬S1 without sleeping.
 
-### TICKET-A4 — ladder state machine + page reducer · TODO · depends-on: A1 · wave 2
+### TICKET-A4 — ladder state machine + page reducer · DONE · depends-on: A1 · wave 2
 **Problem:** The S1/S2 transition logic and the multi-table→page reduction are unowned.
 **Do:** New `src/socr/judge/table_ladder.py`, pure functions over injected rung
 callables: per-table ladder — A(high-conf PASS)→accept; A(low-conf PASS)→confirm at
@@ -88,7 +88,7 @@ one-PASS+one-¬S1).
 
 ## Stream B — witnesses and trust
 
-### TICKET-B0 — table witness preparation · TODO · depends-on: A1 · wave 2
+### TICKET-B0 — table witness preparation · DONE · depends-on: A1 · wave 2
 **Problem:** Nothing maps emitted markdown tables to located regions: the locator
 over-merges stacked tables (`tables/locate.py:132`), borderless tables can yield no
 box, `binding.parse_grid` reads only the first grid, and `_render_crop` is private
@@ -103,7 +103,7 @@ exception.
 1 block/1 box, 2 blocks/1 merged box (ambiguous), 1 block/0 boxes (missing witness),
 temp files removed after the context exits.
 
-### TICKET-B2 — table-scoped trust events · TODO · depends-on: A1 · wave 2
+### TICKET-B2 — table-scoped trust events · DONE · depends-on: A1 · wave 2
 **Problem:** `tables_trust` resolves by page number (`core/tables_trust.py:216`): one
 resolving event erases every distrust event on the page, so one PASS could erase
 another table's REJECTED.
@@ -117,7 +117,7 @@ event survives in `tables_trust`.
 
 ## Stream C — status plumbing
 
-### TICKET-C1 — terminal enums + serialization · TODO · depends-on: none · wave 1
+### TICKET-C1 — terminal enums + serialization · DONE · depends-on: none · wave 1
 **Problem:** The two terminals don't exist as states.
 **Do:** `FailureMode.TABLE_REJECTED` / `FailureMode.TABLE_UNVERIFIED` in
 `core/result.py` with serialization round-trip. Nothing sets them yet.
@@ -125,7 +125,7 @@ event survives in `tables_trust`.
 **Done when:** `~/venvs/socr/bin/pytest tests/test_result_table_terminals.py -q` exits
 0; both modes round-trip `PageOutput.to_dict`/`from_dict`.
 
-### TICKET-C3 — manifest: disposition survives winner selection · TODO · depends-on: C1 · wave 2
+### TICKET-C3 — manifest: disposition survives winner selection · DONE · depends-on: C1 · wave 2
 **Problem:** Final winner selection can substitute native text or another attempt after
 the gate (`core/manifest.py:937/996/1156`), and native-only can reconstruct a demoted
 page as clean SUCCESS (`:1271`) — a REJECTED verdict could silently vanish.
@@ -138,7 +138,7 @@ regain SUCCESS while its disposition is REJECTED).
 exits 0; injection goes through `_winning_page_output` (not merely `best_output`), and
 the native-only reconstruction path (`:1271`) preserves the demotion.
 
-### TICKET-C2 — document aggregation + CLI surfacing · TODO · depends-on: C1, C3, G1 · wave 3
+### TICKET-C2 — document aggregation + CLI surfacing · DONE · depends-on: C1, C3, G1 · wave 3
 **Problem:** The terminals must surface at document status, metadata, and CLI (the
 no-silent-loss rule), through the hand-maintained `pages_ok` chain.
 **Do:** `pages_ok` terms + document-status handling in `_phase_assemble`
@@ -154,7 +154,7 @@ and `_print_summary` output contains both terminal names; flag-off control uncha
 
 ## Stream G — config
 
-### TICKET-G1 — flag, config, fingerprint prep · TODO · depends-on: none · wave 1
+### TICKET-G1 — flag, config, fingerprint prep · DONE · depends-on: none · wave 1
 **Problem:** The ladder needs a default-off switch and all knobs config-visible so tests
 and H1 can inject dummies (no bare constants).
 **Do:** `PipelineConfig` fields: `table_judge_ladder: bool = False`, rung-1 model
@@ -172,7 +172,7 @@ YAML round-trip persists the new fields (generic sweep in `test_config_from_file
 
 ## Stream D/E/B — the gate and its sequels (orchestrator.py, serialized)
 
-### TICKET-B1 — the gate · TODO · depends-on: A2, A3, A4, B0, B2, C1, C3, G1 · wave 4
+### TICKET-B1 — the gate · DONE · depends-on: A2, A3, A4, B0, B2, C1, C3, G1 · wave 4
 **Problem:** The single choke point does not exist; five sites finalize a table today.
 **Do:** In `_phase_agentic`, AFTER `_guard_agentic_page_table_repetition` (~`:3099`,
 so the judged table is the shipped table), behind the flag: B0 witnesses → A4 ladder
@@ -193,7 +193,7 @@ disposition + audit events). Includes a native-only defective-table case (the fo
 F1). Fail-open probes: missing crop, render error, parser error, HTTP error, missing
 binary ⇒ UNVERIFIED. Flag-off run makes zero crop/HTTP/subprocess calls (sentinel).
 
-### TICKET-D1a — sidecar persistence + restore · TODO · depends-on: B1 · wave 5
+### TICKET-D1a — sidecar persistence + restore · DONE · depends-on: B1 · wave 5
 **Problem:** `_restore_terminal_page_state` (`:4605`) does not restore audit events —
 a skipped page would lose its ladder events, trust entry, and metadata note on resume.
 **Do:** Persist a `table_ladder` record (per-table results + disposition) in
@@ -204,7 +204,7 @@ a skipped page would lose its ladder events, trust entry, and metadata note on r
 sidecar round-trips byte-stable; restored state reproduces `tables_trust` and the
 metadata note without re-judging.
 
-### TICKET-D1b — resume skip policy · TODO · depends-on: D1a · wave 6
+### TICKET-D1b — resume skip policy · DONE · depends-on: D1a · wave 6
 **Problem:** `_load_terminal_page` (`:4315`) requires SUCCESS to skip; REJECTED must
 skip-and-keep (deliberate exception to doubt⇒reprocess) while UNVERIFIED reprocesses.
 **Do:** Positive early-return for a terminal REJECTED page after fingerprint + checksum
@@ -214,7 +214,7 @@ validation but before the SUCCESS/audit checks; UNVERIFIED never skips.
 REJECTED + matching fingerprint → skipped, sidecar bytes unchanged; REJECTED + changed
 rung identity → reprocessed; UNVERIFIED + matching fingerprint → reprocessed.
 
-### TICKET-E1 — mechanical binding evidence · TODO · depends-on: B1 · wave 7
+### TICKET-E1 — mechanical binding evidence · DONE · depends-on: B1 · wave 7
 **Problem:** Judges provably miss binding-only shifts under adverse conditions (kimi in
 the bake-off; two frontier judges in GH-273); `bind()` is benchmark-only.
 **Do:** At the gate, run `tables/binding.py:bind()` per witnessed table;
@@ -228,7 +228,7 @@ FAIL when there are no native words.
 (row-label contradiction from `bind()`) demotes with the flag on and ships with it off;
 a no-native-words fixture is NOT demoted by binding alone.
 
-### TICKET-H1 — end-to-end + committed fixture · TODO · depends-on: D1b, E1 · wave 8
+### TICKET-H1 — end-to-end + committed fixture · DONE · depends-on: D1b, E1 · wave 8
 **Problem:** No committed fixture reproduces the GH-273 shape (bake-off artifacts live
 in scratch), and no test walks both terminals through every surface.
 **Do:** A deterministic generated fixture (generator alongside

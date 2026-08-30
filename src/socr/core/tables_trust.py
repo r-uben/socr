@@ -44,7 +44,35 @@ from socr.tables.reconcile import PATCH_ELIGIBLE_NOTE
 #
 # Same rule as excluding ``dualpass_patched``: a resolved disagreement is not
 # distrust. It only arrives later in the pipeline.
-RESOLVING_KINDS: frozenset[str] = frozenset({"table_escalation_accepted"})
+RESOLVING_KINDS: frozenset[str] = frozenset(
+    {
+        "table_escalation_accepted",
+        # GH-353 TICKET-B2: literal string, see the comment on the ladder
+        # terminals in ``TABLE_DISTRUST_KINDS`` below for why this is not an
+        # import. Unlike ``table_escalation_accepted`` (always page-wide),
+        # a ``table_ladder_accepted`` event carries a per-table
+        # ``data["table_id"]`` and resolves ONLY that table -- see
+        # ``build_tables_trust``'s table-scoped resolution. It has NO
+        # whole-page fallback (unlike ``table_escalation_accepted``): a
+        # ``table_ladder_accepted`` with no ``table_id`` is a no-op, not a
+        # page-wide clear. A blanket "no table_id -> clear the whole page"
+        # rule would let one table's accept silently erase a DIFFERENT
+        # table's REJECTED/UNVERIFIED on the same page whenever a caller
+        # forgets to attach ``table_id`` -- the exact bug this ticket exists
+        # to fix, just moved one level up. A genuine page-wide-accept
+        # summary, if ever wanted, needs its own distinct kind and its own
+        # test, not a piggyback on optional ``table_id``.
+        "table_ladder_accepted",
+    }
+)
+
+# Resolving kinds that keep the legacy whole-page-clear behavior when they
+# carry no ``table_id`` (see ``build_tables_trust``). Deliberately a strict
+# allowlist, not "every kind not otherwise scoped": ``table_escalation_accepted``
+# is the only kind with a real emit site that never carries ``table_id`` and
+# was always page-wide by design. New resolving kinds default to no table_id
+# meaning no-op, not whole-page -- opt IN to whole-page semantics here.
+WHOLE_PAGE_RESOLVING_KINDS: frozenset[str] = frozenset({"table_escalation_accepted"})
 
 TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
     {
@@ -85,6 +113,17 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # the disagreement was resolved and the shipped table is the better one.
         "table_escalation_refused",
         "table_escalation_timeout",
+        # GH-353 TICKET-B2: the two ladder terminals (content problem / infra
+        # problem, see the terminal-notes dict below). Values are literal
+        # strings, not an import, matching every other entry in this set --
+        # the source of truth is ``socr.judge.table_verdict.TABLE_LADDER_*``;
+        # duplicating the literal here avoids a core -> judge import (judge/
+        # already imports tables/, and core/ must not import benchmark or grow
+        # a new upward edge per the #175 layering precedent). A drift guard
+        # (``tests/test_gh95_tables_trust.py::test_ladder_kinds_match_judge_table_verdict``)
+        # keeps the two copies from diverging silently.
+        "table_ladder_rejected",
+        "table_ladder_unverified",
         # #123 TICKET-C1: two more shapes of the same no-silent-content-loss rule.
         # "table_unexplained_lanes" — the native layer supports a column the
         # emitted table has no home for; a threshold-free fact once B2's lane
@@ -124,6 +163,21 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         "structure_class_native_fallback",
     }
 )
+
+
+# GH-353 TICKET-B2: fallback wording for the two ladder terminals when the
+# emitting event carries no ``detail`` (the gate is free to pass one; this is
+# only a floor so a consumer never sees a bare kind token). The two sentences
+# echo the design doc's own distinction (content problem, not retryable vs.
+# infra problem, retryable) because that distinction is exactly what a
+# consumer deciding whether to re-run needs and the kind name alone doesn't
+# say it.
+LADDER_TERMINAL_NOTES: dict[str, str] = {
+    "table_ladder_rejected": ("judge ladder rejected this table: content problem, not retryable"),
+    "table_ladder_unverified": (
+        "judge ladder could not verify this table: infra problem, retryable on resume"
+    ),
+}
 
 
 @dataclass
@@ -215,27 +269,56 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
 
     # Pages whose table was superseded by a measurably better read. Collected first
     # because the resolving event is emitted AFTER the distrust events it resolves.
-    resolved = {
-        getattr(e, "page_num", 0) for e in events if getattr(e, "kind", "") in RESOLVING_KINDS
-    }
-    trust.resolved_pages = sorted(resolved)
+    #
+    # GH-353 TICKET-B2 (revised after review): a resolving event that carries
+    # ``data["table_id"]`` resolves ONLY that table, not the whole page -- a
+    # multi-table page's PASS on table 0 must not erase a FAIL/¬S1 recorded
+    # for table 1 (`core/tables_trust.py:216`, pre-fix, was page-number-only).
+    # A resolving event with NO ``table_id`` clears the whole page ONLY when
+    # its kind is in ``WHOLE_PAGE_RESOLVING_KINDS``; every other resolving
+    # kind without a ``table_id`` is a no-op. The reviewer's repro: a
+    # table-scoped ``table_ladder_rejected(table_id="1")`` followed by a
+    # page-wide ``table_ladder_accepted`` (no ``table_id``) must NOT clear
+    # the page -- treating every ``RESOLVING_KINDS`` member the same in the
+    # no-table_id branch made B1's emission discipline (always attach
+    # table_id) load-bearing for correctness, with no test or contract
+    # actually requiring it. Fail closed instead: no-op, not erase.
+    resolved_pages: set[int] = set()
+    resolved_tables: set[tuple[int, str]] = set()
+    for event in events:
+        kind = getattr(event, "kind", "")
+        if kind not in RESOLVING_KINDS:
+            continue
+        page_num = getattr(event, "page_num", 0)
+        table_id = (getattr(event, "data", None) or {}).get("table_id")
+        if table_id is not None:
+            resolved_tables.add((page_num, str(table_id)))
+        elif kind in WHOLE_PAGE_RESOLVING_KINDS:
+            resolved_pages.add(page_num)
+        # else: a resolving kind with neither a table_id nor whole-page
+        # opt-in resolves nothing -- see the module comment above.
+    trust.resolved_pages = sorted(resolved_pages)
 
     for event in events:
-        if getattr(event, "page_num", 0) in resolved:
+        page_num = getattr(event, "page_num", 0)
+        if page_num in resolved_pages:
             continue
         kind = getattr(event, "kind", "")
         if kind not in TABLE_DISTRUST_KINDS:
             continue
 
-        page_num = getattr(event, "page_num", 0)
+        data = getattr(event, "data", None) or {}
+        table_id = data.get("table_id")
+        if table_id is not None and (page_num, str(table_id)) in resolved_tables:
+            continue
+
         page = trust.pages.setdefault(page_num, PageTrust(page_num=page_num))
         page.reasons.append(kind)
 
-        detail = getattr(event, "detail", "") or ""
+        detail = getattr(event, "detail", "") or LADDER_TERMINAL_NOTES.get(kind, "")
         if detail:
             page.details.append(f"{kind}: {detail}")
 
-        data = getattr(event, "data", None) or {}
         if data.get("note") == PATCH_ELIGIBLE_NOTE:
             page.patch_eligible = True
 

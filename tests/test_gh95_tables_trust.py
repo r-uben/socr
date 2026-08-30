@@ -22,8 +22,10 @@ from socr.core.audit_log import AuditEvent
 from socr.core.config import PipelineConfig
 from socr.core.result import PageOutput, PageStatus
 from socr.core.tables_trust import (
+    RESOLVING_KINDS,
     TABLE_DISTRUST_KINDS,
     TRUST_NOTE_PREFIX,
+    WHOLE_PAGE_RESOLVING_KINDS,
     build_tables_trust,
     trust_note,
 )
@@ -224,12 +226,15 @@ def test_orchestrator_note_helper_survives_a_malformed_state():
 def test_watched_kinds_are_real_emitted_kinds():
     """Guards against a typo silently disabling a distrust signal.
 
-    Two documented exceptions:
+    Three documented exceptions:
       - ``dualpass_flagged`` is built as f"dualpass_{action}" with
         action="flagged", so it is not a literal anywhere in the source.
       - ``table_row_repetition_truncated`` is emitted by GH-97, which ships on its
         own branch. Watching it here is forward-compatible (an unemitted kind
         simply never matches) and avoids a follow-up edit once #97 merges.
+      - ``table_ladder_rejected`` / ``table_ladder_unverified`` (GH-353) are
+        registered by TICKET-B2 ahead of TICKET-B1 (the gate), which is what
+        actually emits them.
     """
     import pathlib
     import re
@@ -249,7 +254,14 @@ def test_watched_kinds_are_real_emitted_kinds():
     # matches an event), after it the kind becomes a literal and drops out of
     # ``literals`` subtraction harmlessly. Deliberately NOT a tripwire that fails
     # once #97 lands - a stale comment is cheaper than a red build on main.
-    pending = {"table_row_repetition_truncated"}
+    # GH-353 TICKET-B2: the ladder terminals are registered ahead of B1 (the
+    # gate), which is the ticket that actually emits ``AuditEvent(kind=...)``
+    # for them. Same forward-compatible shape as ``table_row_repetition_truncated``.
+    pending = {
+        "table_row_repetition_truncated",
+        "table_ladder_rejected",
+        "table_ladder_unverified",
+    }
     unknown = TABLE_DISTRUST_KINDS - literals - dynamic - pending
 
     assert unknown == set(), f"watched kinds never emitted anywhere: {sorted(unknown)}"
@@ -440,3 +452,146 @@ def test_a_not_scorable_page_surfaces_with_no_escalation_provider(tmp_path):
     payload = trust.to_dict()
     assert trust.untrusted_pages == [1]
     assert "table_not_scorable" in payload["pages"]["1"]["reasons"]
+
+
+# ----------------------------------------------------------------------
+# GH-353 TICKET-B2: table-scoped ladder events
+# ----------------------------------------------------------------------
+
+
+def _ladder_event(page: int, kind: str, table_id: str, detail: str = "") -> AuditEvent:
+    return AuditEvent(page_num=page, kind=kind, detail=detail, data={"table_id": table_id})
+
+
+def test_one_pass_and_one_fail_the_fail_survives_the_pass():
+    """The bug this ticket fixes: page-number-only resolution let one table's
+    PASS erase another table's REJECTED. A table-scoped resolve must not."""
+    events = [
+        _ladder_event(5, "table_ladder_accepted", table_id="0"),
+        _ladder_event(5, "table_ladder_rejected", table_id="1", detail="WRONG_BINDING on row 3"),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+    payload = trust.to_dict()
+
+    assert trust.untrusted_pages == [5]
+    assert "table_ladder_rejected" in payload["pages"]["5"]["reasons"]
+    assert trust.resolved_pages == [], "a per-table resolve must not clear the page"
+
+
+def test_one_pass_and_one_unverified_the_unverified_survives_the_pass():
+    events = [
+        _ladder_event(9, "table_ladder_accepted", table_id="0"),
+        _ladder_event(9, "table_ladder_unverified", table_id="1"),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+    payload = trust.to_dict()
+
+    assert trust.untrusted_pages == [9]
+    assert "table_ladder_unverified" in payload["pages"]["9"]["reasons"]
+    assert trust.resolved_pages == []
+
+
+def test_a_table_scoped_accept_still_resolves_its_own_table():
+    """A table that WAS previously flagged and is later accepted by the ladder,
+    with a matching table id, must leave the trust index -- table-scoped
+    resolution still resolves, it just no longer over-resolves the page."""
+    events = [
+        _ladder_event(5, "table_ladder_rejected", table_id="0"),
+        _ladder_event(5, "table_ladder_accepted", table_id="0"),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == []
+
+
+def test_a_page_wide_ladder_accept_with_no_table_id_is_a_no_op():
+    """Reviewer repro (6543c1c review): a table-scoped REJECTED for one table
+    must not be silently erased by a page-wide accept (no ``table_id``) for a
+    DIFFERENT table. Unlike ``table_escalation_accepted``, a
+    ``table_ladder_accepted`` with no ``table_id`` clears nothing -- treating
+    every ``RESOLVING_KINDS`` member the same in the no-table_id branch made
+    B1's discipline (always attach table_id) load-bearing for correctness
+    with no contract enforcing it. Fail closed: no-op, not erase.
+    """
+    events = [
+        _ladder_event(5, "table_ladder_rejected", table_id="1", detail="WRONG_BINDING row 3"),
+        AuditEvent(page_num=5, kind="table_ladder_accepted"),  # no table_id
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == [5], "a no-table_id accept must not clear a different table"
+    assert "table_ladder_rejected" in trust.to_dict()["pages"]["5"]["reasons"]
+    assert trust.resolved_pages == []
+
+
+def test_table_escalation_accepted_keeps_its_legacy_whole_page_clear():
+    """``table_escalation_accepted`` is the one kind allowed to clear a whole
+    page with no ``table_id`` -- it is the only kind with a real emit site
+    that never carries one, and was always page-wide by design (GH-96).
+    Regression guard for the fix above: the allowlist must not also silence
+    this legacy behavior.
+    """
+    events = [
+        _flagged(7),
+        AuditEvent(page_num=7, kind="table_escalation_accepted"),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == []
+    assert trust.resolved_pages == [7]
+
+
+def test_all_three_ladder_terminals_are_registered():
+    assert "table_ladder_rejected" in TABLE_DISTRUST_KINDS
+    assert "table_ladder_unverified" in TABLE_DISTRUST_KINDS
+    assert "table_ladder_accepted" not in TABLE_DISTRUST_KINDS, (
+        "accept is a resolving event, not a distrust signal"
+    )
+
+
+def test_terminal_wording_falls_back_when_the_event_carries_no_detail():
+    """A gate that forgets to pass ``detail`` still gets readable prose, not a
+    bare kind token."""
+    events = [_ladder_event(3, "table_ladder_rejected", table_id="0", detail="")]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    detail_text = " ".join(trust.pages[3].details)
+    assert "not retryable" in detail_text
+
+    events_unverified = [_ladder_event(4, "table_ladder_unverified", table_id="0", detail="")]
+    trust_unverified = build_tables_trust("doc.pdf", events_unverified)
+    detail_text_unverified = " ".join(trust_unverified.pages[4].details)
+    assert "retryable on resume" in detail_text_unverified
+
+
+def test_ladder_kinds_match_judge_table_verdict():
+    """Drift guard: the literal strings duplicated here (to avoid a core ->
+    judge import, see the comment in ``core/tables_trust.py``) must match the
+    owned contract in ``socr.judge.table_verdict`` exactly."""
+    from socr.judge.table_verdict import (
+        TABLE_LADDER_ACCEPTED_KIND,
+        TABLE_LADDER_EVENT_KINDS,
+        TABLE_LADDER_REJECTED_KIND,
+        TABLE_LADDER_UNVERIFIED_KIND,
+    )
+
+    assert TABLE_LADDER_ACCEPTED_KIND == "table_ladder_accepted"
+    assert TABLE_LADDER_REJECTED_KIND == "table_ladder_rejected"
+    assert TABLE_LADDER_UNVERIFIED_KIND == "table_ladder_unverified"
+    assert TABLE_LADDER_EVENT_KINDS == {
+        "table_ladder_accepted",
+        "table_ladder_rejected",
+        "table_ladder_unverified",
+    }
+    assert TABLE_LADDER_ACCEPTED_KIND in RESOLVING_KINDS
+    assert TABLE_LADDER_ACCEPTED_KIND not in WHOLE_PAGE_RESOLVING_KINDS, (
+        "table_ladder_accepted must stay table-scoped-only; no whole-page opt-in"
+    )
+    assert TABLE_LADDER_REJECTED_KIND in TABLE_DISTRUST_KINDS
+    assert TABLE_LADDER_UNVERIFIED_KIND in TABLE_DISTRUST_KINDS

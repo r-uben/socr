@@ -58,6 +58,15 @@ AUTO_ENGINE_ORDER: list[EngineType] = [
     EngineType.NOUGAT,  # Local, academic papers only
 ]
 
+# GH-353 table judge ladder — CLI₁ (ollama-cloud glm-5.3-flash) per-call wall-clock
+# budget. NOT a made-up round number: the GH-356 bake-off
+# (docs/log/2026-08-30_gh356-bakeoff.md) measured glm-5.3-flash exceed a 300 s cap on
+# a dense grid (NS p42) and still land the *correct* verdict on retry at a 590 s cap.
+# The bake-off's explicit follow-up is "timeout >= 600 s or streaming with progress
+# detection" — this is that floor. A rung timeout is escalate-as-substitute (¬S1),
+# never a reject, per the GH-353 design (docs/log/2026-08-30_table-judge-ladder.md).
+TABLE_JUDGE_TIMEOUT_SEC_DEFAULT: float = 600.0
+
 
 @dataclass
 class HPCConfig:
@@ -274,6 +283,48 @@ class PipelineConfig:
     max_cost_per_page: float = 0.0  # 0 = no per-page price cap
     cost_budget: float = 0.0  # 0 = unlimited total budget per document
     write_manifest: bool = False  # write reproducibility manifest + blob cache
+
+    # --- GH-353: table judge ladder ---
+    # Two-rung table-page acceptance gate: CLI1 (ollama-cloud vision judge) -> CLI2
+    # (gemini CLI) -> terminal disposition (REJECTED/UNVERIFIED). Design:
+    # docs/log/2026-08-30_table-judge-ladder.md; CLI1 seat decided by the GH-356
+    # bake-off (docs/log/2026-08-30_gh356-bakeoff.md). Default OFF: golden/
+    # byte-identity tests must stay byte-identical with the flag off, and the gate
+    # itself (TICKET-B1) has not landed yet.
+    table_judge_ladder: bool = False
+    # CLI1 rung: ollama-cloud vision judge model. glm-5.3-flash:cloud won the
+    # GH-356 bake-off outright (every verdict + code correct across all three
+    # rounds, including the GH-273 binding-shift case two other candidates missed).
+    table_judge_rung1_model: str = "glm-5.3-flash:cloud"
+    # CLI1 rung: ollama host/endpoint the judge POSTs `/api/chat` to. None resolves
+    # like ``ollama_host`` above (OLLAMA_HOST env var, then the localhost default)
+    # rather than hardcoding localhost, which would misfire on any non-default
+    # ollama deployment.
+    table_judge_rung1_host: str | None = None
+    # CLI2 rung: subprocess binary name/path for the gemini-family CLI invoker
+    # (A3). Default is ``agy`` (Antigravity CLI), not ``gemini`` — the pre-merge
+    # B1 live smoke (2026-08-30) found the bare `gemini` binary can no longer
+    # authenticate headlessly on this machine ("Gemini Code Assist for
+    # individuals" free tier retired; Google's own IneligibleTierError message
+    # says to migrate to Antigravity). `agy` reaches the same model family
+    # through a live, working headless surface (smoke: schema-perfect,
+    # unfenced JSON, all six decoy defects caught — transcript referenced in
+    # docs/log/2026-08-30_gh353-ticket-a3.md). A missing binary is still a
+    # normal ¬S1 substitution, not a config error, whichever binary is
+    # configured.
+    table_judge_rung2_binary: str = "agy"
+    # Per-call wall-clock budget for EITHER rung (see TABLE_JUDGE_TIMEOUT_SEC_DEFAULT
+    # for the bake-off measurement behind the default). A timeout is ¬S1
+    # (escalate-as-substitute to the next rung / terminal), never treated as a
+    # judge FAIL.
+    #
+    # Interaction with --strict-local: strict_local forbids cloud egress, and BOTH
+    # ladder rungs are cloud (ollama-cloud, gemini CLI). So
+    # ``strict_local and table_judge_ladder`` makes every rung unavailable before
+    # the first call — the gate (TICKET-B1) must fail-open each table page to
+    # UNVERIFIED (never a silent PASS, never an exception) rather than call out.
+    # This field only documents the interaction; TICKET-B1 implements the gate.
+    table_judge_timeout_sec: float = TABLE_JUDGE_TIMEOUT_SEC_DEFAULT
 
     # --- Batch flags ---
     reprocess: bool = False

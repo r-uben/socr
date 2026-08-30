@@ -65,6 +65,11 @@ _LIVE = {
     "save_figures",
     "strict_local",
     "write_manifest",
+    # GH-353 TICKET-B1: read unconditionally by `_build_table_judge_rungs`
+    # (doc-scoped, called once per page-major run before the per-page loop)
+    # to decide whether to construct the ladder's rung sequence at all --
+    # acted on even when False, since that is the branch that returns `[]`.
+    "table_judge_ladder",
 }
 
 #: Hashed into the run fingerprint but never acted on. R174b DELETED every consumer
@@ -141,6 +146,16 @@ _UNEXERCISED = {
     "workers",
     "timeout",
     "output_dir",
+    # GH-353 TICKET-B1: read and conditionally fingerprinted only when
+    # `table_judge_ladder` is True (inside `_build_table_judge_rungs` /
+    # `_run_fingerprint`'s ternary, which short-circuits the untaken branch).
+    # This fixture's config leaves the flag at its False default, so these
+    # never get touched here -- covered directly by
+    # tests/test_table_judge_gate.py, which turns the flag on.
+    "table_judge_rung1_model",
+    "table_judge_rung1_host",
+    "table_judge_rung2_binary",
+    "table_judge_timeout_sec",
 }
 
 _BOOKKEEPING = {"_run_fingerprint", "_engine_determinants", "_write_metadata"}
