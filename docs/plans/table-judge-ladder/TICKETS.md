@@ -117,7 +117,7 @@ event survives in `tables_trust`.
 
 ## Stream C — status plumbing
 
-### TICKET-C1 — terminal enums + serialization · TODO · depends-on: none · wave 1
+### TICKET-C1 — terminal enums + serialization · DONE · depends-on: none · wave 1
 **Problem:** The two terminals don't exist as states.
 **Do:** `FailureMode.TABLE_REJECTED` / `FailureMode.TABLE_UNVERIFIED` in
 `core/result.py` with serialization round-trip. Nothing sets them yet.

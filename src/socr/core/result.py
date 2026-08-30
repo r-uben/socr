@@ -85,6 +85,19 @@ class FailureMode(str, Enum):
     #: rung accepted and native carries a table-distrust flag", this one means
     #: "a hard fail-closed floor was superseded", which is a stronger warning.
     MODEL_TABLE_OVER_FAILED_FLOOR = "model_table_over_failed_floor"
+    #: GH-353: the table judge ladder ran to exhaustion on the FAIL branch --
+    #: a rung returned a corroborated FAIL verdict (or a second rung agreed
+    #: with the first FAIL) and no rung ever produced an accepted PASS. The
+    #: page's table content is judged wrong, not merely unconfirmed; this is
+    #: the stronger of the ladder's two terminals.
+    TABLE_REJECTED = "table_rejected"
+    #: GH-353: the table judge ladder ran to exhaustion on the S1 branch --
+    #: every rung failed to produce a parseable verdict (timeout, transport
+    #: error, missing binary, unparseable output) and none ever reached a
+    #: PASS or FAIL. The ladder could not adjudicate the table at all, which
+    #: is weaker than an active rejection: nothing said the table is wrong,
+    #: but nothing could confirm it either.
+    TABLE_UNVERIFIED = "table_unverified"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The
