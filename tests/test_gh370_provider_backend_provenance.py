@@ -200,3 +200,63 @@ class TestOneCopyOfTheAutoRule:
                 f"openai_compatible={executes_openai} but provenance recorded "
                 f"{recorded_backend!r} -- the two copies have drifted"
             )
+
+
+class TestTheInvocationAndTheRecordTellOneStory:
+    """GH-384. GH-370 rewrote ``auto`` + VLLM_BASE_URL to vllm at the RECORDING
+    site only. ``resolve_qwen_intent`` still returned ``("auto", OLLAMA_MODEL)``
+    and ``_build_command`` still sent ``--backend auto --model
+    qwen3-vl:30b-a3b-instruct`` beside a sidecar saying vllm -- the drift GH-370
+    existed to remove, inverted: the manifest naming a backend the invocation
+    never asked for.
+
+    The rewrite now lives in ``resolve_qwen_intent``, which ``_build_command``
+    already reads, so agreement is structural rather than maintained by hand.
+    """
+
+    def _command(self, config) -> list[str]:
+        from pathlib import Path
+
+        from socr.engines.qwen import QwenEngine
+
+        return QwenEngine()._build_command(Path("in.pdf"), Path("out"), config)
+
+    def _flag(self, cmd: list[str], flag: str) -> str:
+        return cmd[cmd.index(flag) + 1] if flag in cmd else ""
+
+    def test_command_and_record_agree_under_auto_plus_env(self, monkeypatch) -> None:
+        from socr.engines.qwen import resolve_qwen_intent
+
+        monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        cfg = _cfg(qwen_backend="auto", qwen_vllm_model=_HF_MODEL)
+
+        intent_backend, intent_model = resolve_qwen_intent(cfg)
+        record_backend, record_model = resolved_provenance(PROFILE_QWEN_LOCAL, cfg)
+        cmd = self._command(cfg)
+
+        assert (intent_backend, intent_model) == (record_backend, record_model)
+        assert self._flag(cmd, "--backend") == record_backend == "vllm"
+        assert self._flag(cmd, "--model") == record_model == _HF_MODEL
+        assert self._flag(cmd, "--backend") != "auto", (
+            "the invocation must not say auto while the sidecar says vllm"
+        )
+
+    def test_no_env_leaves_command_and_record_on_the_local_path(self, monkeypatch) -> None:
+        """Control: without the environment variable nothing is rewritten, and
+        the two still agree."""
+        from socr.engines.qwen import resolve_qwen_intent
+
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+        cfg = _cfg(qwen_backend="auto")
+
+        assert resolve_qwen_intent(cfg) == resolved_provenance(PROFILE_QWEN_LOCAL, cfg)
+        assert self._flag(self._command(cfg), "--backend") == "auto"
+
+    def test_explicit_ollama_still_outranks_the_environment(self, monkeypatch) -> None:
+        from socr.engines.qwen import resolve_qwen_intent
+
+        monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        cfg = _cfg(qwen_backend="ollama")
+
+        assert resolve_qwen_intent(cfg) == resolved_provenance(PROFILE_QWEN_LOCAL, cfg)
+        assert self._flag(self._command(cfg), "--backend") == "ollama"
