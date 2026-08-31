@@ -83,8 +83,12 @@ def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
        the validated instruct MoE.  A cloud model string must never reach a local backend
        via this path.
 
-    Returns a ``(backend, model)`` tuple.  The backend is always the value from config
-    (callers pass it through to ``--backend``).  Only the model may be rewritten.
+    Returns a ``(backend, model)`` tuple.  GH-384: the BACKEND may now be rewritten too --
+    ``auto`` with ``VLLM_BASE_URL`` set resolves to ``"vllm"`` before the rules above are
+    applied, so rule 2 (not rule 3) governs the model for that case. Every caller reads
+    this one answer: ``_build_command`` builds ``--backend``/``--model`` from it,
+    ``process_document`` gates availability on it, and ``resolved_provenance`` records it.
+    An explicit backend is never rewritten, in either direction.
     """
     from socr.core.providers import qwen_auto_resolves_to_openai
 
@@ -174,8 +178,19 @@ class QwenEngine(BaseEngine):
         return True
 
     def process_document(self, pdf_path, output_dir, config):
-        """Process document, pre-checking the Ollama model for the local backend."""
-        if config.qwen_backend in ("auto", "ollama"):
+        """Process document, pre-checking the Ollama model for the local backend.
+
+        GH-391: the gate asks the RESOLVED backend, not the raw config value.
+        ``auto`` is not a transport: with ``VLLM_BASE_URL`` set it means vLLM,
+        which is exactly the HPC deployment where Ollama is absent by policy.
+        Reading the raw value here refused such a run as ``MODEL_UNAVAILABLE``
+        while ``is_available`` above already allowed it and
+        ``resolve_qwen_intent`` already rewrote it -- the third copy of the same
+        rule, disagreeing with the other two. An explicit ``ollama`` still
+        requires the local model.
+        """
+        resolved_backend, _resolved_model = resolve_qwen_intent(config)
+        if resolved_backend in _LOCAL_BACKENDS:
             error = _check_ollama_model(OLLAMA_MODEL)
             if error:
                 from socr.core.result import DocumentStatus, EngineResult, FailureMode
