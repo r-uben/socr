@@ -175,6 +175,22 @@ DEFAULT_PROVIDERS: dict[EngineType, ProviderProfile] = {
     EngineType.VLLM: PROFILE_VLLM,
 }
 
+#: GH-370: every named profile, including the ones DEFAULT_PROVIDERS cannot
+#: hold because they share an ``EngineType`` with another rung (QWEN cloud).
+#: ``profile_by_id`` below resolves a recorded attempt back to its profile.
+_ALL_PROFILES: tuple[ProviderProfile, ...] = (
+    PROFILE_QWEN_LOCAL,
+    PROFILE_QWEN_CLOUD,
+    PROFILE_GEMINI,
+    PROFILE_MARKER,
+    PROFILE_GLM,
+    PROFILE_NOUGAT,
+    PROFILE_MISTRAL,
+    PROFILE_DEEPSEEK,
+    PROFILE_DEEPSEEK_VLLM,
+    PROFILE_VLLM,
+)
+
 
 def _sort_key(p: ProviderProfile) -> tuple[float, int]:
     """Cheapest first; ties broken by the existing priority ladder."""
@@ -295,3 +311,57 @@ def execution_overrides(profile: ProviderProfile) -> dict[str, object]:
             "qwen_model_pinned": True,
         }
     return {}
+
+
+def profile_by_id(provider_id: str) -> ProviderProfile | None:
+    """The named profile whose ``id`` is *provider_id*, or ``None``.
+
+    GH-370. A recorded ``ProviderAttempt`` carries the rung's ``provider_id``
+    but not the profile object, and ``resolved_provenance`` needs the profile
+    (its ``engine`` decides whether anything must be resolved). Keyed on ``id``
+    -- the same stable identity ``is_cloud_qwen`` uses -- so a reworded
+    descriptive label cannot break the lookup.
+    """
+    for prof in _ALL_PROFILES:
+        if prof.id == provider_id:
+            return prof
+    return None
+
+
+def resolved_provenance(profile: ProviderProfile, config: object) -> tuple[str, str]:
+    """Return the ``(backend, model)`` that ACTUALLY executed *profile*.
+
+    GH-370. ``ProviderProfile.backend``/``.model`` describe what a rung IS in
+    the registry, not which transport ran it. For most profiles those coincide.
+    For QWEN they do not: ``PROFILE_QWEN_LOCAL`` declares ``backend="ollama"``
+    and the Ollama tag ``qwen3-vl:30b-a3b-instruct``, while
+    ``execution_overrides`` deliberately returns ``{}`` for it so the operator's
+    ``--qwen-backend`` choice wins at execution. A vLLM/HPC run therefore
+    executed on vLLM and recorded ``ollama`` -- on hosts where Ollama is not
+    even installed.
+
+    That makes the manifest unusable for the audit it exists for: a genuinely
+    misrouted run (``qwen-ocr`` missing from ``PATH``, the documented HPC
+    gotcha) and a correct one are indistinguishable in the record.
+
+    This is the recording counterpart of ``execution_overrides``: both answer
+    "what really runs" from the same two inputs, so provenance cannot drift
+    from execution again.
+
+    - **Cloud Qwen** -- ``("ollama", profile.model)``, matching the overrides
+      above: Ollama Cloud is served by the local Ollama runtime under a
+      ``:cloud`` tag, so the executed backend is ``ollama``, not the
+      descriptive ``ollama-cloud`` label.
+    - **Any other QWEN rung** -- whatever ``resolve_qwen_intent`` derives from
+      the live config, which is exactly what the CLI invocation was built from.
+    - **Everything else** -- the registry values unchanged. Their
+      ``EngineType`` maps 1:1 to a deployment, so there is nothing to resolve.
+    """
+    if is_cloud_qwen(profile):
+        return "ollama", profile.model
+    if profile.engine is EngineType.QWEN:
+        # Local import: ``core`` must not import ``engines`` at module scope.
+        from socr.engines.qwen import resolve_qwen_intent
+
+        return resolve_qwen_intent(config)
+    return profile.backend, profile.model
