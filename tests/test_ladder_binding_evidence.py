@@ -235,7 +235,8 @@ class TestRowLabelShiftComposesWithLadder:
         bo = _bo(_SHIFTED_MD)
 
         rung = _accept_rung("high")
-        pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
+        with patch.object(pipeline, "_transcribe_cell_token", return_value=None):
+            pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
 
         assert len(rung.calls) == 1
         _crop_path, _markdown, prior_findings = rung.calls[0]

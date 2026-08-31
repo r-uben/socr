@@ -230,6 +230,11 @@ def rung_result_from_output(rung: str, text: str, latency_sec: float) -> RungRes
 TABLE_LADDER_ACCEPTED_KIND = "table_ladder_accepted"
 TABLE_LADDER_REJECTED_KIND = "table_ladder_rejected"
 TABLE_LADDER_UNVERIFIED_KIND = "table_ladder_unverified"
+#: GH-367: supporting evidence for a clamp lift/hold. Not a fourth
+#: terminal — the three kinds above remain the only content outcomes.
+#: Kept out of ``TABLE_LADDER_EVENT_KINDS`` so the GH-359 drift guard
+#: (exactly those three terminals) stays about terminals.
+TABLE_BINDING_ADJUDICATED_KIND = "table_binding_adjudicated"
 
 #: All audit-event kinds this module defines, for callers that want to
 #: sanity-check membership without importing each constant by name.

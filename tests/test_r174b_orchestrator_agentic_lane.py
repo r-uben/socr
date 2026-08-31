@@ -160,6 +160,9 @@ class TestOrchestratorAgenticLane:
             "table_judge_rung2_binary",
             "table_judge_timeout_sec",
             "table_judge_prompt_digest",
+            # GH-367: cell-transcribe prompt identity; a wording-only
+            # edit changes what counts as a raster disproof.
+            "cell_transcribe_prompt_digest",
         }
         missing_live = live_keys - dict_keys
         assert not missing_live, (

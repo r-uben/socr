@@ -148,6 +148,11 @@ class PageState:
     #: unwitnessed one. This flag withholds that exception so the page is
     #: reprocessed and the unwitnessed table finally gets a look.
     table_ladder_incomplete: bool = False
+    #: GH-367: per-table_id record of the last binding-contradiction
+    #: adjudication on this page (``{"status": "lifted"|"held", ...}``).
+    #: Restored from the sidecar so a resumed run does not silently
+    #: re-clamp a table whose contradictions were already disproved.
+    binding_adjudication: dict = field(default_factory=dict)
 
     def is_structure_class(self) -> bool:
         """C2: pages whose native branch may never author a GRID.

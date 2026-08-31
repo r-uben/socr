@@ -80,7 +80,7 @@ from pathlib import Path
 from typing import Iterator
 
 from socr.core.pdf import open_pdf
-from socr.tables.extract import _CROP_PADDING_PT, DEFAULT_CROP_DPI
+from socr.tables.extract import CROP_PADDING_PT, DEFAULT_CROP_DPI
 from socr.tables.locate import TableBox, locate_tables
 from socr.tables.native_verifier import _numeric_multiset_from_tokens, _numeric_tokens_from_text
 from socr.tables.reconcile import find_table_blocks
@@ -271,10 +271,10 @@ def _render_crop_safe(pdf_path: Path, page_num: int, box: TableBox, crop_dpi: in
         page_rect = page.rect
         x0, y0, x1, y1 = box.bbox
         clip = fitz.Rect(
-            max(page_rect.x0, x0 - _CROP_PADDING_PT),
-            max(page_rect.y0, y0 - _CROP_PADDING_PT),
-            min(page_rect.x1, x1 + _CROP_PADDING_PT),
-            min(page_rect.y1, y1 + _CROP_PADDING_PT),
+            max(page_rect.x0, x0 - CROP_PADDING_PT),
+            max(page_rect.y0, y0 - CROP_PADDING_PT),
+            min(page_rect.x1, x1 + CROP_PADDING_PT),
+            min(page_rect.y1, y1 + CROP_PADDING_PT),
         )
         rotation = upright_rotation_for(page, clip=clip)
         mat = fitz.Matrix(crop_dpi / 72, crop_dpi / 72)
