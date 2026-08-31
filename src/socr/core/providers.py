@@ -363,15 +363,12 @@ def resolved_provenance(profile: ProviderProfile, config: object) -> tuple[str, 
         # Local import: ``core`` must not import ``engines`` at module scope.
         from socr.engines.qwen import resolve_qwen_intent
 
-        backend, model = resolve_qwen_intent(config)
-        if qwen_auto_resolves_to_openai(config):
-            # ``auto`` is not a transport. resolve_qwen_intent classifies it
-            # with the LOCAL backends and hands back the Ollama tag, so an HPC
-            # run that never touched a flag would record Ollama all over again
-            # -- the same defect by a shorter route.
-            served = getattr(config, "qwen_vllm_model", "") or model
-            return "vllm", served
-        return backend, model
+        # GH-384: no rewrite here. ``resolve_qwen_intent`` now resolves
+        # ``auto`` + VLLM_BASE_URL itself, and ``_build_command`` reads the same
+        # function, so the recorded backend/model is by construction the one the
+        # CLI was invoked with. A second rewrite at this site is what made the
+        # manifest name a backend the invocation never asked for.
+        return resolve_qwen_intent(config)
     return profile.backend, profile.model
 
 

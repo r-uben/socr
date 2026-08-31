@@ -86,8 +86,22 @@ def resolve_qwen_intent(config: PipelineConfig) -> tuple[str, str]:
     Returns a ``(backend, model)`` tuple.  The backend is always the value from config
     (callers pass it through to ``--backend``).  Only the model may be rewritten.
     """
+    from socr.core.providers import qwen_auto_resolves_to_openai
+
     backend = config.qwen_backend
     model = config.qwen_model
+
+    # GH-384: ``auto`` is not a transport. When VLLM_BASE_URL is set, ``auto``
+    # IS the vLLM path -- the same rule ``QwenEngine.is_available`` and
+    # ``_local_backend_is_openai_compatible`` already use. Resolving it HERE,
+    # rather than only at the recording site, is what keeps the invocation and
+    # the manifest telling one story: ``_build_command`` reads this function,
+    # so the ``--backend``/``--model`` the CLI receives and the provenance the
+    # sidecar records now come from a single answer. GH-370 fixed the record
+    # while leaving the command saying ``--backend auto``; that was the same
+    # drift inverted.
+    if backend == "auto" and qwen_auto_resolves_to_openai(config):
+        backend = "vllm"
 
     if config.qwen_model_pinned:
         # Explicit user override — honour it verbatim, regardless of backend.
