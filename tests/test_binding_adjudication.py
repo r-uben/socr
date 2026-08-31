@@ -210,3 +210,85 @@ class TestAdjudicate:
         assert items[1].kind == "row_label"
         assert items[1].native_token == "RowA"
         assert markdown_sha256("a") != markdown_sha256("b")
+
+
+class TestPriorLiftKeepsMultiplicity:
+    """GH-390. Two contradictions can share a signature -- the same kind, paths
+    and normalized tokens at two different loci. ``prior_lift_applies``
+    originally compared SETS, which collapsed them, so a prior lift recording
+    ONE signature matched a current set of TWO and cleared a contradiction
+    nothing ever disproved. On resume that is silent: the second contradiction
+    never gets looked at again.
+
+    #388 shipped the sorted-sequence compare; every existing prior-lift helper
+    uses a single item, so reverting that line stayed green. This is the pin.
+    """
+
+    def _twin_items(self) -> tuple:
+        """Two items with identical signatures at different bboxes.
+
+        The bbox is deliberately NOT part of the signature -- the signature is
+        (kind, row_path, col_path, native, model) -- which is exactly why two
+        real contradictions can collide.
+        """
+        return (
+            _label(
+                row_path=("RowA",),
+                native_token="RowA",
+                model_token="RowB",
+                native_bbox=(0, 0, 1, 1),
+            ),
+            _label(
+                row_path=("RowA",),
+                native_token="RowA",
+                model_token="RowB",
+                native_bbox=(10, 10, 11, 11),
+            ),
+        )
+
+    def test_the_two_items_really_do_share_a_signature(self) -> None:
+        """Precondition. If signatures ever stop colliding, the test below
+        would pass for the wrong reason and guard nothing."""
+        first, second = self._twin_items()
+        assert first.signature() == second.signature()
+        assert first.native_bbox != second.native_bbox
+
+    def test_a_one_signature_prior_does_not_clear_two_contradictions(self) -> None:
+        items = self._twin_items()
+
+        # A prior lift that only ever disproved ONE of them.
+        one_only = adjudicate(items[:1], markdown="md", transcribe=lambda _b: "RowB")
+        assert one_only.status == "lifted"
+        assert len(one_only.to_dict()["signatures"]) == 1
+
+        assert not prior_lift_applies(one_only.to_dict(), "md", items), (
+            "a prior lift of one contradiction must not satisfy two -- a set "
+            "compare collapses the duplicate and clears an undisproved item"
+        )
+
+    def test_adjudicate_re_examines_rather_than_reusing_the_short_prior(self) -> None:
+        """Difference pin at the caller: with the one-signature prior, the two
+        items must be judged afresh, so a transcriber that agrees with NATIVE
+        leaves the table held rather than riding the stale lift."""
+        items = self._twin_items()
+        one_only = adjudicate(items[:1], markdown="md", transcribe=lambda _b: "RowB")
+
+        reused = adjudicate(
+            items, markdown="md", prior=one_only.to_dict(), transcribe=lambda _b: "RowA"
+        )
+        assert reused.status == "held"
+        assert all(o.disproof != "prior_lift" for o in reused.items)
+
+    def test_a_matching_two_signature_prior_still_lifts(self) -> None:
+        """Control: multiplicity is the only thing that changed. A prior that
+        genuinely covers both items must still be reused, or the fix would have
+        broken resume instead of tightening it."""
+        items = self._twin_items()
+        both = adjudicate(items, markdown="md", transcribe=lambda _b: "RowB")
+        assert both.status == "lifted"
+        assert len(both.to_dict()["signatures"]) == 2
+
+        assert prior_lift_applies(both.to_dict(), "md", items)
+        again = adjudicate(items, markdown="md", prior=both.to_dict(), transcribe=lambda _b: "RowA")
+        assert again.status == "lifted"
+        assert all(o.disproof == "prior_lift" for o in again.items)
