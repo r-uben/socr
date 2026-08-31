@@ -152,3 +152,51 @@ class TestAutoBackendOnAnHpcHost:
         monkeypatch.delenv("VLLM_BASE_URL", raising=False)
         backend, _model = resolved_provenance(PROFILE_QWEN_LOCAL, _cfg(qwen_backend="auto"))
         assert backend != "vllm"
+
+
+class TestOneCopyOfTheAutoRule:
+    """cubic P2 on PR #382. Execution and provenance must ask the SAME question.
+
+    ``_local_backend_is_openai_compatible`` decides which server execution talks
+    to; ``resolved_provenance`` decides what the manifest says ran. Two copies of
+    the auto+VLLM_BASE_URL rule is precisely the drift this ticket removes, so
+    the orchestrator delegates its case 2 to the shared helper.
+    """
+
+    def _pipeline(self, **overrides):
+        from socr.core.config import EngineType, PipelineConfig
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        return UnifiedPipeline(
+            PipelineConfig(
+                primary_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                quiet=True,
+                **overrides,
+            )
+        )
+
+    def test_execution_and_provenance_agree_across_every_backend_state(self, monkeypatch) -> None:
+        """Whenever execution says "this run is on an OpenAI-compatible server",
+        provenance must record vllm -- and when it does not, it must not."""
+        for backend, env, expect_openai in (
+            ("auto", None, False),
+            ("auto", "http://localhost:8000/v1", True),
+            ("ollama", "http://localhost:8000/v1", False),
+            ("vllm", None, True),
+        ):
+            if env is None:
+                monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+            else:
+                monkeypatch.setenv("VLLM_BASE_URL", env)
+
+            pipeline = self._pipeline(qwen_backend=backend, qwen_vllm_model=_HF_MODEL)
+            executes_openai = pipeline._local_backend_is_openai_compatible()
+            recorded_backend, _model = resolved_provenance(PROFILE_QWEN_LOCAL, pipeline.config)
+
+            assert executes_openai is expect_openai, (backend, env)
+            assert (recorded_backend == "vllm") is executes_openai, (
+                f"backend={backend!r} env={env!r}: execution says "
+                f"openai_compatible={executes_openai} but provenance recorded "
+                f"{recorded_backend!r} -- the two copies have drifted"
+            )

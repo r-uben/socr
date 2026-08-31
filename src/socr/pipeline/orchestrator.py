@@ -5168,14 +5168,16 @@ class UnifiedPipeline:
         ``"ollama"`` stays Ollama even with ``VLLM_BASE_URL`` exported, because
         a value the user typed outranks one the environment happens to carry.
         """
-        import os
-
+        from socr.core.providers import qwen_auto_resolves_to_openai
         from socr.tables.extract import OPENAI_COMPATIBLE_BACKENDS
 
         backend = getattr(self.config, "qwen_backend", "")
         if backend in OPENAI_COMPATIBLE_BACKENDS:
             return True
-        return backend == "auto" and bool(os.environ.get("VLLM_BASE_URL"))
+        # GH-370 (cubic P2): case 2 lives in ONE place. Provenance recording
+        # asks the same question, and a second copy of this rule is exactly the
+        # execution/recording drift this ticket exists to remove.
+        return qwen_auto_resolves_to_openai(self.config)
 
     def _local_backend_host(self) -> str:
         """Where this run's local Ollama daemon actually listens (GH-222)."""
