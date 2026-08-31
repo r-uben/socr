@@ -158,7 +158,7 @@ def _process(
         patches.append(patch.object(pipeline, "_build_table_judge_rungs", return_value=rungs))
     if isolate_mechanical:
         patches.append(
-            patch.object(pipeline, "_binding_contradiction_for_witness", return_value=False)
+            patch.object(pipeline, "_binding_contradiction_for_witness", return_value=None)
         )
     from contextlib import ExitStack
 
@@ -367,7 +367,7 @@ class TestRuling6ChokePoint:
                 patch.object(
                     pipeline, "_build_table_judge_rungs", return_value=[_QueueRung([_fail()])]
                 ),
-                patch.object(pipeline, "_binding_contradiction_for_witness", return_value=False),
+                patch.object(pipeline, "_binding_contradiction_for_witness", return_value=None),
                 patch.object(pipeline, "_run_table_judge_gate", return_value=None),
             ]
             if not assemble_backfill:
@@ -420,7 +420,7 @@ class TestRuling6ChokePoint:
             patch.object(
                 pipeline_skip, "_build_table_judge_rungs", return_value=[_QueueRung([_fail()])]
             ),
-            patch.object(pipeline_skip, "_binding_contradiction_for_witness", return_value=False),
+            patch.object(pipeline_skip, "_binding_contradiction_for_witness", return_value=None),
             patch.object(pipeline_skip, "_run_table_judge_gate", return_value=None),
         ):
             result_skip = pipeline_skip.process(pdf_skip, tmp_path / "skip_out")

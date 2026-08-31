@@ -188,6 +188,25 @@ def _table_judge_prompt_digest() -> str:
         return f"unreadable-table-judge-prompt:{uuid.uuid4().hex}"
 
 
+def _cell_transcribe_prompt_digest() -> str:
+    """SHA-256 of the cell-transcribe prompt, read at call time.
+
+    GH-367: a wording-only edit to ``prompts/cell_transcribe.md`` changes
+    the constrained transcriber without moving rung identity or timeout.
+    Same non-caching rule as ``_table_judge_prompt_digest``.
+    """
+    import hashlib
+
+    from socr.judge.cell_transcribe import load_cell_transcribe_prompt
+
+    try:
+        return hashlib.sha256(load_cell_transcribe_prompt().encode("utf-8")).hexdigest()
+    except OSError:
+        import uuid
+
+        return f"unreadable-cell-transcribe-prompt:{uuid.uuid4().hex}"
+
+
 def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_dir: Path) -> bool:
     """Whether a doc can be skipped by the resume gate.
 
@@ -519,6 +538,13 @@ class UnifiedPipeline:
             ),
             "table_judge_prompt_digest": (
                 _table_judge_prompt_digest() if cfg.table_judge_ladder else None
+            ),
+            # GH-367: the cell-transcribe prompt is the constrained model
+            # role that can lift a binding clamp. A wording-only edit
+            # changes what counts as a raster disproof and must not reuse
+            # a previously lifted sidecar.
+            "cell_transcribe_prompt_digest": (
+                _cell_transcribe_prompt_digest() if cfg.table_judge_ladder else None
             ),
             # --- figures ---
             # ``save_figures`` controls PNG extraction + image-ref embedding.
@@ -2502,13 +2528,14 @@ class UnifiedPipeline:
     def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
         """Run the mechanical binding check for one LOCATED witness.
 
-        Returns True when a GH-273-class contradiction was found, else
-        False (no box, no native words, an unparseable candidate, or
-        nothing checkable disagreed). Never raises: a page-open/geometry
-        failure is logged and treated as an absence of evidence.
+        Returns the ``BindingResult`` when a GH-273-class contradiction was
+        found, else None (no box, no native words, an unparseable
+        candidate, or nothing checkable disagreed). Never raises: a
+        page-open/geometry failure is logged and treated as an absence of
+        evidence.
         """
         if witness.box is None:
-            return False
+            return None
 
         from socr.core.pdf import open_pdf
         from socr.tables.binding import bind
@@ -2523,9 +2550,9 @@ class UnifiedPipeline:
                 type(exc).__name__,
                 exc,
             )
-            return False
+            return None
         if not words:
-            return False
+            return None
 
         try:
             binding_result = bind(words, witness.markdown, region=witness.box.bbox)
@@ -2538,11 +2565,13 @@ class UnifiedPipeline:
                 exc,
                 exc_info=True,
             )
-            return False
+            return None
 
         # GH-359 ruling 5: fully_checked is not a gate. Only a genuine
         # cell/label contradiction withholds acceptance.
-        return bool(binding_result.contradicted_cells or binding_result.row_label_contradictions)
+        if binding_result.contradicted_cells or binding_result.row_label_contradictions:
+            return binding_result
+        return None
 
     def _run_table_judge_gate(
         self,
@@ -2579,6 +2608,12 @@ class UnifiedPipeline:
         fake judge rung and is never injected into the prompt (ruling 4).
         Empty rungs plus a contradiction is UNVERIFIED, not REJECTED
         (GH-334: the native layer can be the culprit).
+
+        GH-367: the cap may be lifted only by ``tables.adjudication``
+        disproving EACH contradiction (encoding-garbage native token, or
+        an independent cell-raster transcription that matches markdown
+        and not native). An ordinary PASS never lifts it. A failed or
+        partial adjudication leaves the clamp in place.
         """
         if bo.engine == "chart_asset" or not bo.text:
             return
@@ -2591,14 +2626,17 @@ class UnifiedPipeline:
             run_table_ladder,
         )
         from socr.judge.table_verdict import (
+            TABLE_BINDING_ADJUDICATED_KIND,
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
             TABLE_LADDER_UNVERIFIED_KIND,
         )
+        from socr.tables.binding import BindingResult
         from socr.tables.witness import WitnessStatus, prepare_table_witnesses
 
-        # table_id -> True iff bind() found a GH-273-class contradiction.
-        forced_by_binding: dict[str, bool] = {}
+        # table_id -> BindingResult iff bind() found a GH-273-class contradiction.
+        forced_by_binding: dict = {}
+        markdown_by_table: dict[str, str] = {}
 
         try:
             with prepare_table_witnesses(state.handle.path, page_num, bo.text) as witnesses:
@@ -2619,8 +2657,12 @@ class UnifiedPipeline:
                         )
                         continue
 
-                    if self._binding_contradiction_for_witness(state, page_num, witness):
-                        forced_by_binding[witness.table_id] = True
+                    binding = self._binding_contradiction_for_witness(state, page_num, witness)
+                    if isinstance(binding, BindingResult) and (
+                        binding.contradicted_cells or binding.row_label_contradictions
+                    ):
+                        forced_by_binding[witness.table_id] = binding
+                        markdown_by_table[witness.table_id] = witness.markdown
 
                     if not rungs:
                         # No CLI available (strict_local, or flag-on with
@@ -2681,11 +2723,50 @@ class UnifiedPipeline:
         # GH-359 ruling 5: a genuine mechanical contradiction withholds
         # acceptance. REJECTED is untouched (ceiling on accept, not a
         # floor on reject). Empty-rung UNVERIFIED is already UNVERIFIED.
+        # GH-367: the cap lifts only when adjudication disproves EACH
+        # contradiction. Run that only for tables the clamp would
+        # actually withhold (ladder ACCEPTED). Partial/failed
+        # adjudication leaves the clamp in place.
+        lifted_ids: set[str] = set()
+        accepted_ids = {
+            result.table_id
+            for result in table_results
+            if result.outcome is TableLadderOutcome.ACCEPTED
+        }
+        for table_id, binding in forced_by_binding.items():
+            if table_id not in accepted_ids:
+                continue
+            record = self._adjudicate_clamped_table(
+                state,
+                page_num,
+                table_id,
+                markdown_by_table.get(table_id, ""),
+                binding,
+                ps,
+            )
+            ps.binding_adjudication[table_id] = record.to_dict()
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_BINDING_ADJUDICATED_KIND,
+                    engine=bo.engine or "",
+                    detail=(
+                        f"table {table_id} binding adjudication {record.status}: "
+                        f"{sum(1 for o in record.items if o.disproof)}/"
+                        f"{len(record.items)} contradictions disproved"
+                    ),
+                    data={"table_id": table_id, **record.to_dict()},
+                )
+            )
+            if record.status == "lifted":
+                lifted_ids.add(table_id)
+
         clamped_results: list[TableLadderResult] = []
         for result in table_results:
             if (
-                forced_by_binding.get(result.table_id)
+                forced_by_binding.get(result.table_id) is not None
                 and result.outcome is TableLadderOutcome.ACCEPTED
+                and result.table_id not in lifted_ids
             ):
                 result = replace(result, outcome=TableLadderOutcome.UNVERIFIED)
             clamped_results.append(result)
@@ -2698,12 +2779,20 @@ class UnifiedPipeline:
             elif result.outcome is TableLadderOutcome.REJECTED:
                 kind = TABLE_LADDER_REJECTED_KIND
                 detail = f"table {result.table_id} rejected by the judge ladder (content problem, not retryable)"
-            elif forced_by_binding.get(result.table_id):
+            elif forced_by_binding.get(result.table_id) is not None:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
-                detail = (
-                    f"table {result.table_id} unverified: mechanical binding check found a "
-                    "contradiction (acceptance withheld; retryable on resume)"
-                )
+                held = (ps.binding_adjudication.get(result.table_id) or {}).get("status") == "held"
+                if held:
+                    detail = (
+                        f"table {result.table_id} unverified: mechanical binding check found a "
+                        "contradiction that adjudication did not disprove "
+                        "(acceptance withheld; retryable on resume)"
+                    )
+                else:
+                    detail = (
+                        f"table {result.table_id} unverified: mechanical binding check found a "
+                        "contradiction (acceptance withheld; retryable on resume)"
+                    )
             else:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
                 detail = f"table {result.table_id} unverified by the judge ladder (infra problem, retryable on resume)"
@@ -2744,6 +2833,137 @@ class UnifiedPipeline:
             ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
         elif page_result.outcome is TableLadderOutcome.UNVERIFIED:
             ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+
+    def _adjudicate_clamped_table(
+        self,
+        state: DocumentState,
+        page_num: int,
+        table_id: str,
+        markdown: str,
+        binding,
+        ps: PageState,
+    ):
+        """GH-367: try to disprove each bind() contradiction on one table.
+
+        Patch seam for tests: ``_transcribe_cell_token``. Encoding-garbage
+        items never call it. A missing transcriber is not a disproof.
+        """
+        from socr.tables.adjudication import adjudicate, items_from_binding
+
+        items = items_from_binding(binding)
+        prior = (ps.binding_adjudication or {}).get(table_id)
+
+        def _transcribe(bbox: tuple[float, float, float, float]) -> str | None:
+            crop = self._render_adjudication_crop(state.handle.path, page_num, bbox)
+            if crop is None:
+                return None
+            try:
+                return self._transcribe_cell_token(crop)
+            finally:
+                crop.unlink(missing_ok=True)
+
+        return adjudicate(items, markdown=markdown, prior=prior, transcribe=_transcribe)
+
+    def _transcribe_cell_token(self, crop_path: Path) -> str | None:
+        """Constrained transcriber seam. Returns a token or None. Never raises.
+
+        ``strict_local`` skips the cloud POST; encoding-garbage disproof
+        still runs. Tests patch this method rather than httpx.
+        """
+        if self.config.strict_local:
+            return None
+        from socr.judge.cell_transcribe import transcribe_cell
+
+        try:
+            return transcribe_cell(
+                crop_path,
+                model=self.config.table_judge_rung1_model,
+                host=self.config.table_judge_rung1_host,
+                timeout=self.config.table_judge_timeout_sec,
+            )
+        except Exception as exc:
+            logger.warning(
+                "cell transcribe failed (%s: %s); not a disproof",
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+    def _render_adjudication_crop(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        bbox: tuple[float, float, float, float],
+    ) -> Path | None:
+        """Render *bbox* to a temp PNG using the same padding/DPI as table witnesses."""
+        import os
+        import tempfile
+
+        import fitz
+        from PIL import Image
+
+        from socr.core.born_digital import upright_rotation_for
+        from socr.core.pdf import open_pdf
+        from socr.tables.extract import DEFAULT_CROP_DPI, CROP_PADDING_PT
+
+        try:
+            doc = open_pdf(pdf_path)
+        except Exception as exc:
+            logger.warning("adjudication crop: cannot open %s (%s)", pdf_path, exc)
+            return None
+        try:
+            page = doc[page_num - 1]
+            page_rect = page.rect
+            x0, y0, x1, y1 = bbox
+            clip = fitz.Rect(
+                max(page_rect.x0, x0 - CROP_PADDING_PT),
+                max(page_rect.y0, y0 - CROP_PADDING_PT),
+                min(page_rect.x1, x1 + CROP_PADDING_PT),
+                min(page_rect.y1, y1 + CROP_PADDING_PT),
+            )
+            if clip.is_empty or clip.is_infinite:
+                return None
+            rotation = upright_rotation_for(page, clip=clip)
+            mat = fitz.Matrix(DEFAULT_CROP_DPI / 72, DEFAULT_CROP_DPI / 72)
+            if rotation != 0:
+                mat.prerotate(rotation)
+            pix = page.get_pixmap(matrix=mat, clip=clip)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        except Exception as exc:
+            logger.warning(
+                "adjudication crop failed p%d (%s: %s)",
+                page_num,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        finally:
+            doc.close()
+
+        fd, name = tempfile.mkstemp(prefix="socr_adjudicate_", suffix=".png")
+        path = Path(name)
+        try:
+            os.close(fd)
+            img.save(path)
+        except Exception as exc:
+            logger.warning("adjudication crop save failed p%d (%s)", page_num, exc)
+            path.unlink(missing_ok=True)
+            return None
+        return path
+
+    def _apply_binding_adjudication_meta(
+        self, state: DocumentState, page_num: int, meta: dict
+    ) -> None:
+        """Restore GH-367 lift records from a sidecar payload. Malformed → ignore."""
+        raw = meta.get("binding_adjudication")
+        if not isinstance(raw, dict):
+            return
+        cleaned: dict = {}
+        for table_id, record in raw.items():
+            if isinstance(table_id, str) and isinstance(record, dict):
+                cleaned[table_id] = record
+        if cleaned:
+            state.pages[page_num].binding_adjudication = cleaned
 
     # ------------------------------------------------------------------
     # PP-2: Judge deadline adapter (stays in orchestrator; keeps agentic.py
@@ -4837,6 +5057,9 @@ class UnifiedPipeline:
             # disposition alone cannot express "rejected, but not everything
             # here was witnessed".
             "table_ladder_incomplete": bool(ps and ps.table_ladder_incomplete),
+            # GH-367: per-table lift/hold record so a resumed run does not
+            # silently re-clamp a table whose contradictions were disproved.
+            "binding_adjudication": dict(ps.binding_adjudication) if ps else {},
             # Audit log subset for this page.
             "audit_events": page_events,
             # Table-pass and figure refs.
@@ -4964,6 +5187,14 @@ class UnifiedPipeline:
             current_checksum = safe_checksum(state.handle.path)
             if not recorded_checksum or recorded_checksum != current_checksum:
                 return None
+
+            # GH-367: fingerprint+checksum matched, so this sidecar is for
+            # the current run configuration. Restore the per-table lift
+            # record even when the page itself is NOT skippable
+            # (UNVERIFIED reprocess): without it, bind() re-fires and
+            # silently re-clamps a table whose contradictions were
+            # already disproved.
+            self._apply_binding_adjudication_meta(state, page_num, meta)
 
             # GH-353 TICKET-D1b: the table judge ladder's REJECTED terminal is a
             # DELIBERATE exception to "doubt reprocesses" -- a REJECTED verdict is
@@ -5314,11 +5545,16 @@ class UnifiedPipeline:
             disposition_raw = meta.get("table_ladder_disposition")
             ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
+            self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
-            from socr.judge.table_verdict import TABLE_LADDER_EVENT_KINDS
+            from socr.judge.table_verdict import (
+                TABLE_BINDING_ADJUDICATED_KIND,
+                TABLE_LADDER_EVENT_KINDS,
+            )
 
+            restore_kinds = TABLE_LADDER_EVENT_KINDS | {TABLE_BINDING_ADJUDICATED_KIND}
             for ev in meta.get("audit_events", []) or []:
-                if not isinstance(ev, dict) or ev.get("kind") not in TABLE_LADDER_EVENT_KINDS:
+                if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
                 state.events.append(
                     AuditEvent(

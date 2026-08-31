@@ -39,7 +39,12 @@ _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "table_extra
 DEFAULT_CROP_DPI = 250
 # Padding (PDF points) around a located bbox so a rule or edge digit is never
 # clipped by an off-by-a-pixel boundary.
-_CROP_PADDING_PT = 6.0
+#
+# PUBLIC (GH-367): the constrained cell transcriber must crop with the SAME
+# padding as the table witnesses it is adjudicating, or it is not looking at
+# like for like. Sharing one constant is what makes that guarantee checkable;
+# a second copy would let the two drift silently.
+CROP_PADDING_PT = 6.0
 
 # Wall-clock deadline (seconds) applied per-crop in addition to the httpx I/O
 # timeout. Crops are small (fraction of a page), so a crop reread at
@@ -493,10 +498,10 @@ class TableCropExtractor:
 
         x0, y0, x1, y1 = box.bbox
         clip = fitz.Rect(
-            max(page_rect.x0, x0 - _CROP_PADDING_PT),
-            max(page_rect.y0, y0 - _CROP_PADDING_PT),
-            min(page_rect.x1, x1 + _CROP_PADDING_PT),
-            min(page_rect.y1, y1 + _CROP_PADDING_PT),
+            max(page_rect.x0, x0 - CROP_PADDING_PT),
+            max(page_rect.y0, y0 - CROP_PADDING_PT),
+            min(page_rect.x1, x1 + CROP_PADDING_PT),
+            min(page_rect.y1, y1 + CROP_PADDING_PT),
         )
         # GH-304b: derive clip-local rotation; keep bbox and clip in page space, rotate only raster pixels.
         rotation = upright_rotation_for(page, clip=clip)

@@ -42,7 +42,7 @@ from socr.core.born_digital import upright_rotation_for
 from socr.core.document import _upright_rotation_for as doc_upright_rotation_for
 from socr.engines.base import _upright_rotation_for as base_upright_rotation_for
 from socr.tables.extract import (
-    _CROP_PADDING_PT,
+    CROP_PADDING_PT,
     TableCropExtractor,
 )
 from socr.tables.image_locate import DETECT_DPI, locate_tables_image
@@ -383,10 +383,10 @@ class TestCropRotationEvasions:
 
                 # Independent reference renders of the exact same clip.
                 clip = fitz.Rect(
-                    max(page_rect.x0, box.bbox[0] - _CROP_PADDING_PT),
-                    max(page_rect.y0, box.bbox[1] - _CROP_PADDING_PT),
-                    min(page_rect.x1, box.bbox[2] + _CROP_PADDING_PT),
-                    min(page_rect.y1, box.bbox[3] + _CROP_PADDING_PT),
+                    max(page_rect.x0, box.bbox[0] - CROP_PADDING_PT),
+                    max(page_rect.y0, box.bbox[1] - CROP_PADDING_PT),
+                    min(page_rect.x1, box.bbox[2] + CROP_PADDING_PT),
+                    min(page_rect.y1, box.bbox[3] + CROP_PADDING_PT),
                 )
                 # Each oracle uses a fresh matrix, never chained or mutated
                 pix_unrot = page.get_pixmap(matrix=fitz.Matrix(150 / 72, 150 / 72), clip=clip)
@@ -435,17 +435,17 @@ class TestCropRotationEvasions:
 
                 # Table crop clip
                 clip_table = fitz.Rect(
-                    max(page.rect.x0, box_table.bbox[0] - _CROP_PADDING_PT),
-                    max(page.rect.y0, box_table.bbox[1] - _CROP_PADDING_PT),
-                    min(page.rect.x1, box_table.bbox[2] + _CROP_PADDING_PT),
-                    min(page.rect.y1, box_table.bbox[3] + _CROP_PADDING_PT),
+                    max(page.rect.x0, box_table.bbox[0] - CROP_PADDING_PT),
+                    max(page.rect.y0, box_table.bbox[1] - CROP_PADDING_PT),
+                    min(page.rect.x1, box_table.bbox[2] + CROP_PADDING_PT),
+                    min(page.rect.y1, box_table.bbox[3] + CROP_PADDING_PT),
                 )
                 # Prose crop clip
                 clip_prose = fitz.Rect(
-                    max(page.rect.x0, box_prose.bbox[0] - _CROP_PADDING_PT),
-                    max(page.rect.y0, box_prose.bbox[1] - _CROP_PADDING_PT),
-                    min(page.rect.x1, box_prose.bbox[2] + _CROP_PADDING_PT),
-                    min(page.rect.y1, box_prose.bbox[3] + _CROP_PADDING_PT),
+                    max(page.rect.x0, box_prose.bbox[0] - CROP_PADDING_PT),
+                    max(page.rect.y0, box_prose.bbox[1] - CROP_PADDING_PT),
+                    min(page.rect.x1, box_prose.bbox[2] + CROP_PADDING_PT),
+                    min(page.rect.y1, box_prose.bbox[3] + CROP_PADDING_PT),
                 )
                 assert upright_rotation_for(page, clip=clip_table) == 90
                 assert upright_rotation_for(page, clip=clip_prose) == 0
@@ -503,8 +503,8 @@ class TestCropRotationEvasions:
             clamped_clip = fitz.Rect(
                 0.0,
                 0.0,
-                min(page.rect.x1, 150.0 + _CROP_PADDING_PT),
-                min(page.rect.y1, 180.0 + _CROP_PADDING_PT),
+                min(page.rect.x1, 150.0 + CROP_PADDING_PT),
+                min(page.rect.y1, 180.0 + CROP_PADDING_PT),
             )
 
             # Fresh oracle: unrotated render of the exact clamped region
@@ -575,10 +575,10 @@ class TestExtractInvariants:
 
             # Exact legacy unrotated pipeline: clip -> fresh matrix -> get_pixmap -> Image -> save
             clip = fitz.Rect(
-                max(page.rect.x0, box.bbox[0] - _CROP_PADDING_PT),
-                max(page.rect.y0, box.bbox[1] - _CROP_PADDING_PT),
-                min(page.rect.x1, box.bbox[2] + _CROP_PADDING_PT),
-                min(page.rect.y1, box.bbox[3] + _CROP_PADDING_PT),
+                max(page.rect.x0, box.bbox[0] - CROP_PADDING_PT),
+                max(page.rect.y0, box.bbox[1] - CROP_PADDING_PT),
+                min(page.rect.x1, box.bbox[2] + CROP_PADDING_PT),
+                min(page.rect.y1, box.bbox[3] + CROP_PADDING_PT),
             )
             pix = page.get_pixmap(matrix=fitz.Matrix(150 / 72, 150 / 72), clip=clip)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
@@ -608,10 +608,10 @@ class TestExtractInvariants:
 
             # Legacy unrotated render with fresh matrix
             clip = fitz.Rect(
-                max(real_page.rect.x0, box.bbox[0] - _CROP_PADDING_PT),
-                max(real_page.rect.y0, box.bbox[1] - _CROP_PADDING_PT),
-                min(real_page.rect.x1, box.bbox[2] + _CROP_PADDING_PT),
-                min(real_page.rect.y1, box.bbox[3] + _CROP_PADDING_PT),
+                max(real_page.rect.x0, box.bbox[0] - CROP_PADDING_PT),
+                max(real_page.rect.y0, box.bbox[1] - CROP_PADDING_PT),
+                min(real_page.rect.x1, box.bbox[2] + CROP_PADDING_PT),
+                min(real_page.rect.y1, box.bbox[3] + CROP_PADDING_PT),
             )
             pix = real_page.get_pixmap(matrix=fitz.Matrix(150 / 72, 150 / 72), clip=clip)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
@@ -656,10 +656,10 @@ class TestExtractInvariants:
         with fitz.open(pdf_path) as doc:
             page = doc[0]
             clip = fitz.Rect(
-                max(page.rect.x0, box.bbox[0] - _CROP_PADDING_PT),
-                max(page.rect.y0, box.bbox[1] - _CROP_PADDING_PT),
-                min(page.rect.x1, box.bbox[2] + _CROP_PADDING_PT),
-                min(page.rect.y1, box.bbox[3] + _CROP_PADDING_PT),
+                max(page.rect.x0, box.bbox[0] - CROP_PADDING_PT),
+                max(page.rect.y0, box.bbox[1] - CROP_PADDING_PT),
+                min(page.rect.x1, box.bbox[2] + CROP_PADDING_PT),
+                min(page.rect.y1, box.bbox[3] + CROP_PADDING_PT),
             )
             assert upright_rotation_for(page, clip=clip) == 90
             # Fresh matrix oracle for the expected 90-degree rotated crop

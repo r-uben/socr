@@ -290,6 +290,22 @@ class _NativeRow:
     lane_tokens: dict[int, tuple[str, bool]]
     multiset: Counter  # N2-normalized numeric tokens in this row, for A2 anchoring
     band_ambiguous: bool  # this row's own y-band is not well-separated from a neighbour
+    # GH-367: native word bboxes so adjudication can crop the paint bind()
+    # compared against, without re-deriving geometry. Diagnostic only —
+    # never consulted by conviction logic.
+    lane_bboxes: dict[int, tuple[float, float, float, float]] = field(default_factory=dict)
+    label_bbox: tuple[float, float, float, float] | None = None
+
+
+def _union_word_bbox(words: list) -> tuple[float, float, float, float] | None:
+    if not words:
+        return None
+    return (
+        min(w[0] for w in words),
+        min(w[1] for w in words),
+        max(w[2] for w in words),
+        max(w[3] for w in words),
+    )
 
 
 def _row_label(words_in_band: list, lane_of: dict[float, int]) -> str:
@@ -298,10 +314,17 @@ def _row_label(words_in_band: list, lane_of: dict[float, int]) -> str:
     not in ``lane_of`` (see :func:`_native_lane_geometry`), so it lands here
     as label text instead of being swallowed as a phantom data column
     (MAJOR 4)."""
+    return _row_label_and_bbox(words_in_band, lane_of)[0]
+
+
+def _row_label_and_bbox(
+    words_in_band: list, lane_of: dict[float, int]
+) -> tuple[str, tuple[float, float, float, float] | None]:
     sorted_words = sorted(words_in_band, key=lambda w: w[0])
     first_data_x = next((w[0] for w in sorted_words if lane_of.get(w[0]) is not None), None)
-    label_words = [w[4] for w in sorted_words if first_data_x is None or w[0] < first_data_x]
-    return " ".join(label_words).strip()
+    label_words = [w for w in sorted_words if first_data_x is None or w[0] < first_data_x]
+    label = " ".join(w[4] for w in label_words).strip()
+    return label, _union_word_bbox(label_words)
 
 
 def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
@@ -591,7 +614,7 @@ def _native_rows(
         band_words = bands[bidx]
         numeric_words = [w for w in band_words if is_numeric_token(w[4])]
         data_words = [w for w in band_words if lane_of.get(w[0]) is not None]
-        label = _row_label(band_words, lane_of)
+        label, label_bbox = _row_label_and_bbox(band_words, lane_of)
         band_ambiguous = bidx in ambiguous_bands
 
         if not data_words and label:
@@ -610,16 +633,20 @@ def _native_rows(
                     lane_tokens={},
                     multiset=Counter(),
                     band_ambiguous=band_ambiguous,
+                    lane_bboxes={},
+                    label_bbox=label_bbox,
                 )
             )
             continue
 
         row_path = tuple(p[1] for p in prefix_stack) + (label,)
 
-        row_tokens = [(w[0], w[4]) for w in numeric_words]
-        row_lane_ids = {lane_of[x] for x, _ in row_tokens if x in lane_of}
+        row_tokens = [(w[0], w[4], w) for w in numeric_words]
+        row_lane_ids = {lane_of[x] for x, _, _ in row_tokens if x in lane_of}
         if len(row_lane_ids) >= 2:
-            clean_lanes = set(_well_separated_lanes_in_row(row_tokens, lane_of))
+            clean_lanes = set(
+                _well_separated_lanes_in_row([(x, text) for x, text, _ in row_tokens], lane_of)
+            )
         else:
             # `_well_separated_lanes_in_row` needs >= 2 lanes present in the
             # row to judge row-internal jitter and returns [] otherwise — a
@@ -629,8 +656,9 @@ def _native_rows(
             clean_lanes = {li for li in row_lane_ids if _lane_well_separated(lane_centers, li)}
 
         lane_tokens: dict[int, tuple[str, bool]] = {}
+        lane_bboxes: dict[int, tuple[float, float, float, float]] = {}
         multiset: Counter = Counter()
-        for x, text in row_tokens:
+        for x, text, word in row_tokens:
             li = lane_of.get(x)
             if li is None:
                 continue  # stub token (e.g. a numeric row label) — not a data cell
@@ -640,6 +668,7 @@ def _native_rows(
                 lane_tokens[li] = (lane_tokens[li][0], True)
             else:
                 lane_tokens[li] = (text, token_ambiguous)
+                lane_bboxes[li] = (word[0], word[1], word[2], word[3])
             multiset[_normalize_numeric_token(text)] += 1
 
         rows.append(
@@ -650,6 +679,8 @@ def _native_rows(
                 lane_tokens=lane_tokens,
                 multiset=multiset,
                 band_ambiguous=band_ambiguous,
+                lane_bboxes=lane_bboxes,
+                label_bbox=label_bbox,
             )
         )
 
@@ -971,12 +1002,14 @@ class ContradictedCell:
     col_path: tuple[str, ...]
     native_token: str
     model_token: str | None
+    native_bbox: tuple[float, float, float, float] | None = None
 
 
 @dataclass(frozen=True)
 class RowLabelContradiction:
     row_path: tuple[str, ...]
     candidate_label: str
+    native_bbox: tuple[float, float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -1297,6 +1330,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
                 RowLabelContradiction(
                     row_path=native_row.row_path,
                     candidate_label=candidate_label,
+                    native_bbox=native_row.label_bbox,
                 )
             )
 
@@ -1491,6 +1525,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
                             col_path=col_path,
                             native_token=native_value,
                             model_token=model_value,
+                            native_bbox=native_row.lane_bboxes.get(lane),
                         )
                     )
                     continue
@@ -1507,6 +1542,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
                             col_path=col_path,
                             native_token=native_value,
                             model_token=model_value,
+                            native_bbox=native_row.lane_bboxes.get(lane),
                         )
                     )
 
