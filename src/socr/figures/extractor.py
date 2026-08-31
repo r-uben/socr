@@ -958,6 +958,108 @@ def _looks_like_table_grid(
     return horizontal >= 3 and vertical >= 2
 
 
+#: GH-369 (cubic P2): the smallest run of consecutive bare-number lines that
+#: can be an axis scale. Two, because a scale is a sequence of ticks and a lone
+#: number between sentences is content -- a year, a headline stat, a footnote
+#: marker. Structural, not tuned: no page-level ratio is consulted anywhere.
+_MIN_AXIS_SCALE_TICKS = 2
+
+_CHART_AXIS_FENCE_OPEN = "<!-- socr:chart-axis-residue"
+_CHART_AXIS_FENCE_CLOSE = "socr:end-chart-axis-residue -->"
+
+
+def _is_bare_number_line(line: str) -> bool:
+    """Whether *line* is nothing but a number.
+
+    GH-369. Deliberately narrow: only a line whose ENTIRE stripped content is a
+    numeric literal (optionally signed, decimal, or percent). Axis tick scales
+    render exactly this way -- ``2``, ``4``, ``18``, ``-0.5``, ``25%`` each
+    alone on a line -- and it is these that are indistinguishable from a series
+    of data values downstream.
+
+    Word-shaped tick labels ("Lower", "Broadly similar", "Higher") are NOT
+    matched. They are ordinary prose to any reader, they do not read as data,
+    and a classifier confident enough to catch them would be confident enough
+    to swallow a real sentence. There is no share-of-page threshold anywhere in
+    this path: each line is judged on its own content.
+    """
+    text = line.strip()
+    if not text:
+        return False
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    if text[:1] in "+-":
+        text = text[1:]
+    if not text:
+        return False
+    return text.replace(".", "", 1).isdigit()
+
+
+def split_chart_axis_residue(native_text: str) -> tuple[str, list[str]]:
+    """Split *native_text* into (body, axis-residue lines).
+
+    GH-369. A page routed to the chart-asset lane saves the chart as an image
+    and records "data values not transcribed" -- then ships the native text
+    layer whole, axis tick scales included. On the reported page 52% of
+    non-empty lines were a lone number, which is indistinguishable from a
+    series of real values and contradicts the lane's own declaration.
+
+    The residue is SEPARATED, never dropped: a wrong or dropped number is worse
+    than a missing one, so every input line is returned in one of the two
+    halves and the caller fences the residue rather than deleting it. Order is
+    preserved within each half, so the original page is reconstructible.
+
+    Returns ``(body, residue)``. ``residue`` is empty for any page with no bare
+    numeric lines, which leaves every non-chart page byte-identical.
+    """
+    lines = native_text.splitlines()
+    body: list[str] = []
+    residue: list[str] = []
+
+    index = 0
+    while index < len(lines):
+        if not _is_bare_number_line(lines[index]):
+            body.append(lines[index])
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(lines) and _is_bare_number_line(lines[run_end]):
+            run_end += 1
+        run = lines[index:run_end]
+        # A scale is a SEQUENCE of ticks. One number standing alone between
+        # sentences is a year, a headline stat, or a footnote marker -- content,
+        # not chart furniture -- so it stays visible in the body. This is a
+        # structural minimum drawn from what an axis IS, not a tuned cutoff:
+        # there is no such thing as a one-tick scale.
+        (residue if len(run) >= _MIN_AXIS_SCALE_TICKS else body).extend(run)
+        index = run_end
+
+    return "\n".join(body), residue
+
+
+def fence_chart_axis_residue(native_text: str) -> str:
+    """Body text with bare-numeric axis lines moved into a fenced block.
+
+    GH-369. The fence is an HTML comment, so the residue survives verbatim in
+    the file (auditable, greppable, machine-distinguishable) while not
+    rendering as prose beside the chart image it belongs to. Returns
+    *native_text* unchanged when there is nothing to fence.
+    """
+    body, residue = split_chart_axis_residue(native_text)
+    if not residue:
+        return native_text
+    fenced = "\n".join(
+        [
+            _CHART_AXIS_FENCE_OPEN,
+            "axis tick labels from the chart on this page; not data values.",
+            *residue,
+            _CHART_AXIS_FENCE_CLOSE,
+        ]
+    )
+    body = body.rstrip()
+    return f"{body}\n\n{fenced}" if body else fenced
+
+
 def has_chart_marks(page) -> bool:
     """Cluster-first chart detector for the PP-7 chart-asset routing lane.
 
