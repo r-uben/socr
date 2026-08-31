@@ -26,7 +26,13 @@ from socr.core.normalizer import (
     OutputNormalizer,
     collapse_repeated_table_rows,
 )
-from socr.core.providers import ProviderProfile, execution_overrides, is_cloud_qwen
+from socr.core.providers import (
+    ProviderProfile,
+    execution_overrides,
+    is_cloud_qwen,
+    profile_by_id,
+    resolved_provenance,
+)
 from socr.core.result import (
     DocumentStatus,
     EngineResult,
@@ -2289,8 +2295,10 @@ class UnifiedPipeline:
             out.escalated_from = bo.engine
             out.cost_usd = profile.cost_per_page_usd
             out.provider_id = profile.id
-            out.provider_model = profile.model
-            out.provider_backend = profile.backend
+            # GH-370: record the backend/model that ACTUALLY ran, not the
+            # registry's descriptive label. For QWEN the two diverge whenever
+            # --qwen-backend is not ollama.
+            out.provider_backend, out.provider_model = resolved_provenance(profile, self.config)
             ps.attempts.append(out)
             ps.best_output = out
             self._clear_fail_closed_flags(state, page_num, ps, profile)
@@ -3262,8 +3270,19 @@ class UnifiedPipeline:
                     att.output.cost_usd = att.cost_usd
                     att.output.audit_passed = att.accepted
                     att.output.provider_id = att.provider_id  # B3: agentic provenance
-                    att.output.provider_model = att.model  # B3
-                    att.output.provider_backend = att.backend  # B3
+                    # GH-370: ``att.model``/``att.backend`` carry the rung's
+                    # REGISTRY identity. The manifest's provenance fields must
+                    # carry what executed -- for a vLLM run those differ, and
+                    # recording the registry label named a backend that was not
+                    # installed on the host.
+                    att_profile = profile_by_id(att.provider_id)
+                    if att_profile is not None:
+                        att.output.provider_backend, att.output.provider_model = (
+                            resolved_provenance(att_profile, self.config)
+                        )
+                    else:
+                        att.output.provider_model = att.model
+                        att.output.provider_backend = att.backend
                     att.output.skip_reason = (
                         att.reason if not att.accepted and not att.output.text else ""
                     )  # B3
@@ -5149,14 +5168,16 @@ class UnifiedPipeline:
         ``"ollama"`` stays Ollama even with ``VLLM_BASE_URL`` exported, because
         a value the user typed outranks one the environment happens to carry.
         """
-        import os
-
+        from socr.core.providers import qwen_auto_resolves_to_openai
         from socr.tables.extract import OPENAI_COMPATIBLE_BACKENDS
 
         backend = getattr(self.config, "qwen_backend", "")
         if backend in OPENAI_COMPATIBLE_BACKENDS:
             return True
-        return backend == "auto" and bool(os.environ.get("VLLM_BASE_URL"))
+        # GH-370 (cubic P2): case 2 lives in ONE place. Provenance recording
+        # asks the same question, and a second copy of this rule is exactly the
+        # execution/recording drift this ticket exists to remove.
+        return qwen_auto_resolves_to_openai(self.config)
 
     def _local_backend_host(self) -> str:
         """Where this run's local Ollama daemon actually listens (GH-222)."""
