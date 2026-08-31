@@ -363,5 +363,31 @@ def resolved_provenance(profile: ProviderProfile, config: object) -> tuple[str, 
         # Local import: ``core`` must not import ``engines`` at module scope.
         from socr.engines.qwen import resolve_qwen_intent
 
-        return resolve_qwen_intent(config)
+        backend, model = resolve_qwen_intent(config)
+        if qwen_auto_resolves_to_openai(config):
+            # ``auto`` is not a transport. resolve_qwen_intent classifies it
+            # with the LOCAL backends and hands back the Ollama tag, so an HPC
+            # run that never touched a flag would record Ollama all over again
+            # -- the same defect by a shorter route.
+            served = getattr(config, "qwen_vllm_model", "") or model
+            return "vllm", served
+        return backend, model
     return profile.backend, profile.model
+
+
+def qwen_auto_resolves_to_openai(config: object) -> bool:
+    """Whether an ``auto`` qwen backend actually lands on an OpenAI-compatible server.
+
+    GH-370 follow-up. ``PipelineConfig`` adopts ``VLLM_BASE_URL`` into
+    ``qwen_vllm_url`` while leaving ``qwen_backend`` at its ``"auto"`` default,
+    so exporting ONE environment variable is the whole HPC deployment -- see
+    ``UnifiedPipeline._local_backend_is_openai_compatible``, whose docstring
+    names this "not a corner case, it is the HPC deployment".
+
+    An EXPLICIT backend always wins, in both directions: ``"ollama"`` stays
+    Ollama even with ``VLLM_BASE_URL`` exported, because a value the user typed
+    outranks one the environment happens to carry.
+    """
+    import os
+
+    return getattr(config, "qwen_backend", "") == "auto" and bool(os.environ.get("VLLM_BASE_URL"))

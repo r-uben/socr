@@ -108,3 +108,47 @@ class TestProfileLookup:
 
     def test_unknown_id_is_none_not_a_wrong_profile(self) -> None:
         assert profile_by_id("no-such-provider") is None
+
+
+class TestAutoBackendOnAnHpcHost:
+    """cubic P1 on PR #382. ``auto`` is not a transport.
+
+    ``PipelineConfig`` adopts ``VLLM_BASE_URL`` into ``qwen_vllm_url`` while
+    leaving ``qwen_backend`` at its ``"auto"`` default, so exporting ONE
+    environment variable IS the HPC deployment (see
+    ``UnifiedPipeline._local_backend_is_openai_compatible``). Resolving ``auto``
+    with the local backends would hand back the Ollama tag and reproduce the
+    reported defect by a shorter route.
+    """
+
+    def test_env_var_is_the_only_difference_and_it_reaches_provenance(self, monkeypatch) -> None:
+        cfg = _cfg(qwen_backend="auto", qwen_vllm_model=_HF_MODEL)
+
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+        without_env = resolved_provenance(PROFILE_QWEN_LOCAL, cfg)
+
+        monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        with_env = resolved_provenance(PROFILE_QWEN_LOCAL, cfg)
+
+        assert without_env != with_env
+        assert with_env == ("vllm", _HF_MODEL)
+        assert with_env[1] != PROFILE_QWEN_LOCAL.model, (
+            "an auto/HPC run must not record the Ollama tag -- that is the "
+            "original bug reached without touching a flag"
+        )
+
+    def test_an_explicit_backend_outranks_the_environment(self, monkeypatch) -> None:
+        """A value the user typed beats one the environment happens to carry --
+        in both directions, matching the existing predicate's contract."""
+        monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        assert resolved_provenance(PROFILE_QWEN_LOCAL, _cfg(qwen_backend="ollama")) == (
+            "ollama",
+            PROFILE_QWEN_LOCAL.model,
+        )
+
+    def test_auto_without_the_env_var_is_not_claimed_as_vllm(self, monkeypatch) -> None:
+        """Control: no environment, no vLLM claim. Guards against the fix
+        over-reaching into every auto run on a laptop."""
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+        backend, _model = resolved_provenance(PROFILE_QWEN_LOCAL, _cfg(qwen_backend="auto"))
+        assert backend != "vllm"
