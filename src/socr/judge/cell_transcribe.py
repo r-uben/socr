@@ -5,8 +5,11 @@ must return a token string. It never sees markdown, the native string,
 findings, or a PASS/FAIL schema. Arithmetic in ``tables.adjudication``
 decides whether that token disproves a ``bind()`` contradiction.
 
-Transport reuses the table-judge ollama chat seam (``_post_chat`` /
-``_build_payload``) so tests can monkeypatch one function. Every failure
+Transport reuses the table-judge ollama chat seam, resolved THROUGH
+``table_rung_ollama`` rather than copied into this module's namespace, so
+monkeypatching that shared seam actually reaches this caller (GH-388 review):
+a copied reference would let a test believe it had stubbed the transport while
+this function still opened a socket to a real ollama daemon. Every failure
 — missing crop, timeout, unparseable JSON, missing ``token`` — returns
 None (not a disproof). Never raises.
 """
@@ -19,7 +22,7 @@ from pathlib import Path
 import httpx
 
 from socr.judge.judge import _extract_json
-from socr.judge.table_rung_ollama import _build_payload, _post_chat
+from socr.judge import table_rung_ollama as _table_rung_ollama
 from socr.tables.extract import resolve_ollama_host
 
 logger = logging.getLogger(__name__)
@@ -67,10 +70,18 @@ def transcribe_cell(
     except OSError as exc:
         logger.warning("cell transcribe: unreadable crop %s (%s)", crop_path, exc)
         return None
-    payload = _build_payload(model, load_cell_transcribe_prompt(), image_b64)
+    # GH-388 review (cubic P2): the failure boundary must cover EVERYTHING the
+    # docstring promises, not just transport. Prompt construction can raise
+    # OSError on an unreadable policy file; ``resp.json()`` inside the transport
+    # raises ValueError on a 200 body that is not JSON, and attribute access on
+    # an unexpected shape raises AttributeError/KeyError/TypeError. Any of those
+    # escaping breaks the "Never raises" contract and, worse, would abort the
+    # gate instead of simply not being a disproof. Not-a-disproof is the correct
+    # outcome for every one of them.
     try:
-        raw = _post_chat(resolve_ollama_host(host), payload, timeout)
-    except (httpx.HTTPError, OSError) as exc:
+        payload = _table_rung_ollama._build_payload(model, load_cell_transcribe_prompt(), image_b64)
+        raw = _table_rung_ollama._post_chat(resolve_ollama_host(host), payload, timeout)
+        return parse_transcribe_output(raw)
+    except (httpx.HTTPError, OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         logger.warning("cell transcribe: %s (%s: %s)", crop_path, type(exc).__name__, exc)
         return None
-    return parse_transcribe_output(raw)

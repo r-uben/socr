@@ -7,6 +7,12 @@ and not native. An ordinary judge PASS never lifts the GH-359 ruling 5
 clamp. A helper-unit suite is not a gate — this file drives
 ``_run_table_judge_gate`` and ``UnifiedPipeline.process()``.
 
+Every process()-level assertion is a same-process DIFFERENCE (#253/#257): two
+runs changing only the thing under test. Absolute status pins were removed in
+review -- the pipeline is mocked here so they are deterministic today, but the
+repo's rule exists because exactly that kind of pin broke main before, and a
+future unpinned audit step must not turn this file red.
+
 Hermetic: CI has no ollama. Transcriber is injected. ``_available_engines
 _for_agentic`` and ``_resolve_judge_model`` are patched wherever
 ``process()`` runs. Never pin an absolute outcome measured on one machine
@@ -295,9 +301,7 @@ class TestProcessDifference:
         )
 
         assert result_hold.status != result_lift.status
-        assert result_hold.status == DocumentStatus.AUDIT_FAILED
         assert "table_unverified" in (result_hold.error or "")
-        assert result_lift.status == DocumentStatus.SUCCESS
         assert "table_unverified" not in (result_lift.error or "")
         assert "table_rejected" not in (result_lift.error or "")
 
@@ -315,7 +319,9 @@ class TestProcessDifference:
         assert "lifted" in lift_statuses
         assert "held" in hold_statuses
         assert lift_meta.get("table_ladder_disposition") is None
-        assert hold_meta.get("table_ladder_disposition") == FailureMode.TABLE_UNVERIFIED.value
+        assert hold_meta.get("table_ladder_disposition") != lift_meta.get(
+            "table_ladder_disposition"
+        )
 
     def test_encoding_garbage_vs_well_formed_is_the_lift(self, tmp_path: Path) -> None:
         """Same PDF, same shifted markdown, same accepting rung, transcriber
@@ -353,9 +359,7 @@ class TestProcessDifference:
         result_lift = _run(pdf_lift, tmp_path / "lift_out", garbage=True)
 
         assert result_held.status != result_lift.status
-        assert result_held.status == DocumentStatus.AUDIT_FAILED
         assert "table_unverified" in (result_held.error or "")
-        assert result_lift.status == DocumentStatus.SUCCESS
         assert "table_unverified" not in (result_lift.error or "")
 
     def test_flag_off_does_not_adjudicate(self, tmp_path: Path) -> None:
@@ -395,6 +399,5 @@ class TestProcessDifference:
         ):
             result_on = pipeline_on.process(pdf_on, tmp_path / "on_out")
 
-        assert result_off.status == DocumentStatus.SUCCESS
-        assert result_on.status == DocumentStatus.AUDIT_FAILED
+        assert result_off.status != result_on.status
         assert "table_unverified" in (result_on.error or "")

@@ -189,10 +189,17 @@ def prior_lift_applies(prior: object, markdown: str, items: tuple[ContradictionI
     if not isinstance(raw_sigs, list):
         return False
     try:
-        prior_sigs = {tuple(_coerce_signature(sig)) for sig in raw_sigs}
+        # GH-388 review (cubic P1): SORTED SEQUENCES, not sets. Two
+        # contradictions can share a signature -- the same native/model token
+        # pair at two loci that normalize alike -- and a set collapses them.
+        # A resumed run would then match a prior lift of ONE against a current
+        # set of TWO and reuse it, clearing a contradiction nothing ever
+        # disproved. The lift must require every contradiction, not every
+        # distinct signature.
+        prior_sigs = sorted(tuple(_coerce_signature(sig)) for sig in raw_sigs)
     except (TypeError, ValueError):
         return False
-    current_sigs = {item.signature() for item in items}
+    current_sigs = sorted(item.signature() for item in items)
     return prior_sigs == current_sigs
 
 
