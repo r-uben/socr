@@ -30,7 +30,7 @@ silent document-wide sweep):
   UNVERIFIED rather than letting the judge's PASS silently erase the
   mechanical evidence (the exact GH-273 failure). Distinguished from plain
   UNVERIFIED by its own audit-event wording ("mechanical binding check found
-  a contradiction the judge ladder's PASS did not address").
+  a contradiction").
 
 Hermetic throughout, matching every prior GH-353 ticket's own contract: CI
 has no ollama and no ``gemini`` binary, so every rung is an injected fake
@@ -483,12 +483,11 @@ class TestClampedUnverifiedTerminal:
             rungs=[rung],
         )
 
-        # The real rung DID see the mechanical findings (composition, not a
-        # post-hoc overwrite) -- proves the clamp fired via the real pipeline.
+        # GH-359 ruling 4: the real rung does NOT see mechanical findings
+        # (crop + markdown, nothing else). Ruling 5: the clamp still fires.
         shift_calls = [c for c in rung.calls if c[1].strip() == SHIFT_SHIFTED_MD.strip()]
         assert shift_calls
-        assert shift_calls[0][2], "the real rung must see the mechanical contradiction's findings"
-        assert all(f.code.value == "WRONG_BINDING" for f in shift_calls[0][2])
+        assert shift_calls[0][2] is None
 
         assert state_on.pages[SHIFT_PAGE].table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         assert state_on.pages[CLEAN_PAGE].table_ladder_disposition is None

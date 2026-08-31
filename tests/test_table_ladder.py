@@ -141,8 +141,7 @@ def test_a_low_then_not_s1_unverifies():
 
 
 def test_lone_low_confidence_pass_with_no_corroboration_is_unverified():
-    """A single low-confidence PASS with no preceding real-PASS witness cannot verify
-    the table on its own — one weak witness is not consensus."""
+    """GH-359 ruling 1: last-rung PASS+low with no preceding PASS is UNVERIFIED."""
     rung1 = _rung(_pass("rung1", "low"))
 
     result = run_table_ladder([rung1], CROP, MARKDOWN, table_id="t0")
@@ -181,6 +180,28 @@ def test_low_confidence_pass_then_low_confidence_pass_accepts():
 # --------------------------------------------------------------------------
 
 
+def test_b_then_a_low_unverifies():
+    """GH-359 rulings 1+2: CLI₁ FAIL + CLI₂ PASS+low is UNVERIFIED, not accept."""
+    rung1 = _rung(_fail("rung1"))
+    rung2 = _rung(_pass("rung2", "low"))
+
+    result = run_table_ladder([rung1, rung2], CROP, MARKDOWN, table_id="t0")
+
+    assert result.outcome is TableLadderOutcome.UNVERIFIED
+    assert result.final_verdict is None
+
+
+def test_not_a_table_fail_at_last_rung_is_rejected():
+    """GH-359 ruling 7: NOT_A_TABLE is a content FAIL → REJECTED, not a reroute."""
+    findings = [Finding(code=FindingCode.NOT_A_TABLE, where="crop", detail="this is a chart")]
+    rung1 = _rung(_fail("rung1", findings))
+
+    result = run_table_ladder([rung1], CROP, MARKDOWN, table_id="t0")
+
+    assert result.outcome is TableLadderOutcome.REJECTED
+    assert result.final_verdict.findings[0].code is FindingCode.NOT_A_TABLE
+
+
 def test_b_then_a_accepts():
     calls: list = []
     rung1 = _rung_sequence(_fail("rung1"), captured=calls)
@@ -190,11 +211,11 @@ def test_b_then_a_accepts():
 
     assert result.outcome is TableLadderOutcome.ACCEPTED
     assert result.final_verdict.verdict == "PASS"
-    # Tiebreak escalation carries the prior findings.
-    assert calls[1][2] == FAIL_FINDINGS
+    # GH-359 ruling 4: B-escalation does not carry findings.
+    assert calls[1][2] is None
 
 
-def test_b_then_b_rejects_and_carries_findings_forward():
+def test_b_then_b_rejects_without_forwarding_findings():
     calls: list = []
     rung1 = _rung_sequence(_fail("rung1", FAIL_FINDINGS), captured=calls)
     second_findings = [Finding(code=FindingCode.WRONG_BINDING, where="row 2", detail="shifted")]
@@ -204,10 +225,12 @@ def test_b_then_b_rejects_and_carries_findings_forward():
 
     assert result.outcome is TableLadderOutcome.REJECTED
     assert result.final_verdict.findings == second_findings
-    assert calls[1][2] == FAIL_FINDINGS
+    # GH-359 ruling 4: crop + markdown, nothing else.
+    assert calls[1][2] is None
 
 
 def test_b_then_not_s1_unverifies():
+    """GH-359 ruling 3: mixed B then C is UNVERIFIED, not REJECTED."""
     rung1 = _rung(_fail("rung1"))
     rung2 = _rung(_not_s1("rung2"))
 

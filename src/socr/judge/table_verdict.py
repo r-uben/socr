@@ -186,11 +186,9 @@ class RungResult:
 class RungCallable(Protocol):
     """Anything that judges one table crop and returns a ``RungResult``.
 
-    ``prior_findings`` is populated only on a tiebreak escalation (the B
-    outcome — S1 held, previous rung said FAIL): the next rung sees what the
-    previous rung complained about. It is ``None``/empty on a substitute
-    escalation (the C outcome — ¬S1), so a fresh rung is never biased by a
-    verdict nobody actually produced.
+    ``prior_findings`` remains on the signature for call-site compatibility.
+    GH-359 ruling 4: the ladder always passes ``None``. Judge input is crop
+    + markdown, nothing else — a B-escalation does not carry the complaint.
     """
 
     def __call__(

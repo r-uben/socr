@@ -3,9 +3,9 @@
 The prompt is data (``prompts/table_judge.md``), not code, mirroring the page
 judge's ``load_judge_prompt``. Pins: the six-code closed enum appears verbatim
 in the template (A1's parser treats an unknown code as an S1 failure, so the
-model must only ever see these six spellings); the loader renders with and
-without a prior-findings payload (the tiebreak injection slot A3 uses); the
-emitted markdown is always embedded, never dropped.
+model must only ever see these six spellings); GH-359 ruling 4: a prior-
+findings payload is never injected (judge input is crop + markdown only);
+the emitted markdown is always embedded, never dropped.
 """
 
 from __future__ import annotations
@@ -52,38 +52,39 @@ def test_prompt_states_empty_cell_rule():
 def test_loader_returns_raw_template_unrendered():
     template = load_table_judge_prompt()
     assert "{{EMITTED_MARKDOWN}}" in template
-    assert "{{PRIOR_FINDINGS}}" in template
+    assert "independently" in template.lower()
 
 
-def test_build_prompt_without_findings_embeds_markdown_and_neutral_note():
+def test_build_prompt_embeds_markdown_and_independent_look_note():
     markdown = "| a | b |\n|---|---|\n| 1 | 2 |"
     rendered = build_table_judge_prompt(markdown)
     assert markdown in rendered
     assert "{{EMITTED_MARKDOWN}}" not in rendered
     assert "{{PRIOR_FINDINGS}}" not in rendered
-    assert "no prior findings" in rendered.lower()
+    assert "independently" in rendered.lower()
+    assert "not given" in rendered.lower()
 
 
-def test_build_prompt_with_findings_injects_tiebreak_payload():
+def test_build_prompt_does_not_inject_findings():
+    """GH-359 ruling 4: a complaint payload must not reach the judge."""
     markdown = "| a | b |\n|---|---|\n| 1 | 2 |"
     prior_findings = [
         {"code": "WRONG_BINDING", "where": "row 2, col Coef", "detail": "shifted one column left"},
     ]
     rendered = build_table_judge_prompt(markdown, prior_findings)
     assert markdown in rendered
-    assert "WRONG_BINDING" in rendered
-    assert "row 2, col Coef" in rendered
-    assert "shifted one column left" in rendered
-    assert "no prior findings" not in rendered.lower()
+    assert "row 2, col Coef" not in rendered
+    assert "shifted one column left" not in rendered
 
 
-def test_build_prompt_with_empty_findings_list_uses_neutral_note():
+def test_build_prompt_with_empty_findings_list_still_independent():
     rendered = build_table_judge_prompt("| a |\n|---|\n| 1 |", prior_findings=[])
-    assert "no prior findings" in rendered.lower()
+    assert "independently" in rendered.lower()
 
 
-def test_build_prompt_findings_missing_optional_keys_do_not_raise():
+def test_build_prompt_findings_argument_does_not_raise():
     rendered = build_table_judge_prompt(
-        "| a |\n|---|\n| 1 |", prior_findings=[{"code": "NOT_A_TABLE"}]
+        "| a |\n|---|\n| 1 |",
+        prior_findings=[{"code": "NOT_A_TABLE", "detail": "unique-payload-xyz"}],
     )
-    assert "NOT_A_TABLE" in rendered
+    assert "unique-payload-xyz" not in rendered

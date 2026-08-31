@@ -114,9 +114,11 @@ class TestBuildOllamaRung:
         assert result.verdict.verdict == "FAIL"
         assert result.verdict.findings[0].code is FindingCode.MISSING_VALUE
 
-    def test_prior_findings_reach_the_prompt_in_tiebreak_mode(
+    def test_prior_findings_do_not_reach_the_prompt(
         self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
     ):
+        """GH-359 ruling 4: even a caller that still passes findings must
+        not leak them into the judge prompt."""
         captured: dict[str, object] = {}
 
         def _fake_post_chat(host: str, payload: dict, timeout: float) -> str:
@@ -129,9 +131,9 @@ class TestBuildOllamaRung:
         prior = [Finding(code=FindingCode.WRONG_BINDING, where="row 3", detail="label shifted")]
         rung(crop_path, "| a |\n| - |\n| 1 |", prior)
 
-        assert "WRONG_BINDING" in captured["prompt"]
-        assert "row 3" in captured["prompt"]
-        assert "label shifted" in captured["prompt"]
+        assert "row 3" not in captured["prompt"]
+        assert "label shifted" not in captured["prompt"]
+        assert "independently" in captured["prompt"].lower()
 
     def test_malformed_json_is_s1_failure_not_an_exception(
         self, monkeypatch: pytest.MonkeyPatch, crop_path: Path

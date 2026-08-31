@@ -2434,12 +2434,11 @@ class UnifiedPipeline:
     # ------------------------------------------------------------------
     # GH-353 TICKET-B1: the table judge ladder gate.
     #
-    # One choke point, post-repetition-guard (so the judged table is the
-    # shipped table): B0 witnesses -> A4 ladder (A2/A3 rungs injected) ->
-    # A1 audit-event kinds -> PageState.table_ladder_disposition, which C3's
-    # manifest guard and C2's document aggregation both read. Native lane
-    # included (design doc: "the native-lane-unwitnessed hole"); only
-    # ``engine == "chart_asset"`` pages skip the gate entirely.
+    # Content terminals are produced post-repetition-guard in the agentic
+    # loop (B0 witnesses -> A4 ladder -> A1 events -> PageState disposition).
+    # Assemble is a completeness backfill for missing events, not a second
+    # judge. Native lane included; ``engine == "chart_asset"`` still skips
+    # inside the helper (B1); assemble catches residual markdown tables.
     # ------------------------------------------------------------------
 
     def _build_table_judge_rungs(self) -> list:
@@ -2472,120 +2471,36 @@ class UnifiedPipeline:
         ]
 
     # ------------------------------------------------------------------
-    # GH-353 TICKET-E1: mechanical binding evidence at the gate.
+    # GH-359 ruling 5: mechanical binding evidence at the gate.
     #
     # ``tables/binding.py bind()`` is a pure, local, cloud-free geometric
-    # check that catches exactly the failure shape judges have been
-    # measured to miss: a value multiset that is completely correct but
-    # bound to the wrong row/column (GH-273 -- two frontier judges both
-    # blessed that exact defect; kimi missed it too in the GH-356 bake-off).
+    # check that catches the GH-273 shape judges miss: a value multiset
+    # that is completely correct but bound to the wrong row/column.
     #
-    # Deliberately CONTRADICTION-ONLY (``tables/witness.py``'s own module
-    # docstring already names this ticket and this exact contract):
-    # ``BindingResult.no_known_contradiction`` is NOT used as the forcing
-    # signal, because it is also False whenever coverage is merely
-    # incomplete (``native_unbound``/``model_unbound`` -- a dropped- or
-    # invented-*digit count*, not a *conflict*) -- which fires on almost
-    # every real table (binding coverage was measured incomplete on 12/13
-    # corpus table pages) and on any page with sparse or no native text at
-    # all (confirmed empirically: a fully wordless page still populates
-    # ``model_unbound`` for every candidate value, with
-    # ``no_known_contradiction is False``). Forcing on that signal would be
-    # exactly the mass-demotion trap the design log warns against, and
-    # would also falsely convict every existing gate-test fixture (built
-    # only to exercise crop/witness plumbing, never to BE a correct table).
-    # Only ``contradicted_cells``/``row_label_contradictions`` -- a value or
-    # label that WAS checked and disagreed -- forces demotion; absence of
-    # coverage stays NEUTRAL, matching the ticket's own acceptance
-    # criterion (a no-native-words fixture must not be demoted by binding
-    # alone).
+    # CONTRADICTION-ONLY. ``fully_checked``, ``no_known_contradiction``,
+    # ``structural_agreement``, ``native_unbound`` and ``model_unbound``
+    # are NOT gates (GH-330: the binder fully-checks 0/15 real pages;
+    # wiring any of those as SUCCESS re-blocks the wave). Only
+    # ``contradicted_cells`` / ``row_label_contradictions`` fire. Absence
+    # of coverage stays NEUTRAL.
+    #
+    # On fire: withhold acceptance (TABLE_UNVERIFIED). Never REJECTED on
+    # mechanical evidence alone -- the native text layer can be the
+    # culprit (GH-334). A judge REJECTED is left untouched. The check is
+    # not a fake judge rung and does not inject findings into the prompt
+    # (ruling 4: crop + markdown, nothing else).
     # ------------------------------------------------------------------
-
-    #: Rung identifier for the synthetic mechanical-binding "rung" (see
-    #: ``_binding_contradiction_findings``/``_run_table_judge_gate`` below).
-    #: Never a real ``RungCallable`` reaching a socket or subprocess -- it
-    #: is injected directly into A4's ``run_table_ladder`` rung sequence so
-    #: a mechanical contradiction composes with the ladder's own accepted
-    #: B/tiebreak semantics (escalate with findings attached) rather than
-    #: post-hoc overwriting whatever outcome the real rungs reached.
-    _MECHANICAL_BINDING_RUNG = "mechanical:binding"
-
-    @staticmethod
-    def _binding_contradiction_findings(binding_result) -> list:
-        """Turn a contradicted ``BindingResult`` into judge ``Finding``s.
-
-        Only ever called when ``contradicted_cells`` or
-        ``row_label_contradictions`` is non-empty (the gate's own
-        contradiction check), so the returned list is always non-empty --
-        required by the verdict schema's "FAIL must carry >= 1 finding"
-        rule. Both sources map to ``WRONG_BINDING``: a value present on
-        both sides but disagreeing, or a row's label not matching its
-        anchored native row, are both binding (not perception) defects --
-        the same taxonomy slot the design doc assigns the GH-273 case.
-        """
-        from socr.judge.table_verdict import Finding, FindingCode
-
-        findings = []
-        for rlc in binding_result.row_label_contradictions:
-            where = "/".join(rlc.row_path) or "row"
-            findings.append(
-                Finding(
-                    code=FindingCode.WRONG_BINDING,
-                    where=where,
-                    detail=(
-                        f"mechanical binding check: native row {rlc.row_path!r} "
-                        f"anchored by value, but candidate labeled it {rlc.candidate_label!r}"
-                    ),
-                )
-            )
-        for cc in binding_result.contradicted_cells:
-            where = "/".join(cc.row_path + cc.col_path) or "cell"
-            findings.append(
-                Finding(
-                    code=FindingCode.WRONG_BINDING,
-                    where=where,
-                    detail=(
-                        f"mechanical binding check: native value {cc.native_token!r} "
-                        f"vs candidate value {cc.model_token!r} at the same anchored cell"
-                    ),
-                )
-            )
-        return findings
-
-    def _binding_contradiction_rung(self, findings: list):
-        """Build a ``RungCallable`` that always answers a fixed FAIL.
-
-        Ignores ``crop_path``/``markdown``/``prior_findings`` entirely (the
-        verdict was already produced by ``bind()``, not by looking at the
-        crop) -- it exists only so the mechanical evidence can be prepended
-        to a table's own rung sequence and run through A4's
-        ``run_table_ladder`` unmodified: a FAIL at rung 0 that is not the
-        last rung always escalates as a tiebreak carrying these findings,
-        matching the B outcome real judge rungs already produce.
-        """
-        from socr.judge.table_verdict import RungResult, TableJudgeVerdict
-
-        def _rung(crop_path, markdown, prior_findings):
-            return RungResult(
-                rung=self._MECHANICAL_BINDING_RUNG,
-                ok=True,
-                verdict=TableJudgeVerdict(verdict="FAIL", confidence="high", findings=findings),
-            )
-
-        return _rung
 
     def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
         """Run the mechanical binding check for one LOCATED witness.
 
-        Returns the contradiction ``Finding`` list, or ``None`` when
-        nothing about the check forces demotion (no box, no native words,
-        an unparseable candidate block, or nothing checkable disagreed).
-        Never raises: a page-open/geometry failure is logged and treated
-        as an absence of evidence, same as the design's own "fails closed"
-        contract for ``bind()`` itself.
+        Returns True when a GH-273-class contradiction was found, else
+        False (no box, no native words, an unparseable candidate, or
+        nothing checkable disagreed). Never raises: a page-open/geometry
+        failure is logged and treated as an absence of evidence.
         """
         if witness.box is None:
-            return None
+            return False
 
         from socr.core.pdf import open_pdf
         from socr.tables.binding import bind
@@ -2600,9 +2515,9 @@ class UnifiedPipeline:
                 type(exc).__name__,
                 exc,
             )
-            return None
+            return False
         if not words:
-            return None
+            return False
 
         try:
             binding_result = bind(words, witness.markdown, region=witness.box.bbox)
@@ -2615,11 +2530,11 @@ class UnifiedPipeline:
                 exc,
                 exc_info=True,
             )
-            return None
+            return False
 
-        if not binding_result.contradicted_cells and not binding_result.row_label_contradictions:
-            return None
-        return self._binding_contradiction_findings(binding_result)
+        # GH-359 ruling 5: fully_checked is not a gate. Only a genuine
+        # cell/label contradiction withholds acceptance.
+        return bool(binding_result.contradicted_cells or binding_result.row_label_contradictions)
 
     def _run_table_judge_gate(
         self,
@@ -2631,6 +2546,14 @@ class UnifiedPipeline:
     ) -> None:
         """Judge every table this page emits against its own page crop.
 
+        Helper, not the content choke by itself. Content terminals are
+        produced by the ``if self.config.table_judge_ladder`` call in
+        ``_phase_agentic``. Assemble then backfills any emitted table that
+        still has no ladder event as TABLE_UNVERIFIED (completeness). A
+        helper-unit test going green while that ``if`` is commented out is
+        not a content gate; a missing assemble backfill lets an unjudged
+        table ship SUCCESS.
+
         Never raises and never silently passes: a table whose witness could
         not be located (AMBIGUOUS/MISSING), or any infra error while
         preparing witnesses or running the ladder, demotes that table to
@@ -2641,23 +2564,13 @@ class UnifiedPipeline:
         the manifest guard, so the shipped attempt itself is never touched
         here).
 
-        GH-353 TICKET-E1: a LOCATED witness also gets the mechanical
-        binding check (see the block comment above
-        ``_MECHANICAL_BINDING_RUNG``). A genuine contradiction is injected
-        as a synthetic rung-0 FAIL ahead of the real rungs -- it therefore
-        composes with A4's own tiebreak semantics instead of overwriting
-        the ladder's outcome, and can force REJECTED even when ``rungs`` is
-        empty (the mechanical check needs no cloud egress, so
-        ``strict_local`` does not exempt it). CONSILIUM (panel #3): a
-        genuine contradiction also CAPS that table's outcome at
-        UNVERIFIED -- a later judge PASS (any confidence) can no longer
-        resolve it to ACCEPTED, only a ladder REJECTED can still finish
-        REJECTED. Mechanical evidence is a different, near-zero-false-
-        positive evidence class than judge-vs-judge disagreement (letting
-        a fallible judge silently overrule it repeats GH-273), but it does
-        not demote content outright either (the native text layer itself
-        can be the culprit -- GH-334); it withholds acceptance, it does
-        not force rejection.
+        GH-359 ruling 5: a LOCATED witness also gets the mechanical
+        binding-shift detector. A genuine contradiction CAPS the table at
+        UNVERIFIED -- a later judge PASS can no longer resolve it to
+        ACCEPTED. REJECTED is left untouched. Mechanical evidence is not a
+        fake judge rung and is never injected into the prompt (ruling 4).
+        Empty rungs plus a contradiction is UNVERIFIED, not REJECTED
+        (GH-334: the native layer can be the culprit).
         """
         if bo.engine == "chart_asset" or not bo.text:
             return
@@ -2676,15 +2589,14 @@ class UnifiedPipeline:
         )
         from socr.tables.witness import WitnessStatus, prepare_table_witnesses
 
-        # table_id -> True iff that table's ladder run had the mechanical
-        # rung prepended, so the rung_trail loop below (which runs after
-        # this whole try/except) knows to offset its rung1/rung2 identity
-        # lookup by one for that table only.
+        # table_id -> True iff bind() found a GH-273-class contradiction.
         forced_by_binding: dict[str, bool] = {}
 
         try:
             with prepare_table_witnesses(state.handle.path, page_num, bo.text) as witnesses:
                 if not witnesses:
+                    # No table blocks in bo.text. Assemble completeness
+                    # backfills if the shipped text later contains tables.
                     return
                 table_results: list[TableLadderResult] = []
                 for witness in witnesses:
@@ -2699,16 +2611,14 @@ class UnifiedPipeline:
                         )
                         continue
 
-                    table_rungs = rungs
-                    findings = self._binding_contradiction_for_witness(state, page_num, witness)
-                    if findings:
-                        table_rungs = [self._binding_contradiction_rung(findings), *rungs]
+                    if self._binding_contradiction_for_witness(state, page_num, witness):
                         forced_by_binding[witness.table_id] = True
 
-                    if not table_rungs:
-                        # Ladder off, strict_local made every rung
-                        # unavailable before the first call, and the
-                        # mechanical check found nothing -- fail open.
+                    if not rungs:
+                        # No CLI available (strict_local, or flag-on with
+                        # injected empty rungs): fail open to UNVERIFIED.
+                        # A mechanical contradiction does not upgrade this
+                        # to REJECTED (GH-359 ruling 5).
                         table_results.append(
                             TableLadderResult(
                                 table_id=witness.table_id,
@@ -2719,7 +2629,7 @@ class UnifiedPipeline:
                     try:
                         table_results.append(
                             run_table_ladder(
-                                table_rungs, witness.crop_path, witness.markdown, witness.table_id
+                                rungs, witness.crop_path, witness.markdown, witness.table_id
                             )
                         )
                     except Exception as exc:
@@ -2760,23 +2670,9 @@ class UnifiedPipeline:
             ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
             return
 
-        # GH-353 TICKET-E1 CONSILIUM (panel #3, unanimous): a genuine
-        # mechanical contradiction is a different evidence class than
-        # judge-vs-judge disagreement -- objective, localized, and
-        # near-zero-false-positive by design -- so letting a later judge
-        # PASS silently erase it would repeat the exact GH-273 failure
-        # (two frontier judges both blessed the wrong-binding table).
-        # Straight REJECTED was rejected too: the native text layer itself
-        # can be the culprit (GH-334), so mechanical evidence must not
-        # demote content outright -- it can only withhold acceptance. This
-        # caps any table the mechanical rung fired for at UNVERIFIED: a
-        # subsequent judge PASS (at ANY confidence) can no longer resolve
-        # it to ACCEPTED. A REJECTED outcome is untouched -- the clamp is
-        # a ceiling on acceptance, not a floor on rejection. The prepended
-        # synthetic rung (above) still lets the real judges SEE the
-        # evidence -- that improves a genuine FAIL's own findings -- the
-        # clamp composes on top as a final backstop, not a replacement.
-        clamped_table_ids: set[str] = set()
+        # GH-359 ruling 5: a genuine mechanical contradiction withholds
+        # acceptance. REJECTED is untouched (ceiling on accept, not a
+        # floor on reject). Empty-rung UNVERIFIED is already UNVERIFIED.
         clamped_results: list[TableLadderResult] = []
         for result in table_results:
             if (
@@ -2784,7 +2680,6 @@ class UnifiedPipeline:
                 and result.outcome is TableLadderOutcome.ACCEPTED
             ):
                 result = replace(result, outcome=TableLadderOutcome.UNVERIFIED)
-                clamped_table_ids.add(result.table_id)
             clamped_results.append(result)
         table_results = clamped_results
 
@@ -2795,12 +2690,11 @@ class UnifiedPipeline:
             elif result.outcome is TableLadderOutcome.REJECTED:
                 kind = TABLE_LADDER_REJECTED_KIND
                 detail = f"table {result.table_id} rejected by the judge ladder (content problem, not retryable)"
-            elif result.table_id in clamped_table_ids:
+            elif forced_by_binding.get(result.table_id):
                 kind = TABLE_LADDER_UNVERIFIED_KIND
                 detail = (
                     f"table {result.table_id} unverified: mechanical binding check found a "
-                    "contradiction the judge ladder's PASS did not address (acceptance "
-                    "withheld pending an adjudication that disproves it; retryable on resume)"
+                    "contradiction (acceptance withheld; retryable on resume)"
                 )
             else:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
@@ -2815,25 +2709,14 @@ class UnifiedPipeline:
             # guess what actually produced a verdict. Deliberately minimal:
             # no latencies, no verdict duplication -- ``detail`` above
             # already says what happened; this only says who executed it.
-            #
-            # GH-353 TICKET-E1: when the mechanical binding rung was
-            # prepended for this table, it occupies index 0 and every real
-            # rung's own index shifts up by one -- offset the rung1/rung2
-            # lookup accordingly rather than mislabeling the mechanical
-            # entry as rung 1's model (or rung 1 as rung 2's binary).
-            offset = 1 if forced_by_binding.get(result.table_id) else 0
             rung_trail = [
                 {
                     "rung": rr.rung,
                     "ok": rr.ok,
                     "executing": (
-                        "mechanical binding check"
-                        if offset and idx == 0
-                        else (
-                            self.config.table_judge_rung1_model
-                            if idx - offset == 0
-                            else self.config.table_judge_rung2_binary
-                        )
+                        self.config.table_judge_rung1_model
+                        if idx == 0
+                        else self.config.table_judge_rung2_binary
                     ),
                 }
                 for idx, rr in enumerate(result.rung_results)
@@ -3679,11 +3562,12 @@ class UnifiedPipeline:
             # fragment, the sidecar and the stitched body all see one text.
             self._guard_agentic_page_table_repetition(state, page_num, bo, is_native)
 
-            # GH-353 TICKET-B1: the table judge ladder gate. Behind the flag;
-            # placed AFTER the repetition guard so the judged table is the
-            # exact text that ships. Runs on native AND OCR pages alike (the
-            # design's "native lane ships unwitnessed" hole); the gate itself
-            # skips chart_asset pages.
+            # GH-359 ruling 6: THIS `if` produces content terminals. Assemble
+            # does not re-judge; it only backfills a missing terminal as
+            # UNVERIFIED (completeness). Placed AFTER the repetition guard so
+            # the judged table is the exact text that ships. Runs on native
+            # AND OCR pages alike; the helper itself skips chart_asset pages
+            # (assemble catches residual markdown tables those pages still emit).
             if self.config.table_judge_ladder:
                 self._run_table_judge_gate(state, page_num, ps, bo, _table_judge_rungs)
 
@@ -4919,6 +4803,12 @@ class UnifiedPipeline:
                 if ps and ps.table_ladder_disposition is not None
                 else None
             ),
+            # GH-359 (cubic P1): an emitted table on this page reached
+            # assemble with no ladder terminal. Persisted so a resumed run
+            # refuses D1b's REJECTED skip-and-keep for THIS page -- the
+            # disposition alone cannot express "rejected, but not everything
+            # here was witnessed".
+            "table_ladder_incomplete": bool(ps and ps.table_ladder_incomplete),
             # Audit log subset for this page.
             "audit_events": page_events,
             # Table-pass and figure refs.
@@ -4974,13 +4864,20 @@ class UnifiedPipeline:
             ``PageOutput`` without error.
 
         GH-353 TICKET-D1b, the one deliberate exception: a page whose sidecar
-        ``table_ladder_disposition`` is ``FailureMode.TABLE_REJECTED`` skips
+        ``table_ladder_disposition`` is ``FailureMode.TABLE_REJECTED`` **and
+        whose ``table_ladder_incomplete`` is false** skips
         the two checks above and IS skip-and-kept even though C3's
         ``_apply_ladder_disposition_guard`` demotes such a page's finalized
         output to ``status=WARNING, audit_passed=False``. REJECTED is a
         corroborated CONTENT verdict (both ladder rungs looked and said no),
         not an infra doubt, so under the SAME input+config it is final --
         unlike every other condition here, which reprocesses on ANY doubt.
+        GH-359 (cubic P1) narrows the exception: it is forfeited when assemble
+        had to backfill a terminal for any emitted table on the page. The
+        disposition is a page-level reduction, so a page holding one REJECTED
+        table keeps ``TABLE_REJECTED`` even when a second table was never
+        witnessed; without the flag that page would be skip-and-kept forever
+        and the unwitnessed table could never be looked at.
         ``FailureMode.TABLE_UNVERIFIED`` gets NO such exception: the ladder
         ran out of witnesses/rungs without an answer, which IS infra-shaped
         doubt, so an UNVERIFIED page falls through the SUCCESS/audit checks
@@ -5058,7 +4955,13 @@ class UnifiedPipeline:
             # config already forced reprocessing before this line is reached --
             # this check never needs to re-verify rung identity itself.
             disposition_raw = meta.get("table_ladder_disposition")
-            is_ladder_rejected = disposition_raw == FailureMode.TABLE_REJECTED.value
+            # GH-359 (cubic P1): the exception is for a page whose tables were
+            # ALL adjudicated. If assemble had to backfill a terminal for any
+            # emitted table here, "both rungs looked and said no" is false for
+            # that table, so the page falls through and is reprocessed.
+            is_ladder_rejected = disposition_raw == FailureMode.TABLE_REJECTED.value and not bool(
+                meta.get("table_ladder_incomplete")
+            )
 
             # The full winning PageOutput dict must be present and rebuildable.
             winning = meta.get("winning_output")
@@ -5380,6 +5283,7 @@ class UnifiedPipeline:
             # events, never re-judging: no rung is invoked here.
             disposition_raw = meta.get("table_ladder_disposition")
             ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
+            ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
             from socr.core.audit_log import AuditEvent
             from socr.judge.table_verdict import TABLE_LADDER_EVENT_KINDS
 
@@ -5522,6 +5426,76 @@ class UnifiedPipeline:
             )
         return body, True
 
+    def _backfill_missing_table_ladder_terminals(
+        self, state: DocumentState, page_texts: list[str]
+    ) -> None:
+        """Fail closed when an emitted table reaches assemble unwitnessed.
+
+        Completeness, not content. The agentic helper produces ACCEPTED /
+        REJECTED / UNVERIFIED for tables it saw. This sweep does not re-judge:
+        any markdown table in the shipped page text that has no ladder terminal
+        event is TABLE_UNVERIFIED. A missing event is an infra miss (the
+        helper returned early, a resume skipped the gate, chart_asset skipped,
+        or the agentic ``if`` never ran), not a content FAIL.
+
+        Runs before document status, metadata, and the CLI summary are built
+        so an unwitnessed table cannot restamp SUCCESS.
+        """
+        if not self.config.table_judge_ladder:
+            return
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.manifest import is_page_failed_marker
+        from socr.judge.table_verdict import (
+            TABLE_LADDER_ACCEPTED_KIND,
+            TABLE_LADDER_REJECTED_KIND,
+            TABLE_LADDER_UNVERIFIED_KIND,
+        )
+        from socr.tables.reconcile import find_table_blocks
+
+        terminal_kinds = {
+            TABLE_LADDER_ACCEPTED_KIND,
+            TABLE_LADDER_REJECTED_KIND,
+            TABLE_LADDER_UNVERIFIED_KIND,
+        }
+        observed: set[tuple[int, str]] = set()
+        for event in state.events:
+            if event.kind not in terminal_kinds:
+                continue
+            table_id = str((event.data or {}).get("table_id", "") or "")
+            if table_id:
+                observed.add((event.page_num, table_id))
+
+        for page_num, page_text in enumerate(page_texts, start=1):
+            if not page_text or is_page_failed_marker(page_text):
+                continue
+            page_state = state.pages.get(page_num)
+            if page_state is None:
+                continue
+            for table_index, _block in enumerate(find_table_blocks(page_text)):
+                table_id = f"p{page_num}-t{table_index}"
+                if (page_num, table_id) in observed:
+                    continue
+                # GH-359 (cubic P1): record the completeness miss separately
+                # from the page-level disposition. A page holding one REJECTED
+                # table keeps that content verdict, but this flag withholds
+                # D1b's resume skip so the unwitnessed table is looked at.
+                page_state.table_ladder_incomplete = True
+                if page_state.table_ladder_disposition is not FailureMode.TABLE_REJECTED:
+                    page_state.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=TABLE_LADDER_UNVERIFIED_KIND,
+                        engine=(page_state.best_output.engine if page_state.best_output else ""),
+                        detail=(
+                            f"table {table_id} reached assemble with no table-judge "
+                            "terminal (infra problem, retryable on resume)"
+                        ),
+                        data={"table_id": table_id, "rung_trail": []},
+                    )
+                )
+
     def _phase_assemble(self, state: DocumentState, output_dir: Path) -> EngineResult:
         """Build the final EngineResult from DocumentState and save to disk.
 
@@ -5556,6 +5530,7 @@ class UnifiedPipeline:
         )
 
         page_texts = canonical_page_texts(state)
+        self._backfill_missing_table_ladder_terminals(state, page_texts)
 
         # PP-1: flush per-page fragments from the in-memory page texts, then
         # verify stitch round-trips byte-identically. Non-fatal: any error
