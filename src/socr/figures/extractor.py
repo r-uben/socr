@@ -958,6 +958,12 @@ def _looks_like_table_grid(
     return horizontal >= 3 and vertical >= 2
 
 
+#: GH-369 (cubic P2): the smallest run of consecutive bare-number lines that
+#: can be an axis scale. Two, because a scale is a sequence of ticks and a lone
+#: number between sentences is content -- a year, a headline stat, a footnote
+#: marker. Structural, not tuned: no page-level ratio is consulted anywhere.
+_MIN_AXIS_SCALE_TICKS = 2
+
 _CHART_AXIS_FENCE_OPEN = "<!-- socr:chart-axis-residue"
 _CHART_AXIS_FENCE_CLOSE = "socr:end-chart-axis-residue -->"
 
@@ -1006,10 +1012,28 @@ def split_chart_axis_residue(native_text: str) -> tuple[str, list[str]]:
     Returns ``(body, residue)``. ``residue`` is empty for any page with no bare
     numeric lines, which leaves every non-chart page byte-identical.
     """
+    lines = native_text.splitlines()
     body: list[str] = []
     residue: list[str] = []
-    for line in native_text.splitlines():
-        (residue if _is_bare_number_line(line) else body).append(line)
+
+    index = 0
+    while index < len(lines):
+        if not _is_bare_number_line(lines[index]):
+            body.append(lines[index])
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(lines) and _is_bare_number_line(lines[run_end]):
+            run_end += 1
+        run = lines[index:run_end]
+        # A scale is a SEQUENCE of ticks. One number standing alone between
+        # sentences is a year, a headline stat, or a footnote marker -- content,
+        # not chart furniture -- so it stays visible in the body. This is a
+        # structural minimum drawn from what an axis IS, not a tuned cutoff:
+        # there is no such thing as a one-tick scale.
+        (residue if len(run) >= _MIN_AXIS_SCALE_TICKS else body).extend(run)
+        index = run_end
+
     return "\n".join(body), residue
 
 

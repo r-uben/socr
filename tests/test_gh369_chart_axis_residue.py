@@ -117,3 +117,47 @@ class TestFenceIsMachineDistinguishable:
         for number in ("2", "4", "6", "8", "10"):
             assert f"\n{number}\n" in tail
         assert "Figure 4. Uncertainty and risks in economic projections" in head
+
+
+class TestALoneNumberIsContentNotFurniture:
+    """cubic P2 on PR #383. The first draft fenced ANY line that was only a
+    number, so a genuine standalone value on a chart page -- a year, a headline
+    stat, a footnote marker -- vanished from the visible prose into the trailing
+    comment. That is the silent content change the fencing design exists to
+    avoid, arriving by a different door.
+
+    An axis scale is a SEQUENCE of ticks, so only a run of consecutive
+    bare-number lines is furniture. There is still no page-level ratio anywhere.
+    """
+
+    def test_a_lone_year_stays_visible(self) -> None:
+        body, residue = split_chart_axis_residue("Published in\n2025\nby the Board")
+        assert residue == []
+        assert "2025" in body.splitlines()
+
+    def test_a_lone_headline_stat_stays_visible(self) -> None:
+        body, residue = split_chart_axis_residue("unemployment\n4.9\nin March")
+        assert residue == []
+        assert "4.9" in body.splitlines()
+
+    def test_a_lone_percent_fact_stays_visible(self) -> None:
+        body, residue = split_chart_axis_residue("share of respondents\n25%\nsaid yes")
+        assert residue == []
+        assert "25%" in body.splitlines()
+
+    def test_a_run_of_ticks_is_still_fenced(self) -> None:
+        """The control: the fix must not disarm the actual bug."""
+        _body, residue = split_chart_axis_residue("caption\n2\n4\ntail")
+        assert residue == ["2", "4"]
+
+    def test_a_lone_number_leaves_the_page_completely_unfenced(self) -> None:
+        """End to end: a chart page whose only numeric line is content gains no
+        fence at all, so its rendered output is unchanged."""
+        page = "Figure 1. Outlook\nPublished 2025\n2025\nSee notes"
+        assert fence_chart_axis_residue(page) == page
+
+    def test_two_separated_singles_are_not_a_run(self) -> None:
+        """Adjacency is what makes a scale. Two lone numbers with prose between
+        them are two facts, not a two-tick axis."""
+        _body, residue = split_chart_axis_residue("in 2024\n2024\ngrowth was\n4.9\npercent")
+        assert residue == []
