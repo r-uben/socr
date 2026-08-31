@@ -959,8 +959,8 @@ def _union_find_clusters(
     return merged
 
 
-# GH-372: a stroke whose bbox is many times longer than it is thick is a RULE
-# (a booktabs \toprule/\midrule, a tabular frame line), not a data mark.
+# GH-372 / GH-377: a stroke whose bbox is many times longer than it is thick is
+# a RULE (a booktabs \toprule/\midrule, a tabular frame line), not a data mark.
 # LaTeX's heaviest table rule (\heavyrulewidth = 0.08em ≈ 1pt at text sizes)
 # spanning even half a column (≥ 200pt) gives a thickness/span ratio ≤ 0.005,
 # and a stroked line's bbox is thinner still; the flattest thick stroke that
@@ -968,12 +968,112 @@ def _union_find_clusters(
 # vertical extent) sits well above 0.02. Only the thick-stroke branch consults
 # this — fills and coloured strokes are deliberately untouched, so a chart
 # whose axis is a thick rule still qualifies through its other marks.
+# GH-377: the ratio is evaluated per path item rather than on the drawing's union
+# rect, because some PDF generators pack all parallel rules of a table into a single
+# drawing path whose overall bounding box appears fat even though every individual
+# stroke item is flat. The drawing-rect ratio is retained only as a fallback when
+# item records are absent or cannot be safely interpreted.
 # Known limitation, accepted: a chart whose ONLY mark is a single flat
 # axis-aligned thick stroke (no fill, no colour, no frame for GH-150 A1's
 # framed-cluster path) is geometrically indistinguishable from a table rule
 # and is now missed — that shape is judged rarer than the booktabs tables
 # this gate protects (GH-372).
 _RULE_THINNESS_RATIO: float = 0.02
+
+
+def _point_coords(p: object) -> tuple[float, float] | None:
+    """Safely extract (x, y) coordinates from a Point object or tuple/list."""
+    try:
+        if hasattr(p, "x") and hasattr(p, "y"):
+            return float(p.x), float(p.y)
+        if isinstance(p, (tuple, list)) and len(p) >= 2:
+            return float(p[0]), float(p[1])
+        return None
+    except Exception:
+        return None
+
+
+def _rect_coords(r: object) -> tuple[float, float, float, float] | None:
+    """Safely extract (x0, y0, x1, y1) bounds from a Rect object or tuple/list."""
+    try:
+        if hasattr(r, "x0") and hasattr(r, "y0") and hasattr(r, "x1") and hasattr(r, "y1"):
+            x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+        elif hasattr(r, "rect"):
+            return _rect_coords(r.rect)
+        elif isinstance(r, (tuple, list)) and len(r) >= 4:
+            x0, y0, x1, y1 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+        else:
+            return None
+        return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+    except Exception:
+        return None
+
+
+def _drawing_item_bbox(item: object) -> tuple[float, float, float, float] | None:
+    """Return axis-aligned bounding box (x0, y0, x1, y1) for a drawing item.
+
+    Handles PyMuPDF drawing path records:
+    - 'l': line segment ("l", p1, p2)
+    - 're': rectangle ("re", rect, ...)
+    - 'qu': quad ("qu", quad, ...)
+    - 'c': cubic Bézier curve ("c", p1, p2, p3, p4)
+
+    Returns None if item is malformed or an unsupported record kind. Never raises.
+    """
+    try:
+        if not isinstance(item, (tuple, list)) or not item:
+            return None
+        kind = item[0]
+        if kind == "l" and len(item) >= 3:
+            pts = [_point_coords(item[1]), _point_coords(item[2])]
+            if any(p is None for p in pts):
+                return None
+            xs = [p[0] for p in pts]  # type: ignore[index]
+            ys = [p[1] for p in pts]  # type: ignore[index]
+            return min(xs), min(ys), max(xs), max(ys)
+        if kind == "re" and len(item) >= 2:
+            return _rect_coords(item[1])
+        if kind == "qu" and len(item) >= 2:
+            q = item[1]
+            if hasattr(q, "rect"):
+                return _rect_coords(q.rect)
+            if hasattr(q, "ul") and hasattr(q, "ur") and hasattr(q, "ll") and hasattr(q, "lr"):
+                pts = [
+                    _point_coords(q.ul),
+                    _point_coords(q.ur),
+                    _point_coords(q.ll),
+                    _point_coords(q.lr),
+                ]
+                if any(p is None for p in pts):
+                    return None
+                xs = [p[0] for p in pts]  # type: ignore[index]
+                ys = [p[1] for p in pts]  # type: ignore[index]
+                return min(xs), min(ys), max(xs), max(ys)
+            if isinstance(q, (tuple, list)) and len(q) == 4:
+                if all(isinstance(v, (int, float)) for v in q):
+                    return _rect_coords(q)
+                pts = [_point_coords(p) for p in q]
+                if any(p is None for p in pts):
+                    return None
+                xs = [p[0] for p in pts]  # type: ignore[index]
+                ys = [p[1] for p in pts]  # type: ignore[index]
+                return min(xs), min(ys), max(xs), max(ys)
+            return None
+        if kind == "c" and len(item) >= 5:
+            pts = [
+                _point_coords(item[1]),
+                _point_coords(item[2]),
+                _point_coords(item[3]),
+                _point_coords(item[4]),
+            ]
+            if any(p is None for p in pts):
+                return None
+            xs = [p[0] for p in pts]  # type: ignore[index]
+            ys = [p[1] for p in pts]  # type: ignore[index]
+            return min(xs), min(ys), max(xs), max(ys)
+        return None
+    except Exception:
+        return None
 
 
 def _has_filled_rects_or_thick_strokes(page, bbox: tuple[float, float, float, float]) -> bool:
@@ -983,7 +1083,8 @@ def _has_filled_rects_or_thick_strokes(page, bbox: tuple[float, float, float, fl
     hairline. Self-contained approximation of the extractor's data-marks
     signal (kept import-free to avoid cycles from figures/extractor.py
     ``_has_vector_data_marks``) — NOT a mirror: the semantics already differ
-    (any ``'f'``/``'fs'`` fill, any non-black colour, width > 1.0, vs. the
+    (any ``'f'``/``'fs'`` fill, any non-black colour, width > 1.0 plus at least
+    one non-rule-shaped path item (with legacy rect fallback), vs. the
     extractor's coloured-fill-or-thick-stroke check with a neutral-colour
     carve-out). As of GH-150 A1, ``has_chart_marks`` additionally accepts
     framed thin-stroke clusters via ``_has_framed_data_cluster``, which this
@@ -1015,12 +1116,36 @@ def _has_filled_rects_or_thick_strokes(page, bbox: tuple[float, float, float, fl
         # it (Cochrane–Piazzesi p18).  A rule-shaped stroke must not qualify
         # the cluster by itself; a genuine chart still qualifies via fills,
         # colour, or thick strokes with real two-dimensional extent.
+        # GH-377: evaluate geometry per item rather than on d["rect"] (the
+        # union AABB of all items in the path) so multiple parallel rules
+        # packed into a single get_drawings() path do not look like one fat mark.
         width = d.get("width", 0.0) or 0.0
         if width > 1.0:
-            span = max(rect.x1 - rect.x0, rect.y1 - rect.y0)
-            thickness = min(rect.x1 - rect.x0, rect.y1 - rect.y0)
-            if span > 0.0 and thickness / span > _RULE_THINNESS_RATIO:
-                return True
+            items = d.get("items")
+            if not items:
+                span = max(rect.x1 - rect.x0, rect.y1 - rect.y0)
+                thickness = min(rect.x1 - rect.x0, rect.y1 - rect.y0)
+                if span > 0.0 and thickness / span > _RULE_THINNESS_RATIO:
+                    return True
+            else:
+                has_valid_items = False
+                fallback_to_rect = False
+                for item in items:
+                    bbox_item = _drawing_item_bbox(item)
+                    if bbox_item is None:
+                        fallback_to_rect = True
+                        break
+                    has_valid_items = True
+                    ix0, iy0, ix1, iy1 = bbox_item
+                    ispan = max(ix1 - ix0, iy1 - iy0)
+                    ithickness = min(ix1 - ix0, iy1 - iy0)
+                    if ispan > 0.0 and ithickness / ispan > _RULE_THINNESS_RATIO:
+                        return True
+                if fallback_to_rect or not has_valid_items:
+                    span = max(rect.x1 - rect.x0, rect.y1 - rect.y0)
+                    thickness = min(rect.x1 - rect.x0, rect.y1 - rect.y0)
+                    if span > 0.0 and thickness / span > _RULE_THINNESS_RATIO:
+                        return True
     return False
 
 
