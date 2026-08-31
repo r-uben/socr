@@ -867,6 +867,64 @@ class TestAgenticChartLaneRouting:
         arb_events = [e for e in state.events if e.kind == "chart_table_arbitration"]
         assert not arb_events, "Chart-only page must not emit a chart_table_arbitration event"
 
+    def test_axis_tick_scale_is_fenced_not_shipped_as_body_prose(self, tmp_path: Path) -> None:
+        """GH-369: the lane declares "data values not transcribed", so a column
+        of bare numbers must not ship beside the image as body prose.
+
+        This pins the WIRE, not the helper. ``fence_chart_axis_residue`` has its
+        own unit coverage in ``test_gh369_chart_axis_residue.py``; a green helper
+        suite is not a gate on the page that actually ships (GH-359 ruling 6).
+        Revert the call in ``_agentic_chart_asset_page`` and this test fails.
+        """
+        pdf = _make_vector_chart_pdf(tmp_path)
+        pipeline = _make_agentic_pipeline()
+        state = _make_state_with_page(
+            pdf,
+            native_text=(
+                "Figure 4. Uncertainty and risks in economic projections\n"
+                "Number of participants\n"
+                "2\n"
+                "4\n"
+                "6\n"
+                "Lower\n"
+                "March projections"
+            ),
+        )
+        pipeline._last_assessment = state._last_assessment
+
+        with patch("socr.pipeline.orchestrator.route_page"):
+            pipeline._phase_agentic(state, tmp_path)
+
+        text = state.pages[1].best_output.text or ""
+
+        # Nothing is dropped -- a dropped number is worse than a missing one.
+        for line in ("Figure 4. Uncertainty and risks in economic projections", "2", "4", "6"):
+            assert line in text, f"chart lane lost {line!r}"
+
+        # The tick scale is inside the fence; the caption is not.
+        assert "socr:chart-axis-residue" in text
+        head, _, tail = text.partition("socr:chart-axis-residue")
+        for number in ("2", "4", "6"):
+            assert f"\n{number}\n" in tail, f"tick label {number!r} is not inside the fence"
+        assert "Figure 4. Uncertainty and risks in economic projections" in head
+        assert "March projections" in head
+
+    def test_chart_page_without_tick_labels_gains_no_fence(self, tmp_path: Path) -> None:
+        """Difference control: the SAME lane, the SAME fixture, differing only in
+        whether the native layer carries bare-numeric lines. A chart page whose
+        text has none must be byte-identical to its pre-GH-369 output."""
+        pdf = _make_vector_chart_pdf(tmp_path)
+        pipeline = _make_agentic_pipeline()
+        state = _make_state_with_page(pdf, native_text="GDP Growth Forecast 2025")
+        pipeline._last_assessment = state._last_assessment
+
+        with patch("socr.pipeline.orchestrator.route_page"):
+            pipeline._phase_agentic(state, tmp_path)
+
+        text = state.pages[1].best_output.text or ""
+        assert "GDP Growth Forecast 2025" in text
+        assert "socr:chart-axis-residue" not in text
+
     def test_chart_png_produced_without_save_figures_flag(self, tmp_path: Path) -> None:
         """PNG is saved by the chart lane even when save_figures=False."""
         pdf = _make_vector_chart_pdf(tmp_path)

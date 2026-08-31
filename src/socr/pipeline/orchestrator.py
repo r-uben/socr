@@ -3807,7 +3807,16 @@ class UnifiedPipeline:
         # B1 representation: retain native prose + embed chart PNG ref.
         # If render failed, set status=WARNING so downstream stages know
         # the visual payload is missing (fail-closed, never silent).
-        native_prose = ps.native_text or ""
+        #
+        # GH-369: this lane declares "data values not transcribed" and then
+        # shipped the native layer whole, axis tick scales included -- a column
+        # of bare numbers indistinguishable from real values, under a clean
+        # SUCCESS. Fence those lines instead: they stay in the file verbatim
+        # (nothing is dropped) but stop reading as body prose beside the image
+        # they belong to. A page with no bare-numeric lines is unchanged.
+        from socr.figures.extractor import fence_chart_axis_residue
+
+        native_prose = fence_chart_axis_residue(ps.native_text or "")
         if chart_png_ref:
             chart_body = (
                 native_prose.rstrip() + "\n\n" + chart_png_ref
