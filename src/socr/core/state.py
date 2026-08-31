@@ -97,6 +97,10 @@ class PageState:
     native_table_unverifiable_ordinals: list[int] = field(default_factory=list)
     #: GH-371: number of native table regions examined by the per-region verifier.
     native_table_region_count: int = 0
+    #: GH-375: per-ordinal ``table_grid_identity`` of the y0-sorted native
+    #: regions. Empty when identity was not captured. A mismatch against
+    #: ``find_table_blocks`` fails the regional splice closed.
+    native_table_region_identities: list[str] = field(default_factory=list)
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
     #: #263: image ref for the shredded-rotated-page floor. Deliberately NOT
@@ -349,6 +353,9 @@ class DocumentState:
                         getattr(pa, "native_table_unverifiable_ordinals", []) or []
                     )
                     ps.native_table_region_count = getattr(pa, "native_table_region_count", 0)
+                    ps.native_table_region_identities = list(
+                        getattr(pa, "native_table_region_identities", []) or []
+                    )
                     # GH-195: carry the text-strategy grid rejection onto the page
                     # so it can reach page status and document status.
                     if getattr(pa, "text_grid_rejections", None):

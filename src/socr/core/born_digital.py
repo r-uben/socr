@@ -819,6 +819,11 @@ class PageAssessment:
     #: GH-371: number of separator-bearing table regions examined by the
     #: per-region verifier.  Zero also covers pages that never enter that lane.
     native_table_region_count: int = 0
+    #: GH-375: ``table_grid_identity`` of each separator-bearing region, in the
+    #: same ordinal order as ``native_table_unverifiable_ordinals``. Empty when
+    #: no region was examined. Used to fail-close an equal-count identity swap
+    #: between y0-sorted regions and ``find_table_blocks``.
+    native_table_region_identities: list[str] = field(default_factory=list)
     #: GH-195: one record per text-strategy grid rejected because a lane boundary
     #: split a native numeric token. The word-geometry fallback that replaced it
     #: is lossless, so this is a VISIBILITY signal, not a defect flag — the page
@@ -1074,6 +1079,7 @@ class BornDigitalDetector:
         self._last_extraction_had_unverifiable: bool = False
         self._last_extraction_failed_ordinals: list[int] = []
         self._last_extraction_table_count: int = 0
+        self._last_extraction_region_identities: list[str] = []
 
     def detect(self, pdf_path: Path | str) -> DocumentAssessment:
         """Analyze all pages of a PDF for born-digital content.
@@ -1218,6 +1224,7 @@ class BornDigitalDetector:
         self._last_extraction_had_unverifiable = False
         self._last_extraction_failed_ordinals = []
         self._last_extraction_table_count = 0
+        self._last_extraction_region_identities = []
 
         try:
             blocks = page.get_text("dict").get("blocks", [])
@@ -1228,6 +1235,7 @@ class BornDigitalDetector:
         assessment.dominant_text_direction = direction
         assessment.native_table_unverifiable_ordinals = list(self._last_extraction_failed_ordinals)
         assessment.native_table_region_count = self._last_extraction_table_count
+        assessment.native_table_region_identities = list(self._last_extraction_region_identities)
         if text_direction_is_rotated(direction):
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment
@@ -2118,9 +2126,11 @@ class BornDigitalDetector:
             image-asset lane instead of silently shipping the collapsed native.
         """
         from socr.tables.native_verifier import verify_native_table_region
+        from socr.tables.reconcile import markdown_table_identity
 
         any_hard_fail = False
         failed_ordinals: list[int] = []
+        identities: list[str] = []
         table_count = 0
         for region_rect, region_text in regions:
             # Skip non-table regions (chart image refs, prose blocks)
@@ -2128,6 +2138,7 @@ class BornDigitalDetector:
                 continue
             ordinal = table_count
             table_count += 1
+            identities.append(markdown_table_identity(region_text))
             try:
                 vr = verify_native_table_region(page, region_text, region_rect)
             except Exception as exc:
@@ -2152,6 +2163,7 @@ class BornDigitalDetector:
                 )
         self._last_extraction_failed_ordinals = failed_ordinals
         self._last_extraction_table_count = table_count
+        self._last_extraction_region_identities = identities
         return any_hard_fail
 
     def _check_token_coverage(

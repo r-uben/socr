@@ -110,6 +110,27 @@ def find_table_blocks(markdown: str) -> list[_Block]:
     return blocks
 
 
+def table_grid_identity(grid: list[list[str]]) -> str:
+    """Order-sensitive fingerprint of a parsed table grid (cells stripped).
+
+    Used to prove that a y0-sorted native region and a ``find_table_blocks``
+    occurrence name the same table. Count equality alone cannot see a swap.
+    """
+    return "\n".join("|".join(cell.strip() for cell in row) for row in grid)
+
+
+def markdown_table_identity(markdown: str) -> str:
+    """Identity of a region that must contain exactly one markdown table.
+
+    Empty when isolation is unprovable (no table, or more than one), so a
+    later 1:1 compare against parsed page blocks fails closed.
+    """
+    blocks = find_table_blocks(markdown)
+    if len(blocks) != 1:
+        return ""
+    return table_grid_identity(blocks[0].grid)
+
+
 #: GFM permits a delimiter cell with one hyphen, but this shipping-policy
 #: predicate deliberately requires the conventional three. One- and two-dash
 #: fragments are easy products of prose or truncated output; rejecting them

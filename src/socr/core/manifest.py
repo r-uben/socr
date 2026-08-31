@@ -1000,20 +1000,7 @@ def _select_page_output_tagged(
         png_ref = getattr(p, "d3_floor_png_ref", "")
 
         best_output_text = (p.best_output.text or "") if p.best_output else ""
-        d3_text = None
-        if best_output_text:
-            from socr.tables.reconcile import find_table_blocks
-
-            blocks = find_table_blocks(best_output_text)
-            if blocks:
-                all_ordinals = list(range(len(blocks)))
-                d3_text = splice_failed_table_regions(
-                    best_output_text,
-                    failed_ordinals=all_ordinals,
-                    expected_count=len(blocks),
-                    marker_line=d3_marker,
-                    png_ref=png_ref,
-                )
+        d3_text = splice_all_table_regions(best_output_text, marker_line=d3_marker, png_ref=png_ref)
 
         if d3_text is None:
             d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
@@ -1073,24 +1060,48 @@ def _select_page_output_tagged(
                     failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
                 ), WinnerKind.UNVERIFIABLE_TABLE_MODEL_KEPT
 
-            # TR-3: D3 fail-closed floor. Try regional splice if ordinals/counts are
-            # available; fall back to whole-page marker if isolation is unprovable.
+            # TR-3: D3 fail-closed floor. Try regional splice if ordinals/counts
+            # are available; fall back to whole-page marker if isolation is
+            # unprovable.
+            #
+            # GH-375: ``native_table_header_unattributed`` is page-level — there
+            # is no per-table header identity. Regional splice of only TR-3
+            # ordinals would ship a header-destroyed sibling as unmarked GFM.
+            # Refuse isolation and replace every table (GH-90): every table is
+            # untrusted, surrounding prose is not.
             native_text = p.native_text or ""
             d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
             png_ref = getattr(p, "d3_floor_png_ref", "")
 
-            failed_ordinals = getattr(p, "native_table_unverifiable_ordinals", None)
-            region_count = getattr(p, "native_table_region_count", None)
-
             d3_text = None
-            if failed_ordinals is not None and region_count is not None:
-                d3_text = splice_failed_table_regions(
-                    native_text,
-                    failed_ordinals=failed_ordinals,
-                    expected_count=region_count,
-                    marker_line=d3_marker,
-                    png_ref=png_ref,
+            header_unattributed = bool(getattr(p, "native_table_header_unattributed", False))
+            if header_unattributed:
+                d3_text = splice_all_table_regions(
+                    native_text, marker_line=d3_marker, png_ref=png_ref
                 )
+            else:
+                failed_ordinals = getattr(p, "native_table_unverifiable_ordinals", None)
+                region_count = getattr(p, "native_table_region_count", None)
+                identities = list(getattr(p, "native_table_region_identities", []) or [])
+                # Identities are recorded by ``_verify_regions`` for every
+                # examined region, so a missing or short list means the state
+                # predates GH-375 (stale sidecar) or was never captured. An
+                # ordinal splice without a 1:1 identity match is exactly the
+                # equal-count swap hole — refuse it and take the whole-page
+                # marker instead of an unverified splice.
+                if (
+                    failed_ordinals is not None
+                    and region_count is not None
+                    and len(identities) == region_count
+                ):
+                    d3_text = splice_failed_table_regions(
+                        native_text,
+                        failed_ordinals=failed_ordinals,
+                        expected_count=region_count,
+                        marker_line=d3_marker,
+                        png_ref=png_ref,
+                        region_identities=identities,
+                    )
 
             if d3_text is None:
                 d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
@@ -1698,12 +1709,45 @@ def stale_pages(manifest: Manifest, blobs: BlobStore) -> list[int]:
     ]
 
 
+def splice_all_table_regions(
+    page_text: str,
+    marker_line: str,
+    png_ref: str = "",
+) -> str | None:
+    """Replace every parsed markdown table, preserving surrounding prose.
+
+    GH-90 scanned floor distrusts every model table. GH-375 native D3 floor
+    does the same when ``native_table_header_unattributed`` is set: that flag
+    is page-level, so no table on the page can be named as clean. Isolation
+    here is the parser's own block list — ordinals are not drawn from a
+    second enumeration, so an equal-count swap cannot arise.
+
+    Returns None when no table block can be identified (caller falls back to
+    the whole-page marker).
+    """
+    from socr.tables.reconcile import find_table_blocks
+
+    if not page_text:
+        return None
+    blocks = find_table_blocks(page_text)
+    if not blocks:
+        return None
+    return splice_failed_table_regions(
+        page_text,
+        failed_ordinals=list(range(len(blocks))),
+        expected_count=len(blocks),
+        marker_line=marker_line,
+        png_ref=png_ref,
+    )
+
+
 def splice_failed_table_regions(
     page_text: str,
     failed_ordinals: list[int],
     expected_count: int,
     marker_line: str,
     png_ref: str = "",
+    region_identities: list[str] | None = None,
 ) -> str | None:
     """Replace only failed markdown-table blocks in page text, preserving surrounding prose.
 
@@ -1719,13 +1763,18 @@ def splice_failed_table_regions(
             "[page N failed: unverifiable table — see image]").
         png_ref: Optional full-page PNG reference (e.g. "![ref](figures/p1.png)").
             Included only once, at the first failed position (in document order).
+        region_identities: Optional per-ordinal fingerprints of the y0-sorted
+            native regions (``table_grid_identity`` of each region's grid).
+            When supplied, each parsed block must match the corresponding
+            identity; an equal-count swap fails closed to None.
 
     Returns:
         Spliced text with failed blocks removed and markers inserted, or None if
         validation fails (empty ordinals, count mismatch, out-of-range/duplicate
-        ordinals, or no parsed tables). Fail-closed: any ambiguity returns None.
+        ordinals, identity mismatch, or no parsed tables). Fail-closed: any
+        ambiguity returns None.
     """
-    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.reconcile import find_table_blocks, table_grid_identity
 
     if type(expected_count) is not int or expected_count <= 0:
         return None
@@ -1747,12 +1796,25 @@ def splice_failed_table_regions(
         # Identity assumption: ordinal N in the caller's region enumeration
         # (born_digital's y0-sorted table_regions) names the Nth markdown table
         # block that find_table_blocks parses out of the assembled text. Count
-        # equality is the only check tying the two enumerations together — a
+        # equality is the first check tying the two enumerations together — a
         # divergence (a region emitted without pipes, prose that parses as a
-        # table) normally breaks the count and lands here (fail closed), but an
-        # equal-count identity swap would mis-splice silently. If that case is
-        # ever observed, the region spans must be threaded through instead.
+        # table) normally breaks the count and lands here (fail closed).
         return None
+
+    if region_identities is not None:
+        # GH-375: count equality cannot see a permutation. When the caller
+        # captured per-region fingerprints, require a 1:1 match against the
+        # parsed blocks; a swap of two different tables fails closed.
+        if (
+            not isinstance(region_identities, list)
+            or len(region_identities) != expected_count
+            or any(type(item) is not str for item in region_identities)
+            or any(
+                table_grid_identity(block.grid) != ident
+                for block, ident in zip(blocks, region_identities, strict=True)
+            )
+        ):
+            return None
 
     lines = page_text.splitlines(keepends=True)
 
