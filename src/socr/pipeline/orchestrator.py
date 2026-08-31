@@ -4884,6 +4884,9 @@ class UnifiedPipeline:
                 list(getattr(ps, "native_table_unverifiable_ordinals", [])) if ps else []
             ),
             "native_table_region_count": (getattr(ps, "native_table_region_count", 0) if ps else 0),
+            "native_table_region_identities": (
+                list(getattr(ps, "native_table_region_identities", [])) if ps else []
+            ),
             # TR-3: image ref for the D3 floor PNG (empty string when not rendered).
             "d3_floor_png_ref": (str(getattr(ps, "d3_floor_png_ref", "")) if ps else ""),
             # GH-90: scanned-table evidence check failed; D3 floor applies (prose splice).
@@ -5334,6 +5337,11 @@ class UnifiedPipeline:
             ps.native_table_region_count = (
                 raw_count if type(raw_count) is int and raw_count >= 0 else 0
             )
+            raw_idents = meta.get("native_table_region_identities")
+            if isinstance(raw_idents, list) and all(type(item) is str for item in raw_idents):
+                ps.native_table_region_identities = list(raw_idents)
+            else:
+                ps.native_table_region_identities = []
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
             # GH-90: restore scanned-table evidence failure so the scanned floor applies on resume.
             ps.scanned_table_evidence_failed = bool(

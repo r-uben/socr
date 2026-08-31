@@ -570,12 +570,9 @@ class TestVerifyRegionsReturnValue:
             result = detector._verify_regions(page, regions)
         doc.close()
         assert result is True
-        failed_ordinals = getattr(detector, "_last_extraction_failed_ordinals", None)
-        region_count = getattr(detector, "_last_extraction_table_count", None)
-        if failed_ordinals is not None:
-            assert failed_ordinals == [1]
-        if region_count is not None:
-            assert region_count == 2
+        assert detector._last_extraction_failed_ordinals == [1]
+        assert detector._last_extraction_table_count == 2
+        assert len(detector._last_extraction_region_identities) == 2
 
     def test_verify_regions_two_identical_markdown_tables_second_fails(self) -> None:
         """GH-371: When two tables have identical markdown text and only the second fails,
@@ -607,9 +604,8 @@ class TestVerifyRegionsReturnValue:
             result = detector._verify_regions(page, regions)
         doc.close()
         assert result is True
-        failed_ordinals = getattr(detector, "_last_extraction_failed_ordinals", None)
-        if failed_ordinals is not None:
-            assert failed_ordinals == [1]
+        assert detector._last_extraction_failed_ordinals == [1]
+        assert detector._last_extraction_table_count == 2
 
 
 # ---------------------------------------------------------------------------

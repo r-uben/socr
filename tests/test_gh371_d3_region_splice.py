@@ -13,7 +13,8 @@ Fix & tests cover:
        failed blocks by line spans in reverse order, placing the PNG reference exactly once.
 4. t4: Native D3 branch wiring (_winning_page_output), tightened is_page_failed_marker
        (regional marker + prose is not a page failure), assembly event derivation,
-       fallback to whole-page marker on unprovable isolation, and TABLE_REJECTED resume parity.
+       fallback to whole-page marker on unprovable isolation, TABLE_REJECTED resume
+       parity, and GH-375 (header-unattributed mixed page refuses regional splice).
 5. t5: Scanned-page prose preservation (GH-90), removal of all detected tables, removal of
        in-loop destructive best_output overwrite, persistence of scanned_table_evidence_failed,
        and fragment/assembly parity.
@@ -125,13 +126,14 @@ class TestTask1_RegionIdentity:
 
         doc.close()
         assert res is False
-        # Side-channels / recorded state
-        failed_ordinals = getattr(detector, "_last_extraction_failed_ordinals", None)
-        region_count = getattr(detector, "_last_extraction_table_count", None)
-        if failed_ordinals is not None:
-            assert failed_ordinals == []
-        if region_count is not None:
-            assert region_count == 2
+        from socr.tables.reconcile import markdown_table_identity
+
+        assert detector._last_extraction_failed_ordinals == []
+        assert detector._last_extraction_table_count == 2
+        assert detector._last_extraction_region_identities == [
+            markdown_table_identity(regions[0][1]),
+            markdown_table_identity(regions[1][1]),
+        ]
 
     def test_verify_regions_records_failed_ordinal_among_multiple(self) -> None:
         """With two table regions where only the second fails, ordinals must be [1]
@@ -162,12 +164,14 @@ class TestTask1_RegionIdentity:
 
         doc.close()
         assert res is True
-        failed_ordinals = getattr(detector, "_last_extraction_failed_ordinals", None)
-        region_count = getattr(detector, "_last_extraction_table_count", None)
-        if failed_ordinals is not None:
-            assert failed_ordinals == [1]
-        if region_count is not None:
-            assert region_count == 2
+        from socr.tables.reconcile import markdown_table_identity
+
+        assert detector._last_extraction_failed_ordinals == [1]
+        assert detector._last_extraction_table_count == 2
+        assert detector._last_extraction_region_identities == [
+            markdown_table_identity(regions[0][1]),
+            markdown_table_identity(regions[1][1]),
+        ]
 
     def test_two_identical_markdown_regions_distinguished_by_ordinal(self) -> None:
         """When two tables have IDENTICAL markdown text and only the second fails,
@@ -233,8 +237,14 @@ class TestTask1_RegionIdentity:
         doc.close()
         assert res is True
         # Only 2 separator-bearing regions; the second one (H3) is ordinal 1
+        from socr.tables.reconcile import markdown_table_identity
+
         assert detector._last_extraction_failed_ordinals == [1]
         assert detector._last_extraction_table_count == 2
+        assert detector._last_extraction_region_identities == [
+            markdown_table_identity(regions[1][1]),
+            markdown_table_identity(regions[3][1]),
+        ]
 
     def test_page_to_page_side_channel_reset(self, tmp_path: Path) -> None:
         """Page 1 with hard-fail must not leak failed ordinals or region count
@@ -301,6 +311,7 @@ class TestTask2_StatePropagationAndSidecarPersistence:
         )
         pa.native_table_unverifiable_ordinals = [0]
         pa.native_table_region_count = 1
+        pa.native_table_region_identities = ["H|V\n1|2"]
 
         state = DocumentState(handle=_make_handle(1))
         doc_assessment = DocumentAssessment(path=Path("/tmp/fake.pdf"), pages=[pa])
@@ -310,6 +321,7 @@ class TestTask2_StatePropagationAndSidecarPersistence:
         assert ps.native_table_unverifiable is True
         assert ps.native_table_unverifiable_ordinals == [0]
         assert ps.native_table_region_count == 1
+        assert ps.native_table_region_identities == ["H|V\n1|2"]
 
     def test_sidecar_flush_and_restore_round_trip(self, tmp_path: Path) -> None:
         """Multiple ordinals serialize to sidecar and restore cleanly onto PageState."""
@@ -325,6 +337,7 @@ class TestTask2_StatePropagationAndSidecarPersistence:
 
         ps.native_table_unverifiable_ordinals = [0, 2]
         ps.native_table_region_count = 3
+        ps.native_table_region_identities = ["a|b", "c|d", "e|f"]
 
         out_dir = tmp_path / "out"
         sidecar_path = pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
@@ -333,6 +346,7 @@ class TestTask2_StatePropagationAndSidecarPersistence:
         meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
         assert meta["native_table_unverifiable_ordinals"] == [0, 2]
         assert meta["native_table_region_count"] == 3
+        assert meta["native_table_region_identities"] == ["a|b", "c|d", "e|f"]
 
         # Restore into a fresh PageState
         fresh_state = DocumentState(handle=_make_handle(1, path=pdf_path))
@@ -349,6 +363,7 @@ class TestTask2_StatePropagationAndSidecarPersistence:
         assert restored_ps.native_table_unverifiable is True
         assert restored_ps.native_table_unverifiable_ordinals == [0, 2]
         assert restored_ps.native_table_region_count == 3
+        assert restored_ps.native_table_region_identities == ["a|b", "c|d", "e|f"]
 
     def test_restore_rejects_malformed_sidecar_ordinals(self, tmp_path: Path) -> None:
         """Corrupt sidecar values (strings, negative numbers, floats) must safely fall
@@ -373,6 +388,7 @@ class TestTask2_StatePropagationAndSidecarPersistence:
                     "native_table_unverifiable": True,
                     "native_table_unverifiable_ordinals": [-1, "garbage", 2.5],
                     "native_table_region_count": "invalid",
+                    "native_table_region_identities": [1, None],
                 }
             )
         )
@@ -389,6 +405,7 @@ class TestTask2_StatePropagationAndSidecarPersistence:
         ps = state.pages[1]
         assert ps.native_table_unverifiable_ordinals == []
         assert ps.native_table_region_count == 0
+        assert ps.native_table_region_identities == []
 
     def test_restore_old_sidecar_lacking_new_keys(self, tmp_path: Path) -> None:
         """A legacy sidecar with no ordinal/count keys restores with empty defaults."""
@@ -425,6 +442,7 @@ class TestTask2_StatePropagationAndSidecarPersistence:
         ps = state.pages[1]
         assert ps.native_table_unverifiable_ordinals == []
         assert ps.native_table_region_count == 0
+        assert ps.native_table_region_identities == []
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +670,50 @@ class TestTask3_PureMarkdownTableSplicePrimitive:
             is None
         )
 
+    def test_equal_count_identity_swap_fails_closed(self) -> None:
+        """Count-matched but permuted region identities must not splice."""
+        from socr.tables.reconcile import find_table_blocks, table_grid_identity
+
+        splice_fn = _get_splice_helper()
+        t1 = _md_table(["LeftH", "A"], [["1", "2"]])
+        t2 = _md_table(["RightH", "B"], [["3", "4"]])
+        page_text = f"{t1}\n\n{t2}"
+        marker = "[page 1 failed: unverifiable table — see image]"
+        blocks = find_table_blocks(page_text)
+        swapped = [table_grid_identity(blocks[1].grid), table_grid_identity(blocks[0].grid)]
+        assert (
+            splice_fn(
+                page_text,
+                failed_ordinals=[0],
+                expected_count=2,
+                marker_line=marker,
+                region_identities=swapped,
+            )
+            is None
+        )
+
+    def test_matching_region_identities_still_splice(self) -> None:
+        """Live identity guard must not regress GH-371 geometry-only splice."""
+        from socr.tables.reconcile import find_table_blocks, table_grid_identity
+
+        splice_fn = _get_splice_helper()
+        t1 = _md_table(["GoodCol1", "GoodCol2"], [["g1", "g2"]])
+        t2 = _md_table(["BadCol1", "BadCol2"], [["b1", "b2"]])
+        page_text = f"Header prose\n\n{t1}\n\nMiddle prose\n\n{t2}\n\nFooter prose"
+        marker = "[page 1 failed: unverifiable table — see image]"
+        identities = [table_grid_identity(b.grid) for b in find_table_blocks(page_text)]
+        spliced = splice_fn(
+            page_text,
+            failed_ordinals=[1],
+            expected_count=2,
+            marker_line=marker,
+            region_identities=identities,
+        )
+        assert spliced is not None
+        assert "| GoodCol1 | GoodCol2 |" in spliced
+        assert "| g1 | g2 |" in spliced
+        assert "| BadCol1 | BadCol2 |" not in spliced
+
 
 # ---------------------------------------------------------------------------
 # Task t4: Native D3 Branch and Regional-Marker Classification
@@ -667,6 +729,8 @@ class TestTask4_NativeD3RegionalSplice:
         failed_ordinals: list[int] | None = None,
         region_count: int | None = None,
         png_ref: str = "![p1](figures/p1.png)",
+        region_identities: list[str] | None = None,
+        header_unattributed: bool = False,
     ) -> DocumentState:
         state = DocumentState(handle=_make_handle(1))
         ps = state.pages[1]
@@ -690,6 +754,18 @@ class TestTask4_NativeD3RegionalSplice:
             ps.native_table_unverifiable_ordinals = failed_ordinals
         if region_count is not None:
             ps.native_table_region_count = region_count
+        if region_identities is not None:
+            ps.native_table_region_identities = region_identities
+        elif region_count is not None:
+            # Live extraction always records identities alongside the count
+            # (GH-375); derive them from the fixture text so these states match
+            # what ``_verify_regions`` would have produced.
+            from socr.tables.reconcile import find_table_blocks, table_grid_identity
+
+            ps.native_table_region_identities = [
+                table_grid_identity(block.grid) for block in find_table_blocks(native_text)
+            ]
+        ps.native_table_header_unattributed = header_unattributed
         return state
 
     def test_native_d3_regional_splice_preserves_surrounding_prose(self) -> None:
@@ -738,6 +814,104 @@ class TestTask4_NativeD3RegionalSplice:
         # Bad table removed
         assert "| BadH1 | BadH2 |" not in winner.text
         assert "[page 1 failed: unverifiable table — see image]" in winner.text
+
+    def test_header_unattributed_mixed_page_does_not_ship_header_table(self) -> None:
+        """GH-375: table 0 header-unattributed + table 1 TR-3 must not ship table 0.
+
+        Measured at ``_winning_page_output``, not only the tagged helper.
+        """
+        t0 = _md_table(["HeaderDestroyed", "Col"], [["bad", "1.11"]])
+        t1 = _md_table(["GeoFail", "Col"], [["geo", "2.22"]])
+        native_text = f"Top prose\n\n{t0}\n\nMiddle prose\n\n{t1}\n\nBottom prose"
+
+        mixed = self._build_d3_page_state(
+            native_text=native_text,
+            failed_ordinals=[1],
+            region_count=2,
+            header_unattributed=True,
+        )
+        geometry_only = self._build_d3_page_state(
+            native_text=native_text,
+            failed_ordinals=[1],
+            region_count=2,
+            header_unattributed=False,
+        )
+
+        mixed_winner = _winning_page_output(mixed, 1, None)
+        geometry_winner = _winning_page_output(geometry_only, 1, None)
+
+        assert "| HeaderDestroyed | Col |" not in mixed_winner.text
+        assert "| bad | 1.11 |" not in mixed_winner.text
+        # No per-table header identity: the TR-3 sibling is untrusted too.
+        assert "| GeoFail | Col |" not in mixed_winner.text
+        assert "| geo | 2.22 |" not in mixed_winner.text
+        assert "Top prose" in mixed_winner.text
+        assert "Middle prose" in mixed_winner.text
+        assert "Bottom prose" in mixed_winner.text
+        assert "[page 1 failed: unverifiable table — see image]" in mixed_winner.text
+        assert mixed_winner.status == PageStatus.ERROR
+        assert mixed_winner.audit_passed is False
+        assert is_page_failed_marker(mixed_winner.text) is False
+
+        # Geometry-only (the GH-371 case) still keeps the good sibling.
+        assert "| HeaderDestroyed | Col |" in geometry_winner.text
+        assert "| bad | 1.11 |" in geometry_winner.text
+        assert "| GeoFail | Col |" not in geometry_winner.text
+
+        canonical = canonical_page_texts(mixed)
+        assert len(canonical) == 1
+        assert mixed_winner.text.strip() == canonical[0].strip()
+        assert "| HeaderDestroyed | Col |" not in canonical[0]
+
+    def test_identity_swap_at_winner_falls_back_to_whole_page(self) -> None:
+        """Equal-count permutation of region identities refuses regional splice."""
+        from socr.tables.reconcile import find_table_blocks, table_grid_identity
+
+        t0 = _md_table(["GoodH1", "GoodH2"], [["1.0", "2.0"]])
+        t1 = _md_table(["BadH1", "BadH2"], [["3.0", "4.0"]])
+        native_text = f"Top prose\n\n{t0}\n\nMiddle prose\n\n{t1}\n\nBottom prose"
+        blocks = find_table_blocks(native_text)
+        swapped = [table_grid_identity(blocks[1].grid), table_grid_identity(blocks[0].grid)]
+        state = self._build_d3_page_state(
+            native_text=native_text,
+            failed_ordinals=[1],
+            region_count=2,
+            png_ref="![p1](figures/p1.png)",
+            region_identities=swapped,
+        )
+        winner = _winning_page_output(state, 1, None)
+        expected = "[page 1 failed: unverifiable table — see image]\n\n![p1](figures/p1.png)"
+        assert winner.text.strip() == expected.strip()
+        assert "| GoodH1 | GoodH2 |" not in winner.text
+        assert "| BadH1 | BadH2 |" not in winner.text
+
+    def test_missing_identities_refuse_regional_splice(self) -> None:
+        """GH-375: ordinals + count without identities (stale pre-fix sidecar) must
+        take the whole-page marker, not the unguarded legacy splice. Pinned as a
+        difference: the same state with identities present splices regionally."""
+        t0 = _md_table(["GoodH1", "GoodH2"], [["1.0", "2.0"]])
+        t1 = _md_table(["BadH1", "BadH2"], [["3.0", "4.0"]])
+        native_text = f"Top prose\n\n{t0}\n\nMiddle prose\n\n{t1}\n\nBottom prose"
+
+        with_identities = self._build_d3_page_state(
+            native_text=native_text,
+            failed_ordinals=[1],
+            region_count=2,
+        )
+        without_identities = self._build_d3_page_state(
+            native_text=native_text,
+            failed_ordinals=[1],
+            region_count=2,
+            region_identities=[],
+        )
+
+        spliced = _winning_page_output(with_identities, 1, None)
+        refused = _winning_page_output(without_identities, 1, None)
+
+        assert "| GoodH1 | GoodH2 |" in spliced.text
+        assert is_page_failed_marker(refused.text) is True
+        assert "| GoodH1 | GoodH2 |" not in refused.text
+        assert "| BadH1 | BadH2 |" not in refused.text
 
     def test_fallback_to_whole_page_marker_when_provenance_missing(self) -> None:
         """When no ordinals or counts exist (e.g. pre-GH-371 state or header-only GH-200),
@@ -838,6 +1012,132 @@ class TestTask4_NativeD3RegionalSplice:
         assert "table_region_unverifiable" in fallback_kinds
         # Whole page fallback produces only failure marker, so page_failed is emitted
         assert "page_failed" in fallback_kinds
+
+    def test_assemble_mixed_header_page_does_not_ship_header_table(self, tmp_path: Path) -> None:
+        """Assemble seam: header-destroyed grid must not appear in shipped texts."""
+        t0 = _md_table(["HeaderDestroyed", "Col"], [["bad", "1.11"]])
+        t1 = _md_table(["GeoFail", "Col"], [["geo", "2.22"]])
+        state = self._build_d3_page_state(
+            native_text=f"Top prose\n\n{t0}\n\nMiddle prose\n\n{t1}\n\nBottom prose",
+            failed_ordinals=[1],
+            region_count=2,
+            header_unattributed=True,
+        )
+        pipeline = _make_pipeline()
+        out_dir = tmp_path / "out"
+        with (
+            patch.object(pipeline, "_save_markdown", return_value=out_dir / "out.md"),
+            patch.object(pipeline, "_write_metadata", return_value=None),
+            patch.object(pipeline, "_write_manifest", return_value=None),
+            patch.object(pipeline, "_rewrite_all_fragments", return_value=None),
+            patch.object(pipeline, "_flush_page_fragment", return_value=None),
+            patch.object(pipeline, "_flush_page_sidecar", return_value=None),
+            patch.object(pipeline, "_stitch_fragments", return_value=""),
+        ):
+            pipeline._phase_assemble(state, out_dir)
+
+        kinds = [e.kind for e in state.events]
+        assert "table_region_unverifiable" in kinds
+        assert "page_failed" not in kinds
+        shipped = canonical_page_texts(state)[0]
+        assert "| HeaderDestroyed | Col |" not in shipped
+        assert "| bad | 1.11 |" not in shipped
+        assert "Top prose" in shipped
+
+    def test_table_rejected_resume_skips_regional_d3_body(self, tmp_path: Path) -> None:
+        """Regional D3 body + TABLE_REJECTED is skip-and-kept (not a page-failure marker)."""
+        pdf_path = tmp_path / "doc.pdf"
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "page 1 text " * 10)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        table = _md_table(["H1", "H2"], [["1", "2"]])
+        native_text = f"Intro prose.\n\n{table}\n\nOutro prose."
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = native_text
+        ps.has_tables = True
+        ps.native_table_structure_failed = True
+        ps.native_table_unverifiable = True
+        ps.native_table_unverifiable_ordinals = [0]
+        ps.native_table_region_count = 1
+        from socr.tables.reconcile import find_table_blocks, table_grid_identity
+
+        ps.native_table_region_identities = [
+            table_grid_identity(block.grid) for block in find_table_blocks(native_text)
+        ]
+        ps.d3_floor_png_ref = "![p1](figures/p1.png)"
+        ps.attempts.append(
+            PageOutput(
+                page_num=1,
+                text="failed ocr attempt",
+                status=PageStatus.WARNING,
+                engine="qwen",
+                audit_passed=False,
+                failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+            )
+        )
+        ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
+
+        winner = _winning_page_output(state, 1, None)
+        assert is_page_failed_marker(winner.text) is False
+        assert "Intro prose." in winner.text
+
+        out_dir = tmp_path / "out"
+        pipeline._flush_page_fragment(state, 1, winner.text, out_dir)
+        sidecar_path = pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+        meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert meta["table_ladder_disposition"] == FailureMode.TABLE_REJECTED.value
+        assert meta["winning_output"]["audit_passed"] is False
+
+        resumed = pipeline._load_terminal_page(state, 1, out_dir)
+        assert resumed is not None, "regional D3 + TABLE_REJECTED must skip-and-keep"
+        assert resumed.text.strip() == winner.text.strip()
+
+    def test_table_rejected_resume_does_not_skip_whole_page_d3_marker(self, tmp_path: Path) -> None:
+        """Whole-page D3 marker + TABLE_REJECTED is still a failure body: reprocess."""
+        pdf_path = tmp_path / "doc.pdf"
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "page 1 text " * 10)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        table = _md_table(["H1", "H2"], [["1", "2"]])
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = f"Intro prose.\n\n{table}\n\nOutro prose."
+        ps.has_tables = True
+        ps.native_table_structure_failed = True
+        ps.native_table_unverifiable = True
+        ps.d3_floor_png_ref = "![p1](figures/p1.png)"
+        ps.attempts.append(
+            PageOutput(
+                page_num=1,
+                text="failed ocr attempt",
+                status=PageStatus.WARNING,
+                engine="qwen",
+                audit_passed=False,
+                failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+            )
+        )
+        ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
+
+        winner = _winning_page_output(state, 1, None)
+        assert is_page_failed_marker(winner.text) is True
+
+        out_dir = tmp_path / "out"
+        pipeline._flush_page_fragment(state, 1, winner.text, out_dir)
+        pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+
+        resumed = pipeline._load_terminal_page(state, 1, out_dir)
+        assert resumed is None, "whole-page D3 marker must not skip even under TABLE_REJECTED"
 
 
 # ---------------------------------------------------------------------------
