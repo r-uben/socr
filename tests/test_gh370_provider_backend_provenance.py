@@ -260,3 +260,50 @@ class TestTheInvocationAndTheRecordTellOneStory:
 
         assert resolve_qwen_intent(cfg) == resolved_provenance(PROFILE_QWEN_LOCAL, cfg)
         assert self._flag(self._command(cfg), "--backend") == "ollama"
+
+
+class TestProcessDocumentGatesOnTheResolvedBackend:
+    """GH-391. ``process_document`` pre-checked the Ollama model whenever the RAW
+    config said ``auto``. On an HPC host -- no Ollama, by policy -- an
+    ``auto`` + VLLM_BASE_URL run was refused as MODEL_UNAVAILABLE, even though
+    ``is_available`` already allowed it and ``resolve_qwen_intent`` already
+    rewrote it. Third copy of the rule, disagreeing with the other two.
+
+    Hermetic: the Ollama probe is stubbed to report the model missing, which is
+    exactly the HPC condition, so nothing here needs a daemon.
+    """
+
+    def _engine_and_result(self, monkeypatch, backend: str, tmp_path):
+        from socr.core.result import DocumentStatus
+        from socr.engines import qwen as qwen_mod
+
+        monkeypatch.setattr(qwen_mod, "_check_ollama_model", lambda _m: "ollama model not found")
+        # Stop the real run: we only care whether the gate refused first.
+        sentinel = object()
+        monkeypatch.setattr(qwen_mod.BaseEngine, "process_document", lambda *a, **k: sentinel)
+        engine = qwen_mod.QwenEngine()
+        cfg = _cfg(qwen_backend=backend, qwen_vllm_model=_HF_MODEL)
+        out = engine.process_document(tmp_path / "in.pdf", tmp_path / "out", cfg)
+        refused = out is not sentinel and getattr(out, "status", None) == DocumentStatus.ERROR
+        return refused
+
+    def test_auto_plus_vllm_is_not_refused_when_ollama_is_absent(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        assert not self._engine_and_result(monkeypatch, "auto", tmp_path), (
+            "auto + VLLM_BASE_URL is the HPC deployment; a missing Ollama model "
+            "must not refuse the run"
+        )
+
+    def test_explicit_ollama_is_still_refused_when_the_model_is_missing(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Control: the gate must still protect the path it was written for."""
+        monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        assert self._engine_and_result(monkeypatch, "ollama", tmp_path)
+
+    def test_auto_without_the_env_var_is_still_refused(self, monkeypatch, tmp_path) -> None:
+        """Control: plain local auto still needs the local model."""
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+        assert self._engine_and_result(monkeypatch, "auto", tmp_path)
