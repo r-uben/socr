@@ -1007,7 +1007,10 @@ def split_chart_axis_residue(native_text: str) -> tuple[str, list[str]]:
     The residue is SEPARATED, never dropped: a wrong or dropped number is worse
     than a missing one, so every input line is returned in one of the two
     halves and the caller fences the residue rather than deleting it. Order is
-    preserved within each half, so the original page is reconstructible.
+    preserved WITHIN each half, but the interleaving between them is not: the
+    residue moves to a trailing fence, so the original line order is
+    deliberately lost. Nothing is lost as content; the page is not
+    byte-reconstructible from the output.
 
     Returns ``(body, residue)``. ``residue`` is empty for any page with no bare
     numeric lines, which leaves every non-chart page byte-identical.

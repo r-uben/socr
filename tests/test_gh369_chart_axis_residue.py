@@ -9,7 +9,10 @@ a clean SUCCESS with no flag.
 
 The residue is FENCED, never dropped: the repo's rule is that a wrong or
 dropped number is worse than a missing one, so every input line survives in
-the output and the page stays reconstructible. There is no share-of-page
+the output. Interleaving is deliberately lost when the residue moves to the
+trailing fence, so the page is not byte-reconstructible -- the guarantee is
+that no line is dropped, not that the original order survives. There is no
+share-of-page
 threshold in this path -- each line is judged on its own content, so nothing
 here depends on a ratio measured on one document.
 """
