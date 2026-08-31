@@ -4803,6 +4803,12 @@ class UnifiedPipeline:
                 if ps and ps.table_ladder_disposition is not None
                 else None
             ),
+            # GH-359 (cubic P1): an emitted table on this page reached
+            # assemble with no ladder terminal. Persisted so a resumed run
+            # refuses D1b's REJECTED skip-and-keep for THIS page -- the
+            # disposition alone cannot express "rejected, but not everything
+            # here was witnessed".
+            "table_ladder_incomplete": bool(ps and ps.table_ladder_incomplete),
             # Audit log subset for this page.
             "audit_events": page_events,
             # Table-pass and figure refs.
@@ -4858,13 +4864,20 @@ class UnifiedPipeline:
             ``PageOutput`` without error.
 
         GH-353 TICKET-D1b, the one deliberate exception: a page whose sidecar
-        ``table_ladder_disposition`` is ``FailureMode.TABLE_REJECTED`` skips
+        ``table_ladder_disposition`` is ``FailureMode.TABLE_REJECTED`` **and
+        whose ``table_ladder_incomplete`` is false** skips
         the two checks above and IS skip-and-kept even though C3's
         ``_apply_ladder_disposition_guard`` demotes such a page's finalized
         output to ``status=WARNING, audit_passed=False``. REJECTED is a
         corroborated CONTENT verdict (both ladder rungs looked and said no),
         not an infra doubt, so under the SAME input+config it is final --
         unlike every other condition here, which reprocesses on ANY doubt.
+        GH-359 (cubic P1) narrows the exception: it is forfeited when assemble
+        had to backfill a terminal for any emitted table on the page. The
+        disposition is a page-level reduction, so a page holding one REJECTED
+        table keeps ``TABLE_REJECTED`` even when a second table was never
+        witnessed; without the flag that page would be skip-and-kept forever
+        and the unwitnessed table could never be looked at.
         ``FailureMode.TABLE_UNVERIFIED`` gets NO such exception: the ladder
         ran out of witnesses/rungs without an answer, which IS infra-shaped
         doubt, so an UNVERIFIED page falls through the SUCCESS/audit checks
@@ -4942,7 +4955,13 @@ class UnifiedPipeline:
             # config already forced reprocessing before this line is reached --
             # this check never needs to re-verify rung identity itself.
             disposition_raw = meta.get("table_ladder_disposition")
-            is_ladder_rejected = disposition_raw == FailureMode.TABLE_REJECTED.value
+            # GH-359 (cubic P1): the exception is for a page whose tables were
+            # ALL adjudicated. If assemble had to backfill a terminal for any
+            # emitted table here, "both rungs looked and said no" is false for
+            # that table, so the page falls through and is reprocessed.
+            is_ladder_rejected = disposition_raw == FailureMode.TABLE_REJECTED.value and not bool(
+                meta.get("table_ladder_incomplete")
+            )
 
             # The full winning PageOutput dict must be present and rebuildable.
             winning = meta.get("winning_output")
@@ -5264,6 +5283,7 @@ class UnifiedPipeline:
             # events, never re-judging: no rung is invoked here.
             disposition_raw = meta.get("table_ladder_disposition")
             ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
+            ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
             from socr.core.audit_log import AuditEvent
             from socr.judge.table_verdict import TABLE_LADDER_EVENT_KINDS
 
@@ -5456,6 +5476,11 @@ class UnifiedPipeline:
                 table_id = f"p{page_num}-t{table_index}"
                 if (page_num, table_id) in observed:
                     continue
+                # GH-359 (cubic P1): record the completeness miss separately
+                # from the page-level disposition. A page holding one REJECTED
+                # table keeps that content verdict, but this flag withholds
+                # D1b's resume skip so the unwitnessed table is looked at.
+                page_state.table_ladder_incomplete = True
                 if page_state.table_ladder_disposition is not FailureMode.TABLE_REJECTED:
                     page_state.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
                 state.events.append(

@@ -69,6 +69,7 @@ def _seed_and_flush(
     state: DocumentState,
     out_dir: Path,
     disposition: FailureMode | None,
+    incomplete: bool = False,
 ) -> Path:
     """Mirror what B1's gate leaves behind for a demoted page: an ACCEPTED
     ``audit_passed=True`` attempt whose PageState disposition is set to
@@ -88,10 +89,24 @@ def _seed_and_flush(
     ps.attempts.append(accepted)
     ps.best_output = accepted
     ps.table_ladder_disposition = disposition
+    ps.table_ladder_incomplete = incomplete
 
     pipeline._flush_page_fragment(state, 1, accepted.text, out_dir)
     sidecar_path = pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
     return sidecar_path
+
+
+def _reconstruct_for_restore(sidecar_path: Path) -> PageOutput:
+    """The PageOutput a resume would rebuild from the flushed sidecar."""
+    meta = json.loads(sidecar_path.read_text())
+    w = meta["winning_output"]
+    return PageOutput(
+        page_num=1,
+        text=w["text"],
+        status=PageStatus(w["status"]),
+        engine=w["engine"],
+        audit_passed=w["audit_passed"],
+    )
 
 
 class TestRejectedSkipsAndKeeps:
@@ -210,3 +225,84 @@ class TestBaselineUntouched:
 
         resumed = pipeline._load_terminal_page(state, 1, out_dir)
         assert resumed is not None
+
+
+class TestIncompleteRejectedPageForfeitsTheSkip:
+    """GH-359 (cubic P1). ``table_ladder_disposition`` is a PAGE-level
+    reduction, so a page carrying one REJECTED table keeps ``TABLE_REJECTED``
+    even when a SECOND emitted table reached assemble unwitnessed. D1b grants
+    REJECTED a skip-and-keep because "both rungs looked and said no" -- true of
+    the rejected table, false of the unwitnessed one. Without the completeness
+    flag that page is skipped on every resume and the unwitnessed table can
+    never be looked at.
+
+    Pinned as a DIFFERENCE (#253/#257): the SAME fixture, the SAME fingerprint,
+    the SAME REJECTED disposition, flipping ONLY ``table_ladder_incomplete``.
+    """
+
+    def test_incomplete_flag_is_the_only_difference_that_forfeits_the_skip(
+        self, tmp_path: Path
+    ) -> None:
+        pdf_path = _real_pdf(tmp_path)
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+
+        out_complete = tmp_path / "out_complete"
+        state_complete = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        sidecar_complete = _seed_and_flush(
+            pipeline, state_complete, out_complete, FailureMode.TABLE_REJECTED, incomplete=False
+        )
+
+        out_incomplete = tmp_path / "out_incomplete"
+        state_incomplete = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        sidecar_incomplete = _seed_and_flush(
+            pipeline, state_incomplete, out_incomplete, FailureMode.TABLE_REJECTED, incomplete=True
+        )
+
+        meta_complete = json.loads(sidecar_complete.read_text())
+        meta_incomplete = json.loads(sidecar_incomplete.read_text())
+
+        # The two sidecars must differ in EXACTLY this one field -- otherwise
+        # the difference below could be attributed to something else.
+        assert meta_complete["table_ladder_incomplete"] is False
+        assert meta_incomplete["table_ladder_incomplete"] is True
+        assert (
+            meta_complete["table_ladder_disposition"]
+            == meta_incomplete["table_ladder_disposition"]
+            == FailureMode.TABLE_REJECTED.value
+        )
+        assert meta_complete["run_fingerprint"] == meta_incomplete["run_fingerprint"]
+
+        resumed_complete = pipeline._load_terminal_page(state_complete, 1, out_complete)
+        resumed_incomplete = pipeline._load_terminal_page(state_incomplete, 1, out_incomplete)
+
+        assert resumed_complete is not None, (
+            "a fully-witnessed REJECTED page must still skip-and-keep (D1b unchanged)"
+        )
+        assert resumed_incomplete is None, (
+            "a REJECTED page with an unwitnessed table must be reprocessed, "
+            "not skipped -- nobody ever looked at that table"
+        )
+
+    def test_restore_round_trips_the_flag(self, tmp_path: Path) -> None:
+        """The flag must survive the sidecar round trip; if it were dropped on
+        restore, a resumed run would re-flush a sidecar claiming the page was
+        complete and the NEXT resume would wrongly skip it."""
+        pdf_path = _real_pdf(tmp_path)
+        out_dir = tmp_path / "out"
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+
+        sidecar_path = _seed_and_flush(
+            pipeline, state, out_dir, FailureMode.TABLE_REJECTED, incomplete=True
+        )
+
+        fresh = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        # A REJECTED+incomplete page no longer skips, so drive the restore
+        # directly with the reconstructed output the ledger would hand back.
+        resumed = _reconstruct_for_restore(sidecar_path)
+        pipeline._restore_terminal_page_state(fresh, 1, resumed, out_dir)
+
+        assert fresh.pages[1].table_ladder_incomplete is True
+        assert fresh.pages[1].table_ladder_disposition is FailureMode.TABLE_REJECTED

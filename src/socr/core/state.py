@@ -139,6 +139,15 @@ class PageState:
     #: ``audit_passed``/``failure_mode`` in place would make assemble
     #: discard the page's text -- the #252 round-1 rule).
     table_ladder_disposition: FailureMode | None = None
+    #: GH-359 (cubic P1): True when at least one emitted table on this page
+    #: reached assemble with NO ladder terminal of its own. The disposition
+    #: above is a page-level reduction, so a page holding one REJECTED table
+    #: keeps ``TABLE_REJECTED`` even when a SECOND table was never witnessed.
+    #: D1b's resume exception skips a REJECTED page on the grounds that "both
+    #: rungs looked and said no" -- true of the rejected table, false of the
+    #: unwitnessed one. This flag withholds that exception so the page is
+    #: reprocessed and the unwitnessed table finally gets a look.
+    table_ladder_incomplete: bool = False
 
     def is_structure_class(self) -> bool:
         """C2: pages whose native branch may never author a GRID.
