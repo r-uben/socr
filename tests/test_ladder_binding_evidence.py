@@ -213,18 +213,21 @@ class TestNoNativeWordsStaysNeutral:
 
 
 class TestRowLabelShiftComposesWithLadder:
-    def test_shifted_labels_seed_prior_findings_but_cap_at_unverified(self, tmp_path: Path) -> None:
-        """CONSILIUM (panel #3): the mechanical FAIL is prepended as rung 0
-        and tiebreaks into the real rung with the contradiction's findings
-        attached -- proving the composition (not a post-hoc overwrite)
-        actually happened -- but a genuine mechanical contradiction now
-        caps the table at UNVERIFIED even when the real rung answers a
-        high-confidence PASS: mechanical evidence is a different, near-
-        zero-false-positive evidence class than judge-vs-judge
-        disagreement, so a fallible judge can no longer silently overrule
-        it (that was the exact GH-273 failure). It still does not demote
-        content outright (the native text layer itself can be the culprit
-        -- GH-334), so the outcome is UNVERIFIED, not REJECTED."""
+    def test_shifted_labels_do_not_seed_findings_and_cap_at_unverified(
+        self, tmp_path: Path
+    ) -> None:
+        """CONSILIUM (panel #3, GH-353 E1) originally specified: "the
+        mechanical FAIL is prepended as rung 0 and tiebreaks into the
+        real rung with the contradiction's findings attached."
+
+        GH-359 ruling 4 overturns the findings-injection half of that
+        composition: judge input is crop + markdown, nothing else, so the
+        mechanical check cannot occupy a fake ladder slot. The rest of
+        panel #3 stands: a genuine contradiction caps acceptance at
+        UNVERIFIED (not REJECTED -- GH-334: the native text layer can be
+        the culprit), does not inject findings, and does not overrule a
+        ladder REJECTED.
+        """
         pipeline = _make_pipeline()
         pdf_path = _row_shift_pdf(tmp_path)
         state = _make_state(pdf_path)
@@ -236,8 +239,7 @@ class TestRowLabelShiftComposesWithLadder:
 
         assert len(rung.calls) == 1
         _crop_path, _markdown, prior_findings = rung.calls[0]
-        assert prior_findings, "the real rung must see the mechanical contradiction's findings"
-        assert all(f.code.value == "WRONG_BINDING" for f in prior_findings)
+        assert prior_findings is None
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         events = _events_of_kind(state, "table_ladder_unverified")
         assert len(events) == 1
@@ -277,12 +279,12 @@ class TestRowLabelShiftComposesWithLadder:
         assert len(events) == 1
         assert "mechanical binding check found a contradiction" not in events[0].detail
 
-    def test_shifted_labels_with_no_rungs_available_forces_rejected(self, tmp_path: Path) -> None:
-        """No CLI available at all (strict_local, or every rung otherwise
-        unavailable): the mechanical rung is the sole -- and therefore
-        last -- rung in the sequence, so its FAIL exhausts the ladder to
-        REJECTED unconditionally. The mechanical check needs no cloud
-        egress, so an empty ``rungs`` list does not exempt it."""
+    def test_shifted_labels_with_no_rungs_available_is_unverified(self, tmp_path: Path) -> None:
+        """GH-359 ruling 5: no CLI available plus a mechanical
+        contradiction is UNVERIFIED, not REJECTED. Empty-rungs REJECTED
+        was leftover of panel #3's rung-0 composition (mechanical FAIL as
+        last rung). Mechanical evidence withholds accept; it does not
+        force a content verdict (GH-334)."""
         pipeline = _make_pipeline()
         pdf_path = _row_shift_pdf(tmp_path)
         state = _make_state(pdf_path)
@@ -291,12 +293,11 @@ class TestRowLabelShiftComposesWithLadder:
 
         pipeline._run_table_judge_gate(state, 1, ps, bo, [])
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
-        events = _events_of_kind(state, "table_ladder_rejected")
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        events = _events_of_kind(state, "table_ladder_unverified")
         assert len(events) == 1
-        assert events[0].data["rung_trail"] == [
-            {"rung": "mechanical:binding", "ok": True, "executing": "mechanical binding check"}
-        ]
+        assert "mechanical binding check found a contradiction" in events[0].detail
+        assert events[0].data["rung_trail"] == []
 
     def test_correct_labels_with_no_rungs_available_stays_unverified(self, tmp_path: Path) -> None:
         """Sanity: the SAME PDF (same native geometry), but candidate
@@ -388,7 +389,8 @@ class TestProcessFlagDifference:
             result_on = pipeline_on.process(pdf_on, tmp_path / "on_out")
 
         assert result_on.status == DocumentStatus.AUDIT_FAILED
-        assert "table_rejected" in (result_on.error or "")
+        assert "table_unverified" in (result_on.error or "")
+        assert "table_rejected" not in (result_on.error or "")
 
     def test_flag_on_no_native_words_ships_success(self, tmp_path: Path) -> None:
         """The ticket's no-native-words acceptance criterion at the full

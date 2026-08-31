@@ -134,10 +134,12 @@ def test_judge_table_gemini_fail_is_s1_not_s2(tmp_path: Path):
     assert result.verdict.findings[0].code == FindingCode.MISSING_VALUE
 
 
-def test_prior_findings_reach_the_prompt(tmp_path: Path):
+def test_prior_findings_do_not_reach_the_prompt(tmp_path: Path):
+    """GH-359 ruling 4: even a caller that still passes findings must not
+    leak them into the judge prompt."""
     crop = tmp_path / "crop.png"
     config = _config()
-    prior = [Finding(code=FindingCode.WRONG_BINDING, where="row 1", detail="shifted")]
+    prior = [Finding(code=FindingCode.WRONG_BINDING, where="row 1", detail="shifted-payload")]
 
     with patch(
         "socr.judge.table_rung_gemini._run_gemini_cli",
@@ -147,11 +149,11 @@ def test_prior_findings_reach_the_prompt(tmp_path: Path):
 
     argv, _, _ = mock_run.call_args[0]
     prompt_arg = argv[argv.index("-p") + 1]
-    assert "WRONG_BINDING" in prompt_arg
-    assert "shifted" in prompt_arg
+    assert "shifted-payload" not in prompt_arg
+    assert "independently" in prompt_arg.lower()
 
 
-def test_first_look_prompt_has_no_prior_findings_leak(tmp_path: Path):
+def test_first_look_prompt_is_independent(tmp_path: Path):
     crop = tmp_path / "crop.png"
     config = _config()
 
@@ -163,7 +165,8 @@ def test_first_look_prompt_has_no_prior_findings_leak(tmp_path: Path):
 
     argv, _, _ = mock_run.call_args[0]
     prompt_arg = argv[argv.index("-p") + 1]
-    assert "no prior findings" in prompt_arg
+    assert "independently" in prompt_arg.lower()
+    assert "not given" in prompt_arg.lower()
 
 
 def test_subprocess_cwd_is_the_crop_scratch_dir_not_the_repo(tmp_path: Path):

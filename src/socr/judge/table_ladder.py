@@ -6,29 +6,36 @@ markdown they judge are the caller's (B1's) responsibility; this module only
 owns the S1/S2 transition logic per table and the multi-table page
 reduction.
 
-Per-rung outcome vocabulary (design: ``docs/log/2026-08-30_table-judge-ladder.md``):
+Terminals are pinned by GH-359 (``docs/log/2026-08-31_gh359-ladder-terminals.md``),
+which supersedes the contradictory sentences in the 2026-08-30 design note
+for these seven questions.
+
+Per-rung outcome vocabulary:
 
 - **A** — S1 ok, verdict PASS.
-- **B** — S1 ok, verdict FAIL: escalate as *tiebreak* (next rung sees the
-  findings).
-- **C** — S1 failed (¬S1): escalate as *substitute* (next rung gets fresh
-  eyes, no prior verdict).
+- **B** — S1 ok, verdict FAIL: escalate as *tiebreak* (next rung is called;
+  GH-359 ruling 4: it does **not** see the findings).
+- **C** — S1 failed (¬S1): escalate as *substitute* (next rung is also
+  called with no prior verdict).
 
-Per-table resolution:
+Per-table resolution (GH-359):
 
 - **A, high confidence** — accept immediately at the current rung.
 - **A, low confidence** — needs corroboration from a *real PASS witness*
-  (any confidence): escalate to the next rung with no findings (nothing to
-  complain about). If that was the last rung, the table is accepted only
-  if the immediately preceding rung was itself a real PASS — a low-
-  confidence PASS is not, by itself, sufficient evidence. A lone
-  low-confidence PASS (no preceding rung, or a preceding ¬S1/FAIL that
-  substituted/tied-break into it) exhausts the ladder to
-  ``TABLE_UNVERIFIED``: one weak, uncorroborated witness is not consensus.
-- **B** — escalate as tiebreak. Exhausting the ladder on B (no more rungs)
-  is a content problem: ``TABLE_REJECTED``.
+  (any confidence). Escalate with no findings. If that was the last rung,
+  the table is accepted only if the immediately preceding rung was itself
+  a real PASS; a lone low-confidence PASS exhausts to ``TABLE_UNVERIFIED``
+  (ruling 1).
+- **B** — escalate as tiebreak. CLI₂ may overrule CLI₁ FAIL with a
+  high-confidence PASS (ruling 2: "FAIL trusted at any rung" is dropped).
+  Exhausting the ladder on B is a content problem: ``TABLE_REJECTED``.
+  Mixed B then C (CLI₂ never looked) is ``TABLE_UNVERIFIED`` (ruling 3).
 - **C** — escalate as substitute. Exhausting the ladder on C is an infra
   problem: ``TABLE_UNVERIFIED``.
+
+Judge input at every rung is crop + markdown. Nothing else (ruling 4).
+``prior_findings`` is always ``None``; the RungCallable parameter remains
+for signature compatibility.
 
 A high-confidence PASS at any rung ends the ladder in ``TABLE_ACCEPTED``
 immediately — a table is never held hostage by an earlier B or C once a
@@ -45,7 +52,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Sequence
 
-from socr.judge.table_verdict import Finding, RungCallable, RungResult, TableJudgeVerdict
+from socr.judge.table_verdict import RungCallable, RungResult, TableJudgeVerdict
 
 
 class TableLadderOutcome(str, Enum):
@@ -106,15 +113,14 @@ def run_table_ladder(
     """Run one table through the ladder of rung callables in order.
 
     ``rungs`` must be non-empty. Each rung is called with the same
-    ``crop_path``/``markdown`` and the ``prior_findings`` carried from the
-    previous rung's outcome (a FAIL's findings on tiebreak, ``None``
-    otherwise). Returns the full history plus the terminal outcome.
+    ``crop_path``/``markdown`` and ``prior_findings=None`` (GH-359 ruling 4:
+    judge input is crop + markdown, nothing else). Returns the full history
+    plus the terminal outcome.
     """
     if not rungs:
         raise ValueError("run_table_ladder requires at least one rung")
 
     rung_results: list[RungResult] = []
-    prior_findings: list[Finding] | None = None
     # Whether the immediately preceding rung answered with a real PASS
     # verdict (any confidence) — the corroboration a low-confidence PASS
     # needs at the last rung. False before the first rung: there is no
@@ -123,7 +129,7 @@ def run_table_ladder(
     last_index = len(rungs) - 1
 
     for index, rung in enumerate(rungs):
-        result = rung(crop_path, markdown, prior_findings)
+        result = rung(crop_path, markdown, None)
         rung_results.append(result)
         is_last = index == last_index
 
@@ -136,7 +142,6 @@ def run_table_ladder(
                     rung_results=rung_results,
                     final_verdict=None,
                 )
-            prior_findings = None
             prior_was_pass = False
             continue
 
@@ -148,7 +153,7 @@ def run_table_ladder(
             # confidence needs corroboration: at the last rung it accepts
             # only if the PRECEDING rung was already a real PASS (two
             # witnesses in agreement); otherwise a lone, uncorroborated
-            # weak PASS cannot verify the table on its own.
+            # weak PASS cannot verify the table on its own (GH-359 ruling 1).
             if verdict.confidence == "high":
                 return TableLadderResult(
                     table_id=table_id,
@@ -170,12 +175,12 @@ def run_table_ladder(
                     rung_results=rung_results,
                     final_verdict=None,
                 )
-            prior_findings = None
             prior_was_pass = True
             continue
 
-        # B — FAIL. Tiebreak at the next rung with findings attached;
-        # exhausting the ladder on FAIL is a content problem.
+        # B — FAIL. Tiebreak at the next rung; GH-359 ruling 2: CLI2 may
+        # overrule. Exhausting the ladder on FAIL is a content problem.
+        # Findings are NOT forwarded (ruling 4).
         if is_last:
             return TableLadderResult(
                 table_id=table_id,
@@ -183,7 +188,6 @@ def run_table_ladder(
                 rung_results=rung_results,
                 final_verdict=verdict,
             )
-        prior_findings = verdict.findings
         prior_was_pass = False
         continue
 

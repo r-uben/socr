@@ -3,6 +3,9 @@ against the table shown in the attached image crop. Judge ONLY the table region 
 the crop — ignore surrounding page content, caption text style, and anything you
 cannot see in the image.
 
+Judge independently from the crop image and the emitted markdown. You are not given
+any prior verdict or findings.
+
 Findings use exactly one of these codes:
 
 - MISSING_VALUE: a value visible in the image is absent from the markdown.
@@ -23,8 +26,6 @@ Empty-cell rule: a cell that is genuinely blank in the image (no visible mark) a
 is also blank in the markdown is correct, not a finding. Only raise MISSING_VALUE
 when the image shows a value — a number, dash, star, or other mark — that the
 markdown omits. Do not penalize legitimately blank cells.
-
-{{PRIOR_FINDINGS}}
 
 Respond with ONLY a JSON object, no prose, no code fences, exactly this schema:
 {"verdict":"PASS"|"FAIL","confidence":"high"|"low","findings":[{"code":"MISSING_VALUE"|"FABRICATED_VALUE"|"WRONG_BINDING"|"HEADER_MANGLED"|"STRUCTURE_MERGED"|"NOT_A_TABLE","where":"<cell/row/col ref>","detail":"<one sentence>"}]}
