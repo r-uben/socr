@@ -113,3 +113,104 @@ def test_the_page_is_still_demoted_not_restamped():
 def test_a_clean_page_raises_nothing():
     """No defect, no event -- the loop must not manufacture one."""
     assert _defects_for(_Page()) == []
+
+
+def _real_state():
+    """A real DocumentState, built the way GH-226's guard builds one."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from socr.core.state import DocumentHandle, DocumentState
+
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=Path("/tmp/gh345.pdf"), page_count=1)
+    return DocumentState(handle=handle)
+
+
+class TestTheProductionStampNotAStubbedFlag:
+    """GH-345. The tests above stub ``native_table_content_defect`` on a fake
+    page and call the emitter directly, so reverting the ``PageAssessment``
+    kwarg or the ``apply_born_digital`` copy left them green: the mapper was
+    pinned, the production stamp was not.
+
+    This follows GH-226's pattern -- build a real ``PageAssessment`` and
+    propagate it through ``apply_born_digital`` -- and takes the defect from
+    ``structure_check.table_content_defect`` rather than a literal, so the
+    fixture cannot drift from what production computes.
+    """
+
+    def _assessment(self, native_text: str):
+        """The PageAssessment ``_assess_page`` ITSELF produces for this text.
+
+        GH-409 review: an earlier version built the PageAssessment by hand and
+        computed the defect with ``structure_check`` in the test, which pinned
+        ``apply_born_digital``'s copy but not the stamp's ORIGIN -- deleting the
+        ``native_table_content_defect=`` kwarg in ``_assess_page`` would have
+        left it green.
+
+        TWO things are stubbed, and this should not overstate the rest:
+        ``extract_structured`` (so the markdown under test is fixed) and
+        ``_detect_tables`` (so the table branch is entered without needing a PDF
+        whose geometry happens to trip the detector). What lies between them --
+        the ``structure_check`` call and the stamp onto the assessment -- is
+        real code, and that is what this pins.
+        """
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import fitz
+
+        from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
+
+        doc = fitz.open()
+        page = doc.new_page()
+        # Enough real text to clear the born-digital floor: apply_born_digital
+        # only copies the stamp for a born-digital page, so a sparse fixture
+        # would make the propagation test vacuous.
+        for i in range(6):
+            page.insert_text(
+                (72, 100 + i * 16),
+                f"Table 1 line {i}: estimates by year and coefficient value.",
+                fontsize=11,
+            )
+
+        detector = BornDigitalDetector()
+        with (
+            patch.object(detector, "extract_structured", return_value=native_text),
+            patch.object(BornDigitalDetector, "_detect_tables", return_value=True),
+        ):
+            page_assessment = detector._assess_page(page, 1)
+        doc.close()
+
+        return (
+            DocumentAssessment(path=Path("/tmp/gh345.pdf"), pages=[page_assessment]),
+            page_assessment.native_table_content_defect,
+        )
+
+    def test_the_empty_body_defect_is_what_structure_check_produces(self) -> None:
+        """Precondition: if the fixture stopped being an empty-body table this
+        class would pin nothing, so assert the source of truth first."""
+        from socr.tables import structure_check
+
+        assert structure_check.table_content_defect(EMPTY_BODY) == "table_content_empty"
+        assert structure_check.table_content_defect(RAGGED) == ""
+
+    def test_apply_born_digital_copies_the_content_defect_onto_page_state(self) -> None:
+        assessment, defect = self._assessment(EMPTY_BODY)
+        state = _real_state()
+        state.apply_born_digital(assessment)
+
+        assert state.pages[1].native_table_content_defect == defect
+
+    def test_empty_and_ragged_still_differ_after_propagation(self) -> None:
+        """The difference pin the ticket asks to keep, now through production."""
+        empty_state = _real_state()
+        empty_state.apply_born_digital(self._assessment(EMPTY_BODY)[0])
+
+        ragged_state = _real_state()
+        ragged_state.apply_born_digital(self._assessment(RAGGED)[0])
+
+        assert (
+            empty_state.pages[1].native_table_content_defect
+            != ragged_state.pages[1].native_table_content_defect
+        )
