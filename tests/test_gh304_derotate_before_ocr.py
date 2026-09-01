@@ -130,11 +130,17 @@ def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
 
     GH-426: the wording here used to add that this is "why the call sites'
     ``mat = mat.prerotate(...)`` assignment is meaningful", and that both call
-    sites rely on it. Neither is true. The tree carries BOTH forms -- the 304b
-    crop lanes (``tables/extract.py``, ``source_evidence.py``, ``witness.py``)
-    discard the return and rely on the mutation, while the page-level lanes
-    (``engines/base.py``, ``core/document.py``, ``review/html.py``) assign it.
-    They are equivalent precisely because both halves hold.
+    sites rely on it. Neither is true. The tree carries BOTH forms:
+
+    - mutate-only, discarding the return: ``tables/extract.py``,
+      ``tables/source_evidence.py`` (x2), ``tables/witness.py``,
+      ``pipeline/orchestrator.py`` (D3 floor render)
+    - assignment: ``engines/base.py``, ``core/document.py`` (x2),
+      ``review/html.py``, ``pipeline/orchestrator.py`` (chart page, chart region)
+
+    Not a clean split by lane, either -- ``orchestrator.py`` appears on both
+    sides. They are equivalent precisely because both halves of the PyMuPDF
+    behaviour hold.
 
     Pinned because a PyMuPDF upgrade that changed EITHER half would silently
     break one family of call sites while leaving the other working, which is the
