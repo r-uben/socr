@@ -205,7 +205,24 @@ def upright_rotation_for(page, clip=None) -> int:
     if not blocks:
         return 0
 
-    return upright_rotation_degrees(dominant_text_direction(blocks))
+    # GH-310: the fail-open guard wrapped only get_text. dominant_text_direction
+    # and upright_rotation_degrees sat outside it, so a malformed ``dir`` -- or
+    # any raise in either -- propagated out of a helper documented as
+    # fail-open, aborting the crop extract() (whose call precedes _render_crop's
+    # own error boundary, so its never-raises contract failed) and the OCR
+    # render loop that now delegates here.
+    #
+    # One wrap, in the shared helper, covers every caller: #309 hoisted this, so
+    # a second try at each call site would be the duplication that hoist removed.
+    try:
+        return upright_rotation_degrees(dominant_text_direction(blocks))
+    except Exception:
+        # Logged, not swallowed (GH-424 review). Fail-open must not mean
+        # invisible: if either helper regresses, every page renders unrotated
+        # and nothing anywhere says why. Debug level keeps a malformed `dir` on
+        # one page from being noise, while `exc_info` keeps it diagnosable.
+        logger.debug("upright_rotation_for: direction inspection failed", exc_info=True)
+        return 0
 
 
 def text_direction_is_rotated(direction: tuple[float, float]) -> bool:
