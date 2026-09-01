@@ -468,7 +468,12 @@ def process(
             # failure as the flag being inert, one step smaller.
             from socr.pipeline.orchestrator import UnifiedPipeline as _Pipe
 
-            resolved_out = _Pipe(config)._resolve_output_root(pdf_path.parent, output_dir)
+            # pdf_path itself, exactly as process() passes it (orchestrator.py:643).
+            # Passing .parent diverges whenever pdf_path is a directory: the
+            # preview would resolve <parent>/ocr while the run resolves
+            # <directory>/ocr. Same resolver AND same argument, or the two can
+            # still disagree.
+            resolved_out = _Pipe(config)._resolve_output_root(pdf_path, output_dir)
             # soft_wrap: a long temp path wrapped mid-string otherwise, which
             # breaks anything reading the destination back out of the output.
             console.print(f"[blue]Output:[/blue] {resolved_out}", soft_wrap=True)

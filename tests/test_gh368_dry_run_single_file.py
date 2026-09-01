@@ -111,11 +111,33 @@ class TestDryRunIsHonouredOnTheSingleFilePath:
         from socr.cli import build_config
         from socr.pipeline.orchestrator import UnifiedPipeline
 
-        expected = UnifiedPipeline(build_config(output_dir=None))._resolve_output_root(
-            pdf.parent, None
-        )
+        expected = UnifiedPipeline(build_config(output_dir=None))._resolve_output_root(pdf, None)
         assert f"Output: {expected}" in result.output, (
             f"preview named the wrong destination; expected {expected}"
         )
         assert "Output: None" not in result.output
         assert "Would process" in result.output
+
+    def test_a_directory_input_previews_the_same_root_the_run_would_use(
+        self, tmp_path: Path
+    ) -> None:
+        """GH-401 review, P2. A FILE and its parent resolve to the same root, so
+        the test above cannot tell ``pdf_path`` from ``pdf_path.parent``. A
+        DIRECTORY can: the real call passes the path itself (orchestrator.py:643)
+        and resolves ``<dir>/ocr``, while ``.parent`` would resolve
+        ``<parent>/ocr``. This is the case that distinguishes them.
+        """
+        from click.testing import CliRunner
+
+        from socr.cli import build_config, cli
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        target = tmp_path / "corpus"
+        target.mkdir()
+
+        result = CliRunner().invoke(cli, ["process", str(target), "--dry-run", "--primary", "qwen"])
+        expected = UnifiedPipeline(build_config(output_dir=None))._resolve_output_root(target, None)
+        assert f"Output: {expected}" in result.output
+        assert str(tmp_path / "ocr") not in result.output, (
+            "resolved from the parent, not the path the real run passes"
+        )
