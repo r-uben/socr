@@ -56,8 +56,8 @@ below.
 Hermetic: ``_winning_page_output`` / ``PageState.is_structure_class`` /
 ``UnifiedPipeline._is_trusted_native_without_ocr`` are all driven directly, no
 provider ladder, no ollama. The new symbols
-(``FailureMode.STRUCTURE_CLASS_NO_MODEL_ATTEMPT``, ``PageState.is_structure_class``,
-``socr.core.manifest.structure_class_grid_winner``) are reached via ``getattr``
+(``PageState.is_structure_class``, ``socr.core.manifest.structure_class_grid_winner``)
+are reached via ``getattr``
 or a guarded import, so a run against the pre-S1 baseline fails on BEHAVIOUR
 (the winner it picks, or an assertion on a value) rather than on
 ``AttributeError``/``ImportError`` for a symbol that does not exist yet.
@@ -97,6 +97,20 @@ MODEL_GRID = (
     "| 5 | 0.07 | 0.85 | 0.51 |\n"
 )
 NATIVE_FLATTENED = "0.03 0.91 0.44 0.07 0.85 0.51\nn const. slope R2\n2 5\n"
+NATIVE_FLOOR_GRID = "| n | value |\n|---|---|\n| 2 | 0.03 |\n"
+NATIVE_FLOOR_TEXT = (
+    "Results reported below.\n\n" + NATIVE_FLOOR_GRID + "\nSource: author calculations.\n"
+)
+FLOOR_PNG_REF = "![Failed table page 1](figures/failed_table_p1.png)"
+
+
+def _assert_structure_class_floor(winner: PageOutput) -> None:
+    assert winner.engine == "native", winner.engine
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert NATIVE_FLOOR_GRID not in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+    assert winner.audit_passed is False, winner.audit_passed
+    assert winner.failure_mode is FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED, winner.failure_mode
 
 
 def _born_digital_pdf(tmp_path: Path) -> Path:
@@ -121,6 +135,7 @@ def _state(
     rejection_class: str = SOFT_AMBIGUOUS,
     native_audit_passed: bool = True,
     native_best_output: bool = True,
+    native_text: str = NATIVE_FLATTENED,
 ) -> DocumentState:
     """The measured shape: a clean-looking native SUCCESS, no flag anywhere,
     and a correct model grid sitting unread in ``attempts``, soft-refused by
@@ -131,7 +146,7 @@ def _state(
     ps.is_born_digital = True
     ps.has_tables = has_tables
     ps.has_equations = has_equations
-    ps.native_text = NATIVE_FLATTENED
+    ps.native_text = native_text
     # Deliberately: NO native_table_structure_failed, NO
     # native_table_unverifiable, NO native_table_structure_defective, NO
     # native_table_header_unattributed, NO scanned_table_evidence_failed.
@@ -139,7 +154,7 @@ def _state(
 
     native_attempt = PageOutput(
         page_num=1,
-        text=NATIVE_FLATTENED,
+        text=native_text,
         status=PageStatus.SUCCESS,
         engine="native",
         audit_passed=native_audit_passed,
@@ -226,8 +241,8 @@ def test_equation_only_page_is_not_structure_class(tmp_path: Path) -> None:
     """BLOCKING 1 on #269: C2 is tables only now. An equation-only page (no
     tables) must NOT take the S1 branch at all -- even with a model attempt
     that authors no usable grid, which under the pre-fix ("tables or
-    equations") scope wrongly demoted this page to WARNING /
-    STRUCTURE_CLASS_NO_MODEL_ATTEMPT purely because it had an equation and no
+    equations") scope wrongly demoted this page to WARNING / the historical
+    no-model disposition purely because it had an equation and no
     grid-shaped attempt, regardless of whether native's own equation reading
     was fine. This fails on the pre-fix S1 commit (which ships WARNING here)
     and passes once ``is_structure_class()`` is tables-only.
@@ -271,28 +286,39 @@ def test_equation_only_page_does_not_ship_a_coincidentally_grid_shaped_attempt(
 
 
 # ---------------------------------------------------------------------------
-# Case (iii): no attempt anywhere authored a grid. Native prose still ships
-# (C1: dropping prose is the exact content loss this work exists to prevent)
-# but never as SUCCESS.
+# Case (iii): no attempt anywhere authored a grid, so the page ships the
+# WHOLE-PAGE fail-closed floor -- marker plus page image, and no native byte.
+#
+# Cold review round 2 (P2/GH-317): P2 first spliced the table regions out and
+# kept the surrounding prose. That splice could only prove coverage against
+# the same parser that produced the regions, so a detected sibling whose
+# reconstruction failed was absent from the enumeration and its collapsed grid
+# shipped inside the "preserved prose". No independent detection-level count
+# exists to fix that, so the splice was retired. Prose loss on a floored page
+# is a recorded limitation -- see docs/log/2026-09-01_p2-structure-class-floor.md.
 # ---------------------------------------------------------------------------
 
 
-def test_no_grid_authoring_attempt_ships_native_prose_flagged_not_success(
-    tmp_path: Path,
-) -> None:
+def test_no_grid_authoring_attempt_ships_the_whole_page_floor(tmp_path: Path) -> None:
+    """The guarantee this test was written for is unchanged: the unverified
+    native grid must not ship. It is stronger now -- nothing native ships."""
     state = _state(
         _born_digital_pdf(tmp_path),
         model_text="The table on this page could not be read reliably.\n",
+        native_text=NATIVE_FLOOR_TEXT,
     )
+    state.pages[1].d3_floor_png_ref = FLOOR_PNG_REF
 
     winner = _winning_page_output(state, 1)
     assert winner.engine == "native", winner.engine
-    assert winner.text == NATIVE_FLATTENED, winner.text
-    assert winner.status is PageStatus.WARNING, winner.status
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert FLOOR_PNG_REF in winner.text, winner.text
+    assert NATIVE_FLOOR_GRID not in winner.text, winner.text
+    assert "Results reported below." not in winner.text, winner.text
+    assert "Source: author calculations." not in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
     assert winner.audit_passed is False, winner.audit_passed
-    expected = getattr(FailureMode, "STRUCTURE_CLASS_NO_MODEL_ATTEMPT", None)
-    assert expected is not None
-    assert winner.failure_mode is expected, winner.failure_mode
+    assert winner.failure_mode is FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED, winner.failure_mode
 
 
 def test_no_model_rung_at_all_defers_to_the_pre_existing_native_path(tmp_path: Path) -> None:
@@ -319,20 +345,24 @@ def test_no_model_rung_at_all_defers_to_the_pre_existing_native_path(tmp_path: P
     assert winner.audit_passed is True, winner.audit_passed
 
 
-def test_prose_and_appended_sidecar_content_survive_case_iii(tmp_path: Path) -> None:
-    """C1: dropping prose is the exact content loss S1 exists to prevent.
+def test_prose_and_appended_sidecar_are_withheld_by_the_floor(tmp_path: Path) -> None:
+    """The case-(iii) counterpart of the GH-211 prose guarantee, inverted.
 
-    Content appended to a native attempt's text after extraction (GH-36b's
-    equation sidecar splice) must still reach the shipped page under the new
-    branch, exactly as it does under the pre-existing native-fallback branch
-    (GH-211).
+    S1 kept native prose here, and GH-36b's appended equation sidecar with it.
+    The whole-page floor withholds both, because on this ending nothing can be
+    proven to lie outside a table region. Withheld, not silently lost: the page
+    ships ERROR with a marker, a page image, an audit event, a document-level
+    note and a CLI line. The prose guarantee itself is untouched on every
+    OTHER ending -- the native-fallback branch below still keeps it, and that
+    is the difference this file pins.
     """
     state = _state(
         _born_digital_pdf(tmp_path),
         model_text="Nothing usable here.\n",
+        native_text=NATIVE_FLOOR_TEXT,
     )
     ps = state.pages[1]
-    sidecar_text = NATIVE_FLATTENED + "\n\n$$E = mc^2$$"
+    sidecar_text = NATIVE_FLOOR_TEXT + "\n$$E = mc^2$$"
     ps.attempts[0] = PageOutput(
         page_num=1,
         text=sidecar_text,
@@ -343,8 +373,13 @@ def test_prose_and_appended_sidecar_content_survive_case_iii(tmp_path: Path) -> 
     ps.best_output = ps.attempts[0]
 
     winner = _winning_page_output(state, 1)
-    assert "$$E = mc^2$$" in winner.text, winner.text
-    assert winner.status is PageStatus.WARNING, winner.status
+    assert "$$E = mc^2$$" not in winner.text, winner.text
+    assert "Results reported below." not in winner.text, winner.text
+    assert "Source: author calculations." not in winner.text, winner.text
+    assert NATIVE_FLOOR_GRID not in winner.text, winner.text
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+    assert winner.audit_passed is False, winner.audit_passed
 
 
 # ---------------------------------------------------------------------------
@@ -376,35 +411,43 @@ def test_best_output_object_is_never_mutated_case_iii(tmp_path: Path) -> None:
     state = _state(
         _born_digital_pdf(tmp_path),
         model_text="Nothing usable here.\n",
+        native_text=NATIVE_FLOOR_TEXT,
     )
     ps = state.pages[1]
     stored_native = ps.attempts[0]
+    stored_native_text = stored_native.text
+    ps.d3_floor_png_ref = FLOOR_PNG_REF
 
     winner = _winning_page_output(state, 1)
 
     assert stored_native.audit_passed is True, (
         "the stored native attempt's audit_passed flag was mutated by the demotion"
     )
+    assert stored_native.text == stored_native_text, "the stored native attempt text was mutated"
     assert winner is not stored_native, "the demoted page must be a copy, not the stored object"
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert FLOOR_PNG_REF in winner.text, winner.text
+    assert NATIVE_FLOOR_GRID not in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
     assert winner.audit_passed is False, winner.audit_passed
 
 
 # ---------------------------------------------------------------------------
 # Document-level visibility (the gap this segment closed): case (iii) never
 # mutates ``p.best_output`` (the non-negotiable audit_passed rule), so
-# ``_phase_assemble``'s ``native_fallback_pages`` -- keyed off exactly
+# ``_phase_assemble``'s generic fallback bucket -- keyed off exactly
 # ``p.best_output.audit_passed`` -- cannot see this demotion at all. CLAUDE.md:
 # "failures must surface at every level", not just the shipped page text.
-# ``structure_class_native_fallback_applies`` is the exported predicate that
+# ``structure_class_floor_applies`` is the exported predicate that
 # lets ``_phase_assemble`` build its own bucket for this, mirroring
 # ``structure_class_grid_winner`` for case (i).
 # ---------------------------------------------------------------------------
 
 
-def _structure_class_native_fallback_applies(ps) -> bool:
+def _structure_class_floor_applies(ps) -> bool:
     """Guarded import for a symbol that does not exist on the pre-S1 baseline.
 
-    A bare ``from socr.core.manifest import structure_class_native_fallback_applies``
+    A bare import of ``structure_class_floor_applies``
     would fail every call site below with an ``ImportError`` on the pre-S1
     baseline -- a collection-time failure, not a behavioural one. Routing
     through ``getattr`` on the module object instead gives the baseline run a
@@ -413,41 +456,42 @@ def _structure_class_native_fallback_applies(ps) -> bool:
     """
     import socr.core.manifest as _manifest
 
-    fn = getattr(_manifest, "structure_class_native_fallback_applies", None)
-    assert fn is not None, "S1 must add socr.core.manifest.structure_class_native_fallback_applies"
+    fn = getattr(_manifest, "structure_class_floor_applies", None)
+    assert fn is not None, "P2 must add socr.core.manifest.structure_class_floor_applies"
     return fn(ps)
 
 
-def test_structure_class_native_fallback_applies_true_for_case_iii(tmp_path: Path) -> None:
+def test_structure_class_floor_applies_true_for_case_iii(tmp_path: Path) -> None:
 
     state = _state(
         _born_digital_pdf(tmp_path),
         model_text="Nothing usable here.\n",
+        native_text=NATIVE_FLOOR_TEXT,
     )
     ps = state.pages[1]
 
     # The predicate must see the demotion even though ``p.best_output`` (the
     # object it is handed) still reports the clean native SUCCESS unchanged --
-    # exactly the blind spot ``native_fallback_pages`` has today.
+    # exactly the blind spot in the generic fallback bucket.
     assert ps.best_output.audit_passed is True, "fixture drifted: this must start clean"
-    assert _structure_class_native_fallback_applies(ps) is True, (
+    assert _structure_class_floor_applies(ps) is True, (
         "a structure-class page with a real model rung and no grid-authoring "
-        "attempt must report as a case (iii) native-fallback page, even though "
+        "attempt must report as a case (iii) floor page, even though "
         "p.best_output.audit_passed was never touched"
     )
 
 
-def test_structure_class_native_fallback_applies_false_for_case_i(tmp_path: Path) -> None:
+def test_structure_class_floor_applies_false_for_case_i(tmp_path: Path) -> None:
     state = _state(_born_digital_pdf(tmp_path))  # MODEL_GRID: case (i), not (iii)
     ps = state.pages[1]
 
-    assert _structure_class_native_fallback_applies(ps) is False, (
+    assert _structure_class_floor_applies(ps) is False, (
         "a page whose model attempt DID author a grid is case (i), not case "
-        "(iii) -- it must not double up in the native-fallback bucket"
+        "(iii) -- it must not double up in the generic fallback bucket"
     )
 
 
-def test_structure_class_native_fallback_applies_false_with_no_model_rung(
+def test_structure_class_floor_applies_false_with_no_model_rung(
     tmp_path: Path,
 ) -> None:
     """Mirrors the R3-scope fix directly: zero real rungs, so no bucket at all."""
@@ -456,7 +500,7 @@ def test_structure_class_native_fallback_applies_false_with_no_model_rung(
     ps.attempts = [a for a in ps.attempts if a.engine == "native"]
     ps.best_output = ps.attempts[0]
 
-    assert _structure_class_native_fallback_applies(ps) is False, (
+    assert _structure_class_floor_applies(ps) is False, (
         "zero model-rung attempts must defer to the pre-existing tail logic, "
         "not be folded into the new document-level bucket either"
     )
@@ -492,13 +536,13 @@ def test_ordinary_already_passing_non_native_winner_is_not_an_s1_event(
     )
     assert winner.status is PageStatus.SUCCESS, winner.status
     assert winner.audit_passed is True, winner.audit_passed
-    assert _structure_class_native_fallback_applies(ps) is False, (
+    assert _structure_class_floor_applies(ps) is False, (
         "an ordinary already-passing non-native winner must not be flagged "
-        "as a case (iii) native-fallback page"
+        "as a case (iii) floor page"
     )
 
 
-def test_structure_class_native_fallback_applies_false_for_non_structure_class(
+def test_structure_class_floor_applies_false_for_non_structure_class(
     tmp_path: Path,
 ) -> None:
     state = _state(
@@ -509,7 +553,7 @@ def test_structure_class_native_fallback_applies_false_for_non_structure_class(
     )
     ps = state.pages[1]
 
-    assert _structure_class_native_fallback_applies(ps) is False, ps.has_tables
+    assert _structure_class_floor_applies(ps) is False, ps.has_tables
 
 
 def test_orchestrator_assemble_surfaces_case_iii_pages_document_wide(
@@ -531,6 +575,7 @@ def test_orchestrator_assemble_surfaces_case_iii_pages_document_wide(
     state = _state(
         _born_digital_pdf(tmp_path),
         model_text="Nothing usable here.\n",
+        native_text=NATIVE_FLOOR_TEXT,
     )
     assert state.pages[1].best_output.audit_passed is True, (
         "fixture drifted: p.best_output must start clean, unmutated by the "
@@ -550,14 +595,20 @@ def test_orchestrator_assemble_surfaces_case_iii_pages_document_wide(
     out_dir = tmp_path / "out"
     result = pipeline._phase_assemble(state, out_dir)
 
-    # Page level: native's flagged prose shipped, not a clean grid.
+    # Page level: the floor shipped a marker plus the page image, not a grid.
     assert result.status is not DocumentStatus.SUCCESS, result.status
+    winner = _winning_page_output(state, 1)
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert "Results reported below." not in winner.text, winner.text
+    assert NATIVE_FLOOR_GRID not in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+    assert winner.audit_passed is False, winner.audit_passed
 
     # Document level: the new bucket carries page 1, and its audit trail is
     # distinct from every other S1/#259/#262 kind.
     kinds = {getattr(e, "kind", "") for e in state.events}
-    assert "structure_class_native_fallback" in kinds, (
-        f"no document-level trace of the case (iii) demotion for page 1; "
+    assert "structure_class_ladder_exhausted_floor" in kinds, (
+        f"no document-level trace of the case (iii) floor for page 1; "
         f"event kinds seen: {sorted(kinds)}"
     )
     assert "structure_class_model_table_kept" not in kinds, kinds
@@ -585,27 +636,30 @@ def test_non_structure_class_page_is_unaffected(tmp_path: Path) -> None:
 
 
 def test_empty_model_attempt_does_not_count_as_a_grid(tmp_path: Path) -> None:
-    state = _state(_born_digital_pdf(tmp_path), model_text="   \n")
+    state = _state(_born_digital_pdf(tmp_path), model_text="   \n", native_text=NATIVE_FLOOR_TEXT)
 
     winner = _winning_page_output(state, 1)
-    assert winner.engine == "native", winner.engine
-    assert winner.status is PageStatus.WARNING, winner.status
+    _assert_structure_class_floor(winner)
 
 
 def test_hallucinated_model_grid_does_not_rescue_the_page(tmp_path: Path) -> None:
-    state = _state(_born_digital_pdf(tmp_path), model_failure_mode=FailureMode.HALLUCINATION)
+    state = _state(
+        _born_digital_pdf(tmp_path),
+        model_failure_mode=FailureMode.HALLUCINATION,
+        native_text=NATIVE_FLOOR_TEXT,
+    )
 
     winner = _winning_page_output(state, 1)
-    assert winner.engine == "native", winner.engine
-    assert winner.status is PageStatus.WARNING, winner.status
+    _assert_structure_class_floor(winner)
 
 
 def test_error_status_model_grid_does_not_rescue_the_page(tmp_path: Path) -> None:
-    state = _state(_born_digital_pdf(tmp_path), model_status=PageStatus.ERROR)
+    state = _state(
+        _born_digital_pdf(tmp_path), model_status=PageStatus.ERROR, native_text=NATIVE_FLOOR_TEXT
+    )
 
     winner = _winning_page_output(state, 1)
-    assert winner.engine == "native", winner.engine
-    assert winner.status is PageStatus.WARNING, winner.status
+    _assert_structure_class_floor(winner)
 
 
 def test_native_labelled_attempts_alone_do_not_trigger_the_new_branch(tmp_path: Path) -> None:
@@ -634,7 +688,11 @@ def test_a_native_labelled_grid_never_qualifies_even_when_a_real_rung_also_ran(
     still may not be picked as the grid winner, even though it carries a
     grid and even though its own ``audit_passed`` is True.
     """
-    state = _state(_born_digital_pdf(tmp_path), model_text="Nothing usable here.\n")
+    state = _state(
+        _born_digital_pdf(tmp_path),
+        model_text="Nothing usable here.\n",
+        native_text=NATIVE_FLOOR_TEXT,
+    )
     ps = state.pages[1]
     ps.attempts.append(
         PageOutput(
@@ -647,10 +705,7 @@ def test_a_native_labelled_grid_never_qualifies_even_when_a_real_rung_also_ran(
     )
 
     winner = _winning_page_output(state, 1)
-    assert winner.engine == "native", winner.engine
-    assert winner.status is PageStatus.WARNING, winner.status
-    expected = getattr(FailureMode, "STRUCTURE_CLASS_NO_MODEL_ATTEMPT", None)
-    assert winner.failure_mode is expected, winner.failure_mode
+    _assert_structure_class_floor(winner)
 
 
 def test_d3_floor_and_gh259_still_take_precedence_over_the_new_branch(tmp_path: Path) -> None:
@@ -658,7 +713,7 @@ def test_d3_floor_and_gh259_still_take_precedence_over_the_new_branch(tmp_path: 
     substitution; it must not shadow either. A page with
     ``native_table_structure_failed`` + ``native_table_unverifiable`` and no
     attempt authoring a grid still ships the D3 marker, not
-    ``STRUCTURE_CLASS_NO_MODEL_ATTEMPT``."""
+    the structure-class floor."""
     state = _state(
         _born_digital_pdf(tmp_path),
         model_text="Table could not be read from this page.\n",
@@ -683,24 +738,28 @@ def test_d3_floor_and_gh259_still_take_precedence_over_the_new_branch(tmp_path: 
 
 def test_a_certain_fail_grid_never_qualifies(tmp_path: Path) -> None:
     """``vr.hard_fail``: the value guard proved this grid wrong and mutated
-    nothing. Must fall through to native prose, WARNING, case (iii)."""
-    state = _state(_born_digital_pdf(tmp_path), rejection_class=HARD_REFUTED)
+    nothing. The structure-class floor must remain fail-closed."""
+    state = _state(
+        _born_digital_pdf(tmp_path),
+        rejection_class=HARD_REFUTED,
+        native_text=NATIVE_FLOOR_TEXT,
+    )
 
     winner = _winning_page_output(state, 1)
-    assert winner.engine == "native", winner.engine
-    assert winner.status is PageStatus.WARNING, winner.status
-    expected = getattr(FailureMode, "STRUCTURE_CLASS_NO_MODEL_ATTEMPT", None)
-    assert winner.failure_mode is expected, winner.failure_mode
+    _assert_structure_class_floor(winner)
 
 
 def test_an_unrecognised_disposition_never_qualifies(tmp_path: Path) -> None:
     """Allowlist, not denylist: a disposition nobody taught this code does
     not qualify -- fail-safe direction is distrust, not "author a grid"."""
-    state = _state(_born_digital_pdf(tmp_path), rejection_class="some_future_kind")
+    state = _state(
+        _born_digital_pdf(tmp_path),
+        rejection_class="some_future_kind",
+        native_text=NATIVE_FLOOR_TEXT,
+    )
 
     winner = _winning_page_output(state, 1)
-    assert winner.engine == "native", winner.engine
-    assert winner.status is PageStatus.WARNING, winner.status
+    _assert_structure_class_floor(winner)
 
 
 def test_judge_only_disposition_does_not_qualify_on_this_branch(tmp_path: Path) -> None:
@@ -712,11 +771,14 @@ def test_judge_only_disposition_does_not_qualify_on_this_branch(tmp_path: Path) 
     grid". This pins the rebase decision so a future stacking of #264 on top
     of this branch has an explicit, failing test to widen rather than a
     silent behaviour change."""
-    state = _state(_born_digital_pdf(tmp_path), rejection_class=SOFT_JUDGE_ONLY)
+    state = _state(
+        _born_digital_pdf(tmp_path),
+        rejection_class=SOFT_JUDGE_ONLY,
+        native_text=NATIVE_FLOOR_TEXT,
+    )
 
     winner = _winning_page_output(state, 1)
-    assert winner.engine == "native", winner.engine
-    assert winner.status is PageStatus.WARNING, winner.status
+    _assert_structure_class_floor(winner)
 
 
 def test_the_ambiguous_deferred_disposition_also_qualifies(tmp_path: Path) -> None:
@@ -1181,7 +1243,7 @@ def _run_assemble_with_real_sidecars(state: DocumentState, output_dir: Path):
 
 def test_structure_class_model_kept_event_reaches_the_page_sidecar(tmp_path: Path) -> None:
     """MAJOR 6(a) on #269: before the fix, the PP-1 flush loop ran BEFORE the
-    S1 events (``structure_class_model_table_kept`` / ``_native_fallback``)
+    S1 events (the kept-grid event / the floor event)
     were appended to ``state.events``, so ``_flush_page_sidecar`` -- which
     filters ``state.events`` by page_num at the moment it writes -- never
     saw them, and no later pass rewrites a sidecar. A case-(i) page's
@@ -1204,25 +1266,38 @@ def test_structure_class_model_kept_event_reaches_the_page_sidecar(tmp_path: Pat
     )
 
 
-def test_structure_class_native_fallback_event_reaches_the_page_sidecar(tmp_path: Path) -> None:
+def test_structure_class_floor_event_reaches_the_page_sidecar(tmp_path: Path) -> None:
     """Same as above, for case (iii): a model rung ran but authored no
-    usable grid, so native's demoted prose ships and
-    ``structure_class_native_fallback`` must reach the sidecar."""
+    usable grid, so the fail-closed floor ships and its event must reach the
+    sidecar."""
     import json
 
     pdf_path = _born_digital_pdf(tmp_path)
-    state = _state(pdf_path, model_text="Nothing usable here.\n")
+    state = _state(
+        pdf_path,
+        model_text="Nothing usable here.\n",
+        native_text=NATIVE_FLOOR_TEXT,
+    )
+    state.pages[1].d3_floor_png_ref = FLOOR_PNG_REF
     output_dir = tmp_path / "out"
-    output_dir.mkdir()
+    fig_file = output_dir / pdf_path.stem / "figures" / "failed_table_p1.png"
+    fig_file.parent.mkdir(parents=True, exist_ok=True)
+    fig_file.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     _run_assemble_with_real_sidecars(state, output_dir)
 
     sidecar_path = output_dir / pdf_path.stem / "pages" / "00001.json"
     payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
     kinds = [e.get("kind") for e in payload.get("audit_events", [])]
-    assert "structure_class_native_fallback" in kinds, (
-        f"S1 event missing from the page sidecar's audit_events; got: {kinds}"
+    assert "structure_class_ladder_exhausted_floor" in kinds, (
+        f"floor event missing from the page sidecar's audit_events; got: {kinds}"
     )
+    winning = payload["winning_output"]
+    assert "[page 1 failed:" in winning["text"]
+    assert FLOOR_PNG_REF in winning["text"]
+    assert NATIVE_FLOOR_GRID not in winning["text"]
+    assert winning["status"] == "error"
+    assert winning["audit_passed"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1241,7 +1316,7 @@ def test_new_s1_event_kinds_mark_the_page_as_an_untrusted_table() -> None:
     from socr.core.audit_log import AuditEvent
     from socr.core.tables_trust import build_tables_trust
 
-    for kind in ("structure_class_model_table_kept", "structure_class_native_fallback"):
+    for kind in ("structure_class_model_table_kept", "structure_class_ladder_exhausted_floor"):
         events = [AuditEvent(page_num=3, kind=kind, engine="gemini", detail="test")]
         trust = build_tables_trust("fake.pdf", events)
         assert 3 in trust.untrusted_pages, (
@@ -1264,7 +1339,7 @@ def test_new_s1_event_kinds_are_ranked_not_defaulted() -> None:
     with patch.object(DocumentHandle, "__post_init__", lambda self: None):
         handle = DocumentHandle(path=Path("/tmp/fake.pdf"), page_count=1)
     state = DocumentState(handle=handle)
-    for kind in ("structure_class_model_table_kept", "structure_class_native_fallback"):
+    for kind in ("structure_class_model_table_kept", "structure_class_ladder_exhausted_floor"):
         state.events = [
             AuditEvent(page_num=1, kind="page_failed", engine="", detail=""),
             AuditEvent(page_num=1, kind=kind, engine="gemini", detail=""),

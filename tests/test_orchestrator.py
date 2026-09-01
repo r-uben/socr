@@ -2035,7 +2035,7 @@ class TestNativeOnlyRouting:
         assert result.status == DocumentStatus.AUDIT_FAILED
         assert "Native text for page 1" in result.markdown
 
-    def test_agentic_table_judge_reject_all_rungs_is_audit_failed(self, tmp_path) -> None:
+    def test_agentic_table_judge_reject_all_rungs_is_fail_closed(self, tmp_path) -> None:
         """Provenance-masking guard: provider available, OCR returns SUCCESS+non-empty
         content, but judge rejects all rungs — result must not be a clean success.
 
@@ -2073,16 +2073,27 @@ class TestNativeOnlyRouting:
         # too short (1 word) to pass the full heuristic gate → judge rejects all rungs.
         eng = _mock_engine_named("gemini", _bad_text())
 
-        with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
+        # CI has no ollama and no provider. Both seams are patched even though
+        # this test selects the heuristic judge: the provider ladder must not be
+        # empty (the loop bails before routing) and `_phase_judge_hard_pages`
+        # builds an OllamaVisionJudge and POSTs to it regardless of
+        # `judge_backend` unless the judge model resolves empty.
+        with (
+            patch("socr.pipeline.orchestrator.get_engine", return_value=eng),
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        ):
             result = pipeline.process(pdf, tmp_path)
 
-        # (a) document status must be AUDIT_FAILED, not SUCCESS.
-        assert result.status == DocumentStatus.AUDIT_FAILED, (
-            f"expected AUDIT_FAILED but got {result.status}; "
-            "native table page with all-rejected OCR must not be a clean success"
+        # (a) the structure-class floor is a page-level ERROR, not a warning.
+        assert result.status == DocumentStatus.ERROR, (
+            f"expected ERROR but got {result.status}; "
+            "native table page with all-rejected OCR must fail closed"
         )
-        # (b) page must carry native fallback, not be stamped audit_passed=True.
-        # Verify via manifest: the page must be flagged as native fallback, not clean.
+        # (b) page must carry the floor, not be stamped audit_passed=True.
+        # Verify via manifest: the page must be ERROR/audit-failed, not clean.
         manifest_path = tmp_path / "paper" / "manifest.json"
         if manifest_path.exists():
             import json
@@ -2092,6 +2103,8 @@ class TestNativeOnlyRouting:
             assert page_entry.get("audit_passed") is not True, (
                 "page manifest entry must NOT be audit_passed=True when OCR was rejected"
             )
+            assert page_entry.get("status") == PageStatus.ERROR.value
+            assert "Native text for page 1" not in page_entry.get("text", "")
 
     def test_native_only_agentic_suppresses_clean_table_pages(self, tmp_path) -> None:
         """Agentic native_only=True keeps clean table pages native."""

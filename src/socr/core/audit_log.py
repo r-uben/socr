@@ -141,11 +141,11 @@ def build_run_audit(state) -> RunAudit:
         "flagged_model_table_kept": 6,
         "native_fallback": 6,
         "corrupt_math_hybrid_shipped": 6,
-        # S1 (#269): same disposition rank as the two above -- a structure-class
-        # page's winner is a kept-but-unverified model grid or a native-prose
-        # fallback, either way the last word on this page's table content.
+        # S1/P2 (#269/#317): same disposition rank as the two above -- a
+        # structure-class page's winner is a kept-but-unverified model grid or
+        # a fail-closed floor, either way the last word on its table content.
         "structure_class_model_table_kept": 6,
-        "structure_class_native_fallback": 6,
+        "structure_class_ladder_exhausted_floor": 6,
         "page_failed": 7,
     }
     events.sort(key=lambda e: (e.page_num, rank.get(e.kind, 9)))

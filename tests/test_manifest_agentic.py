@@ -539,16 +539,18 @@ def test_d3_floor_fires_on_header_defect() -> None:
     assert winner.failure_mode == FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
 
 
-def test_d3_floor_header_defect_false_keeps_native_fallback_warning() -> None:
-    """Paired negative: with the header flag False, the existing
-    native_is_fallback WARNING behaviour (manifest.py:340-350) is unchanged."""
+def test_structure_class_floor_header_defect_false_is_fail_closed() -> None:
+    """Paired case-(iii): with the header flag False, the table-bearing page
+    still reaches the structure-class floor rather than shipping native bytes."""
     state = _build_state_header_defect(header_unattributed=False)
     winner = _winning_page_output(state, 1, None)
 
     assert winner is not None
-    assert "[page 1 failed:" not in winner.text
-    assert winner.status == PageStatus.WARNING
+    assert "[page 1 failed:" in winner.text
+    assert "collapsed| table |" not in winner.text
+    assert winner.status == PageStatus.ERROR
     assert winner.audit_passed is False
+    assert winner.failure_mode == FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
 
 
 def test_d3_floor_without_png_ships_marker_alone() -> None:

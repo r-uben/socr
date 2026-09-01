@@ -784,9 +784,9 @@ def structure_class_grid_winner(p) -> PageOutput | None:
     return max(candidates, key=lambda out: (out.audit_passed, out.confidence, out.word_count))
 
 
-def structure_class_native_fallback_applies(p) -> bool:
-    """S1 case (iii): whether the general structure-class branch demotes
-    THIS page's winner to native WARNING/audit_passed=False.
+def structure_class_floor_applies(p) -> bool:
+    """S1/P2 case (iii): whether the structure-class branch demotes THIS
+    page's winner to the fail-closed floor (ERROR/audit_passed=False).
 
     Exported so ``_phase_assemble``'s document-level buckets (``pages_ok``,
     the audit log, the CLI summary) can see this demotion too. Nothing in
@@ -810,6 +810,41 @@ def structure_class_native_fallback_applies(p) -> bool:
     if not _reaches_structure_class_branch(p):
         return False
     return structure_class_grid_winner(p) is None
+
+
+def structure_class_floor_text(p, page_num: int) -> str:
+    """P2 / GH-317: fail-closed text representation for an exhausted structure-class page.
+
+    The WHOLE page becomes the standard unverifiable-table marker plus the
+    existing ``d3_floor_png_ref``. No regional splice, and therefore no native
+    prose: on this ending nothing on the page can be proven to be outside a
+    table region.
+
+    Cold review rounds 1 and 2, finding 1. Round 1 shipped a regional splice
+    via ``splice_all_table_regions``, which proves only that it replaced every
+    block ITS OWN PARSER could find -- so a page with two detected tables where
+    reconstruction emitted one as valid GFM and collapsed the other to ragged
+    lines replaced the parseable one and shipped the collapsed one. Round 1's
+    fix required coverage against ``native_table_region_count`` /
+    ``native_table_region_identities``, which does NOT close it: those are
+    recorded by ``_verify_regions`` (born_digital.py:2186-2217) counting only
+    separator-bearing regions of ``table_regions``, and ``table_regions`` is
+    itself built only from SUCCESSFUL reconstructions (born_digital.py:1939-2003).
+    A sibling that failed reconstruction is absent from the count, so the check
+    agrees with the very parser it is meant to audit and passes.
+
+    Splicing safely needs an INDEPENDENT, detection-level region count recorded
+    BEFORE reconstruction. No such signal exists today: ``_detect_tables``
+    (born_digital.py:1766-1804) reduces ``page.find_tables()`` to a bool and
+    discards the count, and no ``PageAssessment``/``PageState`` field carries a
+    detection-level count or bbox list. Until one exists, a regional splice on
+    this ending cannot be justified, so it is gone. The cost -- native prose on
+    a floored page -- is recorded as a known limitation in
+    docs/log/2026-09-01_p2-structure-class-floor.md.
+    """
+    d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
+    png_ref = getattr(p, "d3_floor_png_ref", "")
+    return f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
 
 
 class WinnerKind(str, Enum):
@@ -862,8 +897,9 @@ class WinnerKind(str, Enum):
     STRUCTURE_CLASS_GRID_PASSING = "structure_class_grid_passing"
     #: structure-class: grid winner kept but demoted to WARNING
     STRUCTURE_CLASS_GRID_FLAGGED = "structure_class_grid_flagged"
-    #: structure-class (iii): no attempt authored a grid -- native prose, WARNING
-    STRUCTURE_CLASS_NO_GRID = "structure_class_no_grid"
+    #: structure-class (iii): no attempt authored a grid -- fail-closed floor
+    #: (whole-page marker + image ref; no native byte ships)
+    STRUCTURE_CLASS_FLOOR = "structure_class_floor"
     #: native layer deficient, recovery tried and never passed: native as FALLBACK,
     #: shipped WARNING / audit_passed=False
     NATIVE_FALLBACK = "native_fallback"
@@ -1245,42 +1281,20 @@ def _select_page_output_tagged(
                 ), WinnerKind.STRUCTURE_CLASS_GRID_FLAGGED
             # (iii) no attempt authored a grid (R3's model-rung guarantee
             # found nothing usable, or -- under --native-only -- no rung ran
-            # at all). Native is the only reading left. C1: its PROSE still
-            # ships, because there is no better one, but never as SUCCESS --
-            # the grid it carries is exactly what this branch cannot vouch
-            # for.
-            #
-            # GH-151 B1 / TR-3: a page can reach here carrying one of the
-            # PRE-EXISTING native-table-distrust flags (e.g.
-            # ``native_table_structure_defective`` under --native-only, which
-            # never satisfies the D3-floor condition above on its own) without
-            # ever tripping the D3 floor or #259's flagged-model branch. Those
-            # branches already own the more specific ``NATIVE_TABLE_STRUCTURE_FAILED``
-            # failure mode for exactly this shape; re-deriving it here (instead
-            # of defaulting straight to ``STRUCTURE_CLASS_NO_MODEL_ATTEMPT``)
-            # keeps this new branch from silently overriding a disposition an
-            # existing test already pins. ``STRUCTURE_CLASS_NO_MODEL_ATTEMPT``
-            # is reserved for the genuinely novel case S1 exists for: no legacy
-            # flag ever fired at all (the 2026-08-20 measurement's actual bug).
-            legacy_table_defect = (
-                p.native_table_structure_failed
-                or getattr(p, "native_table_unverifiable", False)
-                or getattr(p, "native_table_structure_defective", False)
-                or getattr(p, "native_table_header_unattributed", False)
-            )
-            fallback_text = _native_text_with_appends(p)
+            # at all). P2 / GH-317: ship the fail-closed floor -- the whole-page
+            # failed-table marker plus the rendered PNG ref. No native byte
+            # ships: the region count that would license a regional splice
+            # is produced by the same parser it would validate (cold review
+            # round 2), so isolation is unprovable and the page fails closed.
+            floor_text = structure_class_floor_text(p, page_num)
             return PageOutput(
                 page_num=page_num,
-                text=fallback_text,
-                status=PageStatus.WARNING,
+                text=floor_text,
+                status=PageStatus.ERROR,
                 engine="native",
                 audit_passed=False,
-                failure_mode=(
-                    FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
-                    if legacy_table_defect
-                    else FailureMode.STRUCTURE_CLASS_NO_MODEL_ATTEMPT
-                ),
-            ), WinnerKind.STRUCTURE_CLASS_NO_GRID
+                failure_mode=FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED,
+            ), WinnerKind.STRUCTURE_CLASS_FLOOR
 
         # An enhancement page (native layer known deficient) whose recovery was
         # tried and never passed ships native text

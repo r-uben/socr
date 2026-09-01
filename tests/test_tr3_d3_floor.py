@@ -182,36 +182,37 @@ class TestSelectionPolicyD3Floor:
 
 
 # ---------------------------------------------------------------------------
-# 2. Negative control: verifiable table still ships grid
+# 2. Structure-class floor: a table-bearing page without a model grid
+#    candidate cannot ship the native geometry grid.
 # ---------------------------------------------------------------------------
 
 
 class TestNegativeControlVerifiableTable:
-    """When per-region verifier PASSES (native_table_unverifiable=False),
-    _winning_page_output must NOT route to the D3 floor — the native fallback
-    text ships as usual (flagged WARNING, not ERROR)."""
+    """A table-bearing page with a real failed rung reaches the structure-class
+    floor even when the per-region verifier did not raise the D3 flag."""
 
     def test_verifiable_table_ships_native_text(self) -> None:
-        """A table page that passed per-region verification ships native text,
-        not the failed-table marker."""
+        """A table page with no usable model grid ships the floor marker, not
+        the collapsed native table."""
         native = "| GDP 2024 | GDP 2025 |\n| --- | --- |\n| 2.1 | 1.9 |"
         state = _build_state_native_fallback(native_text=native)
         winner = _winning_page_output(state, 1, None)
-        assert not is_page_failed_marker(winner.text), (
-            "A verifiable table must NOT hit the D3 floor; "
-            f"got failed-table marker instead. text={winner.text!r}"
+        assert is_page_failed_marker(winner.text), (
+            "A structure-class table with no model grid must hit the floor; "
+            f"got native text instead. text={winner.text!r}"
         )
-        assert native in winner.text or winner.text == native, (
-            f"Expected native text to be shipped; got {winner.text!r}"
+        assert native not in winner.text, (
+            f"The native geometry grid must not be shipped; got {winner.text!r}"
         )
 
     def test_verifiable_table_status_is_warning(self) -> None:
-        """A native-fallback table page ships with PageStatus.WARNING, not ERROR."""
+        """A table-bearing case-(iii) page ships ERROR, not WARNING."""
         state = _build_state_native_fallback()
         winner = _winning_page_output(state, 1, None)
-        assert winner.status == PageStatus.WARNING, (
-            f"Expected WARNING for native-fallback page, got {winner.status}"
+        assert winner.status == PageStatus.ERROR, (
+            f"Expected ERROR for structure-class floor page, got {winner.status}"
         )
+        assert winner.audit_passed is False
 
     def test_d3_floor_requires_attempts(self) -> None:
         """D3 floor only fires when p.attempts is non-empty (OCR was tried).
@@ -359,29 +360,21 @@ class TestAuditEventDistinctness:
             "they have their own distinct table_region_unverifiable event"
         )
 
-    def test_non_d3_fallback_emits_native_fallback_not_d3(self) -> None:
-        """A native-fallback page (verifier passed, OCR failed) must emit its
-        own distinct audit event and NOT ``table_region_unverifiable``.
+    def test_non_d3_fallback_emits_structure_class_floor_not_d3(self) -> None:
+        """A table-bearing page (verifier passed, OCR failed) is a
+        structure-class floor page and must emit its distinct audit event,
+        NOT ``table_region_unverifiable``.
 
-        #269 BLOCKING 2: this fixture is table-bearing (``has_tables=True``),
-        so it is structure-class (C2) with a real failed OCR attempt in
-        ``p.attempts`` (R3's model-rung guarantee is satisfied). Before the
-        fix, ``native_fallback_pages`` also matched it via a since-removed
-        ``or p.is_structure_class()`` term, so this same page was
-        double-booked into BOTH ``native_fallback_pages`` (generic) and
-        ``structure_class_native_fallback_pages`` (S1-specific) -- exactly
-        the double-booking BLOCKING 2 named. The fix excludes a
-        structure-class page from the generic bucket in favour of the more
-        specific one, so this page now emits ``structure_class_native_fallback``
-        only, never the plain ``native_fallback`` kind (still reserved for a
-        native-fallback page that is NOT structure-class).
+        # This fixture is table-bearing (``has_tables=True``), so it is
+        # structure-class (C2) with a real failed OCR attempt in ``p.attempts``.
+        # P2 gives this disposition its own floor event and excludes the page
+        # from the generic fallback bucket.
         """
         state = _build_state_native_fallback()
         events = self._run_assemble(state)
         kinds = [e.kind for e in events]
-        assert "structure_class_native_fallback" in kinds, (
-            f"Expected 'structure_class_native_fallback' for this structure-class "
-            f"native-fallback page; got: {kinds}"
+        assert "structure_class_ladder_exhausted_floor" in kinds, (
+            f"Expected the structure-class floor event for this table-bearing page; got: {kinds}"
         )
         assert "native_fallback" not in kinds, (
             f"a structure-class page must not ALSO double-book into the generic "
@@ -391,13 +384,13 @@ class TestAuditEventDistinctness:
             "Non-D3 fallback page must NOT emit table_region_unverifiable"
         )
 
-    def test_non_structure_class_native_fallback_still_emits_the_generic_kind(
+    def test_non_structure_class_generic_fallback_still_emits_its_kind(
         self,
     ) -> None:
         """Reverse guard for the split above: a native-fallback page that is
         NOT structure-class (no tables) must keep emitting the plain
-        ``native_fallback`` kind -- the specific ``structure_class_native_fallback``
-        kind is reserved for a table-bearing page, per C2."""
+        ``native_fallback`` kind -- the structure-class floor kind is reserved
+        for a table-bearing page, per C2."""
         state = _build_state_native_fallback()
         state.pages[1].has_tables = False
         events = self._run_assemble(state)
@@ -406,7 +399,7 @@ class TestAuditEventDistinctness:
             f"Expected the generic 'native_fallback' kind for a non-structure-class "
             f"page; got: {kinds}"
         )
-        assert "structure_class_native_fallback" not in kinds, kinds
+        assert "structure_class_ladder_exhausted_floor" not in kinds, kinds
 
 
 # ---------------------------------------------------------------------------

@@ -163,7 +163,15 @@ def test_model_produced_nothing_still_falls_back_to_native(tmp_path: Path) -> No
 
     winner = _winning_page_output(state, 1)
     assert winner.engine == "native", winner.engine
-    assert "Large T" in winner.text, winner.text
+    # P2/GH-317 (cold review round 2): native still wins the SELECTION -- the
+    # empty model output is not what ships, which is this test's guarantee.
+    # What the native winner then EMITS is the whole-page fail-closed floor,
+    # because no rung authored a grid for a table page. The native prose goes
+    # with it; see the case-(iii) note in
+    # tests/test_s1_structure_class_winner_gh_reachability.py.
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert "Large T" not in winner.text, winner.text
+    assert winner.failure_mode is FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
 
 
 def test_d3_fail_closed_floor_still_wins_when_no_attempt_authored_a_grid(
@@ -216,15 +224,19 @@ def test_model_produced_no_table_on_a_table_page_falls_back_to_native(
 
     winner = _winning_page_output(state, 1)
     assert winner.engine == "native", winner.engine
-    assert "Large T" in winner.text, winner.text
+    # The model's prose is not a table reading and does not ship. P2/GH-317:
+    # neither does native's grid -- the page takes the whole-page floor.
+    assert "Goldman Sachs" not in winner.text, winner.text
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert "Large T" not in winner.text, winner.text
 
 
-def test_pipe_bearing_prose_does_not_supersede_native(tmp_path: Path) -> None:
+def test_pipe_bearing_prose_reaches_the_structure_class_floor(tmp_path: Path) -> None:
     """GH-268: consecutive prose lines with pipes are not an authored grid.
 
     The permissive reconciliation parser accepts this shape, but the shipping
     policy must fail closed: the model did not produce a table reading, so the
-    existing native reading remains the only grid available to this branch.
+    native grid is replaced by the structure-class floor.
     """
     prose = "revenue | costs were up\nmargins | fell sharply\n"
     state = _state(_born_digital_pdf(tmp_path), model_text=prose)
@@ -232,7 +244,11 @@ def test_pipe_bearing_prose_does_not_supersede_native(tmp_path: Path) -> None:
     winner = _winning_page_output(state, 1)
 
     assert winner.engine == "native", winner
-    assert winner.text.strip() == NATIVE_TABLE.strip()
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert NATIVE_TABLE not in winner.text, winner.text
+    assert winner.status is PageStatus.ERROR, winner.status
+    assert winner.audit_passed is False, winner.audit_passed
+    assert winner.failure_mode is FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
 
 
 def test_native_engine_winner_is_untouched(tmp_path: Path) -> None:
@@ -450,7 +466,11 @@ def test_verifier_hard_fail_still_falls_back_to_native(tmp_path: Path) -> None:
 
     winner = _winning_page_output(_state_with(_born_digital_pdf(tmp_path), output), 1)
     assert winner.engine == "native", winner.engine
-    assert "Large T" in winner.text, winner.text
+    # The proved-wrong model table does not ship. P2/GH-317: native's own grid
+    # does not either -- the page takes the whole-page floor.
+    assert "row1" not in winner.text, winner.text
+    assert "[page 1 failed:" in winner.text, winner.text
+    assert "Large T" not in winner.text, winner.text
 
 
 def test_structural_gate_rejection_still_falls_back_to_native(tmp_path: Path) -> None:
