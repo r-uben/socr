@@ -538,6 +538,16 @@ def has_numeric_columns(page) -> bool:
     at least ``_MIN_LANES_PER_ROW`` lanes at once. Cheap (text only, no table
     inference) and truncation-free, so it is the gate before the expensive
     text-strategy call. Never raises.
+
+    GH-248: co-occupancy alone does not separate a table from corrupt-layer
+    scatter — scatter carries as many numeric tokens, each in its own lane, and
+    co-occupies just as readily. The discriminator is lane REUSE: the same
+    x-lanes recurring across data rows. That filter is what this function adds,
+    and stating only the co-occupancy half is how the bug returns from the docs
+    (GH-348).
+
+    Called from ``BornDigitalDetector._detect_tables`` as the second pass, when
+    ``find_tables()`` finds nothing.
     """
     try:
         words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_no)

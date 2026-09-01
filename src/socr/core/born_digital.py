@@ -1759,6 +1759,19 @@ class BornDigitalDetector:
         row × column grid (multiple distinct x-lanes co-occupied per data row),
         which chart axes never satisfy: tick labels run down a single x position,
         not across several independent lanes simultaneously.
+
+        GH-248, and the part a reader must not miss: co-occupancy alone is NOT
+        the discriminator. Corrupt-layer scatter co-occupies lanes too — it
+        carries as many numeric tokens as a real table, each in its own lane.
+        What separates a table from scatter is lane REUSE: the same x-lanes
+        recurring across data rows. ``has_numeric_columns`` filters on that.
+        Describing this gate as co-occupancy only is how the bug gets
+        reintroduced from the docstring (GH-348).
+
+        Pass 2 is the path GH-248 names, and it is reached ONLY when pass 1
+        returns nothing — see ``TestDetectTablesFallthrough`` in
+        ``tests/test_gh248_lane_reuse.py``, which pins this method rather than
+        the helper.
         """
         try:
             tables = page.find_tables()
