@@ -899,6 +899,25 @@ def _select_page_output(
     return _select_page_output_tagged(state, page_num, whole_doc)[0]
 
 
+def shipped_winner_kind(
+    state: "DocumentState",
+    page_num: int,
+    whole_doc: "_WholeDoc | None" = None,
+) -> WinnerKind:
+    """The disposition this page actually SHIPS under, as a ``WinnerKind``.
+
+    GH-292. The public half of ``_select_page_output_tagged``, so callers
+    outside ``socr.core`` can ask the manifest what it ships instead of
+    re-deriving it from ``PageState`` flags. Re-derivation is what produced
+    #292: a bucket named for a disposition it did not actually match, claiming
+    pages the manifest ships as something else entirely.
+
+    Pass the same ``whole_doc`` ``finalized_page_outputs`` computes, or the tag
+    for a whole-document CLI attempt will not be the one that ships.
+    """
+    return _select_page_output_tagged(state, page_num, whole_doc)[1]
+
+
 def _select_page_output_tagged(
     state: DocumentState,
     page_num: int,
