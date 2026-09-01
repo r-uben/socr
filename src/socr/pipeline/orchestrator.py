@@ -1566,7 +1566,16 @@ class UnifiedPipeline:
 
             with open_pdf(pdf_path) as doc:
                 page = doc[page_num - 1]
+                # GH-307: the chart PNG is the ONLY artifact carrying this page's
+                # visual semantics -- the lane records "data values not
+                # transcribed" and hands the reader the image instead. A sideways
+                # image is the whole payload, rendered unreadable.
+                from socr.core.born_digital import upright_rotation_for
+
                 mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
+                rotation = upright_rotation_for(page)
+                if rotation:
+                    mat = mat.prerotate(rotation)
                 pix = page.get_pixmap(matrix=mat)
                 img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         except Exception as exc:
@@ -1643,7 +1652,14 @@ class UnifiedPipeline:
                 try:
                     with open_pdf(str(pdf_path)) as _doc:
                         _page = _doc[page_num - 1]
+                        # GH-307: clip-scoped, matching the crop path -- a region
+                        # can run against the page's dominant direction.
+                        from socr.core.born_digital import upright_rotation_for
+
                         mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
+                        _rotation = upright_rotation_for(_page, clip=bbox)
+                        if _rotation:
+                            mat = mat.prerotate(_rotation)
                         pix = _page.get_pixmap(matrix=mat, clip=bbox)
                         pix.save(str(out_path))
                     rendered_indices.add(region_idx)
