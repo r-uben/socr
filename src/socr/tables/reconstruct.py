@@ -2025,13 +2025,43 @@ def _rowize_segment(
         # Data cells: assign each word to the nearest lane by x-distance.
         # A lane with no word assigned stays "" (blank / na).
         row_cells = [""] * len(lane_centers)
-        for w in row_ws:
-            if w[0] < data_start_x - snap_margin:
-                continue  # already in the label
-            best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
-            if abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
-                existing = row_cells[best]
-                row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
+        data_words = [w for w in row_ws if w[0] >= data_start_x - snap_margin]
+        snap = _LANE_X_TOL_PT * _LANE_SNAP_MULT
+
+        def _nearest(word) -> int:
+            return min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - word[0]))
+
+        # GH-418: a word beyond the snap radius from EVERY lane used to be
+        # dropped outright -- no cell, no label, no event. Footnote markers like
+        # `n.a.`, a dagger or a star are exactly the tokens that qualify a
+        # number, so losing them silently is the citation-corpus failure this
+        # repo forbids.
+        #
+        # The drop is load-bearing, though, not an oversight: it is what stops a
+        # PROSE page gridding. #342 tried removing the radius, and tried
+        # capturing anything between the first and last lane, and both turned
+        # prose into a whole-page table -- on a prose page the lanes span the
+        # text width, so x-position alone cannot tell the two apart.
+        #
+        # Row-level evidence can. A row that already snaps at least
+        # `_MIN_LANES_PER_ROW` NUMERIC words into distinct lanes is a data row
+        # by the same standard the rest of this module uses; a prose line is
+        # not, whatever its lanes look like. Orphans are rescued only on such
+        # rows, into the nearest lane, so prose pages are untouched and no new
+        # constant is introduced.
+        anchored = {
+            _nearest(w)
+            for w in data_words
+            if _is_numeric_word(w) and abs(lane_centers[_nearest(w)] - w[0]) <= snap
+        }
+        row_is_data = len(anchored) >= _MIN_LANES_PER_ROW
+
+        for w in data_words:
+            best = _nearest(w)
+            if abs(lane_centers[best] - w[0]) > snap and not row_is_data:
+                continue
+            existing = row_cells[best]
+            row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
 
         # Always emit the label as a first cell so all rows share the same
         # column layout.  An empty label yields "" (empty first cell).

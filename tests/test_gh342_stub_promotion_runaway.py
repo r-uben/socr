@@ -72,16 +72,16 @@ class TestGutterMarksDoNotSwallowAColumn:
             for c in range(4):
                 assert f"{r}{c}.5" in emitted, f"data value {r}{c}.5 was lost"
 
-        # GH-416 review: the marker itself does NOT survive here, and that is a
-        # pre-existing placement rule, not something this fix chose. A word
-        # further than the snap radius from every lane is dropped by
+        # GH-418 FIXED, and this assertion has flipped as its comment said it
+        # should. It used to read `"n.a." not in emitted`, recording that a word
+        # further than the snap radius from every lane was dropped by
         # _rowize_segment -- the same rule that stops a prose page being gridded
-        # whole. Narrowing the promotion made the loss visible by no longer
-        # sweeping such words into the label cell. Filed separately; asserted
-        # here so the trade-off is recorded rather than implied.
-        assert "n.a." not in emitted, (
-            "marker now survives -- if this fails, the orphan-word drop was "
-            "fixed and this assertion should become the positive one"
+        # whole. The drop is now conditional on the row NOT being a data row, so
+        # the marker survives on a row that already anchors numeric lanes while
+        # prose pages stay untouched.
+        assert "n.a." in emitted, (
+            "the gutter marker was dropped again; GH-418's row-evidence rescue "
+            "is what keeps it, and losing it is silent content loss"
         )
 
     def test_a_dagger_footnote_behaves_the_same_as_n_a(self) -> None:

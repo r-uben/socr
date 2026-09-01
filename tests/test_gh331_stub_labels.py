@@ -90,9 +90,11 @@ def test_promotion_touches_only_the_label_column(monkeypatch):
     data sub-grid matched even if promotion never fired -- the test was
     tautological and stayed green with the production line reverted.
 
-    The difference that actually tests the claim is the helper on versus off.
-    Promotion must change the LABEL column (that is its whole job) and leave
-    every data cell untouched.
+    GH-418 then changed what "not promoted" looks like. The row-label words used
+    to be DROPPED without promotion (beyond the snap radius of every lane); they
+    are now rescued into the nearest data cell instead. So the honest claim is
+    not that the data sub-grid is identical -- it is that promotion keeps label
+    text OUT of the data cells, which is precisely its job.
     """
     from socr.tables import reconstruct
 
@@ -103,29 +105,30 @@ def test_promotion_touches_only_the_label_column(monkeypatch):
     )
     unpromoted = _cells(rowize_from_word_list(_stub_table(with_labels=True))[0][1])
 
-    # What differs is not that labels MOVE -- without promotion they are lost
-    # outright: the row-label words fall outside every lane's snap radius once
-    # the stub lane is still in the list, so they are dropped from the grid
-    # entirely. That is GH-331's loss, and it is why both grids are the same
-    # WIDTH (#456 review): the stub stays in the label cell either way, so
-    # there is no extra data column to skip when comparing.
-    labels_promoted = [row[0] for row in promoted]
-    labels_unpromoted = [row[0] for row in unpromoted]
     assert len(promoted[0]) == len(unpromoted[0]), (
         f"the two grids are different widths ({len(promoted[0])} vs "
         f"{len(unpromoted[0])}), so the column-wise comparison below is not "
         "aligned and this test would be comparing different columns"
     )
-    assert labels_promoted != labels_unpromoted, (
-        "promotion changed nothing, so this fixture cannot tell the two apart "
-        f"and the assertion below is vacuous: {labels_promoted}"
-    )
 
-    data_promoted = [row[1:] for row in promoted]
-    data_unpromoted = [row[1:] for row in unpromoted]
-    assert data_promoted == data_unpromoted, (
-        f"promotion moved a DATA cell, not just the label:\n"
-        f"  promoted:   {data_promoted}\n  unpromoted: {data_unpromoted}"
+    def label_tokens_in_data(grid) -> set[str]:
+        return {
+            tok
+            for row in grid
+            for cell in row[1:]
+            for tok in cell.split()
+            if tok in {"Large", "Small", "T"}
+        }
+
+    # The anchor: without promotion the label text really does reach a data
+    # cell. Without this, the assertion below could pass on a fixture that
+    # never had label text at all.
+    assert label_tokens_in_data(unpromoted), (
+        f"unpromoted grid has no label text in its data cells, so this fixture "
+        f"cannot show what promotion prevents: {unpromoted}"
+    )
+    assert not label_tokens_in_data(promoted), (
+        f"promotion let label text into a DATA cell: {promoted}"
     )
 
 

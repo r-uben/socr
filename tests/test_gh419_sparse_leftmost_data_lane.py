@@ -70,8 +70,12 @@ def test_the_sparse_columns_values_keep_their_own_cells() -> None:
     assert len(data) == 4, f"expected four data rows, got {data}"
 
     for row in data[:2]:
-        assert any(c in ("0.77", "1.77") for c in row), (
-            f"the sparse column's value is not in a cell of its own: {row}"
+        # GH-418: the rescued gutter marker now shares this cell ("0.77 n.a."),
+        # so compare TOKENS within a data cell rather than the whole cell text.
+        # The claim is unchanged -- the value must be in a data column, not
+        # swallowed into the label -- and index >= 1 is what enforces that.
+        assert any({"0.77", "1.77"} & set(c.split()) for c in row[1:]), (
+            f"the sparse column's value is not in a data cell: {row}"
         )
     for row in data:
         assert row[0].startswith("Label") and len(row[0].split()) == 1, (
@@ -133,7 +137,7 @@ def test_a_label_reaching_into_the_snap_margin_still_counts() -> None:
     data = [r for r in rows if r[0].strip()]
     assert len(data) == 4, f"expected four data rows: {rows}"
     for row in data[:2]:
-        assert any(c in ("0.77", "1.77") for c in row), (
+        assert any({"0.77", "1.77"} & set(c.split()) for c in row[1:]), (
             f"a label overlapping the snap margin let the column be swallowed: {row}"
         )
 
