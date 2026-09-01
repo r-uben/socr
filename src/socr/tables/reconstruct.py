@@ -1749,6 +1749,41 @@ def _promote_stub_lanes(lane_centers: list[float], seg_ys, rows_by_y) -> list[fl
         # was a real data column swallowed into the label cell.
         if _rows_populating(lane_centers[j]) >= _rows_populating(lane_centers[j + 1]):
             break
+        # GH-419: sparsity alone does not make a stub. A leftmost DATA column
+        # that is simply sparse -- populated on fewer rows than its neighbour --
+        # passes the comparison above, and if the gutter after it carries the
+        # usual recurring marks ("n.a.", a dagger) the whole real column is
+        # swallowed into the label cell. #416 capped that blast to one promotion
+        # (`j >= 1`) but never refused a false FIRST one, and its comment ("the
+        # first gap is the stub's by construction") is wrong on exactly this
+        # path: the first gap lies between two numeric lanes.
+        #
+        # The extra evidence is stub-specific, not another sparsity test. A stub
+        # holds the row identifier, so the row's LABEL sits to its right -- that
+        # is the whole premise in the docstring above, and it means nothing
+        # label-like sits to its LEFT. A sparse data column has its label
+        # already to the left, which is what tells the two shapes apart. Reuses
+        # the same snap geometry; no new constant.
+        # Two refinements, both from the #438 review:
+        #
+        # 1. Test the word's LEFT edge (w[0]), not its right. `_rowize_segment`
+        #    decides label membership with `w[0] < data_start_x - snap_margin`,
+        #    so a word that starts left of the lane but reaches into the snap
+        #    margin IS label text there. Keying on w[2] ignored exactly those,
+        #    letting the lane be promoted and swallow its values anyway.
+        # 2. Recurrence, not one sighting -- the same standard the gap test
+        #    below already applies, and for the same reason. A lone
+        #    left-margin footnote or significance marker is not a label column,
+        #    and treating it as one would refuse a GENUINE stub and hand back
+        #    the #331 label loss this promotion exists to prevent. Reuses
+        #    `_MIN_TABLE_ROWS`; no new constant.
+        rows_with_label_left = sum(
+            1
+            for row in data_rows
+            if any(w[0] < lane_centers[j] - snap and not _is_numeric_word(w) for w in row)
+        )
+        if rows_with_label_left >= _MIN_TABLE_ROWS:
+            break
         lo, hi = lane_centers[j] + snap, lane_centers[j + 1] - snap
         if lo >= hi:
             break
