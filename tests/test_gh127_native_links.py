@@ -367,14 +367,19 @@ def test_a_partially_resolved_anchor_is_skipped_not_widened(tmp_path: Path) -> N
 
     real = bd._word_char_spans
 
-    def _only_first_word(text, words):
-        spans = real(text, words)
-        if not spans:
-            return spans
-        first = min(spans)
-        return {first: spans[first]}
+    def _drop_the_second_covered_word(text, words):
+        """Resolve "Smith" but not "2020".
 
-    with patch.object(bd, "_word_char_spans", _only_first_word):
+        GH-417 review: an earlier version kept ``min(spans)``, which is "See" --
+        a word the link does not cover. That made NO covered word resolve, which
+        is hole 2's condition, not hole 3's, so the test passed even with the
+        min/max widening bug present. The partial case needs exactly one of the
+        anchor's OWN words to resolve.
+        """
+        spans = real(text, words)
+        return {i: v for i, v in spans.items() if words[i][4] != "2020"}
+
+    with patch.object(bd, "_word_char_spans", _drop_the_second_covered_word):
         out = _extract(pdf)
 
     assert f"]({DOI})" not in out, (
