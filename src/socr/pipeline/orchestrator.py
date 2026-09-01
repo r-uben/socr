@@ -6141,6 +6141,25 @@ class UnifiedPipeline:
             and n not in structure_class_native_fallback_pages
             # GH-271: the region hybrid ships, so this is not a native fallback.
             and n not in corrupt_math_hybrid_pages
+            # GH-293: a page that ships a FAILURE MARKER did not fall back to
+            # native text -- no native text ships at all. The whole meaning of
+            # this list is "OCR was tried and never passed, so the page shipped
+            # its native body demoted"; a marker page shipped no body.
+            #
+            # The concrete case is GH-263's shredded lane, which takes the
+            # ROTATED_TEXT_SHREDDED ending and never got an exclusion when it
+            # was added. Verified: such a page is in this list AND in
+            # `failed_pages`, so it emits two audit events and two CLI lines for
+            # one page, and the native_fallback line asserts something false.
+            #
+            # Excluding `failed_pages` rather than naming the shredded ending
+            # closes the CLASS, not the instance. `failed_pages` is derived from
+            # the SHIPPED TEXT (`is_page_failed_marker`), so this holds for any
+            # future ending that ships a marker without remembering to add an
+            # exclusion here -- which is exactly how #293 happened. It also
+            # makes "no page is in both lists" true by construction rather than
+            # by six predicates staying in lockstep.
+            and n not in failed_pages
             and p.attempts
             and not (p.best_output and p.best_output.audit_passed)
         ]
