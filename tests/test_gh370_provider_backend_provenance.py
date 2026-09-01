@@ -307,3 +307,133 @@ class TestProcessDocumentGatesOnTheResolvedBackend:
         """Control: plain local auto still needs the local model."""
         monkeypatch.delenv("VLLM_BASE_URL", raising=False)
         assert self._engine_and_result(monkeypatch, "auto", tmp_path)
+
+
+class TestTheOrchestratorWritersAreWhatRecordProvenance:
+    """GH-385. This pins the agentic B3 writer -- the site that stamps the
+    resolved pair onto ``PageOutput`` for a normally-routed page, which is what
+    the manifest and sidecar read. Every other test in this file calls
+    ``resolved_provenance`` directly, so reverting that call site to
+    ``att.backend`` leaves the suite green while a ``--qwen-backend vllm`` run
+    records ``ollama`` again.
+
+    SCOPE, deliberately stated: the OTHER writer -- ``_escalate_table_page``
+    (~2327) -- is NOT pinned here. ``_fake_route`` returns an accepted decision
+    on a plain-text page, so the escalation lane never runs and reverting that
+    site would still pass. Reaching it needs a non-local provider configured and
+    an accepted escalation candidate. Filed separately rather than claimed
+    falsely (cubic P2 on #396).
+
+    Same shape as an unpinned assemble writer (#381): a green helper suite is
+    not a gate on the value that ships.
+
+    Hermetic: the provider ladder is patched, ``route_page`` is faked, and the
+    judge model is stubbed empty, so nothing here needs ollama or a vLLM server.
+    """
+
+    def _run(self, tmp_path, monkeypatch, *, backend: str):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        import fitz
+
+        from socr.core.config import EngineType, PipelineConfig
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+        from socr.core.result import PageOutput, PageStatus
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+        out_dir = tmp_path / f"out_{backend}"
+        pdf_dir = tmp_path / f"src_{backend}"
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = pdf_dir / "doc.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 100), "A paragraph of ordinary prose on the page.", fontsize=11)
+        doc.save(pdf_path)
+        doc.close()
+
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                primary_engine=EngineType.QWEN,
+                agentic=True,
+                judge_backend="heuristic",
+                enabled_engines=[EngineType.QWEN],
+                quiet=True,
+                save_figures=False,
+                write_manifest=False,
+                qwen_backend=backend,
+                qwen_vllm_model=_HF_MODEL,
+            )
+        )
+
+        def _fake_route(page_num, ladder, run_provider, judge, **kwargs):
+            from socr.pipeline.agentic import PageDecision, ProviderAttempt
+
+            out = PageOutput(
+                page_num=page_num,
+                text="A paragraph of ordinary prose on the page.",
+                status=PageStatus.SUCCESS,
+                engine="qwen",
+                audit_passed=True,
+            )
+            prof = ladder[0]
+            att = ProviderAttempt(
+                engine=prof.engine,
+                output=out,
+                cost_usd=prof.cost_per_page_usd,
+                accepted=True,
+                reason="ok",
+                provider_id=prof.id,
+                model=prof.model,
+                backend=prof.backend,
+            )
+            return PageDecision(page_num=page_num, final_output=out, attempts=[att], accepted=True)
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch("socr.pipeline.orchestrator.route_page", side_effect=_fake_route)
+            )
+            stack.enter_context(
+                patch.object(
+                    pipeline,
+                    "_available_engines_for_agentic",
+                    return_value=[PROFILE_QWEN_LOCAL],
+                )
+            )
+            stack.enter_context(patch.object(pipeline, "_resolve_judge_model", return_value=""))
+            pipeline.process(pdf_path, out_dir)
+
+        found = list(out_dir.rglob("00001.json")) or list(out_dir.rglob("001.json"))
+        assert found, f"no page sidecar under {out_dir}"
+        import json
+
+        return json.loads(found[0].read_text(encoding="utf-8")).get("winning_output", {})
+
+    def test_the_recorded_backend_follows_the_config_not_the_registry_label(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The reported bug, at the value that actually ships. The fake attempt
+        carries the REGISTRY label in ``att.backend`` either way, so anything
+        the sidecar shows beyond that came from the orchestrator writer."""
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        ollama_run = self._run(tmp_path, monkeypatch, backend="ollama")
+        vllm_run = self._run(tmp_path, monkeypatch, backend="vllm")
+
+        assert ollama_run.get("provider_backend") != vllm_run.get("provider_backend"), (
+            "a vLLM run and an Ollama run must not be indistinguishable in the "
+            "sidecar -- that is the defect GH-370 fixed and this pins"
+        )
+        assert vllm_run.get("provider_backend") == "vllm"
+        assert vllm_run.get("provider_backend") != PROFILE_QWEN_LOCAL.backend
+        assert vllm_run.get("provider_model") == _HF_MODEL
+
+    def test_the_ollama_run_still_records_the_registry_values(self, tmp_path, monkeypatch) -> None:
+        """Control: the local path is unchanged, so the pin cannot be satisfied
+        by a writer that simply stamps something different every time."""
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        ollama_run = self._run(tmp_path, monkeypatch, backend="ollama")
+        assert ollama_run.get("provider_backend") == PROFILE_QWEN_LOCAL.backend
+        assert ollama_run.get("provider_model") == PROFILE_QWEN_LOCAL.model
