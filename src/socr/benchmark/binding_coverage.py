@@ -260,12 +260,19 @@ def _discover_native_regions(
                 for word in page.get_text("words")
                 if bbox.contains(fitz.Point(word[0], word[1]))
             ]
-            from socr.core.born_digital import upright_rotation_for
-
-            rotation = upright_rotation_for(page, clip=bbox)
-            for rect, content in (
-                rowize_from_word_list(region_words, rotation=rotation, page_rect=page.rect) or []
-            ):
+            # GH-351: NO rotation kwargs. Production's lane-stacked path
+            # (born_digital.extract_structured ~1953) calls
+            # ``rowize_from_word_list(region_words)`` bare. The harness passed a
+            # clip-scoped rotation and page_rect, so on a rotated lane-stacked
+            # page the scoreboard described a DIFFERENT native candidate than
+            # the one that ships.
+            #
+            # The _is_lane_stacked allowlist exists precisely so the instrument
+            # cannot drift from the thing it measures; the call beside it had
+            # drifted. rowize_from_words (the reconstruct fallback) applies a
+            # page-wide rotation, which is a second policy -- the harness must
+            # not invent a third.
+            for rect, content in rowize_from_word_list(region_words) or []:
                 lane_stacked_regions.append(NativeExtractionRegion(rect, content, "lane_stacked"))
         else:
             content = detector._table_to_markdown(table)
