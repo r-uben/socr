@@ -27,6 +27,14 @@ from socr.core.providers import (
 
 _HF_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
+#: GH-400 review: one copy. The page text and the faked route's output must be
+#: the same string -- routing is faked and neither copy is asserted against the
+#: other, so two literals could drift apart without failing anything.
+_PAGE_TEXT = (
+    "A paragraph of ordinary prose on the page, comfortably past the "
+    "text-layer floor so nothing here depends on its length."
+)
+
 
 def _cfg(**overrides) -> PipelineConfig:
     return PipelineConfig(**overrides)
@@ -349,7 +357,7 @@ class TestTheOrchestratorWritersAreWhatRecordProvenance:
         pdf_path = pdf_dir / "doc.pdf"
         doc = fitz.open()
         page = doc.new_page()
-        page.insert_text((72, 100), "A paragraph of ordinary prose on the page.", fontsize=11)
+        page.insert_text((72, 100), _PAGE_TEXT, fontsize=11)
         doc.save(pdf_path)
         doc.close()
 
@@ -362,6 +370,13 @@ class TestTheOrchestratorWritersAreWhatRecordProvenance:
                 quiet=True,
                 save_figures=False,
                 write_manifest=False,
+                # GH-399: reach the B3 writer by CONTRACT, not by accident. The
+                # fixture sentence was 42 chars against a 50-char text-layer
+                # floor, so born-digital detection failed and the default
+                # native_first=True happened not to steal the page. Lengthen
+                # the paragraph and native takes it, the sidecar never sees the
+                # B3 stamp, and reverting the writer stays green.
+                native_first=False,
                 qwen_backend=backend,
                 qwen_vllm_model=_HF_MODEL,
             )
@@ -372,7 +387,7 @@ class TestTheOrchestratorWritersAreWhatRecordProvenance:
 
             out = PageOutput(
                 page_num=page_num,
-                text="A paragraph of ordinary prose on the page.",
+                text=_PAGE_TEXT,
                 status=PageStatus.SUCCESS,
                 engine="qwen",
                 audit_passed=True,
@@ -404,7 +419,7 @@ class TestTheOrchestratorWritersAreWhatRecordProvenance:
             stack.enter_context(patch.object(pipeline, "_resolve_judge_model", return_value=""))
             pipeline.process(pdf_path, out_dir)
 
-        found = list(out_dir.rglob("00001.json")) or list(out_dir.rglob("001.json"))
+        found = list(out_dir.rglob("00001.json"))
         assert found, f"no page sidecar under {out_dir}"
         import json
 
