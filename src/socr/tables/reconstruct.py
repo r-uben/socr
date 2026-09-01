@@ -1386,6 +1386,66 @@ def rowize_from_words_chart_aware(
     return all_regions
 
 
+def _fold_marginal_bands(rows_by_y: dict) -> dict:
+    """Attach a marginal note's words to the nearest real row, not a row of their own.
+
+    GH-406. A running header or marginal note set sideways in the page margin
+    is emitted by ``get_text("words")`` as one word per y-position. Those
+    positions interleave with the table's, and the damage is structural rather
+    than cosmetic: on the measured fixture a single 19-character rotated note
+    took the page from ONE reconstructed region to ZERO. The whole table
+    vanished, silently -- the native path just reports no table.
+
+    Measured mechanism, isolated by experiment rather than inferred:
+
+    - the page's dominant direction is NOT flipped (``upright_rotation_for``
+      returns 0 with and without the note), so this is not an orientation bug;
+    - the note contributes three single-word y-bands that interleave with the
+      four table rows, halving the median row gap (25 -> 17);
+    - removing the note words restores the table, AND so does keeping them but
+      snapping them onto existing rows -- so it is the extra BANDS that break
+      it, not the words.
+
+    So the words are kept and folded into the nearest existing band. Dropping
+    them would trade a table for a silent word loss, which is the #418 defect
+    this repo keeps re-learning.
+
+    A band qualifies as marginal only when it is a single word lying outside
+    the x-interval every other band occupies -- i.e. genuinely in the margin,
+    beside the body rather than part of it. A single-word row INSIDE the body's
+    x-span is left alone: that is an ordinary sparse row.
+    """
+    if len(rows_by_y) < 2:
+        return rows_by_y
+
+    body = [y for y, ws in rows_by_y.items() if len(ws) > 1]
+    if not body:
+        return rows_by_y
+
+    body_x0 = min(w[0] for y in body for w in rows_by_y[y])
+    body_x1 = max(w[2] for y in body for w in rows_by_y[y])
+
+    marginal = [
+        y
+        for y, ws in rows_by_y.items()
+        if len(ws) == 1 and (ws[0][0] > body_x1 or ws[0][2] < body_x0)
+    ]
+    if not marginal:
+        return rows_by_y
+
+    folded: dict = defaultdict(list)
+    for y, ws in rows_by_y.items():
+        if y in marginal:
+            continue
+        folded[y].extend(ws)
+    if not folded:
+        return rows_by_y
+    for y in marginal:
+        nearest = min(folded, key=lambda k: abs(k - y))
+        folded[nearest].extend(rows_by_y[y])
+    return folded
+
+
 def rowize_from_word_list(
     words: list,
     rotation: int = 0,
@@ -1450,6 +1510,8 @@ def rowize_from_word_list(
     rows_by_y: dict[int, list] = defaultdict(list)
     for w in words:
         rows_by_y[round(w[1])].append(w)
+
+    rows_by_y = _fold_marginal_bands(rows_by_y)
 
     ys = sorted(rows_by_y.keys())
     if len(ys) < _MIN_TABLE_ROWS:

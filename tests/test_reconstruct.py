@@ -423,16 +423,10 @@ def test_a_rotated_marginal_note_does_not_flip_the_page_direction():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GH-350/GH-406: a single rotated marginal note destroys rowization of "
-        "the whole table -- 1 region without the note, 0 with it. The old test "
-        "xfailed on empty regions, so this defect read as green. Strict, so it "
-        "fails loudly once the CONTENT assertions below also hold; the "
-        "regions-exist half is tracked separately above so a partial fix shows."
-    ),
-)
+# GH-406 FIXED: the strict xfail that used to sit here XPASSed once
+# `_fold_marginal_bands` landed -- and XPASSed on the CONTENT assertions, not
+# merely on regions being non-empty, which is what the split into two tests was
+# designed to distinguish. Marker removed; this is an ordinary passing test now.
 def test_mixed_horizontal_page_with_rotated_marginal_note_stays_horizontal():
     """GH-330 Task 5: A single rotated marginal note does not flip page orientation.
 
