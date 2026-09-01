@@ -141,3 +141,51 @@ def test_caption_fallback_model_is_ignored_without_descriptions() -> None:
     assert _fingerprint(**common, gemini_model="gemini-a") == _fingerprint(
         **common, gemini_model="gemini-b"
     )
+
+
+def test_table_judge_rung1_host_invalidates() -> None:
+    """GH-366: a model TAG is a label, not the thing that answered.
+
+    Two hosts can serve different builds under the same name, so pointing rung 1
+    at a different ollama host while keeping the tag would resume a ladder
+    verdict a DIFFERENT judge produced. Same shape as #133 (judge identity) and
+    #229, in a repo with a history of fingerprint-omission bugs (#214).
+    """
+    assert _fingerprint(
+        table_judge_ladder=True, table_judge_rung1_host="http://alpha:11434"
+    ) != _fingerprint(table_judge_ladder=True, table_judge_rung1_host="http://beta:11434")
+
+
+def test_table_judge_rung1_host_records_the_resolved_host(monkeypatch) -> None:
+    """GH-402 review: the RESOLVED host, not the config field.
+
+    ``table_judge_rung1_host`` defaults to None and ``resolve_ollama_host`` then
+    falls back to OLLAMA_HOST and finally localhost. Recording the raw field
+    means two runs against genuinely different daemons both store None and
+    share a fingerprint -- the omission this ticket exists to close, one level
+    down. Same distinction ``judge_model`` already makes.
+    """
+    # primary_engine is pinned: AUTO resolution PROBES the daemon, so pointing
+    # OLLAMA_HOST at an unreachable host flips it qwen -> gemini and the
+    # fingerprints differ for a reason that has nothing to do with this field.
+    # Without this the test passes with the raw config field still recorded.
+    from socr.core.config import EngineType
+
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    local = _fingerprint(table_judge_ladder=True, primary_engine=EngineType.QWEN)
+    monkeypatch.setenv("OLLAMA_HOST", "http://remote:11434")
+    remote = _fingerprint(table_judge_ladder=True, primary_engine=EngineType.QWEN)
+
+    assert local != remote, (
+        "the same config against two different daemons must not share a "
+        "fingerprint; the env var is how the HPC deployment points elsewhere"
+    )
+
+
+def test_table_judge_rung1_host_is_ignored_while_the_ladder_is_off() -> None:
+    """Control: the field is recorded only while the gate that reads it is on,
+    so flipping a host cannot invalidate cached pages on a run where no ladder
+    verdict was ever produced."""
+    assert _fingerprint(
+        table_judge_ladder=False, table_judge_rung1_host="http://alpha:11434"
+    ) == _fingerprint(table_judge_ladder=False, table_judge_rung1_host="http://beta:11434")
