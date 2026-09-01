@@ -286,9 +286,19 @@ def _md(header: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
-def _table_page_with_header(header_tokens: list[str] | None, data_values: list[str]) -> fitz.Page:
-    """Label + one data row of numeric values; header words (if any) carry a
-    '%' marker so header_repair._is_table_header_row recognises the band."""
+def _table_page_with_header(
+    header_tokens: list[str] | None,
+    data_values: list[str],
+    second_data_values: list[str] | None = None,
+) -> fitz.Page:
+    """Label + one or two data rows of numeric values; header words (if any)
+    carry a '%' marker so header_repair._is_table_header_row recognises the band.
+
+    ``second_data_values`` is for tests that need the native layer to satisfy
+    the GH-249 grid gate (two rows at the modal width) before the verifier will
+    treat it as ground truth at all. Callers that are rejected by a gate ahead
+    of the verifier do not need it.
+    """
     doc = fitz.open()
     page = doc.new_page(width=700, height=400)
     xs = [100.0 + i * _GAP for i in range(len(data_values))]
@@ -298,6 +308,10 @@ def _table_page_with_header(header_tokens: list[str] | None, data_values: list[s
     page.insert_text((20.0, 140.0), "row1", fontsize=9)
     for x, val in zip(xs, data_values):
         page.insert_text((x, 140.0), val, fontsize=9)
+    if second_data_values is not None:
+        page.insert_text((20.0, 180.0), "row2", fontsize=9)
+        for x, val in zip(xs, second_data_values):
+            page.insert_text((x, 180.0), val, fontsize=9)
     return page
 
 
@@ -452,9 +466,19 @@ class TestStructuralEscalationGate:
         """Disjunction control (b): a rectangular candidate with an intact
         header but a numeric-multiset mismatch must still be rejected -- by
         TR-3's own hard-fail, independent of the structural gate."""
-        page = _table_page_with_header(["Low%", "Mid%", "High%"], ["0.1", "0.2", "0.3"])
+        # Second native row: the GH-249 grid gate needs two rows at the modal
+        # width. It is transcribed CORRECTLY, so the only mismatch left for the
+        # verifier to catch is the invented 0.9 in row 1.
+        page = _table_page_with_header(
+            ["Low%", "Mid%", "High%"],
+            ["0.1", "0.2", "0.3"],
+            second_data_values=["0.4", "0.5", "0.6"],
+        )
         # Output drops 0.3 and invents 0.9 -- multiset mismatch, header intact.
-        output_text = _md(["Currency", "Low%", "Mid%", "High%"], [["row1", "0.1", "0.2", "0.9"]])
+        output_text = _md(
+            ["Currency", "Low%", "Mid%", "High%"],
+            [["row1", "0.1", "0.2", "0.9"], ["row2", "0.4", "0.5", "0.6"]],
+        )
         output = PageOutput(page_num=5, text=output_text, status=PageStatus.SUCCESS, confidence=0.9)
         inner = _stub_inner(accept=True)
         judge = NativeTableVerifierJudge(

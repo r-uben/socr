@@ -130,14 +130,17 @@ class TestVerifyNativeTableHardFail:
 
     def test_hard_fail_two_lane_collapse_to_one_cell(self):
         """Two well-separated native lanes, output data row has only 1 populated cell."""
+        # Two rows: the GH-249 grid gate needs two rows at the modal width
+        # before the native layer can serve as ground truth at all.
         native_rows = [
             [(100.0, "1.2"), (100.0 + _PHYS_COL_GAP, "2.3")],
+            [(100.0, "3.4"), (100.0 + _PHYS_COL_GAP, "4.5")],
         ]
         page = _make_fitz_page_with_words(native_rows)
-        # Output: header has 2 cols, data row has only 1 populated cell
+        # Output: header has 2 cols, each data row has only 1 populated cell
         output_text = _md_table(
             ["c1", "c2"],
-            [["1.2", ""]],  # only 1 populated cell; native has 2 lanes
+            [["1.2", ""], ["3.4", ""]],  # 1 populated cell each; native has 2 lanes
         )
         result = verify_native_table(page, output_text)
         assert result.hard_fail is True, (
@@ -280,14 +283,16 @@ class TestVerifyNativeTableWarnOnly:
         """col_gap >= 2 but output data rows have correct (non-collapsed) cell count
         → warn only, no hard-fail."""
         # 2 native numeric lanes; output has 4 columns → col_gap = |4 - 2| = 2 → warn
+        # Two rows: required by the GH-249 grid gate.
         native_rows = [
             [(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")],
+            [(100.0, "3.3"), (100.0 + _PHYS_COL_GAP, "4.4")],
         ]
         page = _make_fitz_page_with_words(native_rows)
-        # 4-col output, data row has 3 populated cells (label + 2 values) → no collapse
+        # 4-col output, data rows have 3 populated cells (label + 2 values) → no collapse
         output_text = _md_table(
             ["label", "c1", "c2", "c3"],
-            [["row1", "1.1", "2.2", ""]],
+            [["row1", "1.1", "2.2", ""], ["row2", "3.3", "4.4", ""]],
         )
         result = verify_native_table(page, output_text)
         # col_gap = |4 - 2| = 2 → warn
@@ -309,14 +314,18 @@ class TestVerifyNativeTableWarnOnly:
         legitimate layout variant.  The old no-fail was the false-negative the
         value-guard fixes.
         """
+        # Two rows: required by the GH-249 grid gate. The SECOND row is complete;
+        # the drop under test is confined to the first, so the hard-fail must come
+        # from that row's multiset and not from a row-count gap.
         native_rows = [
             [(150.0, "2.1"), (150.0 + _PHYS_COL_GAP, "2.2")],
+            [(150.0, "3.1"), (150.0 + _PHYS_COL_GAP, "3.2")],
         ]
         page = _make_fitz_page_with_words(native_rows)
         # Output: 2.2 is absent → multiset {2.1:1} != native {2.1:1, 2.2:1}
         output_text = _md_table(
             ["country", "2026", "2027"],
-            [["CBO", "2.1", ""]],
+            [["CBO", "2.1", ""], ["CBO-alt", "3.1", "3.2"]],
         )
         result = verify_native_table(page, output_text)
         assert result.hard_fail is True, (
@@ -379,19 +388,26 @@ class TestNativeTableVerifierAuditEvents:
     def test_hard_fail_emits_audit_event(self):
         """Hard-fail emits a native_table_verifier_hard_fail event and does
         NOT call the inner judge."""
+        # Two rows: required by the GH-249 grid gate.
         native_rows = [
             [
                 (100.0, "0.1"),
                 (100.0 + _PHYS_COL_GAP, "0.2"),
                 (100.0 + 2 * _PHYS_COL_GAP, "0.3"),
             ],
+            [
+                (100.0, "0.4"),
+                (100.0 + _PHYS_COL_GAP, "0.5"),
+                (100.0 + 2 * _PHYS_COL_GAP, "0.6"),
+            ],
         ]
         fitz_page = _make_fitz_page_with_words(native_rows)
 
-        # Output row collapses 3 native lanes into 2 cells (label + one value)
+        # Output rows collapse 3 native lanes into 2 cells (label + one value)
         output_text = _md_table(
             ["label", "vals"],
-            [["row1", "0.1"]],  # 2 populated cells, native has 3 lanes → collapse
+            # 2 populated cells each, native has 3 lanes → collapse
+            [["row1", "0.1"], ["row2", "0.4"]],
         )
         output = self._make_output(page_num=1, text=output_text)
 
@@ -429,13 +445,16 @@ class TestNativeTableVerifierAuditEvents:
         """Warn tier emits a native_table_verifier_warn event and still calls
         the inner judge (VLM or heuristic)."""
         # 2 native lanes; output has 4 columns (col_gap = 2 → warn)
+        # Two rows: required by the GH-249 grid gate.
         native_rows = [
             [(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")],
+            [(100.0, "3.3"), (100.0 + _PHYS_COL_GAP, "4.4")],
         ]
         fitz_page = _make_fitz_page_with_words(native_rows)
         output_text = _md_table(
             ["label", "c1", "c2", "c3"],
-            [["row1", "1.1", "2.2", ""]],  # 3 populated cells — no collapse
+            # 3 populated cells each — no collapse
+            [["row1", "1.1", "2.2", ""], ["row2", "3.3", "4.4", ""]],
         )
         output = self._make_output(page_num=2, text=output_text)
 
@@ -474,18 +493,24 @@ class TestNativeTableVerifierAuditEvents:
         short-circuits: it emits a native_table_verifier_exact_pass event and
         returns accept=True immediately, without calling the inner judge.
         """
+        # Two rows: required by the GH-249 grid gate.
         native_rows = [
             [
                 (200.0, "0.1"),
                 (200.0 + _PHYS_COL_GAP, "0.2"),
                 (200.0 + 2 * _PHYS_COL_GAP, "0.3"),
             ],
+            [
+                (200.0, "0.4"),
+                (200.0 + _PHYS_COL_GAP, "0.5"),
+                (200.0 + 2 * _PHYS_COL_GAP, "0.6"),
+            ],
         ]
         fitz_page = _make_fitz_page_with_words(native_rows)
         # 4-col output (label + 3 values), col_gap = 4 - 3 = 1 → no warn
         output_text = _md_table(
             ["label", "c1", "c2", "c3"],
-            [["row1", "0.1", "0.2", "0.3"]],
+            [["row1", "0.1", "0.2", "0.3"], ["row2", "0.4", "0.5", "0.6"]],
         )
         output = self._make_output(page_num=3, text=output_text)
 
@@ -1516,3 +1541,124 @@ class TestTR4RowCount:
             "trip row_count_mismatch or label-binding. "
             f"Got: hard_fail={result.hard_fail}, reason={result.reason!r}"
         )
+
+
+class TestGH249ChartPageAbstains:
+    """GH-249: a native layer that is not a grid cannot serve as ground truth.
+
+    On the FOMC SEP figure pages the native text layer is a column of axis tick
+    labels -- one number per y-line. Nothing about a table is present, but the
+    row parser reads each tick as a row and the value guard then grades the
+    output against that phantom. The inversion is the point: a transcript that
+    correctly says "there is no table here" sits furthest from the tick count
+    and is the one flagged, while a dump of every tick matches it exactly.
+
+    The verifier now applies ``rows_establish_grid`` -- the same predicate the
+    GH-96 exactness metric and the GH-113 escalation trigger already use -- and
+    abstains when it fails. Abstaining means the untouched bypass result: no
+    warn, no hard-fail, nothing said about the output either way.
+    """
+
+    @staticmethod
+    def _tick_label_page() -> fitz.Page:
+        """An axis: one numeric token per line, all in a single x lane."""
+        return _make_fitz_page_with_words(
+            [[(120.0, str(n))] for n in range(2, 20, 2)],
+        )
+
+    def test_chart_tick_labels_are_not_a_grid(self):
+        """The predicate itself: ticks fail, a real two-lane table passes."""
+        from socr.core.table_grid import rows_establish_grid
+        from socr.tables.native_verifier import _GridRow, _rows_by_y_from_words
+
+        ticks = self._tick_label_page().get_text("words")
+        tick_rows = [
+            _GridRow(tuple(tok for _x, tok in row)) for row in _rows_by_y_from_words(ticks).values()
+        ]
+        assert tick_rows, "fixture produced no numeric rows at all"
+        assert rows_establish_grid(tick_rows) is False
+
+    def test_verifier_abstains_on_a_tick_label_page(self):
+        """A correct 'no table here' output is not flagged against the ticks."""
+        page = self._tick_label_page()
+        # What a model that read the page correctly emits: a caption, no data.
+        output_text = _md_table(
+            ["Figure", "Note"],
+            [["Figure 2.A", "Distribution of participants' projections"]],
+        )
+        result = verify_native_table(page, output_text)
+
+        assert result.hard_fail is False, result.reason
+        assert result.warn is False, result.reason
+        assert result.row_count_warn is False, result.row_count_warn_reason
+
+    def test_the_tick_dump_is_not_rewarded_over_the_correct_reading(self):
+        """The inversion, pinned as a DIFFERENCE rather than as two verdicts.
+
+        Before the gate, the transcript that dumped every tick label scored
+        closer to the phantom than the one that reported no table. Both are now
+        treated identically, because neither is being scored at all.
+        """
+        page = self._tick_label_page()
+        correct = _md_table(
+            ["Figure", "Note"],
+            [["Figure 2.A", "Distribution of participants' projections"]],
+        )
+        tick_dump = _md_table(
+            ["value", "count"],
+            [[str(n), ""] for n in range(2, 20, 2)],
+        )
+
+        correct_result = verify_native_table(page, correct)
+        dump_result = verify_native_table(page, tick_dump)
+
+        assert (correct_result.hard_fail, correct_result.row_count_warn) == (
+            dump_result.hard_fail,
+            dump_result.row_count_warn,
+        ), (
+            "the tick dump and the correct reading must be indistinguishable to "
+            "the verifier; if they differ, the phantom baseline is still being "
+            f"built. correct={correct_result!r} dump={dump_result!r}"
+        )
+
+    def test_a_real_grid_is_still_verified(self):
+        """Reverse regression: the gate must not silence the guard on tables.
+
+        Same page shape as the collapse tests -- two rows, two well-separated
+        lanes -- with an output that drops a value. That must still hard-fail;
+        a gate that abstained here would disable the value guard outright.
+        """
+        page = _make_fitz_page_with_words(
+            [
+                [(100.0, "1.2"), (100.0 + _PHYS_COL_GAP, "2.3")],
+                [(100.0, "3.4"), (100.0 + _PHYS_COL_GAP, "4.5")],
+            ]
+        )
+        output_text = _md_table(
+            ["label", "c1", "c2"],
+            [["row1", "1.2", ""], ["row2", "3.4", "4.5"]],
+        )
+        result = verify_native_table(page, output_text)
+        assert result.hard_fail is True, (
+            "a dropped value on a genuine grid must still hard-fail after the "
+            f"GH-249 gate. Got: {result!r}"
+        )
+
+    def test_single_row_native_now_abstains(self):
+        """The narrowing this fix carries, recorded rather than hidden.
+
+        ``rows_establish_grid`` requires TWO rows at the modal width, so a
+        one-data-row native table is no longer verifiable. That is deliberate --
+        a single numeric line is exactly what the predicate cannot tell apart
+        from prose or a stray axis label -- but it does mean the value guard no
+        longer fires on genuine one-row tables. Pinned so the cost is visible
+        and any future change to it is a decision, not a surprise.
+        """
+        page = _make_fitz_page_with_words(
+            [[(100.0, "1.2"), (100.0 + _PHYS_COL_GAP, "2.3")]],
+        )
+        output_text = _md_table(["c1", "c2"], [["1.2", ""]])
+        result = verify_native_table(page, output_text)
+
+        assert result.hard_fail is False
+        assert result.warn is False
