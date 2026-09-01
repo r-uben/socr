@@ -24,9 +24,50 @@ import pytest
 fitz = pytest.importorskip("fitz")
 
 
-def _boom(*_args, **_kwargs):
-    """Stand-in for a malformed ``dir`` tuple reaching the direction helpers."""
-    raise ValueError("malformed dir vector")
+# A line whose ``dir`` is not a pair of numbers. ``dominant_text_direction``
+# does ``float(d[0])`` on it, so this is what a malformed direction actually
+# does to the real helper -- no patching of socr's own functions, which is what
+# made the first version of the anchor below tautological (GH-428 cubic P2).
+_MALFORMED_BLOCKS = {
+    "blocks": [
+        {
+            "lines": [
+                {"dir": "not-a-vector", "spans": [{"text": "Estimate 0.86"}]},
+                {"dir": "not-a-vector", "spans": [{"text": "1.24 (0.02)"}]},
+            ]
+        }
+    ]
+}
+
+
+def _patch_malformed_dirs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every ``get_text("dict")`` on any page return a malformed ``dir``.
+
+    Patched at the PyMuPDF boundary, so socr's own direction helpers run for
+    real on input that genuinely breaks them. Any other ``get_text`` mode is
+    delegated untouched, so the callers still see real page content.
+    """
+    original = fitz.Page.get_text
+
+    def _get_text(self, option="text", **kwargs):
+        if option == "dict":
+            return _MALFORMED_BLOCKS
+        return original(self, option, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "get_text", _get_text)
+
+
+def _sideways_pdf(tmp_path: Path, name: str = "sideways.pdf") -> Path:
+    """A page whose dominant text direction genuinely reads upward (90)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    for i in range(8):
+        page.insert_text((200 + i * 18, 500), "Estimate 0.86 (0.02) 1.24", fontsize=11, rotate=90)
+    path = tmp_path / name
+    doc.save(path)
+    doc.close()
+    return path
 
 
 def _page_pdf(tmp_path: Path, name: str = "page.pdf") -> Path:
@@ -41,17 +82,41 @@ def _page_pdf(tmp_path: Path, name: str = "page.pdf") -> Path:
     return path
 
 
-def test_the_helper_is_the_thing_that_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Anchor: without the guard the patched helper really does raise.
+def test_a_malformed_dir_really_does_break_the_real_helper() -> None:
+    """Anchor 1: the fixture input is genuinely hostile, not a stubbed raise."""
+    from socr.core.born_digital import dominant_text_direction
 
-    Without this, a guard that silently stopped calling the direction helpers
-    at all would satisfy both caller tests below while pinning nothing.
+    with pytest.raises(Exception):
+        dominant_text_direction(_MALFORMED_BLOCKS["blocks"])
+
+
+def test_the_direction_helpers_are_actually_consulted(tmp_path: Path) -> None:
+    """Anchor 2: the guard is not passing because the helpers went unused.
+
+    A regression that stopped calling the direction helpers inside
+    ``upright_rotation_for`` would leave every caller test below green while
+    pinning nothing. This fails in that case: a genuinely sideways page must
+    still come back as 90.
     """
-    import socr.core.born_digital as bd
+    from socr.core.born_digital import upright_rotation_for
 
-    monkeypatch.setattr(bd, "dominant_text_direction", _boom)
-    with pytest.raises(ValueError):
-        bd.dominant_text_direction([{"lines": []}])
+    doc = fitz.open(_sideways_pdf(tmp_path / "anchor"))
+    try:
+        assert upright_rotation_for(doc[0]) == 90
+    finally:
+        doc.close()
+
+
+def test_the_guard_is_what_swallows_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Anchor 3: with malformed dirs the SAME page falls back to 0, not 90."""
+    from socr.core.born_digital import upright_rotation_for
+
+    _patch_malformed_dirs(monkeypatch)
+    doc = fitz.open(_sideways_pdf(tmp_path / "anchor2"))
+    try:
+        assert upright_rotation_for(doc[0]) == 0
+    finally:
+        doc.close()
 
 
 class TestCropExtract:
@@ -65,7 +130,6 @@ class TestCropExtract:
         table path is built on. Driven through the public method, not the
         private renderer, because the contract is on the public one.
         """
-        import socr.core.born_digital as bd
         from socr.tables.extract import TableCropExtractor
         from socr.tables.locate import TableBox
 
@@ -75,7 +139,7 @@ class TestCropExtract:
             def read(self, *_args, **_kwargs):
                 return "| a | b |\n| --- | --- |\n| 1 | 2 |"
 
-        monkeypatch.setattr(bd, "dominant_text_direction", _boom)
+        _patch_malformed_dirs(monkeypatch)
 
         pdf = _page_pdf(tmp_path / "crop")
         box = TableBox(bbox=(60.0, 90.0, 400.0, 260.0), source="ruled")
@@ -94,7 +158,6 @@ class TestProcessPages:
         loop completed -- a raise there abandons the whole batch before the CLI
         is ever built.
         """
-        import socr.core.born_digital as bd
         from socr.core.config import PipelineConfig
         from socr.engines.base import BaseEngine
 
@@ -110,7 +173,7 @@ class TestProcessPages:
             def _build_command(self, pdf_path, output_dir, config):
                 return ["true"]
 
-        monkeypatch.setattr(bd, "dominant_text_direction", _boom)
+        _patch_malformed_dirs(monkeypatch)
 
         pdf = _page_pdf(tmp_path / "ocr")
         pages = _StubEngine().process_pages(pdf, [1], PipelineConfig(quiet=True), dpi=72)
