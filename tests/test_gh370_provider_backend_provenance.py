@@ -310,12 +310,19 @@ class TestProcessDocumentGatesOnTheResolvedBackend:
 
 
 class TestTheOrchestratorWritersAreWhatRecordProvenance:
-    """GH-385. The two orchestrator sites that stamp the resolved pair onto
-    ``PageOutput`` -- the escalation path and the agentic B3 path -- are what the
-    manifest and sidecar actually read. Every other test in this file calls
-    ``resolved_provenance`` directly, so reverting those call sites to
-    ``profile.backend`` / ``att.backend`` leaves the suite green while a
-    ``--qwen-backend vllm`` run records ``ollama`` again.
+    """GH-385. This pins the agentic B3 writer -- the site that stamps the
+    resolved pair onto ``PageOutput`` for a normally-routed page, which is what
+    the manifest and sidecar read. Every other test in this file calls
+    ``resolved_provenance`` directly, so reverting that call site to
+    ``att.backend`` leaves the suite green while a ``--qwen-backend vllm`` run
+    records ``ollama`` again.
+
+    SCOPE, deliberately stated: the OTHER writer -- ``_escalate_table_page``
+    (~2327) -- is NOT pinned here. ``_fake_route`` returns an accepted decision
+    on a plain-text page, so the escalation lane never runs and reverting that
+    site would still pass. Reaching it needs a non-local provider configured and
+    an accepted escalation candidate. Filed separately rather than claimed
+    falsely (cubic P2 on #396).
 
     Same shape as an unpinned assemble writer (#381): a green helper suite is
     not a gate on the value that ships.
