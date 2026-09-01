@@ -134,6 +134,31 @@ class TestBuildOllamaRung:
         assert "row 3" not in captured["prompt"]
         assert "label shifted" not in captured["prompt"]
         assert "independently" in captured["prompt"].lower()
+        assert "multiple tables may be visible" not in captured["prompt"].lower()
+
+    def test_page_scope_context_reaches_the_outgoing_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
+    ):
+        """GH-373: the real CLI1 rung calls build_table_judge_prompt with no
+        scope argument. The gate's context manager is the wire that splices
+        the page-scope fragment into the payload."""
+        from socr.judge.table_prompt import table_judge_prompt_scope
+
+        captured: dict[str, object] = {}
+
+        def _fake_post_chat(host: str, payload: dict, timeout: float) -> str:
+            captured["prompt"] = payload["messages"][0]["content"]
+            return PASS_JSON
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _fake_post_chat)
+
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        with table_judge_prompt_scope("page"):
+            rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        flat = " ".join(captured["prompt"].split()).lower()
+        assert "multiple tables may be visible" in flat
+        assert "whose content matches the emitted markdown" in flat
 
     def test_malformed_json_is_s1_failure_not_an_exception(
         self, monkeypatch: pytest.MonkeyPatch, crop_path: Path

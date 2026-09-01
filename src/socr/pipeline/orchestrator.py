@@ -157,7 +157,7 @@ def _socr_source_digest() -> str:
 
 
 def _table_judge_prompt_digest() -> str:
-    """SHA-256 of the table-judge prompt policy file, read at call time.
+    """SHA-256 of the table-judge prompt policy files, read at call time.
 
     GH-353 TICKET-B1: a wording-only edit to ``prompts/table_judge.md``
     (A0) changes what every rung is asked without moving
@@ -172,13 +172,18 @@ def _table_judge_prompt_digest() -> str:
     and tests routinely monkeypatch ``load_table_judge_prompt``/the file
     itself, so a permanent module-global cache would go stale across runs
     in the same process.
+
+    GH-373: the page-scope fragment is hashed too. A wording-only edit to
+    ``prompts/table_judge_scope_page.md`` changes what a degraded-scope
+    look is asked without touching the main template.
     """
     import hashlib
 
-    from socr.judge.table_prompt import load_table_judge_prompt
+    from socr.judge.table_prompt import load_table_judge_prompt, load_table_judge_scope_note
 
     try:
-        return hashlib.sha256(load_table_judge_prompt().encode("utf-8")).hexdigest()
+        blob = load_table_judge_prompt() + "\0" + load_table_judge_scope_note("page")
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
     except OSError:
         # An unreadable prompt file must not silently degrade to "no prompt
         # identity" (the ``_socr_source_digest`` precedent): tag with a
@@ -2614,10 +2619,12 @@ class UnifiedPipeline:
         not a content gate; a missing assemble backfill lets an unjudged
         table ship SUCCESS.
 
-        Never raises and never silently passes: a table whose witness could
-        not be located (AMBIGUOUS/MISSING), or any infra error while
-        preparing witnesses or running the ladder, demotes that table to
-        UNVERIFIED rather than being skipped. Sets
+        Never raises and never silently passes: a table with no image
+        (MISSING, corroboration-contradicted AMBIGUOUS, or a failed page
+        render), or any infra error while preparing witnesses or running
+        the ladder, demotes that table to UNVERIFIED rather than being
+        skipped. Count-mismatch AMBIGUOUS is judged against a full-page
+        crop (GH-373) rather than abstained. Sets
         ``ps.table_ladder_disposition`` -- NEVER ``bo.audit_passed`` (the
         winner-selection trap) and never mutates ``bo.failure_mode`` in
         place (the #252 round-1 rule: a finalized copy is demoted later, at
@@ -2648,6 +2655,7 @@ class UnifiedPipeline:
             reduce_page_ladder,
             run_table_ladder,
         )
+        from socr.judge.table_prompt import table_judge_prompt_scope
         from socr.judge.table_verdict import (
             TABLE_BINDING_ADJUDICATED_KIND,
             TABLE_LADDER_ACCEPTED_KIND,
@@ -2655,11 +2663,12 @@ class UnifiedPipeline:
             TABLE_LADDER_UNVERIFIED_KIND,
         )
         from socr.tables.binding import BindingResult
-        from socr.tables.witness import WitnessStatus, prepare_table_witnesses
+        from socr.tables.witness import WitnessScope, prepare_table_witnesses
 
         # table_id -> BindingResult iff bind() found a GH-273-class contradiction.
         forced_by_binding: dict = {}
         markdown_by_table: dict[str, str] = {}
+        scope_by_table: dict[str, str] = {}
 
         try:
             with prepare_table_witnesses(state.handle.path, page_num, bo.text) as witnesses:
@@ -2669,9 +2678,13 @@ class UnifiedPipeline:
                     return
                 table_results: list[TableLadderResult] = []
                 for witness in witnesses:
-                    if witness.status is not WitnessStatus.LOCATED or witness.crop_path is None:
-                        # AMBIGUOUS/MISSING: not S1-shaped -- nobody could
-                        # confidently look at this table at all.
+                    scope_by_table[witness.table_id] = witness.scope.value
+                    if witness.crop_path is None:
+                        # MISSING / corroboration-contradicted AMBIGUOUS /
+                        # page-render failed: not S1-shaped -- nobody could
+                        # look at this table at all. Count-mismatch
+                        # AMBIGUOUS with a page crop falls through and is
+                        # judged (GH-373).
                         table_results.append(
                             TableLadderResult(
                                 table_id=witness.table_id,
@@ -2700,11 +2713,13 @@ class UnifiedPipeline:
                         )
                         continue
                     try:
-                        table_results.append(
-                            run_table_ladder(
-                                rungs, witness.crop_path, witness.markdown, witness.table_id
+                        prompt_scope = "page" if witness.scope is WitnessScope.PAGE else "located"
+                        with table_judge_prompt_scope(prompt_scope):
+                            table_results.append(
+                                run_table_ladder(
+                                    rungs, witness.crop_path, witness.markdown, witness.table_id
+                                )
                             )
-                        )
                     except Exception as exc:
                         logger.warning(
                             "table judge ladder errored on p%d table %s (%s: %s); UNVERIFIED",
@@ -2847,7 +2862,11 @@ class UnifiedPipeline:
                     kind=kind,
                     engine=bo.engine or "",
                     detail=detail,
-                    data={"table_id": result.table_id, "rung_trail": rung_trail},
+                    data={
+                        "table_id": result.table_id,
+                        "rung_trail": rung_trail,
+                        "witness_scope": scope_by_table.get(result.table_id, "none"),
+                    },
                 )
             )
 
