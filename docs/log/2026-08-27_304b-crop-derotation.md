@@ -143,8 +143,14 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
 
      | form | sites |
      |---|---|
-     | mutate-only `mat.prerotate(rotation)` | `tables/extract.py`, `tables/source_evidence.py` (x2), `tables/witness.py`, `pipeline/orchestrator.py` (D3 floor render) |
-     | assignment `mat = mat.prerotate(rotation)` | `engines/base.py`, `core/document.py` (x2), `review/html.py`, `pipeline/orchestrator.py` (chart page + chart region) |
+     | mutate-only `mat.prerotate(rotation)` | `tables/extract.py`, `tables/source_evidence.py` (x2), `tables/witness.py`, `pipeline/orchestrator.py` (`_render_adjudication_crop`) |
+     | assignment `mat = mat.prerotate(rotation)` | `engines/base.py`, `core/document.py` (x2), `review/html.py`, `pipeline/orchestrator.py` (`_render_chart_page_png`, `_render_chart_region_pngs`) |
+
+     GH-440: the mutate-only cell first named the D3 floor render. That caller
+     does not call `prerotate` at all -- `_render_d3_floor_png` delegates to
+     `_render_chart_page_png`, so if D3 is named anywhere it belongs on the
+     assignment row, via that helper. Enumerated by walking every `prerotate`
+     occurrence to its enclosing `def`, which is what the first pass did not do.
 
      Because `prerotate` mutates AND returns the same matrix, the two forms are
      equivalent here -- which is precisely why neither can be cited as "what production

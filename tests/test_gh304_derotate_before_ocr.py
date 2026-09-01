@@ -134,9 +134,15 @@ def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
 
     - mutate-only, discarding the return: ``tables/extract.py``,
       ``tables/source_evidence.py`` (x2), ``tables/witness.py``,
-      ``pipeline/orchestrator.py`` (D3 floor render)
+      ``pipeline/orchestrator.py`` (``_render_adjudication_crop``)
     - assignment: ``engines/base.py``, ``core/document.py`` (x2),
-      ``review/html.py``, ``pipeline/orchestrator.py`` (chart page, chart region)
+      ``review/html.py``, ``pipeline/orchestrator.py``
+      (``_render_chart_page_png``, ``_render_chart_region_pngs``)
+
+    GH-440: the mutate-only entry first named the D3 floor render, which does
+    not call ``prerotate`` at all -- ``_render_d3_floor_png`` delegates to
+    ``_render_chart_page_png``. Each site above is now the enclosing ``def`` of
+    an actual ``prerotate`` occurrence.
 
     Not a clean split by lane, either -- ``orchestrator.py`` appears on both
     sides. They are equivalent precisely because both halves of the PyMuPDF
@@ -154,3 +160,59 @@ def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
     assert returned is not None, "the ADR's 'returns None' claim would be true here"
     assert isinstance(returned, fitz.Matrix)
     assert mat != fitz.Matrix(1, 1), "prerotate must still mutate in place"
+
+
+def test_the_recorded_prerotate_call_sites_match_the_code() -> None:
+    """GH-440: the ADR's call-site table must be checkable, not just careful.
+
+    That table has now been wrong three times -- #423 claimed ``prerotate``
+    returns None, #426 claimed production always assigns the result, and #437
+    named the D3 floor render as a mutate-only caller when
+    ``_render_d3_floor_png`` does not call ``prerotate`` at all. Every fix was
+    hand-enumerated, which is exactly why the next one drifted.
+
+    So enumerate it mechanically instead: walk every ``prerotate`` call in the
+    tree to its enclosing ``def`` and compare against the record.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "socr"
+
+    mutate_only: set[tuple[str, str]] = set()
+    assignment: set[tuple[str, str]] = set()
+
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "prerotate"
+            ):
+                continue
+            # enclosing def
+            fn = node
+            while fn in parents and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fn = parents[fn]
+            fn_name = getattr(fn, "name", "<module>")
+            rel = str(path.relative_to(root))
+            # a bare `mat.prerotate(x)` is an Expr statement; an assignment is not
+            where = parents.get(node)
+            (mutate_only if isinstance(where, ast.Expr) else assignment).add((rel, fn_name))
+
+    assert ("pipeline/orchestrator.py", "_render_adjudication_crop") in mutate_only, (
+        f"the orchestrator's mutate-only site moved; found {sorted(mutate_only)}"
+    )
+    assert ("pipeline/orchestrator.py", "_render_d3_floor_png") not in (mutate_only | assignment), (
+        "_render_d3_floor_png does not call prerotate; it must not be recorded as a site"
+    )
+    for fn_name in ("_render_chart_page_png", "_render_chart_region_pngs"):
+        assert ("pipeline/orchestrator.py", fn_name) in assignment, (
+            f"{fn_name} is recorded on the assignment row but is not there: {sorted(assignment)}"
+        )
