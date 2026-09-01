@@ -46,6 +46,16 @@ def _pdf(tmp_path: Path, rotate: int, name: str = "page.pdf") -> Path:
 
 
 def _measured_rotation(pdf: Path) -> int:
+    """The rotation production will derive, asserted as != 0 rather than == 90.
+
+    GH-306 review: PyMuPDF's line direction for a ``rotate=90`` insert can come
+    back as ``(0, -1)`` (-> 90) or ``(0, 1)`` (-> 270) depending on version, and
+    BOTH turn a portrait page landscape -- which is the behaviour the aspect
+    pins below actually measure. Pinning ``== 90`` is stricter than the thing
+    being pinned and would redden on a PyMuPDF where the fixture reports 270,
+    with de-rotation working correctly. Matches the GH-304 precedent, and the
+    house rule: pin a difference, not a locally measured value.
+    """
     from socr.core.born_digital import upright_rotation_for
 
     doc = fitz.open(pdf)
@@ -68,7 +78,7 @@ class TestRenderPage:
 
     def test_a_sideways_page_comes_back_upright(self, tmp_path: Path) -> None:
         pdf = _pdf(tmp_path / "s", rotate=90)
-        assert _measured_rotation(pdf) == 90, "fixture must actually be sideways"
+        assert _measured_rotation(pdf) != 0, "fixture must actually be sideways"
 
         img = _handle(pdf).render_page(1, dpi=72)
         assert img.width > img.height, (
@@ -129,7 +139,7 @@ class TestProcessPages:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         pdf = _pdf(tmp_path / "ps", rotate=90)
-        assert _measured_rotation(pdf) == 90, "fixture must actually be sideways"
+        assert _measured_rotation(pdf) != 0, "fixture must actually be sideways"
 
         width, height = _rendered_size(pdf, monkeypatch)
         assert width > height, (
