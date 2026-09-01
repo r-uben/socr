@@ -1883,19 +1883,34 @@ class BornDigitalDetector:
         a journal footer is exactly where a DOI lives. A page with no links
         produces byte-identical output to before.
 
-        NOTE: the ``find_tables`` failure path below returns raw ``get_text``
-        and therefore still drops links. That is the pre-existing degraded
-        path for a damaged page; recovering links there needs the dict walk
-        this function does after it, and is deliberately out of scope here.
+        GH-340: both failure returns -- the ``find_tables`` except and the
+        dict-walk except -- now apply links too. Links are resolved BEFORE the
+        first attempt so a degraded page loses layout, not URIs. (This replaces
+        an earlier note here saying those paths still dropped links; they no
+        longer do.)
+
+        Still out of scope: a URI whose rect sits INSIDE a detected table cell
+        (GH-339), and routing prose pages onto the dict walk.
         """
+        # GH-127: resolved once, not per line -- get_links() parses the page's
+        # link table on every call.
+        #
+        # GH-340: resolved BEFORE the find_tables attempt, so the failure return
+        # below can still carry them. A damaged page that falls back to flat text
+        # used to drop every URI silently -- and a footer DOI is exactly the kind
+        # of link that survives on a page whose table detection does not.
+        _links = _uri_links(page)
+        try:
+            _flat_words_early = page.get_text("words")
+        except Exception:
+            _flat_words_early = []
+
         try:
             tables_result = page.find_tables()
         except Exception:
-            return page.get_text("text").strip()
-
-        # GH-127: resolved once, not per line -- get_links() parses the page's
-        # link table on every call.
-        _links = _uri_links(page)
+            return _apply_links_to_flat_text(
+                page.get_text("text").strip(), _links, _flat_words_early
+            )
 
         # Collect table bounding boxes and their markdown representations.
         # For each table returned by find_tables(), detect lane-stacking: a
@@ -2014,7 +2029,11 @@ class BornDigitalDetector:
         try:
             page_dict = page.get_text("dict")
         except Exception:
-            return page.get_text("text").strip()
+            # GH-340: same recovery as the find_tables failure above. Losing the
+            # dict walk costs layout, not links.
+            return _apply_links_to_flat_text(
+                page.get_text("text").strip(), _links, _flat_words_early
+            )
 
         blocks = page_dict.get("blocks", [])
         output_parts: list[str] = []

@@ -386,3 +386,87 @@ def test_a_partially_resolved_anchor_is_skipped_not_widened(tmp_path: Path) -> N
         "a half-resolved anchor was wrapped; min/max over survivors can span the wrong range"
     )
     assert "See Smith 2020 for details" in out
+
+
+def test_links_survive_a_find_tables_failure(tmp_path: Path) -> None:
+    """GH-340: a damaged page must lose layout, not URIs.
+
+    ``extract_structured`` returns raw flat text when ``find_tables`` raises.
+    That return dropped every link, so a page whose table detection failed also
+    silently lost its DOIs -- and a footer DOI is exactly the kind of link that
+    survives on a page whose tables do not.
+    """
+    from unittest.mock import patch
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), "Cited in Smith 2020 with details below.", fontsize=11)
+    hits = page.search_for("Smith 2020")
+    assert hits, "fixture needs the anchor"
+    page.insert_link({"kind": fitz.LINK_URI, "from": hits[0], "uri": DOI})
+
+    pdf = tmp_path / "find_tables_raises.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    def _boom(self, *a, **k):
+        raise RuntimeError("simulated find_tables failure")
+
+    with patch.object(fitz.Page, "find_tables", _boom):
+        out = _extract(pdf)
+
+    assert f"]({DOI})" in out, "the link was dropped on the find_tables failure path"
+    assert "Cited in" in out, "the text must survive too"
+
+
+def test_links_survive_a_dict_walk_failure(tmp_path: Path) -> None:
+    """GH-340: the same recovery on the second failure return.
+
+    Losing ``get_text("dict")`` costs position-aware layout, not links.
+    """
+    from unittest.mock import patch
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 80), "Cited in Smith 2020 with details below.", fontsize=11)
+    # A RULED TABLE is required: the dict walk is only reached once the page has
+    # table_regions. A prose page returns before it, so a prose fixture would
+    # pass with the old dropping return still in place -- verified, it did.
+    page.insert_text((100, 150), "ColA", fontsize=10)
+    page.insert_text((200, 150), "ColB", fontsize=10)
+    page.insert_text((100, 180), "10.5", fontsize=10)
+    page.insert_text((200, 180), "20.5", fontsize=10)
+    page.draw_rect(fitz.Rect(90, 135, 280, 200))
+    page.draw_line((90, 160), (280, 160))
+    page.draw_line((180, 135), (180, 200))
+
+    hits = page.search_for("Smith 2020")
+    assert hits, "fixture needs the anchor"
+    page.insert_link({"kind": fitz.LINK_URI, "from": hits[0], "uri": DOI})
+
+    pdf = tmp_path / "dict_raises.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    real_get_text = fitz.Page.get_text
+    seen_dict = {"n": 0}
+
+    def _boom_on_dict(self, kind="text", *a, **k):
+        # Only the dict-walk's OWN call. find_tables also asks for "dict"
+        # internally, so raising on the first one breaks table detection instead
+        # of the path under test -- which showed up as find_tables returning
+        # None rather than as the assertion this test makes.
+        if kind == "dict":
+            seen_dict["n"] += 1
+            if seen_dict["n"] >= 2:
+                raise RuntimeError("simulated dict-walk failure")
+        return real_get_text(self, kind, *a, **k)
+
+    with patch.object(fitz.Page, "get_text", _boom_on_dict):
+        out = _extract(pdf)
+
+    assert seen_dict["n"] >= 2, (
+        "the dict walk was never reached; this test would pass for the wrong reason"
+    )
+    assert f"]({DOI})" in out, "the link was dropped on the dict-walk failure path"
+    assert "Cited in" in out
