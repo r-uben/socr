@@ -27,6 +27,14 @@ from socr.core.providers import (
 
 _HF_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
+#: GH-400 review: one copy. The page text and the faked route's output must be
+#: the same string -- routing is faked and neither copy is asserted against the
+#: other, so two literals could drift apart without failing anything.
+_PAGE_TEXT = (
+    "A paragraph of ordinary prose on the page, comfortably past the "
+    "text-layer floor so nothing here depends on its length."
+)
+
 
 def _cfg(**overrides) -> PipelineConfig:
     return PipelineConfig(**overrides)
@@ -349,12 +357,7 @@ class TestTheOrchestratorWritersAreWhatRecordProvenance:
         pdf_path = pdf_dir / "doc.pdf"
         doc = fitz.open()
         page = doc.new_page()
-        page.insert_text(
-            (72, 100),
-            "A paragraph of ordinary prose on the page, comfortably past the "
-            "text-layer floor so nothing here depends on its length.",
-            fontsize=11,
-        )
+        page.insert_text((72, 100), _PAGE_TEXT, fontsize=11)
         doc.save(pdf_path)
         doc.close()
 
@@ -384,10 +387,7 @@ class TestTheOrchestratorWritersAreWhatRecordProvenance:
 
             out = PageOutput(
                 page_num=page_num,
-                text=(
-                    "A paragraph of ordinary prose on the page, comfortably past the "
-                    "text-layer floor so nothing here depends on its length."
-                ),
+                text=_PAGE_TEXT,
                 status=PageStatus.SUCCESS,
                 engine="qwen",
                 audit_passed=True,
