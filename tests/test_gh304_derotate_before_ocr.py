@@ -126,13 +126,19 @@ class TestRenderOrientation:
 def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
     """GH-311: the 304b ADR said ``prerotate`` returns None.
 
-    It does not. On PyMuPDF 1.28.2 it mutates in place AND returns the matrix,
-    which is why the call sites' ``mat = mat.prerotate(...)`` assignment is
-    meaningful rather than an accident that survives on the mutation alone.
+    It does not. On PyMuPDF 1.28.2 it mutates in place AND returns the matrix.
 
-    Pinned because the ADR now asserts this and both call sites rely on it: a
-    PyMuPDF upgrade that changed either half would silently break the derotation
-    path, and the assignment form would be the first thing to look wrong.
+    GH-426: the wording here used to add that this is "why the call sites'
+    ``mat = mat.prerotate(...)`` assignment is meaningful", and that both call
+    sites rely on it. Neither is true. The tree carries BOTH forms -- the 304b
+    crop lanes (``tables/extract.py``, ``source_evidence.py``, ``witness.py``)
+    discard the return and rely on the mutation, while the page-level lanes
+    (``engines/base.py``, ``core/document.py``, ``review/html.py``) assign it.
+    They are equivalent precisely because both halves hold.
+
+    Pinned because a PyMuPDF upgrade that changed EITHER half would silently
+    break one family of call sites while leaving the other working, which is the
+    hardest version of this bug to find.
     """
     import fitz
 

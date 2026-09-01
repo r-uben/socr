@@ -28,7 +28,7 @@ De-rotate table-crop and source-evidence raster pixels only. All table bboxes, c
 **What rotates:**
 - Only the **rendering matrix**—the 2×3 affine transform passed to `page.get_pixmap(matrix=...)` when rasterizing a crop or full page.
 - The clip region (in page-space PDF points) is **not transformed**.
-- The prerotated matrix applies the 90/270-degree rotation as pixel samples are rendered from the PDF operators.
+- The prerotated matrix applies the rotation (90, 180 or 270 degrees) as pixel samples are rendered from the PDF operators.
 
 **Consequence:** A crop in a rotated region is rendered sideways (matching its text direction) but still anchored to its original page-space bbox.
 
@@ -85,7 +85,8 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
    - If page inspection fails, return 0 and render unrotated.
 
 **Angle values:**
-- `upright_rotation_degrees(direction)` maps a unit-vector direction to 0, 90, 270, or 360 ≡ 0.
+- `upright_rotation_degrees(direction)` maps a unit-vector direction to 0, 90, **180**, 270, or 360 ≡ 0.
+  (GH-426: earlier wording here omitted 180; the measured table below shows `(-1, 0)` -> 180.)
 - Snapped to right angles: text at slight skew (e.g., 7 degrees) maps to the nearest quadrant.
 - 0 for horizontal `(1.0, 0.0)`.
 - 90 for `(0.0, -1.0)`.
@@ -112,7 +113,8 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
 
   A maintainer reading the old wording would believe upside-down text is suppressed. It is
   not. This corrects the RECORD to match the code; it does not change the angle rule,
-  which would need its own pin (GH-311 is explicit on that point).
+  which would need its own pin (GH-311 is explicit on that point). GH-426: that pin now
+  exists -- `test_angle_is_derived_from_direction`.
 
 **Do not claim scanned pages lack text.** The scanned-page predicate is based on *structural* evidence (embedded image coverage, drawn pixel content, absence of proper fonts), not absence of text direction. A scanned page may carry an OCR text layer with directional metadata. Image localization stays unrotated regardless; the angle rule applies only to crop/evidence raster rendering.
 
@@ -127,14 +129,27 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
 1. **Matrix.prerotate() mutates in place AND returns the matrix:**
    ```python
    mat = fitz.Matrix(dpi / 72, dpi / 72)
-   mat.prerotate(90)  # mutates mat AND returns it (PyMuPDF 1.28.2)
-   mat = mat.prerotate(90)  # what production actually does -- the assignment is real
+   mat.prerotate(90)  # the 304b lanes: mutate-only, the return is discarded
+   mat = mat.prerotate(90)  # the page-level lanes: assignment, same effect
    pix = page.get_pixmap(matrix=mat, clip=clip)
    ```
    - Do NOT reuse the matrix after calling `prerotate()` without reinitializing.
    - GH-311: "returns None" was wrong. Verified on PyMuPDF 1.28.2 -- `prerotate` returns a
-     `Matrix`, and the call sites' `mat = mat.prerotate(...)` assignment is meaningful
-     rather than a no-op that happens to work because of the mutation.
+     `Matrix`.
+   - GH-426: the correction then overshot in the other direction, claiming production
+     writes `mat = mat.prerotate(...)` and that the assignment is what makes it work.
+     Both forms are in the tree, and **this ADR's own 304b lanes are the mutate-only
+     form**. Measured on main:
+
+     | form | sites |
+     |---|---|
+     | mutate-only `mat.prerotate(rotation)` | `tables/extract.py`, `tables/source_evidence.py` (x2), `tables/witness.py`, `pipeline/orchestrator.py` (D3 floor render) |
+     | assignment `mat = mat.prerotate(rotation)` | `engines/base.py`, `core/document.py` (x2), `review/html.py`, `pipeline/orchestrator.py` (chart page + chart region) |
+
+     Because `prerotate` mutates AND returns the same matrix, the two forms are
+     equivalent here -- which is precisely why neither can be cited as "what production
+     does". The mutation is what carries the rotation in the 304b lanes; the assignment
+     is redundant where it appears.
 
 2. **Dimension swap on 90/270 rotation:**
    - Unrotated clip `(x0, y0, x1, y1)` with page space width `w = x1 - x0` and height `h = y1 - y0`.
@@ -310,7 +325,7 @@ The session's `pyproject.toml` configures `pythonpath = ['src']`, routing `impor
    - No mixed mode (vector detect + raster localize on the same page) is currently tested; such pages would use vector bboxes and leave image localization unused.
 
 3. **Multi-degree rotations and skew:**
-   - Angles are snapped to 0/90/270. Text set at slight skew maps to the nearest quadrant; sub-degree variations are tolerated by models.
+   - Angles are snapped to 0/90/**180**/270. Text set at slight skew maps to the nearest quadrant; sub-degree variations are tolerated by models. (GH-426: 180 was omitted here.)
    - No sub-angle rotation is applied; it would resample glyphs with no gain.
 
 ---
@@ -322,4 +337,4 @@ The session's `pyproject.toml` configures `pythonpath = ['src']`, routing `impor
 - **PR:** #305 (implemented page-level fix; deferred table-crop lane)
 - **Test suite:** `tests/test_gh304b_crop_derotation.py` (E1–E9 evasion matrix)
 - **Resume audit:** GH-214 (`_socr_source_digest` invalidates cache on source changes)
-- **PyMuPDF:** 1.28.2 (locked; `Matrix.prerotate()` mutates in place; dimensions swap on 90/270)
+- **PyMuPDF:** 1.28.2 (locked; `Matrix.prerotate()` mutates in place **and returns the same matrix**; dimensions swap on 90/270, not on 180)
