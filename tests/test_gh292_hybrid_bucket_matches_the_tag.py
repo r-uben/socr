@@ -145,20 +145,42 @@ def test_the_orchestrator_bucket_itself_reads_the_tag() -> None:
     )
 
     rhs = assigns[0].value
-    source = ast.unparse(assigns[0])
-    assert "shipped_winner_kind" in source, (
-        f"the bucket no longer asks the manifest what ships: {source}"
+
+    # Resolved from the parsed tree, not by matching text over `ast.unparse`.
+    # A substring check can be satisfied by an unrelated literal or a comment on
+    # the same line, so it would stay green through a refactor that decoupled
+    # the bucket from the tag (#450 review).
+    calls_the_accessor = any(
+        isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == "shipped_winner_kind")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "shipped_winner_kind")
+        )
+        for node in ast.walk(rhs)
     )
-    assert "CORRUPT_MATH_HYBRID" in source, (
-        f"the bucket no longer compares against the disposition: {source}"
+    assert calls_the_accessor, (
+        f"the bucket no longer calls shipped_winner_kind: {ast.unparse(assigns[0])}"
     )
 
-    # The defect was reading the PageState flag directly. Look for the attribute
-    # access itself, not the substring -- the variable name contains it too.
+    compares_to_the_kind = any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "CORRUPT_MATH_HYBRID"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "WinnerKind"
+        for node in ast.walk(rhs)
+    )
+    assert compares_to_the_kind, (
+        "the bucket no longer compares against WinnerKind.CORRUPT_MATH_HYBRID: "
+        f"{ast.unparse(assigns[0])}"
+    )
+
+    # The defect was reading the PageState flag directly.
     flag_reads = [
         node
         for node in ast.walk(rhs)
         if (isinstance(node, ast.Attribute) and node.attr == "corrupt_math_hybrid")
         or (isinstance(node, ast.Constant) and node.value == "corrupt_math_hybrid")
     ]
-    assert not flag_reads, f"the bucket is re-deriving the PageState flag again: {source}"
+    assert not flag_reads, (
+        f"the bucket is re-deriving the PageState flag again: {ast.unparse(assigns[0])}"
+    )

@@ -6054,20 +6054,18 @@ class UnifiedPipeline:
         # document to AUDIT_FAILED and emitted a corrupt-math event for a
         # defect it does not have.
         #
-        # `whole_doc` is passed because `finalized_page_outputs` passes it: the
-        # tag for a whole-document CLI attempt differs without it, and this
-        # bucket must name the same disposition that actually ships.
-        from socr.core.manifest import (
-            WinnerKind,
-            _whole_doc_page_texts,
-            shipped_winner_kind,
-        )
+        # `whole_doc` is deliberately NOT passed. The hybrid branch is the first
+        # in `_select_page_output_tagged` and returns before `whole_doc` is ever
+        # read, so plumbing it here would be dead -- and would make
+        # `socr.pipeline` reach into the private `_whole_doc_page_texts` for no
+        # effect, which is the opposite of the public surface this fix adds
+        # (#450 review).
+        from socr.core.manifest import WinnerKind, shipped_winner_kind
 
-        _hybrid_whole_doc = _whole_doc_page_texts(state)
         corrupt_math_hybrid_pages = [
             n
             for n in sorted(state.pages)
-            if shipped_winner_kind(state, n, _hybrid_whole_doc) is WinnerKind.CORRUPT_MATH_HYBRID
+            if shipped_winner_kind(state, n) is WinnerKind.CORRUPT_MATH_HYBRID
         ]
         native_fallback_pages = [
             n
