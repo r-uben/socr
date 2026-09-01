@@ -906,8 +906,48 @@ class TestAgenticChartLaneRouting:
         head, _, tail = text.partition("socr:chart-axis-residue")
         for number in ("2", "4", "6"):
             assert f"\n{number}\n" in tail, f"tick label {number!r} is not inside the fence"
+            # GH-387: presence in the fence is only half of it. A writer that
+            # COPIES the residue into the comment and leaves ps.native_text
+            # beside it satisfies the assertion above while the page still
+            # ships a column of bare numbers as body prose -- the whole defect.
+            assert number not in head.splitlines(), (
+                f"tick label {number!r} is still body prose above the fence"
+            )
         assert "Figure 4. Uncertainty and risks in economic projections" in head
         assert "March projections" in head
+
+    def test_a_lone_year_ships_in_the_body_and_gains_no_fence(self, tmp_path: Path) -> None:
+        """GH-387: the lone-number rule pinned at the WIRE, not just the helper.
+
+        ``TestALoneNumberIsContentNotFurniture`` pins this on
+        ``split_chart_axis_residue``. Revert the helper to fence every bare
+        number and the existing wire test stays green, because its fixture is a
+        run of 2/4/6. A chart page carrying a single year must keep it visible:
+        it is content, and the fence is not where a reader looks.
+        """
+        pdf = _make_vector_chart_pdf(tmp_path)
+        pipeline = _make_agentic_pipeline()
+        state = _make_state_with_page(
+            pdf,
+            native_text=(
+                "Figure 2. Outlook for the coming year\n"
+                "Published 2025\n"
+                "2025\n"
+                "See the notes on page 4"
+            ),
+        )
+        pipeline._last_assessment = state._last_assessment
+
+        with patch("socr.pipeline.orchestrator.route_page"):
+            pipeline._phase_agentic(state, tmp_path)
+
+        text = state.pages[1].best_output.text or ""
+
+        assert "socr:chart-axis-residue" not in text, (
+            "a single number is not an axis scale; fencing it hides content from the rendered page"
+        )
+        assert "2025" in text.splitlines()
+        assert "Figure 2. Outlook for the coming year" in text
 
     def test_chart_page_without_tick_labels_gains_no_fence(self, tmp_path: Path) -> None:
         """Difference control: the SAME lane, the SAME fixture, differing only in
