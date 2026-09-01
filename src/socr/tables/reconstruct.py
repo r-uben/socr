@@ -546,8 +546,17 @@ def has_numeric_columns(page) -> bool:
     and stating only the co-occupancy half is how the bug returns from the docs
     (GH-348).
 
-    Called from ``BornDigitalDetector._detect_tables`` as the second pass, when
-    ``find_tables()`` finds nothing.
+    Two kinds of caller, and the distinction matters:
+
+    - ``BornDigitalDetector._detect_tables`` uses it as the SECOND PASS, reached
+      only when ``find_tables()`` finds nothing. That is the GH-248 path.
+    - ``reconstruct_table_regions`` and the rowizers call it FIRST, as a
+      structural gate before any reconstruction work (``if not
+      has_numeric_columns(page): return []``). No ``find_tables`` call is
+      involved there at all.
+
+    Naming only the first would be the same one-sided attribution GH-348 exists
+    to remove.
     """
     try:
         words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_no)
