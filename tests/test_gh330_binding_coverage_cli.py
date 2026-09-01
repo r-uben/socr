@@ -68,8 +68,11 @@ def test_coverage_cli_rejects_missing_pdf(tmp_path):
             str(tmp_path),
         ],
     )
-    if result.exit_code != 0 and "No such command" in result.output:
-        pytest.xfail("Task 3 'binding-coverage' command not yet registered")
+    # GH-350: no xfail escape. The command IS registered; unregistering it used
+    # to turn this test green instead of red, which is the opposite of a guard.
+    assert "No such command" not in result.output, (
+        "binding-coverage is not registered; the guard must fail, not xfail"
+    )
 
     assert result.exit_code != 0
     assert (
@@ -99,8 +102,11 @@ def test_coverage_cli_rejects_zero_byte_pdf(tmp_path):
             str(tmp_path),
         ],
     )
-    if result.exit_code != 0 and "No such command" in result.output:
-        pytest.xfail("Task 3 'binding-coverage' command not yet registered")
+    # GH-350: no xfail escape. The command IS registered; unregistering it used
+    # to turn this test green instead of red, which is the opposite of a guard.
+    assert "No such command" not in result.output, (
+        "binding-coverage is not registered; the guard must fail, not xfail"
+    )
 
     assert result.exit_code != 0
     assert (
