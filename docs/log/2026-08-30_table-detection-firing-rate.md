@@ -21,9 +21,14 @@ routes:
 **In production these are not independent.** `BornDigitalDetector._detect_tables`
 (`src/socr/core/born_digital.py`) returns True immediately when `find_tables()`
 finds anything and only then falls through to `return has_numeric_columns(page)`.
-So the production quantity is `find_tables() == 0` ∩ heuristic — the
-"second-pass only" row below — and the raw `has_numeric_columns` row counts
-pages the gate would never have asked about.
+So the quantity the HEURISTIC decides in production is `find_tables() == 0` ∩
+heuristic — the "second-pass only" row below — and the raw `has_numeric_columns`
+row counts pages the gate would never have asked about.
+
+That is the heuristic's slice, **not** production's table-page set. A page is a
+table page when EITHER detector fires, so production's set is the union:
+`find_tables` ∪ (`find_tables() == 0` ∩ heuristic). Reading the intersection as
+the whole is the denominator mix this log warns about — see the Result section.
 
 Measuring unconditionally is what makes the 14-page overlap (102 vs 88) visible
 at all. Under the documented gate those two numbers would be equal, and a
