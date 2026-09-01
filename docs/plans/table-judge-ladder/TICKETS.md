@@ -41,6 +41,15 @@ protocol `(crop_path, markdown, prior_findings) -> RungResult`; parser that stri
 markdown fences (reuse `_extract_json`-style extraction — fenced JSON is NOT ¬S1; the
 gemini CLI fences routinely) and treats missing required fields / unknown `code` /
 non-JSON as S1 failure; audit-event kind constants for ladder verdicts.
+**S2 contract (GH-363, pinned after the fact — verified against main):** S2, i.e.
+accept vs reject, keys on **`verdict` only**. `code` is evidence for findings and
+future repair, never a second accept gate. Verified: `reduce`/`run_table_ladder` branch
+on `verdict.passed` and `verdict.confidence` alone, and `code` appears only in parsing
+and in serialising findings for the audit trail. One nuance worth stating precisely
+rather than claiming "code gates nothing": an **unknown** code is a schema violation and
+so yields ¬S1 — that gates on schema validity, not on whether the code chosen was the
+right one. Bake-off finding 3 (GH-356) is why this matters: wrong-code-right-verdict is
+real on hard fabrication.
 **Files:** `src/socr/judge/table_verdict.py`, `tests/test_table_verdict.py`
 **Done when:** `~/venvs/socr/bin/pytest tests/test_table_verdict.py -q` exits 0; tests
 cover: exact JSON, fenced JSON (accepted), PASS⇔empty findings, missing `verdict`,
@@ -80,6 +89,9 @@ next rung; B(FAIL)→tiebreak with findings; C(¬S1)→substitute without findin
 B-exhaustion→REJECTED; C-exhaustion→UNVERIFIED — plus the page reducer: any
 REJECTED table ⇒ page REJECTED; else any UNVERIFIED ⇒ page UNVERIFIED; else accepted
 (per-table results all kept for the sidecar/audit events).
+**Done when (GH-363 addition):** the transition tests key on `verdict` and
+`confidence` only. A test that also asserts a particular finding `code` would overfit to
+code accuracy the ladder does not claim — see A1's S2 contract above.
 **Files:** `src/socr/judge/table_ladder.py`, `tests/test_table_ladder.py`
 **Done when:** `~/venvs/socr/bin/pytest tests/test_table_ladder.py -q` exits 0 against
 the explicit transition table in the ticket (A-high, A-low→A, A-low→B, A-low→¬S1,
@@ -184,6 +196,14 @@ write `"timeout"` into `route_page` attempt fields (`:2970` substring-arms
 cascade-halt). Add fingerprint extras: flag, both rung model/binary identities,
 `table_judge_timeout_sec`, prompt file digest (extend `live_keys` in
 `test_r174b_orchestrator_agentic_lane.py`).
+**Scope (GH-363, pinned after the fact — verified against main, not restated from
+the plan):** the gate is **agentic-only**. `_run_table_judge_gate` has exactly one
+caller, inside `_phase_agentic`; every agentic emit path that ships a table (OCR,
+`_agentic_native_page`, post-reread) reaches it before flush. `engine == "chart_asset"`
+skips at the top of the helper. **Non-agentic emit paths are out of scope for this
+epic** — they never reach the gate, and closing them is separate work (#317 is where
+the native-unwitnessed hole is tracked). Without this sentence the hole the design
+exists to close could survive on a branch that never reaches the choke point.
 **Files:** `src/socr/pipeline/orchestrator.py`, `tests/test_table_judge_gate.py`
 **Done when:** `~/venvs/socr/bin/pytest tests/test_table_judge_gate.py tests/test_pp2_agentic_fuse.py -q`
 exits 0. Gate test: two `process()` runs in one test (flag on vs off, rung callables
