@@ -103,9 +103,13 @@ matched the transcription character for character. That tell is worth keeping.
   measures 18/18, 37/51 and 23/28 orphaned-stub rows on three corpus pages) and it
   relocates values across rows. Grading a model against it produces false convictions —
   10 of them on a page verified correct cell by cell
-  (`docs/log/2026-08-29_gh326-binder-gate-dry-run.md` — the real filename; the earlier
-  `2026-08-29_gh326-...` here was a placeholder, and that file is still not in the repo,
-  which is the same hole #331 names).
+  (`docs/log/2026-08-29_gh326-binder-gate-dry-run.md`). ~~that file is still not in the
+  repo, which is the same hole #331 names~~ — **corrected (GH-422).** The earlier
+  citation here was a placeholder filename, and replacing it with the real one was the
+  fix; carrying the "not in the repo" clause across undid that. The dry-run log is
+  tracked on main (added by #332, `4a2ea70`) and is the artefact this bullet cites. The
+  reproducibility hole that IS still open is the one below — the 13 identifiers and the
+  scorer, tracked on #338 — not this file.
 - ~~**#326 cannot be the gate as written.**~~ **Retracted (GH-338).** This experiment
   asks whether a reconstructed ROW matches a blind transcription. `binding.py` asks
   whether a native WORD sits inside a cell bbox (`model_unbound`). Different instruments,
