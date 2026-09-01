@@ -564,11 +564,27 @@ def has_numeric_columns(page) -> bool:
         words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_no)
     except Exception:  # pragma: no cover - defensive
         return False
-    nums = [
-        (w[0], round(w[1])) for w in words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])
-    ]
-    if len(nums) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
+    numeric_words = [w for w in words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
+    if len(numeric_words) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
         return False
+
+    # GH-349: try BOTH edges as the column anchor. Keying lanes on x0 alone
+    # assumes left alignment. A right-aligned numeric column has a stable x1 and
+    # a varying x0 -- "1" against "1000.00" differ by far more than
+    # _LANE_X_TOL_PT -- so its tokens split into separate lanes, none of which
+    # reaches the reuse threshold, and a real 3-column borderless table returns
+    # False. That is the booktabs page this gate exists for.
+    #
+    # This does NOT weaken reuse (measured: dropping to 2 rows readmits 2 of the
+    # 4 Glaeser noise pages). The same >= _MIN_TABLE_ROWS recurrence is required;
+    # only the anchor changes. Scatter has neither a stable left nor a stable
+    # right edge, so it still fails on both.
+    return any(_numeric_columns_on_anchor(numeric_words, edge) for edge in (0, 2))
+
+
+def _numeric_columns_on_anchor(numeric_words: list, edge: int) -> bool:
+    """``has_numeric_columns``' lane test, keyed on one edge (0 = x0, 2 = x1)."""
+    nums = [(w[edge], round(w[1])) for w in numeric_words]
 
     xs = sorted({x for x, _ in nums})
     lanes: list[list[float]] = []
