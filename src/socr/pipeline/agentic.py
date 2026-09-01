@@ -246,6 +246,15 @@ def route_page(
                             cost_usd=0.0,
                             accepted=False,
                             reason="provider timeout",
+                            # GH-344: the timeout branch was the only attempt
+                            # that omitted these. Budget skip, provider raise,
+                            # judge raise and the accepted path all record them,
+                            # so a timed-out rung was the one journal entry that
+                            # could not say WHICH provider timed out -- exactly
+                            # the entry an operator reads first.
+                            provider_id=prof.id,
+                            model=prof.model,
+                            backend=prof.backend,
                         )
                     )
                     continue
