@@ -1409,11 +1409,17 @@ def _apply_table_emission_guard(output: PageOutput, page_num: int) -> PageOutput
     if text is not output.text:
         output = replace(output, text=text)
     marker = _TABLE_EMISSION_FAILED_RE.fullmatch(text.strip())
-    defect = (
-        marker.group("defect")
-        if marker
-        else (table_emission_defect(text) or table_content_defect(text))
-    )
+    emission_defect = None if marker else table_emission_defect(text)
+    # GH-302 review: the content term must NOT take the text-replacing branch.
+    # An emission defect means the markdown itself is malformed, so replacing
+    # the page with a marker loses nothing that could be trusted. An empty
+    # table is different: `table_content_defect` fires on ONE table run, while
+    # the replacement is whole-page, so a page carrying real prose beside an
+    # empty table had ALL of it swapped for the marker. That is a content loss
+    # introduced by a no-content-loss fix -- the page must be DEMOTED, not
+    # discarded (cf. #252: never destroy a page to flag it).
+    content_defect = None if (marker or emission_defect) else (table_content_defect(text) or None)
+    defect = marker.group("defect") if marker else (emission_defect or content_defect)
     if not defect:
         return output
 
@@ -1421,9 +1427,13 @@ def _apply_table_emission_guard(output: PageOutput, page_num: int) -> PageOutput
     return replace(
         output,
         text=(
-            text.strip()
-            if marker
-            else f"[page {page_num} failed: invalid table emission — {defect}]"
+            text
+            if content_defect
+            else (
+                text.strip()
+                if marker
+                else f"[page {page_num} failed: invalid table emission — {defect}]"
+            )
         ),
         status=PageStatus.ERROR,
         audit_passed=False,

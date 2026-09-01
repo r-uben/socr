@@ -104,3 +104,55 @@ def test_the_shape_term_is_deliberately_not_applied_here() -> None:
     assert out.status is PageStatus.SUCCESS, (
         "the final guard hard-failed a shape defect; that is a routing change #302 rules out"
     )
+
+
+MIXED_PAGE = (
+    "## Section 4\n\n"
+    "Real prose that must survive, carrying a finding worth 0.86.\n\n"
+    "| A | B |\n| --- | --- |\n|  |  |\n\n"
+    "More prose after the table, also worth keeping.\n"
+)
+
+
+def test_a_mixed_page_is_demoted_not_discarded() -> None:
+    """#449 review: the fix must not become the loss it exists to prevent.
+
+    `table_content_defect` fires on ONE table run, but the guard's failure
+    branch replaces the WHOLE page with a marker. So a page carrying real prose
+    beside an empty table had all of it swapped out -- a content loss
+    introduced by a no-content-loss fix.
+
+    The content term therefore DEMOTES: same status, audit flag, failure mode
+    and notes, with the page's text intact. Compare #252: never destroy a page
+    in order to flag it.
+    """
+    out = _shipped(MIXED_PAGE)
+
+    assert out.status is PageStatus.ERROR, "the empty table must still surface"
+    assert out.audit_passed is False
+    assert "table_content_empty" in (out.error or "")
+
+    assert "Real prose that must survive" in (out.text or ""), (
+        f"the prose was discarded to flag the table: {out.text!r}"
+    )
+    assert "More prose after the table" in (out.text or "")
+    assert "| A | B |" in (out.text or ""), "the table itself must not vanish either"
+    assert not (out.text or "").startswith("[page "), "the page was replaced by a failure marker"
+
+
+def test_an_emission_defect_still_replaces_the_page() -> None:
+    """The emission branch keeps its existing behaviour, deliberately.
+
+    An emission defect means the markdown itself is malformed, so there is
+    nothing on the page that could be trusted to keep. Only the content term
+    changed; widening the demote-don't-discard rule to emission would be a
+    separate decision this ticket did not make.
+    """
+    bad = "| A | B | C |\n| --- | --- |\n| 1 | 2 | 3 |\n"
+    assert table_emission_defect(bad), "fixture must be an emission defect"
+
+    out = _shipped(bad)
+    assert out.status is PageStatus.ERROR
+    assert (out.text or "").startswith("[page 1 failed:"), (
+        f"the emission branch stopped replacing the page: {out.text!r}"
+    )
