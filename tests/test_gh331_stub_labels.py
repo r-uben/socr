@@ -103,8 +103,19 @@ def test_promotion_touches_only_the_label_column(monkeypatch):
     )
     unpromoted = _cells(rowize_from_word_list(_stub_table(with_labels=True))[0][1])
 
+    # What differs is not that labels MOVE -- without promotion they are lost
+    # outright: the row-label words fall outside every lane's snap radius once
+    # the stub lane is still in the list, so they are dropped from the grid
+    # entirely. That is GH-331's loss, and it is why both grids are the same
+    # WIDTH (#456 review): the stub stays in the label cell either way, so
+    # there is no extra data column to skip when comparing.
     labels_promoted = [row[0] for row in promoted]
     labels_unpromoted = [row[0] for row in unpromoted]
+    assert len(promoted[0]) == len(unpromoted[0]), (
+        f"the two grids are different widths ({len(promoted[0])} vs "
+        f"{len(unpromoted[0])}), so the column-wise comparison below is not "
+        "aligned and this test would be comparing different columns"
+    )
     assert labels_promoted != labels_unpromoted, (
         "promotion changed nothing, so this fixture cannot tell the two apart "
         f"and the assertion below is vacuous: {labels_promoted}"
