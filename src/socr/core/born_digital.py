@@ -498,18 +498,20 @@ def _apply_links_to_flat_text(text: str, links: list, words: list | None = None)
         idxs = link[3] if len(link) > 3 else ()
         if not anchor or anchor == uri:
             continue
-        bounds = [char_spans[i] for i in idxs if i in char_spans]
-        if bounds:
-            start_c = min(b[0] for b in bounds)
-            end_c = max(b[1] for b in bounds)
-        else:
-            # No word geometry (a damaged text layer, or words the two extractors
-            # spell differently). Fall back to the first textual occurrence -- the
-            # old behaviour, now only for links that would otherwise be lost.
-            idx = text.find(anchor)
-            if idx < 0:
-                continue
-            start_c, end_c = idx, idx + len(anchor)
+        # GH-341, hole 3: EVERY covered word must resolve, not merely some. With
+        # a partial resolve, min/max over the survivors spans whatever happens to
+        # be between them -- a partial anchor, or a wrong range that swallows
+        # neighbouring text. A link is a claim about a specific phrase; a
+        # half-resolved one is not that claim.
+        if not idxs or not all(i in char_spans for i in idxs):
+            # GH-341, hole 2: no `text.find` fallback. It stamped the FIRST
+            # textual occurrence, so a link attached to the bibliography entry
+            # wrapped the in-text mention instead. A wrong URI on the wrong cite
+            # is worse than a dropped link -- skip it.
+            continue
+        bounds = [char_spans[i] for i in idxs]
+        start_c = min(b[0] for b in bounds)
+        end_c = max(b[1] for b in bounds)
         resolved.append((start_c, end_c, uri, text[start_c:end_c]))
 
     # Left-to-right so the FIRST link wins a contested span, then applied in
