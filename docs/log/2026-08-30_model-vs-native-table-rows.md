@@ -4,8 +4,14 @@
 go to an LLM?"* The answer is that socr already escalates every table page to a model.
 What was never measured is whether the thing grading that model is fit to grade it.
 
-It is not. On 13 blind-transcribed rows, **both models beat the native text layer on
-every measure**, and the free local model wins outright.
+It is not. On 13 blind-transcribed rows, both models beat the native text layer on the
+**pre-registered falsifier** (invented + missing): native 21, qwen 14, gemini 7.
+
+~~both models beat the native text layer on every measure, and the free local model wins
+outright~~ — **corrected (GH-338).** "Every measure" overstates: row labels wrong is
+0/0/0, a tie. And "wins outright" inverts the registered metric — the falsifier was
+invented+missing, on which **gemini wins (7 vs qwen's 14)**. Qwen leads only on exact
+rows (12 vs 11). Those are different questions and this log conflated them.
 
 Content-free per the convention of `2026-08-22_binding-oracle-corpus-measurement.md`:
 method, identifiers, aggregate counts only. No page content, no transcribed values, no
@@ -52,10 +58,20 @@ this corpus and native stays the referee.*
 invented + missing: native **21**, qwen **14**, gemini **7**. The falsifier is not met;
 the inversion holds.
 
-Failures are concentrated, not diffuse. Native is clean on 11 rows and catastrophic on
-two. Qwen is exact on 12 and bad on exactly one, with an invented count equal to its
-missing count — the signature of a mis-matched row rather than a wrong reading, so its
-true score is probably better than recorded here.
+Failures are concentrated, not diffuse. ~~Native is clean on 11 rows and catastrophic on
+two.~~ **Corrected (GH-338): the arithmetic does not close.** Native found 12 of 13 and
+was exactly right on 8, leaving 4 found-but-wrong plus 1 never found. "Clean on 11" plus
+"catastrophic on two" sums to 13 and silently counts the unfound row as clean. At most 10
+are clean (8 exact, plus 2 label-lost with nothing invented or missing) and 2 are
+catastrophic, over the 12 found. Qwen is exact on 12 and bad on exactly one, with an invented count equal to its missing
+count.
+
+That equality was read here as a mis-matched row, and therefore as evidence qwen's true
+score is better than recorded. **GH-338: do not spend that tell twice.** Leftover
+invented ≈ missing is the same signature used to catch the two earlier scorer bugs. After
+the switch to numeric-multiset matching it is either a REMAINING scorer bug or a real
+wrong reading — it cannot be assumed to be the benign one without re-running the grader,
+which this log does not make possible (see the caveat below).
 
 Sample size is 13 rows. This is enough to reject "native is the trustworthy baseline";
 it is not enough to rank qwen against gemini.
@@ -79,12 +95,46 @@ matched the transcription character for character. That tell is worth keeping.
 - **Native cannot referee model output on tables.** It loses row labels (2 here; #331
   measures 18/18, 37/51 and 23/28 orphaned-stub rows on three corpus pages) and it
   relocates values across rows. Grading a model against it produces false convictions —
-  10 of them on a page verified correct cell by cell (`2026-08-29_gh326-...`).
-- **#326 cannot be the gate as written.** A native-geometric binder cannot authorize a
-  model when its reference is bent, and the binder independently fully-checks 0 of 13
-  real tables (#330).
-- **The cheap option wins.** The free local model scored best on exact rows. Escalating
-  to paid cloud is not what fixes tables; trusting the model over the text layer is.
+  10 of them on a page verified correct cell by cell
+  (`docs/log/2026-08-29_gh326-binder-gate-dry-run.md` — the real filename; the earlier
+  `2026-08-29_gh326-...` here was a placeholder, and that file is still not in the repo,
+  which is the same hole #331 names).
+- ~~**#326 cannot be the gate as written.**~~ **Retracted (GH-338).** This experiment
+  asks whether a reconstructed ROW matches a blind transcription. `binding.py` asks
+  whether a native WORD sits inside a cell bbox (`model_unbound`). Different instruments,
+  different questions — and #331 already establishes that the native grid poisons
+  index-matched value drift, which is the finding that actually holds. It does not show
+  that word geometry cannot assert "a numeric token is present or absent on the page",
+  which is the remaining role this log itself assigns the text layer and is what a scoped
+  #326 would be. **Order of record stays #330 → #326 → #322.** Do not close or re-scope
+  #326 from this log.
+- The binder's own coverage number cited here as "#330" is the 13-bindable scoreboard
+  from **#332** (`fully_checked` 0/13). #330 as filed is **0/15**. Different denominators;
+  see the sample caveat below.
+- **The cheap option is competitive, not a winner on the registered metric.** The free
+  local model scored best on EXACT ROWS (12 vs 11). On invented+missing — the
+  pre-registered falsifier — gemini won (7 vs 14). Escalating to paid cloud is not what
+  fixes tables; trusting the model over the text layer is. Which model to trust is not
+  settled by 13 rows.
+
+## Sample and reproducibility caveats (GH-338)
+
+Two acceptance items on GH-338 need artefacts this log did not record, and they are
+**not** supplied here:
+
+- **The 13 identifiers.** The manifest has **15** `kind: table` pages; this log scored 13
+  and never listed which, nor which 2 were dropped or why. Eligibility is itself native
+  y-banding (>= 3 numeric tokens, >= 2 neighbouring bands), so the dropped pages are the
+  ones where native banding FAILS — biasing the sample against the worst native pages.
+  Nakamura p42 is #326's named fixture and one of the three no-grid pages; if it is not
+  among the 13, this sample cannot speak to that gate at all.
+- **The scorer.** It is not in the repo, and no content-free result hash was recorded.
+  An earlier draft of this same measurement concluded the OPPOSITE (qwen worse than
+  native) because of two stripping defects. A measurement that once inverted cannot be a
+  decision of record until someone else can re-run the grader. Identifiers and the scorer
+  are not page content, so the content-free convention does not forbid committing them.
+
+Until both land, treat the direction as evidence and the numbers as unreproduced.
 
 ## What this does NOT settle
 
