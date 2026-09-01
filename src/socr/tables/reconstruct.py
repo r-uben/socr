@@ -552,8 +552,10 @@ def has_numeric_columns(page) -> bool:
       only when ``find_tables()`` finds nothing. That is the GH-248 path.
     - ``reconstruct_table_regions`` and the rowizers call it FIRST, as a
       structural gate before any reconstruction work (``if not
-      has_numeric_columns(page): return []``). No ``find_tables`` call is
-      involved there at all.
+      has_numeric_columns(page): return []``). That gate runs BEFORE this
+      module's own ``find_tables(strategy="text")`` call, and is not
+      conditional on it -- the opposite order from the detector above, where
+      the heuristic runs only after a ``find_tables`` miss.
 
     Naming only the first would be the same one-sided attribution GH-348 exists
     to remove.
