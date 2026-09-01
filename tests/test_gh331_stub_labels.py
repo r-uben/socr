@@ -63,12 +63,23 @@ def test_row_labels_survive_a_numeric_stub_column():
 
 
 def test_no_word_is_silently_dropped():
-    """The house rule, pinned. Today's failure mode is silent loss, not misplacement."""
+    """The house rule, pinned. Today's failure mode is silent loss, not misplacement.
+
+    GH-343: matched on CELL TOKENS, not ``in`` against a joined string. The stub
+    ids are ``"2"``/``"3"``/``"4"``, which occur inside the data values
+    ``"2.22"``/``"3.33"``/``"4.44"`` -- so a substring check stayed green with
+    the stub ids gone entirely, which is exactly the silent loss this test
+    exists to catch.
+    """
     words = _stub_table()
     grid = _cells(rowize_from_word_list(words)[0][1])
-    emitted = " ".join(c for row in grid for c in row)
+    emitted_tokens: list[str] = []
+    for row in grid:
+        for cell in row:
+            emitted_tokens.extend(cell.split())
+
     for w in words:
-        assert w[4] in emitted, f"token {w[4]!r} vanished from the grid"
+        assert w[4] in emitted_tokens, f"token {w[4]!r} vanished from the grid"
 
 
 def test_promotion_touches_only_the_label_column():
