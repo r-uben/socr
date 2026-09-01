@@ -141,3 +141,25 @@ def test_caption_fallback_model_is_ignored_without_descriptions() -> None:
     assert _fingerprint(**common, gemini_model="gemini-a") == _fingerprint(
         **common, gemini_model="gemini-b"
     )
+
+
+def test_table_judge_rung1_host_invalidates() -> None:
+    """GH-366: a model TAG is a label, not the thing that answered.
+
+    Two hosts can serve different builds under the same name, so pointing rung 1
+    at a different ollama host while keeping the tag would resume a ladder
+    verdict a DIFFERENT judge produced. Same shape as #133 (judge identity) and
+    #229, in a repo with a history of fingerprint-omission bugs (#214).
+    """
+    assert _fingerprint(
+        table_judge_ladder=True, table_judge_rung1_host="http://alpha:11434"
+    ) != _fingerprint(table_judge_ladder=True, table_judge_rung1_host="http://beta:11434")
+
+
+def test_table_judge_rung1_host_is_ignored_while_the_ladder_is_off() -> None:
+    """Control: the field is recorded only while the gate that reads it is on,
+    so flipping a host cannot invalidate cached pages on a run where no ladder
+    verdict was ever produced."""
+    assert _fingerprint(
+        table_judge_ladder=False, table_judge_rung1_host="http://alpha:11434"
+    ) == _fingerprint(table_judge_ladder=False, table_judge_rung1_host="http://beta:11434")

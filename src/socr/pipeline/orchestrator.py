@@ -530,6 +530,21 @@ class UnifiedPipeline:
             "table_judge_rung1_model": (
                 cfg.table_judge_rung1_model if cfg.table_judge_ladder else None
             ),
+            # GH-366: the HOST too, not just the model tag. A tag is a label,
+            # not the thing that answered -- two hosts can serve different
+            # builds under the same name, so pointing rung 1 elsewhere while
+            # keeping the tag would resume a verdict a different judge produced.
+            # That is the same shape as #133 (judge identity) and #229, and this
+            # repo has a history of fingerprint-omission bugs (#214).
+            #
+            # SCOPE: rung 1 only, which is what this ticket covers. The broader
+            # question -- whether ``ollama_host`` / ``math_model_host`` should be
+            # fingerprinted on the same reasoning -- is deliberately NOT settled
+            # here: those invalidate every cached page on a laptop/HPC move, and
+            # that trade is a separate decision, not a side effect of this one.
+            "table_judge_rung1_host": (
+                cfg.table_judge_rung1_host if cfg.table_judge_ladder else None
+            ),
             "table_judge_rung2_binary": (
                 cfg.table_judge_rung2_binary if cfg.table_judge_ladder else None
             ),
