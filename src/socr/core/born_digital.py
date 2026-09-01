@@ -1883,10 +1883,14 @@ class BornDigitalDetector:
         a journal footer is exactly where a DOI lives. A page with no links
         produces byte-identical output to before.
 
-        NOTE: the ``find_tables`` failure path below returns raw ``get_text``
-        and therefore still drops links. That is the pre-existing degraded
-        path for a damaged page; recovering links there needs the dict walk
-        this function does after it, and is deliberately out of scope here.
+        GH-340: both failure returns -- the ``find_tables`` except and the
+        dict-walk except -- now apply links too. Links are resolved BEFORE the
+        first attempt so a degraded page loses layout, not URIs. (This replaces
+        an earlier note here saying those paths still dropped links; they no
+        longer do.)
+
+        Still out of scope: a URI whose rect sits INSIDE a detected table cell
+        (GH-339), and routing prose pages onto the dict walk.
         """
         # GH-127: resolved once, not per line -- get_links() parses the page's
         # link table on every call.
