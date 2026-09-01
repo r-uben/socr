@@ -18,16 +18,6 @@ _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "table_judge
 
 _MARKDOWN_PLACEHOLDER = "{{EMITTED_MARKDOWN}}"
 
-#: GH-359 ruling 4: leftover placeholder from the dropped findings-injection
-#: slot. If a future edit reintroduces ``{{PRIOR_FINDINGS}}`` in the policy
-#: file, it is filled with this independent-look sentence rather than a
-#: complaint payload.
-_FINDINGS_PLACEHOLDER = "{{PRIOR_FINDINGS}}"
-_INDEPENDENT_LOOK_NOTE = (
-    "Judge independently from the crop image and the emitted markdown. "
-    "You are not given any prior verdict or findings."
-)
-
 
 def load_table_judge_prompt() -> str:
     """Read the raw table-judge prompt template (policy lives in the .md)."""
@@ -45,7 +35,10 @@ def build_table_judge_prompt(
     still pass it do not have to change.
     """
     del prior_findings
-    template = load_table_judge_prompt()
-    rendered = template.replace(_FINDINGS_PLACEHOLDER, _INDEPENDENT_LOOK_NOTE)
-    rendered = rendered.replace(_MARKDOWN_PLACEHOLDER, markdown)
-    return rendered
+    # GH-381: no findings slot. ``prompts/table_judge.md`` carries the
+    # independent-look sentence as policy text, so the old replace was a no-op
+    # against a placeholder that no longer exists -- and it kept a SECOND copy
+    # of that sentence in code, where only the .md copy could ever take effect.
+    # One authority for the wording; the ruling-4 guarantee lives in the caller
+    # passing no findings at all, not in a dead string substitution.
+    return load_table_judge_prompt().replace(_MARKDOWN_PLACEHOLDER, markdown)

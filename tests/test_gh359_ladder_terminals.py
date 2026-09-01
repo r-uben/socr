@@ -14,6 +14,7 @@ patched to ``""``. Never pin an absolute outcome measured on one machine
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,7 @@ from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.judge.table_verdict import Finding, FindingCode, RungResult, TableJudgeVerdict
+from socr.core.state import DocumentHandle, DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.binding import BindingResult, ContradictedCell
 
@@ -48,6 +50,39 @@ def _ruled_pdf(tmp_path: Path, name: str = "doc.pdf") -> Path:
         page.draw_line((100, yy), (460, yy))
     for xx in cols + [460]:
         page.draw_line((xx, rows[0]), (xx, rows[-1]))
+    pdf_path = tmp_path / name
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
+def _two_table_pdf(tmp_path: Path, name: str = "doc.pdf") -> Path:
+    """A page carrying TWO ruled table regions.
+
+    GH-381 needs a page where the second emitted table can genuinely be LOCATED,
+    so "unwitnessed" is something the test arranges rather than an artifact of
+    the fixture. Each region is drawn exactly like ``_ruled_pdf``'s single grid,
+    twice: the locator must find exactly as many boxes as the markdown has
+    blocks, or every witness demotes to AMBIGUOUS and nothing is judged at all.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page()
+    cols = [100, 220, 300, 380]
+
+    def _grid(top: float, base: int) -> None:
+        rows = [top + i * 22 for i in range(4)]
+        for r, y in enumerate(rows):
+            for c, x in enumerate(cols):
+                page.insert_text((x + 4, y + 12), f"{base + r}{c}", fontsize=9)
+        for yy in rows:
+            page.draw_line((100, yy), (460, yy))
+        for xx in cols + [460]:
+            page.draw_line((xx, rows[0]), (xx, rows[-1]))
+
+    _grid(100, 0)
+    _grid(400, 4)
+
     pdf_path = tmp_path / name
     doc.save(pdf_path)
     doc.close()
@@ -230,6 +265,12 @@ class TestRuling2Cli2MayOverruleFail:
 
         assert _rejected(result_over.error) is False
         assert _rejected(result_rej.error) is True
+        # GH-381: "not REJECTED" alone does not prove the override ACCEPTED --
+        # an UNVERIFIED terminal is also not-rejected, so the original pin
+        # passed for a page the ladder never actually approved. The override
+        # side must carry no ladder terminal at all.
+        assert _unverified(result_over.error) is False
+        assert result_over.status != result_rej.status
 
 
 # ---------------------------------------------------------------------------
@@ -461,3 +502,132 @@ class TestRuling7NotATableIsRejected:
         assert "10" in result_nat.markdown
         assert "| 11 |" in result_nat.markdown or "11" in result_nat.markdown
         assert not result_nat.figures
+
+
+# ---------------------------------------------------------------------------
+# GH-390/381 — the assemble WRITER of table_ladder_incomplete
+# ---------------------------------------------------------------------------
+
+_SECOND_TABLE_MD = "| d0 | d1 |\n| --- | --- |\n| 40 | 41 |\n| 50 | 51 |\n| 60 | 61 |\n"
+_TWO_TABLE_MD = _TABLE_MD + "\n\n" + _SECOND_TABLE_MD
+
+
+class TestAssembleWriterOfIncomplete:
+    """GH-381. ``_backfill_missing_table_ladder_terminals`` is the ONLY writer of
+    ``table_ladder_incomplete = True``.
+
+    ``TestIncompleteRejectedPageForfeitsTheSkip`` in ``test_ladder_resume.py``
+    seeds that flag by hand, so it guards the D1b READER and not this writer:
+    delete the assignment in assemble and it still passes, while cubic's P1
+    quietly reopens -- a page with one REJECTED table and a second emitted table
+    nobody ever witnessed is skip-and-kept forever, and the unwitnessed table is
+    never looked at.
+
+    Pinned at ``process()`` and the resume gate, not at the seeded helper.
+    """
+
+    def _run(self, tmp_path: Path, *, witness_both: bool):
+        """One page, TWO emitted tables. ``witness_both=False`` hands the gate a
+        witness for the first table only, which is the shape the backfill exists
+        for: table 0 gets a real FAIL terminal, table 1 gets none.
+        """
+        from contextlib import ExitStack, contextmanager
+
+        from socr.tables.witness import _locate_boxes
+        from socr.tables.witness import prepare_table_witnesses as _real_witnesses
+
+        pdf_path = _two_table_pdf(tmp_path / ("both" if witness_both else "one"), "doc.pdf")
+        out_dir = tmp_path / ("both_out" if witness_both else "one_out")
+        pipeline = UnifiedPipeline(_make_config())
+
+        @contextmanager
+        def _witnesses(path, page_num, text):
+            with _real_witnesses(path, page_num, text) as found:
+                yield list(found) if witness_both else list(found)[:1]
+
+        # The two-grid page also yields one spanning ``booktabs`` box covering
+        # BOTH grids, so the locator returns 3 boxes for 2 markdown blocks and
+        # every witness demotes to AMBIGUOUS. That arbitration is not what
+        # GH-381 measures -- keep the two ruled grids so the gate has real,
+        # LOCATED witnesses to judge.
+        _real_locate = _locate_boxes
+
+        def _ruled_only(path, page_num):
+            boxes, err = _real_locate(path, page_num)
+            return [b for b in boxes if b.source == "ruled"], err
+
+        patches = [
+            patch(
+                "socr.pipeline.orchestrator.route_page",
+                side_effect=_route_page_returning(_TWO_TABLE_MD),
+            ),
+            patch.object(
+                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+            ),
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            # Every witnessed table is FAILed at the last rung -> TABLE_REJECTED.
+            patch.object(
+                pipeline,
+                "_build_table_judge_rungs",
+                return_value=[_QueueRung([_fail(), _fail()])],
+            ),
+            patch.object(pipeline, "_binding_contradiction_for_witness", return_value=None),
+            patch("socr.tables.witness._locate_boxes", _ruled_only),
+            patch("socr.tables.witness.prepare_table_witnesses", _witnesses),
+        ]
+        with ExitStack() as stack:
+            for pt in patches:
+                stack.enter_context(pt)
+            result = pipeline.process(pdf_path, out_dir)
+        return pipeline, result, out_dir, pdf_path
+
+    def _sidecar(self, out_dir: Path) -> dict:
+        found = list(out_dir.rglob("00001.json")) or list(out_dir.rglob("001.json"))
+        assert found, f"no page sidecar under {out_dir}"
+        return json.loads(found[0].read_text(encoding="utf-8"))
+
+    def test_an_unwitnessed_second_table_marks_the_rejected_page_incomplete(
+        self, tmp_path: Path
+    ) -> None:
+        """The writer. A REJECTED page whose second table nobody witnessed must
+        carry BOTH the content verdict and the completeness miss -- the
+        disposition alone cannot express "rejected, but not everything here was
+        looked at"."""
+        _pipeline, _result, out_dir, _pdf = self._run(tmp_path, witness_both=False)
+        meta = self._sidecar(out_dir)
+
+        assert meta.get("table_ladder_disposition") == FailureMode.TABLE_REJECTED.value
+        assert meta.get("table_ladder_incomplete") is True
+
+    def test_witnessing_every_table_leaves_the_page_complete(self, tmp_path: Path) -> None:
+        """Control: the SAME fixture and the SAME FAIL verdicts, differing only
+        in whether the second table was witnessed. Without this, a writer that
+        flagged every page would pass the test above and destroy D1b."""
+        _pipeline, _result, out_dir, _pdf = self._run(tmp_path, witness_both=True)
+        meta = self._sidecar(out_dir)
+
+        assert meta.get("table_ladder_disposition") == FailureMode.TABLE_REJECTED.value
+        assert not meta.get("table_ladder_incomplete")
+
+    def test_the_incomplete_page_is_reprocessed_and_the_complete_one_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        """The consequence, at the resume gate: same disposition, same
+        fingerprint, and the flag decides whether the page is looked at again."""
+        pipe_one, _r1, out_one, pdf_one = self._run(tmp_path, witness_both=False)
+        pipe_both, _r2, out_both, pdf_both = self._run(tmp_path, witness_both=True)
+
+        state_one = DocumentState(handle=DocumentHandle.from_path(pdf_one))
+        state_both = DocumentState(handle=DocumentHandle.from_path(pdf_both))
+        pipe_one._scan_root = pdf_one.parent
+        pipe_both._scan_root = pdf_both.parent
+
+        resumed_one = pipe_one._load_terminal_page(state_one, 1, out_one)
+        resumed_both = pipe_both._load_terminal_page(state_both, 1, out_both)
+
+        assert (resumed_one is None) != (resumed_both is None), (
+            "the completeness flag must be what separates reprocess from "
+            "skip-and-keep; if both behave alike this pins nothing"
+        )
+        assert resumed_one is None, "an unwitnessed table must be looked at again"
+        assert resumed_both is not None, "a fully witnessed REJECTED page still skips"
