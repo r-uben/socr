@@ -103,8 +103,12 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
   | `(0, 0)` | 0 |
 
   Upside-down dominant text yields 180 (bearing 180 → `round(-2) * 90 % 360`), and a
-  180° `prerotate` is applied. Only the all-zero vector and a failed inspection return 0,
-  which is the actual absence-of-evidence rule.
+  180° `prerotate` is applied.
+
+  0 is returned for **horizontal text** `(1.0, 0.0)`, near-horizontal skew such as
+  `(0.99, 0.05)`, the all-zero vector, and a failed or empty inspection. Returning 180 is
+  the signature of upside-down text — it is not one of the 0-returning
+  absence-of-evidence cases, which is exactly what the old wording got backwards.
 
   A maintainer reading the old wording would believe upside-down text is suppressed. It is
   not. This corrects the RECORD to match the code; it does not change the angle rule,
