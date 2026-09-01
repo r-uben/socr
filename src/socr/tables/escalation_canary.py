@@ -249,11 +249,25 @@ def native_text_value_counts(native_text: str) -> Counter:
 
     tokens = collect_table_tokens(native_text or "")
     if tokens and tokens.numeric:
-        return Counter(_normalize_numeric_token(t) for t in tokens.numeric)
+        # GH-355: .elements(), not the Counter itself. Iterating a Counter
+        # yields KEYS, so every native token's count collapsed to 1 while the
+        # regex path below kept multiplicity -- two surfaces, two answers, from
+        # a function whose contract says "with multiplicity".
+        #
+        # The collapse is not cosmetic: this module uses Counters rather than
+        # sets precisely so a value occurring once that appears twice reads as
+        # invented (GH-270 substitution). With counts flattened, a CORRECT
+        # candidate repeating a value the page also repeats fails the multiset
+        # check and falls back to flagged native.
+        return Counter(_normalize_numeric_token(t) for t in tokens.numeric.elements())
     # No table markup in the native text: fall back to every numeric token in it.
     # A page whose native reading lost its grid still has its numbers, and this
     # gate only ever claims presence.
-    raw = _re.findall(r"[-\u2212]?\d[\d,]*\.?\d*", native_text or "")
+    # GH-355: leading-decimal tokens. The old pattern required a digit before
+    # the point, so ".75" matched only from the "7" and became "75" -- a value
+    # an order of magnitude out, silently, in a presence oracle. Econ tables
+    # write .75 and .05 constantly.
+    raw = _re.findall(r"[-\u2212]?(?:\d[\d,]*\.?\d*|\.\d+)", native_text or "")
     return Counter(_normalize_numeric_token(t) for t in raw)
 
 
