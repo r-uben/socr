@@ -426,9 +426,19 @@ def table_content_defect(markdown: str | None) -> str:
 
         header, delimiter = rows[0], rows[1]
         width = len(header)
+        # GH-301: the delimiter's width is NOT a precondition for this term.
+        # Requiring `len(delimiter) == width` here let two spellings of an
+        # empty table through: a blank header with a narrower delimiter, and a
+        # populated header with a narrower delimiter over a body matching the
+        # delimiter. Both skipped this term, and emission skips them too (blank
+        # header, or ragged `content_widths`), while `_parse_grid` drops the
+        # blank body -- so `table_output_defect` never saw them and the page
+        # shipped SUCCESS with no rows. A width mismatch is a SHAPE defect and
+        # keeps its existing owner; it must not excuse the page from being
+        # asked whether it has any content at all. Body width was already
+        # deliberately ignored here for the same reason (see the docstring).
         if (
             width <= 0
-            or len(delimiter) != width
             or not _is_separator_row(delimiter)
             or _row_border(block[0]) != _row_border(block[1])
         ):
