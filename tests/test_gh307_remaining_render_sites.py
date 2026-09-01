@@ -16,6 +16,10 @@ Pinned as DIFFERENCES against the same page rendered upright: a sideways page
 must come back with swapped dimensions, and an already-horizontal page must be
 untouched. Asserting pixel content would pin the renderer; asserting the
 difference pins the derotation.
+
+All four are pinned. The chart REGION clip was left unwitnessed by #425 --
+the method renders nothing without a real chart cluster, and the first
+attempt skipped rather than build one -- and is covered here (#427).
 """
 
 from __future__ import annotations
@@ -128,6 +132,50 @@ class TestReviewHtmlRender:
         )
 
 
+def _chart_region_pdf(tmp_path: Path, rotate: int, name: str = "chart.pdf") -> Path:
+    """A page carrying a real chart CLUSTER, with its labels at *rotate* degrees.
+
+    ``_render_chart_region_pngs`` renders nothing unless ``chart_region_bboxes``
+    finds a qualifying cluster, so the earlier attempt at this pin had to skip.
+    Filled bars give it one: the union-find cluster clears
+    ``_CHART_MIN_CLUSTER_AREA_PT2`` and ``_has_filled_rects_or_thick_strokes``.
+
+    Only the label direction changes between the two variants -- the bars, and
+    therefore the bbox the clip is taken from, are identical. So the difference
+    the test measures can only come from the clip-scoped derotate.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    for i in range(6):
+        x = 100 + i * 40
+        page.draw_rect(
+            fitz.Rect(x, 400 - i * 25, x + 30, 500), color=(0, 0, 0), fill=(0.2, 0.2, 0.2)
+        )
+    for i in range(6):
+        page.insert_text((105 + i * 40, 520), f"20{10 + i}", fontsize=8, rotate=rotate)
+    for j in range(5):
+        page.insert_text((80, 100 + j * 14), f"prose line {j}", fontsize=9)
+    path = tmp_path / name
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _region_clip_rotation(pdf: Path) -> tuple[int, object]:
+    """The rotation and bbox the production code will actually see."""
+    from socr.core.born_digital import upright_rotation_for
+    from socr.tables.reconstruct import chart_region_bboxes
+
+    doc = fitz.open(pdf)
+    try:
+        bboxes = chart_region_bboxes(doc[0])
+        assert bboxes, "fixture must produce a chart region cluster"
+        return upright_rotation_for(doc[0], clip=bboxes[0]), bboxes[0]
+    finally:
+        doc.close()
+
+
 class TestChartRenders:
     """GH-425 review: the PR claimed four sites; only two were pinned.
 
@@ -181,15 +229,59 @@ class TestChartRenders:
             assert img.height > img.width, "an upright portrait page must stay portrait"
 
 
-# GH-425 review, honest scope: THREE of the four sites are pinned above --
-# render_all_pages, the review HTML, and the chart-lane PNG. The fourth, the
-# chart REGION clip in ``_render_chart_region_pngs``, is NOT.
-#
-# A first attempt skipped: the method only renders when
-# ``rowize_from_words_chart_aware`` has embedded a
-# ``![chart region N](chart_region_pP_N.png)`` placeholder, which needs real
-# chart geometry this fixture does not produce. A skipping test reads as
-# coverage in a green run, so it was removed rather than left in.
-#
-# The fix at that site is the same three lines as the chart PNG above and is
-# clip-scoped like the crop path; it is simply unwitnessed by a test.
+class TestChartRegionClip:
+    """The fourth site: the chart REGION clip in ``_render_chart_region_pngs``.
+
+    Left unwitnessed by #425 and filed as #427. A region can run against the
+    page's dominant direction, so the derotate here is clip-scoped rather than
+    page-scoped -- which is exactly what a page-level pin would not catch.
+    """
+
+    def _pipeline(self):
+        from socr.core.config import EngineType, PipelineConfig
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        return UnifiedPipeline(
+            PipelineConfig(
+                primary_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                quiet=True,
+            )
+        )
+
+    def _render(self, pdf: Path, figures: Path):
+        from PIL import Image
+
+        native_text = "![chart region 1](chart_region_p1_1.png)"
+        out = self._pipeline()._render_chart_region_pngs(pdf, 1, native_text, figures)
+        assert out != native_text, (
+            "the placeholder was not rewritten, so no PNG was rendered and the "
+            "assertion below would be measuring nothing"
+        )
+        saved = figures / "chart_region_p1_1.png"
+        assert saved.exists(), "placeholder rewritten but no file on disk"
+        with Image.open(saved) as img:
+            return img.width, img.height
+
+    def test_a_sideways_region_clip_is_rendered_upright(self, tmp_path: Path) -> None:
+        pdf = _chart_region_pdf(tmp_path / "rs", rotate=90)
+        rotation, bbox = _region_clip_rotation(pdf)
+        assert rotation != 0, "fixture region must actually read sideways"
+        assert bbox.width > bbox.height, "fixture bbox must be landscape to start"
+
+        width, height = self._render(pdf, tmp_path / "figs_rs")
+        assert height > width, (
+            f"region PNG saved {width}x{height}; the clip is landscape on the "
+            "page, so a derotated sideways region must come back portrait"
+        )
+
+    def test_an_upright_region_clip_is_left_alone(self, tmp_path: Path) -> None:
+        """Difference control: a renderer that rotated every clip would satisfy
+        the test above without derotating anything."""
+        pdf = _chart_region_pdf(tmp_path / "ru", rotate=0)
+        rotation, bbox = _region_clip_rotation(pdf)
+        assert rotation == 0, "control region must read horizontally"
+        assert bbox.width > bbox.height
+
+        width, height = self._render(pdf, tmp_path / "figs_ru")
+        assert width > height, "an upright landscape clip must stay landscape"
