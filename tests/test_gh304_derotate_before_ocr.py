@@ -126,13 +126,25 @@ class TestRenderOrientation:
 def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
     """GH-311: the 304b ADR said ``prerotate`` returns None.
 
-    It does not. On PyMuPDF 1.28.2 it mutates in place AND returns the matrix,
-    which is why the call sites' ``mat = mat.prerotate(...)`` assignment is
-    meaningful rather than an accident that survives on the mutation alone.
+    It does not. On PyMuPDF 1.28.2 it mutates in place AND returns the matrix.
 
-    Pinned because the ADR now asserts this and both call sites rely on it: a
-    PyMuPDF upgrade that changed either half would silently break the derotation
-    path, and the assignment form would be the first thing to look wrong.
+    GH-426: the wording here used to add that this is "why the call sites'
+    ``mat = mat.prerotate(...)`` assignment is meaningful", and that both call
+    sites rely on it. Neither is true. The tree carries BOTH forms:
+
+    - mutate-only, discarding the return: ``tables/extract.py``,
+      ``tables/source_evidence.py`` (x2), ``tables/witness.py``,
+      ``pipeline/orchestrator.py`` (D3 floor render)
+    - assignment: ``engines/base.py``, ``core/document.py`` (x2),
+      ``review/html.py``, ``pipeline/orchestrator.py`` (chart page, chart region)
+
+    Not a clean split by lane, either -- ``orchestrator.py`` appears on both
+    sides. They are equivalent precisely because both halves of the PyMuPDF
+    behaviour hold.
+
+    Pinned because a PyMuPDF upgrade that changed EITHER half would silently
+    break one family of call sites while leaving the other working, which is the
+    hardest version of this bug to find.
     """
     import fitz
 
