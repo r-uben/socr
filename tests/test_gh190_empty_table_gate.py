@@ -305,7 +305,14 @@ def test_table_content_defect_structural_preconditions() -> None:
     - Delimiter strictly at row index 1.
     - Strict delimiter (>= 3 hyphens per cell).
     - Matching border style between header and delimiter.
-    - Matching column widths across header and delimiter.
+
+    Column widths are NOT a precondition. GH-301 dropped the width-equality
+    skip: it let two spellings of an empty table through (blank header with a
+    narrower delimiter, and a populated header over a body matching a narrower
+    delimiter), which then shipped SUCCESS with no rows. A width mismatch is a
+    SHAPE defect with its own owner (`grid_shape`) and does not excuse the page
+    from the content question. Body width was already ignored here for the same
+    reason. Pinned at the shipping gate by GH-443.
     """
     assert table_content_defect is not None, "table_content_defect must be implemented"
 
