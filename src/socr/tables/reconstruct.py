@@ -1764,10 +1764,25 @@ def _promote_stub_lanes(lane_centers: list[float], seg_ys, rows_by_y) -> list[fl
         # label-like sits to its LEFT. A sparse data column has its label
         # already to the left, which is what tells the two shapes apart. Reuses
         # the same snap geometry; no new constant.
-        if any(
-            any(w[2] < lane_centers[j] - snap and not _is_numeric_word(w) for w in row)
+        # Two refinements, both from the #438 review:
+        #
+        # 1. Test the word's LEFT edge (w[0]), not its right. `_rowize_segment`
+        #    decides label membership with `w[0] < data_start_x - snap_margin`,
+        #    so a word that starts left of the lane but reaches into the snap
+        #    margin IS label text there. Keying on w[2] ignored exactly those,
+        #    letting the lane be promoted and swallow its values anyway.
+        # 2. Recurrence, not one sighting -- the same standard the gap test
+        #    below already applies, and for the same reason. A lone
+        #    left-margin footnote or significance marker is not a label column,
+        #    and treating it as one would refuse a GENUINE stub and hand back
+        #    the #331 label loss this promotion exists to prevent. Reuses
+        #    `_MIN_TABLE_ROWS`; no new constant.
+        rows_with_label_left = sum(
+            1
             for row in data_rows
-        ):
+            if any(w[0] < lane_centers[j] - snap and not _is_numeric_word(w) for w in row)
+        )
+        if rows_with_label_left >= _MIN_TABLE_ROWS:
             break
         lo, hi = lane_centers[j] + snap, lane_centers[j + 1] - snap
         if lo >= hi:

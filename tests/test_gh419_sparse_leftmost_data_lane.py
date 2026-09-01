@@ -106,3 +106,60 @@ def test_a_genuine_stub_is_still_promoted() -> None:
         assert "Treasury" in row[0], (
             f"the stub was not promoted, so the label stayed out of the label cell: {row!r}"
         )
+
+
+def test_a_label_reaching_into_the_snap_margin_still_counts() -> None:
+    """#438 review 1: the guard must key on the LEFT edge, like the label rule.
+
+    ``_rowize_segment`` decides label membership with
+    ``w[0] < data_start_x - snap_margin``. A label that STARTS left of the
+    candidate lane but reaches into the snap margin is label text there, so it
+    must block promotion here too. Keying on the right edge missed exactly
+    these, and the sparse column was swallowed anyway.
+    """
+    words: list = []
+    y = 100.0
+    for r in range(4):
+        # starts well left of the 150 lane, but its right edge runs past 144
+        words.append(_w(60.0, y, f"LongLabel{r}", width=90.0))
+        if r < 2:
+            words.append(_w(150.0, y, f"{r}.77"))
+        words.append(_w(230.0, y, "n.a."))
+        words.append(_w(320.0, y, f"{r}.11"))
+        words.append(_w(390.0, y, f"{r}.22"))
+        words.append(_w(460.0, y, f"{r}.33"))
+        y += 16.0
+    rows = _cells(words)
+    data = [r for r in rows if r[0].strip()]
+    assert len(data) == 4, f"expected four data rows: {rows}"
+    for row in data[:2]:
+        assert any(c in ("0.77", "1.77") for c in row), (
+            f"a label overlapping the snap margin let the column be swallowed: {row}"
+        )
+
+
+def test_a_lone_margin_marker_does_not_block_a_genuine_stub() -> None:
+    """#438 review 2: one stray left-margin token is not a label column.
+
+    Treating ANY non-numeric word to the left as proof of a data column would
+    refuse a genuine stub whenever a footnote or significance marker sits in
+    the left margin -- handing back the GH-331 label loss the promotion exists
+    to prevent. The evidence has to recur, the same standard the gap test uses.
+    """
+    words: list = []
+    y = 100.0
+    for r in range(4):
+        if r == 0:  # a single stray marker in the left margin
+            words.append(_w(20.0, y, "*"))
+        if r % 2 == 0:  # genuine stub: block-start rows only
+            words.append(_w(50.0, y, str(r + 2)))
+        words.append(_w(110.0, y, "Treasury"))
+        words.append(_w(320.0, y, f"{r}.11"))
+        words.append(_w(390.0, y, f"{r}.22"))
+        words.append(_w(460.0, y, f"{r}.33"))
+        y += 16.0
+    rows = _cells(words)
+    data = [r for r in rows if "Treasury" in " ".join(r)]
+    assert len(data) == 4, f"expected four rows carrying the label: {rows}"
+    for row in data:
+        assert "Treasury" in row[0], f"a lone margin marker refused a genuine stub: {row!r}"
