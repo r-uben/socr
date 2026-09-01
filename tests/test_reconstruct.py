@@ -399,6 +399,30 @@ def test_a_rotated_marginal_note_does_not_erase_the_table():
     # would be unreachable (GH-407 review) and would read as the real check.
 
 
+def test_a_rotated_marginal_note_does_not_flip_the_page_direction():
+    """GH-350 reopen, Wanted item 3: MEASURE the rotation.
+
+    The mixed-page test hardcoded ``rotation=0`` into ``rowize_from_word_list``
+    and so never called ``upright_rotation_for`` at all -- the claim in its own
+    name was assumed, not checked. This asserts it, and deliberately lives
+    OUTSIDE that test's ``xfail``: an assertion inside an xfailed body can never
+    fail, which is the trap this whole ticket is about.
+    """
+    from socr.core.born_digital import upright_rotation_for
+
+    doc, page = _create_synthetic_table_page(rotation=0)
+    page.insert_text((550, 200), "Running Header 2026", fontsize=8, rotate=90)
+    try:
+        measured = upright_rotation_for(page)
+    finally:
+        doc.close()
+
+    assert measured == 0, (
+        f"one rotated marginal note flipped the page's dominant direction to "
+        f"{measured}; the page is overwhelmingly horizontal"
+    )
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
@@ -421,9 +445,12 @@ def test_mixed_horizontal_page_with_rotated_marginal_note_stays_horizontal():
     doc, page = _create_synthetic_table_page(rotation=0)
     page.insert_text((550, 200), "Running Header 2026", fontsize=8, rotate=90)
 
+    from socr.core.born_digital import upright_rotation_for
+
+    measured_rotation = upright_rotation_for(page)
     words = page.get_text("words")
     try:
-        regions = rowize_from_word_list(words, rotation=0, page_rect=page.rect)
+        regions = rowize_from_word_list(words, rotation=measured_rotation, page_rect=page.rect)
     except TypeError:
         regions = rowize_from_word_list(words)
 

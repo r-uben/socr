@@ -137,8 +137,11 @@ def test_coverage_cli_json_is_content_free_and_byte_identical(tmp_path):
     ]
 
     res1 = runner.invoke(cli, cmd)
-    if res1.exit_code != 0 and "No such command" in res1.output:
-        pytest.xfail("Task 3 'binding-coverage' command not yet registered")
+    # GH-350 reopen: the two reject tests dropped this escape; this one kept it,
+    # so unregistering the command still turned THIS test green.
+    assert "No such command" not in res1.output, (
+        "binding-coverage is not registered; the guard must fail, not xfail"
+    )
 
     assert res1.exit_code == 0
     res2 = runner.invoke(cli, cmd)

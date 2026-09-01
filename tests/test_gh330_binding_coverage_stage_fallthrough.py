@@ -81,37 +81,135 @@ def test_stage_fallthrough_stage1_find_tables_lines_prevents_later_stages():
     later_stage_3.assert_not_called()
 
 
-def test_stage_fallthrough_lane_stacked_provenance():
-    """When find_tables detects lane-stacking, rowize_from_word_list produces lane_stacked provenance."""
-    region = NativeExtractionRegion(
-        rect=fitz.Rect(50, 100, 300, 250),
-        content="| Stub | Col1 | Col2 |\n| --- | --- | --- |\n| A | 1.0 | 2.0 |",
-        provenance="lane_stacked",
-    )
-    assert region.provenance == "lane_stacked"
-    grid = parse_grid(region.content)
-    assert grid is not None
-    assert grid.n_cols == 3
+def _blank_page():
+    """A page with no ruled tables and no numeric grid, so stage 1 emits nothing."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Ordinary prose with no tabular structure at all.", fontsize=11)
+    return doc, page
 
 
-def test_stage_fallthrough_reconstruct_table_regions_provenance():
-    """When find_tables returns no tables, reconstruct_table_regions provides reconstruct_table_regions provenance."""
-    region = NativeExtractionRegion(
-        rect=fitz.Rect(50, 100, 300, 250),
-        content="| Stub | Col1 | Col2 |\n| --- | --- | --- |\n| A | 1.0 | 2.0 |",
-        provenance="reconstruct_table_regions",
-    )
-    assert region.provenance == "reconstruct_table_regions"
+def _discover(page):
+    from socr.benchmark.binding_coverage import _discover_native_regions
+    from socr.core.born_digital import BornDigitalDetector
+
+    return _discover_native_regions(page, BornDigitalDetector())
 
 
-def test_stage_fallthrough_chart_aware_rowizer_provenance():
-    """When both earlier stages return nothing, chart_aware rowizer provides rowize_chart_aware provenance."""
-    region = NativeExtractionRegion(
-        rect=fitz.Rect(50, 100, 300, 250),
-        content="| Stub | Col1 | Col2 |\n| --- | --- | --- |\n| A | 1.0 | 2.0 |",
-        provenance="rowize_chart_aware",
-    )
-    assert region.provenance == "rowize_chart_aware"
+class TestLaterStageProvenanceThroughTheRealChain:
+    """GH-350 reopen. These three constructed a ``NativeExtractionRegion`` with
+    the provenance they were 'testing' and asserted the string back -- the same
+    tautology stage 1 had. They stayed green with the exclusive-stage chain
+    reverted, so they pinned the dataclass, not the router.
+
+    Each now drives ``_discover_native_regions`` with the earlier stages
+    silenced, so the provenance comes from the code that assigns it.
+    """
+
+    def test_lane_stacked_regions_are_labelled_by_the_router(self):
+        """The third tautology, measured rather than deleted.
+
+        ``lane_stacked`` is still stamped in ``binding_coverage`` for any table
+        ``_is_lane_stacked`` accepts, and coverage ``source_stage`` reports it.
+        Deleting the old tautology removed the bad test without pinning the
+        behaviour, so this drives the real branch: a page ``find_tables``
+        genuinely returns, with the lane-stacked predicate and the rowizer
+        patched so the label comes from the router.
+        """
+        from unittest.mock import patch
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((100, 150), "ColA", fontsize=10)
+        page.insert_text((200, 150), "ColB", fontsize=10)
+        page.insert_text((100, 180), "10.5", fontsize=10)
+        page.insert_text((200, 180), "20.5", fontsize=10)
+        page.draw_rect(fitz.Rect(90, 135, 280, 200))
+        page.draw_line((90, 160), (280, 160))
+        page.draw_line((180, 135), (180, 200))
+
+        try:
+            assert len(page.find_tables().tables) >= 1, "fixture must give find_tables a table"
+            with (
+                patch("socr.benchmark.binding_coverage._is_lane_stacked", return_value=True),
+                patch(
+                    "socr.tables.reconstruct.rowize_from_word_list",
+                    return_value=[
+                        (fitz.Rect(90, 135, 280, 200), "| A | B |\n| --- | --- |\n| 1 | 2 |")
+                    ],
+                ),
+            ):
+                regions = _discover(page)
+        finally:
+            doc.close()
+
+        assert regions, "a lane-stacked table must still emit a region"
+        assert {r.provenance for r in regions} == {"lane_stacked"}
+
+    def test_reconstruct_stage_labels_its_own_regions(self):
+        from unittest.mock import patch
+
+        doc, page = _blank_page()
+        try:
+            with patch(
+                "socr.tables.reconstruct.reconstruct_table_regions",
+                return_value=[
+                    (fitz.Rect(50, 100, 300, 250), "| A | B |\n| --- | --- |\n| 1 | 2 |")
+                ],
+            ):
+                regions = _discover(page)
+        finally:
+            doc.close()
+
+        assert regions, "stage 2 must emit when stage 1 finds nothing"
+        assert {r.provenance for r in regions} == {"reconstruct_table_regions"}
+
+    def test_chart_aware_stage_labels_its_own_regions(self):
+        from unittest.mock import patch
+
+        doc, page = _blank_page()
+        try:
+            with (
+                patch("socr.tables.reconstruct.reconstruct_table_regions", return_value=[]),
+                patch(
+                    "socr.tables.reconstruct.rowize_from_words_chart_aware",
+                    return_value=[
+                        (fitz.Rect(50, 100, 300, 250), "| A | B |\n| --- | --- |\n| 1 | 2 |")
+                    ],
+                ),
+            ):
+                regions = _discover(page)
+        finally:
+            doc.close()
+
+        assert regions, "stage 3 must emit when stages 1 and 2 find nothing"
+        assert {r.provenance for r in regions} == {"rowize_chart_aware"}
+
+    def test_the_two_later_stages_are_labelled_differently(self):
+        """Difference pin: if both stages ever stamped the same provenance, a
+        coverage record could not say which produced a region."""
+        from unittest.mock import patch
+
+        content = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        doc, page = _blank_page()
+        try:
+            with patch(
+                "socr.tables.reconstruct.reconstruct_table_regions",
+                return_value=[(fitz.Rect(50, 100, 300, 250), content)],
+            ):
+                stage2 = _discover(page)
+            with (
+                patch("socr.tables.reconstruct.reconstruct_table_regions", return_value=[]),
+                patch(
+                    "socr.tables.reconstruct.rowize_from_words_chart_aware",
+                    return_value=[(fitz.Rect(50, 100, 300, 250), content)],
+                ),
+            ):
+                stage3 = _discover(page)
+        finally:
+            doc.close()
+
+        assert stage2[0].provenance != stage3[0].provenance
 
 
 def test_placeholders_are_detected_and_never_parsed_as_strict_grids():
