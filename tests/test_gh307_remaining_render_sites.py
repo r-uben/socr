@@ -126,3 +126,70 @@ class TestReviewHtmlRender:
             "the review page image is still sideways; it is the instrument a "
             "human judges the extract against"
         )
+
+
+class TestChartRenders:
+    """GH-425 review: the PR claimed four sites; only two were pinned.
+
+    These two matter most of the four. The chart lane records "data values not
+    transcribed" and hands the reader the PNG instead, so a sideways image is
+    not a degraded output -- it is the entire output, unreadable.
+    """
+
+    def _pipeline(self):
+        from socr.core.config import EngineType, PipelineConfig
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        return UnifiedPipeline(
+            PipelineConfig(
+                primary_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                quiet=True,
+            )
+        )
+
+    def test_a_sideways_chart_page_png_is_saved_upright(self, tmp_path: Path) -> None:
+        from PIL import Image
+
+        sideways = _sideways_pdf(tmp_path / "cs")
+        assert _measured_rotation(sideways) != 0, "fixture must actually be sideways"
+
+        figures = tmp_path / "figs"
+        figures.mkdir()
+        saved = self._pipeline()._render_chart_page_png(sideways, 1, figures)
+
+        with Image.open(saved) as img:
+            assert img.width > img.height, (
+                f"chart PNG saved {img.width}x{img.height}; a derotated sideways "
+                "page must come back landscape, and this image IS the page's "
+                "whole payload"
+            )
+
+    def test_an_upright_chart_page_png_is_left_alone(self, tmp_path: Path) -> None:
+        """Difference control: a renderer that rotated everything would satisfy
+        the test above."""
+        from PIL import Image
+
+        horizontal = _horizontal_pdf(tmp_path / "ch")
+        assert _measured_rotation(horizontal) == 0
+
+        figures = tmp_path / "figs2"
+        figures.mkdir()
+        saved = self._pipeline()._render_chart_page_png(horizontal, 1, figures)
+
+        with Image.open(saved) as img:
+            assert img.height > img.width, "an upright portrait page must stay portrait"
+
+
+# GH-425 review, honest scope: THREE of the four sites are pinned above --
+# render_all_pages, the review HTML, and the chart-lane PNG. The fourth, the
+# chart REGION clip in ``_render_chart_region_pngs``, is NOT.
+#
+# A first attempt skipped: the method only renders when
+# ``rowize_from_words_chart_aware`` has embedded a
+# ``![chart region N](chart_region_pP_N.png)`` placeholder, which needs real
+# chart geometry this fixture does not produce. A skipping test reads as
+# coverage in a green run, so it was removed rather than left in.
+#
+# The fix at that site is the same three lines as the chart PNG above and is
+# clip-scoped like the crop path; it is simply unwitnessed by a test.
