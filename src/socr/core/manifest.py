@@ -899,6 +899,33 @@ def _select_page_output(
     return _select_page_output_tagged(state, page_num, whole_doc)[0]
 
 
+def shipped_winner_kind(
+    state: "DocumentState",
+    page_num: int,
+    whole_doc: "_WholeDoc | None" = None,
+) -> WinnerKind:
+    """Which branch of selection chose this page's output, as a ``WinnerKind``.
+
+    GH-292. The public half of ``_select_page_output_tagged``, so callers
+    outside ``socr.core`` can ask the manifest which ending selection took
+    instead of re-deriving it from ``PageState`` flags. Re-derivation is what
+    produced #292: a bucket named for a disposition it did not actually match,
+    claiming pages selection ends on something else entirely.
+
+    **This names the ending SELECTION took, not the final shipped bytes** --
+    the same caveat ``WinnerKind`` carries, and for the same reason:
+    ``_winning_page_output`` applies ``_apply_table_emission_guard`` after the
+    tag is dropped, so a page tagged ``PASSING_BEST_OUTPUT`` can still ship a
+    failure marker. Callers needing "what shipped" must inspect the emitted
+    text (#450 review).
+
+    Pass the same ``whole_doc`` ``finalized_page_outputs`` computes when the
+    branch you care about can depend on it; the earlier branches return before
+    it is read.
+    """
+    return _select_page_output_tagged(state, page_num, whole_doc)[1]
+
+
 def _select_page_output_tagged(
     state: DocumentState,
     page_num: int,

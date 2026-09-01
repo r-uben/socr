@@ -6038,10 +6038,34 @@ class UnifiedPipeline:
                 and getattr(e, "page_num", 0)
             }
         )
+        # GH-292: ask the manifest what it SHIPS, do not re-derive it. The old
+        # predicate was `corrupt_math_hybrid is not None`, but the manifest
+        # ships the hybrid only when four further conditions hold (not
+        # shredded, not table-blocked, present in `attempts`, engine
+        # `native+math`). The bucket was therefore strictly broader than the
+        # disposition it names, and diverged in 1,984 of 4,096 synthetic states
+        # -- always claiming pages the manifest ships as something else.
+        #
+        # Both consequences are content-visible. `native_fallback_pages`
+        # excludes this bucket on the premise "the hybrid ships", so a genuine
+        # native-fallback page was dropped from the list that surfaces it; and
+        # the bucket feeds `pages_ok`, so a page shipping NATIVE_CLEAN --
+        # SUCCESS, audit_passed True, nothing wrong with it -- drove its
+        # document to AUDIT_FAILED and emitted a corrupt-math event for a
+        # defect it does not have.
+        #
+        # `whole_doc` is deliberately NOT passed. The hybrid branch is the first
+        # in `_select_page_output_tagged` and returns before `whole_doc` is ever
+        # read, so plumbing it here would be dead -- and would make
+        # `socr.pipeline` reach into the private `_whole_doc_page_texts` for no
+        # effect, which is the opposite of the public surface this fix adds
+        # (#450 review).
+        from socr.core.manifest import WinnerKind, shipped_winner_kind
+
         corrupt_math_hybrid_pages = [
             n
-            for n, p in sorted(state.pages.items())
-            if getattr(p, "corrupt_math_hybrid", None) is not None
+            for n in sorted(state.pages)
+            if shipped_winner_kind(state, n) is WinnerKind.CORRUPT_MATH_HYBRID
         ]
         native_fallback_pages = [
             n
