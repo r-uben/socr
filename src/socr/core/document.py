@@ -93,9 +93,18 @@ class DocumentHandle:
 
         images = {}
         with open_pdf(self.path) as pdf:
-            mat = fitz.Matrix(dpi / 72, dpi / 72)
             for i in range(len(pdf)):
-                pix = pdf[i].get_pixmap(matrix=mat)
+                # GH-307: per page, not once for the document -- a mixed-
+                # orientation PDF has a different answer per page, and this feeds
+                # HPC OCR straight through _page_images. A shared matrix would
+                # also carry the previous page's prerotate, since prerotate
+                # mutates in place (GH-311).
+                page = pdf[i]
+                mat = fitz.Matrix(dpi / 72, dpi / 72)
+                rotation = _upright_rotation_for(page)
+                if rotation:
+                    mat = mat.prerotate(rotation)
+                pix = page.get_pixmap(matrix=mat)
                 images[i + 1] = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         return images
 
