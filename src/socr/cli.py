@@ -445,6 +445,40 @@ def process(
     """
     config = build_config(output_dir=output_dir, **kwargs)
 
+    # GH-368: --dry-run was consulted only inside process_batch, so
+    # `socr process <pdf> --dry-run` ran the full real pipeline -- a supposedly
+    # dry test OCR'd a PDF for ~56s. Silently ignoring a flag the user typed
+    # breaks the no-silent-failure rule this repo holds everywhere else.
+    #
+    # Placed before AUTO-engine resolution deliberately: that probes the
+    # installed engines, and a dry run should not touch the machine at all.
+    if config.dry_run:
+        if not config.quiet:
+            size_mb = pdf_path.stat().st_size / (1024 * 1024)
+            console.print("[blue]Would process 1 file:[/blue]")
+            console.print(f"  {pdf_path.name} ({size_mb:.1f} MB)")
+            # GH-401 review, second pass. Report the destination the REAL run
+            # would use, by calling the pipeline's own resolver rather than
+            # re-deriving it here. `-o` is verbatim; a user-set non-sentinel
+            # config.output_dir is verbatim; otherwise it is <input-parent>/ocr/,
+            # NOT the legacy `output` sentinel.
+            #
+            # My first pass swapped "None" for that sentinel and was still
+            # wrong: a dry run that misdescribes the run it previews is the same
+            # failure as the flag being inert, one step smaller.
+            from socr.pipeline.orchestrator import UnifiedPipeline as _Pipe
+
+            # pdf_path itself, exactly as process() passes it (orchestrator.py:643).
+            # Passing .parent diverges whenever pdf_path is a directory: the
+            # preview would resolve <parent>/ocr while the run resolves
+            # <directory>/ocr. Same resolver AND same argument, or the two can
+            # still disagree.
+            resolved_out = _Pipe(config)._resolve_output_root(pdf_path, output_dir)
+            # soft_wrap: a long temp path wrapped mid-string otherwise, which
+            # breaks anything reading the destination back out of the output.
+            console.print(f"[blue]Output:[/blue] {resolved_out}", soft_wrap=True)
+        return
+
     # Resolve AUTO engine early so we can route to the right pipeline
     if config.primary_engine == EngineType.AUTO:
         from socr.engines.registry import resolve_auto_engine
