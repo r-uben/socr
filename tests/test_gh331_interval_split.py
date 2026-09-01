@@ -68,7 +68,22 @@ def test_no_token_is_lost_by_merging():
 
 
 def test_the_interval_reaches_one_cell_end_to_end():
-    """Pinned as a DIFFERENCE through the rowizer, not just the helper."""
+    """Pinned as a DIFFERENCE through the rowizer, not just the helper.
+
+    GH-445: the ``split=False`` half used to be dead code -- only ``split=True``
+    was ever called, so this asserted one reading rather than a difference, and
+    ``Closes #360`` buried that.
+
+    It was not merely unused: with two values per row the joined form falls
+    below the density floor (``_MIN_LANES_PER_ROW * _MIN_TABLE_ROWS``) and
+    reconstructs to NO region at all, so calling it would have raised. The
+    fixture now carries a third column, which is what makes both halves
+    reconstruct and the comparison meaningful.
+
+    What the tear must not change: the interval lands in ONE cell either way,
+    and the grid has the same shape either way. A tear is a lexing artefact of
+    ``get_text("words")``; it must not be visible in the output.
+    """
 
     def grid(split: bool):
         words: list = []
@@ -76,6 +91,7 @@ def test_the_interval_reaches_one_cell_end_to_end():
         for _ in range(4):
             words.append(_w(60.0, y, "Row"))
             words.append(_w(140.0, y, "1.11"))
+            words.append(_w(180.0, y, "2.22"))
             if split:
                 words.append(_w(220.0, y, "[0.01,"))
                 words.append(_w(260.0, y, "0.35]"))
@@ -83,19 +99,33 @@ def test_the_interval_reaches_one_cell_end_to_end():
                 words.append(_w(220.0, y, "[0.01,0.35]"))
             y += 16.0
         regions = rowize_from_word_list(words)
+        assert regions, f"fixture with split={split} reconstructed to nothing"
         return [
             [c.strip() for c in line.strip().strip("|").split("|")]
             for line in regions[0][1].splitlines()
             if line.lstrip().startswith("|") and "---" not in line
         ]
 
+    torn, whole = grid(split=True), grid(split=False)
+
     # Assert on the CELL, never on the joined row: joining with spaces turns two
     # adjacent torn cells back into the substring "[0.01, 0.35]", so a substring
     # test passes whether or not the merge happened. That is how the first version
     # of this test managed to be vacuous.
-    rows = [r for r in grid(split=True) if any("0.01" in c for c in r)]
+    rows = [r for r in torn if any("0.01" in c for c in r)]
     assert rows, "fixture produced no row carrying the interval"
     for row in rows:
         assert any(c.strip() == "[0.01, 0.35]" for c in row), (
             f"interval is not in a single cell: {row}"
+        )
+
+    # The control half: the same table printed without the tear.
+    assert len(torn) == len(whole), f"the tear changed the row count: {len(torn)} vs {len(whole)}"
+    for t_row, w_row in zip(torn, whole):
+        assert len(t_row) == len(w_row), f"the tear changed the column count: {t_row} vs {w_row}"
+    whole_rows = [r for r in whole if any("0.01" in c for c in r)]
+    assert whole_rows, "control produced no row carrying the interval"
+    for row in whole_rows:
+        assert any(c.strip() == "[0.01,0.35]" for c in row), (
+            f"control: the untorn interval is not in a single cell: {row}"
         )
