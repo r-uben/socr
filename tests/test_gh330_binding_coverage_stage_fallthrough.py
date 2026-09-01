@@ -106,6 +106,46 @@ class TestLaterStageProvenanceThroughTheRealChain:
     silenced, so the provenance comes from the code that assigns it.
     """
 
+    def test_lane_stacked_regions_are_labelled_by_the_router(self):
+        """The third tautology, measured rather than deleted.
+
+        ``lane_stacked`` is still stamped in ``binding_coverage`` for any table
+        ``_is_lane_stacked`` accepts, and coverage ``source_stage`` reports it.
+        Deleting the old tautology removed the bad test without pinning the
+        behaviour, so this drives the real branch: a page ``find_tables``
+        genuinely returns, with the lane-stacked predicate and the rowizer
+        patched so the label comes from the router.
+        """
+        from unittest.mock import patch
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((100, 150), "ColA", fontsize=10)
+        page.insert_text((200, 150), "ColB", fontsize=10)
+        page.insert_text((100, 180), "10.5", fontsize=10)
+        page.insert_text((200, 180), "20.5", fontsize=10)
+        page.draw_rect(fitz.Rect(90, 135, 280, 200))
+        page.draw_line((90, 160), (280, 160))
+        page.draw_line((180, 135), (180, 200))
+
+        try:
+            assert len(page.find_tables().tables) >= 1, "fixture must give find_tables a table"
+            with (
+                patch("socr.benchmark.binding_coverage._is_lane_stacked", return_value=True),
+                patch(
+                    "socr.tables.reconstruct.rowize_from_word_list",
+                    return_value=[
+                        (fitz.Rect(90, 135, 280, 200), "| A | B |\n| --- | --- |\n| 1 | 2 |")
+                    ],
+                ),
+            ):
+                regions = _discover(page)
+        finally:
+            doc.close()
+
+        assert regions, "a lane-stacked table must still emit a region"
+        assert {r.provenance for r in regions} == {"lane_stacked"}
+
     def test_reconstruct_stage_labels_its_own_regions(self):
         from unittest.mock import patch
 
