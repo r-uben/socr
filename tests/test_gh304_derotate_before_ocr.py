@@ -162,25 +162,39 @@ def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
     assert mat != fitz.Matrix(1, 1), "prerotate must still mutate in place"
 
 
-def test_the_recorded_prerotate_call_sites_match_the_code() -> None:
-    """GH-440: the ADR's call-site table must be checkable, not just careful.
+# GH-440, and the #442 review. The ADR's call-site table, enumerated
+# mechanically. Asserted as EXACT SETS: a new, renamed, moved or deleted
+# `prerotate` call fails here, whichever file it is in. Anything less relocates
+# the hand-drift this exists to stop instead of ending it.
+_MUTATE_ONLY_SITES = {
+    ("pipeline/orchestrator.py", "_render_adjudication_crop"),
+    ("tables/extract.py", "_render_crop"),
+    ("tables/source_evidence.py", "_render_crop_pixmap"),
+    ("tables/source_evidence.py", "build_scanned_evidence"),
+    ("tables/witness.py", "_render_crop_safe"),
+}
+_ASSIGNMENT_SITES = {
+    ("core/document.py", "render_all_pages"),
+    ("core/document.py", "render_page"),
+    ("engines/base.py", "process_pages"),
+    ("pipeline/orchestrator.py", "_render_chart_page_png"),
+    ("pipeline/orchestrator.py", "_render_chart_region_pngs"),
+    ("review/html.py", "_render_page_image"),
+}
 
-    That table has now been wrong three times -- #423 claimed ``prerotate``
-    returns None, #426 claimed production always assigns the result, and #437
-    named the D3 floor render as a mutate-only caller when
-    ``_render_d3_floor_png`` does not call ``prerotate`` at all. Every fix was
-    hand-enumerated, which is exactly why the next one drifted.
 
-    So enumerate it mechanically instead: walk every ``prerotate`` call in the
-    tree to its enclosing ``def`` and compare against the record.
+def _prerotate_sites() -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """Every ``prerotate`` call in ``src/socr``, by (file, enclosing def).
+
+    Split by whether the call is a bare statement (``ast.Expr`` -- mutate-only,
+    relying on the in-place mutation) or not (its value is used, i.e. assigned).
     """
     import ast
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "src" / "socr"
-
-    mutate_only: set[tuple[str, str]] = set()
-    assignment: set[tuple[str, str]] = set()
+    mutate: set[tuple[str, str]] = set()
+    assign: set[tuple[str, str]] = set()
 
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text())
@@ -196,23 +210,42 @@ def test_the_recorded_prerotate_call_sites_match_the_code() -> None:
                 and node.func.attr == "prerotate"
             ):
                 continue
-            # enclosing def
-            fn = node
+            fn: ast.AST = node
             while fn in parents and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 fn = parents[fn]
-            fn_name = getattr(fn, "name", "<module>")
-            rel = str(path.relative_to(root))
-            # a bare `mat.prerotate(x)` is an Expr statement; an assignment is not
-            where = parents.get(node)
-            (mutate_only if isinstance(where, ast.Expr) else assignment).add((rel, fn_name))
+            site = (str(path.relative_to(root)), getattr(fn, "name", "<module>"))
+            (mutate if isinstance(parents.get(node), ast.Expr) else assign).add(site)
 
-    assert ("pipeline/orchestrator.py", "_render_adjudication_crop") in mutate_only, (
-        f"the orchestrator's mutate-only site moved; found {sorted(mutate_only)}"
+    return mutate, assign
+
+
+def test_the_recorded_prerotate_call_sites_match_the_code() -> None:
+    """GH-440: the ADR's call-site table must be checkable, not just careful.
+
+    That table has now been wrong three times -- #423 claimed ``prerotate``
+    returns None, #426 claimed production always assigns the result, and #437
+    named the D3 floor render as a mutate-only caller when
+    ``_render_d3_floor_png`` does not call ``prerotate`` at all. Every fix was
+    hand-enumerated, which is exactly why the next one drifted.
+
+    So enumerate it mechanically and compare EXACT sets. Asserting only the
+    sites someone happened to think of would relocate the drift rather than end
+    it (#442 review): a rename in ``tables/extract.py``, or ``document.py``
+    switching from assignment to mutate-only, has to fail here too.
+
+    When this fails, the code moved and the ADR table
+    (``docs/log/2026-08-27_304b-crop-derotation.md``) needs the same edit.
+    """
+    mutate, assign = _prerotate_sites()
+
+    assert mutate == _MUTATE_ONLY_SITES, (
+        "mutate-only prerotate sites drifted from the ADR table.\n"
+        f"  added:   {sorted(mutate - _MUTATE_ONLY_SITES)}\n"
+        f"  missing: {sorted(_MUTATE_ONLY_SITES - mutate)}"
     )
-    assert ("pipeline/orchestrator.py", "_render_d3_floor_png") not in (mutate_only | assignment), (
-        "_render_d3_floor_png does not call prerotate; it must not be recorded as a site"
+    assert assign == _ASSIGNMENT_SITES, (
+        "assignment prerotate sites drifted from the ADR table.\n"
+        f"  added:   {sorted(assign - _ASSIGNMENT_SITES)}\n"
+        f"  missing: {sorted(_ASSIGNMENT_SITES - assign)}"
     )
-    for fn_name in ("_render_chart_page_png", "_render_chart_region_pngs"):
-        assert ("pipeline/orchestrator.py", fn_name) in assignment, (
-            f"{fn_name} is recorded on the assignment row but is not there: {sorted(assignment)}"
-        )
+    assert not (mutate & assign), f"a site is recorded as both forms: {sorted(mutate & assign)}"

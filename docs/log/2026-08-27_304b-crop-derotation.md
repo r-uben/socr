@@ -143,8 +143,8 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
 
      | form | sites |
      |---|---|
-     | mutate-only `mat.prerotate(rotation)` | `tables/extract.py`, `tables/source_evidence.py` (x2), `tables/witness.py`, `pipeline/orchestrator.py` (`_render_adjudication_crop`) |
-     | assignment `mat = mat.prerotate(rotation)` | `engines/base.py`, `core/document.py` (x2), `review/html.py`, `pipeline/orchestrator.py` (`_render_chart_page_png`, `_render_chart_region_pngs`) |
+     | mutate-only `mat.prerotate(rotation)` | `tables/extract.py` (`_render_crop`), `tables/source_evidence.py` (`_render_crop_pixmap`, `build_scanned_evidence`), `tables/witness.py` (`_render_crop_safe`), `pipeline/orchestrator.py` (`_render_adjudication_crop`) |
+     | assignment `mat = mat.prerotate(rotation)` | `engines/base.py` (`process_pages`), `core/document.py` (`render_page`, `render_all_pages`), `review/html.py` (`_render_page_image`), `pipeline/orchestrator.py` (`_render_chart_page_png`, `_render_chart_region_pngs`) |
 
      GH-440: the mutate-only cell first named the D3 floor render. That caller
      does not call `prerotate` at all -- `_render_d3_floor_png` delegates to
