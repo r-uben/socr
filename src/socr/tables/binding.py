@@ -211,8 +211,8 @@ def parse_grid(markdown: str) -> Grid | None:
     return None
 
 
-def _project_candidate_data_columns(grid: Grid) -> Grid:
-    """Keep candidate columns that contain a genuine numeric data token.
+def _candidate_data_column_indices(grid: Grid) -> tuple[int, ...]:
+    """Return original indexes for candidate columns with genuine numeric data.
 
     The rowizer emits a fixed lane grid before ``_clean_grid`` sees it.  A
     lane can consequently remain in the markdown when its header is populated
@@ -220,6 +220,9 @@ def _project_candidate_data_columns(grid: Grid) -> Grid:
     the same header-only shape.  Such a column has no numeric binding claim.
     Projecting it out keeps the binder's column space aligned with the
     candidate's numeric data space without selecting a native lane by value.
+
+    ``_project_candidate_data_columns`` and ``bind()``'s column remap both
+    consume this tuple so the projected grid and index mapping cannot drift.
     """
     numeric_columns_by_row: list[set[int]] = []
     for column in range(1, grid.n_cols):
@@ -236,42 +239,23 @@ def _project_candidate_data_columns(grid: Grid) -> Grid:
                 numeric_columns_by_row[row_number].add(column)
 
     if not numeric_columns_by_row:
-        return grid
+        return tuple()
     widest_rows = max(len(columns) for columns in numeric_columns_by_row)
     data_columns = sorted(
         set().union(*(columns for columns in numeric_columns_by_row if len(columns) == widest_rows))
     )
+    return tuple(data_columns)
+
+
+def _project_candidate_data_columns(grid: Grid) -> Grid:
+    """Project *grid* down to stub plus the numeric data columns from the helper."""
+    data_columns = _candidate_data_column_indices(grid)
     if not data_columns:
         return grid
     keep = (0, *data_columns)
     return Grid(
         header_rows=tuple(tuple(row[column] for column in keep) for row in grid.header_rows),
         rows=tuple(tuple(row[column] for column in keep) for row in grid.rows),
-    )
-
-
-def _candidate_data_column_indices(grid: Grid) -> tuple[int, ...]:
-    """Return original indexes for the projected candidate data columns."""
-    numeric_columns_by_row: list[set[int]] = []
-    for row in grid.rows:
-        columns = set()
-        for column, cell in enumerate(row[1:], start=1):
-            if any(
-                is_numeric_token(token) and not _SPEC_NUMBER_RE.match(strip_presentation(token))
-                for token in re.split(r"\s+", cell.strip())
-                if token
-            ):
-                columns.add(column)
-        numeric_columns_by_row.append(columns)
-    if not numeric_columns_by_row:
-        return tuple()
-    widest_rows = max(len(columns) for columns in numeric_columns_by_row)
-    return tuple(
-        sorted(
-            set().union(
-                *(columns for columns in numeric_columns_by_row if len(columns) == widest_rows)
-            )
-        )
     )
 
 
