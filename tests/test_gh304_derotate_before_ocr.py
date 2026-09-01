@@ -121,3 +121,24 @@ class TestRenderOrientation:
         doc.close()
         with fitz.open(path) as d:
             assert _upright_rotation_for(d[0]) == 0
+
+
+def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
+    """GH-311: the 304b ADR said ``prerotate`` returns None.
+
+    It does not. On PyMuPDF 1.28.2 it mutates in place AND returns the matrix,
+    which is why the call sites' ``mat = mat.prerotate(...)`` assignment is
+    meaningful rather than an accident that survives on the mutation alone.
+
+    Pinned because the ADR now asserts this and both call sites rely on it: a
+    PyMuPDF upgrade that changed either half would silently break the derotation
+    path, and the assignment form would be the first thing to look wrong.
+    """
+    import fitz
+
+    mat = fitz.Matrix(1, 1)
+    returned = mat.prerotate(90)
+
+    assert returned is not None, "the ADR's 'returns None' claim would be true here"
+    assert isinstance(returned, fitz.Matrix)
+    assert mat != fitz.Matrix(1, 1), "prerotate must still mutate in place"

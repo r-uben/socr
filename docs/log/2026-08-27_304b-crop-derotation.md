@@ -90,7 +90,25 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
 - 0 for horizontal `(1.0, 0.0)`.
 - 90 for `(0.0, -1.0)`.
 - 270 for `(0.0, 1.0)`.
-- **Never 180:** Text running upside-down was never detected in the reference corpus; if it occurs, the dominant-direction logic treats it as rotation not yet classified and returns 0 (absence-of-evidence rule).
+- ~~**Never 180:** Text running upside-down ... returns 0 (absence-of-evidence rule).~~
+  **Corrected (GH-311): the code does NOT do this.** Measured against
+  `upright_rotation_degrees`:
+
+  | direction vector | returns |
+  |---|---|
+  | `(1, 0)` | 0 |
+  | `(0, -1)` | 90 |
+  | `(-1, 0)` | **180** |
+  | `(0, 1)` | 270 |
+  | `(0, 0)` | 0 |
+
+  Upside-down dominant text yields 180 (bearing 180 → `round(-2) * 90 % 360`), and a
+  180° `prerotate` is applied. Only the all-zero vector and a failed inspection return 0,
+  which is the actual absence-of-evidence rule.
+
+  A maintainer reading the old wording would believe upside-down text is suppressed. It is
+  not. This corrects the RECORD to match the code; it does not change the angle rule,
+  which would need its own pin (GH-311 is explicit on that point).
 
 **Do not claim scanned pages lack text.** The scanned-page predicate is based on *structural* evidence (embedded image coverage, drawn pixel content, absence of proper fonts), not absence of text direction. A scanned page may carry an OCR text layer with directional metadata. Image localization stays unrotated regardless; the angle rule applies only to crop/evidence raster rendering.
 
@@ -102,13 +120,17 @@ All rotation angles are **derived from page content**, never guessed or hard-cod
 
 **Key behavior under 1.28.2:**
 
-1. **Matrix.prerotate() mutates in place:**
+1. **Matrix.prerotate() mutates in place AND returns the matrix:**
    ```python
    mat = fitz.Matrix(dpi / 72, dpi / 72)
-   mat.prerotate(90)  # mutates mat; returns None
+   mat.prerotate(90)  # mutates mat AND returns it (PyMuPDF 1.28.2)
+   mat = mat.prerotate(90)  # what production actually does -- the assignment is real
    pix = page.get_pixmap(matrix=mat, clip=clip)
    ```
    - Do NOT reuse the matrix after calling `prerotate()` without reinitializing.
+   - GH-311: "returns None" was wrong. Verified on PyMuPDF 1.28.2 -- `prerotate` returns a
+     `Matrix`, and the call sites' `mat = mat.prerotate(...)` assignment is meaningful
+     rather than a no-op that happens to work because of the mutation.
 
 2. **Dimension swap on 90/270 rotation:**
    - Unrotated clip `(x0, y0, x1, y1)` with page space width `w = x1 - x0` and height `h = y1 - y0`.
