@@ -119,3 +119,47 @@ def test_lanes_must_recur_not_merely_co_occur():
 def test_a_page_with_no_numeric_tokens_is_unchanged():
     """The early exit is untouched."""
     assert has_numeric_columns(_FakePage([_w(60.0, 100.0, "Police")])) is False
+
+
+class _FakePageWithNoRuledTables(_FakePage):
+    """A ``_FakePage`` that also answers ``find_tables()`` — with nothing.
+
+    GH-348: the reuse filter was pinned only through ``has_numeric_columns``.
+    The path GH-248 actually names is the SECOND PASS inside
+    ``BornDigitalDetector._detect_tables``: ``find_tables()`` returns nothing,
+    and the heuristic decides. Deleting that fallthrough left the whole suite
+    green, because no test went through the detector at all.
+    """
+
+    class _NoTables:
+        tables: list = []
+
+    def find_tables(self):
+        return self._NoTables()
+
+
+def _detect(page) -> bool:
+    from socr.core.born_digital import BornDigitalDetector
+
+    return BornDigitalDetector()._detect_tables(page)
+
+
+class TestDetectTablesFallthrough:
+    """The predicate reached through its real caller, not called directly."""
+
+    def test_a_reused_grid_is_detected_through_the_second_pass(self) -> None:
+        page = _FakePageWithNoRuledTables(_real_table()._words)
+        assert _detect(page) is True
+
+    def test_scatter_is_not_detected_through_the_second_pass(self) -> None:
+        """The discriminator is lane REUSE, not token count: scatter carries as
+        many numeric tokens as the table and must still be rejected."""
+        page = _FakePageWithNoRuledTables(_scatter()._words)
+        assert _detect(page) is False
+
+    def test_the_two_differ_only_in_lane_reuse(self) -> None:
+        """Pinned as a difference, so neither case can pass for an unrelated
+        reason: same detector, same call, opposite answers."""
+        table = _FakePageWithNoRuledTables(_real_table()._words)
+        scatter = _FakePageWithNoRuledTables(_scatter()._words)
+        assert _detect(table) != _detect(scatter)
