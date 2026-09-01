@@ -140,28 +140,48 @@ class TestTheProductionStampNotAStubbedFlag:
     """
 
     def _assessment(self, native_text: str):
+        """The PageAssessment ``_assess_page`` ITSELF produces for this text.
+
+        GH-409 review: an earlier version built the PageAssessment by hand and
+        computed the defect with ``structure_check`` in the test, which pinned
+        ``apply_born_digital``'s copy but not the stamp's ORIGIN -- deleting the
+        ``native_table_content_defect=`` kwarg in ``_assess_page`` would have
+        left it green.
+
+        Only ``extract_structured`` is stubbed, so the markdown under test is
+        fixed; everything downstream of it -- the ``structure_check`` call and
+        the stamp onto the assessment -- is the real code.
+        """
         from pathlib import Path
+        from unittest.mock import patch
 
-        from socr.core.born_digital import DocumentAssessment, PageAssessment
-        from socr.tables import structure_check
+        import fitz
 
-        defect = structure_check.table_content_defect(native_text)
+        from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
+
+        doc = fitz.open()
+        page = doc.new_page()
+        # Enough real text to clear the born-digital floor: apply_born_digital
+        # only copies the stamp for a born-digital page, so a sparse fixture
+        # would make the propagation test vacuous.
+        for i in range(6):
+            page.insert_text(
+                (72, 100 + i * 16),
+                f"Table 1 line {i}: estimates by year and coefficient value.",
+                fontsize=11,
+            )
+
+        detector = BornDigitalDetector()
+        with (
+            patch.object(detector, "extract_structured", return_value=native_text),
+            patch.object(BornDigitalDetector, "_detect_tables", return_value=True),
+        ):
+            page_assessment = detector._assess_page(page, 1)
+        doc.close()
+
         return (
-            DocumentAssessment(
-                path=Path("/tmp/gh345.pdf"),
-                pages=[
-                    PageAssessment(
-                        page_num=1,
-                        is_born_digital=True,
-                        native_text=native_text,
-                        confidence=1.0,
-                        has_tables=True,
-                        native_table_structure_defective=True,
-                        native_table_content_defect=defect,
-                    )
-                ],
-            ),
-            defect,
+            DocumentAssessment(path=Path("/tmp/gh345.pdf"), pages=[page_assessment]),
+            page_assessment.native_table_content_defect,
         )
 
     def test_the_empty_body_defect_is_what_structure_check_produces(self) -> None:
