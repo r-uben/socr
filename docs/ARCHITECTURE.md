@@ -16,10 +16,9 @@ the real output:
 The router records the winning provider + cost per page and writes a replayable
 manifest. See `docs/log/2026-05-30_cost-aware-agentic-ocr.md`.
 
-A deprecated deterministic path (backbone -> score -> judge -> repair) remains
-reachable through the hidden `--legacy-routing` flag pending deletion. It
-chooses the initial engine from page difficulty, checks output with heuristics,
-then uses `RepairRouter` to select another engine by failure mode.
+The deterministic backbone -> score -> judge -> repair path was deleted on
+2026-08-25 (#174, `docs/log/2026-08-25_174-legacy-fork.md`). There is one control
+loop.
 
 ## Extraction method: extract / verify / escalate
 Agentic routing uses one general method for getting structured content (tables,
@@ -84,10 +83,7 @@ See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
     assembly. Writes the manifest.
   - `agentic.py`: `route_page()` (Python-owned per-page loop) + `PageJudge`
     adapters (`VLMPageJudge`, `HeuristicPageJudge`).
-  - `repair.py`: `RepairRouter` selects another engine by failure mode in the
-    deprecated deterministic branch; pending deletion.
-  - `consensus.py`, `reconciler.py`, `hpc_pipeline.py`: multi-engine consensus,
-    reconciliation, and the HPC/vLLM path.
+  - `reconciler.py`, `hpc_pipeline.py`: reconciliation and the HPC/vLLM path.
 - `figures/`: `FigureExtractor` (PyMuPDF embedded-image extraction + VLM captions).
 - `ui/`: Rich console/progress/panels.
 
