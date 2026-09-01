@@ -1389,14 +1389,31 @@ def _select_page_output_tagged(
 
 
 def _apply_table_emission_guard(output: PageOutput, page_num: int) -> PageOutput:
-    """Return *output* normalized and hard-failed on a GH-226 defect."""
-    from socr.tables.reconcile import table_emission_defect
+    """Return *output* normalized and hard-failed on a GH-226 or GH-190 defect.
+
+    GH-302. This is the LAST shipping backstop -- whole-document CLI attempts
+    that never reach the agentic judge or the post-route recheck have nothing
+    else between them and the reader. It ran ``table_emission_defect`` alone,
+    and an empty but well-formed table is not an EMISSION defect, so GH-190's
+    own fixture still shipped SUCCESS here.
+
+    The content term is added; the shape term is deliberately NOT. Running the
+    whole of ``table_output_defect`` was tried first and is too wide for this
+    seam: ``structural_gate_fires`` turns pages that ``--native-only`` ships
+    FLAGGED into hard failures, which is a routing change this ticket rules
+    out. Shape keeps its existing owner. Neither term is a density rule.
+    """
+    from socr.tables.reconcile import table_content_defect, table_emission_defect
 
     text = output.text or ""
     if text is not output.text:
         output = replace(output, text=text)
     marker = _TABLE_EMISSION_FAILED_RE.fullmatch(text.strip())
-    defect = marker.group("defect") if marker else table_emission_defect(text)
+    defect = (
+        marker.group("defect")
+        if marker
+        else (table_emission_defect(text) or table_content_defect(text))
+    )
     if not defect:
         return output
 
