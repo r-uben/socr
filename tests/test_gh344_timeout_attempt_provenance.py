@@ -18,11 +18,20 @@ from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import route_page
 
 
-def _judge_rejects(page_num, output, profile=None, **kwargs):
-    """Never reached on the timeout / budget-skip paths, but must not be a
-    landmine if the fixture grows: the previous version imported a
-    ``JudgeDecision`` symbol that does not exist."""
-    raise AssertionError("judge must not be reached on a timeout or budget skip")
+class _JudgeMustNotRun:
+    """A real ``PageJudge`` shape that fails loudly if it is ever consulted.
+
+    ``route_page`` calls ``judge.assess(output, profile)``, so a bare function
+    is the wrong interface -- it would raise ``AttributeError`` and mask what a
+    test was actually asserting. The timeout and budget-skip paths never reach
+    the judge, and this makes that a checked property rather than an assumption.
+    """
+
+    def assess(self, output, provider):
+        raise AssertionError("judge must not be reached on a timeout or budget skip")
+
+
+_judge_rejects = _JudgeMustNotRun()
 
 
 def _timeout_attempt():
@@ -127,13 +136,18 @@ class TestSharedEngineProfilesAreDisambiguated:
                 audit_passed=True,
             )
 
-        def _always_escalate(page_num, output, profile=None, **kwargs):
-            class _D:
-                accepted = False
-                reason = "escalate"
-                raw_verdict = None
+        class _AlwaysEscalate:
+            """Also a real ``PageJudge``: ``assess`` returning an
+            ``AcceptDecision`` with ``accept=False``, so the ladder moves on to
+            the cloud rung. The previous version returned an ad-hoc object with
+            an ``accepted`` attribute the protocol does not use."""
 
-            return _D()
+            def assess(self, output, provider):
+                from socr.pipeline.agentic import AcceptDecision
+
+                return AcceptDecision(accept=False, reason="escalate")
+
+        _always_escalate = _AlwaysEscalate()
 
         decision = route_page(
             1,
