@@ -1749,6 +1749,26 @@ def _promote_stub_lanes(lane_centers: list[float], seg_ys, rows_by_y) -> list[fl
         # was a real data column swallowed into the label cell.
         if _rows_populating(lane_centers[j]) >= _rows_populating(lane_centers[j + 1]):
             break
+        # GH-419: sparsity alone does not make a stub. A leftmost DATA column
+        # that is simply sparse -- populated on fewer rows than its neighbour --
+        # passes the comparison above, and if the gutter after it carries the
+        # usual recurring marks ("n.a.", a dagger) the whole real column is
+        # swallowed into the label cell. #416 capped that blast to one promotion
+        # (`j >= 1`) but never refused a false FIRST one, and its comment ("the
+        # first gap is the stub's by construction") is wrong on exactly this
+        # path: the first gap lies between two numeric lanes.
+        #
+        # The extra evidence is stub-specific, not another sparsity test. A stub
+        # holds the row identifier, so the row's LABEL sits to its right -- that
+        # is the whole premise in the docstring above, and it means nothing
+        # label-like sits to its LEFT. A sparse data column has its label
+        # already to the left, which is what tells the two shapes apart. Reuses
+        # the same snap geometry; no new constant.
+        if any(
+            any(w[2] < lane_centers[j] - snap and not _is_numeric_word(w) for w in row)
+            for row in data_rows
+        ):
+            break
         lo, hi = lane_centers[j] + snap, lane_centers[j + 1] - snap
         if lo >= hi:
             break
