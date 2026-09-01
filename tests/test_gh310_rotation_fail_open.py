@@ -55,6 +55,29 @@ class TestTheHelperIsFailOpenThroughout:
         finally:
             doc.close()
 
+    def test_the_swallowed_failure_is_logged(self, caplog) -> None:
+        """GH-424 review: fail-open must not mean invisible.
+
+        If either helper regresses, every page renders unrotated. Without a log
+        line there is nothing anywhere saying why -- which is the silent-failure
+        shape this repo rejects everywhere else.
+        """
+        import logging
+
+        doc, page = _page()
+        try:
+            with (
+                caplog.at_level(logging.DEBUG, logger="socr.core.born_digital"),
+                patch.object(fitz.Page, "get_text", lambda self, *a, **k: _MALFORMED),
+            ):
+                assert upright_rotation_for(page) == 0
+        finally:
+            doc.close()
+
+        assert any("direction inspection failed" in r.message for r in caplog.records), (
+            "the failure was swallowed with no trace"
+        )
+
     def test_a_raise_inside_the_direction_helper_is_contained(self) -> None:
         """The other half of the ticket: not just malformed data, but any raise
         from the two functions that used to sit outside the guard."""

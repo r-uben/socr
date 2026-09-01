@@ -217,6 +217,11 @@ def upright_rotation_for(page, clip=None) -> int:
     try:
         return upright_rotation_degrees(dominant_text_direction(blocks))
     except Exception:
+        # Logged, not swallowed (GH-424 review). Fail-open must not mean
+        # invisible: if either helper regresses, every page renders unrotated
+        # and nothing anywhere says why. Debug level keeps a malformed `dir` on
+        # one page from being noise, while `exc_info` keeps it diagnosable.
+        logger.debug("upright_rotation_for: direction inspection failed", exc_info=True)
         return 0
 
 
