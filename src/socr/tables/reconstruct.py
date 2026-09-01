@@ -1765,7 +1765,7 @@ def _promote_stub_lanes(lane_centers: list[float], seg_ys, rows_by_y) -> list[fl
     return lane_centers[j:]
 
 
-def _lane_words(seg_ys, rows_by_y) -> list:
+def _lane_words(seg_ys, rows_by_y) -> tuple[list, list]:
     """Numeric words to cluster column lanes on, AFTER bracket merging.
 
     GH-360. The comma-split repair (``_merge_unclosed_bracket_words``) runs per
