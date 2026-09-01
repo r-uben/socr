@@ -13,17 +13,16 @@ carries for the same profile, so neither can drift alone.
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
-from socr.core.providers import PROFILE_QWEN_LOCAL
+from socr.core.providers import PROFILE_QWEN_CLOUD, PROFILE_QWEN_LOCAL
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import route_page
 
 
 def _judge_rejects(page_num, output, profile=None, **kwargs):
-    from socr.pipeline.agentic import JudgeDecision
-
-    return JudgeDecision(accepted=False, reason="rejected", raw_verdict=None)
+    """Never reached on the timeout / budget-skip paths, but must not be a
+    landmine if the fixture grows: the previous version imported a
+    ``JudgeDecision`` symbol that does not exist."""
+    raise AssertionError("judge must not be reached on a timeout or budget skip")
 
 
 def _timeout_attempt():
@@ -100,3 +99,57 @@ class TestEveryAttemptSaysWhichProviderItWas:
 
         assert attempt.accepted is False
         assert attempt.cost_usd == 0.0
+
+
+class TestSharedEngineProfilesAreDisambiguated:
+    """GH-344 AC #2, and the canary GH-227 actually needs.
+
+    ``PROFILE_QWEN_LOCAL`` and ``PROFILE_QWEN_CLOUD`` share ``EngineType.QWEN``,
+    so ``prof.engine`` cannot say which of them timed out -- only ``prof.id``
+    can. Without two Qwen rungs on one ladder that disambiguation is argued
+    rather than measured.
+    """
+
+    def test_the_cloud_rung_is_named_when_it_is_the_one_that_times_out(self) -> None:
+        seen: list = []
+
+        def _local_ok_cloud_hangs(profile, page_num):
+            seen.append(profile.id)
+            if profile.id == PROFILE_QWEN_CLOUD.id:
+                import time
+
+                time.sleep(5)
+            return PageOutput(
+                page_num=page_num,
+                text="local output the judge rejects",
+                status=PageStatus.SUCCESS,
+                engine=profile.engine.value,
+                audit_passed=True,
+            )
+
+        def _always_escalate(page_num, output, profile=None, **kwargs):
+            class _D:
+                accepted = False
+                reason = "escalate"
+                raw_verdict = None
+
+            return _D()
+
+        decision = route_page(
+            1,
+            [PROFILE_QWEN_LOCAL, PROFILE_QWEN_CLOUD],
+            _local_ok_cloud_hangs,
+            _always_escalate,
+            provider_timeout={PROFILE_QWEN_LOCAL.engine: 0.05},
+        )
+
+        timeouts = [a for a in decision.attempts if a.reason == "provider timeout"]
+        assert timeouts, f"cloud rung never timed out; providers seen: {seen}"
+        assert timeouts[0].provider_id == PROFILE_QWEN_CLOUD.id, (
+            "the journal named the wrong Qwen rung; engine alone cannot "
+            "disambiguate two profiles sharing EngineType.QWEN"
+        )
+        assert timeouts[0].provider_id != PROFILE_QWEN_LOCAL.id
+        assert PROFILE_QWEN_LOCAL.engine == PROFILE_QWEN_CLOUD.engine, (
+            "precondition: if these stop sharing an engine this pins nothing"
+        )
