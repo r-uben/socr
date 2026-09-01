@@ -72,6 +72,18 @@ class TestGutterMarksDoNotSwallowAColumn:
             for c in range(4):
                 assert f"{r}{c}.5" in emitted, f"data value {r}{c}.5 was lost"
 
+        # GH-416 review: the marker itself does NOT survive here, and that is a
+        # pre-existing placement rule, not something this fix chose. A word
+        # further than the snap radius from every lane is dropped by
+        # _rowize_segment -- the same rule that stops a prose page being gridded
+        # whole. Narrowing the promotion made the loss visible by no longer
+        # sweeping such words into the label cell. Filed separately; asserted
+        # here so the trade-off is recorded rather than implied.
+        assert "n.a." not in emitted, (
+            "marker now survives -- if this fails, the orphan-word drop was "
+            "fixed and this assertion should become the positive one"
+        )
+
     def test_a_dagger_footnote_behaves_the_same_as_n_a(self) -> None:
         """The ticket names both shapes; neither is numeric, so neither should
         be read as a stub column."""
