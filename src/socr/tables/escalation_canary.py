@@ -249,11 +249,40 @@ def native_text_value_counts(native_text: str) -> Counter:
 
     tokens = collect_table_tokens(native_text or "")
     if tokens and tokens.numeric:
-        return Counter(_normalize_numeric_token(t) for t in tokens.numeric)
+        # GH-355 hole 3: UNION with the whole-page pass, never narrow to the
+        # grid alone. This caller's input is `native_table_structure_failed` --
+        # the grid is precisely what is broken -- so a correct model value
+        # sitting OUTSIDE the ragged native grid read as invented and the good
+        # table was discarded. Presence claims must cover the page the
+        # disposition site actually has.
+        #
+        # Union, not replace: grid cells stay counted, so a value inside the
+        # grid keeps its multiplicity. Counters throughout -- set containment
+        # would be blind to GH-270 substitution, which the module docs forbid.
+        # GH-355: .elements(), not the Counter itself. Iterating a Counter
+        # yields KEYS, so every native token's count collapsed to 1 while the
+        # regex path below kept multiplicity -- two surfaces, two answers, from
+        # a function whose contract says "with multiplicity".
+        #
+        # The collapse is not cosmetic: this module uses Counters rather than
+        # sets precisely so a value occurring once that appears twice reads as
+        # invented (GH-270 substitution). With counts flattened, a CORRECT
+        # candidate repeating a value the page also repeats fails the multiset
+        # check and falls back to flagged native.
+        grid_counts = Counter(_normalize_numeric_token(t) for t in tokens.numeric.elements())
+        page_raw = _re.findall(r"[-\u2212]?(?:\d[\d,]*\.?\d*|\.\d+)", native_text or "")
+        page_counts = Counter(_normalize_numeric_token(t) for t in page_raw)
+        # Max, not sum: the same token appears in both passes when it is inside
+        # the grid, and adding would double it into a phantom occurrence.
+        return Counter({t: max(grid_counts[t], page_counts[t]) for t in grid_counts | page_counts})
     # No table markup in the native text: fall back to every numeric token in it.
     # A page whose native reading lost its grid still has its numbers, and this
     # gate only ever claims presence.
-    raw = _re.findall(r"[-\u2212]?\d[\d,]*\.?\d*", native_text or "")
+    # GH-355: leading-decimal tokens. The old pattern required a digit before
+    # the point, so ".75" matched only from the "7" and became "75" -- a value
+    # an order of magnitude out, silently, in a presence oracle. Econ tables
+    # write .75 and .05 constantly.
+    raw = _re.findall(r"[-\u2212]?(?:\d[\d,]*\.?\d*|\.\d+)", native_text or "")
     return Counter(_normalize_numeric_token(t) for t in raw)
 
 
