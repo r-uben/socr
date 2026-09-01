@@ -82,15 +82,40 @@ def test_no_word_is_silently_dropped():
         assert w[4] in emitted_tokens, f"token {w[4]!r} vanished from the grid"
 
 
-def test_promotion_touches_only_the_label_column():
-    """Pinned as a DIFFERENCE: the data sub-grid is identical with and without
-    the stub-and-label words, so promotion can never move a data cell."""
-    with_labels = _cells(rowize_from_word_list(_stub_table(with_labels=True))[0][1])
-    without = _cells(rowize_from_word_list(_stub_table(with_labels=False))[0][1])
+def test_promotion_touches_only_the_label_column(monkeypatch):
+    """Pinned as PROMOTED vs NOT, which is what the claim is about.
 
-    data_with = [row[1:] for row in with_labels]
-    data_without = [row[1:] for row in without]
-    assert data_with == data_without
+    GH-343: this used to compare the with-labels fixture against a stub-only
+    one and drop column 0. Both paths land the stub in the label cell, so the
+    data sub-grid matched even if promotion never fired -- the test was
+    tautological and stayed green with the production line reverted.
+
+    The difference that actually tests the claim is the helper on versus off.
+    Promotion must change the LABEL column (that is its whole job) and leave
+    every data cell untouched.
+    """
+    from socr.tables import reconstruct
+
+    promoted = _cells(rowize_from_word_list(_stub_table(with_labels=True))[0][1])
+
+    monkeypatch.setattr(
+        reconstruct, "_promote_stub_lanes", lambda lane_centers, *_a, **_k: lane_centers
+    )
+    unpromoted = _cells(rowize_from_word_list(_stub_table(with_labels=True))[0][1])
+
+    labels_promoted = [row[0] for row in promoted]
+    labels_unpromoted = [row[0] for row in unpromoted]
+    assert labels_promoted != labels_unpromoted, (
+        "promotion changed nothing, so this fixture cannot tell the two apart "
+        f"and the assertion below is vacuous: {labels_promoted}"
+    )
+
+    data_promoted = [row[1:] for row in promoted]
+    data_unpromoted = [row[1:] for row in unpromoted]
+    assert data_promoted == data_unpromoted, (
+        f"promotion moved a DATA cell, not just the label:\n"
+        f"  promoted:   {data_promoted}\n  unpromoted: {data_unpromoted}"
+    )
 
 
 def test_a_table_with_no_intervening_labels_is_untouched():
