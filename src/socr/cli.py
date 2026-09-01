@@ -445,6 +445,21 @@ def process(
     """
     config = build_config(output_dir=output_dir, **kwargs)
 
+    # GH-368: --dry-run was consulted only inside process_batch, so
+    # `socr process <pdf> --dry-run` ran the full real pipeline -- a supposedly
+    # dry test OCR'd a PDF for ~56s. Silently ignoring a flag the user typed
+    # breaks the no-silent-failure rule this repo holds everywhere else.
+    #
+    # Placed before AUTO-engine resolution deliberately: that probes the
+    # installed engines, and a dry run should not touch the machine at all.
+    if config.dry_run:
+        if not config.quiet:
+            size_mb = pdf_path.stat().st_size / (1024 * 1024)
+            console.print("[blue]Would process 1 file:[/blue]")
+            console.print(f"  {pdf_path.name} ({size_mb:.1f} MB)")
+            console.print(f"[blue]Output:[/blue] {output_dir}")
+        return
+
     # Resolve AUTO engine early so we can route to the right pipeline
     if config.primary_engine == EngineType.AUTO:
         from socr.engines.registry import resolve_auto_engine
