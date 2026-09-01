@@ -148,9 +148,12 @@ class TestTheProductionStampNotAStubbedFlag:
         ``native_table_content_defect=`` kwarg in ``_assess_page`` would have
         left it green.
 
-        Only ``extract_structured`` is stubbed, so the markdown under test is
-        fixed; everything downstream of it -- the ``structure_check`` call and
-        the stamp onto the assessment -- is the real code.
+        TWO things are stubbed, and this should not overstate the rest:
+        ``extract_structured`` (so the markdown under test is fixed) and
+        ``_detect_tables`` (so the table branch is entered without needing a PDF
+        whose geometry happens to trip the detector). What lies between them --
+        the ``structure_check`` call and the stamp onto the assessment -- is
+        real code, and that is what this pins.
         """
         from pathlib import Path
         from unittest.mock import patch
