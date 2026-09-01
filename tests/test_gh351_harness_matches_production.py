@@ -22,10 +22,17 @@ import inspect
 from pathlib import Path
 
 
-def _rowize_call_kwargs(source: str, func_name: str) -> set[str]:
-    """Keyword names passed to ``rowize_from_word_list`` inside ``func_name``."""
+def _rowize_call_shape(source: str, func_name: str) -> set[tuple]:
+    """The full call shape of each ``rowize_from_word_list`` in ``func_name``.
+
+    GH-432 review: comparing keyword NAMES alone misses a divergence expressed
+    positionally, or one where the same keyword carries a different expression.
+    The shape therefore records positional arity plus each keyword's unparsed
+    argument source, so ``rotation=0`` and ``rotation=upright_rotation_for(...)``
+    do not compare equal.
+    """
     tree = ast.parse(source)
-    found: set[str] = set()
+    found: set[tuple] = set()
     seen_call = False
 
     for node in ast.walk(tree):
@@ -38,9 +45,21 @@ def _rowize_call_kwargs(source: str, func_name: str) -> set[str]:
                 and inner.func.id == "rowize_from_word_list"
             ):
                 seen_call = True
-                found |= {kw.arg for kw in inner.keywords if kw.arg}
+                keywords = tuple(
+                    sorted((kw.arg or "**", ast.unparse(kw.value)) for kw in inner.keywords)
+                )
+                found.add((len(inner.args), keywords))
     assert seen_call, f"no rowize_from_word_list call found in {func_name}()"
     return found
+
+
+def _rowize_call_kwargs(source: str, func_name: str) -> set[str]:
+    """Just the keyword names, for the explicit rotation/page_rect assertion."""
+    return {
+        name
+        for _arity, keywords in _rowize_call_shape(source, func_name)
+        for name, _value in keywords
+    }
 
 
 def _source_of(module_path: str) -> str:
@@ -52,14 +71,14 @@ def _source_of(module_path: str) -> str:
 
 class TestTheInstrumentMatchesTheThingItMeasures:
     def test_the_harness_passes_the_same_kwargs_as_production(self) -> None:
-        production = _rowize_call_kwargs(_source_of("socr.core.born_digital"), "extract_structured")
-        harness = _rowize_call_kwargs(
+        production = _rowize_call_shape(_source_of("socr.core.born_digital"), "extract_structured")
+        harness = _rowize_call_shape(
             _source_of("socr.benchmark.binding_coverage"), "_discover_native_regions"
         )
 
         assert harness == production, (
-            f"the coverage harness rowizes with {harness or 'no kwargs'} while "
-            f"production uses {production or 'no kwargs'}; the scoreboard would "
+            f"the coverage harness rowizes as {harness} while production uses "
+            f"{production}; the scoreboard would "
             "describe a different native candidate than the one that ships"
         )
 
