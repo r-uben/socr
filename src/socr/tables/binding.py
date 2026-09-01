@@ -1385,8 +1385,20 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
                 UnboundCell(row_path=row_path, col_path=col_path, token=model_value)
             )
 
-    result.column_binding_unverifiable = lane_count == 0 or n_cand_cols != lane_count
+    # GH-352: the reported flag must describe the walk that actually RAN.
+    #
+    # It used the PROJECTED column count while the walk below gates on the
+    # PHYSICAL one. `_project_candidate_data_columns` can make those disagree,
+    # and then the 1:1 walk is skipped while the scoreboard reports columns
+    # verified -- the 1/13 in the GH-332 table. `fully_checked` may still be 0
+    # via `ambiguous_count` today, so it does not stamp SUCCESS yet; GH-326's
+    # gate will read it, and then it would.
+    #
+    # Tied to the physical condition, which is the conservative direction: a
+    # table can now only be called column-verifiable when the walk that would
+    # verify it was actually performed.
     walk_column_binding_unverifiable = lane_count == 0 or physical_n_cand_cols != lane_count
+    result.column_binding_unverifiable = walk_column_binding_unverifiable
     if walk_column_binding_unverifiable:
         # HIGH 1: column geometry itself is unverifiable, but that is not
         # licence to drop every cell signal for the whole table — only to
