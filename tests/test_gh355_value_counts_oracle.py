@@ -61,3 +61,36 @@ class TestLeadingDecimalsAreNotMangled:
         counts = native_text_value_counts("values 0.75 and 12.5 here")
         assert counts["0.75"] == 1
         assert counts["12.5"] == 1
+
+
+class TestTheOracleCoversThePageNotJustTheGrid:
+    """GH-355 hole 3, and the reason it matters most of the three.
+
+    This caller's input is ``native_table_structure_failed`` -- the grid is
+    exactly what is broken. Narrowing the oracle to grid cells meant a correct
+    model value sitting OUTSIDE the ragged native grid read as invented, and the
+    good table was discarded.
+    """
+
+    _RAGGED = "| a | b |\n| --- | --- |\n| 5.0 | 1.0 |\nstray value 9.9 outside the grid\n"
+
+    def test_a_value_outside_the_ragged_grid_is_seen(self) -> None:
+        counts = native_text_value_counts(self._RAGGED)
+        assert counts["9.9"] == 1, (
+            "a page value outside the broken grid never entered the oracle, so a "
+            "model that read it correctly looked like it invented it"
+        )
+
+    def test_grid_values_keep_their_counts(self) -> None:
+        """Control: the union must not cost the grid its own signal."""
+        counts = native_text_value_counts(self._RAGGED)
+        assert counts["5.0"] == 1
+        assert counts["1.0"] == 1
+
+    def test_a_value_inside_the_grid_is_not_double_counted(self) -> None:
+        """The union takes the MAX of the two passes, not the sum: a grid value
+        appears in both, and adding would invent an occurrence -- which is
+        exactly the GH-270 substitution signal this module exists to preserve."""
+        counts = native_text_value_counts(_GRID)
+        assert counts["5.0"] == 3, f"three occurrences became {counts['5.0']}"
+        assert counts["1.0"] == 1
