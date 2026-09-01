@@ -84,13 +84,10 @@ class TestDryRunIsHonouredOnTheSingleFilePath:
         _invoke(pdf, out, dry_run=True)
         assert not out.exists() or not any(out.rglob("*.md"))
 
-    def test_dry_run_says_what_it_would_have_done(self) -> None:
+    def test_dry_run_says_what_it_would_have_done(self, tmp_path: Path) -> None:
         """Honouring the flag silently would be its own small failure -- the
         batch path prints what it would process, and so must this one."""
-        import tempfile
-
-        tmp = Path(tempfile.mkdtemp())
-        pdf = _pdf(tmp / "src")
-        _calls, result = _invoke(pdf, tmp / "out", dry_run=True, quiet=False)
+        pdf = _pdf(tmp_path / "src")
+        _calls, result = _invoke(pdf, tmp_path / "out", dry_run=True, quiet=False)
         assert "Would process" in result.output
         assert pdf.name in result.output
