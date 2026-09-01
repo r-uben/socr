@@ -334,8 +334,11 @@ def test_rowize_from_words_orientation_aware_rotation_matrix():
             # If rotation / page_rect kwargs are not yet supported on rowize_from_word_list
             pytest.xfail(f"rowize_from_word_list does not yet accept rotation={rot}")
 
-        if not regions:
-            pytest.xfail(f"rowize_from_word_list returned no regions for rotation={rot}")
+        # GH-350: no empty-regions escape. A rowizer that returns nothing is
+        # BROKEN, and xfailing on it made breakage indistinguishable from a
+        # feature that is not built yet. The TypeError branch above is the
+        # legitimate not-yet-supported signal; this is not.
+        assert regions, f"rowize_from_word_list returned no regions for rotation={rot}"
 
         rect, md = regions[0]
         grid = parse_grid(md)
@@ -361,6 +364,15 @@ def test_rowize_from_words_orientation_aware_rotation_matrix():
         doc.close()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GH-350: a single rotated marginal note currently destroys rowization of "
+        "the whole table -- 1 region without the note, 0 with it. The old test "
+        "xfailed on empty regions, so this defect read as green. Strict, so it "
+        "fails loudly the day the behaviour starts holding."
+    ),
+)
 def test_mixed_horizontal_page_with_rotated_marginal_note_stays_horizontal():
     """GH-330 Task 5: A single rotated marginal note does not flip page orientation.
 
@@ -379,8 +391,8 @@ def test_mixed_horizontal_page_with_rotated_marginal_note_stays_horizontal():
     except TypeError:
         regions = rowize_from_word_list(words)
 
-    if not regions:
-        pytest.xfail("rowize_from_word_list returned no regions")
+    # GH-350: see above -- empty regions is breakage, not an unbuilt feature.
+    assert regions, "rowize_from_word_list returned no regions"
 
     _rect, md = regions[0]
     grid = parse_grid(md)

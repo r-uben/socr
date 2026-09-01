@@ -58,9 +58,27 @@ def test_stage_fallthrough_stage1_find_tables_lines_prevents_later_stages():
     tables = page.find_tables()
     assert len(tables.tables) >= 1
 
-    # Stage 1 emits find_tables_lines provenance
-    provenance = "find_tables_lines"
-    assert provenance == "find_tables_lines"
+    # GH-350: call the REAL chain and prove the later stages are never reached.
+    # This test used to assign `provenance = "find_tables_lines"` and assert that
+    # literal back -- a tautology that stayed green with the exclusive-stage
+    # chain reverted, which is the thing it exists to guard.
+    from unittest.mock import patch
+
+    from socr.benchmark.binding_coverage import _discover_native_regions
+    from socr.core.born_digital import BornDigitalDetector
+
+    with (
+        patch("socr.tables.reconstruct.reconstruct_table_regions") as later_stage_2,
+        patch("socr.tables.reconstruct.rowize_from_words_chart_aware") as later_stage_3,
+    ):
+        regions = _discover_native_regions(page, BornDigitalDetector())
+
+    assert regions, "stage 1 must emit a region for a ruled table"
+    assert all(r.provenance == "find_tables_lines" for r in regions), [
+        r.provenance for r in regions
+    ]
+    later_stage_2.assert_not_called()
+    later_stage_3.assert_not_called()
 
 
 def test_stage_fallthrough_lane_stacked_provenance():
