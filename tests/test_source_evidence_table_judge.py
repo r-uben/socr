@@ -235,7 +235,18 @@ class TestSourceEvidenceTableJudge:
         )
         judge, inner, events = self._wrap_chain(fitz_page)
         output = _make_output(1, output_text)
-        decision = judge.assess(output, MagicMock())
+        # #245: a headerless fixture makes the header term abstain, which now
+        # routes to the inner judge; pin it GROUNDED so the exact-pass
+        # short-circuit under test is the path taken.
+        from unittest.mock import patch
+
+        from socr.tables.header_attribution import HeaderVerdict
+
+        with patch(
+            "socr.tables.structure_check.table_header_verdicts",
+            return_value=[HeaderVerdict.OK],
+        ):
+            decision = judge.assess(output, MagicMock())
 
         assert decision.accept is True
         inner.assess.assert_not_called()
