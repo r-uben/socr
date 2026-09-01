@@ -61,9 +61,16 @@ the inversion holds.
 Failures are concentrated, not diffuse. ~~Native is clean on 11 rows and catastrophic on
 two.~~ **Corrected (GH-338): the arithmetic does not close.** Native found 12 of 13 and
 was exactly right on 8, leaving 4 found-but-wrong plus 1 never found. "Clean on 11" plus
-"catastrophic on two" sums to 13 and silently counts the unfound row as clean. At most 10
-are clean (8 exact, plus 2 label-lost with nothing invented or missing) and 2 are
-catastrophic, over the 12 found. Qwen is exact on 12 and bad on exactly one, with an invented count equal to its missing
+"catastrophic on two" sums to 13 and silently counts the unfound row as clean.
+
+What the aggregates DO support, over the 12 found: 8 exact, 4 found-but-wrong, and those
+4 carry all 21 invented+missing between them. How many of the 4 are "catastrophic" is
+**not determined** by the aggregate -- it is between 2 and 4, depending on whether the 2
+label-lost rows also carry invented or missing values, which this log does not record.
+Clean is correspondingly at most 10.
+
+Stating an exact 2 here would repeat the very error being corrected: a distributional
+claim the aggregate cannot carry (GH-421 review). Qwen is exact on 12 and bad on exactly one, with an invented count equal to its missing
 count.
 
 That equality was read here as a mis-matched row, and therefore as evidence qwen's true
