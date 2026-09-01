@@ -364,13 +364,46 @@ def test_rowize_from_words_orientation_aware_rotation_matrix():
         doc.close()
 
 
+def test_a_rotated_marginal_note_does_not_erase_the_table():
+    """GH-406, isolated so a PARTIAL fix is still visible.
+
+    GH-407 review: a strict xfail on the full test only trips when EVERY
+    assertion passes, so restoring rowization to non-empty regions -- the fix
+    we actually expect first -- would leave it silently xfailing on the content
+    assertions instead of announcing the improvement.
+
+    This asserts ONLY the measured defect: with the note, 0 regions; without it,
+    1. When that is fixed, this XPASSes loudly and the content test below can be
+    un-xfailed.
+    """
+    from socr.tables.reconstruct import rowize_from_word_list
+
+    doc, page = _create_synthetic_table_page(rotation=0)
+    without = len(rowize_from_word_list(page.get_text("words"), rotation=0, page_rect=page.rect))
+    doc.close()
+
+    doc, page = _create_synthetic_table_page(rotation=0)
+    page.insert_text((550, 200), "Running Header 2026", fontsize=8, rotate=90)
+    with_note = len(rowize_from_word_list(page.get_text("words"), rotation=0, page_rect=page.rect))
+    doc.close()
+
+    assert without >= 1, "fixture must rowize without the note, or it pins nothing"
+    if with_note == 0:
+        pytest.xfail(
+            f"GH-406: the marginal note erases the table ({without} regions "
+            f"without it, {with_note} with it)"
+        )
+    assert with_note >= 1
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "GH-350: a single rotated marginal note currently destroys rowization of "
+        "GH-350/GH-406: a single rotated marginal note destroys rowization of "
         "the whole table -- 1 region without the note, 0 with it. The old test "
         "xfailed on empty regions, so this defect read as green. Strict, so it "
-        "fails loudly the day the behaviour starts holding."
+        "fails loudly once the CONTENT assertions below also hold; the "
+        "regions-exist half is tracked separately above so a partial fix shows."
     ),
 )
 def test_mixed_horizontal_page_with_rotated_marginal_note_stays_horizontal():
