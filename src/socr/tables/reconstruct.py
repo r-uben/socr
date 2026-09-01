@@ -1548,7 +1548,12 @@ def _numeric_lane_centers(num_words: list) -> list[float] | None:
     return [sum(xs) / len(xs) for xs in lanes_x]
 
 
-_OPENERS = {"[": "]", "(": ")", "\u27e8": "\u27e9", "{": "}"}
+# GH-360: square and round brackets only. ``\u27e8\u27e9`` and ``{}`` were advertised
+# here and in the docstring below, but a run only ever extends across words
+# ``_is_numeric_word`` accepts, and that predicate rejects ``\u27e80.00\u27e9`` and ``{1}``
+# outright -- so those two pairs could never merge anything. Listing them
+# claimed a capability the code does not have.
+_OPENERS = {"[": "]", "(": ")"}
 
 
 def _merge_unclosed_bracket_words(row_ws: list) -> list:
@@ -1566,9 +1571,12 @@ def _merge_unclosed_bracket_words(row_ws: list) -> list:
 
     The rule is bracket balance, not punctuation: a word carrying an unclosed
     opener absorbs following words on the same row until the bracket closes. That
-    covers ``[a, b]`` intervals, ``(a, b)`` pairs and angle-bracket p-values alike
-    without special-casing the comma, and it cannot run away -- an opener that
-    never closes on the row is left exactly as it was.
+    covers ``[a, b]`` intervals and ``(a, b)`` pairs without special-casing the
+    comma, and it cannot run away -- an opener that never closes on the row is
+    left exactly as it was. Only those two pairs: a run extends across
+    ``_is_numeric_word`` words only, and that predicate rejects angle-bracket
+    and brace notation, so listing them here would promise a merge that can
+    never happen (GH-360).
     """
     merged: list = []
     i = 0
@@ -1757,6 +1765,89 @@ def _promote_stub_lanes(lane_centers: list[float], seg_ys, rows_by_y) -> list[fl
     return lane_centers[j:]
 
 
+def _lane_words(seg_ys, rows_by_y) -> list:
+    """Numeric words to cluster column lanes on, AFTER bracket merging.
+
+    GH-360. The comma-split repair (``_merge_unclosed_bracket_words``) runs per
+    row when cells are built, but lanes used to be clustered on the RAW words.
+    So an interval printed ``[0.01, 0.35]`` contributed two lanes -- one at the
+    opener's x, one at the closer's -- while the merged token that actually
+    ships sits at the OPENER's x alone. The closer's lane then survives as a
+    column every repaired row leaves blank. ``_clean_grid`` only drops a column
+    that is empty on EVERY row, so a page mixing repaired intervals with a real
+    value near that x ships a phantom column.
+
+    Clustering on the merged words is the fix, but a merged token carries a
+    space (``[0.01, 0.35]``) and ``_NUM_TOKEN_RE`` is anchored, so testing the
+    merged text would silently drop every interval lane instead. The ticket
+    forbids widening the predicate, and widening it is not what is wanted here:
+    a merged token is numeric exactly when the opener it starts with was, and
+    it occupies exactly that opener's lane. So the predicate is applied to the
+    merged word's LEADING component, which for an unmerged word is the whole
+    word and leaves its behaviour identical.
+    """
+    merged_rows = [
+        _merge_unclosed_bracket_words(sorted(rows_by_y[y], key=lambda w: w[0])) for y in seg_ys
+    ]
+    merged_words = [w for row in merged_rows for w in row]
+    lane_ws = [w for w in merged_words if _is_lane_numeric(w)]
+    return lane_ws, merged_words
+
+
+def _is_lane_numeric(w) -> bool:
+    """Numeric test for lane clustering, applied to a possibly-merged word.
+
+    A merged token carries a space (``[0.01, 0.35]``) and ``_NUM_TOKEN_RE`` is
+    anchored, so testing the merged text would drop every interval lane. GH-360
+    forbids widening the predicate, and widening it is not what is wanted: a
+    merged token is numeric exactly when the opener it starts with was, and it
+    occupies exactly that opener's lane. For an unmerged word the leading
+    component is the whole word, so behaviour is unchanged.
+    """
+    head = w[4].split()[0] if w[4].split() else w[4]
+    return bool(_NUM_TOKEN_RE.match(head)) and bool(_NUMERIC_RE.search(head))
+
+
+def _lanes_after_merge(seg_words: list, seg_ys, rows_by_y) -> list[float] | None:
+    """Column lanes clustered on the MERGED words, minus nothing that is occupied.
+
+    GH-360, second half. Clustering on merged words alone removes the phantom
+    lane, but it also removes a lane that a NON-numeric word legitimately sits
+    in -- on the corpus, a lone header ``T`` above an otherwise data-less column
+    whose lane existed only because interval closers landed there. Words outside
+    every lane's snap radius are discarded (the pre-existing drop tracked by
+    #418), so pruning that lane deleted ``T``: a phantom column traded for lost
+    content, which is not a fix.
+
+    So a raw lane is dropped only when NOTHING occupies it after merging. Lanes
+    the merged numeric words describe are kept as the base; any raw lane that no
+    base lane covers is restored if some merged word -- numeric or not -- snaps
+    to it and to no base lane. On the measured corpus this removes the phantom
+    column on both affected pages and loses no token on either.
+    """
+    lane_ws, merged_words = _lane_words(seg_ys, rows_by_y)
+    base = _numeric_lane_centers(lane_ws)
+    if base is None:
+        return None
+    raw = _numeric_lane_centers(
+        [w for w in seg_words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
+    )
+    if not raw:
+        return base
+    snap = _LANE_X_TOL_PT * _LANE_SNAP_MULT
+
+    def _covered(x: float, lanes) -> bool:
+        return any(abs(c - x) <= snap for c in lanes)
+
+    rescued = [
+        c
+        for c in raw
+        if not _covered(c, base)
+        and any(abs(w[0] - c) <= snap and not _covered(w[0], base) for w in merged_words)
+    ]
+    return sorted(base + rescued) if rescued else base
+
+
 def _prepend_header_band(
     grid: list[list[str]],
     x0: float,
@@ -1785,8 +1876,9 @@ def _prepend_header_band(
     unchanged when there is no previous segment, this segment has no numeric
     lanes, or nothing in the previous segment snaps.
     """
-    num_words = [w for w in seg_words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
-    lane_centers = _numeric_lane_centers(num_words)
+    lane_centers = _lanes_after_merge(
+        seg_words, sorted({round(w[1]) for w in seg_words}), rows_by_y
+    )
     if lane_centers is None or not prev_seg_ys:
         return grid, x0, y0, x1, y1
     # GH-331: must match `_rowize_segment`'s promotion exactly, or the header band
@@ -1856,11 +1948,17 @@ def _rowize_segment(
     cell that maps to ``"na"`` in parity checks.
     """
     # Find numeric tokens to detect column lanes
+    # The density floor stays on the RAW words. It asks "is this block dense
+    # enough to be a table", and merging halves the token count of every
+    # interval column -- gating on merged words drops real tables below the
+    # floor (it un-detects the GH-331 fixture outright). Only the CLUSTERING
+    # moves to the merged words, which is the question GH-360 is about: where
+    # do the tokens that actually ship sit.
     num_words = [w for w in seg_words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
     if len(num_words) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
         return None
 
-    lane_centers = _numeric_lane_centers(num_words)
+    lane_centers = _lanes_after_merge(seg_words, seg_ys, rows_by_y)
     if lane_centers is None:
         return None
     lane_centers = _promote_stub_lanes(lane_centers, seg_ys, rows_by_y)
