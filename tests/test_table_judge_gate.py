@@ -283,24 +283,36 @@ class TestWitnessFailOpen:
         assert len(events) == 1
         # No rung ever ran for a witness that was never LOCATED -- an empty
         # rung trail, not an absent one (GH-353 rung-trail follow-up).
-        assert events[0].data == {"table_id": "p1-t0", "rung_trail": []}
+        assert events[0].data == {
+            "table_id": "p1-t0",
+            "rung_trail": [],
+            "witness_scope": "none",
+        }
 
-    def test_ambiguous_witness_is_unverified(self, tmp_path: Path) -> None:
-        """1 box, 2 emitted blocks -> count mismatch -> AMBIGUOUS -> UNVERIFIED."""
+    def test_count_mismatch_ambiguous_is_judged_not_abstained(self, tmp_path: Path) -> None:
+        """1 box, 2 emitted blocks -> count mismatch -> AMBIGUOUS with a page
+        crop -> the judge looks (GH-373). A high PASS accepts; this is no
+        longer the UNVERIFIED abstention."""
         pipeline = _make_pipeline()
         pdf_path = _ruled_pdf(tmp_path)
         state = _make_state(pdf_path)
         ps = state.pages[1]
         bo = _bo(_TWO_TABLE_MD)
 
-        rung = _accept_rung()
+        rung = _QueueRung(
+            [
+                RungResult(rung="fake1", ok=True, verdict=_pass_verdict("high")),
+                RungResult(rung="fake1", ok=True, verdict=_pass_verdict("high")),
+            ]
+        )
         pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
-        assert rung.calls == []
-        events = _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
-        assert len(events) == 2  # both mismatched blocks demote independently
+        assert len(rung.calls) == 2
+        assert ps.table_ladder_disposition is None
+        events = _events_of_kind(state, TABLE_LADDER_ACCEPTED_KIND)
+        assert len(events) == 2
         assert {e.data.get("table_id") for e in events} == {"p1-t0", "p1-t1"}
+        assert {e.data.get("witness_scope") for e in events} == {"page"}
 
     def test_witness_preparation_exception_is_unverified_not_raised(self, tmp_path: Path) -> None:
         pipeline = _make_pipeline()
@@ -342,7 +354,11 @@ class TestWitnessFailOpen:
         events = _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
         assert len(events) == 1
         # rungs=[] -- fail-open before any rung is ever called.
-        assert events[0].data == {"table_id": "p1-t0", "rung_trail": []}
+        assert events[0].data == {
+            "table_id": "p1-t0",
+            "rung_trail": [],
+            "witness_scope": "located",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +395,7 @@ class TestRungFailOpen:
             "rung_trail": [
                 {"rung": "fake1", "ok": False, "executing": pipeline.config.table_judge_rung1_model}
             ],
+            "witness_scope": "located",
         }
 
     def test_run_table_ladder_exception_is_unverified_not_raised(self, tmp_path: Path) -> None:
@@ -423,6 +440,7 @@ class TestLadderOutcomes:
             "rung_trail": [
                 {"rung": "fake1", "ok": True, "executing": pipeline.config.table_judge_rung1_model}
             ],
+            "witness_scope": "located",
         }
 
     def test_rejected_sets_disposition_and_emits_rejected_event(self, tmp_path: Path) -> None:
@@ -443,6 +461,7 @@ class TestLadderOutcomes:
             "rung_trail": [
                 {"rung": "fake1", "ok": True, "executing": pipeline.config.table_judge_rung1_model}
             ],
+            "witness_scope": "located",
         }
 
     def test_reduce_page_ladder_rejected_wins_over_unverified(self, tmp_path: Path) -> None:
@@ -463,7 +482,7 @@ class TestLadderOutcomes:
         ps = state.pages[1]
         bo = _bo(_TABLE_MD)
 
-        from socr.tables.witness import TableWitness, WitnessStatus
+        from socr.tables.witness import TableWitness, WitnessScope, WitnessStatus
 
         crop_path = tmp_path / "crop.png"
         crop_path.write_bytes(b"fake-png")
@@ -475,6 +494,7 @@ class TestLadderOutcomes:
                 markdown=_TABLE_MD,
                 status=WitnessStatus.LOCATED,
                 crop_path=crop_path,
+                scope=WitnessScope.LOCATED,
             ),
             TableWitness(
                 table_id="p1-t1",
@@ -482,6 +502,7 @@ class TestLadderOutcomes:
                 block_index=1,
                 markdown=_TABLE_MD,
                 status=WitnessStatus.MISSING,
+                scope=WitnessScope.NONE,
             ),
         ]
 

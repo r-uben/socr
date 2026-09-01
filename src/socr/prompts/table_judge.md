@@ -2,7 +2,7 @@ You are a table-extraction quality judge. Compare the emitted markdown table bel
 against the table shown in the attached image crop. Judge ONLY the table region in
 the crop — ignore surrounding page content, caption text style, and anything you
 cannot see in the image.
-
+{{SCOPE_NOTE}}
 Judge independently from the crop image and the emitted markdown. You are not given
 any prior verdict or findings.
 

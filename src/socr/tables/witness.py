@@ -62,6 +62,20 @@ Three outcomes, in order of how much evidence is required:
   — a demonstrated wrong pairing must never silently self-correct into
   another guess).
 
+## Degraded scope (GH-373)
+
+Count-mismatch ``AMBIGUOUS`` (``_classify`` only) is a mapping failure, not
+an absence of pixels. Those witnesses get a full-page crop
+(``WitnessScope.PAGE``) so the judge can look, with a policy-file scope
+note telling it to match the emitted markdown. The union of located boxes
+is NOT used: a spanning header can sit outside every located box, which is
+the HEADER_MANGLED catch the first live run hid by abstaining.
+
+Corroboration-contradicted ``AMBIGUOUS`` does **not** get a page crop.
+Counts matched and the index pairing is known-wrong; showing any crop
+(swapped, merged, or the page) would be another guess. ``MISSING`` stays
+¬S1: no geometric evidence a table region exists.
+
 Crops are rendered into temp files with caller-owned lifetime scoped to a
 context manager (mirrors ``TableCropExtractor._render_crop``'s caller-owned
 cleanup, but guarantees the unlink here so a gate that raises mid-ladder never
@@ -98,8 +112,24 @@ class WitnessStatus(str, Enum):
     MISSING = "missing"
     #: Block count and box count on the page disagree (locator over-merge,
     #: an extra spurious box, ...) — no box can be confidently assigned to
-    #: any one block. No crop is rendered.
+    #: any one block. Count-mismatch AMBIGUOUS still renders a full-page
+    #: crop (GH-373); corroboration-contradicted AMBIGUOUS does not.
     AMBIGUOUS = "ambiguous"
+
+
+class WitnessScope(str, Enum):
+    """What image, if any, the judge is shown for this witness.
+
+    Distinct from ``WitnessStatus``: both AMBIGUOUS causes share a status,
+    but only count mismatch ships a page image.
+    """
+
+    #: 1:1 box crop. Status is LOCATED.
+    LOCATED = "located"
+    #: Full-page image. Status is count-mismatch AMBIGUOUS.
+    PAGE = "page"
+    #: No image. MISSING, corroboration-contradicted AMBIGUOUS, or render failure.
+    NONE = "none"
 
 
 @dataclass(frozen=True)
@@ -112,10 +142,12 @@ class TableWitness:
     markdown: str  # the emitted block's own markdown (header + separator + rows)
     status: WitnessStatus
     box: TableBox | None = None  # set only when status == LOCATED
-    crop_path: Path | None = None  # set only when status == LOCATED; valid
-    # only for the lifetime of the ``prepare_table_witnesses`` context.
+    crop_path: Path | None = None  # set when a crop was rendered (LOCATED or
+    # count-mismatch AMBIGUOUS); valid only for the lifetime of the
+    # ``prepare_table_witnesses`` context.
     boxes_found_on_page: int = 0  # diagnostic: len(locate_tables(page))
     note: str = ""
+    scope: WitnessScope = WitnessScope.NONE
 
 
 def _block_markdown(markdown: str, start: int, end: int) -> str:
@@ -166,6 +198,14 @@ def prepare_table_witnesses(
                 contradicted = _corroboration_contradicted_indices(
                     pdf_path, page_num, boxes, block_mds
                 )
+            # Count-mismatch AMBIGUOUS (from _classify, not corroboration)
+            # gets one full-page crop shared by every block on the page.
+            page_crop: Path | None = None
+            if status is WitnessStatus.AMBIGUOUS:
+                page_crop = _render_page_safe(pdf_path, page_num, crop_dpi)
+                if page_crop is not None:
+                    crop_paths.append(page_crop)
+
             for idx, block_md in enumerate(block_mds):
                 table_id = f"p{page_num}-t{idx}"
                 if status is WitnessStatus.LOCATED and idx in contradicted:
@@ -178,6 +218,7 @@ def prepare_table_witnesses(
                             status=WitnessStatus.AMBIGUOUS,
                             boxes_found_on_page=len(boxes),
                             note="pairing corroboration contradicted the index pairing (swap evidence)",
+                            scope=WitnessScope.NONE,
                         )
                     )
                 elif status is WitnessStatus.LOCATED:
@@ -193,6 +234,7 @@ def prepare_table_witnesses(
                                 status=WitnessStatus.MISSING,
                                 boxes_found_on_page=len(boxes),
                                 note="crop render failed",
+                                scope=WitnessScope.NONE,
                             )
                         )
                         continue
@@ -207,6 +249,7 @@ def prepare_table_witnesses(
                             box=box,
                             crop_path=crop_path,
                             boxes_found_on_page=len(boxes),
+                            scope=WitnessScope.LOCATED,
                         )
                     )
                 else:
@@ -215,6 +258,11 @@ def prepare_table_witnesses(
                         if status is WitnessStatus.MISSING
                         else f"{len(blocks)} table block(s) vs {len(boxes)} located box(es)"
                     )
+                    crop_path = None
+                    scope = WitnessScope.NONE
+                    if status is WitnessStatus.AMBIGUOUS and page_crop is not None:
+                        crop_path = page_crop
+                        scope = WitnessScope.PAGE
                     witnesses.append(
                         TableWitness(
                             table_id=table_id,
@@ -222,8 +270,10 @@ def prepare_table_witnesses(
                             block_index=idx,
                             markdown=block_md,
                             status=status,
+                            crop_path=crop_path,
                             boxes_found_on_page=len(boxes),
                             note=note,
+                            scope=scope,
                         )
                     )
         yield witnesses
@@ -300,6 +350,32 @@ def _render_crop_safe(pdf_path: Path, page_num: int, box: TableBox, crop_dpi: in
         path.unlink(missing_ok=True)
         return None
     return path
+
+
+def _render_page_safe(pdf_path: Path, page_num: int, crop_dpi: int) -> Path | None:
+    """Render the full page to a temp PNG. Never raises; ``None`` on failure.
+
+    Reuses ``_render_crop_safe`` with a box equal to the page rect so padding
+    clips to the page and rotation/DPI stay identical to a located crop.
+    """
+    try:
+        doc = open_pdf(pdf_path)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("table witness: cannot open %s for page crop (%s)", pdf_path, exc)
+        return None
+    try:
+        page = doc[page_num - 1]
+        rect = page.rect
+        box = TableBox(
+            bbox=(float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)),
+            source="page",
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("table witness: page rect failed p%d (%s)", page_num, exc)
+        return None
+    finally:
+        doc.close()
+    return _render_crop_safe(pdf_path, page_num, box, crop_dpi)
 
 
 def _corroboration_contradicted_indices(

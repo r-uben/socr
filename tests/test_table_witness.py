@@ -6,7 +6,7 @@ import fitz
 import pytest
 
 from socr.tables.locate import locate_tables
-from socr.tables.witness import WitnessStatus, prepare_table_witnesses
+from socr.tables.witness import WitnessScope, WitnessStatus, prepare_table_witnesses
 
 _MD_ONE_TABLE = "| a | b |\n| --- | --- |\n| 1 | 2 |\n"
 _MD_TWO_TABLES = (
@@ -92,6 +92,7 @@ def test_located_single_block_single_box(tmp_path):
         assert len(witnesses) == 1
         w = witnesses[0]
         assert w.status is WitnessStatus.LOCATED
+        assert w.scope is WitnessScope.LOCATED
         assert w.box is not None
         assert w.crop_path is not None
         assert w.crop_path.exists()
@@ -207,6 +208,7 @@ def test_corroboration_contradicted_swapped_content_demotes_to_ambiguous(tmp_pat
         assert len(witnesses) == 2
         for w in witnesses:
             assert w.status is WitnessStatus.AMBIGUOUS
+            assert w.scope is WitnessScope.NONE
             assert w.box is None
             assert w.crop_path is None
             assert "corroboration" in w.note
@@ -251,19 +253,35 @@ def test_ambiguous_two_blocks_one_merged_box(tmp_path):
     # Sanity: the locator really does over-merge these into one band.
     doc = fitz.open(str(pdf_path))
     boxes = locate_tables(doc[0])
+    doc_rect = doc[0].rect
     doc.close()
     assert len(boxes) == 1
 
     with prepare_table_witnesses(pdf_path, page_num=1, markdown=_MD_TWO_TABLES) as witnesses:
         assert len(witnesses) == 2
+        crop_paths = {w.crop_path for w in witnesses}
+        assert len(crop_paths) == 1
+        shared = witnesses[0].crop_path
+        assert shared is not None and shared.exists()
         for w in witnesses:
             assert w.status is WitnessStatus.AMBIGUOUS
+            assert w.scope is WitnessScope.PAGE
             assert w.box is None
-            assert w.crop_path is None
+            assert w.crop_path == shared
             assert w.boxes_found_on_page == 1
             assert w.note
         assert witnesses[0].table_id == "p1-t0"
         assert witnesses[1].table_id == "p1-t1"
+        from PIL import Image
+
+        from socr.tables.extract import DEFAULT_CROP_DPI
+
+        img = Image.open(shared)
+        expected_w = int(doc_rect.width * DEFAULT_CROP_DPI / 72)
+        expected_h = int(doc_rect.height * DEFAULT_CROP_DPI / 72)
+        assert abs(img.width - expected_w) <= 1
+        assert abs(img.height - expected_h) <= 1
+    assert not shared.exists()
 
 
 def test_missing_witness_no_located_box(tmp_path):
@@ -272,6 +290,7 @@ def test_missing_witness_no_located_box(tmp_path):
         assert len(witnesses) == 1
         w = witnesses[0]
         assert w.status is WitnessStatus.MISSING
+        assert w.scope is WitnessScope.NONE
         assert w.box is None
         assert w.crop_path is None
         assert w.boxes_found_on_page == 0
