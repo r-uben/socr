@@ -2394,6 +2394,7 @@ class UnifiedPipeline:
                 "native_table_structure_failed",
                 "native_table_structure_defective",  # GH-151 TICKET-B1
                 "native_table_emission_defect",  # GH-226 exact provenance
+                "native_table_content_defect",  # GH-303, added by GH-346
                 "native_table_header_unattributed",  # GH-200
                 "native_table_unverifiable",
                 "scanned_table_evidence_failed",
@@ -2403,7 +2404,18 @@ class UnifiedPipeline:
         if not cleared:
             return
         for name in cleared:
-            setattr(ps, name, "" if name == "native_table_emission_defect" else False)
+            # GH-346: the two defect terms are strings and clear to ""; the rest
+            # are booleans. native_table_content_defect was added as a sibling
+            # of the emission term in GH-303 but never added here, so a
+            # recovered page kept empty-table provenance the clear path claimed
+            # to have released.
+            setattr(
+                ps,
+                name,
+                ""
+                if name in ("native_table_emission_defect", "native_table_content_defect")
+                else False,
+            )
         state.events.append(
             AuditEvent(
                 page_num=page_num,
@@ -5044,6 +5056,12 @@ class UnifiedPipeline:
             "native_table_emission_defect": (
                 str(getattr(ps, "native_table_emission_defect", "")) if ps else ""
             ),
+            # GH-346: persisted next to the emission term. Without it a resume
+            # dropped the content provenance entirely, so a page reloaded from
+            # its sidecar disagreed with the page that wrote it.
+            "native_table_content_defect": (
+                str(getattr(ps, "native_table_content_defect", "")) if ps else ""
+            ),
             # GH-200: header-attribution HARD verdict found at extraction time.
             "native_table_header_unattributed": (
                 bool(getattr(ps, "native_table_header_unattributed", False)) if ps else False
@@ -5520,6 +5538,9 @@ class UnifiedPipeline:
             ps.native_table_emission_defect = str(
                 meta.get("native_table_emission_defect", "") or ""
             )
+            # GH-346: restored alongside emission, so the resumed PageState
+            # carries the same content provenance the sidecar recorded.
+            ps.native_table_content_defect = str(meta.get("native_table_content_defect", "") or "")
             # GH-200: restore the header-attribution defect flag so it
             # survives resume instead of evaporating on a resumed run.
             ps.native_table_header_unattributed = bool(
