@@ -457,12 +457,21 @@ def process(
             size_mb = pdf_path.stat().st_size / (1024 * 1024)
             console.print("[blue]Would process 1 file:[/blue]")
             console.print(f"  {pdf_path.name} ({size_mb:.1f} MB)")
-            # GH-401 review: report the RESOLVED destination. `output_dir` is
-            # None when -o is omitted, and printing that would tell the user
-            # "Output: None" while a real run writes to the configured default
-            # -- a dry run that misdescribes the run it is previewing is its own
-            # small failure.
-            console.print(f"[blue]Output:[/blue] {getattr(config, 'output_dir', output_dir)}")
+            # GH-401 review, second pass. Report the destination the REAL run
+            # would use, by calling the pipeline's own resolver rather than
+            # re-deriving it here. `-o` is verbatim; a user-set non-sentinel
+            # config.output_dir is verbatim; otherwise it is <input-parent>/ocr/,
+            # NOT the legacy `output` sentinel.
+            #
+            # My first pass swapped "None" for that sentinel and was still
+            # wrong: a dry run that misdescribes the run it previews is the same
+            # failure as the flag being inert, one step smaller.
+            from socr.pipeline.orchestrator import UnifiedPipeline as _Pipe
+
+            resolved_out = _Pipe(config)._resolve_output_root(pdf_path.parent, output_dir)
+            # soft_wrap: a long temp path wrapped mid-string otherwise, which
+            # breaks anything reading the destination back out of the output.
+            console.print(f"[blue]Output:[/blue] {resolved_out}", soft_wrap=True)
         return
 
     # Resolve AUTO engine early so we can route to the right pipeline

@@ -105,5 +105,17 @@ class TestDryRunIsHonouredOnTheSingleFilePath:
         pdf = _pdf(tmp_path / "src")
         result = CliRunner().invoke(cli, ["process", str(pdf), "--dry-run", "--primary", "qwen"])
 
+        # Assert against the REAL destination, not merely the absence of
+        # "None". The first version of this test only checked that "None" was
+        # gone, so it passed while the message still named the wrong directory.
+        from socr.cli import build_config
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        expected = UnifiedPipeline(build_config(output_dir=None))._resolve_output_root(
+            pdf.parent, None
+        )
+        assert f"Output: {expected}" in result.output, (
+            f"preview named the wrong destination; expected {expected}"
+        )
         assert "Output: None" not in result.output
         assert "Would process" in result.output
