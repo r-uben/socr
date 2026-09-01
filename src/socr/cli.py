@@ -457,7 +457,12 @@ def process(
             size_mb = pdf_path.stat().st_size / (1024 * 1024)
             console.print("[blue]Would process 1 file:[/blue]")
             console.print(f"  {pdf_path.name} ({size_mb:.1f} MB)")
-            console.print(f"[blue]Output:[/blue] {output_dir}")
+            # GH-401 review: report the RESOLVED destination. `output_dir` is
+            # None when -o is omitted, and printing that would tell the user
+            # "Output: None" while a real run writes to the configured default
+            # -- a dry run that misdescribes the run it is previewing is its own
+            # small failure.
+            console.print(f"[blue]Output:[/blue] {getattr(config, 'output_dir', output_dir)}")
         return
 
     # Resolve AUTO engine early so we can route to the right pipeline

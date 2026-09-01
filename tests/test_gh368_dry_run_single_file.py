@@ -91,3 +91,19 @@ class TestDryRunIsHonouredOnTheSingleFilePath:
         _calls, result = _invoke(pdf, tmp_path / "out", dry_run=True, quiet=False)
         assert "Would process" in result.output
         assert pdf.name in result.output
+
+    def test_dry_run_without_o_names_the_real_destination(self, tmp_path: Path) -> None:
+        """GH-401 review: omitting -o must not print "Output: None".
+
+        A real run writes to the configured default, so a preview that names
+        None describes a run that never happens.
+        """
+        from click.testing import CliRunner
+
+        from socr.cli import cli
+
+        pdf = _pdf(tmp_path / "src")
+        result = CliRunner().invoke(cli, ["process", str(pdf), "--dry-run", "--primary", "qwen"])
+
+        assert "Output: None" not in result.output
+        assert "Would process" in result.output
