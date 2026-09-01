@@ -393,7 +393,10 @@ def test_a_rotated_marginal_note_does_not_erase_the_table():
             f"GH-406: the marginal note erases the table ({without} regions "
             f"without it, {with_note} with it)"
         )
-    assert with_note >= 1
+
+    # Reaching here IS the pass: with_note is a len(), so anything but 0 means
+    # the note no longer erases the table. A trailing `assert with_note >= 1`
+    # would be unreachable (GH-407 review) and would read as the real check.
 
 
 @pytest.mark.xfail(
