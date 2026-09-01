@@ -172,3 +172,128 @@ def test_the_bucket_excludes_failed_pages_not_just_the_shredded_ending() -> None
         "the bucket no longer excludes failed_pages, so a marker page can be "
         f"counted twice again: {ast.unparse(bucket)}"
     )
+
+
+def _run_pipeline(tmp_path, *, shredded: bool):
+    """A hermetic end-to-end run over one born-digital page that fails OCR.
+
+    `_available_engines_for_agentic` is patched (CI has no provider) and
+    `route_page` returns a failing attempt, so the page reaches the native
+    fallback decision for real. Only `native_rotated_text_shredded` differs
+    between the two runs.
+    """
+    from unittest.mock import patch
+
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline.agentic import PageDecision, ProviderAttempt
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text(
+        (72, 72), "Table 1. Regressions of one-year excess returns on forward rates."
+    )
+    doc.save(str(pdf))
+    doc.close()
+
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            agentic=True,
+            judge_backend="heuristic",
+            enabled_engines=[EngineType.QWEN],
+            quiet=True,
+            save_figures=False,
+            write_manifest=False,
+        )
+    )
+
+    def _failing_route(page_num, ladder, run_provider, judge, **kwargs):
+        out = PageOutput(
+            page_num=page_num,
+            text="model reading that never passed",
+            status=PageStatus.ERROR,
+            engine="qwen",
+            audit_passed=False,
+            failure_mode=FailureMode.AUDIT_FAILED,
+        )
+        prof = ladder[0]
+        att = ProviderAttempt(
+            engine=prof.engine,
+            output=out,
+            cost_usd=0.0,
+            accepted=False,
+            reason="never passed",
+            provider_id=prof.id,
+            model=prof.model,
+            backend=prof.backend,
+        )
+        return PageDecision(page_num=page_num, final_output=out, attempts=[att])
+
+    # Set the page flags just before the bucket is computed, so the run reaches
+    # the real decision, and keep the state so its events can be read after.
+    # Reading `state.events` rather than a written audit_log.json keeps this
+    # independent of whether the run chose to persist one.
+    original_assemble = UnifiedPipeline._phase_assemble
+    seen: dict = {}
+
+    def _assemble(self, state, *args, **kwargs):
+        # The ticket's exact page shape, set on the real state just before the
+        # bucket is built: born-digital, native text present, an OCR attempt
+        # that never passed. The heuristic judge otherwise re-stamps the
+        # attempt as passing, which excludes the page for an unrelated reason.
+        for ps in state.pages.values():
+            ps.is_born_digital = True
+            ps.native_text = ps.native_text or "native body"
+            ps.needs_ocr_enhancement = True
+            failed = PageOutput(
+                page_num=ps.page_num,
+                text="ocr attempt that never passed",
+                status=PageStatus.ERROR,
+                engine="qwen",
+                audit_passed=False,
+                failure_mode=FailureMode.AUDIT_FAILED,
+            )
+            ps.attempts = [failed]
+            ps.best_output = failed
+            if shredded:
+                ps.native_rotated_text_shredded = True
+        seen["state"] = state
+        return original_assemble(self, state, *args, **kwargs)
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch("socr.pipeline.orchestrator.route_page", side_effect=_failing_route),
+        patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
+        patch.object(UnifiedPipeline, "_phase_assemble", _assemble),
+    ):
+        pipeline.process(pdf, tmp_path / "out")
+
+    assert "state" in seen, "_phase_assemble never ran, so the bucket was never built"
+    return [getattr(e, "kind", "") for e in seen["state"].events]
+
+
+def test_the_real_bucket_drops_a_shredded_page(tmp_path) -> None:
+    """The production list, at runtime -- not its AST and not a replica.
+
+    #451 review: the AST pin and the hand-rolled `_includes` replica never run
+    the actual bucket, so an edit that kept the token but broke the exclusion
+    would pass. This asserts the emitted audit events, which is what the bucket
+    produces and what the double-count was visible in.
+    """
+    shredded = _run_pipeline(tmp_path / "s", shredded=True)
+    assert "native_fallback" not in shredded, (
+        f"a page shipping a failure marker was counted as a native fallback: {shredded}"
+    )
+
+
+def test_the_real_bucket_keeps_an_unshredded_page(tmp_path) -> None:
+    """Control: the exclusion must not empty the bucket at runtime either.
+
+    Without it the two runs would be indistinguishable, and the test above
+    would pass on a pipeline that had stopped emitting the event entirely.
+    """
+    plain = _run_pipeline(tmp_path / "p", shredded=False)
+    assert "native_fallback" in plain, f"a genuine native fallback stopped being reported: {plain}"
