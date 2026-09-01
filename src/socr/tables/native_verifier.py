@@ -62,7 +62,9 @@ import logging
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
+from socr.core.table_grid import rows_establish_grid
 from socr.tables.reconstruct import (
     _LANE_X_TOL_PT,
     _NUM_TOKEN_RE,
@@ -254,6 +256,17 @@ def _rows_by_y(page) -> dict[float, list[tuple[float, str]]]:
     except Exception:
         return {}
     return _rows_by_y_from_words(words)
+
+
+class _GridRow(NamedTuple):
+    """Adapter so the verifier's numeric rows satisfy ``rows_establish_grid``.
+
+    The shared predicate takes anything with ``.values``; the verifier carries
+    its rows as ``[(x, token), ...]`` per y-line. Wrapping rather than
+    reimplementing keeps GH-249 on the same predicate as GH-96 and GH-113.
+    """
+
+    values: tuple[str, ...]
 
 
 def _rows_by_y_from_words(words: list) -> dict[float, list[tuple[float, str]]]:
@@ -1035,6 +1048,42 @@ def _verify_from_words(
     result.output_col_count = output_col_count
 
     if lane_count == 0:
+        return result
+
+    # ------------------------------------------------------------------
+    # GH-249: the native layer must look like a GRID before it can be used as
+    # the yardstick at all.
+    #
+    # On a chart page the numeric "rows" recovered here are axis tick labels —
+    # one number per y-line — and the row-count check then compares an output
+    # against a table that does not exist. The failure is inverted: the
+    # transcript that correctly reports "there is no table on this page" sits
+    # furthest from the tick-label count, so it is the one flagged for dropped
+    # rows, while a dump of every tick label matches the phantom exactly. On the
+    # FOMC SEP figure pages this fired across the whole minutes series.
+    #
+    # Same predicate as the GH-96 exactness metric and the GH-113 escalation
+    # trigger (``core.table_grid.rows_establish_grid``): a grid needs two value
+    # columns and two rows sharing that width. Until now the verifier was the
+    # one consumer of the native layer that did not ask — which is why a page
+    # could be declared ``table_not_scorable`` by the orchestrator and still be
+    # graded against that same layer here.
+    #
+    # Abstaining means returning the untouched bypass result, exactly as the
+    # no-words and no-lanes cases above do: no warn, no hard-fail, no state
+    # change. A page whose native layer is not a grid is not evidence about the
+    # output either way.
+    native_grid_rows = [
+        _GridRow(tuple(tok for _x, tok in row_tokens))
+        for row_tokens in _rows_by_y_from_words(words).values()
+    ]
+    if not rows_establish_grid(native_grid_rows):
+        logger.debug(
+            "native_verifier [%s]: native layer parsed %d numeric row(s) that do "
+            "not form a grid; abstaining (no usable ground truth)",
+            scope_label,
+            len(native_grid_rows),
+        )
         return result
 
     # ------------------------------------------------------------------

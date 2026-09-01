@@ -848,9 +848,16 @@ def test_a_certain_fail_leaves_no_disposition_behind(tmp_path: Path) -> None:
     bad dispositions has nothing to match on.
     """
     gap = 60.0
+    # Two native rows: the GH-249 grid gate needs two rows at the modal width
+    # before the native layer can serve as ground truth at all.
     decision, output = _assess(
-        _fitz_page([[(100.0, "0.1"), (100.0 + gap, "0.2"), (100.0 + 2 * gap, "0.3")]]),
-        "| label | vals |\n|---|---|\n| row1 | 0.1 |\n",
+        _fitz_page(
+            [
+                [(100.0, "0.1"), (100.0 + gap, "0.2"), (100.0 + 2 * gap, "0.3")],
+                [(100.0, "0.4"), (100.0 + gap, "0.5"), (100.0 + 2 * gap, "0.6")],
+            ]
+        ),
+        "| label | vals |\n|---|---|\n| row1 | 0.1 |\n| row2 | 0.4 |\n",
         inner_accepts=True,
     )
     assert decision.accept is False, decision

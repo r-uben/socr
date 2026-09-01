@@ -221,17 +221,24 @@ class TestSourceEvidenceTableJudge:
 
     def test_born_digital_matching_table_passes(self) -> None:
         """Born-digital native table still passes through native verifier (no regression)."""
+        # Two rows: the GH-249 grid gate needs two rows at the modal width before
+        # the native layer can serve as ground truth at all.
         native_rows = [
             [
                 (200.0, "0.1"),
                 (200.0 + _PHYS_COL_GAP, "0.2"),
                 (200.0 + 2 * _PHYS_COL_GAP, "0.3"),
             ],
+            [
+                (200.0, "0.4"),
+                (200.0 + _PHYS_COL_GAP, "0.5"),
+                (200.0 + 2 * _PHYS_COL_GAP, "0.6"),
+            ],
         ]
         fitz_page = _make_fitz_page_with_words(native_rows)
         output_text = _md_table(
             ["label", "c1", "c2", "c3"],
-            [["row1", "0.1", "0.2", "0.3"]],
+            [["row1", "0.1", "0.2", "0.3"], ["row2", "0.4", "0.5", "0.6"]],
         )
         judge, inner, events = self._wrap_chain(fitz_page)
         output = _make_output(1, output_text)
