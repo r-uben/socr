@@ -33,9 +33,7 @@ POPULATED_HEADER_NARROW_DELIM = "| A | B | C |\n| --- | --- |\n|  |  |\n"
         ("populated header", POPULATED_HEADER_NARROW_DELIM),
     ],
 )
-def test_an_empty_table_is_caught_despite_a_narrower_delimiter(
-    name: str, markdown: str
-) -> None:
+def test_an_empty_table_is_caught_despite_a_narrower_delimiter(name: str, markdown: str) -> None:
     assert table_content_defect(markdown) == TABLE_CONTENT_EMPTY, (
         f"{name}: an empty table escaped the content term on a width mismatch"
     )
