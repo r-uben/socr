@@ -175,18 +175,25 @@ def test_the_bucket_excludes_failed_pages_not_just_the_shredded_ending() -> None
 
 
 def _run_pipeline(tmp_path, *, shredded: bool):
-    """A hermetic end-to-end run over one born-digital page that fails OCR.
+    """A hermetic end-to-end run over one born-digital page.
 
-    `_available_engines_for_agentic` is patched (CI has no provider) and
-    `route_page` returns a failing attempt, so the page reaches the native
-    fallback decision for real. Only `native_rotated_text_shredded` differs
-    between the two runs.
+    GH-453: this used to patch `route_page` with a failing attempt and claim
+    that was how the page reached the native-fallback decision. It was not.
+    The page is born-digital with native text, so during `_phase_agentic`
+    `_is_agentic_trusted_native` takes `_agentic_native_page` and bypasses the
+    ladder entirely -- `route_page` was never called. Measured, then removed
+    rather than left as a comment describing a path the test does not take.
+
+    What actually drives the decision is the page shape stamped just before the
+    bucket is built, which is the same shape the ticket's own reproduction uses.
+    `_available_engines_for_agentic` is patched because CI has no provider.
+
+    Only `native_rotated_text_shredded` differs between the two runs.
     """
     from unittest.mock import patch
 
     from socr.core.config import EngineType, PipelineConfig
     from socr.core.providers import PROFILE_QWEN_LOCAL
-    from socr.pipeline.agentic import PageDecision, ProviderAttempt
     from socr.pipeline.orchestrator import UnifiedPipeline
 
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -209,28 +216,6 @@ def _run_pipeline(tmp_path, *, shredded: bool):
             write_manifest=False,
         )
     )
-
-    def _failing_route(page_num, ladder, run_provider, judge, **kwargs):
-        out = PageOutput(
-            page_num=page_num,
-            text="model reading that never passed",
-            status=PageStatus.ERROR,
-            engine="qwen",
-            audit_passed=False,
-            failure_mode=FailureMode.AUDIT_FAILED,
-        )
-        prof = ladder[0]
-        att = ProviderAttempt(
-            engine=prof.engine,
-            output=out,
-            cost_usd=0.0,
-            accepted=False,
-            reason="never passed",
-            provider_id=prof.id,
-            model=prof.model,
-            backend=prof.backend,
-        )
-        return PageDecision(page_num=page_num, final_output=out, attempts=[att])
 
     # Set the page flags just before the bucket is computed, so the run reaches
     # the real decision, and keep the state so its events can be read after.
@@ -265,7 +250,6 @@ def _run_pipeline(tmp_path, *, shredded: bool):
 
     with (
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
-        patch("socr.pipeline.orchestrator.route_page", side_effect=_failing_route),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
         patch.object(UnifiedPipeline, "_phase_assemble", _assemble),
     ):
