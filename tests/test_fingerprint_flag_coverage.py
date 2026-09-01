@@ -156,6 +156,32 @@ def test_table_judge_rung1_host_invalidates() -> None:
     ) != _fingerprint(table_judge_ladder=True, table_judge_rung1_host="http://beta:11434")
 
 
+def test_table_judge_rung1_host_records_the_resolved_host(monkeypatch) -> None:
+    """GH-402 review: the RESOLVED host, not the config field.
+
+    ``table_judge_rung1_host`` defaults to None and ``resolve_ollama_host`` then
+    falls back to OLLAMA_HOST and finally localhost. Recording the raw field
+    means two runs against genuinely different daemons both store None and
+    share a fingerprint -- the omission this ticket exists to close, one level
+    down. Same distinction ``judge_model`` already makes.
+    """
+    # primary_engine is pinned: AUTO resolution PROBES the daemon, so pointing
+    # OLLAMA_HOST at an unreachable host flips it qwen -> gemini and the
+    # fingerprints differ for a reason that has nothing to do with this field.
+    # Without this the test passes with the raw config field still recorded.
+    from socr.core.config import EngineType
+
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    local = _fingerprint(table_judge_ladder=True, primary_engine=EngineType.QWEN)
+    monkeypatch.setenv("OLLAMA_HOST", "http://remote:11434")
+    remote = _fingerprint(table_judge_ladder=True, primary_engine=EngineType.QWEN)
+
+    assert local != remote, (
+        "the same config against two different daemons must not share a "
+        "fingerprint; the env var is how the HPC deployment points elsewhere"
+    )
+
+
 def test_table_judge_rung1_host_is_ignored_while_the_ladder_is_off() -> None:
     """Control: the field is recorded only while the gate that reads it is on,
     so flipping a host cannot invalidate cached pages on a run where no ladder
