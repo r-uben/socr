@@ -300,3 +300,89 @@ def test_an_unresolvable_anchor_leaves_the_span_alone() -> None:
 
     assert out == span["text"], out
     assert DOI not in out
+
+
+def test_a_geometry_miss_drops_the_link_rather_than_stamping_the_first_mention(
+    tmp_path: Path,
+) -> None:
+    """GH-341 hole 2: no ``text.find`` fallback.
+
+    When no covered word resolves to a character span, the old code fell back to
+    the FIRST textual occurrence -- reintroducing the exact wrong-mention bug on
+    the path that was supposed to be fixed. A link is a claim about one specific
+    phrase; if we cannot locate that phrase, the honest outcome is no link.
+
+    Simulated by making word resolution fail wholesale, which is what a damaged
+    text layer does, rather than by hand-crafting a PDF that defeats the cursor.
+    """
+    from unittest.mock import patch
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), "As shown in Smith 2020. Effect is large.", fontsize=11)
+    page.insert_text((72, 300), "Smith 2020. Journal of Results.", fontsize=11)
+
+    hits = page.search_for("Smith 2020")
+    assert len(hits) >= 2, "fixture needs two occurrences"
+    second = sorted(hits, key=lambda r: r.y0)[1]
+    page.insert_link({"kind": fitz.LINK_URI, "from": second, "uri": DOI})
+
+    pdf = tmp_path / "geometry_miss.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    with patch("socr.core.born_digital._word_char_spans", return_value={}):
+        out = _extract(pdf)
+
+    assert f"]({DOI})" not in out, (
+        "a link with no resolvable geometry was stamped anyway; the first "
+        "mention would carry the bibliography's URI"
+    )
+    # Dropping the LINK is not licence to drop the words.
+    assert "As shown in Smith 2020" in out
+    assert "Journal of Results" in out
+
+
+def test_a_partially_resolved_anchor_is_skipped_not_widened(tmp_path: Path) -> None:
+    """GH-341 hole 3: every covered word must resolve, not merely some.
+
+    With a partial resolve, ``min``/``max`` over the survivors spans whatever
+    sits between them, which can wrap a partial phrase or swallow neighbouring
+    text. Simulated by resolving only the first word of a two-word anchor.
+    """
+    from unittest.mock import patch
+
+    import socr.core.born_digital as bd
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), "See Smith 2020 for details.", fontsize=11)
+    hits = page.search_for("Smith 2020")
+    assert hits, "fixture needs the anchor"
+    page.insert_link({"kind": fitz.LINK_URI, "from": hits[0], "uri": DOI})
+
+    pdf = tmp_path / "partial.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    real = bd._word_char_spans
+
+    def _drop_the_second_covered_word(text, words):
+        """Resolve "Smith" but not "2020".
+
+        GH-417 review: an earlier version kept ``min(spans)``, which is "See" --
+        a word the link does not cover. That made NO covered word resolve, which
+        is hole 2's condition, not hole 3's, so the test passed even with the
+        min/max widening bug present. The partial case needs exactly one of the
+        anchor's OWN words to resolve.
+        """
+        spans = real(text, words)
+        return {i: v for i, v in spans.items() if words[i][4] != "2020"}
+
+    with patch.object(bd, "_word_char_spans", _drop_the_second_covered_word):
+        out = _extract(pdf)
+
+    assert f"]({DOI})" not in out, (
+        "a half-resolved anchor was wrapped; min/max over survivors can span the wrong range"
+    )
+    assert "See Smith 2020 for details" in out
