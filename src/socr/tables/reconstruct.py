@@ -1694,7 +1694,37 @@ def _promote_stub_lanes(lane_centers: list[float], seg_ys, rows_by_y) -> list[fl
     snap = _LANE_X_TOL_PT * _LANE_SNAP_MULT
     data_rows = [rows_by_y[y] for y in seg_ys if any(_is_numeric_word(w) for w in rows_by_y[y])]
     j = 0
+
+    # GH-342: promote the LEADING stub only, once. The loop was open-ended on
+    # "any recurring non-numeric text in the gap", and recurrence does not
+    # distinguish a stub column from ordinary gutter marks: a "n.a." or a dagger
+    # footnote appearing on three data rows in a wide data-to-data gap satisfies
+    # the same test, moves data_start_x again, and swallows a real data column
+    # into the label cell.
+    #
+    # The first gap is the stub's by construction -- everything left of the
+    # first numeric lane is label territory. Past that, every gap lies BETWEEN
+    # two data lanes, where the same evidence means something different. One
+    # promotion, then stop.
+    def _rows_populating(center: float) -> int:
+        return sum(
+            1
+            for row in data_rows
+            if any(abs(w[0] - center) <= snap and _is_numeric_word(w) for w in row)
+        )
+
     while j + 1 < len(lane_centers) and len(lane_centers) - (j + 1) >= _MIN_COLS:
+        if j >= 1:
+            break
+        # GH-342: the lane being promoted must itself BE a stub -- populated on
+        # fewer data rows than the lane after it. That is what a stub is
+        # (GH-331: row identifiers on block-start rows only), and it is the test
+        # the old code never made: it promoted on "there is recurring
+        # non-numeric text in the gap", which a "n.a." or dagger footnote in an
+        # ordinary wide data-to-data gutter satisfies just as well. The result
+        # was a real data column swallowed into the label cell.
+        if _rows_populating(lane_centers[j]) >= _rows_populating(lane_centers[j + 1]):
+            break
         lo, hi = lane_centers[j] + snap, lane_centers[j + 1] - snap
         if lo >= hi:
             break
