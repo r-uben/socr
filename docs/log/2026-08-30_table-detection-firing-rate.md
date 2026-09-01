@@ -72,18 +72,29 @@ measurement does not have and cannot derive: the native reconstruction cannot
 adjudicate its own routing decision, and that is the same circularity
 `2026-08-30_model-vs-native-table-rows.md` had to break with blind transcription.
 
-What is established is the direction of the error. The Glaeser–Sacerdote–Scheinkman
-paper (mirrored OCR text layer) put four pure-prose pages into this bucket before
-GH-248 — `find_tables` returned 0 on all four while the heuristic returned True — so
-the count inflates on scanned or damaged sources and does so silently.
+What is established is the direction of the error, but NOT from this sweep.
+The Glaeser–Sacerdote–Scheinkman evidence (mirrored OCR text layer; four pure-prose
+pages where `find_tables` returned 0 and the heuristic returned True) is
+**GH-248-external** — GSS is not one of the nine papers measured here, and this log
+carries no per-paper page tally to place it in the 528. It is cited as corroboration
+of the direction, not as a result of this measurement (GH-410).
+
+The nine papers this sweep DOES cover, per
+`docs/log/2026-08-20_lane-comparison-manifest.json`:
+Cochrane–Piazzesi 2002, Gertler–Karadi 2015, Nakamura–Steinsson 2018,
+Pflueger–Rinaldi 2020, Kaminska–Mumtaz–Šustek 2021, Bauer–Swanson 2022,
+Kekre–Lenel 2022, Bauer–Swanson 2023, Bybee 2023.
 
 ## Why the number is worth having
 
-- It is the denominator for any "socr finds N table pages" claim. GH-248's issue
-  records a triage that filtered on `has_tables`, got 391 hits, and found prose among
-  the top ones by hand.
-- 15% on a clean corpus is the *floor*. A corpus containing scanned papers will sit
-  higher, and nothing in the pipeline signals which case it is in.
+- It gives the denominator for a "socr finds N table pages" claim — which is
+  **101 / 19%** (`find_tables` 23 + second-pass-only 78), not the 78 / 15% headline
+  above it. That headline is the HEURISTIC's slice. GH-248's issue records a triage
+  that filtered on `has_tables` — both paths, so 391 hits — and found prose among the
+  top ones by hand; quoting 15% against that is the denominator mix GH-357 opened for.
+- **19%** on a clean corpus is the *floor* for the table-path rate (15% for the
+  heuristic slice alone). A corpus containing scanned papers will sit higher, and
+  nothing in the pipeline signals which case it is in.
 - ~~GH-326's re-measurement wants a trustworthy denominator, which is what this
   is.~~ **Retracted (GH-357).** This is two detector booleans over 528 pages;
   GH-326's re-measurement is the 14 real candidates plus Nakamura p42, pinned at
