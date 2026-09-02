@@ -197,22 +197,29 @@ class ManifestEntry:
     blob_ref: str  # content hash of the winning PageOutput in the BlobStore
     fingerprint: PageFingerprint
     journal: list[dict] = field(default_factory=list)  # provenance: attempts tried
+    disposition: PageDisposition | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "page_num": self.page_num,
             "blob_ref": self.blob_ref,
             "fingerprint": asdict(self.fingerprint),
             "journal": self.journal,
         }
+        if self.disposition is not None:
+            d["disposition"] = self.disposition.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> ManifestEntry:
+        disp_dict = d.get("disposition")
+        disposition = PageDisposition.from_dict(disp_dict) if disp_dict is not None else None
         return cls(
             page_num=d["page_num"],
             blob_ref=d["blob_ref"],
             fingerprint=PageFingerprint(**d["fingerprint"]),
             journal=d.get("journal", []),
+            disposition=disposition,
         )
 
 
@@ -879,7 +886,72 @@ def structure_class_floor_text(p, page_num: int) -> str:
     return f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
 
 
-class WinnerKind(str, Enum):
+class PageEnding(str, Enum):
+    """Normalized ending vocabulary for what actually ships on a page.
+
+    DEMOTED_NATIVE is the panel-approved temporary deviation from the
+    three-ending ruling. Exit criterion: enumerate corpus pages by
+    needs_ocr_enhancement, chart_asset_render_failed, text_grid_rejected,
+    and residual native-table-defect trigger; hand-check each trigger's
+    fidelity; assign each trigger independently to N or F in a later ticket.
+    """
+
+    NATIVE_PROSE = "native_prose"
+    MODEL_OUTPUT = "model_output"
+    FAIL_CLOSED_MARKER = "fail_closed_marker"
+    #: DEMOTED_NATIVE is the panel-approved temporary deviation from the
+    #: three-ending ruling. Exit criterion: enumerate corpus pages by
+    #: needs_ocr_enhancement, chart_asset_render_failed, text_grid_rejected,
+    #: and residual native-table-defect trigger; hand-check each trigger's
+    #: fidelity; assign each trigger independently to N or F in a later ticket.
+    DEMOTED_NATIVE = "demoted_native"
+
+
+class PagePrimaryReason(str, Enum):
+    """Normalized primary cause vocabulary explaining why a page received its ending."""
+
+    CORRUPT_MATH_HYBRID = "corrupt_math_hybrid"
+    ACCEPTED_OUTPUT = "accepted_output"
+    SCANNED_TABLE_UNVERIFIABLE = "scanned_table_unverifiable"
+    NATIVE_TABLE_UNVERIFIABLE = "native_table_unverifiable"
+    ROTATED_NATIVE_TEXT_SHREDDED = "rotated_native_text_shredded"
+    NATIVE_TABLE_DISTRUST = "native_table_distrust"
+    STRUCTURE_CLASS = "structure_class"
+    DEMOTED_NATIVE_RECOVERY_EXHAUSTION = "demoted_native_recovery_exhaustion"
+    CLEAN_NATIVE_PROSE = "clean_native_prose"
+    WHOLE_DOCUMENT_SECTION = "whole_document_section"
+    UNACCEPTED_OUTPUT_KEPT = "unaccepted_output_kept"
+    NO_USABLE_OUTPUT = "no_usable_output"
+    INVALID_TABLE_EMISSION = "invalid_table_emission"
+    #: The shipped bytes are a recognised failure marker that selection did not
+    #: account for. The page shipped no content, and socr will not name a cause it
+    #: cannot read off the bytes.
+    SHIPPED_FAILURE_MARKER = "shipped_failure_marker"
+
+
+@dataclass(frozen=True)
+class PageDisposition:
+    """Public, finalization-aware page outcome (ending + normalized primary cause)."""
+
+    ending: PageEnding
+    primary_reason: PagePrimaryReason
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "ending": self.ending.value,
+            "primary_reason": self.primary_reason.value,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> PageDisposition:
+        ending_val = d["ending"]
+        ending = PageEnding(ending_val) if isinstance(ending_val, str) else ending_val
+        reason_val = d["primary_reason"]
+        reason = PagePrimaryReason(reason_val) if isinstance(reason_val, str) else reason_val
+        return cls(ending=ending, primary_reason=reason)
+
+
+class SelectionProvenance(str, Enum):
     """R7: which of ``_select_page_output_tagged``'s endings shipped this page.
 
     The cascade is 15 returns and **zero loops** (AST-verified), so exactly one
@@ -952,6 +1024,75 @@ class WinnerKind(str, Enum):
     NO_TEXT_MARKER = "no_text_marker"
 
 
+_PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
+    SelectionProvenance.CORRUPT_MATH_HYBRID: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.CORRUPT_MATH_HYBRID
+    ),
+    SelectionProvenance.PASSING_BEST_OUTPUT: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.ACCEPTED_OUTPUT
+    ),
+    SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.SCANNED_TABLE_UNVERIFIABLE
+    ),
+    SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.NATIVE_TABLE_UNVERIFIABLE
+    ),
+    SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.NATIVE_TABLE_UNVERIFIABLE
+    ),
+    SelectionProvenance.ROTATED_TEXT_SHREDDED: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.ROTATED_NATIVE_TEXT_SHREDDED
+    ),
+    SelectionProvenance.FLAGGED_MODEL_KEPT: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.NATIVE_TABLE_DISTRUST
+    ),
+    SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    SelectionProvenance.STRUCTURE_CLASS_FLOOR: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    SelectionProvenance.NATIVE_FALLBACK: PageDisposition(
+        PageEnding.DEMOTED_NATIVE, PagePrimaryReason.DEMOTED_NATIVE_RECOVERY_EXHAUSTION
+    ),
+    SelectionProvenance.NATIVE_CLEAN: PageDisposition(
+        PageEnding.NATIVE_PROSE, PagePrimaryReason.CLEAN_NATIVE_PROSE
+    ),
+    SelectionProvenance.WHOLE_DOC_SECTION: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.WHOLE_DOCUMENT_SECTION
+    ),
+    SelectionProvenance.BEST_OUTPUT_UNVERIFIED: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.UNACCEPTED_OUTPUT_KEPT
+    ),
+    SelectionProvenance.BEST_ATTEMPT_FLAGGED: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.UNACCEPTED_OUTPUT_KEPT
+    ),
+    SelectionProvenance.NO_TEXT_MARKER: PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.NO_USABLE_OUTPUT
+    ),
+}
+
+
+def provenance_to_disposition(provenance: SelectionProvenance) -> PageDisposition:
+    """Total mapping from every private selection provenance member to its base PageDisposition."""
+    return _PROVENANCE_TO_DISPOSITION[provenance]
+
+
+@dataclass(frozen=True)
+class _FinalizedPageRecord:
+    """Authoritative per-page outcome combining output, disposition, and selection provenance."""
+
+    output: PageOutput
+    disposition: PageDisposition
+    selection_provenance: SelectionProvenance
+
+
+FinalizedPageRecord = _FinalizedPageRecord
+
+
 def _select_page_output(
     state: DocumentState,
     page_num: int,
@@ -959,46 +1100,19 @@ def _select_page_output(
 ) -> PageOutput:
     """The PageOutput that should be frozen for this page.
 
-    Thin wrapper over :func:`_select_page_output_tagged` that drops the R7
-    disposition tag. Byte-identical to the pre-R7 function for every caller;
-    callers that need to know WHICH ending shipped call the tagged form rather
-    than re-deriving it.
+    Thin wrapper over :func:`_select_page_output_tagged` that drops the
+    selection provenance tag. Byte-identical to the pre-R7 function for every
+    caller; callers that need to know WHICH ending shipped call the tagged
+    form rather than re-deriving it.
     """
     return _select_page_output_tagged(state, page_num, whole_doc)[0]
-
-
-def shipped_winner_kind(
-    state: "DocumentState",
-    page_num: int,
-    whole_doc: "_WholeDoc | None" = None,
-) -> WinnerKind:
-    """Which branch of selection chose this page's output, as a ``WinnerKind``.
-
-    GH-292. The public half of ``_select_page_output_tagged``, so callers
-    outside ``socr.core`` can ask the manifest which ending selection took
-    instead of re-deriving it from ``PageState`` flags. Re-derivation is what
-    produced #292: a bucket named for a disposition it did not actually match,
-    claiming pages selection ends on something else entirely.
-
-    **This names the ending SELECTION took, not the final shipped bytes** --
-    the same caveat ``WinnerKind`` carries, and for the same reason:
-    ``_winning_page_output`` applies ``_apply_table_emission_guard`` after the
-    tag is dropped, so a page tagged ``PASSING_BEST_OUTPUT`` can still ship a
-    failure marker. Callers needing "what shipped" must inspect the emitted
-    text (#450 review).
-
-    Pass the same ``whole_doc`` ``finalized_page_outputs`` computes when the
-    branch you care about can depend on it; the earlier branches return before
-    it is read.
-    """
-    return _select_page_output_tagged(state, page_num, whole_doc)[1]
 
 
 def _select_page_output_tagged(
     state: DocumentState,
     page_num: int,
     whole_doc: _WholeDoc | None = None,
-) -> tuple[PageOutput, WinnerKind]:
+) -> tuple[PageOutput, SelectionProvenance]:
     """The PageOutput that should be frozen for this page.
 
     Mirrors ``DocumentState.text`` selection: a passing OCR best_output wins;
@@ -1042,7 +1156,7 @@ def _select_page_output_tagged(
                 if math_hybrid.failure_mode is FailureMode.NONE
                 else math_hybrid.failure_mode
             ),
-        ), WinnerKind.CORRUPT_MATH_HYBRID
+        ), SelectionProvenance.CORRUPT_MATH_HYBRID
     if p.best_output and p.best_output.audit_passed:
         # A passing NATIVE best_output that also carries a table-distrust flag
         # is a CONTRADICTION, and the contradiction must lose to the flag
@@ -1082,7 +1196,7 @@ def _select_page_output_tagged(
             p, "native_rotated_text_shredded", False
         )
         if not (native_distrusted or native_text_shredded):
-            return p.best_output, WinnerKind.PASSING_BEST_OUTPUT
+            return p.best_output, SelectionProvenance.PASSING_BEST_OUTPUT
     # GH-90: scanned-table fail-closed floor.  When the source-evidence gate
     # rejected a VLM-emitted markdown table on a scan, shipping the fluent
     # hallucination is worse than an explicit failure marker — same D3 pattern.
@@ -1107,7 +1221,7 @@ def _select_page_output_tagged(
             engine=p.best_output.engine if p.best_output else "qwen",
             audit_passed=False,
             failure_mode=FailureMode.HALLUCINATION,
-        ), WinnerKind.UNVERIFIABLE_TABLE_SCANNED
+        ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
     if p.is_born_digital and p.native_text:
         # TR-3: D3 fail-closed floor.  When the OCR ladder failed for a table
         # page AND the per-region geometry verifier flagged a hard-fail
@@ -1153,7 +1267,7 @@ def _select_page_output_tagged(
                     status=PageStatus.WARNING,
                     audit_passed=False,
                     failure_mode=FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR,
-                ), WinnerKind.UNVERIFIABLE_TABLE_MODEL_KEPT
+                ), SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT
 
             # TR-3: D3 fail-closed floor. Try regional splice if ordinals/counts
             # are available; fall back to whole-page marker if isolation is
@@ -1208,7 +1322,7 @@ def _select_page_output_tagged(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
-            ), WinnerKind.UNVERIFIABLE_TABLE_NATIVE
+            ), SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE
 
         # #263: rotated-shredded fail-closed floor. The native layer of a
         # rotated page can come back as one glyph run per line -- 177 chars
@@ -1235,7 +1349,7 @@ def _select_page_output_tagged(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.NATIVE_TEXT_SHREDDED,
-            ), WinnerKind.ROTATED_TEXT_SHREDDED
+            ), SelectionProvenance.ROTATED_TEXT_SHREDDED
 
         # #259: a flagged-but-PRESENT model output stays the winner. Placed
         # AFTER the D3 floor above so a hard-fail still fails closed, and before
@@ -1259,7 +1373,7 @@ def _select_page_output_tagged(
                     if flagged_model.failure_mode is FailureMode.NONE
                     else flagged_model.failure_mode
                 ),
-            ), WinnerKind.FLAGGED_MODEL_KEPT
+            ), SelectionProvenance.FLAGGED_MODEL_KEPT
 
         # S1: the general structure-class case (C2, tables only). Originally
         # scoped to "tables or equations"; BLOCKING 1 on #269's review found
@@ -1322,7 +1436,7 @@ def _select_page_output_tagged(
                 # (``audit_passed`` already True) ships exactly as before --
                 # this adds nothing on top of an ordinary passing attempt.
                 if grid_winner.audit_passed:
-                    return grid_winner, WinnerKind.STRUCTURE_CLASS_GRID_PASSING
+                    return grid_winner, SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING
                 kept_text = grid_winner.text
                 note = kept_table_flag_note(state, page_num, kept_text)
                 if note:
@@ -1337,7 +1451,7 @@ def _select_page_output_tagged(
                         if grid_winner.failure_mode is FailureMode.NONE
                         else grid_winner.failure_mode
                     ),
-                ), WinnerKind.STRUCTURE_CLASS_GRID_FLAGGED
+                ), SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED
             # (iii) no attempt authored a grid (R3's model-rung guarantee
             # found nothing usable, or -- under --native-only -- no rung ran
             # at all). P2 / GH-317: ship the fail-closed floor -- the whole-page
@@ -1353,7 +1467,7 @@ def _select_page_output_tagged(
                 engine="native",
                 audit_passed=False,
                 failure_mode=FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED,
-            ), WinnerKind.STRUCTURE_CLASS_FLOOR
+            ), SelectionProvenance.STRUCTURE_CLASS_FLOOR
 
         # An enhancement page (native layer known deficient) whose recovery was
         # tried and never passed ships native text
@@ -1414,7 +1528,11 @@ def _select_page_output_tagged(
                 if native_table_defect and native_is_fallback
                 else FailureMode.NONE
             ),
-        ), (WinnerKind.NATIVE_FALLBACK if native_demoted else WinnerKind.NATIVE_CLEAN)
+        ), (
+            SelectionProvenance.NATIVE_FALLBACK
+            if native_demoted
+            else SelectionProvenance.NATIVE_CLEAN
+        )
     # Whole-document CLI path: recover this page's text from the split markdown.
     # Consulted BEFORE a FAILED per-page best_output so a whole-doc attempt that
     # carries real content for this page is not shadowed (the prior ordering left
@@ -1432,11 +1550,11 @@ def _select_page_output_tagged(
             status=PageStatus.SUCCESS if whole_doc.audit_passed else PageStatus.WARNING,
             engine=whole_doc.engine,
             audit_passed=whole_doc.audit_passed,
-        ), WinnerKind.WHOLE_DOC_SECTION
+        ), SelectionProvenance.WHOLE_DOC_SECTION
     # A failed per-page attempt (content present, audit not passed) beats an
     # empty page so the manifest preserves what little we have.
     if p.best_output:
-        return p.best_output, WinnerKind.BEST_OUTPUT_UNVERIFIED
+        return p.best_output, SelectionProvenance.BEST_OUTPUT_UNVERIFIED
     # The documented-but-previously-missing fallback: when scoring/judging
     # cleared ``best_output`` and repair produced nothing, the rejected text
     # still lives in ``attempts``. Ship it flagged rather than erasing the
@@ -1461,7 +1579,7 @@ def _select_page_output_tagged(
             provider_id=attempt.provider_id,
             provider_model=attempt.provider_model,
             provider_backend=attempt.provider_backend,
-        ), WinnerKind.BEST_ATTEMPT_FLAGGED
+        ), SelectionProvenance.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
     # a silent gap between page headers.
     return PageOutput(
@@ -1469,7 +1587,10 @@ def _select_page_output_tagged(
         text=page_failed_marker(page_num),
         status=PageStatus.ERROR,
         audit_passed=False,
-    ), WinnerKind.NO_TEXT_MARKER
+    ), SelectionProvenance.NO_TEXT_MARKER
+
+
+_select_page_output_with_provenance = _select_page_output_tagged
 
 
 def _apply_table_emission_guard(output: PageOutput, page_num: int) -> PageOutput:
@@ -1568,22 +1689,168 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
             audit_passed=False,
             failure_mode=disposition,
         )
+    # HEAD's condition, restored (cold review round 2, finding 2). Widening this
+    # to ``or output.failure_mode in _LADDER_TERMINAL_FAILURE_MODES`` overwrites an
+    # already-recorded terminal with a different one -- an output carrying
+    # TABLE_REJECTED on a page whose ladder disposition is TABLE_UNVERIFIED came
+    # out TABLE_UNVERIFIED -- which changes the shipped output, the sidecar, the
+    # manifest blob and the retry semantics. Stage A/B preserves behaviour.
     if output.failure_mode is FailureMode.NONE:
         return replace(output, failure_mode=disposition)
     return output
 
 
-def _finalize_page_output(state: DocumentState, output: PageOutput, page_num: int) -> PageOutput:
-    """Apply every final-validation guard a selected page output must pass.
+#: The marker families socr itself authors, keyed by the prose each builder emits
+#: after ``failed: ``. Cold review round 2, finding 3: the ending must be read from
+#: the SHIPPED BYTES through the one shared recogniser (``is_page_failed_marker``),
+#: never from selection provenance alone -- a page whose body is
+#: ``[page 1 failed: timeout during extraction]`` reached ``BEST_OUTPUT_UNVERIFIED``
+#: and was published as ``(MODEL_OUTPUT, UNACCEPTED_OUTPUT_KEPT)``, which is exactly
+#: the misclassification the public contract exists to close.
+#:
+#: The table names the family so the reason can say WHICH marker shipped. An
+#: unrecognised family is not a hole: it falls back to ``SHIPPED_FAILURE_MARKER``,
+#: which still says fail-closed. ``tests/test_p6_disposition_contract.py`` asserts
+#: every family the tree can build is listed here.
+_MARKER_FAMILY_REASONS: tuple[tuple[str, "PagePrimaryReason"], ...] = (
+    ("invalid table emission", PagePrimaryReason.INVALID_TABLE_EMISSION),
+    ("rotated text extraction shredded", PagePrimaryReason.ROTATED_NATIVE_TEXT_SHREDDED),
+    ("no usable OCR output", PagePrimaryReason.NO_USABLE_OUTPUT),
+    # The unverifiable-table family is DELIBERATELY absent. Its marker prose does
+    # not say which lane distrusted the table, and every path that authors it --
+    # the two D3 floors and the structure-class floor -- already carries a
+    # FAIL_CLOSED_MARKER provenance whose lane-specific reason is kept above. A
+    # page reaching the fallback with those bytes is therefore one socr genuinely
+    # cannot attribute, and SHIPPED_FAILURE_MARKER says exactly that. Inventing a
+    # fourth member to name a lane the bytes do not carry would be worse.
+)
 
-    Single seam for both callers below so the ladder disposition guard (C3)
-    and the GH-226 table-emission guard can never drift apart between the
-    manifest/replay path and the assembled-Markdown path -- the exact drift
-    ``_reaches_structure_class_branch``'s own docstring warns against.
+
+def _shipped_marker_reason(text: str) -> PagePrimaryReason:
+    """Which marker family the shipped bytes are, as a primary reason."""
+    marker = text.strip().splitlines()[0].strip() if text.strip() else ""
+    body = marker.partition("failed:")[2].strip().rstrip("]").strip()
+    for prose, reason in _MARKER_FAMILY_REASONS:
+        if body.startswith(prose):
+            return reason
+    return PagePrimaryReason.SHIPPED_FAILURE_MARKER
+
+
+def _select_and_finalize_page(
+    state: DocumentState,
+    page_num: int,
+    whole_doc: _WholeDoc | None = None,
+    saved_text: str | None = None,
+) -> _FinalizedPageRecord:
+    """Select and finalize a single page through guards, producing one authoritative record.
+
+    Performs, in order:
+      1. _select_page_output_with_provenance (the unchanged 16-way selector)
+      2. Optional saved-body text replacement
+      3. _apply_table_emission_guard
+      4. _apply_ladder_disposition_guard
+      5. Disposition construction from the guarded output and provenance.
     """
+    output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
+    if saved_text is not None:
+        output = replace(output, text=saved_text)
     output = _apply_table_emission_guard(output, page_num)
     p = state.pages.get(page_num)
-    return _apply_ladder_disposition_guard(output, page_num, p) if p is not None else output
+    if p is not None:
+        output = _apply_ladder_disposition_guard(output, page_num, p)
+
+    text = (output.text or "").strip()
+
+    # The BASE disposition -- what this page would be called if nothing about the
+    # final bytes said otherwise. A page restored from a terminal sidecar takes the
+    # base its ORIGINAL run published, because resume rebuilds ``p.attempts`` as the
+    # single frozen winner and recomputing here would answer a question about the
+    # reconstruction rather than about the run that shipped the bytes.
+    #
+    # This is a base, and only a base (cold review round 3). It is applied HERE,
+    # before the byte-derived classification below, so a guard that rewrote the
+    # CURRENT shipped bytes still wins: a restored value may stabilise a resume that
+    # changed nothing, and may never outrank what the page actually ships now.
+    base = provenance_to_disposition(provenance)
+    restored = getattr(p, "resumed_disposition", None) if p is not None else None
+    if restored:
+        try:
+            base = PageDisposition.from_dict(restored)
+        except (KeyError, ValueError, TypeError):
+            logger.debug("P6: unreadable persisted disposition on p%d; recomputing", page_num)
+
+    if _TABLE_EMISSION_FAILED_RE.fullmatch(text):
+        # The emission guard's own rewrite outranks whatever branch selected the
+        # page: the body it replaced is gone, and the defect it names is the most
+        # specific true statement about what shipped.
+        disposition = PageDisposition(
+            ending=PageEnding.FAIL_CLOSED_MARKER,
+            primary_reason=PagePrimaryReason.INVALID_TABLE_EMISSION,
+        )
+    elif is_page_failed_marker(text):
+        # Any OTHER recognised whole-page marker. When selection already knew the
+        # page was fail-closed its reason is kept -- it is strictly more specific
+        # than the family the bytes can reveal. When it did not, the bytes win and
+        # the reason names the marker.
+        disposition = (
+            base
+            if base.ending is PageEnding.FAIL_CLOSED_MARKER
+            else PageDisposition(
+                ending=PageEnding.FAIL_CLOSED_MARKER,
+                primary_reason=_shipped_marker_reason(text),
+            )
+        )
+    else:
+        disposition = base
+
+    return _FinalizedPageRecord(
+        output=output,
+        disposition=disposition,
+        selection_provenance=provenance,
+    )
+
+
+def finalized_page_record(
+    state: DocumentState,
+    page_num: int,
+    whole_doc: _WholeDoc | None = None,
+    saved_text: str | None = None,
+) -> FinalizedPageRecord:
+    """Select and finalize a single page through guards, producing one authoritative record."""
+    return _select_and_finalize_page(state, page_num, whole_doc=whole_doc, saved_text=saved_text)
+
+
+def page_disposition(
+    state: DocumentState,
+    page_num: int,
+    whole_doc: _WholeDoc | None = None,
+) -> PageDisposition:
+    """Public, finalization-aware page outcome (ending + normalized primary cause)."""
+    return _select_and_finalize_page(state, page_num, whole_doc=whole_doc).disposition
+
+
+def finalized_page_records(
+    state: DocumentState,
+    saved_body: str | None = None,
+) -> list[_FinalizedPageRecord]:
+    """Compute exactly one finalized page record per page in one pass."""
+    saved_pages = split_native_pages(saved_body) if saved_body is not None else None
+    whole_doc = _whole_doc_page_texts(state)
+    records: list[_FinalizedPageRecord] = []
+    for page_num in range(1, state.handle.page_count + 1):
+        saved_text = (
+            saved_pages[page_num - 1]
+            if saved_pages is not None and page_num - 1 < len(saved_pages)
+            else None
+        )
+        record = _select_and_finalize_page(
+            state,
+            page_num,
+            whole_doc=whole_doc,
+            saved_text=saved_text,
+        )
+        records.append(record)
+    return records
 
 
 def _winning_page_output(
@@ -1591,43 +1858,16 @@ def _winning_page_output(
     page_num: int,
     whole_doc: _WholeDoc | None = None,
 ) -> PageOutput:
-    """Select and final-validate the exact page text that will ship.
-
-    GH-226 puts the last table-emission guard here because this seam is shared
-    by canonical fragments, assembled Markdown, manifest blobs, and replay,
-    including whole-document CLI attempts that never pass through the agentic
-    acceptance gate. Earlier checks still drive repair and routing; this one is
-    the fail-closed backstop after those choices are exhausted. GH-353 C3 adds
-    the ladder disposition guard at the same seam for the same reason.
-    """
-    return _finalize_page_output(
-        state,
-        _select_page_output(state, page_num, whole_doc),
-        page_num,
-    )
+    """Select and final-validate the exact page text that will ship."""
+    return _select_and_finalize_page(state, page_num, whole_doc=whole_doc).output
 
 
 def finalized_page_outputs(
     state: DocumentState,
     saved_body: str | None = None,
 ) -> list[PageOutput]:
-    """Page outputs matching the exact body that ships, with final guards.
-
-    ``saved_body`` is post-transform Markdown (phantom-ref cleanup, figures,
-    captions). When supplied, its per-page text overrides the selected text
-    *before* the same GH-226 / GH-353 guards are applied, closing the
-    manifest/replay and post-figure bypass without duplicating validation
-    policy.
-    """
-    saved_pages = split_native_pages(saved_body) if saved_body is not None else None
-    whole_doc = _whole_doc_page_texts(state)
-    outputs: list[PageOutput] = []
-    for page_num in range(1, state.handle.page_count + 1):
-        output = _select_page_output(state, page_num, whole_doc)
-        if saved_pages is not None and page_num - 1 < len(saved_pages):
-            output = replace(output, text=saved_pages[page_num - 1])
-        outputs.append(_finalize_page_output(state, output, page_num))
-    return outputs
+    """Page outputs matching the exact body that ships, with final guards."""
+    return [rec.output for rec in finalized_page_records(state, saved_body=saved_body)]
 
 
 def _strip_leading_page_marker(text: str) -> str:
@@ -1646,7 +1886,10 @@ def _strip_leading_page_marker(text: str) -> str:
     return text
 
 
-def canonical_page_texts(state: DocumentState) -> list[str]:
+def canonical_page_texts(
+    state: DocumentState,
+    records: list[FinalizedPageRecord] | None = None,
+) -> list[str]:
     """Per-page winning texts for the document, length == ``handle.page_count``.
 
     The SINGLE source of truth for both the saved ``.md`` body and the manifest
@@ -1656,7 +1899,10 @@ def canonical_page_texts(state: DocumentState) -> list[str]:
     pre-existing leading ``## Page N`` header stripped so ``assemble_pages`` adds
     exactly one canonical header per page. ``split_native_pages`` round-trips it.
     """
-    return [_strip_leading_page_marker(page.text) for page in finalized_page_outputs(state)]
+    outputs = (
+        [rec.output for rec in records] if records is not None else finalized_page_outputs(state)
+    )
+    return [_strip_leading_page_marker(page.text) for page in outputs]
 
 
 def _base_engine_name(engine: str) -> str:
@@ -1679,6 +1925,7 @@ def build_manifest(
     dpi: int | None = None,
     fingerprint_inputs: dict[str, tuple[str, str, str | None, str | None]] | None = None,
     saved_body: str | None = None,
+    records: list[FinalizedPageRecord] | None = None,
 ) -> Manifest:
     """Freeze a completed ``DocumentState`` into (manifest, cached blobs).
 
@@ -1700,6 +1947,12 @@ def build_manifest(
     TEXT is taken from splitting that saved body, so ``replay`` reproduces the
     on-disk document bit-for-bit instead of diverging via pre-transform state.
     The fingerprint/engine metadata still comes from the winning PageOutput.
+
+    ``records`` is the optional internal finalization snapshot. The assemble
+    phase passes the records it already computed for the exact saved body so
+    manifest construction cannot select or guard those pages a second time.
+    Direct callers omit it and get one record per page from
+    :func:`finalized_page_records`, using the same seam.
     """
     handle = state.handle
     dpi = dpi if dpi is not None else 200
@@ -1723,8 +1976,15 @@ def build_manifest(
         agentic_judge_model=getattr(state, "agentic_judge_model", ""),
     )
     # Recover/finalize every exact page body once so the manifest, cache and
-    # replay cannot diverge from the saved Markdown or its failure status.
-    frozen_pages = finalized_page_outputs(state, saved_body)
+    # replay cannot diverge from the saved Markdown or its failure status. The
+    # assemble phase supplies its already-finalized snapshot; direct callers
+    # use this function as the single computation seam.
+    frozen_records = records if records is not None else finalized_page_records(state, saved_body)
+    if len(frozen_records) != handle.page_count:
+        raise ValueError(
+            "manifest finalization records must contain exactly one record per page "
+            f"(got {len(frozen_records)}, expected {handle.page_count})"
+        )
     whole_doc = _whole_doc_page_texts(state)
     # Validate the recovered split count against the real page count: a mismatch
     # (the '---'-only legacy case, or dropped/merged markers) would silently
@@ -1740,7 +2000,8 @@ def build_manifest(
     # Model version per engine, so a model swap/drift invalidates the fingerprint.
     model_versions = {r.engine: r.model_version for r in state.engine_runs if r.model_version}
     for page_num in range(1, handle.page_count + 1):
-        page = frozen_pages[page_num - 1]
+        record = frozen_records[page_num - 1]
+        page = record.output
         blob_ref = blobs.put_page(page)
         image_hash = ""
         if page.engine and page.engine != "native":
@@ -1826,7 +2087,11 @@ def build_manifest(
             for a in state.pages[page_num].attempts
         ]
         manifest.entries[page_num] = ManifestEntry(
-            page_num=page_num, blob_ref=blob_ref, fingerprint=fp, journal=journal
+            page_num=page_num,
+            blob_ref=blob_ref,
+            fingerprint=fp,
+            journal=journal,
+            disposition=record.disposition,
         )
     return manifest
 

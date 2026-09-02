@@ -617,12 +617,16 @@ def test_manifest_selection_ships_the_attached_output_unchanged(tmp_path: Path) 
     `startswith("native")` guard treats it as a native lane. This pins that the
     guard chain does not then discard the attachments.
     """
-    from socr.core.manifest import WinnerKind, _select_page_output_tagged, _winning_page_output
+    from socr.core.manifest import (
+        SelectionProvenance,
+        _select_page_output_tagged,
+        _winning_page_output,
+    )
 
     on, _, _, _ = _run(tmp_path / "winner", lane=True, provider=True)
 
     selected, kind = _select_page_output_tagged(on, 2)
-    assert kind is WinnerKind.PASSING_BEST_OUTPUT
+    assert kind is SelectionProvenance.PASSING_BEST_OUTPUT
     assert selected is on.pages[2].best_output
     shipped = _winning_page_output(on, 2)
     assert shipped.text == on.pages[2].best_output.text

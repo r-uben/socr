@@ -149,6 +149,19 @@ class PageState:
     #: ``structure_class_model_pages`` on the second run even though the same
     #: input produced it on the first.
     structure_class_model_kept_on_resume: bool = False
+    #: P6 cold review round 2: the ``PageDisposition`` the run that produced the
+    #: terminal sidecar published for this page, as its serialized dict, restored
+    #: by ``_restore_terminal_page_state``. Same problem shape as the flag above --
+    #: resume collapses ``p.attempts`` to the single frozen winner, so a resumed
+    #: re-flush recomputes a DIFFERENT disposition for the same page (an accepted
+    #: winner demoted by the ladder guard comes back as ``UNACCEPTED_OUTPUT_KEPT``
+    #: rather than the ``ACCEPTED_OUTPUT`` run 1 recorded) and the sidecar bytes
+    #: move on a run that reprocessed nothing.
+    #:
+    #: Read only when building the page's published disposition. Nothing in the
+    #: resume GATE consults it, and no bucket is derived from it, so it cannot
+    #: change which pages are skipped or how a document is scored.
+    resumed_disposition: dict | None = None
     #: P4-R (cold review round 1, finding 5): the equation-region lane wanted to
     #: read this page and could not, because no available provider served the
     #: clean-equation model. That is TRANSIENT external state, not configuration,

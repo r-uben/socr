@@ -25,10 +25,11 @@ fitz = pytest.importorskip("fitz")
 
 from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.manifest import (  # noqa: E402
-    WinnerKind,
+    PageEnding,
+    SelectionProvenance,
     _select_page_output_tagged,
     is_page_failed_marker,
-    shipped_winner_kind,
+    page_disposition,
 )
 from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
 from socr.core.state import DocumentState  # noqa: E402
@@ -98,7 +99,7 @@ def test_a_shredded_page_ships_a_marker_under_every_include_flag(tmp_path, inclu
         f"{include_flag}: fixture does not reach the include-clause, so it measures nothing"
     )
     output, tag = _select_page_output_tagged(state, 1)
-    assert tag is WinnerKind.ROTATED_TEXT_SHREDDED
+    assert tag is SelectionProvenance.ROTATED_TEXT_SHREDDED
     assert output.status is PageStatus.ERROR
     assert is_page_failed_marker(output.text or ""), (
         f"{include_flag}: expected a failure marker, got {output.text!r}"
@@ -122,7 +123,7 @@ def test_an_unshredded_page_still_ships_its_native_body(tmp_path, include_flag) 
     assert not is_page_failed_marker(output.text or ""), (
         f"{include_flag}: control page ships a marker, so it is not a valid control"
     )
-    assert shipped_winner_kind(state, 1) is not WinnerKind.ROTATED_TEXT_SHREDDED
+    assert page_disposition(state, 1).ending is not PageEnding.FAIL_CLOSED_MARKER
 
 
 def test_the_bucket_excludes_failed_pages_not_just_the_shredded_ending() -> None:

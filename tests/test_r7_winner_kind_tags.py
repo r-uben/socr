@@ -6,6 +6,9 @@ carries one) and EXCLUSIVE (exactly one ending runs). Exclusivity is structural
 -- the cascade is loop-free and single-return -- so these tests pin the shape
 itself, not a sampled outcome.
 
+Retargeted to the renamed private provenance enum (SelectionProvenance) while
+keeping the full structural proof intact.
+
 Hermetic: pure AST + a wrapper identity check. No provider, no pipeline run.
 """
 
@@ -13,9 +16,16 @@ from __future__ import annotations
 
 import ast
 import inspect
+from collections import defaultdict
+from unittest.mock import MagicMock
 
 from socr.core import manifest
-from socr.core.manifest import WinnerKind
+from socr.core.manifest import (
+    PageDisposition,
+    PageEnding,
+    PagePrimaryReason,
+    SelectionProvenance,
+)
 
 
 def _cascade() -> ast.FunctionDef:
@@ -32,22 +42,15 @@ def _returns(fn: ast.FunctionDef) -> list[ast.Return]:
 
 
 def _tag_names(ret: ast.Return) -> list[str]:
-    """The WinnerKind names an ending can yield, in source order.
-
-    Usually one. An ending whose own body already switches on a flag may yield
-    two via a conditional -- ``NATIVE_FALLBACK``/``NATIVE_CLEAN`` do, because
-    that single return ships either a demoted fallback or an ordinary native
-    success. Returning both names keeps the totality/bijection checks honest
-    instead of letting one tag quietly stand for two dispositions.
-    """
+    """The SelectionProvenance names an ending can yield, in source order."""
     v = ret.value
     assert isinstance(v, ast.Tuple) and len(v.elts) == 2, f"untagged return @{ret.lineno}"
     tag = v.elts[1]
     parts = [tag.body, tag.orelse] if isinstance(tag, ast.IfExp) else [tag]
     names = []
     for node in parts:
-        assert isinstance(node, ast.Attribute), f"non-WinnerKind tag @{ret.lineno}"
-        assert isinstance(node.value, ast.Name) and node.value.id == "WinnerKind"
+        assert isinstance(node, ast.Attribute), f"non-SelectionProvenance tag @{ret.lineno}"
+        assert isinstance(node.value, ast.Name) and node.value.id == "SelectionProvenance"
         names.append(node.attr)
     return names
 
@@ -79,53 +82,141 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
-    assert len(used) == len(set(used)), "two endings share a tag"
-    assert set(used) == {k.name for k in WinnerKind}
-    assert len({k.value for k in WinnerKind}) == len(list(WinnerKind))
+    assert len(used) == len(set(used)) == 16, "two endings share a tag or tag count != 16"
+    assert set(used) == {k.name for k in SelectionProvenance}
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 16
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
-    """Precedence lives in the cascade's order, so the enum must mirror it.
-
-    ``WinnerKind``'s docstring makes definition order load-bearing: it is the
-    record of which ending outranks which, and part two is told to treat it as
-    the authority. A set comparison cannot see order, so on its own it would let
-    two tags be transposed -- or the enum reordered by an alphabetising autofix --
-    while totality, exclusivity and bijection all still hold. That failure is
-    silent and hands every downstream caller a systematically wrong disposition.
-
-    Pinning source order against declaration order also catches a hand-transposed
-    pair, which is the one defect the AST checks are structurally blind to.
-    """
+    """Precedence lives in the cascade's order, so the enum must mirror it."""
     fn = _cascade()
     in_source = [n for r in sorted(_returns(fn), key=lambda r: r.lineno) for n in _tag_names(r)]
-    assert in_source == [k.name for k in WinnerKind]
+    assert in_source == [k.name for k in SelectionProvenance]
 
 
 def test_public_wrapper_returns_the_output_not_the_tuple() -> None:
     """The tag is INTERNAL: the public function must still yield a bare PageOutput.
 
-    Checked by CALLING the wrapper, not by matching its source text: a substring
-    assertion breaks on harmless reformatting and passes if the string only ever
-    appears in a comment. Patching the tagged form proves the wrapper really
-    delegates and really drops element 1.
+    The output-only wrapper drops private provenance while page_disposition is
+    constructed only after final guards.
     """
-    sentinel = object()
+    sentinel_output = manifest.PageOutput(
+        page_num=1,
+        text="| a | b |\n| --- |\n| 1 | 2 |",  # invalid table emission triggering guard
+        status=manifest.PageStatus.SUCCESS,
+        audit_passed=True,
+    )
     calls: list[tuple] = []
 
     def _fake(state, page_num, whole_doc=None):
         calls.append((state, page_num, whole_doc))
-        return sentinel, WinnerKind.PASSING_BEST_OUTPUT
+        return sentinel_output, SelectionProvenance.PASSING_BEST_OUTPUT
 
-    original = manifest._select_page_output_tagged
+    original_tagged = manifest._select_page_output_tagged
+    original_with_prov = manifest._select_page_output_with_provenance
     manifest._select_page_output_tagged = _fake
+    manifest._select_page_output_with_provenance = _fake
     try:
+        # 1. Output-only wrapper drops private provenance tag and yields bare PageOutput
         got = manifest._select_page_output("STATE", 7, "WHOLE")
-    finally:
-        manifest._select_page_output_tagged = original
+        assert got is sentinel_output, "wrapper did not delegate, or did not drop the tag"
+        assert calls == [("STATE", 7, "WHOLE")], "wrapper dropped or reordered arguments"
 
-    assert got is sentinel, "wrapper did not delegate, or did not drop the tag"
-    assert calls == [("STATE", 7, "WHOLE")], "wrapper dropped or reordered arguments"
+        # 2. page_disposition is constructed only after final guards
+        mock_state = MagicMock()
+        mock_state.pages.get.return_value = None
+        disp = manifest.page_disposition(mock_state, 1)
+        assert disp.ending is PageEnding.FAIL_CLOSED_MARKER
+        assert disp.primary_reason is PagePrimaryReason.INVALID_TABLE_EMISSION
+    finally:
+        manifest._select_page_output_tagged = original_tagged
+        manifest._select_page_output_with_provenance = original_with_prov
 
     ann = inspect.signature(manifest._select_page_output).return_annotation
     assert ann in ("PageOutput", manifest.PageOutput)
+
+
+def test_every_provenance_member_maps_to_a_disposition() -> None:
+    """Mapping totality: every SelectionProvenance member maps to a valid PageDisposition."""
+    for member in SelectionProvenance:
+        d = manifest.provenance_to_disposition(member)
+        assert isinstance(d, PageDisposition), f"{member.name} has no mapped disposition"
+        assert isinstance(d.ending, PageEnding)
+        assert isinstance(d.primary_reason, PagePrimaryReason)
+
+
+def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
+    """Pin the explicit allowed equivalence groups from SelectionProvenance to PageDisposition.
+
+    Do not assert a bijection from provenance to PageDisposition because normalized primary
+    reasons deliberately allow multiple selector rows to share one cause. Instead, pin the
+    explicit allowed equivalence partitions so no accidental collapse is accepted:
+
+    Under PageDisposition (ending, primary_reason):
+      - STRUCTURE_CLASS_GRID_PASSING and STRUCTURE_CLASS_GRID_FLAGGED collapse to
+        (MODEL_OUTPUT, STRUCTURE_CLASS)
+      - BEST_OUTPUT_UNVERIFIED and BEST_ATTEMPT_FLAGGED collapse to
+        (MODEL_OUTPUT, UNACCEPTED_OUTPUT_KEPT)
+      - All other 12 provenance members map to 12 distinct dispositions (14 total groups).
+
+    Under primary_reason alone:
+      - {STRUCTURE_CLASS_GRID_PASSING, STRUCTURE_CLASS_GRID_FLAGGED, STRUCTURE_CLASS_FLOOR} -> STRUCTURE_CLASS
+      - {UNVERIFIABLE_TABLE_MODEL_KEPT, UNVERIFIABLE_TABLE_NATIVE} -> NATIVE_TABLE_UNVERIFIABLE
+      - {BEST_OUTPUT_UNVERIFIED, BEST_ATTEMPT_FLAGGED} -> UNACCEPTED_OUTPUT_KEPT
+      - The remaining 9 members map to 9 distinct primary reasons (12 total reasons).
+    """
+    by_disposition: dict[PageDisposition, set[SelectionProvenance]] = defaultdict(set)
+    by_reason: dict[PagePrimaryReason, set[SelectionProvenance]] = defaultdict(set)
+
+    for member in SelectionProvenance:
+        d = manifest.provenance_to_disposition(member)
+        by_disposition[d].add(member)
+        by_reason[d.primary_reason].add(member)
+
+    # 1. Total count of mapped provenance members must be exactly 16
+    assert len(list(SelectionProvenance)) == 16
+
+    # 2. Check full disposition equivalence groups (exactly 14 distinct disposition pairs)
+    assert len(by_disposition) == 14
+
+    expected_multi_dispositions = {
+        PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS): {
+            SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
+            SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
+        },
+        PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.UNACCEPTED_OUTPUT_KEPT): {
+            SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
+            SelectionProvenance.BEST_ATTEMPT_FLAGGED,
+        },
+    }
+
+    for disp, members in expected_multi_dispositions.items():
+        assert by_disposition[disp] == members, f"mismatch for multi-member disposition {disp}"
+
+    single_disposition_count = sum(1 for members in by_disposition.values() if len(members) == 1)
+    assert single_disposition_count == 12
+
+    # 3. Check primary reason equivalence groups (exactly 12 distinct primary reasons)
+    assert len(by_reason) == 12
+
+    expected_multi_reasons = {
+        PagePrimaryReason.STRUCTURE_CLASS: {
+            SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
+            SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
+            SelectionProvenance.STRUCTURE_CLASS_FLOOR,
+        },
+        PagePrimaryReason.NATIVE_TABLE_UNVERIFIABLE: {
+            SelectionProvenance.UNVERIFIABLE_TABLE_MODEL_KEPT,
+            SelectionProvenance.UNVERIFIABLE_TABLE_NATIVE,
+        },
+        PagePrimaryReason.UNACCEPTED_OUTPUT_KEPT: {
+            SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
+            SelectionProvenance.BEST_ATTEMPT_FLAGGED,
+        },
+    }
+
+    for reason, members in expected_multi_reasons.items():
+        assert by_reason[reason] == members, f"mismatch for multi-member reason {reason}"
+
+    single_reason_count = sum(1 for members in by_reason.values() if len(members) == 1)
+    assert single_reason_count == 9
