@@ -126,15 +126,18 @@ class TestTheWarningReachesTheRun:
                 # `process` myself simulated a batch and would have passed while
                 # `process_batch` regressed -- the same "drive the real caller"
                 # failure this suite keeps finding elsewhere.
-                pipeline.process_batch(tmp_path, tmp_path / "out")
+                processed = len(pipeline.process_batch(tmp_path, tmp_path / "out"))
             else:
                 for pdf in pdfs:
                     pipeline.process(pdf, tmp_path / "out")
+                processed = len(pdfs)
 
-        return [r.getMessage() for r in caplog.records if "judge_hard_pages" in r.getMessage()]
+        return processed, [
+            r.getMessage() for r in caplog.records if "judge_hard_pages" in r.getMessage()
+        ]
 
     def test_a_run_with_an_inert_field_set_says_so(self, tmp_path, caplog) -> None:
-        messages = self._run(tmp_path / "warned", caplog, inert=True)
+        _processed, messages = self._run(tmp_path / "warned", caplog, inert=True)
         assert messages, (
             "the run ignored judge_hard_pages without saying so; the call site "
             "is not wired, so only the helper is tested"
@@ -142,11 +145,24 @@ class TestTheWarningReachesTheRun:
 
     def test_a_default_run_stays_quiet(self, tmp_path, caplog) -> None:
         """Control: a warning on every run is a warning nobody reads."""
-        assert self._run(tmp_path / "quiet", caplog, inert=False) == []
+        _processed, messages = self._run(tmp_path / "quiet", caplog, inert=False)
+        assert messages == []
 
     def test_a_batch_says_it_once_not_once_per_document(self, tmp_path, caplog) -> None:
         """Through `process_batch` itself, not a hand-rolled loop over `process`."""
-        messages = self._run(tmp_path / "batch", caplog, inert=True, documents=3, batch=True)
+        processed, messages = self._run(
+            tmp_path / "batch", caplog, inert=True, documents=3, batch=True
+        )
+
+        # cubic P3 on #529: `_report_inert_config` runs BEFORE the PDF glob, so
+        # one warning is emitted whether the batch found three documents or
+        # none. Without this, a regression in document discovery would leave
+        # this test green while the "once, not once-per-document" claim it makes
+        # went unexercised -- the same false green the rest of this PR removed.
+        assert processed == 3, (
+            f"the batch processed {processed} documents, so the once-per-batch "
+            "claim was not measured against a batch that did anything"
+        )
         assert len(messages) == 1, (
             f"3 documents produced {len(messages)} identical warnings; the "
             "config cannot change between them"
@@ -160,7 +176,11 @@ class TestTheWarningReachesTheRun:
         nothing, while its fingerprint ignored the fields just the same. That is
         the silence this half of the fix exists to remove.
         """
-        messages = self._run(tmp_path / "empty", caplog, inert=True, documents=0, batch=True)
+        processed, messages = self._run(
+            tmp_path / "empty", caplog, inert=True, documents=0, batch=True
+        )
+
+        assert processed == 0, "the control failed: this batch was supposed to find nothing"
         assert len(messages) == 1, (
             f"an empty batch produced {len(messages)} warnings; it ignores the "
             "same settings a non-empty one does"
