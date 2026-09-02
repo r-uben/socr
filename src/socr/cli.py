@@ -328,7 +328,37 @@ def build_config(
     if primary:
         config.primary_engine = EngineType(primary)
     if fallback:
-        config.fallback_engine = EngineType(fallback)
+        # GH-142. The FOURTH instance, found by the same sweep (cubic on #516).
+        # `--fallback` set `fallback_engine`, a property whose setter writes
+        # `fallback_chain`. Across the whole source tree that field is read in
+        # exactly three places: twice inside `_run_fingerprint`, and once in
+        # `benchmark calibrate --apply-config`, which serialises a FRESH
+        # PipelineConfig and never sees this value. No execution path reads it.
+        #
+        # Same shape as --no-judge-hard-pages, and the same consequence: it
+        # changes the run identity without changing behaviour, so it invalidates
+        # terminal pages and buys a reprocess that produces the same output. The
+        # multi-engine fallback branches it steered were deleted in #298; the
+        # agentic ladder supersedes them.
+        raise click.UsageError(
+            "--fallback no longer does anything and has been rejected rather "
+            "than silently ignored (GH-142).\n"
+            "\n"
+            "It set PipelineConfig.fallback_engine (writing fallback_chain), a "
+            "value no execution path reads: the multi-engine fallback branches "
+            "that consumed it were removed in #298. Its only remaining readers "
+            "are the run fingerprint and a benchmark report.\n"
+            "\n"
+            "So passing it did not change which engines ran -- it changed the run "
+            "identity, invalidating already-completed pages and forcing a "
+            "reprocess that produces the same output.\n"
+            "\n"
+            "In agentic mode -- the default -- escalation IS the fallback: a page "
+            "moves to the next rung because a judge rejected the current one. "
+            "Use --primary to choose the first rung, --strict-local to keep the "
+            "ladder on local rungs, and --table-judge-ladder to change the "
+            "table-judge order."
+        )
     if no_audit:
         # GH-139. `--no-audit` advertised "skip quality audit stage" and set
         # `audit_enabled=False`, but every consumer of that field is gone: the four
@@ -371,7 +401,41 @@ def build_config(
             "--max-cost-per-page, or --cost-budget."
         )
     if no_judge_hard_pages:
-        config.judge_hard_pages = False
+        # GH-142. The sweep this issue asked for found the third instance of the
+        # class, and this is it. `--no-judge-hard-pages` advertised "skip the
+        # hard-page judge" and set `config.judge_hard_pages = False`. Nothing
+        # reads that field to gate anything: the phase it named is gone, and the
+        # ONLY remaining read is `_run_fingerprint`, which copies it into the
+        # run identity.
+        #
+        # That makes it worse than inert. Toggling it changes no behaviour but
+        # DOES change the fingerprint, so it invalidates every terminal page and
+        # forces a full reprocess that produces byte-identical output -- a flag
+        # that costs the user a rerun to buy nothing.
+        #
+        # Resolution 1 of the issue's preference order, as #139 did for
+        # --no-audit: reject it, loudly, and keep the flag so existing scripts
+        # get this explanation rather than click's bare "no such option".
+        raise click.UsageError(
+            "--no-judge-hard-pages no longer does anything and has been rejected "
+            "rather than silently ignored (GH-142).\n"
+            "\n"
+            "It set PipelineConfig.judge_hard_pages, which no longer gates any "
+            "phase: the separate hard-page judging pass it named was removed, and "
+            "the field's only remaining reader is the run fingerprint.\n"
+            "\n"
+            "So passing it did not skip anything -- it changed the run identity, "
+            "invalidating already-completed pages and forcing a reprocess that "
+            "produces the same output.\n"
+            "\n"
+            "In agentic mode -- the default -- every page is judged by "
+            "construction: the judge IS the routing algorithm, so there is no "
+            "separate hard-page pass to opt out of.\n"
+            "\n"
+            "To spend less on judging, use --judge-backend heuristic (no VLM "
+            "calls), or --strict-local / --max-cost-per-page / --cost-budget to "
+            "bound model spend overall."
+        )
     if no_dual_pass_tables:
         config.dual_pass_tables = False
     if auto_patch_tables:
