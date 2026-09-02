@@ -279,3 +279,98 @@ def test_an_untrusted_page_reaches_the_classical_ocr_path(tmp_path: Path) -> Non
         "no pixel reading was attempted for an untrusted page; the evidence "
         "check ran on nothing, which is not verification"
     )
+
+
+class TestTheJudgePassesTheClassificationThrough:
+    """GH-513: `assess()` itself, not the helper and not the construction site.
+
+    Everything above either calls `verify_scanned_table` by hand or checks that
+    `_build_page_judge` attaches a supplier. Neither runs the line between
+    them. Reverting `native_trusted=trusted` inside `assess()` left this whole
+    file green while restoring word-presence deferral in production for every
+    scanned page with a baked-in OCR layer -- the exact GH-163 failure -- and
+    never reaching the `include_text_layer=False` path either.
+
+    Same standard the wiring test applies at the other end.
+    """
+
+    class _AlwaysAccepts:
+        """Stands in for the inner judge chain.
+
+        It accepts unconditionally, so a deferral is visible as an ACCEPT: if
+        the classification is not passed through, the page defers here and
+        ships. That makes the difference between the two cases below entirely
+        attributable to the pass-through.
+        """
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def assess(self, output, provider):
+            from socr.pipeline.agentic import AcceptDecision
+
+            self.calls += 1
+            return AcceptDecision(accept=True, reason="inner accepted", confidence=1.0)
+
+    def _judge(self, doc, trusted):
+        from socr.pipeline.agentic import SourceEvidenceTableJudge
+
+        inner = self._AlwaysAccepts()
+        judge = SourceEvidenceTableJudge(
+            inner=inner,
+            get_fitz_page=lambda _n: doc[0],
+            record_event=None,
+            ocr_image_fn=lambda _pix: "",
+            native_trusted=lambda _n: trusted,
+        )
+        return judge, inner
+
+    def _output(self):
+        from socr.core.result import PageOutput, PageStatus
+
+        return PageOutput(
+            page_num=1,
+            text=HALLUCINATED,
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+        )
+
+    def _provider(self):
+        from socr.core.providers import PROFILE_QWEN_LOCAL
+
+        return PROFILE_QWEN_LOCAL
+
+    def test_an_untrusted_page_is_rejected_by_the_real_judge(self, tmp_path: Path) -> None:
+        doc = _page_with_untrusted_ocr_layer(tmp_path / "assess_untrusted")
+        try:
+            assert page_has_native_words(doc[0]), (
+                "the page must have words, or the old code would not have deferred"
+            )
+            judge, inner = self._judge(doc, trusted=False)
+            decision = judge.assess(self._output(), self._provider())
+
+            assert inner.calls == 0, (
+                "the judge deferred to the inner chain on an untrusted page, so "
+                "the classification never reached verify_scanned_table"
+            )
+            assert not decision.accept, (
+                f"a hallucinated table on an untrusted page was accepted: {decision.reason}"
+            )
+        finally:
+            doc.close()
+
+    def test_a_trusted_page_defers_to_the_inner_chain(self, tmp_path: Path) -> None:
+        """Control: the same page, the same table, the opposite classification.
+
+        Without it, a judge that rejected everything would satisfy the test
+        above.
+        """
+        doc = _page_with_untrusted_ocr_layer(tmp_path / "assess_trusted")
+        try:
+            judge, inner = self._judge(doc, trusted=True)
+            decision = judge.assess(self._output(), self._provider())
+
+            assert inner.calls == 1, "a trusted page must reach the inner judge chain"
+            assert decision.accept, "the inner judge accepted; the wrapper must not override it"
+        finally:
+            doc.close()
