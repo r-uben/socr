@@ -1724,7 +1724,15 @@ def build_manifest(
         # failure this ticket is named for.
         page_model = getattr(page, "provider_model", "") or ""
         prompt_hash = ""
-        if determinants is not None:
+        if page.engine == "native":
+            # A native page had NO model, and every source below describes some
+            # other engine's model (cubic P2 on #507). On a mixed document the
+            # OCR engine's `EngineResult.model_version` is populated, so without
+            # this the native pages were stamped with a model that never read
+            # them -- erasing the very distinction this ticket argues the empty
+            # value exists to preserve. Short-circuit before any of them.
+            model_version = ""
+        elif determinants is not None:
             model, backend, task, prompt = determinants
             model_version = (
                 page_model

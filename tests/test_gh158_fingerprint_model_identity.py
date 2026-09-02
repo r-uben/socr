@@ -127,14 +127,28 @@ def test_swapping_only_the_model_tag_changes_the_fingerprint(tmp_path: Path) -> 
     assert first.model_version != second.model_version
 
 
-def test_a_native_page_is_identified_by_engine_not_by_a_fake_model(tmp_path: Path) -> None:
+@pytest.mark.parametrize("determinant", [None, "qwen3-vl:30b-a3b-instruct"])
+def test_a_native_page_is_identified_by_engine_not_by_a_fake_model(
+    tmp_path: Path, determinant: str | None
+) -> None:
     """Control, and the deliberate asymmetry.
 
     Without this, populating `model_version` from anything at hand -- a default,
     a sentinel, the engine name -- would satisfy the tests above while erasing
     the difference between "no model ran" and "a model ran".
+
+    Parametrised over an engine-level determinant (cubic P2 on #507): a MIXED
+    document populates `EngineResult.model_version` for its OCR engine, and the
+    native pages were then stamped with a model that never read them. The
+    unparametrised version of this test could not see that -- it had no
+    configured model for the fallback chain to find.
     """
-    fp = _fingerprint(tmp_path / "native", engine="native", model="")
+    fp = _fingerprint(
+        tmp_path / f"native_{determinant}",
+        engine="native",
+        model="",
+        determinant_model=determinant,
+    )
 
     assert fp.engine == "native", f"a native page must say so: {fp.engine!r}"
     assert fp.model_version == "", (
