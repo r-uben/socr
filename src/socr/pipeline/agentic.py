@@ -457,11 +457,18 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
     """Fail-closed source-evidence gate for VLM-emitted markdown tables (GH-90).
 
     Runs BEFORE the inner judge chain on ANY model output that contains markdown
-    table blocks, regardless of ``PageState.has_tables``.  Born-digital pages
-    with native PyMuPDF words defer to ``NativeTableVerifierJudge``; scanned pages
-    with no native words verify cell tokens against local non-generative evidence
-    (page/crop raster + optional classical OCR).  Unsupported or unverifiable
-    tables hard-reject before heuristic acceptance.
+    table blocks, regardless of ``PageState.has_tables``.
+
+    Deferral is selected on the page's born-digital TRUST classification, not on
+    word presence (GH-163). A trusted-native page defers to
+    ``NativeTableVerifierJudge``; a page classified untrusted verifies cell
+    tokens against local non-generative evidence (crop and page raster +
+    optional classical OCR) EVEN IF it carries native words -- a scanned page
+    with a baked-in OCR layer has words and no trustworthy reading, and its text
+    layer is excluded from that evidence so it cannot corroborate the table
+    under suspicion. When the classification is unavailable, word presence is
+    the fallback, as before. Unsupported or unverifiable tables hard-reject
+    before heuristic acceptance.
     """
 
     def __init__(
