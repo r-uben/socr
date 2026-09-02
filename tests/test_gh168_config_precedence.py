@@ -59,12 +59,12 @@ LOADED = {
 }
 
 
-def _run(tmp_path: Path, extra: list[str], monkeypatch: pytest.MonkeyPatch):
-    """Invoke `socr process --config ...` and capture the config it built."""
+def _run_with(tmp_path: Path, config_text: str, extra: list[str], monkeypatch):
     fitz = pytest.importorskip("fitz")
 
+    tmp_path.mkdir(parents=True, exist_ok=True)
     cfg = tmp_path / "c.yaml"
-    cfg.write_text(CONFIG)
+    cfg.write_text(config_text)
     pdf = tmp_path / "d.pdf"
     doc = fitz.open()
     doc.new_page().insert_text((72, 72), "born digital text long enough to be a text layer.")
@@ -80,11 +80,23 @@ def _run(tmp_path: Path, extra: list[str], monkeypatch: pytest.MonkeyPatch):
         def process(self, *_a, **_k):
             raise SystemExit(0)
 
-    monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
+        def _resolve_output_root(self, *_a, **_k):
+            return tmp_path / "out"
 
+    monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
     CliRunner().invoke(cli, ["process", str(pdf), "--config", str(cfg), *extra])
     assert "config" in seen, "the pipeline was never constructed, so nothing was measured"
     return seen["config"]
+
+
+def _run(tmp_path: Path, extra: list[str], monkeypatch: pytest.MonkeyPatch):
+    """Invoke `socr process --config <CONFIG>` and capture the config it built.
+
+    GH-479 review: a thin wrapper over `_run_with` rather than a near-identical
+    copy, so the PDF fixture and the capturing stub live in ONE place and cannot
+    drift apart.
+    """
+    return _run_with(tmp_path, CONFIG, extra, monkeypatch)
 
 
 @pytest.mark.parametrize(("field", "expected"), sorted(LOADED.items()))
@@ -198,36 +210,6 @@ save_figures: false
 """
 
 
-def _run_with(tmp_path: Path, config_text: str, extra: list[str], monkeypatch):
-    fitz = pytest.importorskip("fitz")
-
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    cfg = tmp_path / "c.yaml"
-    cfg.write_text(config_text)
-    pdf = tmp_path / "d.pdf"
-    doc = fitz.open()
-    doc.new_page().insert_text((72, 72), "born digital text long enough to be a text layer.")
-    doc.save(str(pdf))
-    doc.close()
-
-    seen: dict = {}
-
-    class _Stub:
-        def __init__(self, config):
-            seen["config"] = config
-
-        def process(self, *_a, **_k):
-            raise SystemExit(0)
-
-        def _resolve_output_root(self, *_a, **_k):
-            return tmp_path / "out"
-
-    monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
-    CliRunner().invoke(cli, ["process", str(pdf), "--config", str(cfg), *extra])
-    assert "config" in seen, "the pipeline was never constructed, so nothing was measured"
-    return seen["config"]
-
-
 @pytest.mark.parametrize(
     ("flag", "field"),
     [
@@ -248,18 +230,13 @@ def test_an_explicit_flag_overrides_a_loaded_false(
     )
 
 
-@pytest.mark.parametrize(
-    "field", ["reprocess", "quiet", "verbose", "write_manifest", "save_figures"]
-)
-def test_a_loaded_false_survives_without_the_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
-) -> None:
-    """The anchor: without it the test above passes on a config that never loaded.
-
-    If `false` were not actually reaching the config, `True` after the flag
-    would prove nothing about precedence.
-    """
-    config = _run_with(tmp_path / f"{field}_off", FALSE_CONFIG, [], monkeypatch)
-    assert getattr(config, field) is False, (
-        f"`{field}: false` did not load, so the override test above measures nothing"
-    )
+# GH-479 review: an anchor asserting `<field> is False` with no flag was WRONG
+# and is removed rather than reworded. Every one of these fields defaults to
+# False in `PipelineConfig`, so that assertion passed identically whether the
+# YAML `false` loaded or the field simply kept its default -- an anti-vacuity
+# anchor that was itself vacuous, and whose docstring claimed the opposite.
+#
+# Loading IS proven, by `test_an_absent_option_preserves_the_loaded_value`
+# above: it asserts a loaded `true` survives for these same fields, which is
+# only possible if the YAML reached the config. Duplicating that here with the
+# wrong polarity added nothing.
