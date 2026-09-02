@@ -87,17 +87,31 @@ def main() -> int:
     # underscore collapsed to one. Resolve on a normalised name so a cosmetic
     # rename does not silently turn a scored page into "pdf not found", which
     # would look exactly like a dropped page.
-    by_key = {_key(p.name): p for p in pdf_dir.glob("*.pdf")}
+    #
+    # GH-501: an alias must never be AMBIGUOUS. Two corpus files can normalise
+    # to the same key, and a dict comprehension would silently keep the last
+    # one -- scoring one paper while printing another paper's identifier, which
+    # is the one failure this whole script exists to rule out. Exact basename
+    # always wins; a normalised key claimed by more than one file is refused.
+    by_exact = {p.name: p for p in pdf_dir.glob("*.pdf")}
+    by_key: dict[str, Path] = {}
+    ambiguous: dict[str, list[str]] = defaultdict(list)
+    for path in sorted(by_exact.values()):
+        ambiguous[_key(path.name)].append(path.name)
+    for key, names in ambiguous.items():
+        if len(names) == 1:
+            by_key[key] = pdf_dir / names[0]
 
     rows = []
+    unresolved: list[tuple[str, list[str]]] = []
     for entry in manifest:
-        pdf = by_key.get(_key(entry["pdf"]), pdf_dir / entry["pdf"])
         table_pages = [p["page"] for p in entry["pages"] if p["kind"] == "table"]
         if not table_pages:
             continue
-        if not pdf.exists():
-            for page_num in table_pages:
-                rows.append((entry["pdf"], page_num, None))
+        pdf = by_exact.get(entry["pdf"]) or by_key.get(_key(entry["pdf"]))
+        if pdf is None:
+            unresolved.append((entry["pdf"], ambiguous.get(_key(entry["pdf"]), [])))
+            rows.extend((entry["pdf"], page_num, None) for page_num in table_pages)
             continue
         doc = fitz.open(pdf)
         try:
@@ -110,8 +124,25 @@ def main() -> int:
     print(f"{len(rows)} table pages; {len(eligible)} carry at least one eligible row\n")
     for name, page_num, count in rows:
         mark = "--" if count is None else ("ELIGIBLE" if count else "dropped ")
-        shown = "pdf not found" if count is None else f"{count} eligible band(s)"
+        shown = "UNRESOLVED" if count is None else f"{count} eligible band(s)"
         print(f"  {mark}  {name[:44]:44s} p{page_num:<4d} {shown}")
+
+    # GH-501: a partial corpus must not read as an eligibility result. An
+    # unresolved paper prints in the same table as a page with zero eligible
+    # bands, and the two mean opposite things -- "not measured" versus
+    # "measured and dropped". Exit non-zero so a caller cannot mistake one for
+    # the other, and say which papers and why.
+    if unresolved:
+        print(f"\n{len(unresolved)} paper(s) could not be resolved in {pdf_dir}:")
+        for name, collisions in unresolved:
+            why = (
+                f"normalised name claimed by {len(collisions)} files: {collisions}"
+                if collisions
+                else "no file with this basename, and no unambiguous normalised match"
+            )
+            print(f"  {name}\n    {why}")
+        print("\nThe counts above are INCOMPLETE; this is not an eligibility result.")
+        return 1
     return 0
 
 
