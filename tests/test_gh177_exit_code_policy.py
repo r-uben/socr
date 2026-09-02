@@ -122,3 +122,45 @@ def test_the_status_mapping_is_the_shared_one() -> None:
         is Status.PARTIAL
     )
     assert contract_status_for(_result(pdf, DocumentStatus.ERROR, "boom")) is Status.FAILED
+
+
+def test_batch_exits_nonzero_when_a_file_raises(tmp_path: Path) -> None:
+    """GH-475/476: the exception arm of `process_batch`, at the real caller.
+
+    `process_batch` catches a raising `process` so one bad file cannot abort the
+    batch, and records `Status.FAILED` for it. Nothing pinned that: the GH-177
+    stub only ever RETURNS results, so deleting that `outcome.add` left the full
+    suite green at 2846 -- and `socr batch` would exit 0 on a hard per-file
+    crash, reporting a run that processed nothing as clean.
+
+    The other half matters as much: the batch must still COMPLETE. A crash that
+    aborted the run would also exit nonzero, so the test asserts the surviving
+    file was processed too.
+    """
+    from unittest.mock import patch
+
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    in_dir = tmp_path / "in"
+    bad = _pdf(in_dir)
+    good = in_dir / "good.pdf"
+    good.write_bytes(bad.read_bytes())
+
+    seen: list[str] = []
+
+    def _process(self, pdf_path, output_dir=None, scan_root=None):
+        seen.append(Path(pdf_path).name)
+        if Path(pdf_path).name == bad.name:
+            raise RuntimeError("engine blew up on this file")
+        return _result(Path(pdf_path), DocumentStatus.SUCCESS, None)
+
+    with patch.object(UnifiedPipeline, "process", _process):
+        res = CliRunner().invoke(cli, ["batch", str(in_dir), "-o", str(tmp_path / "o"), "-q"])
+
+    assert bad.name in seen and good.name in seen, (
+        f"the batch stopped at the failing file instead of continuing: {seen}"
+    )
+    assert res.exit_code != 0, (
+        "a file that raised was not recorded, so the batch reported a run that "
+        "crashed on a document as clean"
+    )
