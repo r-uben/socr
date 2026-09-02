@@ -165,7 +165,14 @@ def test_batch_still_works_without_an_hpc_config(tmp_path: Path) -> None:
         def __init__(self, config):
             built.append("UnifiedPipeline")
             self.config = config
-            self.last_outcome = None
+            # A real outcome, because the CLI reads `last_outcome.exit_code`
+            # after the batch (cubic P2 on #535). Leaving it None made the
+            # command fail AFTER constructing the pipeline, and this test still
+            # passed -- it asserted construction and never looked at the exit
+            # code, so "batch still works" was not what it measured.
+            from ocr_output_contract import RunOutcome
+
+            self.last_outcome = RunOutcome()
 
         def process_batch(self, *_a, **_k):
             return []
@@ -178,4 +185,9 @@ def test_batch_still_works_without_an_hpc_config(tmp_path: Path) -> None:
     assert built == ["UnifiedPipeline"], (
         f"an ordinary batch no longer builds the agentic pipeline: {built}, "
         f"output={result.output!r}"
+    )
+    assert result.exit_code == 0, (
+        f"an ordinary batch did not succeed (exit {result.exit_code}): "
+        f"{result.output!r}. Constructing the pipeline is not the same as "
+        "running, which is what this control claims."
     )
