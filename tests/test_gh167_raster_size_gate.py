@@ -170,3 +170,52 @@ class TestFailOpenOnUnmeasurablePlacement:
             )
         finally:
             doc.close()
+
+    def test_one_unresolved_image_beside_a_small_measured_one_still_fails_open(
+        self, tmp_path: Path
+    ) -> None:
+        """The mixed case, which is the actual P2 regression (cubic P3 on #510).
+
+        Both tests above patch every lookup, so a change that recomputed
+        `largest` from the MEASURED rects only and rejected on that would pass
+        them while restoring exactly the bug: a page rejected on evidence that
+        never covered one of its images.
+
+        Here one image measures small and the other resolves to nothing. The
+        measured evidence says "too small"; the unmeasured one says nothing at
+        all, and nothing is not a licence to reject.
+        """
+        small = _SIDE / 3
+        tmp = tmp_path / "mixed"
+        tmp.mkdir(parents=True, exist_ok=True)
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 700), "ordinary prose on an ordinary page", fontsize=10)
+        page.insert_image(fitz.Rect(72, 60, 72 + small, 60 + small), stream=_png(400, 300))
+        page.insert_image(fitz.Rect(300, 60, 300 + small, 60 + small), stream=_png(64, 64))
+        pdf = tmp / "p.pdf"
+        doc.save(pdf)
+        doc.close()
+
+        doc = fitz.open(pdf)
+        try:
+            page = doc[0]
+            xrefs = [image[0] for image in page.get_images()]
+            assert len(xrefs) == 2, f"fixture must embed two distinct images: {xrefs}"
+            assert not has_chart_marks(page), (
+                "control: with BOTH placements measured and small, the page is rejected"
+            )
+
+            unresolved = xrefs[1]
+            real_rects = page.get_image_rects
+
+            def _one_unresolved(xref, *a, **k):
+                return [] if xref == unresolved else real_rects(xref, *a, **k)
+
+            page.get_image_rects = _one_unresolved
+            assert has_chart_marks(page), (
+                "a page with one unresolved image was rejected on the other "
+                "image's evidence -- the gate narrowed on ignorance"
+            )
+        finally:
+            doc.close()
