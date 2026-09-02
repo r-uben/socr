@@ -4914,6 +4914,7 @@ class UnifiedPipeline:
         output_dir: Path,
         *,
         terminal: bool = True,
+        extra_figures: list | None = None,
     ) -> Path:
         """Write per-page provenance sidecar to ``pages/NNN.json`` atomically.
 
@@ -5005,11 +5006,26 @@ class UnifiedPipeline:
 
         # Figure refs emitted by the description phase and stored on EngineResult.
         # We record only the page-local subset here.
+        # GH-171: figures reach the sidecar from TWO places, and only the first
+        # existed. `_describe_and_embed_figures` attaches its results to the
+        # returned `EngineResult`, not to `state.engine_runs` -- and it runs
+        # AFTER the assemble-time flush. So the sidecar the pipeline calls
+        # authoritative shipped with an empty `figure_refs` on every page that
+        # had figures, and no later pass corrected it (`_rewrite_all_fragments`
+        # rewrites `.md` only). `extra_figures` carries that second source; the
+        # re-flush after the figure phase supplies it.
+        figure_sources: list = list(state.engine_runs)
+        seen_figs: list = []
+        for run in figure_sources:
+            seen_figs.extend(getattr(run, "figures", []) or [])
+        seen_figs.extend(extra_figures or [])
+
         figure_refs: list[dict] = []
-        for run in state.engine_runs:
-            for fig in getattr(run, "figures", []):
-                if getattr(fig, "page_num", None) == page_num:
-                    figure_refs.append(fig.to_dict() if hasattr(fig, "to_dict") else {})
+        for fig in seen_figs:
+            if getattr(fig, "page_num", None) == page_num:
+                ref = fig.to_dict() if hasattr(fig, "to_dict") else {}
+                if ref not in figure_refs:  # the same figure can reach both sources
+                    figure_refs.append(ref)
 
         payload: dict = {
             "page_num": page_num,
@@ -6755,6 +6771,32 @@ class UnifiedPipeline:
             # Always finalize the record (real fingerprint, final status),
             # replacing the provisional pre-figures entry.
             self._write_metadata(state, final_result, output_dir, has_text)
+
+            # GH-171: and re-flush the sidecars, for the same reason the flush
+            # was already moved below the audit-event append (see the MAJOR 6(a)
+            # note above): a sidecar is written from a snapshot, and nothing
+            # corrects it afterwards. Flushing before this phase left the
+            # authoritative `pages/NNN.json` without the figure paths, bboxes
+            # and caption engine that the final markdown and the manifest both
+            # carry -- three records of one page disagreeing.
+            #
+            # Non-fatal, like the first flush: a failure here leaves the
+            # pre-figure sidecars, which is what shipped before this fix.
+            if has_text and page_texts:
+                try:
+                    for pnum in range(1, state.handle.page_count + 1):
+                        self._flush_page_sidecar(
+                            state,
+                            pnum,
+                            output_dir,
+                            extra_figures=list(getattr(final_result, "figures", []) or []),
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "GH-171 [%s]: post-figure sidecar re-flush failed (%s)",
+                        state.handle.path.name,
+                        exc,
+                    )
 
         # GH-226 review round: validate the EXACT post-transform body, not only
         # the pre-figure winner. Captions and other final transforms are model
