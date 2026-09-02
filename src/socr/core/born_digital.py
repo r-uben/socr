@@ -561,6 +561,49 @@ def _emit_run(text: str, uri: str) -> str:
     return f"{lead}[{inner}]({uri}){trail}"
 
 
+def _anchor_offset_under(text: str, anchor: str, span_rect, link_rect) -> int | None:
+    """Character offset of the anchor occurrence the link RECTANGLE covers.
+
+    GH-341. This used to be ``text.index(anchor)`` -- the FIRST occurrence in the
+    span, whatever the rectangle actually covered. A uniform-font line is a
+    single span, so a page citing "Smith 2020" in the body and again in the
+    references stamped the bibliography's DOI on the in-text mention. A wrong
+    URI on the wrong cite is worse than a dropped one: nothing about it looks
+    like an error.
+
+    Offsets are estimated by interpolating across the span's own bbox, which is
+    the only positional information a span dict carries. That is coarse, but the
+    question here is only WHICH of a handful of occurrences a rectangle sits
+    over, and those are line-widths apart.
+
+    Returns ``None`` when no occurrence overlaps the rectangle, so the caller
+    can skip rather than guess.
+    """
+    if not text:
+        return None
+    try:
+        sx0, sx1 = float(span_rect.x0), float(span_rect.x1)
+        lx0, lx1 = float(link_rect.x0), float(link_rect.x1)
+    except Exception:
+        return None
+    width = sx1 - sx0
+    if width <= 0:
+        return None
+
+    per_char = width / len(text)
+    best: tuple[float, int] | None = None
+    start = text.find(anchor)
+    while start != -1:
+        a0 = sx0 + start * per_char
+        a1 = sx0 + (start + len(anchor)) * per_char
+        if a0 < lx1 and a1 > lx0:  # horizontal overlap with the link rect
+            overlap = min(a1, lx1) - max(a0, lx0)
+            if best is None or overlap > best[0]:
+                best = (overlap, start)
+        start = text.find(anchor, start + 1)
+    return None if best is None else best[1]
+
+
 def _line_text(spans, links: list[tuple[object, str, str]]) -> str:
     """Join a line's spans, wrapping link anchors in markdown links.
 
@@ -603,7 +646,13 @@ def _line_text(spans, links: list[tuple[object, str, str]]) -> str:
                 # uniform-font line is a single span -- the behaviour this
                 # anchor-resolution replaced (GH-127 review).
                 continue
-            hits.append((text.index(anchor), text.index(anchor) + len(anchor), uri, anchor))
+            start_c = _anchor_offset_under(text, anchor, span_rect, rect)
+            if start_c is None:
+                # GH-341: prefer skipping to guessing. A dropped link is
+                # recoverable; a URI stamped on the wrong citation is not
+                # visible as an error at all.
+                continue
+            hits.append((start_c, start_c + len(anchor), uri, anchor))
 
         hits.sort(key=lambda h: (h[0], h[1]))
         kept: list[tuple[int, int, str, str]] = []
