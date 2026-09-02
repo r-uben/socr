@@ -2063,7 +2063,12 @@ class UnifiedPipeline:
             process_equation_region,
         )
         from socr.math.recover import DEFAULT_MODEL
-        from socr.tables.escalation_canary import PRESENCE_INVENTED, region_presence_verdict
+        from socr.tables.escalation_canary import (
+            PRESENCE_INVENTED,
+            PRESENCE_UNVERIFIABLE,
+            region_presence_verdict,
+            text_value_tokens,
+        )
 
         # 1. The floor. Identical to the lane-off page in every respect.
         self._agentic_native_page(state, page_num, ps)
@@ -2292,6 +2297,54 @@ class UnifiedPipeline:
                     )
                 )
                 continue
+
+            # GH-522: an UNVERIFIABLE verdict is an ABSTENTION, not a pass. The
+            # guard returns it when the page has no numeric oracle, or when the
+            # text layer shows decode damage (ruling 4: never FAIL on damaged
+            # text). Attaching regardless put a crop-backed LaTeX sidecar --
+            # possibly carrying invented values -- beside the authoritative
+            # native slice, tagged only by `presence_status` on an audit event
+            # that a reader of the .md never sees.
+            #
+            # Refused, but only when there is something to invent. A reading with
+            # no numeric tokens cannot carry an invented VALUE whatever the
+            # oracle says, and dropping those would discard safe LaTeX for
+            # pure-symbol equations -- the "dropped is worse than missing" half
+            # of the corpus rule. So the test is the CANDIDATE's own numbers,
+            # read with the same extractor the guard itself uses, not the
+            # verdict alone.
+            #
+            # The crop stays on disk exactly as for a rejection, so the reading
+            # remains available to anyone who wants to check it by hand. The page
+            # is NOT demoted and native prose stays: this removes an unchecked
+            # addition, it does not take anything away.
+            if verdict.status == PRESENCE_UNVERIFIABLE:
+                unchecked = text_value_tokens(result.raw_latex)
+                if unchecked:
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="equation_region_reading_unverifiable",
+                            engine="native+equations",
+                            detail=(
+                                f"region {region_index} reading NOT attached: it carries "
+                                f"{sum(unchecked.values())} numeric value(s) the presence "
+                                f"guard could not check ({verdict.reason}); the page keeps "
+                                "its native prose and is NOT demoted"
+                            ),
+                            data={
+                                "region_index": region_index,
+                                "crop_path": crop_path,
+                                "model_id": model,
+                                "presence_status": verdict.status,
+                                "presence_reason": verdict.reason,
+                                "unchecked_values": sorted(unchecked.elements()),
+                                "oracle_size": verdict.oracle_size,
+                                "raw_latex": result.raw_latex,
+                            },
+                        )
+                    )
+                    continue
 
             result.presence_status = verdict.status
             result.presence_reason = verdict.reason

@@ -363,8 +363,19 @@ def test_invented_number_rejects_the_reading_without_demoting_the_page(
     assert "equation_region_reading_attached" not in _kinds(on, 2)
 
 
-def test_encoding_suspect_abstains_and_the_reading_is_attached(tmp_path: Path) -> None:
-    """Ruling 4: an encoding-suspect page ABSTAINS; it never FAILs."""
+def test_encoding_suspect_abstains_and_a_numeric_reading_is_not_attached(tmp_path: Path) -> None:
+    """Ruling 4 holds, and GH-522 narrows what the abstention permits.
+
+    The page still ABSTAINS rather than FAILs: it is not rejected, not demoted,
+    and keeps its native prose. What changed is that an abstention no longer
+    licenses ATTACHING a reading whose numbers nobody could check -- a
+    crop-backed LaTeX sidecar sat beside the authoritative native slice carrying
+    possibly-invented values, tagged only by `presence_status` on an audit event
+    the .md never shows.
+
+    Scoped to readings that HAVE numbers; the number-free case below still
+    attaches, because there is nothing to invent.
+    """
     pipeline = _make_pipeline(equation_region_lane=True)
     pdf_dir = tmp_path / "suspect"
 
@@ -412,7 +423,83 @@ def test_encoding_suspect_abstains_and_the_reading_is_attached(tmp_path: Path) -
     attached = [
         e for e in state.events if e.page_num == 2 and e.kind == "equation_region_reading_attached"
     ]
-    assert len(attached) == 1, "encoding-suspect must ABSTAIN, not reject"
+    assert attached == [], (
+        "an unchecked numeric reading was attached to the page under an abstention (GH-522)"
+    )
+
+    unverifiable = [
+        e
+        for e in state.events
+        if e.page_num == 2 and e.kind == "equation_region_reading_unverifiable"
+    ]
+    assert len(unverifiable) == 1, "the refusal must be recorded, not silent"
+    assert unverifiable[0].data["presence_status"] == "unverifiable"
+    assert unverifiable[0].data["unchecked_values"], "the event does not say WHICH values"
+    assert unverifiable[0].data["crop_path"], "the crop must stay on disk as evidence"
+
+    # Ruling 4, still: abstain is not reject, and the page is not demoted.
+    assert "equation_region_reading_rejected" not in _kinds(state, 2), (
+        "an encoding-suspect page was REJECTED; ruling 4 says it abstains"
+    )
+
+
+def test_an_abstaining_page_still_attaches_a_reading_with_no_numbers(tmp_path: Path) -> None:
+    """The other half of GH-522, and the reason the refusal is scoped.
+
+    A pure-symbol equation carries nothing that can be invented, so refusing it
+    would discard safe LaTeX on exactly the pages where the text layer is
+    already damaged -- the "dropped is worse than missing" half of the corpus
+    rule. Without this, a blanket refusal on UNVERIFIABLE would satisfy the test
+    above.
+    """
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.agentic import PageDecision
+
+    pipeline = _make_pipeline(equation_region_lane=True)
+    pdf_dir = tmp_path / "suspect_symbols"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf = _make_pdf(pdf_dir)
+    state = _make_state(pdf)
+    state.pages[2].has_encoding_hygiene_suspect = True
+    pipeline._last_assessment = state._last_assessment
+    spy = _ModelSpy(r"\alpha + \beta = \gamma")
+
+    def _detect(page, page_num):
+        from socr.math.detect_equations import EquationDetectionResult
+
+        if page_num != 2:
+            return EquationDetectionResult(page_num=page_num, regions=[], detection_time_s=0.0)
+        return _region(page)
+
+    def _routed(page_num, *args, **kwargs):
+        return PageDecision(
+            page_num=page_num,
+            final_output=PageOutput(
+                page_num=page_num, text="x", status=PageStatus.SUCCESS, engine="qwen"
+            ),
+            accepted=True,
+        )
+
+    out_dir = pdf_dir / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (
+        patch("socr.math.detect_equations.detect_display_equations", side_effect=_detect),
+        patch("socr.math.equation_latex.latex_for_crop", side_effect=spy),
+        patch("socr.pipeline.orchestrator.route_page", side_effect=_routed),
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+    ):
+        pipeline._phase_agentic(state, out_dir)
+        pipeline._phase_assemble(state, out_dir)
+
+    attached = [
+        e for e in state.events if e.page_num == 2 and e.kind == "equation_region_reading_attached"
+    ]
+    assert len(attached) == 1, (
+        "a number-free reading was refused; nothing in it can be invented, so "
+        "the presence guard has no grounds to withhold it"
+    )
     assert attached[0].data["presence_status"] == "unverifiable"
 
 
