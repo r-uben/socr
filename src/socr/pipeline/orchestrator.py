@@ -5141,7 +5141,7 @@ class UnifiedPipeline:
                 from ocr_output_contract import PAGE_MARKER_RE
 
                 from socr.core.manifest import (
-                    _apply_table_emission_guard,
+                    finalized_page_record,
                     structure_class_floor_applies,
                     structure_class_floor_text,
                 )
@@ -5154,19 +5154,27 @@ class UnifiedPipeline:
                 if structure_class_floor_applies(ps):
                     _raw_body = structure_class_floor_text(ps, page_num)
                 else:
-                    # GH-539: through the SAME emission guard the provisional
-                    # sidecar finalises with. The fragment wrote `bo.text` raw,
-                    # so for a passing output carrying a width-mismatched GFM
-                    # table the fragment held the invalid table while the sidecar
-                    # beside it said `error / table_emission_invalid` with the
-                    # marker text. `_rewrite_all_fragments` corrects the fragment
-                    # at assemble time, so the final `.md` was always right --
-                    # but a crash in between left two files on disk
-                    # contradicting each other, which is the one thing this
-                    # crash-recovery copy exists to prevent.
+                    # GH-539: the SAME selection AND the same guard the
+                    # provisional sidecar uses. The fragment wrote `bo.text`
+                    # raw, so for a passing output carrying a width-mismatched
+                    # GFM table the fragment held the invalid table while the
+                    # sidecar beside it said `error / table_emission_invalid`.
+                    # `_rewrite_all_fragments` corrects the fragment at assemble
+                    # time, so the final `.md` was always right -- but a crash in
+                    # between left two files on disk contradicting each other,
+                    # which is the one thing this crash-recovery copy exists to
+                    # prevent.
                     #
-                    # One finalisation, one set of bytes.
-                    _raw_body = _apply_table_emission_guard(bo, page_num).text or ""
+                    # `finalized_page_record`, not `_apply_table_emission_guard`
+                    # on `bo` (cubic P2 on #549): the same guard applied to a
+                    # DIFFERENT output is still two finalisations. `bo` is the
+                    # raw per-page attempt, and the sidecar selects its winner --
+                    # they diverge exactly in the fallback cases
+                    # `_flush_page_sidecar` documents, e.g. a rejected OCR
+                    # attempt overridden by a flagged native-text fallback.
+                    #
+                    # One selection, one finalisation, one set of bytes.
+                    _raw_body = finalized_page_record(state, page_num).output.text or ""
                 _stripped = _raw_body.lstrip()
                 _m = PAGE_MARKER_RE.match(_stripped)
                 _body = _stripped[_m.end() :].lstrip("\n") if _m else _raw_body

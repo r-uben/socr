@@ -36,7 +36,7 @@ from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 _INVALID_TABLE_BODY = "Prose above.\n\n| a | b | c |\n|---|---|\n| 1 | 2 | 3 |\n\nProse below.\n"
 
 
-def _flush(tmp_path: Path, body: str):
+def _flush(tmp_path: Path, body: str, *, native_fallback: str | None = None):
     """Drive the REAL in-loop provisional flush inside `_phase_agentic`.
 
     Building the guarded text in the test and writing the two files by hand
@@ -66,7 +66,15 @@ def _flush(tmp_path: Path, body: str):
     )
     state = DocumentState(handle=DocumentHandle.from_path(pdf))
 
+    if native_fallback is not None:
+        # A REJECTED OCR attempt with a native-text fallback available: the
+        # selection the sidecar makes is not `ps.best_output`, which is the
+        # divergence cubic P2 on #549 named.
+        state.pages[1].is_born_digital = True
+        state.pages[1].native_text = native_fallback
+
     def _routed(page_num, *_a, **_k):
+        rejected = native_fallback is not None
         return PageDecision(
             page_num=page_num,
             final_output=PageOutput(
@@ -74,9 +82,9 @@ def _flush(tmp_path: Path, body: str):
                 text=body,
                 status=PageStatus.SUCCESS,
                 engine="qwen",
-                audit_passed=True,
+                audit_passed=not rejected,
             ),
-            accepted=True,
+            accepted=not rejected,
         )
 
     out_dir = tmp_path / "out"
@@ -125,3 +133,28 @@ def test_a_clean_page_is_untouched(tmp_path: Path) -> None:
     assert sidecar["status"] == "success", f"the control page was failed: {sidecar['status']!r}"
     assert "| a | b |" in fragment, "a valid table was stripped from the fragment"
     assert fragment.strip() == sidecar["winning_output"]["text"].strip()
+
+
+def test_a_page_whose_winner_is_not_best_output_still_agrees(tmp_path: Path) -> None:
+    """cubic P2 on #549: the same guard on a DIFFERENT output is two finalisations.
+
+    `ps.best_output` is the raw per-page attempt; the sidecar SELECTS its winner.
+    They diverge exactly in the fallback cases `_flush_page_sidecar` documents --
+    a rejected OCR attempt overridden by a flagged native-text fallback. Guarding
+    `best_output` and selecting separately would leave the two artefacts
+    disagreeing again, for a different reason.
+
+    Sourcing both from `finalized_page_record` is what makes the equality hold
+    whatever the selection decides.
+    """
+    fragment, sidecar = _flush(
+        tmp_path / "fallback",
+        _INVALID_TABLE_BODY,
+        native_fallback="Native prose recovered from the text layer.",
+    )
+
+    assert fragment.strip() == sidecar["winning_output"]["text"].strip(), (
+        "the fragment and sidecar disagree on a page whose shipped winner is "
+        "not best_output:\n"
+        f"fragment={fragment!r}\nsidecar ={sidecar['winning_output']['text']!r}"
+    )

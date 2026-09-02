@@ -33,17 +33,6 @@ _ALLOWED_PRIVATE_IMPORTS = {
     ("math/detect_equations.py", "socr.core.born_digital", "_MATH_FONT_RE"),
     ("pipeline/agentic.py", "socr.tables.locate", "_horizontal_rules"),
     ("pipeline/orchestrator.py", "socr.core.manifest", "_whole_doc_page_texts"),
-    # GH-539. The provisional fragment and the provisional sidecar are written
-    # side by side as crash insurance, and must therefore finalise IDENTICALLY.
-    # The sidecar reaches this guard through `_winning_page_output`; the
-    # fragment has to call it directly, and re-implementing the finalisation
-    # publicly would let the two copies drift -- which is the exact defect this
-    # ticket fixes, reintroduced one layer down.
-    #
-    # A public rename is the cleaner long-term shape (this is the shipping
-    # backstop, not an implementation detail), but it churns a module another
-    # session is actively landing P6 work in, so it is not done here.
-    ("pipeline/orchestrator.py", "socr.core.manifest", "_apply_table_emission_guard"),
 }
 
 _MODULE_IMPORT = "<module>"
