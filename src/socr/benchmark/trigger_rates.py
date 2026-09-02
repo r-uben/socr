@@ -23,7 +23,8 @@ from pathlib import Path
 
 import fitz
 
-from socr.core.born_digital import _MATH_FONT_RE, BornDigitalDetector
+from socr.core.born_digital import BornDigitalDetector, math_font_char_count
+from socr.core.pdf import open_pdf
 
 #: Buckets for the math-font character count, chosen to expose the shape of the
 #: distribution, not to define a threshold. The threshold, if any, is picked from
@@ -61,14 +62,14 @@ class Tally:
 
 
 def _math_font_chars(page: fitz.Page) -> int:
-    """Characters rendered in a math-font span on the page."""
-    n = 0
-    for block in page.get_text("dict").get("blocks", []):
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                if _MATH_FONT_RE.search(span.get("font", "") or ""):
-                    n += len(span.get("text", ""))
-    return n
+    """Characters rendered in a math-font span on the page.
+
+    Delegates to ``born_digital.math_font_char_count`` so this measurement uses
+    the SAME term the production ``has_equations`` signal uses. A local copy of
+    the rule would let the two drift, and then the measured trigger rate would
+    describe a detector that does not ship.
+    """
+    return math_font_char_count(page)
 
 
 def measure(pdfs: list[Path]) -> Tally:
@@ -80,7 +81,7 @@ def measure(pdfs: list[Path]) -> Tally:
         except Exception as exc:  # noqa: BLE001 - a corrupt PDF must not end the run
             print(f"skip {pdf.name}: {exc!r}", file=sys.stderr)
             continue
-        with fitz.open(str(pdf)) as doc:
+        with open_pdf(pdf) as doc:
             for pa in assessment.pages:
                 tally.pages += 1
                 if not pa.is_born_digital:
