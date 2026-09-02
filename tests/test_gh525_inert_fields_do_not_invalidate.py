@@ -85,3 +85,62 @@ def test_the_frozen_value_is_the_config_default(field: str) -> None:
     from socr.pipeline.orchestrator import _INERT_FIELD_DEFAULTS
 
     assert _INERT_FIELD_DEFAULTS[field] == getattr(PipelineConfig(), field)
+
+
+class TestTheWarningReachesTheRun:
+    """cubic P3 on #529: the helper was pinned, its call site was not.
+
+    Everything above asserts what `_warn_inert_config` RETURNS. A refactor that
+    stopped calling it would leave all of that green while the setting went back
+    to being ignored in silence -- which is the half of this fix that is about
+    the operator rather than the cache.
+    """
+
+    def _run(self, tmp_path, caplog, *, inert: bool, documents: int = 1):
+        import logging
+        from unittest.mock import patch
+
+        import fitz
+
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        pdfs = []
+        for i in range(documents):
+            doc = fitz.open()
+            doc.new_page().insert_text((72, 72), f"a text layer for document {i}.")
+            path = tmp_path / f"d{i}.pdf"
+            doc.save(path)
+            doc.close()
+            pdfs.append(path)
+
+        overrides = {"judge_hard_pages": False} if inert else {}
+        pipeline = UnifiedPipeline(PipelineConfig(quiet=True, **overrides))
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch.object(UnifiedPipeline, "_phase_agentic", lambda self, *a, **k: None),
+        ):
+            for pdf in pdfs:
+                pipeline.process(pdf, tmp_path / "out")
+
+        return [r.getMessage() for r in caplog.records if "judge_hard_pages" in r.getMessage()]
+
+    def test_a_run_with_an_inert_field_set_says_so(self, tmp_path, caplog) -> None:
+        messages = self._run(tmp_path / "warned", caplog, inert=True)
+        assert messages, (
+            "the run ignored judge_hard_pages without saying so; the call site "
+            "is not wired, so only the helper is tested"
+        )
+
+    def test_a_default_run_stays_quiet(self, tmp_path, caplog) -> None:
+        """Control: a warning on every run is a warning nobody reads."""
+        assert self._run(tmp_path / "quiet", caplog, inert=False) == []
+
+    def test_a_batch_says_it_once_not_once_per_document(self, tmp_path, caplog) -> None:
+        """cubic P3: `process_batch` calls `process` per PDF."""
+        messages = self._run(tmp_path / "batch", caplog, inert=True, documents=3)
+        assert len(messages) == 1, (
+            f"3 documents produced {len(messages)} identical warnings; the "
+            "config cannot change between them"
+        )

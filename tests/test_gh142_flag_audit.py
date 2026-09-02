@@ -421,6 +421,36 @@ def test_every_classification_is_well_formed() -> None:
     )
 
 
+def test_an_ignored_field_reporter_does_not_certify_a_flag() -> None:
+    """The other exclusion, and the leg the benchmark test does not cover.
+
+    cubic P3 on #529: `_warn_inert_config` reads BOTH inert fields to report
+    that they are ignored. The benchmark control happens to cover
+    `fallback_chain`; nothing covered `judge_hard_pages`, so renaming or
+    dropping `_warn_inert_config` would silently let that reporter read certify
+    a dead field as live -- the run's own "I am ignoring this" becoming the
+    evidence that it does not.
+    """
+    import test_gh142_flag_audit as module
+
+    assert module._config_read_sites("judge_hard_pages") == [], (
+        "a read that exists to report the field is ignored is being counted as "
+        "an execution consumer"
+    )
+
+    original = module._NON_EXECUTION_FUNCTIONS
+    try:
+        module._NON_EXECUTION_FUNCTIONS = frozenset()
+        without = module._config_read_sites("judge_hard_pages")
+    finally:
+        module._NON_EXECUTION_FUNCTIONS = original
+
+    assert without, (
+        "the control failed: with the exclusion removed there is no reporter "
+        "read left to exclude, so the assertion above proves nothing"
+    )
+
+
 def test_a_benchmark_report_read_does_not_certify_a_flag() -> None:
     """The exclusion the audit's guarantee rests on, verified directly.
 

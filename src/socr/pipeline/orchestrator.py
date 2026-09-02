@@ -408,6 +408,10 @@ class UnifiedPipeline:
         # the file's parent). Threaded into every contract key so per-doc output
         # mirrors the input subtree relative to it, not the bare basename.
         self._scan_root: Path | None = None
+        #: GH-525: the inert-config warning is emitted once per pipeline, not
+        #: once per document -- `process_batch` calls `process` per PDF and the
+        #: config cannot change between them.
+        self._warned_inert_config = False
         self._final_winning_outputs = None
         # Set by process_batch: the contract RunOutcome that drives the exit code.
         from ocr_output_contract import RunOutcome
@@ -635,22 +639,25 @@ class UnifiedPipeline:
             # --- routing / engine selection (all contributing engines) ---
             "primary_engine": engine_type.value,
             "local_engine": cfg.local_engine.value,
-            # GH-525: likewise the default. No execution path reads
-            # `fallback_chain` (the multi-engine branches that did were deleted
-            # in #298), so a config that sets it changed the run identity
-            # without changing the run.
-            "fallback_chain": [e.value for e in _INERT_FIELD_DEFAULTS["fallback_chain"]],
             # Resolved model/backend/task of every secondary engine, so a swap of
             # a local/fallback member's model invalidates the cache too.
             "local_engine_determinants": self._engine_determinants(cfg.local_engine),
-            # ...and therefore EMPTY. Resolving the default chain's determinants
-            # here was a real regression in the first draft of GH-525: it made
-            # `gemini_model` invalidate the run through the fallback chain even
-            # for a config that had emptied that chain, which
-            # `test_caption_fallback_model_is_ignored_without_descriptions`
-            # caught. If nothing reads the chain, nothing reads its members'
-            # models either.
-            "fallback_determinants": [],
+            # GH-525: `judge_hard_pages`, `fallback_chain` and its determinants
+            # are deliberately ABSENT. None gates any phase (GH-142 rejected
+            # their flags for that), so including them made a config-only toggle
+            # invalidate every terminal page and force a reprocess producing
+            # byte-identical output.
+            #
+            # Dropping them changes this fingerprint once, for everybody. That
+            # cost was the reason not to -- until `_socr_source_digest` was
+            # checked: it hashes every shipped .py file, so ANY source edit
+            # already invalidates every fingerprint, deliberately ("an
+            # output-neutral edit costs one needless reprocess. Re-OCR is
+            # cheap"). This edit is one of those, so the cost is not additional.
+            #
+            # `_warn_inert_config` names them when a config sets them, because
+            # ignoring a setting silently is the failure this ticket family is
+            # about.
             # PP-5: the agentic provider ladder is built from ``enabled_engines``
             # and pruned by ``max_cost_per_page`` / ``cost_budget`` — all three
             # change which provider produces (or is even tried on) a page, so a
@@ -689,17 +696,6 @@ class UnifiedPipeline:
             "agentic": cfg.agentic,
             "strict_local": cfg.strict_local,
             "audit_min_words": cfg.audit_min_words,
-            # GH-525: the DEFAULT, never `cfg.judge_hard_pages`. The field gates
-            # no phase anywhere (GH-142 rejected its flag for that reason), and
-            # the CLI now refuses to set it -- but YAML still can, and the value
-            # reaching this dict made a config-only toggle invalidate every
-            # terminal page and force a reprocess producing byte-identical
-            # output. Recording the default keeps the key (so the schema and
-            # every existing fingerprint are unchanged) while making a setting
-            # that changes nothing change nothing. `_warn_inert_config` says so
-            # out loud, because silently ignoring a setting is the failure this
-            # whole ticket family is about.
-            "judge_hard_pages": _INERT_FIELD_DEFAULTS["judge_hard_pages"],
             "judge_backend": cfg.judge_backend,
             # The RESOLVED judge identity, not the (possibly empty) config field.
             # Under the default auto-resolution ``cfg.judge_model`` is "", so
@@ -878,9 +874,16 @@ class UnifiedPipeline:
         pdf_path = Path(pdf_path)
         # GH-525: a config that sets an inert field must not be ignored in
         # silence -- that is the same failure the rejected flags had, moved to
-        # the YAML layer. Warn once per run, naming the fields.
-        inert = _warn_inert_config(self.config)
+        # the YAML layer.
+        #
+        # Once per PIPELINE, not per document: `process_batch` calls `process`
+        # for every PDF, so an unguarded warning repeated once per file and
+        # became noise the operator learns to skip (cubic P3 on #529). The
+        # config cannot change between those calls, so one line says everything
+        # repeating it would.
+        inert = [] if self._warned_inert_config else _warn_inert_config(self.config)
         if inert:
+            self._warned_inert_config = True
             message = (
                 f"ignoring config field(s) {', '.join(inert)}: they gate nothing "
                 "on any path (GH-142/GH-525) and are excluded from the run "
