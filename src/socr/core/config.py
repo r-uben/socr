@@ -77,7 +77,17 @@ class HPCConfig:
     """
 
     enabled: bool = False
-    sequential: bool = False
+    #: GH-536: defaults TRUE because sequential loading is the only HPC mode
+    #: there is -- `HPCPipeline` implements nothing else, and GH-517 established
+    #: that nothing reads this field to select anything.
+    #:
+    #: With the old `False` default, a bare `hpc: {enabled: true}` was REFUSED by
+    #: the GH-517 guard, which was meant for someone explicitly asking for a mode
+    #: that does not exist. Omitted and explicit-false are indistinguishable
+    #: after `from_file`, so the default is what separates them: True means an
+    #: omitted key takes the only mode, and `sequential: false` can only be
+    #: someone who typed it.
+    sequential: bool = True
     vllm_url: str = ""
     vllm_port: int = 8000
     ocr_model: str = "deepseek-ai/DeepSeek-OCR"
