@@ -176,9 +176,16 @@ more.
 
 **Under the recomputation, Nakamura p42 is excluded** -- it has no band anywhere on the
 page carrying three numeric tokens with two numeric neighbours. p42 is #326's named
-fixture and one of the three no-grid pages, so the bias GH-338 suspected is a real
-property of the written eligibility rule: it drops the pages where native banding fails,
-which are the pages a native-vs-model comparison most needs.
+fixture and one of the three no-grid pages, so the sample cannot speak to that fixture.
+
+~~it drops the pages where native banding fails~~ -- **narrowed (GH-505).** One page
+failing the band rule does not show the rule drops every page where native banding or
+grid reconstruction fails; those are different diagnostics and this recompute measured
+only the first. What it establishes is the specific fact: the page #326 is named for
+fails the measured band condition, so a sample built by following the written rule
+excludes it. The general worry -- that a numeric-band eligibility test preferentially
+drops the pages a native-vs-model comparison most needs -- is plausible and stays
+UNMEASURED here.
 
 ~~This settles the sample question~~ -- **corrected (GH-501).** It does not. The original
 selection script and its selected rows are gone, so agreeing on the COUNT cannot show
@@ -188,8 +195,10 @@ written excludes p42, so a sample built by following it could not have spoken to
 The retraction already recorded above rests on its own reasoning (different instruments)
 and does not depend on this.
 
-Two of nine papers contribute nothing, and one contributes four of the thirteen rows, so
-the 13 are not thirteen independent documents either. That is a further reason 13 rows
+In the RECOMPUTED set (GH-505: this distribution is a property of the table above, not a
+recovered fact about the historical 13), two of nine papers contribute nothing and one
+contributes four of the thirteen rows, so those 13 are not thirteen independent documents
+either. That is a further reason 13 rows
 cannot rank qwen against gemini. ~~native's failures here are not concentrated in one
 paper~~ -- **dropped (GH-501):** the content-free record carries no per-paper
 native-failure map, so that clause asserted a distribution nothing here measures.
