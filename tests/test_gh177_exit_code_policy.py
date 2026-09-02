@@ -141,10 +141,18 @@ def test_batch_exits_nonzero_when_a_file_raises(tmp_path: Path) -> None:
 
     from socr.pipeline.orchestrator import UnifiedPipeline
 
+    # GH-478: the names are deliberate. The "continue" half only proves anything
+    # if the FAILING file is processed FIRST -- if it sorted last, an
+    # abort-on-crash defect would still leave both names in `seen` and still
+    # exit nonzero, and this test would stay green with continue coverage gone.
+    # Named so the order is fixed rather than incidental, and asserted below.
     in_dir = tmp_path / "in"
-    bad = _pdf(in_dir)
-    good = in_dir / "good.pdf"
-    good.write_bytes(bad.read_bytes())
+    seed = _pdf(in_dir)
+    bad = in_dir / "a_raises.pdf"
+    good = in_dir / "z_succeeds.pdf"
+    bad.write_bytes(seed.read_bytes())
+    good.write_bytes(seed.read_bytes())
+    seed.unlink()
 
     seen: list[str] = []
 
@@ -159,6 +167,10 @@ def test_batch_exits_nonzero_when_a_file_raises(tmp_path: Path) -> None:
 
     assert bad.name in seen and good.name in seen, (
         f"the batch stopped at the failing file instead of continuing: {seen}"
+    )
+    assert seen.index(bad.name) < seen.index(good.name), (
+        f"the failing file was not processed FIRST, so 'both were seen' does not "
+        f"distinguish continuing from aborting after the last file: {seen}"
     )
     assert res.exit_code != 0, (
         "a file that raised was not recorded, so the batch reported a run that "
