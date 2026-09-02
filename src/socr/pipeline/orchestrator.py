@@ -2273,11 +2273,13 @@ class UnifiedPipeline:
             # Ruling 4: numeric presence is a REJECTION guard, not an acceptance
             # contract. Containment is one-way and proves only "not invented" --
             # never that a value is correctly placed or bound.
+            encoding_suspect = bool(getattr(ps, "has_encoding_hygiene_suspect", False))
+            corrupt_math = bool(ps.has_corrupt_math)
             verdict = region_presence_verdict(
                 native_text,
                 result.raw_latex,
-                encoding_suspect=bool(getattr(ps, "has_encoding_hygiene_suspect", False)),
-                corrupt_math=bool(ps.has_corrupt_math),
+                encoding_suspect=encoding_suspect,
+                corrupt_math=corrupt_math,
             )
             if verdict.status == PRESENCE_INVENTED:
                 state.events.append(
@@ -2312,19 +2314,28 @@ class UnifiedPipeline:
             # native slice, tagged only by `presence_status` on an audit event
             # that a reader of the .md never sees.
             #
-            # Refused, but only when there is something to invent. A reading with
-            # no numeric tokens cannot carry an invented VALUE whatever the
-            # oracle says, and dropping those would discard safe LaTeX for
-            # pure-symbol equations -- the "dropped is worse than missing" half
-            # of the corpus rule. So the test is the CANDIDATE's own numbers,
-            # read with the same extractor the guard itself uses, not the
-            # verdict alone.
+            # Refused under two narrowings, both load-bearing (GH-543 corrected
+            # the first, which this lane shipped too broad):
+            #
+            #  - only when the TEXT LAYER IS DAMAGED. UNVERIFIABLE also covers
+            #    "the page has no numeric oracle", and there a numeral in the
+            #    reading is usually NOTATION -- the 2 in `E = mc^2`, an equation
+            #    tag -- not a data value. Refusing on that convicts notation-only
+            #    LaTeX on prose pages. The damaged-text case is the one this
+            #    ticket is about: an oracle exists but cannot be trusted.
+            #  - only when the reading HAS numeric tokens. A pure-symbol equation
+            #    carries nothing that can be invented, and dropping those would
+            #    discard safe LaTeX -- the "dropped is worse than missing" half
+            #    of the corpus rule.
+            #
+            # So the test is the CANDIDATE's own numbers, read with the same
+            # extractor the guard itself uses, not the verdict alone.
             #
             # The crop stays on disk exactly as for a rejection, so the reading
             # remains available to anyone who wants to check it by hand. The page
             # is NOT demoted and native prose stays: this removes an unchecked
             # addition, it does not take anything away.
-            if verdict.status == PRESENCE_UNVERIFIABLE:
+            if verdict.status == PRESENCE_UNVERIFIABLE and (encoding_suspect or corrupt_math):
                 unchecked = text_value_tokens(result.raw_latex)
                 if unchecked:
                     state.events.append(
@@ -9226,7 +9237,12 @@ class UnifiedPipeline:
         Returns ``(block_to_append, latex_attached)``.
         """
         from socr.core.audit_log import AuditEvent
-        from socr.tables.escalation_canary import PRESENCE_INVENTED, region_presence_verdict
+        from socr.tables.escalation_canary import (
+            PRESENCE_INVENTED,
+            PRESENCE_UNVERIFIABLE,
+            region_presence_verdict,
+            text_value_tokens,
+        )
 
         block = result.sidecar_block or ""
         latex_attached = bool(result.latex_attached)
@@ -9234,13 +9250,45 @@ class UnifiedPipeline:
             return block, latex_attached
 
         ps = state.pages.get(page_num)
+        encoding_suspect = bool(getattr(ps, "has_encoding_hygiene_suspect", False))
+        corrupt_math = bool(getattr(ps, "has_corrupt_math", False))
+        text_layer_damaged = encoding_suspect or corrupt_math
         verdict = region_presence_verdict(
             native_text,
             result.raw_latex or "",
-            encoding_suspect=bool(getattr(ps, "has_encoding_hygiene_suspect", False)),
-            corrupt_math=bool(getattr(ps, "has_corrupt_math", False)),
+            encoding_suspect=encoding_suspect,
+            corrupt_math=corrupt_math,
         )
-        if verdict.status != PRESENCE_INVENTED:
+        # GH-543: the legacy GH-36b path had the same hole GH-522 closed on the
+        # region lane -- only PRESENCE_INVENTED refused, so an encoding-suspect
+        # or corrupt-math page that ABSTAINS still attached a crop-backed LaTeX
+        # sidecar carrying numbers nobody could check.
+        #
+        # Scoped twice over, and both narrowings matter:
+        #
+        #  - only when the TEXT LAYER IS DAMAGED. UNVERIFIABLE also covers "the
+        #    page has no numeric oracle", and there a numeral in the reading is
+        #    usually NOTATION -- the 2 in `E = mc^2`, an equation tag -- not a
+        #    data value. Refusing on that convicts notation-only LaTeX on prose
+        #    pages, which `test_a_page_with_no_numbers_is_unverifiable_not_invented`
+        #    deliberately protects. The damaged-text case is the one #522 and
+        #    #543 are actually about: an oracle exists but cannot be trusted.
+        #  - only when the reading HAS numeric tokens. A pure-symbol equation
+        #    carries nothing that can be invented, and dropping it would discard
+        #    safe LaTeX on exactly the pages already worst served.
+        #
+        # Read with `text_value_tokens`, the extractor `region_presence_verdict`
+        # uses on the candidate, so the two cannot disagree about what a number
+        # is.
+        if verdict.status == PRESENCE_INVENTED:
+            refusal = "latex carried numbers absent from the page source"
+        elif (
+            verdict.status == PRESENCE_UNVERIFIABLE
+            and text_layer_damaged
+            and text_value_tokens(result.raw_latex or "")
+        ):
+            refusal = f"latex carried numbers the presence guard could not check ({verdict.reason})"
+        else:
             return block, latex_attached
 
         from socr.math.equation_latex import build_equation_sidecar
@@ -9250,7 +9298,7 @@ class UnifiedPipeline:
             native_text=native_text,
             raw_latex="",
             validation_ok=False,
-            validation_reason="latex carried numbers absent from the page source",
+            validation_reason=refusal,
         )
         state.events.append(
             AuditEvent(
@@ -9259,7 +9307,8 @@ class UnifiedPipeline:
                 engine="equation_latex",
                 detail=(
                     f"region {result.region_index} LaTeX refused by the numeric-presence "
-                    f"guard ({verdict.reason}); the crop and the native text are kept"
+                    f"guard ({refusal}); the crop and the native text are kept, and the "
+                    "page is NOT demoted"
                 ),
                 data={
                     "region_index": result.region_index,
