@@ -1851,6 +1851,12 @@ class UnifiedPipeline:
         {
             "equation_region_reading_attached",
             "equation_region_reading_rejected",
+            # GH-522 (cubic P1 on #537): the refusal record and, with it, the
+            # `crop_path` pointing at the evidence. Refusing a reading is only
+            # acceptable BECAUSE the crop survives for a human to check; without
+            # this the record was dropped on resume and the guarantee held only
+            # until the next run.
+            "equation_region_reading_unverifiable",
             "equation_region_reading_unvalidated",
             "equation_region_reading_unaligned",
             "equation_region_reading_unsafe_markup",
