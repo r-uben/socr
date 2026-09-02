@@ -321,7 +321,20 @@ def test_extractor_fail_open_on_reader_error(tmp_path):
     doc.save(pdf)
     boxes = locate_tables(fitz.open(pdf)[0])
     crops = TableCropExtractor(_StubReader("", raises=True)).extract(pdf, 1, boxes)
-    assert crops == []  # failed read drops the table; never raises
+
+    # GH-166: this used to assert `crops == []` -- "failed read drops the
+    # table". That silence IS the defect: a page whose crops all failed was
+    # indistinguishable from a page with no crops, so the incumbent table read
+    # as verified because the check that would have contradicted it left no
+    # trace. A failed crop now comes back as a typed sentinel.
+    #
+    # The test's real point is unchanged and still asserted: extract() does not
+    # raise, and returns no usable reading.
+    assert crops, "a located crop must yield success or a typed failure sentinel"
+    assert all(getattr(c, "_failed", "") == "read_error" for c in crops), (
+        f"expected read_error sentinels, got {[getattr(c, '_failed', None) for c in crops]}"
+    )
+    assert all(not c.markdown.strip() for c in crops), "a failed crop must carry no reading"
 
 
 def test_clean_markdown_strips_fences_and_prose():
@@ -458,7 +471,15 @@ def test_cascade_guard_stops_next_crop_after_timeout(tmp_path):
     crops = extractor.extract(pdf, 1, [box1, box2], deadline=1.0, cascade_probe=False)
     # Both crops should be skipped; the degraded-guard triggers before the first read.
     assert slow.calls == 0, "No VLM call should fire when backend is already degraded"
-    assert crops == []
+
+    # GH-166: this used to assert `crops == []`. A skipped page leaving NO
+    # record is the same defect one level up -- the orchestrator had nothing to
+    # iterate, emitted no distrust, and the page looked verified. The skip now
+    # leaves a typed sentinel per skipped box; the guard itself is unchanged,
+    # which is what `slow.calls == 0` above still pins.
+    assert len(crops) == 2, f"every skipped box must leave a record: {crops}"
+    assert all(getattr(c, "_failed", "") == "backend_degraded" for c in crops)
+    assert all(not c.markdown.strip() for c in crops), "a skipped crop carries no reading"
 
 
 def test_cascade_guard_triggered_by_first_timeout(tmp_path):

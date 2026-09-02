@@ -4480,6 +4480,7 @@ class UnifiedPipeline:
         # for each timeout so they appear in audit_log.json.
         had_timeout = False
         crops = []
+        failed_crops: list = []
         for c in raw_crops:
             if getattr(c, "_timed_out", False):
                 had_timeout = True
@@ -4501,17 +4502,50 @@ class UnifiedPipeline:
                 bo.audit_notes.append(
                     f"dual-pass crop timeout p{page_num} ({c.source}); kept existing text"
                 )
+            elif getattr(c, "_failed", ""):
+                # GH-166: a located crop that produced nothing. Previously these
+                # were dropped inside the extractor with no sentinel at all, so
+                # a page whose crops ALL failed returned (0, 0) and left the
+                # incumbent table looking verified -- the check that would have
+                # contradicted it simply left no trace.
+                failed_crops.append(c)
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="dualpass_crop_failed",
+                        engine=bo.engine,
+                        detail=(
+                            f"crop reread produced no reading ({c._failed}); "
+                            "the incumbent table is unverified"
+                        ),
+                        data={"source": c.source, "reason": c._failed},
+                    )
+                )
+                bo.audit_notes.append(
+                    f"dual-pass crop failed p{page_num} ({c.source}, {c._failed}); "
+                    "kept existing text"
+                )
             else:
                 crops.append(c)
 
         if not crops:
+            # Every located crop failed or timed out. The page keeps its
+            # incumbent table, so a consumer must be told the verification never
+            # completed -- the per-crop events above carry that, and both kinds
+            # are in TABLE_DISTRUST_KINDS so `tables_trust.json` shows the page.
             return 0, 0
 
         # If ANY crop on this page timed out, do NOT auto-patch even when the
         # config enables it. Partial crop coverage means we cannot safely assert
         # that the remaining crops represent the full table set; patching on
         # incomplete evidence risks data loss. Force flag-only for this page.
-        effective_auto_patch = self.config.auto_patch_tables and not had_timeout
+        # GH-166 review (P2): a FAILED crop means the same thing a timed-out one
+        # does -- partial coverage. The comment above says patching on
+        # incomplete evidence risks data loss; that reasoning does not depend on
+        # which way the crop failed, so both force flag-only.
+        effective_auto_patch = (
+            self.config.auto_patch_tables and not had_timeout and not failed_crops
+        )
         crop_repair_fallback = False
         crop_repair_declined = False
         original_text = bo.text
@@ -4523,10 +4557,19 @@ class UnifiedPipeline:
                 page_needs_crop_repair_fallback,
             )
 
-            needs_crop_fallback = not had_timeout and page_needs_crop_repair_fallback(
-                original_text,
-                native_table_unverifiable=getattr(ps, "native_table_unverifiable", False),
-                fitz_page=fitz_page,
+            # GH-166 review (P2), second half: the fallback can turn auto-patch
+            # back ON, so gating only the initial assignment would let a page
+            # with a FAILED crop patch anyway by this route. `failed_crops`
+            # joins `had_timeout` here for the same reason it does above --
+            # partial coverage is partial however the crop failed.
+            needs_crop_fallback = (
+                not had_timeout
+                and not failed_crops
+                and page_needs_crop_repair_fallback(
+                    original_text,
+                    native_table_unverifiable=getattr(ps, "native_table_unverifiable", False),
+                    fitz_page=fitz_page,
+                )
             )
             if needs_crop_fallback and not effective_auto_patch:
                 candidate = reconcile_page_tables(
