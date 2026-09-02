@@ -250,3 +250,12 @@ signal by name.
 4. Follow-up ticket: `visual_values_not_transcribed` for figure pages.
 
 Not done here: the consilium archive entry for this run.
+
+## Addendum after rebase — GH-167 (#510, merged 2026-09-02)
+
+Section 1's claim that *every* table-free page with an embedded raster takes the
+chart-asset lane is narrower on current `main`: `has_chart_marks` now counts a
+raster only when its placed area reaches `CHART_MIN_CLUSTER_AREA` (an unmeasurable
+raster still counts, fail-open). A page whose only raster is a logo or icon stays in
+the plain free lane. The Q3 ruling stands — a sub-chart-sized raster is not a figure
+that needs a reading — and the `visual_values_not_transcribed` follow-up is unchanged.
