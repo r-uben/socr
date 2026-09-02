@@ -67,10 +67,17 @@ _GATES_BY_CONSTRUCTION = {
     "hpc_sequential": "cli.py builds HPCPipeline from the local variable, not from config",
 }
 
-# Modules whose reads do NOT make a flag live for `process`. A value serialised
-# into a benchmark report is not consumed by any run (cubic P2 on #516: this is
-# how `--fallback` passed the audit while no execution path read it).
+# Reads that do NOT make a flag live for `process`. A value serialised into a
+# benchmark report is not consumed by any run -- this is how `--fallback` passed
+# the audit while no execution path read it (cubic P2 on #516).
+#
+# The directory exclusion alone did NOT deliver that (cubic P2, round two): the
+# motivating site is `benchmark_calibrate` in `cli.py`, which no `benchmark/`
+# prefix covers. The exclusion is by FUNCTION for that reason, the same way the
+# fingerprint one is -- naming the construct rather than hoping a path prefix
+# happens to contain it.
 _NON_EXECUTION_DIRS = ("benchmark/",)
+_NON_EXECUTION_FUNCTIONS = frozenset({"benchmark_calibrate"})
 
 # Functions that compute the run FINGERPRINT rather than gate behaviour. A read
 # reached only through one of these records the value into the run identity,
@@ -201,7 +208,7 @@ class _ConfigReads(ast.NodeVisitor):
         self._skip_depth = 0
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
-        skip = node.name in _FINGERPRINT_FUNCTIONS
+        skip = node.name in _FINGERPRINT_FUNCTIONS or node.name in _NON_EXECUTION_FUNCTIONS
         self._skip_depth += skip
         self.generic_visit(node)
         self._skip_depth -= skip
@@ -232,6 +239,28 @@ def _is_config_path(node: ast.AST, section: list[str]) -> bool:
         return node.id in {"config", "cfg"}
     if isinstance(node, ast.Attribute):
         return node.attr in {"config", "cfg"}
+    return False
+
+
+def _flag_constructs(option: str, class_name: str) -> bool:
+    """True when ``if <option>:`` in cli.py contains a call to *class_name*.
+
+    Structural, so it survives reformatting and cannot be satisfied by the name
+    appearing in a comment, an import, or a different branch.
+    """
+    tree = ast.parse((_SRC / "cli.py").read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        if not (isinstance(node.test, ast.Name) and node.test.id == option):
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id == class_name
+            ):
+                return True
     return False
 
 
@@ -267,9 +296,16 @@ def test_a_live_flag_has_a_consumer_beyond_the_fingerprint(option: str) -> None:
     the shape all three known liars had.
     """
     if option in _GATES_BY_CONSTRUCTION:
-        # Not a skip: the exemption is asserted, so it stays visible and has to
-        # be justified in the table above rather than inferred from silence.
+        # Not a skip, and not a rubber stamp either (cubic P2 on #516): a
+        # non-empty justification string proved nothing, so the audit would have
+        # stayed green if the HPC branch stopped building HPCPipeline. The
+        # construct the exemption NAMES is what gets asserted.
         assert _GATES_BY_CONSTRUCTION[option].strip()
+        assert _flag_constructs(option, "HPCPipeline"), (
+            f"{option} is exempted from the config-consumer check because it "
+            "gates by construction -- but its branch no longer constructs "
+            "HPCPipeline, so it now gates nothing at all. Re-audit it."
+        )
         return
 
     field = _config_field_for(option)
@@ -352,4 +388,38 @@ def test_every_classification_is_well_formed() -> None:
     assert not no_reason, (
         f"classified with no reason: {no_reason}. The reason is what a future "
         "reader checks against the code; without it the entry asserts nothing."
+    )
+
+
+def test_a_benchmark_report_read_does_not_certify_a_flag() -> None:
+    """The exclusion the audit's guarantee rests on, verified directly.
+
+    cubic P2 on #516 (round two): the first attempt excluded the `benchmark/`
+    DIRECTORY, but the motivating site -- `benchmark_calibrate` serialising
+    `config.fallback_chain` into a report -- lives in `cli.py`, which no path
+    prefix covers. The claim was documented and unenforced.
+
+    `fallback_chain` is the case: outside the fingerprint, its only read in the
+    whole tree is that serialisation, of a FRESH PipelineConfig that never sees
+    the user's value. Asserting through a flag would not isolate this (the flag
+    is rejected now, so it has no reads at all either way), so this measures the
+    function directly.
+    """
+    import test_gh142_flag_audit as module
+
+    assert module._config_read_sites("fallback_chain") == [], (
+        "a benchmark-report serialisation is being counted as an execution "
+        "consumer; a flag read only there would pass the audit"
+    )
+
+    original = module._NON_EXECUTION_FUNCTIONS
+    try:
+        module._NON_EXECUTION_FUNCTIONS = frozenset()
+        without = module._config_read_sites("fallback_chain")
+    finally:
+        module._NON_EXECUTION_FUNCTIONS = original
+
+    assert without, (
+        "the control failed: with the exclusion removed there is no benchmark "
+        "read left to exclude, so the test above proves nothing"
     )
