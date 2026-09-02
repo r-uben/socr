@@ -89,6 +89,10 @@ _LIVE = {
 _INERT_BUT_FINGERPRINTED = {
     "chunk_size",
     "chunk_threshold",
+    # GH-525: still inert, and no longer fingerprinted from the CONFIG -- the
+    # fingerprint records their defaults, so setting them from YAML can no
+    # longer over-invalidate terminal pages. They stay in this set because they
+    # remain inert and their keys remain in the fingerprint dict.
     "fallback_chain",
     "judge_hard_pages",
     "local_engine",
@@ -161,7 +165,17 @@ _UNEXERCISED = {
     "table_judge_timeout_sec",
 }
 
-_BOOKKEEPING = {"_run_fingerprint", "_engine_determinants", "_write_metadata"}
+#: `_warn_inert_config` reads the inert fields in order to REPORT that they are
+#: being ignored (GH-525). Reading a value to say it does not matter is not
+#: acting on it -- crediting it as real behaviour would reclassify the two
+#: fields this guard exists to keep classified as inert, and the run's own
+#: warning would be the evidence that they are live.
+_BOOKKEEPING = {
+    "_run_fingerprint",
+    "_engine_determinants",
+    "_write_metadata",
+    "_warn_inert_config",
+}
 
 #: Frames to scan above a config read when attributing it. Must be deep enough
 #: to see a bookkeeping caller through its helpers: `_run_fingerprint` ->

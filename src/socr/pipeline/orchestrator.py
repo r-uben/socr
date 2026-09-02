@@ -62,6 +62,43 @@ console = Console()
 JUDGE_IDENTITY_HEURISTIC = "heuristic"
 
 
+#: Config fields that gate NOTHING but still reach the run fingerprint (GH-525).
+#: Their CLI flags are rejected (GH-142); YAML can still set them, and doing so
+#: used to invalidate every terminal page for a run that behaves identically.
+#: The fingerprint records these values instead of the configured ones, so the
+#: key stays (no schema change, no mass re-fingerprinting) while a setting that
+#: changes nothing changes nothing.
+#:
+#: Taken from PipelineConfig's own defaults rather than written out, so the two
+#: cannot drift: a changed default moves both together.
+def _inert_field_defaults() -> dict:
+    from socr.core.config import PipelineConfig
+
+    defaults = PipelineConfig()
+    return {
+        "judge_hard_pages": defaults.judge_hard_pages,
+        "fallback_chain": list(defaults.fallback_chain),
+    }
+
+
+_INERT_FIELD_DEFAULTS = _inert_field_defaults()
+
+
+def _warn_inert_config(cfg) -> list[str]:
+    """Names of inert fields this config sets away from their defaults.
+
+    Ignoring a setting silently is the failure this ticket family is about, so
+    the run says which ones it ignored rather than leaving the operator to infer
+    it from output that did not change.
+    """
+    differing = []
+    if bool(cfg.judge_hard_pages) != bool(_INERT_FIELD_DEFAULTS["judge_hard_pages"]):
+        differing.append("judge_hard_pages")
+    if list(cfg.fallback_chain) != list(_INERT_FIELD_DEFAULTS["fallback_chain"]):
+        differing.append("fallback_chain")
+    return differing
+
+
 def _page_blob_key(page_output_dict: dict) -> str:
     """Content-addressed key for a serialised PageOutput dict.
 
@@ -561,6 +598,10 @@ class UnifiedPipeline:
     def _run_fingerprint(self, engine_type: EngineType | None = None) -> str:
         """Run-config fingerprint for idempotency, from the RESOLVED run config.
 
+        Two fields are recorded at their DEFAULTS rather than as configured --
+        ``judge_hard_pages`` and ``fallback_chain`` -- because they gate nothing
+        (GH-142 / GH-525). See ``_INERT_FIELD_DEFAULTS``.
+
         Captures what changes *what output an input produces*: the resolved
         primary engine's model id, backend, and task, the resolved determinants
         of every secondary engine that can contribute text (local and fallback
@@ -594,11 +635,22 @@ class UnifiedPipeline:
             # --- routing / engine selection (all contributing engines) ---
             "primary_engine": engine_type.value,
             "local_engine": cfg.local_engine.value,
-            "fallback_chain": [e.value for e in cfg.fallback_chain],
+            # GH-525: likewise the default. No execution path reads
+            # `fallback_chain` (the multi-engine branches that did were deleted
+            # in #298), so a config that sets it changed the run identity
+            # without changing the run.
+            "fallback_chain": [e.value for e in _INERT_FIELD_DEFAULTS["fallback_chain"]],
             # Resolved model/backend/task of every secondary engine, so a swap of
             # a local/fallback member's model invalidates the cache too.
             "local_engine_determinants": self._engine_determinants(cfg.local_engine),
-            "fallback_determinants": [self._engine_determinants(e) for e in cfg.fallback_chain],
+            # ...and therefore EMPTY. Resolving the default chain's determinants
+            # here was a real regression in the first draft of GH-525: it made
+            # `gemini_model` invalidate the run through the fallback chain even
+            # for a config that had emptied that chain, which
+            # `test_caption_fallback_model_is_ignored_without_descriptions`
+            # caught. If nothing reads the chain, nothing reads its members'
+            # models either.
+            "fallback_determinants": [],
             # PP-5: the agentic provider ladder is built from ``enabled_engines``
             # and pruned by ``max_cost_per_page`` / ``cost_budget`` — all three
             # change which provider produces (or is even tried on) a page, so a
@@ -637,7 +689,17 @@ class UnifiedPipeline:
             "agentic": cfg.agentic,
             "strict_local": cfg.strict_local,
             "audit_min_words": cfg.audit_min_words,
-            "judge_hard_pages": cfg.judge_hard_pages,
+            # GH-525: the DEFAULT, never `cfg.judge_hard_pages`. The field gates
+            # no phase anywhere (GH-142 rejected its flag for that reason), and
+            # the CLI now refuses to set it -- but YAML still can, and the value
+            # reaching this dict made a config-only toggle invalidate every
+            # terminal page and force a reprocess producing byte-identical
+            # output. Recording the default keeps the key (so the schema and
+            # every existing fingerprint are unchanged) while making a setting
+            # that changes nothing change nothing. `_warn_inert_config` says so
+            # out loud, because silently ignoring a setting is the failure this
+            # whole ticket family is about.
+            "judge_hard_pages": _INERT_FIELD_DEFAULTS["judge_hard_pages"],
             "judge_backend": cfg.judge_backend,
             # The RESOLVED judge identity, not the (possibly empty) config field.
             # Under the default auto-resolution ``cfg.judge_model`` is "", so
@@ -814,6 +876,20 @@ class UnifiedPipeline:
         the canon's basename-collision fix.
         """
         pdf_path = Path(pdf_path)
+        # GH-525: a config that sets an inert field must not be ignored in
+        # silence -- that is the same failure the rejected flags had, moved to
+        # the YAML layer. Warn once per run, naming the fields.
+        inert = _warn_inert_config(self.config)
+        if inert:
+            message = (
+                f"ignoring config field(s) {', '.join(inert)}: they gate nothing "
+                "on any path (GH-142/GH-525) and are excluded from the run "
+                "fingerprint, so setting them changes neither the output nor "
+                "which pages are reused"
+            )
+            logger.warning("%s", message)
+            if not self.config.quiet:
+                console.print(f"  [yellow]{message}[/yellow]")
         out_dir = self._resolve_output_root(pdf_path, output_dir)
         self._scan_root = scan_root if scan_root is not None else pdf_path.parent
 

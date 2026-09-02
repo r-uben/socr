@@ -77,7 +77,11 @@ _GATES_BY_CONSTRUCTION = {
 # fingerprint one is -- naming the construct rather than hoping a path prefix
 # happens to contain it.
 _NON_EXECUTION_DIRS = ("benchmark/",)
-_NON_EXECUTION_FUNCTIONS = frozenset({"benchmark_calibrate"})
+#: `_warn_inert_config` reads the inert fields to REPORT that they are ignored
+#: (GH-525). Counting that as a consumer would certify the very fields whose
+#: deadness this audit established -- the run's own "I am ignoring this" would
+#: become the evidence that it is not.
+_NON_EXECUTION_FUNCTIONS = frozenset({"benchmark_calibrate", "_warn_inert_config"})
 
 # Functions that compute the run FINGERPRINT rather than gate behaviour. A read
 # reached only through one of these records the value into the run identity,
