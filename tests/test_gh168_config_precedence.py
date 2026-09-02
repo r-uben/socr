@@ -106,8 +106,10 @@ def test_an_absent_option_preserves_the_loaded_value(
         (["--timeout", "60"], "timeout", 60),
         (["--judge-backend", "vlm"], "judge_backend", "vlm"),
         (["--judge-model", "other"], "judge_model", "other"),
-        # The figures pair: `--describe-figures` implies save_figures, and
-        # `--save-figures` on its own must still turn describe_figures off.
+        # The figures pair: `--describe-figures` implies save_figures. The
+        # `--save-figures` row below deliberately expects describe_figures to
+        # stay TRUE -- see its own comment. (GH-479: this comment used to say
+        # the opposite, contradicting the row it introduces.)
         (["--describe-figures"], "describe_figures", True),
         (["--describe-figures"], "save_figures", True),
         # NOT `describe_figures False`: the user typed --save-figures, not
@@ -181,3 +183,83 @@ def test_a_loaded_dry_run_is_preserved(tmp_path: Path, monkeypatch: pytest.Monke
         f"run proceeded instead of listing: {result.output!r}"
     )
     assert "config" not in built or built["config"].dry_run is True
+
+
+# GH-479: preserve was pinned, override was not. A gate that simply ignored the
+# CLI would satisfy every preserve test in this file, so the other direction --
+# a YAML `false` that an explicit flag must flip ON -- is the half that proves
+# `_explicitly_given` still lets the user win.
+FALSE_CONFIG = """
+reprocess: false
+quiet: false
+verbose: false
+write_manifest: false
+save_figures: false
+"""
+
+
+def _run_with(tmp_path: Path, config_text: str, extra: list[str], monkeypatch):
+    fitz = pytest.importorskip("fitz")
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(config_text)
+    pdf = tmp_path / "d.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "born digital text long enough to be a text layer.")
+    doc.save(str(pdf))
+    doc.close()
+
+    seen: dict = {}
+
+    class _Stub:
+        def __init__(self, config):
+            seen["config"] = config
+
+        def process(self, *_a, **_k):
+            raise SystemExit(0)
+
+        def _resolve_output_root(self, *_a, **_k):
+            return tmp_path / "out"
+
+    monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
+    CliRunner().invoke(cli, ["process", str(pdf), "--config", str(cfg), *extra])
+    assert "config" in seen, "the pipeline was never constructed, so nothing was measured"
+    return seen["config"]
+
+
+@pytest.mark.parametrize(
+    ("flag", "field"),
+    [
+        (["--reprocess"], "reprocess"),
+        (["--quiet"], "quiet"),
+        (["--verbose"], "verbose"),
+        (["--write-manifest"], "write_manifest"),
+        (["--save-figures"], "save_figures"),
+    ],
+)
+def test_an_explicit_flag_overrides_a_loaded_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: list[str], field: str
+) -> None:
+    """A YAML `false` must not survive the user explicitly asking for it."""
+    config = _run_with(tmp_path / field, FALSE_CONFIG, flag, monkeypatch)
+    assert getattr(config, field) is True, (
+        f"{flag[0]} did not override `{field}: false` from --config"
+    )
+
+
+@pytest.mark.parametrize(
+    "field", ["reprocess", "quiet", "verbose", "write_manifest", "save_figures"]
+)
+def test_a_loaded_false_survives_without_the_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """The anchor: without it the test above passes on a config that never loaded.
+
+    If `false` were not actually reaching the config, `True` after the flag
+    would prove nothing about precedence.
+    """
+    config = _run_with(tmp_path / f"{field}_off", FALSE_CONFIG, [], monkeypatch)
+    assert getattr(config, field) is False, (
+        f"`{field}: false` did not load, so the override test above measures nothing"
+    )
