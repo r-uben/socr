@@ -13,6 +13,10 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from socr.math.detect_equations import EquationRegion
 
 from rich.console import Console
 
@@ -26,7 +30,6 @@ from socr.core.normalizer import (
     OutputNormalizer,
     collapse_repeated_table_rows,
 )
-from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.core.providers import (
     ProviderProfile,
     execution_overrides,
@@ -47,6 +50,7 @@ from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.pipeline.agentic import route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
+from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -213,7 +217,39 @@ def _cell_transcribe_prompt_digest() -> str:
         return f"unreadable-cell-transcribe-prompt:{uuid.uuid4().hex}"
 
 
-def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_dir: Path) -> bool:
+class _EquationRetryMetadata:
+    """``DocMetadata`` plus P4-R's pending-retry latch on the root entry.
+
+    ``DocMetadata.to_entry`` is a fixed contract shape and the latch is socr-side
+    state, so it is layered on here rather than pushed into the contract.
+    Passing this to ``RootIndex.record`` keeps that method the sole author of
+    root metadata.json -- the PP-5 invariant -- while still committing the
+    status and the latch in a single save (cold review round 3, finding 5).
+
+    Everything other than ``to_entry`` delegates to the wrapped metadata.
+    """
+
+    def __init__(self, meta):
+        self._meta = meta
+
+    def __getattr__(self, name):
+        return getattr(self._meta, name)
+
+    def to_entry(self) -> dict:
+        entry = self._meta.to_entry()
+        entry["equation_lane_retry_pending"] = True
+        return entry
+
+
+def _resume_skippable(
+    index,
+    rel_key: str,
+    checksum: str,
+    fingerprint: str,
+    out_dir: Path,
+    *,
+    equation_lane_retry_blocks: bool = False,
+) -> bool:
     """Whether a doc can be skipped by the resume gate.
 
     Canonically completed docs skip via :meth:`RootIndex.is_completed`. A
@@ -223,10 +259,26 @@ def _resume_skippable(index, rel_key: str, checksum: str, fingerprint: str, out_
     demoted to AUDIT_FAILED (flagged native fallback, lost pages) would be
     re-processed at full provider cost on EVERY batch resume, forever.
     ``--reprocess`` still forces a retry (checked by the callers).
+
+    ``equation_lane_retry_blocks`` closes the hole cold review round 2 found in
+    P4-R's retry latch (finding 5). The per-page ledger check is downstream of
+    THIS gate: ``process()`` consults the document gate before a
+    ``DocumentState`` exists, so a document whose equation pages never reached
+    a provider was skipped whole and the per-page latch was never read. Provider
+    availability is transient and deliberately absent from the fingerprint, so
+    everything this function checks can match while the document still holds an
+    unread equation. When the caller passes True -- meaning the equation lane is
+    enabled on this run -- a recorded pending retry refuses the skip.
+
+    Re-running is then cheap rather than free: pages that DID finish are still
+    restored by the per-page ledger, which is provider-aware and keeps skipping
+    them, so an offline rerun re-opens the document without re-reading anything.
     """
+    entry = index.files.get(rel_key)
+    if equation_lane_retry_blocks and entry and entry.get("equation_lane_retry_pending") is True:
+        return False
     if index.is_completed(rel_key, checksum, fingerprint=fingerprint):
         return True
-    entry = index.files.get(rel_key)
     if not entry or entry.get("status") != "partial":
         return False
     if entry.get("checksum") != checksum:
@@ -380,7 +432,12 @@ class UnifiedPipeline:
             scan_root = self._scan_root or pdf_path.parent
             rel_key = relative_key(pdf_path, scan_root)
             if not _resume_skippable(
-                RootIndex(out_dir), rel_key, checksum, self._run_fingerprint(), out_dir
+                RootIndex(out_dir),
+                rel_key,
+                checksum,
+                self._run_fingerprint(),
+                out_dir,
+                equation_lane_retry_blocks=self._equation_lane_retry_blocks_resume(),
             ):
                 return None
         except Exception as exc:  # never let the resume check break a run
@@ -394,6 +451,89 @@ class UnifiedPipeline:
             engine=self.config.primary_engine.value,
             status=DocumentStatus.SKIPPED,
         )
+
+    def _equation_lane_retry_blocks_resume(self) -> bool:
+        """Whether a recorded P4-R pending retry should refuse a document skip.
+
+        Only when the lane could actually act on the retry: it is enabled and
+        this is an agentic run. With the lane switched off, a marker left by an
+        earlier run is inert history and must not force endless reprocessing.
+        """
+        return bool(self.config.equation_region_lane and self.config.agentic)
+
+    def _invalidate_root_entry_for_rerun(
+        self, pdf_path: Path, out_dir: Path
+    ) -> EngineResult | None:
+        """Mark an existing root entry non-resumable before this run rewrites it.
+
+        Returns None to proceed, or an ERROR result the caller must return.
+
+        Only acts when a record already exists: a first run has nothing to
+        invalidate. The replacement is written with ``Status.FAILED`` -- neither
+        ``completed`` nor ``partial``, so ``_resume_skippable`` refuses it in
+        both of its branches -- and carries an explicit error string saying a run
+        is in progress, so nothing reads it as a result.
+
+        If that write fails the run REFUSES to start. Proceeding would re-create
+        the output the stale entry points at and hand the next run a skippable
+        record describing work this run may never finish, which is the
+        lost-retry outcome P4-R's latch exists to prevent. Refusing costs a
+        re-run; proceeding silently loses an unread equation page.
+        """
+        from ocr_output_contract import (
+            DocMetadata,
+            RootIndex,
+            Status,
+            relative_key,
+            safe_checksum,
+            utc_timestamp,
+        )
+
+        try:
+            checksum = safe_checksum(pdf_path)
+            if checksum is None:
+                return None
+            scan_root = self._scan_root or pdf_path.parent
+            rel_key = relative_key(pdf_path, scan_root)
+            index = RootIndex(out_dir)
+            if index.files.get(rel_key) is None:
+                return None
+        except Exception as exc:
+            # Reading the index is not the write this guard protects; a broken
+            # read leaves the run to the ordinary metadata path.
+            logger.warning("root-entry invalidation check failed (non-fatal): %s", exc)
+            return None
+
+        marker = DocMetadata(
+            status=Status.FAILED,
+            checksum=checksum,
+            model=self.config.primary_engine.value,
+            backend="socr",
+            processing_time=0.0,
+            timestamp=utc_timestamp(),
+            output_path="",
+            pages=0,
+            error="run in progress; the previous record was invalidated before reprocessing",
+            fingerprint=self._run_fingerprint(),
+        )
+        try:
+            index.record(rel_key, marker)
+        except Exception as exc:
+            message = (
+                f"refusing to reprocess {pdf_path.name}: the stale root index entry could "
+                f"not be invalidated ({exc}). Proceeding would re-create the output that "
+                "entry points at and let the next run skip this document."
+            )
+            logger.error(message)
+            if not self.config.quiet:
+                console.print(f"[red]{message}[/red]")
+            return EngineResult(
+                document_path=pdf_path,
+                engine=self.config.primary_engine.value,
+                status=DocumentStatus.ERROR,
+                error=message,
+            )
+        return None
 
     def _engine_determinants(self, engine_type: EngineType) -> dict[str, str | None]:
         """Resolved ``{model, backend, task}`` for an engine, never raising.
@@ -598,14 +738,25 @@ class UnifiedPipeline:
             # 1A gate + 1C sidecar attachment.  Changing it changes the .md
             # content (sidecar blocks appear/disappear) so it invalidates cache.
             "recover_clean_equations": cfg.recover_clean_equations,
+            # --- P4-R: the agentic equation-region lane ---
+            # The lane routes table-free equation pages out of the free native
+            # bypass and can attach crop-backed LaTeX beside the native slice,
+            # so toggling it changes the saved .md and must invalidate the
+            # per-page resume ledger.
+            "equation_region_lane": cfg.equation_region_lane,
             # #230: the model that produces those LaTeX sidecars. Swapping it
-            # changes the sidecar text, so it must invalidate. The lane runs iff
-            # BOTH flags are set (``recover_clean_equations and detect_equations``
-            # at :1120), so recording the model on the first flag alone would
-            # force a needless reprocess with detection off.
+            # changes the sidecar text, so it must invalidate. It now has TWO
+            # consumers -- the legacy GH-36b lane, which runs iff BOTH of its
+            # flags are set (``recover_clean_equations and detect_equations``),
+            # and P4-R, which reads it whenever the region lane is on. Record
+            # the model when EITHER consumer can run; recording it when neither
+            # can would force a needless reprocess over an unused default (#233).
             "clean_equation_model": (
                 cfg.clean_equation_model
-                if (cfg.recover_clean_equations and cfg.detect_equations)
+                if (
+                    (cfg.recover_clean_equations and cfg.detect_equations)
+                    or cfg.equation_region_lane
+                )
                 else None
             ),
             "figures_engine": cfg.figures_engine.value,
@@ -683,6 +834,18 @@ class UnifiedPipeline:
         if skipped is not None:
             return skipped
 
+        # Fail closed BEFORE re-emitting output, not only after (cold review
+        # round 4). The terminal write at the end is atomic, but atomicity only
+        # protects what it writes: a matching OLDER entry -- completed,
+        # latch-free, its output since deleted -- survives a failed terminal
+        # write, and this run will have re-created the output it points at, so
+        # it becomes resumable again with no latch and the next run skips the
+        # document whole. Invalidating that record first means a failure
+        # anywhere in the run leaves an entry the gate refuses.
+        refused = self._invalidate_root_entry_for_rerun(pdf_path, out_dir)
+        if refused is not None:
+            return refused
+
         doc = DocumentHandle.from_path(pdf_path)
         state = DocumentState(handle=doc)
 
@@ -754,7 +917,12 @@ class UnifiedPipeline:
             checksum = safe_checksum(pdf)
             rel_key = relative_key(pdf, input_dir)
             already_done = checksum is not None and _resume_skippable(
-                root_index, rel_key, checksum, run_fp, out_dir
+                root_index,
+                rel_key,
+                checksum,
+                run_fp,
+                out_dir,
+                equation_lane_retry_blocks=self._equation_lane_retry_blocks_resume(),
             )
             if already_done and not self.config.reprocess:
                 if self.config.verbose:
@@ -1339,8 +1507,56 @@ class UnifiedPipeline:
         return not self._page_has_tables(page_num, ps)
 
     def _is_agentic_trusted_native(self, page_num: int, ps: PageState) -> bool:
-        """Backward-compatible alias for the agentic native-bypass predicate."""
+        """The agentic native-bypass predicate: trusted native MINUS the P4-R lane.
+
+        The shared ``_is_trusted_native_without_ocr`` is deliberately left alone
+        (ruling 2 / BLOCKING 1 on #269): it is read by the non-agentic
+        single-engine, consensus and repair paths, which have no region
+        machinery to fall into and would push an equation page into whole-page
+        OCR instead. P4-R's widening therefore lives HERE, in the agentic lane
+        set only, and it is a re-route rather than a demotion: the page leaves
+        the free bypass for ``_agentic_equation_region_page``, which ships the
+        same native prose as its floor.
+        """
+        if self._is_equation_region_lane_page(page_num, ps):
+            return False
         return self._is_trusted_native_without_ocr(page_num, ps)
+
+    def _is_equation_region_lane_page(self, page_num: int, ps: PageState) -> bool:
+        """P4-R: whether the region-scoped equation lane owns this page.
+
+        The trigger is ``has_equations`` AS DETECTED -- no threshold, no count,
+        no new signal. That is the ratified choice, made from the measured
+        table in ``docs/log/2026-09-02_p4m-trigger-rates.md`` (36.1% of today's
+        free lane, with no natural break in the math-character distribution that
+        would justify inventing a cut). Over-routing is a cost, not a
+        correctness risk, because the lane is advisory: it never replaces
+        whole-page native prose.
+
+        Excluded, and each for its own reason:
+          * tables -- a mixed page is already routed by the table lane, and
+            ``PageState.is_structure_class()`` stays table-only so the P2
+            structure-class floor can never reach a page this predicate accepts;
+          * corrupt math -- the GH-271 region lane owns those pages already;
+          * shredded rotated native text -- the native slice is not a usable
+            anchor for in-place attachment;
+          * ``--native-only`` -- an explicit request for the free lane;
+          * anything ``_is_native_eligible_without_ocr`` refuses (not
+            born-digital, no native text, needs OCR enhancement), which goes to
+            the ladder as a whole page regardless.
+        """
+        return bool(
+            self.config.equation_region_lane
+            and self.config.agentic
+            and not self.config.native_only
+            and self._is_native_eligible_without_ocr(page_num, ps)
+            and ps.is_born_digital
+            and ps.native_text
+            and ps.has_equations
+            and not ps.has_corrupt_math
+            and not ps.native_rotated_text_shredded
+            and not self._page_has_tables(page_num, ps)
+        )
 
     def _corrupt_math_model_disabled_reason(self) -> str:
         """Why the direct equation-model call is forbidden by run policy."""
@@ -1494,6 +1710,582 @@ class UnifiedPipeline:
                 )
             )
         return page_output
+
+    # ------------------------------------------------------------------
+    # P4-R: region-scoped equation lane (advisory, never replaces prose)
+    # ------------------------------------------------------------------
+
+    #: Every terminal disposition the lane records for a region, plus its two
+    #: page-level outcomes. Named here because ``_restore_terminal_page_state``
+    #: replays audit events from an explicit allowlist: a kind missing from this
+    #: set is persisted in the page sidecar but disappears from
+    #: ``audit_log.json`` the moment the page resumes, which is exactly how a
+    #: rejected reading would become invisible (the #252 / GH-353 D1a shape).
+    EQUATION_LANE_EVENT_KINDS = frozenset(
+        {
+            "equation_region_reading_attached",
+            "equation_region_reading_rejected",
+            "equation_region_reading_unvalidated",
+            "equation_region_reading_unaligned",
+            "equation_region_reading_unsafe_markup",
+            "equation_lane_no_region",
+            "equation_lane_detection_failed",
+        }
+    )
+
+    #: The backends the lane's transport can actually address. ``latex_for_crop``
+    #: POSTs to ``{host}/api/generate`` -- the Ollama generate API -- so a
+    #: profile serving the same model over vLLM, Gemini or anything else is NOT
+    #: a provider for this call, however identical its model tag looks.
+    #: Cold review round 2, finding 4.
+    EQUATION_LANE_BACKENDS = frozenset({"ollama", "ollama-cloud"})
+
+    def _equation_lane_backend_addressable(self, profile) -> bool:
+        """Whether this lane's transport can reach ``profile`` under THIS config.
+
+        Cold review round 3, finding 4. Reading ``profile.backend`` is not
+        enough: the registry entry is a DECLARATION, and the same
+        ``PROFILE_QWEN_LOCAL`` that declares ``ollama`` resolves through
+        ``qwen_backend`` and lands on vLLM on an HPC deployment. The lane would
+        then post a crop to the local Ollama socket on the strength of a rung
+        that is actually serving somewhere else, and lend the call that rung's
+        price and provenance. ``resolved_provenance`` is the function the
+        manifest and the CLI invocation already agree on, so asking it is asking
+        the same question the rest of the pipeline asks.
+
+        ``auto`` is resolvable only in context: it means Ollama unless
+        ``VLLM_BASE_URL`` is exported, which ``qwen_auto_resolves_to_openai``
+        decides -- "not a corner case, it is the HPC deployment".
+        """
+        from socr.core.providers import qwen_auto_resolves_to_openai, resolved_provenance
+
+        try:
+            backend = (resolved_provenance(profile, self.config) or ("", ""))[0] or ""
+        except Exception as exc:  # a resolver failure is doubt, and doubt refuses
+            logger.debug("equation lane: cannot resolve backend for %s: %s", profile, exc)
+            return False
+        if backend == "auto":
+            return not qwen_auto_resolves_to_openai(self.config)
+        return backend in self.EQUATION_LANE_BACKENDS
+
+    def _equation_lane_provider(self, available_profiles=None):
+        """The ladder rung that can serve the clean-equation model, or why not.
+
+        Returns ``(profile, reason)``; exactly one is populated.
+
+        Cold review round 2, structural ruling: the lane does not re-implement
+        the ladder's guarantees, it uses them. Candidates are filtered by
+        ``--strict-local`` and then run through ``provider_ladder`` with the
+        SAME ``per_page_only`` / ``max_cost_per_page`` arguments
+        ``_phase_agentic`` uses to build the routing ladder, so a rung priced
+        out of the ladder is priced out of this lane by construction rather
+        than by a second copy of the rule.
+
+        Selection is then ``(model, backend)``: the model tag the lane is about
+        to send AND a backend this lane's transport can address. Round 1 matched
+        the model alone, which let a same-model vLLM rung authorise an Ollama
+        call and then lend it its price and provenance (finding 4).
+
+        Fail-closed: no rung, no call, native prose ships.
+        """
+        from socr.core.providers import TIER_LOCAL, provider_ladder
+        from socr.math.recover import DEFAULT_MODEL
+
+        model = self.config.clean_equation_model or DEFAULT_MODEL
+        is_cloud = "cloud" in model.casefold()
+        if self.config.strict_local and is_cloud:
+            return None, f"model call skipped: strict-local forbids remote model {model}"
+        if is_cloud and (self.config.max_cost_per_page > 0 or self.config.cost_budget > 0):
+            return None, "model call skipped: remote equation model has no configured price"
+
+        profiles = (
+            list(available_profiles)
+            if available_profiles is not None
+            else list(self._available_engines_for_agentic())
+        )
+        if self.config.strict_local:
+            profiles = [p for p in profiles if getattr(p, "tier", None) == TIER_LOCAL]
+
+        ladder = provider_ladder(
+            profiles,
+            per_page_only=True,
+            max_cost_per_page=self.config.max_cost_per_page,
+        )
+        for profile in ladder:
+            if (getattr(profile, "model", "") or "") != model:
+                continue
+            if self._equation_lane_backend_addressable(profile):
+                return profile, ""
+
+        # Name the ACTUAL reason, so an operator can tell "nothing is running"
+        # from "you priced it out" from "that rung cannot serve this transport".
+        same_model = [p for p in profiles if (getattr(p, "model", "") or "") == model]
+        if not same_model:
+            served = ", ".join(sorted(getattr(p, "id", "") or "?" for p in profiles)) or "none"
+            return None, (
+                f"model call skipped: no available provider serves the equation model "
+                f"{model} (available: {served}); the page ships its native prose unchanged"
+            )
+        wrong_backend = [p for p in same_model if not self._equation_lane_backend_addressable(p)]
+        if len(wrong_backend) == len(same_model):
+            from socr.core.providers import resolved_provenance
+
+            resolved = []
+            for p in same_model:
+                try:
+                    resolved.append((resolved_provenance(p, self.config) or ("?", ""))[0] or "?")
+                except Exception:
+                    resolved.append("?")
+            backends = ", ".join(sorted(set(resolved)))
+            return None, (
+                f"model call skipped: {model} resolves to backend(s) {backends} under this "
+                f"configuration, which this lane's transport cannot address"
+            )
+        return None, (
+            f"model call skipped: every rung serving {model} is priced above "
+            f"--max-cost-per-page ({self.config.max_cost_per_page})"
+        )
+
+    @staticmethod
+    def _equation_lane_availability_refusal(reason: str) -> bool:
+        """Whether a refusal reflects TRANSIENT availability rather than config.
+
+        Only an availability refusal latches the page for retry. A refusal the
+        run fingerprint already describes -- strict-local versus a cloud model,
+        a per-page cap, an exhausted budget -- reproduces identically on every
+        rerun, so latching it would make the document permanently unskippable
+        and change nothing about the outcome. Cold review round 2, finding 5.
+        """
+        if not reason:
+            return False
+        settled_by_config = (
+            "strict-local forbids",
+            "no configured price",
+            "priced above",
+            "cost cap",
+            "cost budget",
+            # Cold review round 4, N2: a model that RESOLVES to a backend this
+            # transport cannot address is a supported deployment (the HPC vLLM
+            # setup), not an outage. Latching it would refuse the document skip
+            # on every rerun, restore the same page, and rewrite the latch --
+            # idempotent resume defeated forever for that configuration.
+            "resolves to backend(s)",
+        )
+        return not any(marker in reason for marker in settled_by_config)
+
+    def _equation_lane_remaining_budget(self, state: DocumentState) -> float | None:
+        """Paid budget still available to this page, or None when uncapped.
+
+        The same computation, and the same fail-closed rule, the generic OCR
+        branch applies before ``route_page``: an unmetered earlier call makes
+        the remaining budget unknowable, and an unknown subtotal must never be
+        treated as zero spend. Cold review round 2, finding 3.
+        """
+        if self.config.cost_budget <= 0:
+            return None
+        total_cost = state.total_cost
+        if total_cost is None:
+            return 0.0
+        return max(self.config.cost_budget - total_cost, 0.0)
+
+    def _equation_lane_call_cost(self, profile, calls: int) -> float:
+        """What ``calls`` region reads on ``profile`` cost, as a KNOWN number.
+
+        Cold review round 1, finding 3. The lane used to stamp ``cost_usd=None``
+        (unknown) and append no ``EngineResult``, which made an executed model
+        call invisible to ``--cost-budget`` live and, on resume, turned
+        ``state.total_cost`` into None -- so the SAME document routed a later
+        page differently live than resumed. A local profile is priced 0.00,
+        which is a known number and not an unknown one.
+
+        One region read is charged as one page-equivalent at the serving
+        profile's rate. That is the only unit the profile publishes; it is an
+        estimate for a whole-page call and this is a crop, so it is an upper
+        bound, and for every local rung it is exactly zero either way.
+        """
+        rate = float(getattr(profile, "cost_per_page_usd", 0.0) or 0.0)
+        return rate * max(calls, 0)
+
+    def _agentic_equation_region_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        output_dir: Path,
+        available_profiles=None,
+        *,
+        ocr=None,
+    ) -> None:
+        """P4-R: read this page's display-equation regions and attach what survives.
+
+        The page's floor is the ORDINARY native page, built first by
+        ``_agentic_native_page`` so a lane that attaches nothing ships bytes,
+        status, ``audit_passed`` and audit events identical to a run with the
+        lane off. Everything below is additive on top of that floor.
+
+        Per region: crop (already saved by the model-free detector) -> local VLM
+        -> 1A structural gate -> numeric-presence REJECTION guard -> in-place
+        attachment beside the region's own native slice. Any step that fails
+        drops that ONE region's reading and leaves the page text untouched; it
+        never demotes the page, never flips ``audit_passed`` (the winner-selection
+        flag), and never lets a whole-page model read compete with native prose.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.math.equation_latex import (
+            attach_equation_sidecars_in_place,
+            contract_delimiter_violation,
+            process_equation_region,
+        )
+        from socr.math.recover import DEFAULT_MODEL
+        from socr.tables.escalation_canary import PRESENCE_INVENTED, region_presence_verdict
+
+        # 1. The floor. Identical to the lane-off page in every respect.
+        self._agentic_native_page(state, page_num, ps)
+        baseline = ps.best_output
+        native_text = ps.native_text or ""
+
+        # 2. Deterministic, model-free region location. The page trigger is
+        #    ``has_equations``; this detector is the LOCATOR, not a second
+        #    trigger -- a signalled page with no display region simply has
+        #    nothing to read, costs no model call, and ships the floor.
+        try:
+            regions = self._detect_and_crop_equation_page(state, page_num, output_dir)
+        except Exception as exc:
+            logger.warning("equation lane: region detection failed on p%d: %s", page_num, exc)
+            regions = []
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="equation_lane_detection_failed",
+                    engine="native+equations",
+                    detail=(
+                        "display-equation region detection failed; the page ships its "
+                        "native prose unchanged"
+                    ),
+                    data={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+            )
+        if not regions:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="equation_lane_no_region",
+                    engine="native+equations",
+                    detail=(
+                        "page carries the equation signal but no display-equation region "
+                        "was located; no model call was made and the native prose ships "
+                        "unchanged"
+                    ),
+                    data={"has_equations": bool(ps.has_equations), "regions": 0},
+                )
+            )
+            return
+
+        model = self.config.clean_equation_model or DEFAULT_MODEL
+        profile, skip_reason = self._equation_lane_provider(available_profiles)
+        host = self._local_backend_host()
+        calls_made = 0
+        rate = float(getattr(profile, "cost_per_page_usd", 0.0) or 0.0)
+        remaining_budget = self._equation_lane_remaining_budget(state)
+        spent_here = 0.0
+        # Cold review round 1 finding 5, tightened in round 2. The latch means
+        # exactly one thing: THE EQUATION MODEL DID NOT RUN ON THIS PAGE, for a
+        # reason the run fingerprint does not describe. Provider availability is
+        # transient external state, so a page skipped because nothing was up
+        # would otherwise be written terminal SUCCESS and restored forever,
+        # leaving a default-on lane permanently inert on that page.
+        #
+        # Set for unavailability (round 2: regardless of ``strict_local`` -- a
+        # strict-local run whose local rung is briefly down did not run the
+        # model either) and, below, for a transport failure. NOT set for refusals
+        # the fingerprint DOES describe -- strict-local versus a cloud model, or
+        # a budget/cap decision -- because those are identical on every rerun
+        # under the same config, so latching them would make the document
+        # permanently unskippable while changing nothing.
+        if profile is None and self._equation_lane_availability_refusal(skip_reason):
+            ps.equation_lane_retry_pending = True
+
+        if not self.config.quiet:
+            console.print(
+                f"  p{page_num}: [cyan]equation region lane [{model}] "
+                f"({len(regions)} region(s))[/cyan]"
+            )
+
+        attachable: list = []
+        for region_index, region in enumerate(regions):
+            crop_path = region.crop_path
+            crop_ref = f"equations/{Path(crop_path).name}" if crop_path else ""
+            # Cold review round 2, finding 3: the per-page cap and the remaining
+            # document budget are checked BEFORE each call, and region reads
+            # count CUMULATIVELY -- two reads on one page cost twice the rate,
+            # and the cap is per page. Accounting after an unauthorised call
+            # does not make a cap respected.
+            budget_reason = ""
+            if rate > 0.0:
+                cap = self.config.max_cost_per_page
+                if cap > 0 and spent_here + rate > cap:
+                    budget_reason = (
+                        f"per-page cost cap reached: {spent_here:.4f} already spent on this "
+                        f"page and one more region read at {rate:.4f} would exceed "
+                        f"--max-cost-per-page {cap}"
+                    )
+                elif remaining_budget is not None and spent_here + rate > remaining_budget:
+                    budget_reason = (
+                        f"document cost budget exhausted: {remaining_budget:.4f} remained and "
+                        f"one more region read at {rate:.4f} would exceed it"
+                    )
+            if skip_reason or budget_reason or not crop_path:
+                reason = skip_reason or budget_reason or "no crop was retained for this region"
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_region_reading_unvalidated",
+                        engine="native+equations",
+                        detail=(
+                            f"no LaTeX candidate for region {region_index} ({reason}); "
+                            "native text for the region is unchanged"
+                        ),
+                        data={
+                            "region_index": region_index,
+                            "crop_path": crop_path,
+                            "model_id": model,
+                            "model_call_skipped": True,
+                            "skip_reason": reason,
+                            "validation_ok": False,
+                        },
+                    )
+                )
+                continue
+
+            result = process_equation_region(
+                region_index=region_index,
+                page_num=page_num,
+                crop_path=crop_path,
+                native_text=region.source_text or "",
+                source_text=region.source_text or "",
+                crop_ref=crop_ref,
+                ocr=ocr,
+                model=model,
+                host=host,
+            )
+            calls_made += 1
+            spent_here += rate
+
+            # Cold review round 1, finding 1: a reading carrying a delimiter the
+            # output contract owns is refused outright. `process_equation_region`
+            # already fails such a candidate at the contract gate; this branch
+            # exists so the refusal lands under its OWN audit kind instead of
+            # being filed as an ordinary validation miss -- a model writing page
+            # boundaries into a page body is worth being able to grep for.
+            markup_violation = contract_delimiter_violation(result.raw_latex)
+            if markup_violation:
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_region_reading_unsafe_markup",
+                        engine="native+equations",
+                        detail=(
+                            f"region {region_index} reading refused: {markup_violation}; "
+                            "embedding it would let a model reading split the document, so "
+                            "the page keeps its native prose and is NOT demoted"
+                        ),
+                        data={
+                            "region_index": region_index,
+                            "crop_path": crop_path,
+                            "model_id": model,
+                            "violation": markup_violation,
+                            "raw_latex": result.raw_latex,
+                        },
+                    )
+                )
+                continue
+
+            if not result.raw_latex.strip():
+                # Cold review round 2, finding 5: ``latex_for_crop`` returns ""
+                # when the transport fails (unreadable crop, URLError, timeout,
+                # a response with no body). A provider was present at selection
+                # time and the model still did not run, so the page is NOT a
+                # finished result. Conservative by design: a model that genuinely
+                # answers with nothing is indistinguishable here and costs a
+                # retry, which is the safe direction.
+                ps.equation_lane_retry_pending = True
+
+            if not (result.validation_ok and result.raw_latex.strip()):
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_region_reading_unvalidated",
+                        engine="native+equations",
+                        detail=(
+                            f"region {region_index} produced no 1A-valid LaTeX "
+                            f"({result.validation_reason}); native text for the region "
+                            "is unchanged"
+                        ),
+                        data={
+                            "region_index": region_index,
+                            "crop_path": crop_path,
+                            "model_id": model,
+                            "model_call_skipped": False,
+                            "validation_ok": result.validation_ok,
+                            "validation_reason": result.validation_reason,
+                        },
+                    )
+                )
+                continue
+
+            # Ruling 4: numeric presence is a REJECTION guard, not an acceptance
+            # contract. Containment is one-way and proves only "not invented" --
+            # never that a value is correctly placed or bound.
+            verdict = region_presence_verdict(
+                native_text,
+                result.raw_latex,
+                encoding_suspect=bool(getattr(ps, "has_encoding_hygiene_suspect", False)),
+                corrupt_math=bool(ps.has_corrupt_math),
+            )
+            if verdict.status == PRESENCE_INVENTED:
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_region_reading_rejected",
+                        engine="native+equations",
+                        detail=(
+                            f"region {region_index} reading rejected by the numeric-presence "
+                            f"guard ({verdict.reason}); the page keeps its native prose and "
+                            "is NOT demoted"
+                        ),
+                        data={
+                            "region_index": region_index,
+                            "crop_path": crop_path,
+                            "model_id": model,
+                            "presence_status": verdict.status,
+                            "presence_reason": verdict.reason,
+                            "invented": list(verdict.invented),
+                            "oracle_size": verdict.oracle_size,
+                            "raw_latex": result.raw_latex,
+                        },
+                    )
+                )
+                continue
+
+            result.presence_status = verdict.status
+            result.presence_reason = verdict.reason
+            attachable.append(result)
+
+        # Cold review round 1, finding 3: every executed call is metered before
+        # any early return below, so a rejected or unaligned reading cannot
+        # erase the spend it cost.
+        self._meter_equation_lane_calls(state, ps, page_num, profile, model, calls_made)
+
+        if not attachable:
+            return
+
+        text, unaligned = attach_equation_sidecars_in_place(native_text, attachable)
+        unaligned_set = set(unaligned)
+        for result in attachable:
+            if result.region_index in unaligned_set:
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_region_reading_unaligned",
+                        engine="native+equations",
+                        detail=(
+                            f"region {result.region_index}'s native slice was not found in "
+                            "the page text, so its reading was dropped rather than appended "
+                            "somewhere it does not belong"
+                        ),
+                        data={
+                            "region_index": result.region_index,
+                            "crop_path": result.crop_path,
+                            "model_id": model,
+                            "source_text": result.source_text,
+                        },
+                    )
+                )
+            else:
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_region_reading_attached",
+                        engine="native+equations",
+                        detail=(
+                            f"region {result.region_index}: crop-backed, 1A-validated LaTeX "
+                            "attached beside its own native slice; the native text is "
+                            "retained and remains authoritative"
+                        ),
+                        data={
+                            "region_index": result.region_index,
+                            "crop_path": result.crop_path,
+                            "crop_ref": result.crop_ref,
+                            "model_id": model,
+                            "presence_status": getattr(result, "presence_status", ""),
+                            "presence_reason": getattr(result, "presence_reason", ""),
+                            "validation_scope": "latex_syntax_only",
+                            "semantic_fidelity_verified": False,
+                        },
+                    )
+                )
+
+        if text == native_text:
+            return
+
+        # A passing winner, never a demotion: status / audit_passed / failure_mode
+        # are carried from the native floor rather than restated, so this lane
+        # cannot upgrade or demote a page relative to the lane-off run.
+        #
+        # ``cost_usd`` carries the metered figure, never None: the resume path
+        # rebuilds an ``EngineResult`` from this field, and an unknown there
+        # makes the whole run's total cost unknown and fails every later paid
+        # rung closed (finding 3).
+        attached_out = replace(
+            baseline,
+            text=text,
+            engine="native+equations",
+            provider_id=(getattr(profile, "id", "") or "equation-region-lane"),
+            provider_model=model,
+            provider_backend=(getattr(profile, "backend", "") or "ollama-compatible"),
+            cost_usd=self._equation_lane_call_cost(profile, calls_made),
+        )
+        ps.attempts.append(attached_out)
+        ps.best_output = attached_out
+
+    def _meter_equation_lane_calls(
+        self,
+        state: DocumentState,
+        ps: PageState,
+        page_num: int,
+        profile,
+        model: str,
+        calls_made: int,
+    ) -> None:
+        """Record the lane's executed model calls in ``state.engine_runs``.
+
+        Cold review round 1, finding 3. Without this the calls were invisible to
+        ``--cost-budget``, ``--max-cost-per-page``, the reported total, the
+        metadata and the resume ledger. A local rung costs 0.00 -- a KNOWN
+        number -- so recording it never makes the total unknown, and recording
+        it is what keeps a resumed run's arithmetic identical to a live one.
+
+        Also stamps the cost on the page's current output so a page whose
+        reading was REJECTED still carries the spend the refused call cost; the
+        resume path rebuilds its ``EngineResult`` from that field.
+        """
+        if calls_made <= 0:
+            return
+        cost = self._equation_lane_call_cost(profile, calls_made)
+        if ps.best_output is not None:
+            ps.best_output.cost_usd = cost
+        state.engine_runs.append(
+            EngineResult(
+                document_path=state.handle.path,
+                engine="native+equations",
+                status=DocumentStatus.SUCCESS,
+                pages=[ps.best_output] if ps.best_output is not None else [],
+                model_version=model,
+                cost=cost,
+                pages_processed=1,
+                audit_passed=True,
+            )
+        )
 
     # ------------------------------------------------------------------
     # PP-7: Chart-asset routing lane
@@ -2977,7 +3769,7 @@ class UnifiedPipeline:
 
         from socr.core.born_digital import upright_rotation_for
         from socr.core.pdf import open_pdf
-        from socr.tables.extract import DEFAULT_CROP_DPI, CROP_PADDING_PT
+        from socr.tables.extract import CROP_PADDING_PT, DEFAULT_CROP_DPI
 
         try:
             doc = open_pdf(pdf_path)
@@ -3142,10 +3934,23 @@ class UnifiedPipeline:
             for page_num, ps in sorted(state.pages.items())
             if self._is_corrupt_math_recovery_page(page_num, ps)
         }
+        # P4-R: the equation-region lane is likewise a region lane, not a
+        # whole-page OCR rung. Built here, beside the corrupt-math set and
+        # BEFORE provider setup, so the empty-ladder branch below cannot stamp
+        # one of its pages WARNING/MODEL_UNAVAILABLE -- with no provider the
+        # page must ship its native prose exactly as it does with the lane off.
+        equation_lane_pages = {
+            page_num
+            for page_num, ps in sorted(state.pages.items())
+            if page_num not in math_recovery_pages
+            and self._is_equation_region_lane_page(page_num, ps)
+        }
         ocr_pages: list[int] = []
         for page_num, ps in sorted(state.pages.items()):
-            if page_num not in math_recovery_pages and not self._is_agentic_trusted_native(
-                page_num, ps
+            if (
+                page_num not in math_recovery_pages
+                and page_num not in equation_lane_pages
+                and not self._is_agentic_trusted_native(page_num, ps)
             ):
                 ocr_pages.append(page_num)
 
@@ -3302,6 +4107,18 @@ class UnifiedPipeline:
             native_fallback_pages = [
                 p for p in native_fallback_pages if p not in chart_winner_pages
             ]
+        # P4-R precedence, stated once and enforced here rather than only in the
+        # loop's elif order: corrupt math > chart asset > equation region >
+        # generic no-provider > plain native > whole-page route_page. A chart
+        # page keeps the chart lane unchanged; its equation regions are simply
+        # not read (deliberate, and recorded in the P4-R decision log).
+        equation_lane_pages -= chart_winner_pages
+        equation_lane_pages -= resumed_pages
+        # Pages the lane actually ran on this pass. The legacy GH-36a/36b in-loop
+        # block is skipped for exactly these, so `--detect-equations
+        # --recover-clean-equations` plus the lane cannot detect, crop or attach
+        # the same region twice.
+        equation_lane_handled: set[int] = set()
 
         # -- Doc-scoped provider setup -------------------------------------------
         available = self._available_engines_for_agentic()
@@ -3533,6 +4350,15 @@ class UnifiedPipeline:
             # figures is off (chart PNGs are mandatory preservation artifacts).
             elif page_num in chart_winner_pages:
                 self._agentic_chart_asset_page(state, page_num, ps, _chart_figures_dir)
+            # P4-R: region-scoped equation lane. It sits AFTER the corrupt-math
+            # and chart lanes and BEFORE plain native, so a page those two own
+            # keeps its existing route. The lane's floor is the plain-native
+            # output it builds first, which is why it is safe here: with no
+            # provider, no region, or a refused reading it ships exactly what
+            # the `elif is_native` branch below would have shipped.
+            elif page_num in equation_lane_pages:
+                self._agentic_equation_region_page(state, page_num, ps, output_dir, available)
+                equation_lane_handled.add(page_num)
             elif page_num in no_ocr_provider_pages:
                 self._agentic_no_provider_page(page_num, ps)
             elif is_native:
@@ -3870,7 +4696,11 @@ class UnifiedPipeline:
             # sidecar.  Runs ONLY when the flags are on (default-off).  With
             # both flags OFF, the page body is unchanged — output is byte-
             # identical to a non-equation-aware run (AC: "flags OFF → unchanged").
-            if _detect_eq and bo.text:
+            # P4-R: a page the equation lane already handled has been detected,
+            # cropped, read and attached once. Running the legacy block over it
+            # would detect and crop the same regions again and append a SECOND
+            # sidecar at page end, so it is skipped here.
+            if _detect_eq and bo.text and page_num not in equation_lane_handled:
                 # Determine whether this page has clean equations.
                 _eq_pages_set: set[int] = set()
                 if self._last_assessment:
@@ -5216,6 +6046,12 @@ class UnifiedPipeline:
                 bool(ps.chart_asset_render_failed) if ps else False  # PP-7
             ),
             # GH-318: chart eligibility never resolved for this page.
+            # P4-R: the lane could not reach its provider on the run that wrote
+            # this sidecar, so the page is not a finished result even though it
+            # ships a clean native SUCCESS (finding 5).
+            "equation_lane_retry_pending": (
+                bool(getattr(ps, "equation_lane_retry_pending", False)) if ps else False
+            ),
             "chart_asset_detection_failed": (
                 bool(getattr(ps, "chart_asset_detection_failed", False)) if ps else False
             ),
@@ -5374,6 +6210,25 @@ class UnifiedPipeline:
             current_checksum = safe_checksum(state.handle.path)
             if not recorded_checksum or recorded_checksum != current_checksum:
                 return None
+
+            # P4-R (cold review round 1, finding 5): the sidecar was written by a
+            # run whose equation lane never reached a provider. Provider
+            # availability is transient and invisible to the fingerprint, so
+            # everything above can match while the page still has an unread
+            # equation on it. Refuse the skip when a provider is available NOW;
+            # keep it when there is still none, so a genuinely offline rerun is
+            # not forced to redo work it cannot do any better.
+            if meta.get("equation_lane_retry_pending") is True:
+                ps_now = state.pages.get(page_num)
+                if ps_now is not None and self._is_equation_region_lane_page(page_num, ps_now):
+                    profile, _reason = self._equation_lane_provider()
+                    if profile is not None:
+                        logger.debug(
+                            "PP-5: p%d not resumed; its equation lane had no provider and "
+                            "one is available now",
+                            page_num,
+                        )
+                        return None
 
             # GH-367: fingerprint+checksum matched, so this sidecar is for
             # the current run configuration. Restore the per-table lift
@@ -5731,6 +6586,10 @@ class UnifiedPipeline:
             ps.chart_asset_detection_failed = bool(
                 getattr(ps, "chart_asset_detection_failed", False)
             ) or bool(meta.get("chart_asset_detection_failed", False))
+            # P4-R: carry the unread-equation latch forward, so a page resumed
+            # while STILL offline keeps saying so and is re-read on the first
+            # run that has a provider.
+            ps.equation_lane_retry_pending = bool(meta.get("equation_lane_retry_pending", False))
             ps.judge_rejected = bool(meta.get("judge_rejected", False))
             # MAJOR 7(b): restore the S1 resume-idempotency flag so
             # ``_reaches_structure_class_branch`` can re-derive the bucket
@@ -5760,7 +6619,16 @@ class UnifiedPipeline:
                 TABLE_LADDER_EVENT_KINDS,
             )
 
-            restore_kinds = TABLE_LADDER_EVENT_KINDS | {TABLE_BINDING_ADJUDICATED_KIND}
+            # P4-R joins the allowlist for the same reason D1a wrote it: the
+            # lane's dispositions -- above all a presence-guard REJECTION --
+            # are the only record that a reading was looked at and refused.
+            # Dropping them on resume would leave a page that silently ships
+            # native prose with no trace of the refusal.
+            restore_kinds = (
+                TABLE_LADDER_EVENT_KINDS
+                | {TABLE_BINDING_ADJUDICATED_KIND}
+                | self.EQUATION_LANE_EVENT_KINDS
+            )
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
@@ -7102,7 +7970,32 @@ class UnifiedPipeline:
             from ocr_output_contract import write_doc_metadata
 
             write_doc_metadata(doc_dir, rel_key, meta)
-            RootIndex(output_dir).record(rel_key, meta)
+
+            # P4-R (cold review round 3, finding 5): the root entry and its
+            # pending-retry latch are ONE write, made by ``RootIndex.record``.
+            #
+            # Round 2 called ``record()`` -- which saves immediately -- and then
+            # mutated the saved entry and saved again. Between those two saves
+            # the index holds a RESUMABLE entry with NO latch (``partial``
+            # counts: the gate accepts a partial entry whose checksum,
+            # fingerprint and output all match), and an interruption or a
+            # failure of the second save leaves it there permanently. The next
+            # run's document gate then skips the whole file and the equation
+            # page is never read -- the original finding-5 failure with a
+            # smaller window.
+            #
+            # The latch rides in on ``to_entry`` instead, so ``record`` stays the
+            # SOLE author of root metadata.json (the PP-5 invariant, pinned by
+            # tests/test_pp5_resume_ledger.py) and there is still exactly one
+            # save. The field is absent -- not false -- when nothing is pending,
+            # so an older index without it reads identically.
+            #
+            # Fail-closed: if that save raises, NOTHING is recorded, the outer
+            # handler logs it, and the next run reprocesses the document.
+            index_meta = meta
+            if any(getattr(p, "equation_lane_retry_pending", False) for p in state.pages.values()):
+                index_meta = _EquationRetryMetadata(meta)
+            RootIndex(output_dir).record(rel_key, index_meta)
         except Exception as exc:  # never lose output over a metadata write
             logger.warning("metadata write failed (non-fatal): %s", exc)
 
@@ -7472,21 +8365,23 @@ class UnifiedPipeline:
             )
         )
 
-    def _detect_and_crop_equations(
+    def _detect_and_crop_equation_page(
         self,
         state: DocumentState,
-        page_nums: list[int],
+        page_num: int,
         output_dir: Path,
-    ) -> None:
-        """GH-36a: detect display-equation regions and save crop PNGs.
+        *,
+        page=None,
+    ) -> list[EquationRegion]:
+        """Detect display-equation regions on one page and save crop PNGs.
 
-        Runs the deterministic, model-free detector on each page in
-        ``page_nums``.  Saves a crop PNG for every detected region to
-        ``equations/`` beside the figures directory, and records provenance in
-        ``state.events`` (AuditEvent kind ``equation_region_detected``).
+        If ``page`` is provided (a ``fitz.Page``), detection and crop rendering
+        reuse it directly without opening the document again. If omitted or None,
+        opens the PDF for the duration of this call.
 
-        No text is modified, no model is called.  This is DETECTION + EVIDENCE
-        only; the engine/validation/splice layer is GH-36b.
+        Returns the detected ``EquationRegion`` records in page-vertical order,
+        each carrying geometry, ``source_text``, ``equation_label``, and the
+        absolute ``crop_path`` (or None if crop render failed).
         """
         from ocr_output_contract import doc_dir_for, relative_key
 
@@ -7502,12 +8397,91 @@ class UnifiedPipeline:
         doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         equations_dir = doc_dir / "equations"
 
-        total_regions = 0
+        if page is None:
+            try:
+                with open_pdf(state.handle.path) as pdf:
+                    try:
+                        p = pdf[page_num - 1]
+                    except IndexError:
+                        logger.warning(
+                            "equation detection: page %d out of range (skipping)", page_num
+                        )
+                        return []
+                    return self._detect_and_crop_equation_page(
+                        state,
+                        page_num,
+                        output_dir,
+                        page=p,
+                    )
+            except Exception as exc:
+                logger.warning("equation detection: cannot open PDF for page %d: %s", page_num, exc)
+                return []
+
+        det: EquationDetectionResult = detect_display_equations(page, page_num)
+        if not det.regions:
+            return []
+
+        save_equation_crops(det.regions, page, equations_dir, dpi=self.config.render_dpi)
+
+        for region_index, region in enumerate(det.regions):
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="equation_region_detected",
+                    engine="detect_equations",
+                    detail=(
+                        f"display-equation region detected "
+                        f"(bbox={region.source_bbox!r}, "
+                        f"eq_num={region.has_eq_number}, "
+                        f"crop={region.crop_path!r})"
+                    ),
+                    data={
+                        "source_bbox": list(region.source_bbox),
+                        "padded_bbox": list(region.bbox),
+                        "has_eq_number": region.has_eq_number,
+                        "crop_path": region.crop_path,
+                        "detection_time_s": det.detection_time_s,
+                        "source_text": region.source_text,
+                        "equation_label": region.equation_label,
+                        "region_index": region_index,
+                    },
+                )
+            )
+
+        return det.regions
+
+    def _detect_and_crop_equations(
+        self,
+        state: DocumentState,
+        page_nums: list[int],
+        output_dir: Path,
+    ) -> dict[int, list[EquationRegion]]:
+        """GH-36a: detect display-equation regions and save crop PNGs.
+
+        Runs the deterministic, model-free detector on each page in
+        ``page_nums``.  Saves a crop PNG for every detected region to
+        ``equations/`` beside the figures directory, and records provenance in
+        ``state.events`` (AuditEvent kind ``equation_region_detected``).
+
+        Returns detected ``EquationRegion`` records grouped by 1-indexed page_num.
+
+        No text is modified, no model is called.  This is DETECTION + EVIDENCE
+        only; the engine/validation/splice layer is GH-36b / P4-R.
+        """
+        from ocr_output_contract import doc_dir_for, relative_key
+
+        from socr.core.pdf import open_pdf
+
+        scan_root = self._scan_root or state.handle.path.parent
+        doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
+        equations_dir = doc_dir / "equations"
+
+        results: dict[int, list[EquationRegion]] = {p: [] for p in page_nums}
         try:
             pdf = open_pdf(state.handle.path)
         except Exception as exc:
             logger.warning("equation detection: cannot open PDF: %s", exc)
-            return
+            return results
 
         try:
             for page_num in page_nums:
@@ -7517,42 +8491,24 @@ class UnifiedPipeline:
                     logger.warning("equation detection: page %d out of range (skipping)", page_num)
                     continue
 
-                det: EquationDetectionResult = detect_display_equations(page, page_num)
-                if not det.regions:
-                    continue
-
-                save_equation_crops(det.regions, page, equations_dir, dpi=self.config.render_dpi)
-
-                for region in det.regions:
-                    total_regions += 1
-                    state.events.append(
-                        AuditEvent(
-                            page_num=page_num,
-                            kind="equation_region_detected",
-                            engine="detect_equations",
-                            detail=(
-                                f"display-equation region detected "
-                                f"(bbox={region.source_bbox!r}, "
-                                f"eq_num={region.has_eq_number}, "
-                                f"crop={region.crop_path!r})"
-                            ),
-                            data={
-                                "source_bbox": list(region.source_bbox),
-                                "padded_bbox": list(region.bbox),
-                                "has_eq_number": region.has_eq_number,
-                                "crop_path": region.crop_path,
-                                "detection_time_s": det.detection_time_s,
-                            },
-                        )
-                    )
+                regions = self._detect_and_crop_equation_page(
+                    state,
+                    page_num,
+                    output_dir,
+                    page=page,
+                )
+                results[page_num] = regions
         finally:
             pdf.close()
 
+        total_regions = sum(len(regs) for regs in results.values())
         if total_regions and not self.config.quiet:
             console.print(
                 f"  [dim]GH-36a: {total_regions} equation region(s) detected "
                 f"and cropped to {equations_dir}[/dim]"
             )
+
+        return results
 
     def _attach_equation_latex_sidecars(
         self,

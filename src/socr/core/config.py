@@ -211,6 +211,27 @@ class PipelineConfig:
     # (thinking/non-instruct, runs away on dense regions).
     clean_equation_model: str = "qwen3-vl:30b-a3b-instruct"
 
+    # --- P4-R: agentic equation-region lane (default ON) ---
+    # Takes a table-free born-digital page carrying the equation signal OUT of
+    # the free trusted-native bypass in AGENTIC mode, so its mathematics is read
+    # by a model instead of shipping whatever PyMuPDF flattened it into.
+    #
+    # Trigger: ``has_equations`` AS DETECTED — no threshold, no new signal.  The
+    # rate this costs was measured before the widening shipped
+    # (docs/log/2026-09-02_p4m-trigger-rates.md: 36% of today's free lane).
+    #
+    # The lane is ADVISORY and REGION-SCOPED: the model's reading NEVER replaces
+    # whole-page native prose.  Each display-equation region is cropped, read,
+    # gated (1A syntax + a one-way numeric-presence REJECTION guard) and, if it
+    # survives, attached in place beside the untouched native slice.  A page with
+    # no region, no provider, a refused model or a rejected reading ships its
+    # native prose as SUCCESS, exactly as it does with this flag off.
+    #
+    # Separate from the legacy GH-36a/36b opt-in above (``detect_equations`` /
+    # ``recover_clean_equations``), which stays default-off and unchanged.
+    # Kill switch: ``--no-equation-region-lane``.
+    equation_region_lane: bool = True
+
     # --- Processing ---
     # ``Path("output")`` is the LEGACY SENTINEL meaning "unset". The canon
     # default output root is ``<input-parent>/ocr/`` (resolved per-input via the

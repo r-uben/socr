@@ -18,6 +18,7 @@ import fitz
 
 from socr.math.detect_equations import (
     EquationDetectionResult,
+    EquationRegion,
     detect_display_equations,
     save_equation_crops,
 )
@@ -602,15 +603,257 @@ class TestThroughputHarness:
         avg_ms = (total_time / pages) * 1000
 
         # The throughput harness must return non-negative measurements.
+        #
+        # Cold review round 1, finding 9: there was a `avg_ms < 500` assertion
+        # here. It is an empirical magic threshold of exactly the kind this repo
+        # forbids -- a loaded CI worker fails it with correct geometry, and a
+        # real regression that stays under it passes. Throughput acceptance
+        # belongs in a benchmark with a measured baseline, not in a unit test's
+        # wall clock. What remains is instrumentation: the harness must produce
+        # a measurement at all, and it must not be negative.
         assert all(t >= 0.0 for t in timings), "detection_time_s must be non-negative"
-        # Geometry-only detection should be well under 500 ms per page
-        # (the actual bound will be much lower; this guards against hangs).
-        assert avg_ms < 500, (
-            f"Detection is unexpectedly slow: {avg_ms:.1f} ms/page avg on synthetic pages"
-        )
         # Report for the log (visible with pytest -s).
         print(
             f"\nThroughput harness: {pages} pages, "
             f"total {total_time * 1000:.1f} ms, "
             f"avg {avg_ms:.2f} ms/page"
         )
+
+
+class TestOrchestratorEquationDetectionSeam:
+    """Tests for refactored _detect_and_crop_equations and _detect_and_crop_equation_page."""
+
+    def _make_pipeline_and_state(self, pdf_path: Path):
+        from socr.core.config import PipelineConfig
+        from socr.core.document import DocumentHandle
+        from socr.core.state import DocumentState
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        cfg = PipelineConfig()
+        cfg.detect_equations = True
+        pipeline = UnifiedPipeline(cfg)
+        handle = DocumentHandle(path=pdf_path)
+        state = DocumentState(handle=handle)
+        return pipeline, state
+
+    def test_zero_region_return(self, tmp_path: Path):
+        """Zero regions on a page return an empty list for that page."""
+        # Create a 2-page PDF with prose only (no math fonts)
+        pdf_path = tmp_path / "prose.pdf"
+        doc = fitz.open()
+        doc.new_page(width=595, height=842)
+        doc.new_page(width=595, height=842)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        pipeline, state = self._make_pipeline_and_state(pdf_path)
+        out_dir = tmp_path / "output"
+
+        results = pipeline._detect_and_crop_equations(state, [1, 2], out_dir)
+
+        assert results == {1: [], 2: []}
+        assert len(state.events) == 0
+        eq_dir = out_dir / "prose" / "equations"
+        assert not eq_dir.exists() or len(list(eq_dir.glob("*.png"))) == 0
+
+    def test_single_page_seam_with_passed_page_avoids_reopen(self, tmp_path: Path):
+        """_detect_and_crop_equation_page reuses passed fitz.Page directly without open_pdf."""
+        pdf_path = tmp_path / "doc.pdf"
+        doc = fitz.open()
+        doc.new_page(width=595, height=842)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        pipeline, state = self._make_pipeline_and_state(pdf_path)
+        out_dir = tmp_path / "output"
+
+        # Mock page with 1 detected equation region
+        mock_page = fitz.open(str(pdf_path))[0]
+        region = EquationRegion(
+            page_num=1,
+            bbox=(100.0, 200.0, 400.0, 240.0),
+            source_bbox=(104.0, 204.0, 396.0, 236.0),
+            has_eq_number=True,
+            equation_label="(1.1)",
+            source_text="x^2 + y^2 = z^2 (1.1)",
+        )
+        canned_det = EquationDetectionResult(page_num=1, regions=[region], detection_time_s=0.005)
+
+        from unittest.mock import patch
+
+        with (
+            patch("socr.core.pdf.open_pdf") as mock_open_pdf,
+            patch(
+                "socr.math.detect_equations.detect_display_equations",
+                return_value=canned_det,
+            ),
+        ):
+            regions = pipeline._detect_and_crop_equation_page(
+                state,
+                1,
+                out_dir,
+                page=mock_page,
+            )
+
+        # open_pdf should NOT have been called because page was supplied directly
+        assert mock_open_pdf.call_count == 0
+        assert len(regions) == 1
+        assert regions[0] is region
+        assert regions[0].source_text == "x^2 + y^2 = z^2 (1.1)"
+        assert regions[0].equation_label == "(1.1)"
+        assert regions[0].crop_path is not None
+        assert Path(regions[0].crop_path).exists()
+        assert Path(regions[0].crop_path).name == "equation_1_page1.png"
+
+        # Audit event emitted with all legacy and alignment fields
+        assert len(state.events) == 1
+        ev = state.events[0]
+        assert ev.kind == "equation_region_detected"
+        assert ev.engine == "detect_equations"
+        assert ev.page_num == 1
+        assert ev.data["source_text"] == "x^2 + y^2 = z^2 (1.1)"
+        assert ev.data["equation_label"] == "(1.1)"
+        assert ev.data["crop_path"] == regions[0].crop_path
+        assert ev.data["has_eq_number"] is True
+        assert ev.data["source_bbox"] == [104.0, 204.0, 396.0, 236.0]
+        assert ev.data["padded_bbox"] == [100.0, 200.0, 400.0, 240.0]
+        assert ev.data["region_index"] == 0
+
+    def test_single_page_seam_with_page_none_opens_pdf(self, tmp_path: Path):
+        """_detect_and_crop_equation_page opens PDF once when page is None."""
+        pdf_path = tmp_path / "doc.pdf"
+        doc = fitz.open()
+        doc.new_page(width=595, height=842)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        pipeline, state = self._make_pipeline_and_state(pdf_path)
+        out_dir = tmp_path / "output"
+
+        region = EquationRegion(
+            page_num=1,
+            bbox=(50.0, 100.0, 300.0, 150.0),
+            source_bbox=(54.0, 104.0, 296.0, 146.0),
+            has_eq_number=False,
+            source_text="E = mc^2",
+        )
+        canned_det = EquationDetectionResult(page_num=1, regions=[region], detection_time_s=0.002)
+
+        from unittest.mock import patch
+
+        with patch(
+            "socr.math.detect_equations.detect_display_equations",
+            return_value=canned_det,
+        ):
+            regions = pipeline._detect_and_crop_equation_page(state, 1, out_dir, page=None)
+
+        assert len(regions) == 1
+        assert regions[0].source_text == "E = mc^2"
+        assert regions[0].crop_path is not None
+        assert Path(regions[0].crop_path).exists()
+
+    def test_multiple_region_order_and_grouping(self, tmp_path: Path):
+        """Multiple regions on a page preserve vertical order, source text, label, and paths."""
+        pdf_path = tmp_path / "multi.pdf"
+        doc = fitz.open()
+        doc.new_page(width=595, height=842)
+        doc.new_page(width=595, height=842)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        pipeline, state = self._make_pipeline_and_state(pdf_path)
+        out_dir = tmp_path / "output"
+
+        r1 = EquationRegion(
+            page_num=1,
+            bbox=(100.0, 150.0, 400.0, 180.0),
+            source_bbox=(104.0, 154.0, 396.0, 176.0),
+            has_eq_number=True,
+            equation_label="(1)",
+            source_text="a = b (1)",
+        )
+        r2 = EquationRegion(
+            page_num=1,
+            bbox=(100.0, 300.0, 400.0, 340.0),
+            source_bbox=(104.0, 304.0, 396.0, 336.0),
+            has_eq_number=True,
+            equation_label="(2)",
+            source_text="c = d (2)",
+        )
+        det_p1 = EquationDetectionResult(page_num=1, regions=[r1, r2], detection_time_s=0.003)
+        det_p2 = EquationDetectionResult(page_num=2, regions=[], detection_time_s=0.001)
+
+        from unittest.mock import patch
+
+        def fake_detect(page, page_num, **kwargs):
+            if page_num == 1:
+                return det_p1
+            return det_p2
+
+        with patch("socr.math.detect_equations.detect_display_equations", side_effect=fake_detect):
+            results = pipeline._detect_and_crop_equations(state, [1, 2], out_dir)
+
+        assert 1 in results and 2 in results
+        assert results[2] == []
+        p1_regions = results[1]
+        assert len(p1_regions) == 2
+        assert p1_regions[0].bbox[1] < p1_regions[1].bbox[1]
+        assert p1_regions[0].source_text == "a = b (1)"
+        assert p1_regions[1].source_text == "c = d (2)"
+        assert p1_regions[0].equation_label == "(1)"
+        assert p1_regions[1].equation_label == "(2)"
+        assert Path(p1_regions[0].crop_path).name == "equation_1_page1.png"
+        assert Path(p1_regions[1].crop_path).name == "equation_2_page1.png"
+
+        # Check events
+        events_p1 = [e for e in state.events if e.page_num == 1]
+        assert len(events_p1) == 2
+        assert events_p1[0].data["region_index"] == 0
+        assert events_p1[1].data["region_index"] == 1
+
+    def test_crop_failure_representation(self, tmp_path: Path):
+        """When crop save fails, region.crop_path is None and event has crop_path=None."""
+        pdf_path = tmp_path / "bad_crop.pdf"
+        doc = fitz.open()
+        doc.new_page(width=595, height=842)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        pipeline, state = self._make_pipeline_and_state(pdf_path)
+        out_dir = tmp_path / "output"
+
+        region = EquationRegion(
+            page_num=1,
+            bbox=(100.0, 200.0, 400.0, 240.0),
+            source_bbox=(104.0, 204.0, 396.0, 236.0),
+            has_eq_number=False,
+            source_text="x = y",
+        )
+        canned_det = EquationDetectionResult(page_num=1, regions=[region], detection_time_s=0.002)
+
+        from unittest.mock import patch
+
+        def fake_save_crops(regions, page, save_dir, dpi=300):
+            # Simulate failure by not setting crop_path (leaves None)
+            pass
+
+        with (
+            patch(
+                "socr.math.detect_equations.detect_display_equations",
+                return_value=canned_det,
+            ),
+            patch(
+                "socr.math.detect_equations.save_equation_crops",
+                side_effect=fake_save_crops,
+            ),
+        ):
+            results = pipeline._detect_and_crop_equations(state, [1], out_dir)
+
+        assert len(results[1]) == 1
+        ret_region = results[1][0]
+        assert ret_region.crop_path is None
+        assert ret_region.source_text == "x = y"
+        assert ret_region.source_bbox == (104.0, 204.0, 396.0, 236.0)
+
+        assert len(state.events) == 1
+        assert state.events[0].data["crop_path"] is None

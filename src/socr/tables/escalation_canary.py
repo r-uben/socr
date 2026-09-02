@@ -44,6 +44,7 @@ What acceptance does NOT establish is stated on :func:`judge_escalation`.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -231,6 +232,35 @@ def native_value_counts(page) -> Counter:
     return Counter(_normalize_numeric_token(v) for row in rows for v in row.values)
 
 
+# Whole-text numeric token regex.
+# Matches signed or unsigned integers, decimals (including leading decimals like .75),
+# and comma-separated numbers. Preserves Unicode minus (\u2212) and ASCII minus.
+#
+# NO exponent exclusion. An earlier version began with a ``(?<!\^)`` lookbehind so
+# that ``x^2`` contributed no token, on the theory that an exponent is notation
+# rather than a value. Cold review round 1 (finding 2) showed that is a
+# tokenizer-evasion path straight through the presence guard: ``x^9`` produced an
+# EMPTY candidate multiset, so an invented 9 was contained in every oracle and
+# attached. It was also wrong on its own terms -- only the FIRST digit was
+# skipped, so ``x^999`` tokenized as ``99``. An exponent is a number the model
+# wrote, and ruling 4 requires the guard to see every one of them.
+_NUMERIC_TEXT_RE = re.compile(r"[-\u2212]?(?:\d[\d,]*\.?\d*|\.\d+)")
+
+
+def text_value_tokens(text: str) -> Counter:
+    """Extract normalized numeric tokens from arbitrary text (including LaTeX), with multiplicity.
+
+    Uses the shared numeric regex without stripping alphabetic LaTeX control words,
+    so candidate tokens inside braces (e.g., in ``\\tag{3}`` or ``\\frac{1}{2}``) are
+    preserved intact. Leading decimals (.75) and Unicode minus (−3.2) are normalized
+    via :func:`_normalize_numeric_token`.
+    """
+    if not text:
+        return Counter()
+    raw = _NUMERIC_TEXT_RE.findall(text)
+    return Counter(_normalize_numeric_token(t) for t in raw)
+
+
 def native_text_value_counts(native_text: str) -> Counter:
     """Numeric tokens in a page's own extracted text, with multiplicity.
 
@@ -243,8 +273,6 @@ def native_text_value_counts(native_text: str) -> Counter:
 
     So this is the same oracle read off a different surface, not a weaker one.
     """
-    import re as _re
-
     from socr.tables.source_evidence import collect_table_tokens
 
     tokens = collect_table_tokens(native_text or "")
@@ -270,8 +298,7 @@ def native_text_value_counts(native_text: str) -> Counter:
         # candidate repeating a value the page also repeats fails the multiset
         # check and falls back to flagged native.
         grid_counts = Counter(_normalize_numeric_token(t) for t in tokens.numeric.elements())
-        page_raw = _re.findall(r"[-\u2212]?(?:\d[\d,]*\.?\d*|\.\d+)", native_text or "")
-        page_counts = Counter(_normalize_numeric_token(t) for t in page_raw)
+        page_counts = text_value_tokens(native_text or "")
         # Max, not sum: the same token appears in both passes when it is inside
         # the grid, and adding would double it into a phantom occurrence.
         return Counter({t: max(grid_counts[t], page_counts[t]) for t in grid_counts | page_counts})
@@ -282,8 +309,7 @@ def native_text_value_counts(native_text: str) -> Counter:
     # the point, so ".75" matched only from the "7" and became "75" -- a value
     # an order of magnitude out, silently, in a presence oracle. Econ tables
     # write .75 and .05 constantly.
-    raw = _re.findall(r"[-\u2212]?(?:\d[\d,]*\.?\d*|\.\d+)", native_text or "")
-    return Counter(_normalize_numeric_token(t) for t in raw)
+    return text_value_tokens(native_text or "")
 
 
 def presence_verdict_from_text(
@@ -364,6 +390,52 @@ def presence_verdict(
             reason=f"{sum(lost.values())} page value(s) absent from the candidate",
         )
     return PresenceVerdict(PRESENCE_OK, oracle_size=len(oracle), reason="every value accounted for")
+
+
+def region_presence_verdict(
+    native_text: str,
+    candidate_text: str,
+    *,
+    encoding_suspect: bool = False,
+    corrupt_math: bool = False,
+) -> PresenceVerdict:
+    """Judge a region candidate (e.g. equation) against page text via one-way containment.
+
+    One-way multiset containment is a rejection guard and does not prove
+    placement, binding, completeness, or mathematical correctness.
+
+    Returns :data:`PRESENCE_UNVERIFIABLE` when the native text has no numeric tokens,
+    or when ``encoding_suspect`` or ``corrupt_math`` indicates text layer decode damage.
+    Returns :data:`PRESENCE_INVENTED` when the candidate contains numeric tokens (with
+    multiplicity) that exceed or do not exist in the page's native text oracle.
+    Otherwise returns :data:`PRESENCE_OK`.
+
+    This verdict never returns :data:`PRESENCE_LOST` because a region is expected
+    to contain only a subset of page numbers.
+    """
+    oracle = native_text_value_counts(native_text)
+    if not oracle:
+        return PresenceVerdict(PRESENCE_UNVERIFIABLE, reason="no numeric tokens in native text")
+    if encoding_suspect or corrupt_math:
+        return PresenceVerdict(
+            PRESENCE_UNVERIFIABLE,
+            oracle_size=len(oracle),
+            reason="text layer shows decode damage or corrupt math; absence is not evidence here",
+        )
+    candidate = text_value_tokens(candidate_text)
+    invented = candidate - oracle
+    if invented:
+        return PresenceVerdict(
+            PRESENCE_INVENTED,
+            invented=tuple(sorted(invented.elements())),
+            oracle_size=len(oracle),
+            reason=f"{sum(invented.values())} value(s) not present in the page text",
+        )
+    return PresenceVerdict(
+        PRESENCE_OK,
+        oracle_size=len(oracle),
+        reason="all candidate values accounted for in page text",
+    )
 
 
 # ---------------------------------------------------------------------------

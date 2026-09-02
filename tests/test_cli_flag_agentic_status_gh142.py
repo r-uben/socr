@@ -47,6 +47,9 @@ _LIVE = {
     "cost_budget",
     "detect_equations",
     "dual_pass_tables",
+    # P4-R: read for every page by `_is_equation_region_lane_page`, which
+    # `_is_agentic_trusted_native` consults before the free native bypass.
+    "equation_region_lane",
     "escalate_ambiguous_tables",
     "figures_max_per_page",
     "figures_max_total",
@@ -286,6 +289,12 @@ def readers(tmp_path_factory):
     pipe.bd_detector.detect = detect_with_corrupt_math
     pipe._available_engines_for_agentic = lambda: [providers.PROFILE_QWEN_LOCAL]
     pipe._build_page_judge = lambda state: _YesJudge()
+    # Cold review round 1, finding 8: `_run_fingerprint` resolves the judge
+    # identity, and the resolver PROBES Ollama over HTTP. Left live, this
+    # fixture made up to three real network calls and its result depended on
+    # local Ollama state -- the exact non-hermeticity this repo's CI trap
+    # documents. Pinned so the classification is the same everywhere.
+    pipe._resolve_judge_model = lambda: ""
     # Determinism, not convenience: _resolve_crop_vlm_model probes Ollama over
     # HTTP. Left live, the classification depends on whether the developer
     # happens to have a vision model pulled — the table-extractor block (and

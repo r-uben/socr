@@ -100,6 +100,17 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
+        "--no-equation-region-lane",
+        is_flag=True,
+        help=(
+            "P4-R kill switch: keep table-free born-digital equation pages in the free "
+            "trusted-native lane instead of giving them a region-scoped, crop-backed model "
+            "reading. The lane is ON by default and is advisory — it attaches validated "
+            "LaTeX beside each equation region and never replaces whole-page native prose. "
+            "Pass this to restore the pre-P4-R routing (no model call on equation pages)."
+        ),
+    )(f)
+    f = click.option(
         "--clean-equation-model",
         default=None,
         help=(
@@ -277,6 +288,8 @@ def build_config(
     recover_corrupt_math: bool = False,
     detect_equations: bool = False,
     recover_clean_equations: bool = False,
+    no_equation_region_lane: bool = False,
+    equation_region_lane: bool | None = None,
     clean_equation_model: str | None = None,
     math_model: str | None = None,
     timeout: int = 1800,
@@ -380,6 +393,16 @@ def build_config(
         config.detect_equations = True
     if recover_clean_equations:
         config.recover_clean_equations = True
+    # P4-R. Two spellings, one field: ``--no-equation-region-lane`` is the CLI
+    # kill switch click passes as ``no_equation_region_lane``, while
+    # ``equation_region_lane`` is the direct programmatic override. Both are
+    # tri-state by omission: an unpassed flag leaves whatever the YAML/profile
+    # set, so the kill switch cannot silently re-enable a lane a config file
+    # turned off.
+    if no_equation_region_lane:
+        config.equation_region_lane = False
+    if equation_region_lane is not None:
+        config.equation_region_lane = equation_region_lane
     if clean_equation_model is not None:
         config.clean_equation_model = clean_equation_model
     if math_model is not None:
