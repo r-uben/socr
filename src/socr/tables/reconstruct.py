@@ -2010,8 +2010,9 @@ def _prepend_header_band(
         # A folded margin word never snaps to a lane by construction -- that is
         # why it was folded. Rejecting its row here would drop the whole header
         # band and reintroduce the loss this fold exists to stop (#460 review),
-        # so it is exempt from the eligibility test; `_rowize_segment` routes it
-        # to the label cell.
+        # so it is exempt from the eligibility test. It is then routed to the
+        # dedicated note column -- NOT the label cell, which is what this
+        # comment used to say before GH-461 replaced that placement.
         if _is_folded_marginal(word):
             return True
         return min(abs(c - word[0]) for c in lane_centers) <= snap_radius
@@ -2042,11 +2043,21 @@ def _prepend_header_band(
         row_ws = _merge_unclosed_bracket_words(sorted(rows_by_y[y], key=lambda w: w[0]))
         band_words.extend(row_ws)
         row_cells = [""] * len(lane_centers)
+        band_note: list[str] = []
         for w in row_ws:
+            # GH-461 review: the header band has its own cell loop, and without
+            # this check a folded margin word landing on a header row snapped
+            # into the nearest header cell -- `| Model 2026 |`. Same defect the
+            # dedicated note column exists to prevent, one row up.
+            if _is_folded_marginal(w):
+                band_note.append(w[4])
+                continue
             best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
             existing = row_cells[best]
             row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
-        header_rows.append([""] + row_cells)  # empty label cell -> _is_header_row(True)
+        # Empty label cell -> _is_header_row(True); trailing cell is the note
+        # column, which `_clean_grid` drops when no row uses it.
+        header_rows.append(["", *row_cells, " ".join(band_note)])
 
     new_x0 = min([x0] + [w[0] for w in band_words])
     new_y0 = min([y0] + [w[1] for w in band_words])
@@ -2108,7 +2119,13 @@ def _rowize_segment(
         row_ws = _merge_unclosed_bracket_words(sorted(rows_by_y[y], key=lambda w: w[0]))
 
         # Label: concatenate all words to the left of the data boundary
-        label_words = [w[4] for w in row_ws if w[0] < data_start_x - snap_margin]
+        # GH-461 review: exclude tagged words BEFORE label classification. A note
+        # in the LEFT margin is left of the data boundary, so the label branch
+        # consumed it first and the stub stayed corrupted -- the dedicated note
+        # column only ever helped right-margin notes.
+        label_words = [
+            w[4] for w in row_ws if w[0] < data_start_x - snap_margin and not _is_folded_marginal(w)
+        ]
         label = " ".join(label_words) if label_words else ""
 
         # Data cells: assign each word to the nearest lane by x-distance.
@@ -2116,7 +2133,7 @@ def _rowize_segment(
         row_cells = [""] * len(lane_centers)
         orphan_marginals: list[str] = []
         for w in row_ws:
-            if w[0] < data_start_x - snap_margin:
+            if w[0] < data_start_x - snap_margin and not _is_folded_marginal(w):
                 continue  # already in the label
             best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
             # The tag is checked BEFORE the snap assignment, not after. #460
@@ -2126,17 +2143,27 @@ def _rowize_segment(
             # the misattribution it exists to avoid. A margin note near a
             # column's x is still a margin note.
             if _is_folded_marginal(w):
+                # GH-461: a DEDICATED cell, not the label and not an existing
+                # lane. #459 put these in the label and I published the result
+                # as if it were fine -- it reads `| OLS 2026 |`, silently
+                # corrupting the row's identity. That is the same class of
+                # wrongness as attaching the note to a data value, just on the
+                # stub side, and the test I wrote then ENCODED it by comparing
+                # `row[1:]` only.
+                #
+                # The note is neither a stub nor a datum, so it gets a column of
+                # its own. `_clean_grid` drops that column when no row has one,
+                # so a page without margin notes is unaffected.
                 orphan_marginals.append(w[4])
             elif abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
                 existing = row_cells[best]
                 row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
 
-        if orphan_marginals:
-            label = " ".join(x for x in (label, *orphan_marginals) if x)
-
         # Always emit the label as a first cell so all rows share the same
-        # column layout.  An empty label yields "" (empty first cell).
-        grid_row = [label] + row_cells
+        # column layout.  An empty label yields "" (empty first cell). The
+        # trailing cell is GH-461's margin-note column, empty on rows that have
+        # none and dropped entirely by `_clean_grid` when no row does.
+        grid_row = [label, *row_cells, " ".join(orphan_marginals)]
         if any(c.strip() for c in grid_row):
             grid.append(grid_row)
 
