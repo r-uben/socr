@@ -352,7 +352,7 @@ def test_partial_crop_coverage_flags_instead_of_patching(tmp_path, partial: str)
     assert "1.0" in text, f"the incumbent text was rewritten anyway: {text}"
 
 
-def _reread_via_fallback(tmp_path, *, partial: bool):
+def _reread_via_fallback(tmp_path, *, partial: str | None):
     """The SECOND route into a patch: the crop-repair fallback.
 
     `effective_auto_patch` starts False here (auto-patch is off in config); the
@@ -388,31 +388,45 @@ def _reread_via_fallback(tmp_path, *, partial: bool):
         )
     )
     crops = [CropTable(markdown=repaired, source="booktabs", bbox=(10.0, 10.0, 200.0, 100.0))]
-    if partial:
+    if partial is not None:
         dud = CropTable(markdown="", source="booktabs", bbox=(10.0, 110.0, 200.0, 200.0))
-        dud._failed = "read_error"
+        if partial == "failed":
+            dud._failed = "read_error"
+        else:
+            dud._timed_out = True
         crops.append(dud)
 
-    patched, _flagged = pipeline._reread_page_tables(state, 1, crops, extractor=object())
-    return patched, state.pages[1].best_output.text
+    patched, flagged = pipeline._reread_page_tables(state, 1, crops, extractor=object())
+    return patched, flagged, state.pages[1].best_output.text
 
 
 def test_the_crop_repair_fallback_patches_a_broken_header(tmp_path) -> None:
-    """Control for the pin below: this route really does patch."""
-    patched, text = _reread_via_fallback(tmp_path / "fb_clean", partial=False)
+    """Control for the pins below: this route really does patch."""
+    patched, _flagged, text = _reread_via_fallback(tmp_path / "fb_clean", partial=None)
     assert patched == 1, "the crop-repair fallback did not fire at all"
     assert "Est" in text, f"the collapsed header was not repaired: {text}"
 
 
-def test_the_crop_repair_fallback_is_gated_by_partial_coverage(tmp_path) -> None:
-    """#495 item 2, second route: a failed crop must block the fallback too.
+@pytest.mark.parametrize("partial", ["failed", "timeout"])
+def test_the_crop_repair_fallback_is_gated_by_partial_coverage(tmp_path, partial: str) -> None:
+    """#495 item 2, second route: partial coverage must block the fallback too.
 
     This is the route the deleted AST check was really there for -- and the
     only one the flag-only tests above do not reach, because auto-patch is off
     in config and the fallback is what turns it back on.
+
+    Parametrised over BOTH kinds (cubic P2 on #499): with auto-patch off,
+    `effective_auto_patch` is False whatever `had_timeout` says, so the
+    `and not had_timeout` clause inside `needs_crop_fallback` is the only thing
+    standing between a timed-out crop and a patch. A failed-only fixture would
+    have left reverting that one clause green.
     """
-    patched, text = _reread_via_fallback(tmp_path / "fb_partial", partial=True)
+    patched, flagged, text = _reread_via_fallback(tmp_path / f"fb_{partial}", partial=partial)
     assert patched == 0, (
-        f"a page with a failed crop was patched through the repair fallback: {text}"
+        f"a page with a {partial} crop was patched through the repair fallback: {text}"
+    )
+    assert flagged >= 1, (
+        "the disagreement was neither patched nor flagged -- a route that "
+        "returned (0, 0) would satisfy the assertions above while losing it"
     )
     assert "Est" not in text, f"the incumbent text was rewritten anyway: {text}"
