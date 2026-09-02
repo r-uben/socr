@@ -471,7 +471,15 @@ def test_cascade_guard_stops_next_crop_after_timeout(tmp_path):
     crops = extractor.extract(pdf, 1, [box1, box2], deadline=1.0, cascade_probe=False)
     # Both crops should be skipped; the degraded-guard triggers before the first read.
     assert slow.calls == 0, "No VLM call should fire when backend is already degraded"
-    assert crops == []
+
+    # GH-166: this used to assert `crops == []`. A skipped page leaving NO
+    # record is the same defect one level up -- the orchestrator had nothing to
+    # iterate, emitted no distrust, and the page looked verified. The skip now
+    # leaves a typed sentinel per skipped box; the guard itself is unchanged,
+    # which is what `slow.calls == 0` above still pins.
+    assert len(crops) == 2, f"every skipped box must leave a record: {crops}"
+    assert all(getattr(c, "_failed", "") == "backend_degraded" for c in crops)
+    assert all(not c.markdown.strip() for c in crops), "a skipped crop carries no reading"
 
 
 def test_cascade_guard_triggered_by_first_timeout(tmp_path):

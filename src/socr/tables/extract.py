@@ -377,7 +377,13 @@ class TableCropExtractor:
         skipped and ``_backend_degraded`` is set on self. A future PP-2 document-
         level halt can test this attribute to abort the whole document.
 
-        A failed crop/read (non-timeout) drops that table (returns no entry for it)
+        GH-166: a failed crop/read (non-timeout) now returns a TYPED SENTINEL --
+        a ``CropTable`` with empty markdown and a ``_failed`` reason
+        (``render_failed`` / ``read_error`` / ``empty_response`` /
+        ``backend_degraded``) -- rather than no entry at all. The orchestrator
+        turns each into a ``dualpass_crop_failed`` audit event, which is a
+        distrust kind, so a reread that verified nothing cannot leave the
+        incumbent table looking verified. It previously dropped that table
         rather than aborting the page — the reconciler then sees a count mismatch
         and flags rather than patches, which is the safe outcome.
         """
@@ -399,7 +405,7 @@ class TableCropExtractor:
         try:
             page = doc[page_num - 1]
             page_rect = page.rect
-            for box in boxes:
+            for i, box in enumerate(boxes):
                 if getattr(self, "_backend_degraded", False):
                     # Cascade guard: a prior timeout left the GPU in an unknown
                     # state — don't fire more VLM calls into the wedged backend.
@@ -407,6 +413,13 @@ class TableCropExtractor:
                         "dual-pass: backend degraded; skipping remaining crops on p%d",
                         page_num,
                     )
+                    # GH-166 review (P1): the skip must leave a TRACE. Breaking
+                    # with no sentinel meant a page skipped entirely after a
+                    # prior timeout produced an empty `raw_crops`, so the
+                    # orchestrator had nothing to iterate and emitted no
+                    # distrust -- the skipped page looked verified, which is
+                    # this ticket's defect one level up.
+                    out.extend(self._failed_crop(b, "backend_degraded") for b in boxes[i:])
                     break
                 img_path = self._render_crop(page, box, page_rect)
                 if img_path is None:

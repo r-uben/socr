@@ -92,3 +92,86 @@ def test_a_located_crop_always_yields_a_sentinel(tmp_path, reason, raises, reply
     assert all(getattr(c, "_failed", "") == reason for c in crops), (
         f"expected {reason!r} sentinels, got {[getattr(c, '_failed', None) for c in crops]}"
     )
+
+
+def test_a_page_skipped_by_the_cascade_guard_still_leaves_a_record(tmp_path) -> None:
+    """#489 review (P1): the skip is the same defect one level up.
+
+    When a prior timeout degrades the backend, the extractor skips the page's
+    remaining crops. Breaking with no sentinel produced an empty `raw_crops`,
+    so the orchestrator had nothing to iterate, emitted no distrust, and the
+    SKIPPED page looked verified.
+    """
+    from socr.tables.extract import TableCropExtractor
+    from socr.tables.locate import TableBox
+
+    pdf = tmp_path / "t.pdf"
+    doc = fitz.open()
+    doc.new_page(width=500, height=600)
+    doc.save(str(pdf))
+    doc.close()
+
+    boxes = [
+        TableBox(bbox=(100.0, 100.0, 460.0, 250.0), source="booktabs"),
+        TableBox(bbox=(100.0, 300.0, 460.0, 450.0), source="booktabs"),
+    ]
+
+    class _NeverCalled:
+        timeout = 5.0
+
+        def read(self, *_a, **_k):
+            raise AssertionError("no VLM call may fire once the backend is degraded")
+
+    extractor = TableCropExtractor(_NeverCalled())
+    extractor._backend_degraded = True
+    crops = extractor.extract(pdf, 1, boxes, cascade_probe=False)
+
+    assert len(crops) == len(boxes), (
+        f"a skipped page left {len(crops)} records for {len(boxes)} located "
+        "boxes, so the skip is invisible downstream"
+    )
+    assert all(getattr(c, "_failed", "") == "backend_degraded" for c in crops)
+
+
+def test_a_failed_crop_forces_flag_only() -> None:
+    """#489 review (P2): partial coverage must not auto-patch.
+
+    The existing comment says patching on incomplete evidence risks data loss,
+    and gates that on `had_timeout` alone. A crop that FAILED leaves exactly the
+    same partial coverage, so it must gate too -- otherwise one failed crop
+    beside one successful crop still patches the page.
+    """
+    import ast
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src"
+        / "socr"
+        / "pipeline"
+        / "orchestrator.py"
+    )
+    tree = ast.parse(src.read_text())
+
+    # Two gates decide whether a page may be patched: the initial
+    # `effective_auto_patch`, and `needs_crop_fallback`, which can turn it back
+    # ON. Gating only the first would let a failed-crop page patch by the second
+    # route, so both are pinned.
+    def _gated_rhs(name: str) -> str:
+        assigns = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+        ]
+        gated = [a for a in assigns if "had_timeout" in ast.unparse(a.value)]
+        assert gated, f"no {name} assignment carries the coverage gate at all"
+        return ast.unparse(gated[0].value)
+
+    for name in ("effective_auto_patch", "needs_crop_fallback"):
+        rhs = _gated_rhs(name)
+        assert "had_timeout" in rhs, f"{name}: the timeout gate was lost: {rhs}"
+        assert "failed_crops" in rhs, (
+            f"{name}: a failed crop does not force flag-only, so a page with "
+            f"partial crop coverage can still be auto-patched: {rhs}"
+        )

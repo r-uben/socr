@@ -4539,7 +4539,13 @@ class UnifiedPipeline:
         # config enables it. Partial crop coverage means we cannot safely assert
         # that the remaining crops represent the full table set; patching on
         # incomplete evidence risks data loss. Force flag-only for this page.
-        effective_auto_patch = self.config.auto_patch_tables and not had_timeout
+        # GH-166 review (P2): a FAILED crop means the same thing a timed-out one
+        # does -- partial coverage. The comment above says patching on
+        # incomplete evidence risks data loss; that reasoning does not depend on
+        # which way the crop failed, so both force flag-only.
+        effective_auto_patch = (
+            self.config.auto_patch_tables and not had_timeout and not failed_crops
+        )
         crop_repair_fallback = False
         crop_repair_declined = False
         original_text = bo.text
@@ -4551,10 +4557,19 @@ class UnifiedPipeline:
                 page_needs_crop_repair_fallback,
             )
 
-            needs_crop_fallback = not had_timeout and page_needs_crop_repair_fallback(
-                original_text,
-                native_table_unverifiable=getattr(ps, "native_table_unverifiable", False),
-                fitz_page=fitz_page,
+            # GH-166 review (P2), second half: the fallback can turn auto-patch
+            # back ON, so gating only the initial assignment would let a page
+            # with a FAILED crop patch anyway by this route. `failed_crops`
+            # joins `had_timeout` here for the same reason it does above --
+            # partial coverage is partial however the crop failed.
+            needs_crop_fallback = (
+                not had_timeout
+                and not failed_crops
+                and page_needs_crop_repair_fallback(
+                    original_text,
+                    native_table_unverifiable=getattr(ps, "native_table_unverifiable", False),
+                    fitz_page=fitz_page,
+                )
             )
             if needs_crop_fallback and not effective_auto_patch:
                 candidate = reconcile_page_tables(
