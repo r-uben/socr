@@ -825,6 +825,12 @@ _SPLIT_GAP_MIN_PT = 10.0
 #: function for why it rides on the tuple.
 _FOLDED_MARGINAL = "__socr_folded_marginal__"
 
+
+def _is_folded_marginal(word: tuple) -> bool:
+    """Whether `_fold_marginal_bands` reattached this word from the margin."""
+    return len(word) > 8 and word[8] == _FOLDED_MARGINAL
+
+
 # Words within this factor × _LANE_X_TOL_PT of the nearest data-column x are
 # assigned to that column; words further left go into the label cell.
 # Using 3× the lane tolerance gives a comfortable snap radius for slight PDF
@@ -2001,6 +2007,13 @@ def _prepend_header_band(
     snap_radius = _LANE_X_TOL_PT * _LANE_SNAP_MULT
 
     def _snaps(word: tuple) -> bool:
+        # A folded margin word never snaps to a lane by construction -- that is
+        # why it was folded. Rejecting its row here would drop the whole header
+        # band and reintroduce the loss this fold exists to stop (#460 review),
+        # so it is exempt from the eligibility test; `_rowize_segment` routes it
+        # to the label cell.
+        if _is_folded_marginal(word):
+            return True
         return min(abs(c - word[0]) for c in lane_centers) <= snap_radius
 
     eligible_ys: list[int] = []
@@ -2106,18 +2119,17 @@ def _rowize_segment(
             if w[0] < data_start_x - snap_margin:
                 continue  # already in the label
             best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
-            if abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
+            # The tag is checked BEFORE the snap assignment, not after. #460
+            # review: with the order reversed a tagged word that happened to
+            # land within the snap radius of a real lane went into that data
+            # cell -- contradicting this block's own comment, and doing exactly
+            # the misattribution it exists to avoid. A margin note near a
+            # column's x is still a margin note.
+            if _is_folded_marginal(w):
+                orphan_marginals.append(w[4])
+            elif abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
                 existing = row_cells[best]
                 row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
-            elif len(w) > 8 and w[8] == _FOLDED_MARGINAL:
-                # GH-459: a word `_fold_marginal_bands` already reattached is
-                # known to be a margin note, so keeping it needs no guess about
-                # WHICH column it belongs to -- the general orphan question is
-                # #418's and is deliberately not answered here. It goes to the
-                # label cell: the row keeps the token without claiming a column
-                # for it, which in a citation corpus beats attaching a
-                # qualifier to a value it may not qualify.
-                orphan_marginals.append(w[4])
 
         if orphan_marginals:
             label = " ".join(x for x in (label, *orphan_marginals) if x)

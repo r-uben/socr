@@ -96,12 +96,13 @@ def test_the_notes_words_are_kept_not_dropped(note: str) -> None:
 
 
 def test_the_table_itself_is_unchanged_by_the_note() -> None:
-    """Scope: the note may add a column, but must not disturb the table's own.
+    """Scope: the note's words ride in the LABEL cell; data columns are untouched.
 
-    Folding puts the note's words in a lane of their own, to the right of the
-    data. That is the intended outcome -- the words are kept and the reader can
-    see they were marginal. What must not happen is the table's own cells
-    moving, which a fold that swallowed a real row would cause.
+    #460 review: a folded word used to go into whatever lane it happened to be
+    nearest, which is the misattribution this design exists to avoid. It now
+    goes to the label, so the row keeps the token without claiming a column for
+    it -- and every data column stays byte-identical to the no-note run, which
+    is the assertion that would catch a note bleeding into a value.
     """
 
     def cells(md: str) -> list[list[str]]:
@@ -117,13 +118,15 @@ def test_the_table_itself_is_unchanged_by_the_note() -> None:
     assert len(with_note) == len(without), (
         f"the note changed the ROW count: {len(with_note)} vs {len(without)}"
     )
-    width = len(without[0])
-    for got, expected in zip(with_note, without):
-        assert got[:width] == expected, (
-            f"the note disturbed the table's own cells: {got[:width]} != {expected}"
-        )
-
-    extra = [row[width:] for row in with_note]
-    assert any(any(c for c in row) for row in extra), (
-        f"the note's words are not in the extra lane: {extra}"
+    assert len(with_note[0]) == len(without[0]), (
+        f"the note added a column: {len(with_note[0])} vs {len(without[0])}"
     )
+
+    for got, expected in zip(with_note, without):
+        assert got[1:] == expected[1:], f"the note bled into a DATA column: {got} != {expected}"
+
+    labels = " ".join(row[0] for row in with_note)
+    for word in NOTE.split():
+        assert word in labels.split(), (
+            f"{word!r} is not in a label cell, so it was not kept where the design says: {labels!r}"
+        )
