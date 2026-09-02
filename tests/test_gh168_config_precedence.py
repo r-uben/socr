@@ -59,12 +59,12 @@ LOADED = {
 }
 
 
-def _run(tmp_path: Path, extra: list[str], monkeypatch: pytest.MonkeyPatch):
-    """Invoke `socr process --config ...` and capture the config it built."""
+def _run_with(tmp_path: Path, config_text: str, extra: list[str], monkeypatch):
     fitz = pytest.importorskip("fitz")
 
+    tmp_path.mkdir(parents=True, exist_ok=True)
     cfg = tmp_path / "c.yaml"
-    cfg.write_text(CONFIG)
+    cfg.write_text(config_text)
     pdf = tmp_path / "d.pdf"
     doc = fitz.open()
     doc.new_page().insert_text((72, 72), "born digital text long enough to be a text layer.")
@@ -80,11 +80,23 @@ def _run(tmp_path: Path, extra: list[str], monkeypatch: pytest.MonkeyPatch):
         def process(self, *_a, **_k):
             raise SystemExit(0)
 
-    monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
+        def _resolve_output_root(self, *_a, **_k):
+            return tmp_path / "out"
 
+    monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
     CliRunner().invoke(cli, ["process", str(pdf), "--config", str(cfg), *extra])
     assert "config" in seen, "the pipeline was never constructed, so nothing was measured"
     return seen["config"]
+
+
+def _run(tmp_path: Path, extra: list[str], monkeypatch: pytest.MonkeyPatch):
+    """Invoke `socr process --config <CONFIG>` and capture the config it built.
+
+    GH-479 review: a thin wrapper over `_run_with` rather than a near-identical
+    copy, so the PDF fixture and the capturing stub live in ONE place and cannot
+    drift apart.
+    """
+    return _run_with(tmp_path, CONFIG, extra, monkeypatch)
 
 
 @pytest.mark.parametrize(("field", "expected"), sorted(LOADED.items()))
@@ -106,8 +118,10 @@ def test_an_absent_option_preserves_the_loaded_value(
         (["--timeout", "60"], "timeout", 60),
         (["--judge-backend", "vlm"], "judge_backend", "vlm"),
         (["--judge-model", "other"], "judge_model", "other"),
-        # The figures pair: `--describe-figures` implies save_figures, and
-        # `--save-figures` on its own must still turn describe_figures off.
+        # The figures pair: `--describe-figures` implies save_figures. The
+        # `--save-figures` row below deliberately expects describe_figures to
+        # stay TRUE -- see its own comment. (GH-479: this comment used to say
+        # the opposite, contradicting the row it introduces.)
         (["--describe-figures"], "describe_figures", True),
         (["--describe-figures"], "save_figures", True),
         # NOT `describe_figures False`: the user typed --save-figures, not
@@ -181,3 +195,48 @@ def test_a_loaded_dry_run_is_preserved(tmp_path: Path, monkeypatch: pytest.Monke
         f"run proceeded instead of listing: {result.output!r}"
     )
     assert "config" not in built or built["config"].dry_run is True
+
+
+# GH-479: preserve was pinned, override was not. A gate that simply ignored the
+# CLI would satisfy every preserve test in this file, so the other direction --
+# a YAML `false` that an explicit flag must flip ON -- is the half that proves
+# `_explicitly_given` still lets the user win.
+FALSE_CONFIG = """
+reprocess: false
+quiet: false
+verbose: false
+write_manifest: false
+save_figures: false
+"""
+
+
+@pytest.mark.parametrize(
+    ("flag", "field"),
+    [
+        (["--reprocess"], "reprocess"),
+        (["--quiet"], "quiet"),
+        (["--verbose"], "verbose"),
+        (["--write-manifest"], "write_manifest"),
+        (["--save-figures"], "save_figures"),
+    ],
+)
+def test_an_explicit_flag_overrides_a_loaded_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: list[str], field: str
+) -> None:
+    """A YAML `false` must not survive the user explicitly asking for it."""
+    config = _run_with(tmp_path / field, FALSE_CONFIG, flag, monkeypatch)
+    assert getattr(config, field) is True, (
+        f"{flag[0]} did not override `{field}: false` from --config"
+    )
+
+
+# GH-479 review: an anchor asserting `<field> is False` with no flag was WRONG
+# and is removed rather than reworded. Every one of these fields defaults to
+# False in `PipelineConfig`, so that assertion passed identically whether the
+# YAML `false` loaded or the field simply kept its default -- an anti-vacuity
+# anchor that was itself vacuous, and whose docstring claimed the opposite.
+#
+# Loading IS proven, by `test_an_absent_option_preserves_the_loaded_value`
+# above: it asserts a loaded `true` survives for these same fields, which is
+# only possible if the YAML reached the config. Duplicating that here with the
+# wrong polarity added nothing.
