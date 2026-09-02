@@ -2093,18 +2093,37 @@ class TestNativeOnlyRouting:
             "native table page with all-rejected OCR must fail closed"
         )
         # (b) page must carry the floor, not be stamped audit_passed=True.
-        # Verify via manifest: the page must be ERROR/audit-failed, not clean.
-        manifest_path = tmp_path / "paper" / "manifest.json"
-        if manifest_path.exists():
-            import json
+        #
+        # GH-508: this was read from `manifest.json`, guarded by
+        # `if manifest_path.exists()`, and NONE of it ever ran. `_write_manifest`
+        # is gated on `has_text`, and `_assemble_result` only reaches ERROR when
+        # `has_text` is False -- so on this exact path the manifest is never
+        # written and the guard was always False. (Doubly dead: the lookup used
+        # `manifest["pages"]`, and the key is `entries`.)
+        #
+        # The per-page sidecar IS written on this path, carries the same three
+        # facts, and needs no guard -- its absence is itself a failure worth
+        # reporting.
+        import json
 
-            manifest = json.loads(manifest_path.read_text())
-            page_entry = manifest.get("pages", {}).get("1", {})
-            assert page_entry.get("audit_passed") is not True, (
-                "page manifest entry must NOT be audit_passed=True when OCR was rejected"
-            )
-            assert page_entry.get("status") == PageStatus.ERROR.value
-            assert "Native text for page 1" not in page_entry.get("text", "")
+        sidecar_path = tmp_path / "paper" / "pages" / "00001.json"
+        assert sidecar_path.exists(), (
+            "no page sidecar was written for a fail-closed page, so nothing "
+            "records WHY the document errored"
+        )
+        sidecar = json.loads(sidecar_path.read_text())
+        winner = sidecar.get("winning_output", {})
+
+        assert winner.get("audit_passed") is not True, (
+            "the shipped page must NOT be audit_passed=True when every OCR rung was rejected"
+        )
+        assert sidecar.get("status") == PageStatus.ERROR.value, (
+            f"the sidecar does not carry the floor: {sidecar.get('status')!r}"
+        )
+        assert "Native text for page 1" not in winner.get("text", ""), (
+            "the rejected page fell back to native text under a failure status; "
+            "a fail-closed page must not ship unverified content as its body"
+        )
 
     def test_native_only_agentic_suppresses_clean_table_pages(self, tmp_path) -> None:
         """Agentic native_only=True keeps clean table pages native."""
