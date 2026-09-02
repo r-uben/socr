@@ -73,14 +73,16 @@ class FailureMode(str, Enum):
     #: came back as one glyph run per line. The fragments are not a reading of
     #: the page, so the page ships a failure marker plus an image ref instead.
     NATIVE_TEXT_SHREDDED = "native_text_shredded"
-    #: S1 (the reachability-measurement build): a structure-class page (C2 --
-    #: tables or equations) reached selection with no attempt that authored a
-    #: GRID and no positively-caught native distrust flag either (that case
-    #: is NATIVE_TABLE_STRUCTURE_FAILED). Native cannot author the grid here
-    #: (C1) but its prose still ships -- flagged, because R3's model-rung
-    #: guarantee found nothing to corroborate it, or (under --native-only)
-    #: never ran a model rung at all. Never SUCCESS.
+    #: Deprecated / deserialization-only: historically assigned when a
+    #: structure-class page had no grid-authoring model attempt. Pre-P2 sidecars
+    #: in old caches may still contain this string; modern runs fail closed to
+    #: STRUCTURE_CLASS_LADDER_EXHAUSTED instead.
     STRUCTURE_CLASS_NO_MODEL_ATTEMPT = "structure_class_no_model_attempt"
+    #: P2 / GH-317: a structure-class page (tables) reached selection with no
+    #: attempt that authored a usable grid. The native grid is dropped and the
+    #: page ships the fail-closed floor (whole-page unverifiable-table marker +
+    #: rendered PNG ref; no native byte). Shipped as ERROR / audit_passed=False.
+    STRUCTURE_CLASS_LADDER_EXHAUSTED = "structure_class_ladder_exhausted"
     #: #262: the TR-3 D3 fail-closed floor fired on the NATIVE lane, but a model
     #: attempt in the page's own run cache authored a grid. The marker's whole
     #: justification is that no better reading exists; when one does, the marker

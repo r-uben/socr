@@ -15,8 +15,30 @@ evidence groups:
      for both.
   3. A hermetic ``process()`` run on the rotated-grid PDF emits exactly one
      ``landscape_page_refused`` audit event, in both ``state.events`` and the
-     page sidecar, ships ``DocumentStatus.AUDIT_FAILED`` with a native-prose
-     WARNING fallback, and accepts no OCR output.
+     page sidecar, fails the page closed, and accepts no OCR output.
+
+     P2 / GH-317 retarget: before P2 this page shipped the native reading as a
+     WARNING "native fallback" (case (iii) of ``_select_page_output_tagged``).
+     P2 rules that an exhausted ladder on a structure-class page ships the
+     fail-closed floor instead, so the page now ships
+     ``PageStatus.ERROR`` / ``audit_passed=False`` /
+     ``FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED``. The fixture is one page
+     and that page is floored, so ``_phase_assemble``'s standing rule (ERROR
+     when no page still carries text, AUDIT_FAILED when some page does) makes
+     the document ``DocumentStatus.ERROR``. The guarantee this test was written
+     for is unchanged and asserted below: the refused rotated grid must not
+     ship. It is now stronger -- the shredded native cell text does not ship
+     either.
+
+     Deliberate trade recorded here so it is not mistaken for a regression:
+     this page's native layer contains NO parseable markdown table (the rotated
+     cells come out as bare reading-order lines), so
+     ``splice_all_table_regions`` cannot isolate a table region and the floor
+     falls back to the whole-page marker exactly as the pre-existing D3 and
+     GH-90 floors already do. The three prose lines therefore do not survive on
+     THIS fixture. They are not lost silently: the page ships ERROR with a
+     ``page_failed`` event, the floor event, a document-level note and a
+     rendered page PNG. See docs/log/2026-09-01_p2-structure-class-floor.md.
   4. Review negative control (PR #193): a non-born-digital rotated page that
      also carries a ruled table -- ``has_tables`` is stamped before the early
      non-born-digital returns in ``_assess_page_signals``, so the refusal
@@ -39,7 +61,7 @@ from socr.core.born_digital import BornDigitalDetector, DocumentAssessment, Page
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.providers import PROFILE_QWEN_LOCAL
-from socr.core.result import DocumentStatus, PageOutput, PageStatus
+from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState, PageState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -360,7 +382,7 @@ def _rejected_decision_with_attempt(page_num: int, ladder):
 
 
 class TestHermeticProcessRefusal:
-    def test_rotated_table_page_emits_refusal_event_and_audit_failed(self, tmp_path: Path) -> None:
+    def test_rotated_table_page_emits_refusal_event_and_fails_closed(self, tmp_path: Path) -> None:
         pdf_path = tmp_path / "rotated_grid.pdf"
         _rotated_ruled_grid_pdf(pdf_path)
 
@@ -394,6 +416,10 @@ class TestHermeticProcessRefusal:
             ),
             patch("socr.pipeline.orchestrator.route_page", side_effect=_fake_route),
             patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
+            # CI has no ollama: `_phase_judge_hard_pages` builds an
+            # OllamaVisionJudge and POSTs to it regardless of `judge_backend`
+            # unless the judge model resolves empty.
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
             patch.object(pipeline, "_phase_assemble", side_effect=_capture_assemble),
         ):
             result = pipeline.process(pdf_path, tmp_path)
@@ -413,22 +439,42 @@ class TestHermeticProcessRefusal:
         sidecar_kinds = [ev["kind"] for ev in sidecar["audit_events"]]
         assert "landscape_page_refused" in sidecar_kinds
 
-        assert result.status == DocumentStatus.AUDIT_FAILED, (
-            f"expected AUDIT_FAILED; got {result.status}"
-        )
+        # P2 / GH-317: the floor event is emitted alongside the refusal, and the
+        # page is recorded as failed. Both surfaces, not just one (CLAUDE.md:
+        # a failure must surface at every level).
+        assert "structure_class_ladder_exhausted_floor" in sidecar_kinds
+        assert "page_failed" in sidecar_kinds
 
-        # The frozen winning output for the page is the native-prose fallback:
-        # needs_ocr_enhancement + a rejected attempt routes _winning_page_output
-        # to the WARNING/audit_passed=False native-text branch (manifest.py),
-        # not the rejected OCR attempt itself (ps.best_output stays the rejected
-        # decision.final_output -- the fallback only wins at freeze time).
-        assert sidecar["status"] == PageStatus.WARNING.value, (
-            f"expected sidecar status warning (native fallback); got {sidecar['status']}"
+        # One page, and it is floored, so no page still carries text ->
+        # _phase_assemble's standing rule gives the document ERROR.
+        assert result.status == DocumentStatus.ERROR, (
+            f"expected ERROR (the only page is floored); got {result.status}"
+        )
+        assert "structure-class ladder exhausted" in (result.error or "")
+
+        # The frozen winning output for the page is the fail-closed floor:
+        # needs_ocr_enhancement + a rejected attempt reaches the structure-class
+        # branch, no attempt authored a grid, so case (iii) ships the floor.
+        assert sidecar["status"] == PageStatus.ERROR.value, (
+            f"expected sidecar status error (fail-closed floor); got {sidecar['status']}"
         )
         assert sidecar["engine"] == "native"
+        assert sidecar["winning_output"]["audit_passed"] is False
+        assert (
+            sidecar["winning_output"]["failure_mode"]
+            == FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED.value
+        )
         winning_text = sidecar["winning_output"].get("text", "")
-        for line in _PROSE_LINES:
-            assert line in winning_text
+        assert "[page 1 failed: unverifiable table — see image]" in winning_text
+
+        # The original guarantee, unweakened: the refused rotated grid does not
+        # ship. Stronger now -- not one shredded cell of it reaches the bytes.
+        for cell in ("c00", "c11", "c32"):
+            assert cell not in winning_text, f"refused rotated cell {cell!r} shipped"
+            assert cell not in (result.markdown or ""), (
+                f"refused rotated cell {cell!r} reached the assembled document"
+            )
+        assert "|" not in winning_text
 
         ps = state.pages[1]
         # No accepted OCR anywhere for this page.

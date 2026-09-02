@@ -1,8 +1,8 @@
 # CLAUDE.md — socr
 
 Multi-engine document OCR. Each engine is a standalone CLI subprocess; `socr` routes
-pages, audits quality, and falls back. Two modes: deterministic (default) and
-**agentic** (`--agentic`, the primary path).
+pages, audits quality, and falls back. One control loop: the
+**agentic** page-major path (the default; `--agentic` is accepted and a no-op).
 
 ## Build / test / lint (use these exact tools)
 

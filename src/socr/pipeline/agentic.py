@@ -751,7 +751,12 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
                 reason="native_table_verifier: EXACT_PASS",
                 confidence=1.0,
             )
-            return self._apply_structural_gate(decision, output, page_num, words, rules)
+            # #245: this is the one accepting exit where no model has seen the
+            # page. The gate is told so; a header-attribution abstain on this
+            # path delegates to the inner judge instead of shipping at 1.0.
+            return self._apply_structural_gate(
+                decision, output, page_num, words, rules, provider=provider, inner_consulted=False
+            )
 
         # No issue detected → delegate to inner judge
         decision = self._inner.assess(output, provider)
@@ -775,6 +780,9 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         page_num: int,
         words: list | None,
         rules: list[tuple[float, float, float]] | None = None,
+        *,
+        provider: ProviderProfile | None = None,
+        inner_consulted: bool = True,
     ) -> AcceptDecision:
         """GH-200: the winner-side structural/header check on whatever is ABOUT TO SHIP.
 
@@ -786,6 +794,14 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         labels, and star-only row deletion (2026-08-15 hand judgement, 4/4
         damaged pages). A rejecting inner decision is returned unchanged --
         there is nothing to gate on a page that is not shipping anyway.
+
+        #245: ``inner_consulted`` says whether a model has already seen this
+        page on the way here. On the EXACT_PASS path it has not. When the
+        header-attribution term then ABSTAINS (borderless table, no drawn
+        rule, non-unique anchor), the page is not verified -- it is
+        unverifiable -- and an abstain must not ship at confidence 1.0. It is
+        treated as AMBIGUOUS: the inner judge is consulted and its decision
+        stands. A grounded verdict (HARD/SOFT/OK) keeps the short-circuit.
         """
         if not decision.accept:
             return decision
@@ -797,15 +813,26 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         if not defect and words:
             verdicts = table_header_verdicts(output.text, words)
             if HeaderVerdict.UNVERIFIABLE in verdicts:
+                delegated = not inner_consulted and provider is not None
                 # Abstain, surfaced so its firing rate is measurable rather
                 # than silently swallowed (#206/#207 notation-gap risk).
                 self._emit_event(
                     page_num=page_num,
                     kind="table_header_unverifiable",
                     engine=output.engine or "",
-                    detail="header-attribution geometry chain abstained",
-                    data={"verdicts": [v.value for v in verdicts]},
+                    detail=(
+                        "header-attribution geometry chain abstained"
+                        + ("; delegated to inner judge (#245)" if delegated else "")
+                    ),
+                    data={"verdicts": [v.value for v in verdicts], "delegated": delegated},
                 )
+                if delegated:
+                    decision = self._inner.assess(output, provider)
+                    if not decision.accept:
+                        # Same disposition as the warn tier: the verifier
+                        # could not refute the reading, the judge refused it.
+                        output.rejection_class = REJECTION_AMBIGUOUS_DEFERRED
+                        return decision
 
         if not defect:
             return decision

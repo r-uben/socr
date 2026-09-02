@@ -962,23 +962,36 @@ class TestEndToEndParity:
     """Drive ``UnifiedPipeline.process()`` on the fixture and assert full parity.
 
     TR-2 (chart-clip + per-region verifier + token coverage + reading-order
-    reassembly) is now implemented, so this test must PASS.
+    reassembly) is now implemented, so the native reconstruction must reach
+    full cell parity.
+
+    P2 / GH-317 retarget. The fixture's page carries tables, so it is excluded
+    from the free native lane and enters the provider ladder; the route stub
+    below accepts nothing, so the ladder is exhausted with no attempt authoring
+    a grid. Before P2 that ending shipped the native reconstruction, and this
+    test measured TR-2 parity on the assembled markdown. P2 rules that the
+    native grid the verifier refused must never be the consolation prize, so
+    the page now ships the fail-closed floor and the grid is withheld.
+
+    The measurement is therefore taken where the reconstruction still exists --
+    the page's own native text, captured from the live ``DocumentState`` -- and
+    is NOT weakened: the same ``assert_table_parity`` over the same ground
+    truth, cell for cell, separate grids and reading order included. What is
+    added is the P2 guarantee: those bytes must not appear in the shipped
+    document.
     """
 
     def test_agentic_parity_on_ce_like_fixture(self, tmp_path: Path) -> None:
-        """Full agentic run on the fixture must pass cell-parity for both tables.
+        """Native reconstruction reaches full cell parity; P2 withholds it from the ship.
 
         Hermeticity:
           - ``_available_engines_for_agentic`` is patched → no ollama required.
           - ``route_page`` is patched → no VLM call; the page uses the
             born-digital / native text path (the path TR-2 fixes).
           - ``probe_ollama_idle`` is patched → no network call.
-
-        The born-digital page is classified as a native page by ``_phase_agentic``
-        (is_born_digital=True + is_trusted_native). After TR-1 the rowizer gate
-        will produce a correct grid; before TR-1 the test is expected to xfail.
         """
         from socr.core.config import EngineType, PipelineConfig
+        from socr.core.manifest import _native_text_with_appends
         from socr.core.providers import PROFILE_QWEN_LOCAL
         from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -993,6 +1006,13 @@ class TestEndToEndParity:
         )
         pipeline = UnifiedPipeline(config)
 
+        captured_state: dict[str, object] = {}
+        orig_assemble = pipeline._phase_assemble
+
+        def _capture_assemble(state, output_dir):
+            captured_state["state"] = state
+            return orig_assemble(state, output_dir)
+
         with (
             patch.object(
                 pipeline,
@@ -1001,6 +1021,11 @@ class TestEndToEndParity:
             ),
             patch("socr.pipeline.orchestrator.route_page") as mock_route,
             patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
+            # CI has no ollama: `_phase_judge_hard_pages` builds an
+            # OllamaVisionJudge and POSTs to it regardless of `judge_backend`
+            # unless the judge model resolves empty.
+            patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            patch.object(pipeline, "_phase_assemble", side_effect=_capture_assemble),
         ):
             # route_page should NOT be called for a native (born-digital) page,
             # but we patch it defensively so CI does not attempt a real VLM call.
@@ -1032,9 +1057,32 @@ class TestEndToEndParity:
 
             result = pipeline.process(FIXTURE_PDF, tmp_path)
 
-        extracted_md = result.markdown
         gt = _load_gt()
 
-        # This assertion will xfail today (collapsed output from find_tables()).
-        # After TR-1..TR-3 it must pass (flip xfail → pass).
-        assert_table_parity(extracted_md, gt)
+        # TR-1..TR-3: the native reconstruction must reach full cell parity.
+        # Measured on the reconstruction itself because P2 stops it shipping.
+        state = captured_state["state"]
+        native_md = "\n\n".join(
+            _native_text_with_appends(state.pages[n]) for n in sorted(state.pages)
+        )
+        assert_table_parity(native_md, gt)
+
+        # P2 / GH-317: the ladder was exhausted with no rung authoring a grid,
+        # so that reconstruction is withheld and the whole-page floor ships.
+        # This fixture is ONE page and it is floored, so the document carries no
+        # text at all: assemble writes no markdown, and the page's marker and
+        # image live in the sidecar and the figures directory. See the
+        # second-order-consequence note in
+        # docs/log/2026-09-01_p2-structure-class-floor.md.
+        extracted_md = result.markdown or ""
+        for row_label in ("Ashford Capital", "Brightwater Research", "GDP Actual"):
+            assert row_label in native_md, f"fixture no longer produces {row_label!r}"
+            assert row_label not in extracted_md, (
+                f"refused native grid row {row_label!r} shipped despite the P2 floor"
+            )
+
+        # Withheld, not silently lost: the failure surfaces on the document.
+        from socr.core.result import DocumentStatus
+
+        assert result.status is DocumentStatus.ERROR, result.status
+        assert "structure-class ladder exhausted" in (result.error or "")

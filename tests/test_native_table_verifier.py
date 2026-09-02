@@ -467,13 +467,17 @@ class TestNativeTableVerifierAuditEvents:
         assert "native_lane_count" in evt.data
         assert "output_col_count" in evt.data
 
-    def test_exact_pass_ships_immediately_with_event(self):
-        """TR-6 EXACT_PASS: verifier ships immediately without calling inner judge.
+    def _exact_pass_run(self, inner_accept: bool, header_verdicts):
+        """Drive the EXACT_PASS fixture with the header-attribution term pinned.
 
-        When row counts match and multiset is clean (EXACT_PASS), the judge
-        short-circuits: it emits a native_table_verifier_exact_pass event and
-        returns accept=True immediately, without calling the inner judge.
+        The 3-lane fixture has no header words, so the real geometry chain
+        ABSTAINS on it. #245 makes that abstain route to the inner judge, so
+        the two halves of the pin (grounded vs abstain) patch the verdict
+        list rather than build two geometries -- the difference under test is
+        the gate's control flow, not header attribution itself.
         """
+        from unittest.mock import patch
+
         native_rows = [
             [
                 (200.0, "0.1"),
@@ -490,7 +494,7 @@ class TestNativeTableVerifierAuditEvents:
         output = self._make_output(page_num=3, text=output_text)
 
         events: list[AuditEvent] = []
-        inner = self._make_inner_judge(accept=True)
+        inner = self._make_inner_judge(accept=inner_accept)
 
         judge = NativeTableVerifierJudge(
             inner=inner,
@@ -499,16 +503,99 @@ class TestNativeTableVerifierAuditEvents:
             record_event=events.append,
         )
         provider = MagicMock()
-        decision = judge.assess(output, provider)
+        with patch(
+            "socr.tables.structure_check.table_header_verdicts",
+            return_value=list(header_verdicts),
+        ):
+            decision = judge.assess(output, provider)
+        return decision, inner, events, output
 
-        # TR-6: EXACT_PASS short-circuits — inner judge is NOT called
+    def test_exact_pass_with_grounded_header_ships_immediately_with_event(self):
+        """TR-6 EXACT_PASS: verifier ships immediately without calling inner judge.
+
+        When row counts match, the multiset is clean (EXACT_PASS) and the
+        header-attribution term is GROUNDED, the judge short-circuits: it
+        emits a native_table_verifier_exact_pass event and returns accept=True
+        without calling the inner judge.
+        """
+        from socr.tables.header_attribution import HeaderVerdict
+
+        decision, inner, events, _ = self._exact_pass_run(True, [HeaderVerdict.OK])
+
         inner.assess.assert_not_called()
         assert decision.accept is True, "EXACT_PASS must accept"
-        # GH-200: the structural gate also runs on this accepting exit and
-        # may additionally record a table_header_unverifiable abstain (the
-        # 3-lane fixture has no header words at all) -- filter by kind.
+        assert decision.confidence == 1.0
         exact_pass_events = [e for e in events if e.kind == "native_table_verifier_exact_pass"]
         assert len(exact_pass_events) == 1, f"expected 1 exact_pass event, got {exact_pass_events}"
+        assert not [e for e in events if e.kind == "table_header_unverifiable"]
+
+    def test_exact_pass_with_header_abstain_delegates_to_inner_judge(self):
+        """#245: an abstaining header term on the EXACT_PASS path is AMBIGUOUS.
+
+        Same fixture, only the header verdict differs: UNVERIFIABLE now calls
+        the inner judge and returns ITS decision instead of confidence 1.0
+        with no model having seen the page. The abstain event records that it
+        delegated, so the firing rate stays measurable.
+        """
+        from socr.tables.header_attribution import HeaderVerdict
+
+        decision, inner, events, _ = self._exact_pass_run(True, [HeaderVerdict.UNVERIFIABLE])
+
+        inner.assess.assert_called_once()
+        assert decision is inner.assess.return_value
+        abstain = [e for e in events if e.kind == "table_header_unverifiable"]
+        assert len(abstain) == 1
+        assert abstain[0].data["delegated"] is True
+        assert abstain[0].data["verdicts"] == ["unverifiable"]
+        # The EXACT_PASS event still fires: the multiset verdict is unchanged.
+        assert len([e for e in events if e.kind == "native_table_verifier_exact_pass"]) == 1
+
+    def test_exact_pass_with_header_abstain_inner_rejection_stands(self):
+        """#245: when the delegated judge refuses, the page does not ship, and the
+        refusal is classed AMBIGUOUS_DEFERRED exactly like the warn tier."""
+        from socr.core.result import REJECTION_AMBIGUOUS_DEFERRED
+        from socr.tables.header_attribution import HeaderVerdict
+
+        decision, inner, _, output = self._exact_pass_run(False, [HeaderVerdict.UNVERIFIABLE])
+
+        inner.assess.assert_called_once()
+        assert decision.accept is False
+        assert output.rejection_class == REJECTION_AMBIGUOUS_DEFERRED
+
+    def test_delegated_no_issue_path_abstain_does_not_call_inner_twice(self):
+        """The delegated-no-issue exit already consulted the inner judge; an
+        abstain there is recorded but must not re-run the judge (#245 applies
+        to the EXACT_PASS exit only)."""
+        from socr.tables.header_attribution import HeaderVerdict
+
+        # 2 native lanes; 4-col output (col_gap = 2 → warn tier), so the
+        # verifier is AMBIGUOUS and delegates to the inner judge itself.
+        native_rows = [[(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")]]
+        fitz_page = _make_fitz_page_with_words(native_rows)
+        output = self._make_output(
+            page_num=2,
+            text=_md_table(["label", "c1", "c2", "c3"], [["row1", "1.1", "2.2", ""]]),
+        )
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: fitz_page,
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+        from unittest.mock import patch
+
+        with patch(
+            "socr.tables.structure_check.table_header_verdicts",
+            return_value=[HeaderVerdict.UNVERIFIABLE],
+        ):
+            decision = judge.assess(output, MagicMock())
+
+        assert inner.assess.call_count == 1
+        assert decision.accept is True
+        abstain = [e for e in events if e.kind == "table_header_unverifiable"]
+        assert len(abstain) == 1 and abstain[0].data["delegated"] is False
 
     def test_scan_page_bypasses_verifier_in_judge(self):
         """Scanned page: no native words → verifier bypassed, inner judge called."""
@@ -1401,11 +1488,23 @@ class TestTR4RowCount:
             text=output_text,
             status=PageStatus.SUCCESS,
         )
-        decision = judge.assess(page_output, MagicMock())
+        # #245: the subject here is the y-band exclusion, not header
+        # attribution. This fixture draws no rules, so the real header chain
+        # would abstain and (correctly) route to the inner judge; pin the
+        # header term GROUNDED so the short-circuit under test is reached.
+        from unittest.mock import patch
+
+        from socr.tables.header_attribution import HeaderVerdict
+
+        with patch(
+            "socr.tables.structure_check.table_header_verdicts",
+            return_value=[HeaderVerdict.OK],
+        ):
+            decision = judge.assess(page_output, MagicMock())
         assert decision.accept is True, (
             f"EXACT_PASS must SHIP. Got: accept={decision.accept}, reason={decision.reason!r}"
         )
-        # Inner judge NOT called on EXACT_PASS
+        # Inner judge NOT called on a grounded EXACT_PASS
         inner_judge.assess.assert_not_called()
         event_kinds = [e.kind for e in events]
         assert "native_table_verifier_exact_pass" in event_kinds, (

@@ -3726,6 +3726,25 @@ class UnifiedPipeline:
                             _chart_figures_dir,
                         )
 
+                    # P2 / GH-317: structure-class fail-closed floor PNG. When
+                    # no attempt authored a usable grid on a born-digital table
+                    # page, render a full-page PNG so the fail-closed floor can
+                    # reference the image instead of shipping the unverified native grid.
+                    from socr.core.manifest import structure_class_floor_applies
+
+                    if (
+                        structure_class_floor_applies(ps)
+                        and _chart_figures_dir is not None
+                        and not getattr(ps, "d3_floor_png_ref", "")
+                    ):
+                        ps.d3_floor_png_ref = self._render_d3_floor_png(
+                            state.handle.path,
+                            page_num,
+                            _chart_figures_dir,
+                            stem="failed_table",
+                            label="Failed table page",
+                        )
+
                 # Record cost so DocumentState.total_cost reflects spend.
                 state.engine_runs.append(
                     EngineResult(
@@ -3920,10 +3939,20 @@ class UnifiedPipeline:
             try:
                 from ocr_output_contract import PAGE_MARKER_RE
 
+                from socr.core.manifest import (
+                    structure_class_floor_applies,
+                    structure_class_floor_text,
+                )
+
                 # Strip any leading ## Page N marker from bo.text so the
                 # provisional fragment body matches what assemble would produce
                 # (modulo post-strip/post-figure transforms, which run later).
-                _raw_body = bo.text or ""
+                # For structure_class_floor_applies pages, derive from the
+                # finalized floor text so the provisional fragment and sidecar agree.
+                if structure_class_floor_applies(ps):
+                    _raw_body = structure_class_floor_text(ps, page_num)
+                else:
+                    _raw_body = bo.text or ""
                 _stripped = _raw_body.lstrip()
                 _m = PAGE_MARKER_RE.match(_stripped)
                 _body = _stripped[_m.end() :].lstrip("\n") if _m else _raw_body
@@ -5082,6 +5111,10 @@ class UnifiedPipeline:
             # Status mirrors the winning output's status, or "missing" when
             # no output exists.
             "status": winning_dict.get("status", "missing"),
+            # Keep the terminal disposition directly addressable for consumers
+            # that inspect the sidecar without unpacking ``winning_output``.
+            "failure_mode": winning_dict.get("failure_mode", "none"),
+            "audit_passed": winning_dict.get("audit_passed", False),
             # terminal: True when this is the definitive sidecar written at
             # assembly time; False for a provisional mid-run incremental
             # flush from PP-2 that may be superseded by the authoritative write.
@@ -5358,19 +5391,37 @@ class UnifiedPipeline:
             # rung identities, timeout, prompt digest), so a changed rung
             # config already forced reprocessing before this line is reached --
             # this check never needs to re-verify rung identity itself.
+            # The full winning PageOutput dict must be present and rebuildable.
+            # Read BEFORE the D1b exception is decided: the exception's scope
+            # depends on what actually shipped, not on the disposition alone.
+            winning = meta.get("winning_output")
+            if not isinstance(winning, dict) or not winning:
+                return None
+
             disposition_raw = meta.get("table_ladder_disposition")
             # GH-359 (cubic P1): the exception is for a page whose tables were
             # ALL adjudicated. If assemble had to backfill a terminal for any
             # emitted table here, "both rungs looked and said no" is false for
             # that table, so the page falls through and is reprocessed.
-            is_ladder_rejected = disposition_raw == FailureMode.TABLE_REJECTED.value and not bool(
-                meta.get("table_ladder_incomplete")
+            #
+            # P2 / GH-317 (cold review round 1, finding 2): and the exception is
+            # about a JUDGED TABLE, never about a page whose every ladder rung
+            # was refused. Those two can co-occur -- a rejected rung output can
+            # record TABLE_REJECTED while still authoring no usable grid, so the
+            # page ships the fail-closed floor. Without this clause D1b bypasses
+            # the SUCCESS and audit_passed gates, and the only guard left is
+            # ``is_page_failed_marker``, which deliberately returns False for a
+            # REGIONAL floor (marker surrounded by preserved prose). The floored
+            # page would then be restored verbatim and never re-OCR'd. The floor
+            # is a page-level fail-closed disposition; it is never skippable.
+            floor_shipped = (
+                winning.get("failure_mode") == FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED.value
             )
-
-            # The full winning PageOutput dict must be present and rebuildable.
-            winning = meta.get("winning_output")
-            if not isinstance(winning, dict) or not winning:
-                return None
+            is_ladder_rejected = (
+                disposition_raw == FailureMode.TABLE_REJECTED.value
+                and not bool(meta.get("table_ladder_incomplete"))
+                and not floor_shipped
+            )
 
             if not is_ladder_rejected:
                 # Status MUST be SUCCESS.  A page written terminal at assemble time
@@ -5939,8 +5990,8 @@ class UnifiedPipeline:
             flagged_model_page_output,
             is_page_failed_marker,
             kept_table_grid_defect,
+            structure_class_floor_applies,
             structure_class_grid_winner,
-            structure_class_native_fallback_applies,
         )
 
         page_texts = canonical_page_texts(state)
@@ -6073,17 +6124,17 @@ class UnifiedPipeline:
             n for n, p in sorted(state.pages.items()) if structure_class_grid_winner(p) is not None
         ]
 
-        # S1 case (iii): the same branch, resolved the OTHER way -- a real
-        # rung ran but authored no usable grid, so native's PROSE ships
-        # (C1), demoted to WARNING/audit_passed=False. Nothing upstream in
-        # The page-routing checks do not flip ``p.best_output.audit_passed`` for
-        # this shape (a clean-looking native table is exactly what the scorer is
-        # blind to), so this needs its OWN bucket -- folding it
-        # into ``native_fallback_pages`` above would silently miss every
-        # page here, since that list's final clause reads
-        # ``p.best_output.audit_passed`` and this branch never touches it.
-        structure_class_native_fallback_pages = [
-            n for n, p in sorted(state.pages.items()) if structure_class_native_fallback_applies(p)
+        # S1/P2 case (iii): the same branch, resolved the OTHER way -- a real
+        # rung ran but authored no usable grid, so the fail-closed floor ships
+        # instead of the native geometry grid. Nothing upstream in the
+        # page-routing checks flips ``p.best_output.audit_passed`` for this
+        # shape (a clean-looking native table is exactly what the scorer is
+        # blind to), so this needs its OWN bucket -- folding it into
+        # ``native_fallback_pages`` above would silently miss every page here,
+        # since that list's final clause reads ``p.best_output.audit_passed``
+        # and this branch never touches it.
+        structure_class_floor_pages = [
+            n for n, p in sorted(state.pages.items()) if structure_class_floor_applies(p)
         ]
 
         # #259 round 3: pages where the value guard DETECTED a numeric multiset
@@ -6195,7 +6246,7 @@ class UnifiedPipeline:
             # S1: the model's grid ships on these; native did not.
             and n not in structure_class_model_pages
             # S1 case (iii): this page has its OWN bucket
-            # (``structure_class_native_fallback_pages``) and its own event
+            # (``structure_class_floor_pages``) and its own event
             # kind/CLI line. BLOCKING 2 on #269: this list previously OR'd
             # ``p.is_structure_class()`` straight into its attempts-gate below
             # AND its include-clause above, so a structure-class page could
@@ -6207,7 +6258,7 @@ class UnifiedPipeline:
             # attempts-gate below to plain ``p.attempts`` restores this list
             # to "OCR was tried [for a REASON OTHER THAN S1] and never
             # passed" -- S1's own bucket owns S1's own pages exclusively.
-            and n not in structure_class_native_fallback_pages
+            and n not in structure_class_floor_pages
             # GH-271: the region hybrid ships, so this is not a native fallback.
             and n not in corrupt_math_hybrid_pages
             # GH-293: a page that ships a FAILURE MARKER did not fall back to
@@ -6288,10 +6339,10 @@ class UnifiedPipeline:
         # the page ships the kept model reading over native, so it is not a
         # page failure, but the document cannot report a clean SUCCESS either.
         pages_ok = pages_ok and not structure_class_model_pages
-        # S1 case (iii): native's PROSE ships (there is no better reading),
-        # but it is never SUCCESS -- the grid it carries is exactly what
-        # this branch could not vouch for (no rung authored one).
-        pages_ok = pages_ok and not structure_class_native_fallback_pages
+        # S1/P2 case (iii): the fail-closed floor ships a whole-page marker plus
+        # image and withholds every native byte; it is never SUCCESS because no
+        # usable grid candidate survived selection.
+        pages_ok = pages_ok and not structure_class_floor_pages
         # #262: the model's reading superseded a HARD fail-closed floor. That is
         # strictly more alarming than #259's flag, and it must not leave the run
         # reporting a clean SUCCESS. AUDIT_FAILED rather than ERROR: the page
@@ -6370,7 +6421,7 @@ class UnifiedPipeline:
             or native_only_distrust_pages
             or flagged_model_pages
             or structure_class_model_pages
-            or structure_class_native_fallback_pages
+            or structure_class_floor_pages
             or d3_model_table_pages
             or corrupt_math_hybrid_pages
             or value_drift_pages
@@ -6544,26 +6595,23 @@ class UnifiedPipeline:
                         data={"structure_class_model_kept": True},
                     )
                 )
-            # S1 case (iii): the same structure-class branch resolved the other
-            # way -- a real model rung ran (R3) but authored no usable grid,
-            # so native's PROSE ships (C1 permits prose, never a grid),
-            # demoted to WARNING/audit_passed=False. Recorded on its own
-            # bucket because ``p.best_output.audit_passed`` is never mutated
-            # for this case (the non-negotiable audit_passed rule), so
-            # nothing keyed off that flag alone would ever see it.
-            for n in structure_class_native_fallback_pages:
+            # S1/P2 case (iii): every usable grid candidate was refused or
+            # absent, so the fail-closed floor ships a marker plus page image
+            # and withholds every native byte. Floor pages also remain in
+            # ``failed_pages`` (a whole-page floor produced no usable output);
+            # this event is the floor-specific surface on top of that.
+            for n in structure_class_floor_pages:
                 state.events.append(
                     AuditEvent(
                         page_num=n,
-                        kind="structure_class_native_fallback",
+                        kind="structure_class_ladder_exhausted_floor",
                         engine="native",
                         detail=(
-                            "structure-class page (table); a model rung ran"
-                            " but authored no usable grid, and native may not author one"
-                            " either (C1) -- native's prose ships instead, flagged"
-                            " WARNING rather than SUCCESS"
+                            "every usable grid candidate was refused/absent; marker plus "
+                            "page image was selected, and the native geometry grid was "
+                            "withheld (fail-closed floor)"
                         ),
-                        data={"structure_class_native_fallback": True},
+                        data={"structure_class_floor": True},
                     )
                 )
             if not self.config.quiet:
@@ -6601,11 +6649,12 @@ class UnifiedPipeline:
                         f"shipped the model's grid reading over native (native may not author "
                         f"a grid): {structure_class_model_pages}[/yellow]"
                     )
-                if structure_class_native_fallback_pages:
+                if structure_class_floor_pages:
                     console.print(
-                        f"  [yellow]{len(structure_class_native_fallback_pages)} structure-class "
-                        f"page(s) shipped native's prose flagged (a model rung ran but authored "
-                        f"no usable grid): {structure_class_native_fallback_pages}[/yellow]"
+                        f"  [red]{len(structure_class_floor_pages)} structure-class page(s) hit "
+                        f"the fail-closed floor (usable grid candidates refused/absent; marker "
+                        f"plus page image selected; native geometry grid withheld): "
+                        f"{structure_class_floor_pages}[/red]"
                     )
                 if value_drift_pages:
                     from socr.tables.native_verifier import describe_drift
@@ -6649,7 +6698,8 @@ class UnifiedPipeline:
         # bucket derivation and audit-event-append block above.
         # `_flush_page_sidecar` filters `state.events` by page_num at the
         # MOMENT it writes each sidecar -- so flushing before the S1 events
-        # (`structure_class_model_table_kept` / `structure_class_native_fallback`)
+        # (`structure_class_model_table_kept` /
+        # `structure_class_ladder_exhausted_floor`)
         # were appended meant those events never reached `pages/NNN.json`'s
         # `audit_events` field at all, and no later pass corrects a sidecar
         # (`_rewrite_all_fragments` only rewrites `.md` fragments).
@@ -6666,7 +6716,7 @@ class UnifiedPipeline:
         # the other wants the PRE-strip text -- so they no longer share a loop.
         # Non-fatal: any error here leaves whatever sidecars were already
         # written, in-memory body is unaffected either way.
-        if has_text and page_texts:
+        if page_texts:
             try:
                 page_nums = list(range(1, state.handle.page_count + 1))
                 for pnum in page_nums:
@@ -6779,6 +6829,12 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_ladder_note}"
             else:
                 final_result.error = _ladder_note
+        _floor_note = self._structure_class_floor_note(state)
+        if _floor_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_floor_note}"
+            else:
+                final_result.error = _floor_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
@@ -7080,6 +7136,28 @@ class UnifiedPipeline:
                 console.print(f"  [yellow]Table trust:[/yellow] {trust.summary_line()}")
         except Exception as exc:
             logger.warning("tables_trust.json write failed (non-fatal): %s", exc)
+
+    @staticmethod
+    def _structure_class_floor_note(state: DocumentState) -> str | None:
+        """GH-317: document-level note for structure-class floor pages."""
+        try:
+            from socr.core.manifest import structure_class_floor_applies
+
+            pages = sorted(
+                page_num
+                for page_num, page_state in state.pages.items()
+                if structure_class_floor_applies(page_state)
+            )
+            if not pages:
+                return None
+            return (
+                f"page(s) {', '.join(str(page_num) for page_num in pages)}: "
+                "structure-class ladder exhausted; fail-closed floor shipped "
+                "(marker plus page image, native geometry grid withheld)"
+            )
+        except Exception as exc:
+            logger.warning("structure-class floor note derivation failed (non-fatal): %s", exc)
+            return None
 
     @staticmethod
     def _tables_trust_note(state: DocumentState) -> str | None:
