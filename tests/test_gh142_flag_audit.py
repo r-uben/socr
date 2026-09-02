@@ -507,3 +507,40 @@ def test_a_rejected_flag_does_not_advertise_the_old_behaviour(option: str) -> No
         f"--{option.replace('_', '-')} raises on invoke but its help text still "
         f"advertises behaviour it does not have: {param.help!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "option", [n for n, (status, _) in CLASSIFIED.items() if status == REJECTED]
+)
+def test_the_readme_does_not_advertise_a_rejected_flag(option: str) -> None:
+    """GH-528: the third surface to tell the same lie.
+
+    `--fallback` and `--no-judge-hard-pages` raise on invoke (GH-142), and their
+    `--help` was corrected (GH-524) -- and the README's CLI reference still
+    listed `--fallback` as "Fallback engine". Three surfaces, fixed one ticket
+    at a time, each after someone noticed.
+
+    So this checks the README rather than fixing it again: a rejected flag that
+    appears there must be marked removed. Absent is fine too -- a reference that
+    omits a dead flag is not lying about it.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    flag = "--" + option.replace("_", "-")
+
+    mentions = [
+        line
+        for line in readme.splitlines()
+        # The flag at the START of a reference entry, not any prose that happens
+        # to name it -- a sentence explaining WHY it was removed is not an
+        # advertisement, and should not have to shout REMOVED to pass.
+        if line.strip().startswith(flag)
+    ]
+    if not mentions:
+        return
+
+    for line in mentions:
+        assert "REMOVED" in line.upper() or "REJECT" in line.upper(), (
+            f"README lists {flag} as if it worked: {line.strip()!r}. It raises "
+            "on invoke; a reader of the docs alone would believe the constraint "
+            "exists."
+        )

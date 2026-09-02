@@ -143,8 +143,11 @@ $ socr engines
 socr process <PDF> [OPTIONS]
   -o, --output-dir PATH       Output directory
   --primary ENGINE             Primary OCR engine (gemini, marker, deepseek, etc.)
-  --fallback ENGINE            Fallback engine
+  --fallback ENGINE            REMOVED - rejected with an error (GH-142).
+                               No execution path reads it; escalation IS the
+                               fallback. Use --primary for the first rung.
   --no-audit                   REMOVED - rejected with an error (GH-139)
+  --no-judge-hard-pages        REMOVED - rejected with an error (GH-142)
   --no-native-first            OCR every page (don't use native text for prose)
   --save-figures               Extract figure PNGs + inline image refs (no captions)
   --describe-figures           Also add VLM captions (opt-in, non-authoritative)
