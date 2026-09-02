@@ -479,10 +479,14 @@ class TableCropExtractor:
         """Submit ``reader.read`` to a single-worker executor; raise ``_CropTimeoutError``
         if the wall-clock deadline expires.
 
-        Mirrors the ``ThreadPoolExecutor`` pattern in ``agentic.py route_page``
-        (~lines 213-247): abandon the future with ``wait=False`` so the pipeline
-        is not blocked by a stalled thread. The daemon thread is cleaned up when
-        it eventually unblocks or the process exits.
+        Mirrors the ``ThreadPoolExecutor`` pattern in ``agentic.py route_page``:
+        abandon the future with ``wait=False`` so the pipeline is not blocked by
+        a stalled thread.
+
+        The abandoned thread is NOT a daemon (GH-172) -- see the note at the
+        ``ex.shutdown(wait=False)`` below, and the matching one in
+        ``route_page``. It keeps the process alive until it unblocks, which its
+        own httpx client timeout guarantees it eventually does.
         """
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = ex.submit(self._reader.read, img_path)
@@ -502,9 +506,15 @@ class TableCropExtractor:
             # stalled thread (blocked on httpx response) is NOT reaped — it keeps
             # running until it unblocks. ThreadPoolExecutor workers are NOT daemon
             # threads; they keep the process alive if it tries to exit while a
-            # worker is blocked. In practice the orchestrator is long-lived and the
-            # thread unblocks once Ollama finishes generating (or the process exits
-            # naturally). This is the accepted trade-off in the agentic.py pattern.
+            # worker is blocked.
+            #
+            # GH-172 measured the exit path rather than assuming it: the process
+            # exits when the worker returns, and nothing short of that releases
+            # it (`threading._shutdown` joins on locks captured at thread START,
+            # so re-flagging the thread as daemonic afterwards changes nothing).
+            # The wait is bounded by ``self._reader``'s own httpx timeout, so
+            # the residual delay is (reader timeout - this deadline). Closing
+            # that gap is #172.
             ex.shutdown(wait=False)
 
     def _failed_crop(self, box, reason: str):

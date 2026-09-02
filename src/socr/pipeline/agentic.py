@@ -225,10 +225,25 @@ def route_page(
                     output = future.result(timeout=timeout_sec)
                 except concurrent.futures.TimeoutError:
                     future.cancel()
-                    # Abandon the executor without waiting for the stalled thread:
-                    # wait=False lets us escalate immediately; the daemon thread
-                    # will be cleaned up when the process exits or the thread
-                    # eventually unblocks.
+                    # Abandon the executor without waiting for the stalled
+                    # thread: wait=False lets us escalate immediately.
+                    #
+                    # GH-172: the thread is NOT a daemon. `ThreadPoolExecutor`
+                    # workers never are, and they cannot be made so after they
+                    # start -- `t.daemon = True` raises on a running thread, and
+                    # forcing `_daemonic` does not help either, because
+                    # `threading._shutdown` joins on `_shutdown_locks` captured
+                    # when the thread STARTED. Measured: a process whose only
+                    # remaining work is one wedged worker exits when that worker
+                    # returns, not before.
+                    #
+                    # So the CLI can outlive this timeout. It is BOUNDED, not
+                    # unbounded: every provider, judge and crop call passes a
+                    # client timeout to httpx, so the worker unblocks on its own
+                    # deadline. The residual wait is (client timeout - this soft
+                    # timeout). Closing that gap means bounding the client
+                    # timeout by the soft one, or moving the call to a killable
+                    # process boundary -- tracked on #172, not done here.
                     ex.shutdown(wait=False)
                     logger.warning(
                         "provider %s timed out on page %s (%.2fs) — escalating",
