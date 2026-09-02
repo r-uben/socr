@@ -133,19 +133,59 @@ matched the transcription character for character. That tell is worth keeping.
 Two acceptance items on GH-338 need artefacts this log did not record, and they are
 **not** supplied here:
 
-- **The 13 identifiers.** The manifest has **15** `kind: table` pages; this log scored 13
-  and never listed which, nor which 2 were dropped or why. Eligibility is itself native
-  y-banding (>= 3 numeric tokens, >= 2 neighbouring bands), so the dropped pages are the
-  ones where native banding FAILS — biasing the sample against the worst native pages.
-  Nakamura p42 is #326's named fixture and one of the three no-grid pages; if it is not
-  among the 13, this sample cannot speak to that gate at all.
-- **The scorer.** It is not in the repo, and no content-free result hash was recorded.
+- **The 13 identifiers.** ~~never listed~~ — **supplied below (GH-338).** The scorer is
+  still missing, so this is the reproducibility half that now lands.
+- **The scorer.** Still not in the repo, and no content-free result hash was recorded.
   An earlier draft of this same measurement concluded the OPPOSITE (qwen worse than
   native) because of two stripping defects. A measurement that once inverted cannot be a
   decision of record until someone else can re-run the grader. Identifiers and the scorer
   are not page content, so the content-free convention does not forbid committing them.
 
-Until both land, treat the direction as evidence and the numbers as unreproduced.
+Until the scorer lands, treat the direction as evidence and the numbers as unreproduced.
+
+## The 13, and the 2 dropped (GH-338)
+
+The original selection script was never committed, so the 13 cannot be RECOVERED, only
+recomputed. `2026-08-30_row-eligibility.py` (committed alongside this log) applies the
+rule exactly as this log states it -- a y-band with >= 3 numeric tokens and >= 2
+neighbouring numeric bands within twice the page's own median band pitch -- reusing
+socr's own `_is_numeric_word` and `round(y0)` banding rather than reimplementing either.
+
+It returns **13 of the manifest's 15** `kind: table` pages, which is the count this log
+reported. That is corroboration, not proof: a second implementation of the same written
+rule agreeing on the split is evidence the rule was applied as described, and nothing
+more.
+
+| paper | page | eligible bands |
+|---|---|---|
+| cochrane_piazzesi 2002 | 7 | 6 |
+| cochrane_piazzesi 2002 | 10 | 4 |
+| cochrane_piazzesi 2002 | 12 | 6 |
+| cochrane_piazzesi 2002 | 15 | 1 |
+| gertler_karadi 2015 | 14 | 8 |
+| gertler_karadi 2015 | 15 | 3 |
+| gertler_karadi 2015 | 16 | 2 |
+| nakamura_steinsson 2018 | 13 | 11 |
+| nakamura_steinsson 2018 | 43 | 4 |
+| nakamura_steinsson 2018 | 44 | 11 |
+| pflueger_rinaldi 2020 | 34 | 3 |
+| bauer_swanson 2022 | 21 | 13 |
+| bauer_swanson 2023 | 20 | 13 |
+| **dropped** — nakamura_steinsson 2018 | **42** | **0** |
+| **dropped** — kaminska_mumtaz_sustek 2021 | **39** | **0** |
+
+**This settles the sample question against the log's own conclusion.** Nakamura p42 is
+#326's named fixture and one of the three no-grid pages, and it is one of the two
+dropped: it has no band anywhere on the page carrying three numeric tokens with two
+numeric neighbours. So the bias GH-338 suspected is real and it is not hypothetical --
+the sample excludes exactly the page the retired-#326 claim rested on. The retraction
+already recorded above stands on its own reasoning (different instruments); this is a
+second, independent reason it had to be retracted.
+
+Two of nine papers contribute nothing, and one contributes four of the thirteen rows,
+so the 13 are not thirteen independent documents either. That does not weaken "native is
+not a trustworthy baseline" -- native's failures here are not concentrated in one paper
+-- but it is a further reason 13 rows cannot rank qwen against gemini.
 
 ## What this does NOT settle
 
