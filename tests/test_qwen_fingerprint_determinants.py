@@ -26,6 +26,27 @@ SERVED_BACKENDS = ("vllm", "sglang", "api")
 
 
 @pytest.fixture(autouse=True)
+def _isolate_backend_resolution(monkeypatch):
+    """Decide backend resolution here, never inherit it from the shell.
+
+    GH-521. `qwen_backend` defaults to `auto`, and `auto` means vLLM whenever
+    `VLLM_BASE_URL` is exported -- which is the documented HPC deployment. So on
+    such a machine these tests failed while production was behaving exactly as
+    designed: they asserted the Ollama answer and got the correct vLLM one.
+
+    Clearing the variable makes the DEFAULT deterministic. What THIS file pins
+    is the backend-to-model mapping, via explicit `qwen_backend` values, so it
+    needs the ambient variable out of the way rather than restored.
+
+    The exported state itself -- `auto` resolving to vLLM when a server is
+    exported -- is pinned in `test_qwen_engine.py`, which is where the
+    resolution lives. (The first version of this docstring was copied verbatim
+    from that file and claimed the pinning happened here too; cubic P3 on #526.)
+    """
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _pin_source_digest(monkeypatch: pytest.MonkeyPatch):
     """Hold socr's own source identity constant so only the knob under test varies."""
     orch._SOURCE_DIGEST_CACHE = None
