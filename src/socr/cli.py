@@ -649,11 +649,40 @@ def process(
         if not config.quiet:
             console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
 
+    # GH-517: `hpc.enabled` selects the HPC lane, from a config file as well as
+    # from the flag. It was written here and read NOWHERE, so `hpc.enabled: true`
+    # in a YAML did nothing and the lane was reachable only through
+    # `--hpc-sequential`. A config key that looks like a switch and is not one
+    # misleads exactly the way a flag does (GH-142's whole thesis), and its
+    # sibling `hpc.audit_enabled` IS read (hpc_pipeline.py), which made the dead
+    # ones more convincing, not less.
     if hpc_sequential:
-        from socr.pipeline.hpc_pipeline import HPCPipeline
-
         config.hpc.enabled = True
         config.hpc.sequential = True
+
+    if config.hpc.enabled:
+        from socr.pipeline.hpc_pipeline import HPCPipeline
+
+        # `sequential` is the only HPC mode there is: HPCPipeline exists for
+        # sequential model loading on a single GPU, and no other path reads the
+        # field. Setting it False asked for a mode that does not exist, and
+        # silently running the sequential one anyway would be the "flag that
+        # lies" failure at the YAML layer -- so it is refused, not ignored.
+        if not config.hpc.sequential:
+            raise click.UsageError(
+                "hpc.sequential: false is not supported (GH-517).\n"
+                "\n"
+                "The HPC lane has one mode -- sequential model loading for a "
+                "single GPU -- and HPCPipeline implements only that. Nothing "
+                "reads the field to select anything else, so accepting false "
+                "would run the sequential pipeline while your config said "
+                "otherwise.\n"
+                "\n"
+                "Set 'hpc.sequential: true' (or omit it and pass "
+                "--hpc-sequential), or set 'hpc.enabled: false' to use the "
+                "default agentic pipeline."
+            )
+
         pipeline = HPCPipeline(config)
     else:
         # UnifiedPipeline is the sole orchestrator: analyze -> agentic -> assemble.
