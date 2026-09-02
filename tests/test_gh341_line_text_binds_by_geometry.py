@@ -63,11 +63,21 @@ def test_a_rectangle_over_the_first_mention_still_wraps_the_first() -> None:
 def test_a_rectangle_over_neither_mention_wraps_nothing() -> None:
     """Prefer skipping to guessing.
 
-    A link whose rectangle sits over no occurrence of its anchor is dropped.
-    That is recoverable; a URI stamped on an arbitrary citation is not visible
-    as an error at all.
+    GH-465: the first version of this test put the rectangle PAST the span
+    (x 500-560 against a span ending at 400). `_line_text` drops that at
+    `span_rect.intersects(rect)` and never reaches the offset resolver, so the
+    test re-pinned the pre-existing intersects filter and passed with the skip
+    path deleted -- vacuous.
+
+    The rectangle now sits INSIDE the span, over the gap BETWEEN the two
+    mentions, which is the path the skip actually guards: the link intersects
+    the span, the anchor is present, and no occurrence lies under the rect.
     """
-    rect = fitz.Rect(500.0, 90.0, 560.0, 102.0)  # past the end of the span
+    rect = fitz.Rect(180.0, 90.0, 230.0, 102.0)  # inside the span, between the two mentions
+    assert rect.intersects(fitz.Rect(SPAN["bbox"])), (
+        "the rectangle must intersect the span, or this pins the intersects "
+        "filter rather than the skip path"
+    )
     out = _line_text([SPAN], [(rect, URI, ANCHOR)])
 
     assert out == LINE, f"a link with no covered occurrence was still stamped: {out}"
@@ -76,3 +86,25 @@ def test_a_rectangle_over_neither_mention_wraps_nothing() -> None:
 def test_a_line_with_no_links_is_byte_identical() -> None:
     """The golden-fragment contract this function has always carried."""
     assert _line_text([SPAN], []) == LINE
+
+
+# GH-465 hole 2 asked for an `extract_structured` pin on a table/span page.
+# I could not build one, and the reason is worth recording rather than replacing
+# with a fixture that passes for the wrong reason.
+#
+# The page must DETECT a table for the prose line to reach `_line_text`. A
+# two-column table is not detected at all, so the page silently falls back to
+# the flat path -- which #417 already fixes, and the pins then passed under BOTH
+# a `text.index` and a `text.rindex` revert, i.e. measured nothing.
+#
+# Giving it four numeric lanes does detect a table, but then the prose line is
+# swallowed INTO the grid:
+#
+#     '| See Smith 2020 here; | cite Smith 2020 there. |  |  |'
+#
+# and the link is gone before binding is reached. Moving the prose 460pt from
+# the table does not change it. That is the prose-gridding defect (#150/#213
+# family), not this ticket's, and it makes the fixture unbuildable today.
+#
+# The binding itself is pinned above at `_line_text`, in both directions and on
+# the skip path. Measured on #465.
