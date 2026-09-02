@@ -62,6 +62,43 @@ console = Console()
 JUDGE_IDENTITY_HEURISTIC = "heuristic"
 
 
+#: Config fields that gate NOTHING but still reach the run fingerprint (GH-525).
+#: Their CLI flags are rejected (GH-142); YAML can still set them, and doing so
+#: used to invalidate every terminal page for a run that behaves identically.
+#: The fingerprint records these values instead of the configured ones, so the
+#: key stays (no schema change, no mass re-fingerprinting) while a setting that
+#: changes nothing changes nothing.
+#:
+#: Taken from PipelineConfig's own defaults rather than written out, so the two
+#: cannot drift: a changed default moves both together.
+def _inert_field_defaults() -> dict:
+    from socr.core.config import PipelineConfig
+
+    defaults = PipelineConfig()
+    return {
+        "judge_hard_pages": defaults.judge_hard_pages,
+        "fallback_chain": list(defaults.fallback_chain),
+    }
+
+
+_INERT_FIELD_DEFAULTS = _inert_field_defaults()
+
+
+def _warn_inert_config(cfg) -> list[str]:
+    """Names of inert fields this config sets away from their defaults.
+
+    Ignoring a setting silently is the failure this ticket family is about, so
+    the run says which ones it ignored rather than leaving the operator to infer
+    it from output that did not change.
+    """
+    differing = []
+    if bool(cfg.judge_hard_pages) != bool(_INERT_FIELD_DEFAULTS["judge_hard_pages"]):
+        differing.append("judge_hard_pages")
+    if list(cfg.fallback_chain) != list(_INERT_FIELD_DEFAULTS["fallback_chain"]):
+        differing.append("fallback_chain")
+    return differing
+
+
 def _page_blob_key(page_output_dict: dict) -> str:
     """Content-addressed key for a serialised PageOutput dict.
 
@@ -371,6 +408,10 @@ class UnifiedPipeline:
         # the file's parent). Threaded into every contract key so per-doc output
         # mirrors the input subtree relative to it, not the bare basename.
         self._scan_root: Path | None = None
+        #: GH-525: the inert-config warning is emitted once per pipeline, not
+        #: once per document -- `process_batch` calls `process` per PDF and the
+        #: config cannot change between them.
+        self._warned_inert_config = False
         self._final_winning_outputs = None
         # Set by process_batch: the contract RunOutcome that drives the exit code.
         from ocr_output_contract import RunOutcome
@@ -561,6 +602,10 @@ class UnifiedPipeline:
     def _run_fingerprint(self, engine_type: EngineType | None = None) -> str:
         """Run-config fingerprint for idempotency, from the RESOLVED run config.
 
+        Two fields are recorded at their DEFAULTS rather than as configured --
+        ``judge_hard_pages`` and ``fallback_chain`` -- because they gate nothing
+        (GH-142 / GH-525). See ``_INERT_FIELD_DEFAULTS``.
+
         Captures what changes *what output an input produces*: the resolved
         primary engine's model id, backend, and task, the resolved determinants
         of every secondary engine that can contribute text (local and fallback
@@ -594,11 +639,25 @@ class UnifiedPipeline:
             # --- routing / engine selection (all contributing engines) ---
             "primary_engine": engine_type.value,
             "local_engine": cfg.local_engine.value,
-            "fallback_chain": [e.value for e in cfg.fallback_chain],
             # Resolved model/backend/task of every secondary engine, so a swap of
             # a local/fallback member's model invalidates the cache too.
             "local_engine_determinants": self._engine_determinants(cfg.local_engine),
-            "fallback_determinants": [self._engine_determinants(e) for e in cfg.fallback_chain],
+            # GH-525: `judge_hard_pages`, `fallback_chain` and its determinants
+            # are deliberately ABSENT. None gates any phase (GH-142 rejected
+            # their flags for that), so including them made a config-only toggle
+            # invalidate every terminal page and force a reprocess producing
+            # byte-identical output.
+            #
+            # Dropping them changes this fingerprint once, for everybody. That
+            # cost was the reason not to -- until `_socr_source_digest` was
+            # checked: it hashes every shipped .py file, so ANY source edit
+            # already invalidates every fingerprint, deliberately ("an
+            # output-neutral edit costs one needless reprocess. Re-OCR is
+            # cheap"). This edit is one of those, so the cost is not additional.
+            #
+            # `_warn_inert_config` names them when a config sets them, because
+            # ignoring a setting silently is the failure this ticket family is
+            # about.
             # PP-5: the agentic provider ladder is built from ``enabled_engines``
             # and pruned by ``max_cost_per_page`` / ``cost_budget`` — all three
             # change which provider produces (or is even tried on) a page, so a
@@ -637,7 +696,6 @@ class UnifiedPipeline:
             "agentic": cfg.agentic,
             "strict_local": cfg.strict_local,
             "audit_min_words": cfg.audit_min_words,
-            "judge_hard_pages": cfg.judge_hard_pages,
             "judge_backend": cfg.judge_backend,
             # The RESOLVED judge identity, not the (possibly empty) config field.
             # Under the default auto-resolution ``cfg.judge_model`` is "", so
@@ -794,6 +852,38 @@ class UnifiedPipeline:
             primary["model"], primary["backend"] or "socr", primary["task"], None, extra=extra
         )
 
+    def _report_inert_config(self) -> None:
+        """Name any config field the run is ignoring, once per pipeline.
+
+        GH-525: a config that sets an inert field must not be ignored in
+        silence -- that is the same failure the rejected flags had, moved to
+        the YAML layer.
+
+        Once per PIPELINE, not per document: `process_batch` calls `process` for
+        every PDF, so an unguarded warning repeated once per file and became
+        noise an operator learns to skip. The config cannot change between those
+        calls, so one line says everything repeating it would.
+
+        Called from BOTH entry points (cubic P2 on #529). Calling it only from
+        `process` meant an empty batch -- nothing to do, everything skipped --
+        reported nothing, even though its fingerprint ignored the fields just
+        the same. The guard makes the second call a no-op.
+        """
+        if self._warned_inert_config:
+            return
+        inert = _warn_inert_config(self.config)
+        if not inert:
+            return
+        self._warned_inert_config = True
+        message = (
+            f"ignoring config field(s) {', '.join(inert)}: they gate nothing on "
+            "any path (GH-142/GH-525) and are excluded from the run fingerprint, "
+            "so setting them changes neither the output nor which pages are reused"
+        )
+        logger.warning("%s", message)
+        if not self.config.quiet:
+            console.print(f"  [yellow]{message}[/yellow]")
+
     def process(
         self,
         pdf_path: Path,
@@ -814,6 +904,7 @@ class UnifiedPipeline:
         the canon's basename-collision fix.
         """
         pdf_path = Path(pdf_path)
+        self._report_inert_config()
         out_dir = self._resolve_output_root(pdf_path, output_dir)
         self._scan_root = scan_root if scan_root is not None else pdf_path.parent
 
@@ -873,6 +964,8 @@ class UnifiedPipeline:
         contract :class:`RunOutcome`); the CLI consults it so the batch exit
         code is nonzero when any file failed (the canon's uniform exit policy).
         """
+        self._report_inert_config()
+
         from ocr_output_contract import (
             RootIndex,
             RunOutcome,

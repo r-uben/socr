@@ -223,7 +223,12 @@ class TestFingerprintCoversOutputAffectingFlags:
             dict(figures_max_total=99),
             dict(figures_max_per_page=9),
             dict(local_engine=EngineType.GEMINI),
-            dict(fallback_chain=[EngineType.MISTRAL]),
+            # GH-525 removed `fallback_chain` from this list. It is not an
+            # output-affecting flag and never was: no execution path reads it
+            # (the multi-engine branches that did were deleted in #298), so
+            # requiring it to invalidate the run was requiring a reprocess that
+            # produces identical output. Pinned in the other direction now, in
+            # `test_gh525_inert_fields_do_not_invalidate.py`.
             dict(tiered=False),
             dict(judge_backend="vlm"),
             dict(judge_model="qwen2-vl:7b"),
