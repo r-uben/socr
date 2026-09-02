@@ -1074,9 +1074,19 @@ def has_chart_marks(page) -> bool:
     of the cluster bbox plus >= ``MIN_DRAWINGS_FOR_VECTOR`` interior marks —
     catches thin-stroke monochrome spike plots that have no coloured fill or
     thick stroke).
-    Also returns True when the page carries at least one embedded raster image
-    (``page.get_images()``), because an embedded PNG/JPEG chart is visually lost
-    as native word-salad just like a vector one.
+    Also returns True when the page carries an embedded raster image whose
+    PLACED area on the page reaches ``CHART_MIN_CLUSTER_AREA`` -- the same bar
+    the vector path applies to a cluster -- because an embedded PNG/JPEG chart
+    is visually lost as native word-salad just like a vector one. Presence alone
+    is NOT sufficient (GH-167): a logo or signature is not a chart, and routing
+    its page to the chart lane discards that page's prose. When a placement
+    cannot be measured -- ``get_image_rects`` raising, or returning no rect for
+    an image -- the page FAILS OPEN and is treated as a chart, so the lane can
+    only ever narrow on evidence, never on ignorance.
+
+    What this gate does NOT do: separate a page-sized photograph or decorative
+    background from a page-sized raster chart. Nothing in the geometry
+    distinguishes them, and no deterministic signal here can (GH-511).
 
     Note on ``_looks_like_table_grid``: this function is intentionally NOT called
     here.  Its first-line short-circuit ``if has_data_marks: return False`` means
@@ -1104,16 +1114,80 @@ def has_chart_marks(page) -> bool:
     page_height = page.rect.height
     page_area = page_width * page_height
 
-    # Fast path: embedded raster image present → raster chart.
+    # Fast path: an embedded raster BIG ENOUGH to be a chart.
+    #
+    # GH-167: presence alone used to be enough, so any logo, signature, header
+    # rule, publisher mark or decorative photo on an otherwise clean prose page
+    # routed that page into the chart-asset lane -- shipped as a full-page PNG
+    # and audited as if chart data had not been transcribed. The page's prose is
+    # perfectly good native text; calling it an untranscribed chart loses it.
+    #
+    # The gate is the SAME bar the vector path already applies to a cluster
+    # (``CHART_MIN_CLUSTER_AREA``): a mark too small to be a chart cluster is
+    # too small to be a raster chart. No new threshold is introduced.
+    #
+    # Measured on the PLACED rect, not the pixel dimensions: a 2000x1500 logo
+    # scaled into a 30x20pt corner is a logo, and a low-resolution scan of a
+    # figure stretched across half the page is a figure.
+    #
+    # Fail OPEN when the placement cannot be measured (older PyMuPDF, or a rect
+    # lookup that raises): an unmeasurable image keeps the pre-GH-167 answer, so
+    # this can only ever narrow the lane on evidence, never on ignorance.
     try:
         raster_images = page.get_images()
         if raster_images:
+            try:
+                page_label = page.number + 1
+            except Exception:  # noqa: BLE001 - label only
+                page_label = getattr(page, "number", "?")
+
+            largest = 0.0
+            unmeasurable = False
+            for image in raster_images:
+                try:
+                    rects = page.get_image_rects(image[0])
+                except Exception as exc:  # noqa: BLE001 - unmeasurable, fail open
+                    logger.debug("has_chart_marks: get_image_rects failed: %s", exc)
+                    rects = None
+                # cubic P2 on #510: an image that resolves to NO rect is just as
+                # unmeasurable as one whose lookup raised. Treating only the
+                # raising case as unknown let a page with one unresolved image
+                # and one small image be rejected on evidence that never covered
+                # the unresolved one.
+                if not rects:
+                    unmeasurable = True
+                    continue
+                for rect in rects:
+                    largest = max(largest, abs(rect.width) * abs(rect.height))
+
+            if unmeasurable:
+                logger.debug(
+                    "has_chart_marks p%s: raster path — %d image(s), at least one "
+                    "placement unresolved; treating as chart (fail open)",
+                    page_label,
+                    len(raster_images),
+                )
+                return True
+
+            if largest >= CHART_MIN_CLUSTER_AREA:
+                logger.debug(
+                    "has_chart_marks p%s: raster path — %d embedded image(s), "
+                    "largest placement %.0fpt2 >= %.0f",
+                    page_label,
+                    len(raster_images),
+                    largest,
+                    CHART_MIN_CLUSTER_AREA,
+                )
+                return True
+
             logger.debug(
-                "has_chart_marks p%s: raster path — %d embedded image(s)",
-                getattr(page, "number", "?") + 1,
+                "has_chart_marks p%s: raster rejected — %d image(s), largest "
+                "placement %.0fpt2 < %.0f (logo/decoration, not a chart)",
+                page_label,
                 len(raster_images),
+                largest,
+                CHART_MIN_CLUSTER_AREA,
             )
-            return True
     except Exception as exc:
         logger.debug("has_chart_marks: get_images() failed: %s", exc)
 
