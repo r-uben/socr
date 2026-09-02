@@ -216,3 +216,41 @@ def test_a_bare_hpc_enabled_selects_the_lane(tmp_path: Path) -> None:
         f"a bare hpc.enabled: true did not select the HPC lane (built {built}); "
         f"output={result.output!r}"
     )
+
+
+def test_the_flag_still_selects_the_lane(tmp_path: Path) -> None:
+    """GH-541: `--hpc-sequential` end to end, which no case covered.
+
+    Every other case here drives the config file. GH-517 changed the flag from
+    "build HPCPipeline directly" to "set the config, then let the config
+    choose", so the flag now depends on a second step -- and the GH-142 audit
+    covers only that `hpc.enabled` has a consumer, not that the flag reaches it.
+
+    One CliRunner case closes that: flag in, HPC lane out.
+    """
+    from unittest.mock import patch
+
+    built: list[str] = []
+
+    class _Recorder:
+        def __init__(self, config):
+            built.append(type(self).__name__)
+            self.config = config
+
+        def process(self, *_a, **_k):
+            raise RuntimeError("stop here: the pipeline choice is what is measured")
+
+    hpc = type("HPCPipeline", (_Recorder,), {})
+    unified = type("UnifiedPipeline", (_Recorder,), {})
+
+    with (
+        patch("socr.pipeline.hpc_pipeline.HPCPipeline", hpc),
+        patch("socr.pipeline.orchestrator.UnifiedPipeline", unified),
+    ):
+        CliRunner().invoke(cli, ["process", str(_pdf(tmp_path / "flag")), "--hpc-sequential"])
+
+    assert built == ["HPCPipeline"], (
+        f"--hpc-sequential no longer reaches the HPC lane (built {built}); since "
+        "GH-517 the flag routes through the config, so the two steps have to "
+        "stay connected"
+    )
