@@ -24,7 +24,13 @@ import pytest
 fitz = pytest.importorskip("fitz")
 
 from socr.core.document import DocumentHandle  # noqa: E402
-from socr.core.manifest import WinnerKind, shipped_winner_kind  # noqa: E402
+from socr.core.manifest import (  # noqa: E402
+    PageEnding,
+    PagePrimaryReason,
+    SelectionProvenance,
+    _select_page_output_tagged,
+    page_disposition,
+)
 from socr.core.result import FailureMode, PageOutput, PageStatus  # noqa: E402
 from socr.core.state import DocumentState  # noqa: E402
 
@@ -72,16 +78,16 @@ def _old_bucket_predicate(p) -> bool:
 @pytest.mark.parametrize(
     ("shape", "expected"),
     [
-        ("ships", WinnerKind.CORRUPT_MATH_HYBRID),
-        ("shredded", WinnerKind.ROTATED_TEXT_SHREDDED),
-        ("not_in_attempts", WinnerKind.NATIVE_CLEAN),
-        ("wrong_engine", WinnerKind.NATIVE_CLEAN),
+        ("ships", SelectionProvenance.CORRUPT_MATH_HYBRID),
+        ("shredded", SelectionProvenance.ROTATED_TEXT_SHREDDED),
+        ("not_in_attempts", SelectionProvenance.NATIVE_CLEAN),
+        ("wrong_engine", SelectionProvenance.NATIVE_CLEAN),
     ],
 )
 def test_the_tag_is_what_the_page_actually_ships(tmp_path, shape, expected) -> None:
     """The three divergent shapes from the ticket, plus the one that does ship."""
     state, p = _state(tmp_path, shape)
-    assert shipped_winner_kind(state, 1) is expected
+    assert _select_page_output_tagged(state, 1)[1] is expected
 
     # The anchor: the OLD predicate claims all four, which is the bug.
     assert _old_bucket_predicate(p) is True, (
@@ -97,12 +103,10 @@ def test_a_clean_page_is_not_claimed_as_a_hybrid(tmp_path, shape) -> None:
     AUDIT_FAILED and emitted a corrupt-math event for a defect the page does
     not have.
     """
-    from socr.core.manifest import _select_page_output_tagged
-
     state, _ = _state(tmp_path, shape)
     output, tag = _select_page_output_tagged(state, 1)
 
-    assert tag is not WinnerKind.CORRUPT_MATH_HYBRID
+    assert tag is not SelectionProvenance.CORRUPT_MATH_HYBRID
     assert output.status is PageStatus.SUCCESS, (
         f"{shape}: fixture must ship a CLEAN page, or the point is lost"
     )
@@ -116,13 +120,15 @@ def test_the_shipping_shape_is_still_claimed(tmp_path) -> None:
     traded a false positive for a false negative.
     """
     state, _ = _state(tmp_path, "ships")
-    assert shipped_winner_kind(state, 1) is WinnerKind.CORRUPT_MATH_HYBRID
+    assert _select_page_output_tagged(state, 1)[1] is SelectionProvenance.CORRUPT_MATH_HYBRID
+    assert page_disposition(state, 1).ending is PageEnding.MODEL_OUTPUT
+    assert page_disposition(state, 1).primary_reason is PagePrimaryReason.CORRUPT_MATH_HYBRID
 
 
 def test_the_orchestrator_bucket_itself_reads_the_tag() -> None:
     """The bucket in `orchestrator.py`, not just the tag it should consult.
 
-    Pinning `shipped_winner_kind` alone would stay green if the orchestrator
+    Pinning `page_disposition` alone would stay green if the orchestrator
     went back to re-deriving the predicate -- which is exactly how #292
     happened. This asserts the production line.
     """
@@ -132,55 +138,69 @@ def test_the_orchestrator_bucket_itself_reads_the_tag() -> None:
     src = pathlib.Path(__file__).resolve().parents[1] / "src" / "socr"
     tree = ast.parse((src / "pipeline" / "orchestrator.py").read_text())
 
-    assigns = [
+    derive_fn = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
+        if isinstance(node, ast.FunctionDef) and node.name == "_derive_disposition_buckets"
+    ]
+    assert len(derive_fn) == 1, "expected _derive_disposition_buckets helper in orchestrator.py"
+
+    fn_body = derive_fn[0]
+
+    # P6 stage A/B: the bucket reads the SELECTION TAG rather than the public
+    # disposition, because the two differ by the post-selection guards, which can
+    # rewrite the hybrid ending to INVALID_TABLE_EMISSION and would silently empty
+    # this bucket. GH-292's demand is unchanged either way -- ask the manifest which
+    # ending selection took, never re-derive it -- so the assertion below accepts
+    # either vocabulary but keeps the RHS-SPECIFIC dataflow shape the original test
+    # proved (cold review round 2, finding 9): the CORRUPT_MATH_HYBRID member must
+    # be compared against something that came out of the finalized record, not
+    # merely mentioned somewhere in the function.
+    tag_vocabularies = {"SelectionProvenance", "PagePrimaryReason", "WinnerKind"}
+    record_fields = {"selection_provenance", "disposition", "primary_reason", "ending"}
+
+    def _from_the_record(node: ast.AST, bound: dict[str, bool]) -> bool:
+        """True if *node* is a record field access, or a local bound to one."""
+        if isinstance(node, ast.Attribute):
+            return node.attr in record_fields or _from_the_record(node.value, bound)
+        if isinstance(node, ast.Name):
+            return bound.get(node.id, False)
+        return False
+
+    # Locals assigned from a record field, e.g. ``tag = r.selection_provenance``.
+    bound: dict[str, bool] = {}
+    for node in ast.walk(fn_body):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                bound[target.id] = _from_the_record(node.value, bound)
+
+    dataflow_compares = [
+        node
+        for node in ast.walk(fn_body)
+        if isinstance(node, ast.Compare)
+        and _from_the_record(node.left, bound)
         and any(
-            isinstance(t, ast.Name) and t.id == "corrupt_math_hybrid_pages" for t in node.targets
+            isinstance(cmp_, ast.Attribute)
+            and cmp_.attr == "CORRUPT_MATH_HYBRID"
+            and isinstance(cmp_.value, ast.Name)
+            and cmp_.value.id in tag_vocabularies
+            for cmp_ in node.comparators
         )
     ]
-    assert len(assigns) == 1, (
-        f"expected exactly one corrupt_math_hybrid_pages assignment, got {len(assigns)}"
-    )
-
-    rhs = assigns[0].value
-
-    # Resolved from the parsed tree, not by matching text over `ast.unparse`.
-    # A substring check can be satisfied by an unrelated literal or a comment on
-    # the same line, so it would stay green through a refactor that decoupled
-    # the bucket from the tag (#450 review).
-    calls_the_accessor = any(
-        isinstance(node, ast.Call)
-        and (
-            (isinstance(node.func, ast.Name) and node.func.id == "shipped_winner_kind")
-            or (isinstance(node.func, ast.Attribute) and node.func.attr == "shipped_winner_kind")
-        )
-        for node in ast.walk(rhs)
-    )
-    assert calls_the_accessor, (
-        f"the bucket no longer calls shipped_winner_kind: {ast.unparse(assigns[0])}"
-    )
-
-    compares_to_the_kind = any(
-        isinstance(node, ast.Attribute)
-        and node.attr == "CORRUPT_MATH_HYBRID"
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "WinnerKind"
-        for node in ast.walk(rhs)
-    )
-    assert compares_to_the_kind, (
-        "the bucket no longer compares against WinnerKind.CORRUPT_MATH_HYBRID: "
-        f"{ast.unparse(assigns[0])}"
+    assert dataflow_compares, (
+        "the corrupt-math bucket no longer compares a value taken FROM THE FINALIZED "
+        "RECORD against a CORRUPT_MATH_HYBRID tag member -- a bare mention of the "
+        f"member anywhere in the helper is not the pin: {ast.unparse(fn_body)}"
     )
 
     # The defect was reading the PageState flag directly.
     flag_reads = [
         node
-        for node in ast.walk(rhs)
+        for node in ast.walk(fn_body)
         if (isinstance(node, ast.Attribute) and node.attr == "corrupt_math_hybrid")
         or (isinstance(node, ast.Constant) and node.value == "corrupt_math_hybrid")
     ]
     assert not flag_reads, (
-        f"the bucket is re-deriving the PageState flag again: {ast.unparse(assigns[0])}"
+        f"the bucket helper is re-deriving the PageState flag again: {ast.unparse(fn_body)}"
     )

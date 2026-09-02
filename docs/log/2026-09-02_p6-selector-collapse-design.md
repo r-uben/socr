@@ -240,3 +240,40 @@ contract FIRST (S2 before S1), then derive buckets from it with a difference tes
 today's buckets over the golden corpus, then merge the fail-closed family, then the model
 family. Every stage byte-identity-pinned and difference-pinned. Nothing in the first two
 stages changes shipped bytes.
+
+---
+
+## 9. Amendment — §8's bucket inventory, after implementation (2026-09-03)
+
+§2 and §8 say six assemble buckets are tag-derivable and that stage B derives all six
+from the public disposition. Implementation and two cold reviews measured that this is
+not achievable in a byte-preserving stage. The inventory is amended as follows; §2's
+six-bucket list and §8's "corrected inventory" are superseded by it.
+
+**Three buckets are provenance-derived in stage B to preserve behaviour; they migrate
+to the shipped disposition in stage C, where the CLI change is intended and pinned.**
+Those three are `structure_class_model_pages`, `structure_class_floor_pages` and
+`corrupt_math_hybrid_pages`.
+
+`SelectionProvenance` is NOT the public contract, and nothing in the implementation
+claims it is. Q3's ruling stands: the public disposition names what SHIPPED. These three
+buckets simply do not read it yet, because reading it changes observable output today. A
+`CORRUPT_MATH_HYBRID` candidate that the emission guard then replaces ships
+`FAIL_CLOSED_MARKER / INVALID_TABLE_EMISSION`; deriving the bucket from the disposition
+correctly drops that page, and with it the `corrupt_math_hybrid_shipped` audit event and
+the "shipped crop-backed equation candidate(s)" CLI line. That is the right outcome in
+the wrong stage. Stage C owns it, with a difference test that STATES the intended CLI
+and audit-kind change instead of letting it arrive unannounced.
+
+**Three buckets are flag-derived and are not tag-derivable at all**:
+`d3_model_table_pages`, `d3_floor_pages`, `flagged_model_pages`. Each is keyed on a
+native-lane verdict — the D3 flag conjunction, or `flagged_model_page_output` — that a
+page can carry while selection ends on a different branch entirely. A page with the full
+D3 conjunction and a passing non-native `best_output` returns at `PASSING_BEST_OUTPUT`
+before either branch is reached, so it carries the tag AND the disposition of an ordinary
+clean model page. Neither vocabulary can express these buckets. Whether a native-lane
+verdict should outrank a passing winner is a real question, and a separate one from the
+stage-C migration above.
+
+The measurements behind both paragraphs, and the difference tests that hold them, are in
+`docs/log/2026-09-02_p6-stage-ab-disposition-contract.md` §10 and §11.

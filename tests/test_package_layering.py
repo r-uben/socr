@@ -33,7 +33,6 @@ _ALLOWED_PRIVATE_IMPORTS = {
     ("math/detect_equations.py", "socr.core.born_digital", "_MATH_FONT_RE"),
     ("pipeline/agentic.py", "socr.tables.locate", "_horizontal_rules"),
     ("pipeline/orchestrator.py", "socr.core.manifest", "_whole_doc_page_texts"),
-    ("pipeline/orchestrator.py", "socr.core.manifest", "_winning_page_output"),
 }
 
 _MODULE_IMPORT = "<module>"

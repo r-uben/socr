@@ -28,6 +28,7 @@ from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
+from socr.core.manifest import FinalizedPageRecord
 from socr.core.normalizer import (
     MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS,
     OutputNormalizer,
@@ -55,6 +56,100 @@ from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_
 from socr.pipeline.agentic import route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
+
+
+def _derive_disposition_buckets(
+    state: DocumentState, records: list[FinalizedPageRecord]
+) -> dict[str, set[int]]:
+    """The six selection-shaped assemble buckets, with EXACTLY their pre-P6 membership.
+
+    **Three buckets are provenance-derived in stage B to preserve behaviour; they
+    migrate to the shipped disposition in stage C, where the CLI change is intended
+    and pinned.** Those three are ``structure_class_model_pages``,
+    ``structure_class_floor_pages`` and ``corrupt_math_hybrid_pages``.
+
+    ``SelectionProvenance`` is NOT the public contract and this is not a claim that it
+    should be. The public contract is ``PageDisposition``, which names the bytes that
+    shipped; the buckets do not read it yet only because reading it changes behaviour
+    now. A page whose ``CORRUPT_MATH_HYBRID`` candidate is then replaced by the
+    emission guard ships ``FAIL_CLOSED_MARKER / INVALID_TABLE_EMISSION``, so deriving
+    from the disposition would correctly drop it from this bucket -- and with it the
+    ``corrupt_math_hybrid_shipped`` audit event and the "shipped crop-backed equation
+    candidate(s)" CLI line. That is the RIGHT outcome and the WRONG stage: stage A/B
+    is byte-preserving, so the change belongs in stage C with a difference test that
+    states the intended CLI and audit-kind change rather than smuggling it in here.
+
+    **Three buckets stay flag-derived** (``d3_model_table_pages``, ``d3_floor_pages``,
+    ``flagged_model_pages``). These are not questions about which branch won at all.
+    Each is keyed on a native-lane verdict -- the D3 flag conjunction, or
+    ``flagged_model_page_output`` -- that a page can carry while selection ends
+    somewhere else entirely. The measured case is a page with the full D3 conjunction
+    (or a flagged-model candidate) AND a passing non-native ``best_output``: selection
+    returns at ``PASSING_BEST_OUTPUT`` long before either branch is reached, so the
+    page carries the tag and the disposition an ordinary clean model page carries, and
+    neither can recover it. Deriving these three from either vocabulary flipped such a
+    document from AUDIT_FAILED to SUCCESS and dropped its D3 / flagged-model audit
+    events, CLI lines and tables-trust note.
+
+    Whether a native-lane verdict SHOULD outrank a passing winner is a real question,
+    and a separate one from the stage-C migration above.
+
+    ``tests/conftest.py`` holds the pre-change predicates and asserts this function
+    reproduces them on every ``_phase_assemble`` the whole suite drives.
+    """
+    from socr.core.manifest import (
+        SelectionProvenance,
+        d3_floor_kept_model_output,
+        flagged_model_page_output,
+    )
+
+    struct_model: set[int] = set()
+    struct_floor: set[int] = set()
+    corrupt_math: set[int] = set()
+
+    _STRUCTURE_CLASS_MODEL_TAGS = (
+        SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
+        SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
+    )
+    for r in records:
+        pn = r.output.page_num
+        tag = r.selection_provenance
+        if tag in _STRUCTURE_CLASS_MODEL_TAGS:
+            struct_model.add(pn)
+        elif tag is SelectionProvenance.STRUCTURE_CLASS_FLOOR:
+            struct_floor.add(pn)
+        elif tag is SelectionProvenance.CORRUPT_MATH_HYBRID:
+            corrupt_math.add(pn)
+
+    # The three native-lane verdicts, unchanged from the pre-P6 assemble predicates.
+    d3_model: set[int] = {
+        n for n, p in state.pages.items() if d3_floor_kept_model_output(p) is not None
+    }
+    d3_floor: set[int] = {
+        n
+        for n, p in state.pages.items()
+        if p.is_born_digital
+        and p.native_table_structure_failed
+        and (
+            getattr(p, "native_table_unverifiable", False)
+            or getattr(p, "native_table_header_unattributed", False)
+        )
+        and bool(p.attempts)
+        and n not in d3_model
+    }
+    flagged_model: set[int] = {
+        n for n, p in state.pages.items() if flagged_model_page_output(p) is not None
+    }
+
+    return {
+        "d3_model_table_pages": d3_model,
+        "d3_floor_pages": d3_floor,
+        "flagged_model_pages": flagged_model,
+        "structure_class_model_pages": struct_model,
+        "structure_class_floor_pages": struct_floor,
+        "corrupt_math_hybrid_pages": corrupt_math,
+    }
+
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -400,7 +495,7 @@ class UnifiedPipeline:
     # fingerprint call on such an instance must not explode on a missing
     # attribute. Assignment in ``_resolve_judge_model`` shadows it per instance.
     _judge_model_cache: str | None | bool = False
-    _final_winning_outputs: dict[int, PageOutput] | None = None
+    _final_records: dict[int, FinalizedPageRecord] | None = None
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
@@ -421,7 +516,7 @@ class UnifiedPipeline:
         #: once per document -- `process_batch` calls `process` per PDF and the
         #: config cannot change between them.
         self._warned_inert_config = False
-        self._final_winning_outputs = None
+        self._final_records = None
         # Set by process_batch: the contract RunOutcome that drives the exit code.
         from ocr_output_contract import RunOutcome
 
@@ -6375,7 +6470,11 @@ class UnifiedPipeline:
         return inputs
 
     def _write_manifest(
-        self, state: DocumentState, output_dir: Path, saved_body: str | None = None
+        self,
+        state: DocumentState,
+        output_dir: Path,
+        saved_body: str | None = None,
+        records: list[FinalizedPageRecord] | None = None,
     ) -> None:
         """Write a reproducibility manifest + blob cache for `socr replay`.
 
@@ -6397,6 +6496,7 @@ class UnifiedPipeline:
                 dpi=self.config.render_dpi,
                 fingerprint_inputs=self._fingerprint_inputs(state),
                 saved_body=saved_body,
+                records=records,
             )
             manifest.save(doc_dir / "manifest.json")
             if not self.config.quiet:
@@ -6473,6 +6573,7 @@ class UnifiedPipeline:
         *,
         terminal: bool = True,
         extra_figures: list | None = None,
+        record: FinalizedPageRecord | None = None,
     ) -> Path:
         """Write per-page provenance sidecar to ``pages/NNN.json`` atomically.
 
@@ -6529,17 +6630,21 @@ class UnifiedPipeline:
         # output, including historical or reconstructed state.
         from socr.core.manifest import (
             _whole_doc_page_texts,
-            _winning_page_output,
+            finalized_page_record,
             is_page_failed_marker,
             structure_class_grid_winner,
         )
 
-        whole_doc = _whole_doc_page_texts(state)
-        final_outputs = self._final_winning_outputs or {}
-        winning_out = final_outputs.get(page_num)
-        if winning_out is None:
-            winning_out = _winning_page_output(state, page_num, whole_doc) if ps else None
+        if record is None and self._final_records:
+            record = self._final_records.get(page_num)
+        if record is None and ps:
+            whole_doc = _whole_doc_page_texts(state)
+            record = finalized_page_record(state, page_num, whole_doc)
+
+        winning_out = record.output if record is not None else None
         winning_dict = winning_out.to_dict() if winning_out is not None else {}
+        disp = record.disposition if record is not None else None
+        disposition_dict = disp.to_dict() if disp is not None else None
         # MAJOR 7(b) on #269: persisted so a RESUMED run can re-derive
         # ``structure_class_model_pages`` membership without the full attempt
         # history. Resume collapses ``p.attempts`` to the single frozen
@@ -6587,6 +6692,7 @@ class UnifiedPipeline:
 
         payload: dict = {
             "page_num": page_num,
+            "disposition": disposition_dict,
             # Status mirrors the winning output's status, or "missing" when
             # no output exists.
             "status": winning_dict.get("status", "missing"),
@@ -7242,6 +7348,14 @@ class UnifiedPipeline:
             else:
                 ps.native_table_region_identities = []
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
+            # P6 cold review round 2: carry run 1's published disposition forward
+            # so a resumed re-flush reproduces the sidecar byte for byte. A
+            # sidecar written before the field existed restores None and the
+            # disposition is recomputed, exactly as it is on a fresh run.
+            _restored_disposition = meta.get("disposition")
+            ps.resumed_disposition = (
+                dict(_restored_disposition) if isinstance(_restored_disposition, dict) else None
+            )
             # GH-90: restore scanned-table evidence failure so the scanned floor applies on resume.
             ps.scanned_table_evidence_failed = bool(
                 meta.get("scanned_table_evidence_failed", False)
@@ -7321,6 +7435,7 @@ class UnifiedPipeline:
         state: DocumentState,
         output_dir: Path,
         final_text: str,
+        records: list[FinalizedPageRecord] | None = None,
     ) -> None:
         """Rewrite every per-page fragment from the FINAL assembled text.
 
@@ -7339,7 +7454,10 @@ class UnifiedPipeline:
         """
         from ocr_output_contract import split_native_pages
 
-        page_bodies = split_native_pages(final_text)
+        if records is not None:
+            page_bodies = [rec.output.text for rec in records]
+        else:
+            page_bodies = split_native_pages(final_text)
         if not page_bodies:
             return
 
@@ -7403,7 +7521,9 @@ class UnifiedPipeline:
     # Assemble
     # ------------------------------------------------------------------
 
-    def _canonical_body(self, state: DocumentState) -> tuple[str, bool]:
+    def _canonical_body(
+        self, state: DocumentState, page_texts: list[str] | None = None
+    ) -> tuple[str, bool]:
         """Assemble the document body with canonical ``## Page N`` headers.
 
         Replaces socr's legacy ``\\n\\n---\\n\\n`` join: the saved ``.md`` now
@@ -7423,7 +7543,7 @@ class UnifiedPipeline:
 
         from socr.core.manifest import canonical_page_texts, is_page_failed_marker
 
-        texts = canonical_page_texts(state)
+        texts = page_texts if page_texts is not None else canonical_page_texts(state)
         # Failure markers are honesty, not content: an all-failed document
         # must still be recorded as having produced nothing.
         has_content = any(t.strip() and not is_page_failed_marker(t) for t in texts)
@@ -7526,24 +7646,19 @@ class UnifiedPipeline:
         if not self.config.quiet:
             console.print("\n[cyan]Assemble:[/cyan]")
 
-        final_text, has_text = self._canonical_body(state)
-
-        # Pages that produced no usable text anywhere (shipped as explicit
-        # failure markers) and enhancement pages that silently reverted to
-        # native text after recovery was tried and never passed. Both demote
-        # the document from SUCCESS: a run that lost content or shipped known-
-        # lossy fallbacks must not report a clean pass.
         from socr.core.manifest import (
             canonical_page_texts,
             d3_floor_kept_model_output,
-            flagged_model_page_output,
+            finalized_page_records,
             is_page_failed_marker,
             kept_table_grid_defect,
-            structure_class_floor_applies,
             structure_class_grid_winner,
         )
 
-        page_texts = canonical_page_texts(state)
+        pre_records = finalized_page_records(state)
+        page_texts = canonical_page_texts(state, records=pre_records)
+        final_text, has_text = self._canonical_body(state, page_texts=page_texts)
+
         self._backfill_missing_table_ladder_terminals(state, page_texts)
 
         # PP-1: flush per-page fragments from the in-memory page texts, then
@@ -7592,39 +7707,21 @@ class UnifiedPipeline:
                 )
 
         failed_pages = [i for i, t in enumerate(page_texts, start=1) if is_page_failed_marker(t)]
-        # TR-3: D3 fail-closed floor pages — born-digital table pages where the
-        # per-region geometry verifier hard-failed AND the OCR ladder also failed.
-        # These ship the explicit failed-table marker (not the collapsed native) so
-        # no plausible-but-wrong table is ever emitted.  Whole-page fallbacks are
-        # also in failed_pages, while regional splices retain usable prose and are
-        # deliberately absent from that page-failure bucket.  Count D3 pages
-        # separately for the distinct audit event and CLI summary.
-        # GH-200: widened identically to manifest.py's D3 conjunction -- a
-        # header-only defect (native_table_header_unattributed, TR-3 is blind
-        # to header loss by construction) is a D3 floor page too, else it is
-        # double-counted below (both in d3_floor_pages via the manifest ship
-        # and in native_fallback_pages via this list, since the exclusion
-        # predicate must match exactly what _winning_page_output ships).
-        # #262: a page where some attempt DID author a grid no longer ships the
-        # marker -- ``_winning_page_output`` keeps the model's reading instead --
-        # so it must leave this list. As with every other bucket here, the
-        # exclusion predicate has to match EXACTLY what the manifest ships, or
-        # the page is counted under a disposition it does not have.
-        d3_model_table_pages = [
-            n for n, p in sorted(state.pages.items()) if d3_floor_kept_model_output(p) is not None
-        ]
-        d3_floor_pages = [
-            n
-            for n, p in sorted(state.pages.items())
-            if p.is_born_digital
-            and p.native_table_structure_failed
-            and (
-                getattr(p, "native_table_unverifiable", False)
-                or getattr(p, "native_table_header_unattributed", False)
-            )
-            and bool(p.attempts)
-            and n not in d3_model_table_pages
-        ]
+
+        # P6: derive the six selection-shaped buckets from the pre-computed records in one pass.
+        disposition_buckets = _derive_disposition_buckets(state, pre_records)
+        d3_model_table_pages = sorted(disposition_buckets["d3_model_table_pages"])
+        d3_floor_pages = sorted(disposition_buckets["d3_floor_pages"])
+        flagged_model_pages = sorted(disposition_buckets["flagged_model_pages"])
+        structure_class_model_pages = sorted(disposition_buckets["structure_class_model_pages"])
+        structure_class_floor_pages = sorted(disposition_buckets["structure_class_floor_pages"])
+        corrupt_math_hybrid_pages = sorted(disposition_buckets["corrupt_math_hybrid_pages"])
+
+        # The six orthogonal bucket groups (native-only distrust, value drift,
+        # fabrication, text-grid rejection, chart-detection failure, and
+        # table-ladder rejected/unverified) are alerts or post-selection events,
+        # not PageDisposition, so they remain flag/config/event/terminal-derived.
+
         # GH-211 MAJOR-2: under --native-only the OCR ladder never runs, so a
         # page demoted purely because the extraction-time TR-3 geometry check
         # flagged it (``native_table_unverifiable``) never had an OCR attempt
@@ -7647,54 +7744,13 @@ class UnifiedPipeline:
             and all((a.engine or "").startswith("native") for a in p.attempts)
             and not (p.best_output and p.best_output.audit_passed)
         ]
-        # #259: pages where the ladder accepted nothing but the model DID
-        # produce a table, so ``_winning_page_output`` now ships the model's
-        # reading rather than substituting native. They must be excluded from
-        # ``native_fallback_pages`` for the same reason D3 floor pages are: that
-        # list's exclusion predicate has to match exactly what the manifest
-        # ships, and "fell back to native text" is simply false for these. The
-        # page still ships FLAGGED, so it gets its own term in ``pages_ok``, its
-        # own audit kind and its own CLI line -- one bucket per disposition.
-        flagged_model_pages = [
-            n for n, p in sorted(state.pages.items()) if flagged_model_page_output(p) is not None
-        ]
 
-        # S1: the general structure-class case (C2, tables only -- narrowed
-        # from "tables or equations" by BLOCKING 1 on #269's review; see
-        # ``_is_trusted_native_without_ocr``'s docstring above for why).
-        # ``_winning_page_output`` ships the grid-authoring model attempt
-        # instead of native whenever one exists, regardless of whether any
-        # native-distrust flag ever fired (the 2026-08-20 measurement: 7 of 8
-        # losing pages set none). Must match the manifest's winner EXACTLY --
-        # same predicate, same function -- or this list and the shipped page
-        # disagree, exactly the failure mode the other bucket exclusions above
-        # already guard against.
-        structure_class_model_pages = [
-            n for n, p in sorted(state.pages.items()) if structure_class_grid_winner(p) is not None
-        ]
-
-        # S1/P2 case (iii): the same branch, resolved the OTHER way -- a real
-        # rung ran but authored no usable grid, so the fail-closed floor ships
-        # instead of the native geometry grid. Nothing upstream in the
-        # page-routing checks flips ``p.best_output.audit_passed`` for this
-        # shape (a clean-looking native table is exactly what the scorer is
-        # blind to), so this needs its OWN bucket -- folding it into
-        # ``native_fallback_pages`` above would silently miss every page here,
-        # since that list's final clause reads ``p.best_output.audit_passed``
-        # and this branch never touches it.
-        structure_class_floor_pages = [
-            n for n, p in sorted(state.pages.items()) if structure_class_floor_applies(p)
-        ]
-
-        # #259 round 3: pages where the value guard DETECTED a numeric multiset
-        # mismatch but declined to call it certain (row-count discrepancy →
-        # unreliable pairing). The owner's ruling keeps the flagged table, so
-        # this is not a reason to fail the page -- but socr privately believing
-        # one of its numbers is wrong and saying nothing is the cardinal rule,
-        # so it must reach the document, the metadata and the CLI as well as the
-        # page body. Derived from the audit log because the verifier judge has
-        # no PageState to mark, exactly like ``doc_fabrication`` below.
         def _kept_defect(page_num: int) -> str:
+            # ``best_output``, not the finalized record (cold review round 2,
+            # finding 5). The flagged-model event describes the CANDIDATE that was
+            # kept; reading the record instead reads it after the emission guard has
+            # replaced the body with a marker, so a defect the event exists to name
+            # -- a live LaTeX leak in the kept grid -- silently became "".
             ps_ = state.pages.get(page_num)
             bo_ = ps_.best_output if ps_ else None
             return kept_table_grid_defect(bo_.text) if bo_ and bo_.text else ""
@@ -7707,35 +7763,10 @@ class UnifiedPipeline:
                 and getattr(e, "page_num", 0)
             }
         )
-        # GH-292: ask the manifest what it SHIPS, do not re-derive it. The old
-        # predicate was `corrupt_math_hybrid is not None`, but the manifest
-        # ships the hybrid only when four further conditions hold (not
-        # shredded, not table-blocked, present in `attempts`, engine
-        # `native+math`). The bucket was therefore strictly broader than the
-        # disposition it names, and diverged in 1,984 of 4,096 synthetic states
-        # -- always claiming pages the manifest ships as something else.
-        #
-        # Both consequences are content-visible. `native_fallback_pages`
-        # excludes this bucket on the premise "the hybrid ships", so a genuine
-        # native-fallback page was dropped from the list that surfaces it; and
-        # the bucket feeds `pages_ok`, so a page shipping NATIVE_CLEAN --
-        # SUCCESS, audit_passed True, nothing wrong with it -- drove its
-        # document to AUDIT_FAILED and emitted a corrupt-math event for a
-        # defect it does not have.
-        #
-        # `whole_doc` is deliberately NOT passed. The hybrid branch is the first
-        # in `_select_page_output_tagged` and returns before `whole_doc` is ever
-        # read, so plumbing it here would be dead -- and would make
-        # `socr.pipeline` reach into the private `_whole_doc_page_texts` for no
-        # effect, which is the opposite of the public surface this fix adds
-        # (#450 review).
-        from socr.core.manifest import WinnerKind, shipped_winner_kind
-
-        corrupt_math_hybrid_pages = [
-            n
-            for n in sorted(state.pages)
-            if shipped_winner_kind(state, n) is WinnerKind.CORRUPT_MATH_HYBRID
-        ]
+        # Contract: native_fallback_pages means OCR was tried for a
+        # non-S1/non-D3/non-flagged-model reason and native bytes ultimately shipped
+        # demoted; it is intentionally not equivalent to the DEMOTED_NATIVE ending
+        # or the old NATIVE_FALLBACK provenance.
         native_fallback_pages = [
             n
             for n, p in sorted(state.pages.items())
@@ -8088,6 +8119,10 @@ class UnifiedPipeline:
             # be able to tell "we shipped nothing" from "we shipped the model
             # over a hard fail", so it gets its own kind rather than reusing one.
             for n in d3_model_table_pages:
+                # The engine named here is the CANDIDATE d3_floor_kept_model_output
+                # chose, not the record that shipped. On a page whose passing
+                # best_output wins selection outright the two differ, and the
+                # audit log must name the reading the D3 supersession is about.
                 _kept_d3 = d3_floor_kept_model_output(state.pages[n])
                 state.events.append(
                     AuditEvent(
@@ -8129,6 +8164,8 @@ class UnifiedPipeline:
             # ANY structure-class page whose native branch may not author the
             # grid, flag or no flag -- the 2026-08-20 measurement's actual bug.
             for n in structure_class_model_pages:
+                # Same reason as the D3 event above: name the grid candidate the
+                # structure-class branch selected, not whatever finally shipped.
                 _kept_sc = structure_class_grid_winner(state.pages[n])
                 state.events.append(
                     AuditEvent(
@@ -8464,14 +8501,16 @@ class UnifiedPipeline:
         # output too; the saved Markdown, authoritative fragments, sidecars and
         # replay blobs must all freeze the same guarded page text and status.
         final_page_outputs: list[PageOutput] | None = None
+        final_records: list[FinalizedPageRecord] | None = None
         if has_text:
             from ocr_output_contract import assemble_pages, split_native_pages
 
-            from socr.core.manifest import finalized_page_outputs
+            from socr.core.manifest import finalized_page_records
 
             final_bodies = split_native_pages(final_text)
             if len(final_bodies) == state.handle.page_count:
-                final_page_outputs = finalized_page_outputs(state, final_text)
+                final_records = finalized_page_records(state, final_text)
+                final_page_outputs = [record.output for record in final_records]
                 emission_failures = [
                     page
                     for page in final_page_outputs
@@ -8530,7 +8569,7 @@ class UnifiedPipeline:
         # figures or phantom image refs.  Supersedes the PP-1 pre-strip flush for
         # ALL pages.
         if has_text:
-            self._rewrite_all_fragments(state, output_dir, final_text)
+            self._rewrite_all_fragments(state, output_dir, final_text, records=final_records)
 
         # The earlier terminal sidecar flush intentionally precedes the figure
         # phase. Rewrite it once more from the exact final outputs so captions,
@@ -8543,22 +8582,31 @@ class UnifiedPipeline:
         # writes to -- so it silently undid GH-171's re-flush above and shipped
         # empty `figure_refs` again. Fixing one call site was not enough; every
         # writer of this file needs the same sources or the last one wins.
-        if has_text and final_page_outputs is not None:
-            self._final_winning_outputs = {page.page_num: page for page in final_page_outputs}
+        if has_text and final_records is not None:
+            self._final_records = {rec.output.page_num: rec for rec in final_records}
             _final_figures = list(getattr(final_result, "figures", []) or [])
             try:
-                for page in final_page_outputs:
+                for rec in final_records:
                     self._flush_page_sidecar(
-                        state, page.page_num, output_dir, extra_figures=_final_figures
+                        state,
+                        rec.output.page_num,
+                        output_dir,
+                        extra_figures=_final_figures,
+                        record=rec,
                     )
             finally:
-                self._final_winning_outputs = None
+                self._final_records = None
 
         # Reproducibility manifest (opt-in; default-on in agentic mode). Pass the
         # FINAL saved body so the manifest blobs (and thus replay) reproduce the
         # on-disk .md bit-for-bit, not the pre-transform state.
         if has_text and (self.config.write_manifest or self.config.agentic):
-            self._write_manifest(state, output_dir, saved_body=final_text)
+            self._write_manifest(
+                state,
+                output_dir,
+                saved_body=final_text,
+                records=final_records,
+            )
 
         # Durable per-run audit log of notable events (RECITATION escalations,
         # judge rejections, dual-pass patches). Always written; never fatal.

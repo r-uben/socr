@@ -160,8 +160,8 @@ def _manifest_symbol(name: str):
 def _floor_kind():
     import socr.core.manifest as _manifest
 
-    kind = getattr(_manifest.WinnerKind, "STRUCTURE_CLASS_FLOOR", None)
-    assert kind is not None, "P2 must expose WinnerKind.STRUCTURE_CLASS_FLOOR"
+    kind = getattr(_manifest.SelectionProvenance, "STRUCTURE_CLASS_FLOOR", None)
+    assert kind is not None, "P2 must expose SelectionProvenance.STRUCTURE_CLASS_FLOOR"
     return kind
 
 
@@ -180,10 +180,10 @@ def test_grid_arm_is_unaffected_by_p2(tmp_path: Path) -> None:
     assert UNIQUE_NATIVE_ROW in winner.text, winner.text
     assert winner.audit_passed is False, winner.audit_passed
 
-    from socr.core.manifest import WinnerKind, _select_page_output_tagged
+    from socr.core.manifest import SelectionProvenance, _select_page_output_tagged
 
     _out, kind = _select_page_output_tagged(state, 1)
-    assert kind is WinnerKind.STRUCTURE_CLASS_GRID_FLAGGED, kind
+    assert kind is SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED, kind
 
 
 def test_no_grid_arm_loses_the_native_row_and_gains_the_marker(tmp_path: Path) -> None:
@@ -377,7 +377,7 @@ def test_winner_kind_structure_class_floor_replaces_retired_ending(tmp_path: Pat
     specific rename P2 requires."""
     import socr.core.manifest as _manifest
 
-    assert not any(member.name.endswith("_NO_GRID") for member in _manifest.WinnerKind), (
+    assert not any(member.name.endswith("_NO_GRID") for member in _manifest.SelectionProvenance), (
         "P2 must remove the retired no-grid WinnerKind member"
     )
     floor_kind = _floor_kind()
@@ -616,10 +616,80 @@ def test_structure_class_floor_note_is_none_when_the_floor_never_fires(tmp_path:
 # ---------------------------------------------------------------------------
 
 
-def _flush_terminal_sidecar(pipeline, state: DocumentState, page_num: int, out_dir: Path) -> None:
+def _flush_terminal_sidecar(
+    pipeline, state: DocumentState, page_num: int, out_dir: Path, record=None
+) -> Path:
     text = state.pages[page_num].best_output.text
     pipeline._flush_page_fragment(state, page_num, text, out_dir)
-    pipeline._flush_page_sidecar(state, page_num, out_dir, terminal=True)
+    return pipeline._flush_page_sidecar(state, page_num, out_dir, terminal=True, record=record)
+
+
+def _flush_legacy_sidecar(
+    pipeline, state: DocumentState, page_num: int, out_dir: Path, output: PageOutput
+) -> Path:
+    """Write the sidecar an OLDER BUILD would have left behind for *output*.
+
+    Two things make the artefact historical rather than merely injected. The body
+    is the fixture's own -- the current selector cannot produce it, which is the
+    whole point of these tests. And the file carries **no** ``disposition`` key: the
+    builds these tests defend against predate that field entirely.
+
+    Stripping the key is what keeps the artefact internally consistent (cold review
+    round 2, finding 9). Production always writes a disposition, and one recomputed
+    from live state can contradict the injected bytes -- a Gemini
+    ``WARNING/TABLE_REJECTED`` output paired with ``(MODEL_OUTPUT, ACCEPTED_OUTPUT)``.
+    ``_load_terminal_page`` never reads the field, so such a contradiction would sit
+    on disk unexamined and the resume assertion would pass over an invalid record.
+
+    Production now has ONE record path (``_final_records`` / the ``record=``
+    argument); this is a test fixture built on top of it, not a second one.
+    """
+    from socr.core.manifest import FinalizedPageRecord, finalized_page_record
+
+    base = finalized_page_record(state, page_num)
+    record = FinalizedPageRecord(
+        output=output,
+        disposition=base.disposition,
+        selection_provenance=base.selection_provenance,
+    )
+    path = _flush_terminal_sidecar(pipeline, state, page_num, out_dir, record=record)
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta.pop("disposition", None)
+    path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return path
+
+
+def test_a_legacy_sidecar_fixture_carries_no_disposition_field(tmp_path: Path) -> None:
+    """The historical-artefact claim, pinned rather than asserted in a docstring.
+
+    Cold review round 2, finding 9. Every resume test below that injects an
+    older-build body reads a file with no ``disposition`` key, so the three fields of
+    a finalized record cannot silently disagree on disk, and the resume decision is
+    made on the same evidence the older build left.
+    """
+    pdf_path = _born_digital_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    pipeline = _pipeline()
+    pipeline._scan_root = pdf_path.parent
+
+    state = _state(pdf_path, grid_qualifies=False)
+    legacy = PageOutput(
+        page_num=1,
+        text=NATIVE_TEXT_WITH_PROSE,
+        status=PageStatus.WARNING,
+        engine="native",
+        audit_passed=False,
+        failure_mode=FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+    )
+    state.pages[1].best_output = legacy
+    path = _flush_legacy_sidecar(pipeline, state, 1, out_dir, legacy)
+
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    assert "disposition" not in meta, meta
+    # ...while an ordinary flush from the current build does carry it, so the
+    # absence above is the fixture's doing and not a missing feature.
+    ordinary = _flush_terminal_sidecar(pipeline, state, 1, out_dir)
+    assert "disposition" in json.loads(ordinary.read_text(encoding="utf-8"))
 
 
 def test_new_floor_sidecar_is_reprocessed_not_skipped(tmp_path: Path) -> None:
@@ -685,9 +755,8 @@ def test_pre_p2_case_iii_warning_sidecar_is_also_reprocessed(
         failure_mode=legacy_failure_mode,
     )
     state.pages[1].best_output = legacy_winner
-    pipeline._final_winning_outputs = {1: legacy_winner}
 
-    _flush_terminal_sidecar(pipeline, state, 1, out_dir)
+    _flush_legacy_sidecar(pipeline, state, 1, out_dir, legacy_winner)
 
     sidecar_path = next(out_dir.rglob("pages/00001.json"), None)
     assert sidecar_path is not None
@@ -756,8 +825,7 @@ def test_the_new_failure_mode_alone_grants_no_gh353_resume_exception(tmp_path: P
     state.pages[1].best_output = table_rejected_winner
     state.pages[1].table_ladder_disposition = FailureMode.TABLE_REJECTED
     state.pages[1].table_ladder_incomplete = False
-    pipeline._final_winning_outputs = {1: table_rejected_winner}
-    _flush_terminal_sidecar(pipeline, state, 1, out_dir)
+    _flush_legacy_sidecar(pipeline, state, 1, out_dir, table_rejected_winner)
     resumed_d1b = pipeline._load_terminal_page(state, 1, out_dir)
     assert resumed_d1b is not None, (
         "exact TABLE_REJECTED with table_ladder_incomplete=False is the sole D1b exception"
@@ -1454,8 +1522,7 @@ def test_floored_page_is_reprocessed_even_when_the_ladder_said_table_rejected(
     state.pages[1].best_output = winner
     state.pages[1].table_ladder_disposition = FailureMode.TABLE_REJECTED
     state.pages[1].table_ladder_incomplete = False
-    pipeline._final_winning_outputs = {1: winner}
-    _flush_terminal_sidecar(pipeline, state, 1, out_dir)
+    _flush_legacy_sidecar(pipeline, state, 1, out_dir, winner)
 
     sidecar_path = next(out_dir.rglob("pages/00001.json"), None)
     assert sidecar_path is not None
@@ -1495,8 +1562,7 @@ def test_d1b_exception_still_works_for_a_genuinely_rejected_table(tmp_path: Path
     state.pages[1].best_output = rejected_winner
     state.pages[1].table_ladder_disposition = FailureMode.TABLE_REJECTED
     state.pages[1].table_ladder_incomplete = False
-    pipeline._final_winning_outputs = {1: rejected_winner}
-    _flush_terminal_sidecar(pipeline, state, 1, out_dir)
+    _flush_legacy_sidecar(pipeline, state, 1, out_dir, rejected_winner)
 
     assert pipeline._load_terminal_page(state, 1, out_dir) is not None, (
         "the D1b exception must survive finding 2's fix for its own case"
