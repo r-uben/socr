@@ -585,15 +585,19 @@ class UnifiedPipeline:
         """Resolved ``{model, backend, task}`` for an engine, never raising.
 
         Used to fold the model/backend/task of every configured engine that can
-        contribute text (primary or local) into the run fingerprint. A swap of a
-        secondary engine's model/task/backend changes the saved output (the
-        orchestrator routes pages to it), so it must invalidate the resume cache
-        just like a primary-engine swap. Degrades to the engine name on any
-        error so fingerprinting never breaks a run.
+        contribute text -- the primary, the local engine, and each member of
+        ``enabled_engines`` (the agentic ladder is built from those) -- into the
+        run fingerprint. A swap of a secondary engine's model/task/backend
+        changes the saved output (the orchestrator routes pages to it), so it
+        must invalidate the resume cache just like a primary-engine swap.
+        Degrades to the engine name on any error so fingerprinting never breaks
+        a run.
 
-        The FALLBACK chain is no longer among them (GH-525): no execution path
-        reads it, so its members cannot contribute text and their models cannot
-        change the saved output.
+        The FALLBACK chain is no longer among the sources (GH-525): the
+        ``fallback_chain`` field is not read for routing, so changing it alone
+        cannot select a provider. That is narrower than "its members cannot
+        contribute" (cubic P3 on #532) -- a member enabled independently still
+        can, and is fingerprinted through ``enabled_engines``.
         """
         from socr.engines.registry import get_engine
 
@@ -618,8 +622,9 @@ class UnifiedPipeline:
 
         Captures what changes *what output an input produces*: the resolved
         primary engine's model id, backend, and task, the resolved determinants
-        of every secondary engine that can contribute text (the local engine),
-        and socr's output-affecting orchestration flags. Stored in
+        of every secondary engine that can contribute text (the local engine and
+        each member of ``enabled_engines``, which is what the agentic ladder is
+        built from), and socr's output-affecting orchestration flags. Stored in
         :class:`DocMetadata.fingerprint` and consulted by
         :meth:`RootIndex.is_completed`, so a re-run under a different model / task
         / flag reprocesses instead of silently reusing the cached output.
@@ -657,10 +662,15 @@ class UnifiedPipeline:
             # the GH-525 note below.)
             "local_engine_determinants": self._engine_determinants(cfg.local_engine),
             # GH-525: `judge_hard_pages`, `fallback_chain` and its determinants
-            # are deliberately ABSENT. None gates any phase (GH-142 rejected
-            # their flags for that), so including them made a config-only toggle
-            # invalidate every terminal page and force a reprocess producing
-            # byte-identical output.
+            # are deliberately ABSENT. Neither field is read for routing
+            # (GH-142 rejected their flags for that), so including them made a
+            # config-only toggle invalidate every terminal page and force a
+            # reprocess producing byte-identical output.
+            #
+            # Narrower than "a fallback member cannot contribute" (cubic P3 on
+            # #532): a member ENABLED independently still can, and is
+            # fingerprinted through `enabled_engines` below. What changing
+            # `fallback_chain` alone cannot do is select a provider.
             #
             # Dropping them changes this fingerprint once, for everybody. That
             # cost was the reason not to -- until `_socr_source_digest` was
