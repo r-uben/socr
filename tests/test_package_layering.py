@@ -287,3 +287,28 @@ def test_private_import_styles_are_caught(rel: str, source: str, module: str, na
     assert (module, name) in {(m, n) for _ln, m, n in keys}, (
         f"private import slipped through ({module}.{name}):\n{source}"
     )
+
+
+def test_math_font_term_has_a_public_core_accessor() -> None:
+    """Cold review round 1, finding 7.
+
+    The P4-M trigger measurement must read the math-font term through public
+    core API, not a private regex import, so a core refactor cannot silently
+    change what the measurement measured. This pins the accessor's existence and
+    that it agrees with the private pattern it wraps.
+    """
+    from socr.core.born_digital import _MATH_FONT_RE, is_math_font, math_font_char_count
+
+    assert callable(math_font_char_count)
+    assert is_math_font("ABCDEF+CMMI10") == "CMMI"
+    assert is_math_font("Times-Roman") is None
+    assert is_math_font("") is None
+    for name in ("ABCDEF+CMMI10", "STIXMath", "Times-Roman", "Helvetica"):
+        assert bool(is_math_font(name)) is bool(_MATH_FONT_RE.search(name))
+
+
+def test_the_benchmark_does_not_import_the_private_math_font_regex() -> None:
+    """The allowlist entry that blessed this import was reverted; keep it out."""
+    src = (SRC / "benchmark" / "trigger_rates.py").read_text()
+    assert "_MATH_FONT_RE" not in src
+    assert "math_font_char_count" in src

@@ -129,6 +129,18 @@ class PageState:
     #: ``structure_class_model_pages`` on the second run even though the same
     #: input produced it on the first.
     structure_class_model_kept_on_resume: bool = False
+    #: P4-R (cold review round 1, finding 5): the equation-region lane wanted to
+    #: read this page and could not, because no available provider served the
+    #: clean-equation model. That is TRANSIENT external state, not configuration,
+    #: so the run fingerprint does not describe it -- and a page whose only
+    #: defect is "the model was not up" would otherwise be written terminal
+    #: SUCCESS and restored forever, leaving a default-on lane permanently inert
+    #: on that page. Persisted in the page sidecar and read by
+    #: ``_load_terminal_page``, which refuses to skip such a page so the next run
+    #: with a provider actually reads it. Deliberately NOT a status demotion: the
+    #: page's shipped bytes, status and audit verdict are exactly what they are
+    #: with the lane switched off, per the no-provider parity requirement.
+    equation_lane_retry_pending: bool = False
     #: GH-353 TICKET-B1: the table judge ladder's page-level disposition
     #: (``FailureMode.TABLE_REJECTED`` / ``TABLE_UNVERIFIED`` / ``None``).
     #: This is the durable, pre-guard signal C3's manifest guard

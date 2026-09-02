@@ -88,16 +88,36 @@ def test_clean_equation_model_invalidates_while_the_lane_is_on() -> None:
 
 
 def test_clean_equation_model_is_ignored_while_the_lane_is_off() -> None:
-    """Converse: no sidecars are produced, so the model identity is irrelevant."""
-    off = {"recover_clean_equations": False, "detect_equations": True}
+    """Converse: no sidecars are produced, so the model identity is irrelevant.
+
+    P4-R gave this model a SECOND consumer -- the default-on equation region
+    lane, which reads it whenever ``equation_region_lane`` is set. The converse
+    therefore holds only when NEITHER consumer can run, so the region lane is
+    switched off here explicitly. The P4-R arms (model swaps with the region
+    lane on, with the legacy lane on, and with both off) are pinned in
+    tests/test_equation_lane_config_p4r.py.
+    """
+    off = {
+        "recover_clean_equations": False,
+        "detect_equations": True,
+        "equation_region_lane": False,
+    }
     assert _fingerprint(**off, clean_equation_model="model-a") == _fingerprint(
         **off, clean_equation_model="model-b"
     )
 
 
 def test_clean_equation_model_is_ignored_without_detection() -> None:
-    """Converse, second prerequisite: recovery is a no-op when detection is off."""
-    off = {"recover_clean_equations": True, "detect_equations": False}
+    """Converse, second prerequisite: recovery is a no-op when detection is off.
+
+    ``equation_region_lane`` off for the same reason as above: P4-R is the
+    model's other consumer.
+    """
+    off = {
+        "recover_clean_equations": True,
+        "detect_equations": False,
+        "equation_region_lane": False,
+    }
     assert _fingerprint(**off, clean_equation_model="model-a") == _fingerprint(
         **off, clean_equation_model="model-b"
     )

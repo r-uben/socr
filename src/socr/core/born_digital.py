@@ -42,6 +42,43 @@ _MATH_FONT_RE = re.compile(
     r"Euler|rsfs)"  # Euler script, RSFS (calligraphic)
 )
 
+
+def is_math_font(basefont: str) -> str | None:
+    """The math family ``basefont`` belongs to, or None.
+
+    The PUBLIC form of the math-font term behind the page-level ``has_equations``
+    signal. Subset prefixes are handled (``ABCDEF+CMMI10`` matches ``CMMI``).
+
+    Exists because the P4-M trigger measurement must count the SAME term P4-R
+    routes on: a measurement made with a private copy of the rule describes a
+    detector that is not the one in production, and nothing stops the two from
+    drifting apart. Cold review round 1, finding 7 -- the alternative was a
+    permanent allowlist entry blessing a private cross-package import.
+    """
+    match = _MATH_FONT_RE.search(basefont or "")
+    return match.group(0) if match else None
+
+
+def math_font_char_count(page) -> int:
+    """Characters on ``page`` rendered in a recognised math font.
+
+    The magnitude behind the same signal, as a public measurement seam. Returns
+    0 on a page with no math-font spans and never raises on a page whose text
+    dict cannot be read.
+    """
+    total = 0
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+    except Exception:
+        return 0
+    for block in blocks:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if is_math_font(span.get("font", "") or ""):
+                    total += len(span.get("text", ""))
+    return total
+
+
 # Math typeset with a broken font/ToUnicode map decodes operators and delimiters
 # as Latin-1 letters and fraction glyphs: '=' -> '¼', '(' -> 'ð', ')' -> 'Þ',
 # '+' -> 'þ', '-' -> a C0 control char. These glyphs do not occur in clean
