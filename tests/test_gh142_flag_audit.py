@@ -51,6 +51,11 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "socr"
 _FIELD_ALIASES = {
     "primary": "primary_engine",
     "dpi": "render_dpi",
+    # `--hpc-sequential` writes a NESTED field. Checking the parent `hpc` object
+    # instead would let any unrelated HPC setting certify this flag as live --
+    # and would even count `config.hpc.enabled = True` itself, since the parent
+    # is loaded in order to store into it (cubic P2 on #516).
+    "hpc_sequential": "hpc.enabled",
 }
 
 # Flags that gate BY CONSTRUCTION rather than through a config read, with the
@@ -58,15 +63,16 @@ _FIELD_ALIASES = {
 # of this file skipped four flags for want of a field mapping, which is exactly
 # how a flag escapes the audit.
 #
-# `--hpc-sequential` is the one such case. Its `if hpc_sequential:` branch in
-# `cli.py` builds HPCPipeline directly off the LOCAL variable, so the flag has a
-# real effect while the two config fields it also writes -- `hpc.enabled` and
-# `hpc.sequential` -- are read nowhere in the source tree. Those dead fields are
-# a smaller finding of this same sweep, filed separately; they are not what
-# makes the flag work, so convicting the flag on them would be wrong.
-_GATES_BY_CONSTRUCTION = {
-    "hpc_sequential": "cli.py builds HPCPipeline from the local variable, not from config",
-}
+# EMPTY since GH-517. `--hpc-sequential` was the one entry: its branch built
+# HPCPipeline off the LOCAL variable, so the flag worked while the two config
+# fields it also wrote were read nowhere. GH-517 made `hpc.enabled` the real
+# selector, so the flag now gates through config like every other one and is
+# mapped above.
+#
+# This test caught that transition on its own -- the exemption went stale the
+# moment the construct moved, and the guard said so. Keep the mechanism; a
+# future flag may need it.
+_GATES_BY_CONSTRUCTION: dict[str, str] = {}
 
 # Reads that do NOT make a flag live for `process`. A value serialised into a
 # benchmark report is not consumed by any run -- this is how `--fallback` passed
@@ -150,7 +156,7 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "no_equation_region_lane": (AGENTIC, "equation_region_lane, gated in the agentic lane"),
     # -- non-agentic by design
     "fallback": (REJECTED, "GH-142: no execution reader; raises UsageError"),
-    "hpc_sequential": (NON_AGENTIC, "HPC lane only"),
+    "hpc_sequential": (NON_AGENTIC, "HPC lane only; sets hpc.enabled, read at pipeline choice"),
     # -- rejected outright
     "no_audit": (REJECTED, "GH-139: no consumer in any mode; raises UsageError"),
     "no_judge_hard_pages": (REJECTED, "GH-142: gates nothing; raises UsageError"),
