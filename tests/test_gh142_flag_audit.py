@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import re
 from pathlib import Path
 
 import click
@@ -510,3 +511,57 @@ def test_a_rejected_flag_does_not_advertise_the_old_behaviour(option: str) -> No
         f"--{option.replace('_', '-')} raises on invoke but its help text still "
         f"advertises behaviour it does not have: {param.help!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "option", [n for n, (status, _) in CLASSIFIED.items() if status == REJECTED]
+)
+def test_the_readme_does_not_advertise_a_rejected_flag(option: str) -> None:
+    """GH-528: the third surface to tell the same lie.
+
+    `--fallback` and `--no-judge-hard-pages` raise on invoke (GH-142), and their
+    `--help` was corrected (GH-524) -- and the README's CLI reference still
+    listed `--fallback` as "Fallback engine". Three surfaces, fixed one ticket
+    at a time, each after someone noticed.
+
+    So this checks the README rather than fixing it again: a rejected flag that
+    appears there must be marked removed. Absent is fine too -- a reference that
+    omits a dead flag is not lying about it.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    flag = "--" + option.replace("_", "-")
+
+    # A reference entry is a line whose FIRST TOKEN is the flag, once the
+    # markdown decoration is stripped. Not any prose that happens to name it --
+    # a sentence explaining why it was removed is not an advertisement and
+    # should not have to shout REMOVED to pass.
+    #
+    # cubic P2 on #531: matching the raw line's prefix let any other layout
+    # escape -- `` `--fallback` `` in backticks, a `- --fallback` list item, a
+    # table cell -- and the check would return green while the README told the
+    # exact lie it exists to prevent. A format tweak must not be able to
+    # silently disable it.
+    def _entry_flag(line: str) -> str | None:
+        # Strip a LIST or TABLE marker only -- not "-", which is the flag's own
+        # prefix (cubic P2, round two: `lstrip("-*|`")` turned `- fallback
+        # engine` into `--fallback`, a false positive, and left
+        # `**--fallback**` as `--fallback**`, a miss).
+        stripped = re.sub(r"^\s*(?:[*|]|-\s)\s*", "", line).strip()
+        tokens = stripped.split()
+        if not tokens:
+            return None
+        # Trim inline formatting from the token itself, then require it to be a
+        # flag. A word that merely BECOMES one after stripping is not an entry.
+        token = tokens[0].strip("`*_|,")
+        return token if token.startswith("--") else None
+
+    mentions = [line for line in readme.splitlines() if _entry_flag(line) == flag]
+    if not mentions:
+        return
+
+    for line in mentions:
+        assert "REMOVED" in line.upper() or "REJECT" in line.upper(), (
+            f"README lists {flag} as if it worked: {line.strip()!r}. It raises "
+            "on invoke; a reader of the docs alone would believe the constraint "
+            "exists."
+        )
