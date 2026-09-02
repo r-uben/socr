@@ -35,6 +35,7 @@ timeout: 999
 judge_backend: heuristic
 judge_model: my-judge
 save_figures: true
+describe_figures: true
 """
 
 LOADED = {
@@ -45,6 +46,9 @@ LOADED = {
     "judge_backend": "heuristic",
     "judge_model": "my-judge",
     "save_figures": True,
+    # GH-168 review: the `--describe-figures` else-branch clears BOTH of these
+    # when the flag is absent, so both need a preserve assertion.
+    "describe_figures": True,
 }
 
 
@@ -95,6 +99,15 @@ def test_an_absent_option_preserves_the_loaded_value(
         (["--timeout", "60"], "timeout", 60),
         (["--judge-backend", "vlm"], "judge_backend", "vlm"),
         (["--judge-model", "other"], "judge_model", "other"),
+        # The figures pair: `--describe-figures` implies save_figures, and
+        # `--save-figures` on its own must still turn describe_figures off.
+        (["--describe-figures"], "describe_figures", True),
+        (["--describe-figures"], "save_figures", True),
+        # NOT `describe_figures False`: the user typed --save-figures, not
+        # "do not describe". Clearing a `describe_figures: true` loaded from the
+        # file because an unrelated flag was given is the very clobbering this
+        # ticket is about, so the loaded value stands.
+        (["--save-figures"], "describe_figures", True),
     ],
 )
 def test_an_explicit_option_still_overrides_the_loaded_value(
