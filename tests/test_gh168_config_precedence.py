@@ -188,8 +188,11 @@ def test_a_loaded_dry_run_is_preserved(tmp_path: Path, monkeypatch: pytest.Monke
     )
 
     # The dry-run listing is the evidence: it only happens when the loaded
-    # `dry_run: true` survived. Asserted on the OUTPUT rather than the exit
-    # code, which the dry-run path does not define as part of this contract.
+    # `dry_run: true` survived. GH-483: this used to add that the exit code is
+    # "not defined as part of this contract", which contradicted the
+    # `exit_code == 0` assertion added just above it in the #473 round. The
+    # exit code IS asserted; the listing is the additional evidence, not a
+    # substitute for it.
     assert "Would process" in result.output, (
         f"the CLI default cleared a `dry_run: true` loaded from --config; the "
         f"run proceeded instead of listing: {result.output!r}"
@@ -203,6 +206,7 @@ def test_a_loaded_dry_run_is_preserved(tmp_path: Path, monkeypatch: pytest.Monke
 # `_explicitly_given` still lets the user win.
 FALSE_CONFIG = """
 reprocess: false
+dry_run: false
 quiet: false
 verbose: false
 write_manifest: false
@@ -214,6 +218,12 @@ save_figures: false
     ("flag", "field"),
     [
         (["--reprocess"], "reprocess"),
+        # GH-483: dry_run rides the same parametrize. `_run_with` stubs
+        # `_resolve_output_root`, and the dry-run path constructs the stubbed
+        # pipeline to call it, so the built config is still captured. It was
+        # omitted from #481 -- the one field #479 listed FIRST -- and a gate
+        # that ignored the CLI for dry_run alone would have stayed green.
+        (["--dry-run"], "dry_run"),
         (["--quiet"], "quiet"),
         (["--verbose"], "verbose"),
         (["--write-manifest"], "write_manifest"),
