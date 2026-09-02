@@ -28,9 +28,8 @@ gating anything. Per-flag behavioural pins stay the job of each flag's own test.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
-import re
-import subprocess
 from pathlib import Path
 
 import click
@@ -40,6 +39,22 @@ from socr.cli import cli
 from socr.core.config import PipelineConfig
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "socr"
+
+# CLI option name -> PipelineConfig field, where the two differ (cubic P2 on
+# #516). These four were SKIPPED by the first version for want of a matching
+# dataclass field -- which quietly exempted `--primary`, `--dpi` and
+# `--fallback` from the very check this file exists to apply.
+# `fallback` maps to the BACKING field, not to the alias: `fallback_engine` is a
+# property whose setter writes `fallback_chain`, so checking for reads of the
+# property name would find none and wrongly convict a working flag.
+_FIELD_ALIASES = {
+    "primary": "primary_engine",
+    "fallback": "fallback_chain",
+    "dpi": "render_dpi",
+    # `--hpc-sequential` writes config.hpc.*, a nested section rather than a
+    # top-level field, so it is checked by its nested attribute instead.
+    "hpc_sequential": "hpc",
+}
 
 # --- status vocabulary ------------------------------------------------------
 AGENTIC = "agentic"  # read on, or by a helper of, the default agentic path
@@ -126,10 +141,70 @@ def test_the_classification_has_no_stale_entries() -> None:
 
 def _config_field_for(option_name: str) -> str | None:
     fields = {f.name for f in dataclasses.fields(PipelineConfig)}
-    for candidate in (option_name, option_name.removeprefix("no_")):
+    for candidate in (
+        _FIELD_ALIASES.get(option_name, option_name),
+        option_name.removeprefix("no_"),
+    ):
         if candidate in fields:
             return candidate
     return None
+
+
+class _ConfigReads(ast.NodeVisitor):
+    """Attribute LOADS of ``config.<field>``, excluding the run fingerprint.
+
+    cubic P2 on #516: the first version grepped source text, so a comment or a
+    docstring mentioning ``config.foo`` certified a dead flag as live, and a
+    read spelled across a line break was invisible. Text matching is the wrong
+    instrument for "is this value used"; the parse tree is the right one.
+
+    The fingerprint exclusion is structural rather than a string test: any read
+    inside ``_run_fingerprint`` records the value into the run identity, which
+    is precisely the not-gating-anything case this check is for.
+    """
+
+    def __init__(self, field: str) -> None:
+        self.field = field
+        self.reads: list[int] = []
+        self._skip_depth = 0
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        skip = node.name == "_run_fingerprint"
+        self._skip_depth += skip
+        self.generic_visit(node)
+        self._skip_depth -= skip
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
+        if (
+            self._skip_depth == 0
+            and node.attr == self.field
+            and isinstance(node.ctx, ast.Load)
+            and _names_config(node.value)
+        ):
+            self.reads.append(node.lineno)
+        self.generic_visit(node)
+
+
+def _names_config(node: ast.AST) -> bool:
+    """True for ``config`` / ``self.config`` / ``cfg`` / ``self.cfg``."""
+    if isinstance(node, ast.Name):
+        return node.id in {"config", "cfg"}
+    if isinstance(node, ast.Attribute):
+        return node.attr in {"config", "cfg"}
+    return False
+
+
+def _config_read_sites(field: str) -> list[str]:
+    sites: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:  # pragma: no cover - a broken file is its own failure
+            continue
+        visitor = _ConfigReads(field)
+        visitor.visit(tree)
+        sites.extend(f"{path.relative_to(_SRC)}:{line}" for line in visitor.reads)
+    return sites
 
 
 @pytest.mark.parametrize(
@@ -151,31 +226,22 @@ def test_a_live_flag_has_a_consumer_beyond_the_fingerprint(option: str) -> None:
     if field is None:
         pytest.skip(f"{option} has no PipelineConfig field (handled at the CLI layer)")
 
-    found = subprocess.run(
-        ["grep", "-rn", rf"config\.{field}\b", str(_SRC)],
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-
-    assert found, f"{option} -> config.{field} is never read anywhere; the flag is dead"
-
-    # Two kinds of match are not consumption, and excluding them is what makes
-    # this check bite. Verified by probe: with only the fingerprint line
-    # excluded, restoring the `--no-judge-hard-pages` bug still PASSED, because
+    # Attribute LOADS only, and never from inside `_run_fingerprint`. Both
+    # exclusions are structural: assignments are `ast.Store`, so they cannot be
+    # counted, and the fingerprint is excluded by the function it lives in
+    # rather than by matching its dict-key text.
+    #
+    # Both exclusions were found by probing this check against the bug it was
+    # written for. With neither, restoring `--no-judge-hard-pages` still PASSED:
     # the CLI's own `config.judge_hard_pages = False` counted as a read site.
     # Writing a field is not reading it.
-    gating = [
-        line
-        for line in found
-        if f'"{field}":' not in line  # the run-fingerprint dict
-        and not re.search(rf"config\.{field}\s*=[^=]", line)  # an assignment
-    ]
+    gating = _config_read_sites(field)
     assert gating, (
         f"{option} -> config.{field} is only ASSIGNED or copied into the run "
         "fingerprint, never read to gate anything. That is the GH-142 failure "
         "shape: toggling it changes the run identity and forces a reprocess "
         "without changing behaviour. Either give it a consumer, or reject it at "
-        f"the CLI as #139 and #142 did. Sites found:\n" + "\n".join(found)
+        "the CLI as #139 and #142 did."
     )
 
 
@@ -200,4 +266,28 @@ def test_a_rejected_flag_actually_refuses(option: str, tmp_path: Path) -> None:
     assert "GH-" in (result.output or ""), (
         f"{flag} is refused but the message does not point at the ticket "
         f"explaining why: {result.output!r}"
+    )
+
+
+def test_every_classification_is_well_formed() -> None:
+    """A mistyped status would bypass every status-specific check below it.
+
+    cubic P2 on #516: `test_a_live_flag_has_a_consumer...` and
+    `test_a_rejected_flag_actually_refuses` both select by status, so a typo
+    like "agentc" silently exempts a flag from both while still satisfying
+    `test_every_process_flag_is_classified`. An empty reason is the same
+    failure in slower motion: it looks classified and tells a later reader
+    nothing to check against.
+    """
+    allowed = {AGENTIC, NON_AGENTIC, PLUMBING, REJECTED}
+    bad_status = {n: st for n, (st, _) in CLASSIFIED.items() if st not in allowed}
+    assert not bad_status, (
+        f"unknown status(es) -- these flags are silently exempt from every "
+        f"status-specific check: {bad_status}"
+    )
+
+    no_reason = [n for n, (_, why) in CLASSIFIED.items() if not why.strip()]
+    assert not no_reason, (
+        f"classified with no reason: {no_reason}. The reason is what a future "
+        "reader checks against the code; without it the entry asserts nothing."
     )
