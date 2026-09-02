@@ -114,3 +114,68 @@ def test_a_non_sequential_hpc_config_is_refused(tmp_path: Path) -> None:
         f"the refusal does not name the key that caused it: {result.output!r}"
     )
     assert built == [], f"a pipeline was built before the config was rejected: {built}"
+
+
+def test_batch_refuses_an_hpc_config_rather_than_ignoring_it(tmp_path: Path) -> None:
+    """cubic P2 on #535: making `hpc.enabled` authoritative for ONE command.
+
+    `process` honours it now. `batch` does not implement the HPC lane at all --
+    `HPCPipeline` has no `process_batch` -- so accepting the config there would
+    run the agentic pipeline while the config asked for HPC. That is the same
+    silent-ignore this ticket exists to remove, newly created by fixing it one
+    command over.
+
+    Refused rather than routed: routing would mean inventing a batch loop for a
+    pipeline that has none, which is a feature rather than a bug fix.
+    """
+    tmp = tmp_path / "batch_hpc"
+    tmp.mkdir(parents=True, exist_ok=True)
+    (tmp / "d.pdf").write_bytes(b"%PDF-1.4\n")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "batch",
+            str(tmp),
+            "--config",
+            str(_config(tmp, "hpc:\n  enabled: true\n  sequential: true\n")),
+        ],
+    )
+
+    assert result.exit_code != 0, (
+        "batch accepted an HPC config and would have run the agentic pipeline "
+        "while the config asked for HPC"
+    )
+    assert "hpc.enabled" in result.output, (
+        f"the refusal does not name the setting that caused it: {result.output!r}"
+    )
+
+
+def test_batch_still_works_without_an_hpc_config(tmp_path: Path) -> None:
+    """Control: the refusal must be scoped to HPC configs, not to batch."""
+    from unittest.mock import patch
+
+    tmp = tmp_path / "batch_plain"
+    tmp.mkdir(parents=True, exist_ok=True)
+    (tmp / "d.pdf").write_bytes(b"%PDF-1.4\n")
+
+    built: list[str] = []
+
+    class _Unified:
+        def __init__(self, config):
+            built.append("UnifiedPipeline")
+            self.config = config
+            self.last_outcome = None
+
+        def process_batch(self, *_a, **_k):
+            return []
+
+    with patch("socr.pipeline.orchestrator.UnifiedPipeline", _Unified):
+        result = CliRunner().invoke(
+            cli, ["batch", str(tmp), "--config", str(_config(tmp, "quiet: true\n"))]
+        )
+
+    assert built == ["UnifiedPipeline"], (
+        f"an ordinary batch no longer builds the agentic pipeline: {built}, "
+        f"output={result.output!r}"
+    )

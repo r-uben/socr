@@ -641,14 +641,6 @@ def process(
             console.print(f"[blue]Output:[/blue] {resolved_out}", soft_wrap=True)
         return
 
-    # Resolve AUTO engine early so we can route to the right pipeline
-    if config.primary_engine == EngineType.AUTO:
-        from socr.engines.registry import resolve_auto_engine
-
-        config.primary_engine = resolve_auto_engine()
-        if not config.quiet:
-            console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
-
     # GH-517: `hpc.enabled` selects the HPC lane, from a config file as well as
     # from the flag. It was written here and read NOWHERE, so `hpc.enabled: true`
     # in a YAML did nothing and the lane was reachable only through
@@ -685,6 +677,17 @@ def process(
 
         pipeline = HPCPipeline(config)
     else:
+        # Resolve AUTO only for the lane that uses it (cubic P2 on #535).
+        # `HPCPipeline` reads its models from `config.hpc`, never
+        # `primary_engine`, so probing the engine registry for an HPC run cost
+        # startup latency to pick a value nothing would read.
+        if config.primary_engine == EngineType.AUTO:
+            from socr.engines.registry import resolve_auto_engine
+
+            config.primary_engine = resolve_auto_engine()
+            if not config.quiet:
+                console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
+
         # UnifiedPipeline is the sole orchestrator: analyze -> agentic -> assemble.
         # --unified is kept as a backwards-compatible no-op.
         from socr.pipeline.orchestrator import UnifiedPipeline
@@ -753,6 +756,28 @@ def batch(
         socr batch ~/Papers/ --unified
     """
     config = build_config(output_dir=output_dir, **kwargs)
+
+    # GH-517 (cubic P2 on #535): `hpc.enabled` is authoritative for `process`
+    # now, and `batch` does not implement the HPC lane -- `HPCPipeline` has no
+    # `process_batch`. Accepting the config here would run the agentic pipeline
+    # while the config asked for HPC, which is the same silent-ignore this
+    # ticket exists to remove, created by fixing it one command over.
+    #
+    # Refused rather than routed: routing would mean inventing a batch loop for
+    # a pipeline that has none, which is a feature, not a bug fix.
+    if config.hpc.enabled:
+        raise click.UsageError(
+            "hpc.enabled is set, but 'socr batch' does not implement the HPC "
+            "lane (GH-517).\n"
+            "\n"
+            "HPCPipeline has no batch entry point. Running the batch anyway "
+            "would use the ordinary agentic pipeline while your config asked "
+            "for HPC.\n"
+            "\n"
+            "Process the files one at a time with 'socr process <PDF> "
+            "--hpc-sequential', or set 'hpc.enabled: false' to batch with the "
+            "default pipeline."
+        )
 
     # Resolve AUTO engine
     if config.primary_engine == EngineType.AUTO:
