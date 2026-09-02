@@ -36,6 +36,10 @@ judge_backend: heuristic
 judge_model: my-judge
 save_figures: true
 describe_figures: true
+# GH-469: four `is_flag` options of the same class, missed by GH-168.
+reprocess: true
+quiet: true
+verbose: true
 """
 
 LOADED = {
@@ -49,6 +53,9 @@ LOADED = {
     # GH-168 review: the `--describe-figures` else-branch clears BOTH of these
     # when the flag is absent, so both need a preserve assertion.
     "describe_figures": True,
+    "reprocess": True,
+    "quiet": True,
+    "verbose": True,
 }
 
 
@@ -118,3 +125,47 @@ def test_an_explicit_option_still_overrides_the_loaded_value(
     assert getattr(config, field) == value, (
         f"{field}: an explicit {flag[0]} did not override the config file"
     )
+
+
+def test_a_loaded_dry_run_is_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GH-469: `dry_run` needs its own test, and the reason is the evidence.
+
+    It cannot ride in the shared fixture above: a preserved `dry_run: true`
+    makes the CLI list files instead of constructing the pipeline, so every
+    other assertion there loses the config it measures. That the pipeline is
+    NEVER constructed is exactly the proof the loaded value survived -- under
+    the old unconditional assignment it was cleared to False and the run
+    proceeded.
+    """
+    fitz = pytest.importorskip("fitz")
+
+    d = tmp_path / "dry"
+    d.mkdir(parents=True, exist_ok=True)
+    cfg = d / "c.yaml"
+    cfg.write_text("dry_run: true\n")
+    pdf = d / "d.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "born digital text long enough to be a text layer.")
+    doc.save(str(pdf))
+    doc.close()
+
+    built: dict = {}
+
+    class _Stub:
+        def __init__(self, config):
+            built["config"] = config
+
+        def process(self, *_a, **_k):
+            raise AssertionError("dry_run was cleared: the pipeline ran anyway")
+
+    monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
+    result = CliRunner().invoke(cli, ["process", str(pdf), "--config", str(cfg)])
+
+    # The dry-run listing is the evidence: it only happens when the loaded
+    # `dry_run: true` survived. Asserted on the OUTPUT rather than the exit
+    # code, which the dry-run path does not define as part of this contract.
+    assert "Would process" in result.output, (
+        f"the CLI default cleared a `dry_run: true` loaded from --config; the "
+        f"run proceeded instead of listing: {result.output!r}"
+    )
+    assert "config" not in built or built["config"].dry_run is True

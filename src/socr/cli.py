@@ -412,10 +412,20 @@ def build_config(
             config.save_figures = save_figures
         if _explicitly_given("describe_figures"):
             config.describe_figures = False
-    config.reprocess = reprocess
-    config.dry_run = dry_run
-    config.quiet = quiet
-    config.verbose = verbose
+    # GH-469: the same gate as the seven GH-168 measured. These four are
+    # `is_flag`, so an absent flag arrives as False and overwrote a profile's
+    # `quiet: true` / `reprocess: true` / `dry_run: true` / `verbose: true`.
+    # `from_file` loads them generically (#240), so they were loadable and then
+    # silently discarded -- the same class, just missed because #168 gated only
+    # the fields its reproduction happened to name.
+    for _flag_name, _flag_value in (
+        ("reprocess", reprocess),
+        ("dry_run", dry_run),
+        ("quiet", quiet),
+        ("verbose", verbose),
+    ):
+        if _explicitly_given(_flag_name):
+            setattr(config, _flag_name, _flag_value)
 
     # Agentic cost-aware routing is the sole default; --agentic is a backward-compatibility no-op.
     # The config default (True from PipelineConfig or loaded YAML) is always used.
