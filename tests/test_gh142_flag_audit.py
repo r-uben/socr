@@ -527,14 +527,22 @@ def test_the_readme_does_not_advertise_a_rejected_flag(option: str) -> None:
     readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
     flag = "--" + option.replace("_", "-")
 
-    mentions = [
-        line
-        for line in readme.splitlines()
-        # The flag at the START of a reference entry, not any prose that happens
-        # to name it -- a sentence explaining WHY it was removed is not an
-        # advertisement, and should not have to shout REMOVED to pass.
-        if line.strip().startswith(flag)
-    ]
+    # A reference entry is a line whose FIRST TOKEN is the flag, once the
+    # markdown decoration is stripped. Not any prose that happens to name it --
+    # a sentence explaining why it was removed is not an advertisement and
+    # should not have to shout REMOVED to pass.
+    #
+    # cubic P2 on #531: matching the raw line's prefix let any other layout
+    # escape -- `` `--fallback` `` in backticks, a `- --fallback` list item, a
+    # table cell -- and the check would return green while the README told the
+    # exact lie it exists to prevent. A format tweak must not be able to
+    # silently disable it.
+    def _entry_flag(line: str) -> str:
+        stripped = line.strip().lstrip("-*|` \t")
+        head = stripped.split(maxsplit=1)[0] if stripped.split() else ""
+        return "--" + head.lstrip("-").strip("`,|")
+
+    mentions = [line for line in readme.splitlines() if _entry_flag(line) == flag]
     if not mentions:
         return
 
