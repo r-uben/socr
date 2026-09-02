@@ -155,3 +155,47 @@ def test_the_reflush_happens_after_the_figure_phase() -> None:
         "no caller passes extra_figures, so the figure phase's results still "
         "never reach the sidecar"
     )
+
+
+def test_every_terminal_flush_carries_the_figures() -> None:
+    """GH-485: fixing ONE call site was not enough -- the last writer wins.
+
+    #484 added `extra_figures` to the mid-assemble re-flush, but a LATER
+    authoritative flush (after `_rewrite_all_fragments`) still called the helper
+    without it. That write scans `state.engine_runs` only, which the figure
+    phase never populates, so it silently undid the fix and shipped empty
+    `figure_refs` again on the happy path.
+
+    So the pin is over ALL terminal call sites rather than one: any flush that
+    is not explicitly provisional must pass the figures.
+    """
+    import ast
+
+    src = Path(__file__).resolve().parents[1] / "src" / "socr" / "pipeline" / "orchestrator.py"
+    tree = ast.parse(src.read_text())
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_flush_page_sidecar"
+    ]
+    assert len(calls) >= 3, f"expected several flush sites, found {len(calls)}"
+
+    offenders: list[str] = []
+    for call in calls:
+        kwargs = {kw.arg: kw.value for kw in call.keywords}
+        # A provisional flush is the mid-run crash-recovery copy; it predates
+        # the figure phase by design and is not authoritative.
+        terminal = kwargs.get("terminal")
+        is_provisional = isinstance(terminal, ast.Constant) and terminal.value is False
+        if is_provisional:
+            continue
+        if "extra_figures" not in kwargs:
+            offenders.append(ast.unparse(call))
+
+    assert not offenders, (
+        "these terminal sidecar writes do not carry the figure phase's results, "
+        "so whichever runs last will wipe them:\n  " + "\n  ".join(offenders)
+    )

@@ -329,8 +329,12 @@ class TestIncrementalFlush:
         provisional_sidecars: list[dict] = []
         _orig = pipeline._flush_page_sidecar
 
-        def _capture(state, page_num, output_dir, *, terminal=True):
-            path = _orig(state, page_num, output_dir, terminal=terminal)
+        # GH-485: forward every keyword. A spy with a narrower signature than
+        # the real method turns a new argument into a TypeError instead of a
+        # measurement, which is how these two failed when `extra_figures` landed.
+        def _capture(state, page_num, output_dir, **kwargs):
+            terminal = kwargs.get("terminal", True)
+            path = _orig(state, page_num, output_dir, **kwargs)
             if not terminal:
                 provisional_sidecars.append(json.loads(path.read_text()))
             return path
@@ -520,8 +524,9 @@ class TestCascadeHalt:
         provisional_flush_calls: list[int] = []
         _orig_flush = pipeline._flush_page_sidecar
 
-        def _spy_sidecar(state, page_num, output_dir, *, terminal=True):
-            path = _orig_flush(state, page_num, output_dir, terminal=terminal)
+        def _spy_sidecar(state, page_num, output_dir, **kwargs):
+            terminal = kwargs.get("terminal", True)
+            path = _orig_flush(state, page_num, output_dir, **kwargs)
             if not terminal:
                 provisional_flush_calls.append(page_num)
             return path
