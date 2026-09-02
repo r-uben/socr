@@ -449,3 +449,27 @@ def test_a_benchmark_report_read_does_not_certify_a_flag() -> None:
         "the control failed: with the exclusion removed there is no benchmark "
         "read left to exclude, so the test above proves nothing"
     )
+
+
+@pytest.mark.parametrize(
+    "option", [n for n, (status, _) in CLASSIFIED.items() if status == REJECTED]
+)
+def test_a_rejected_flag_does_not_advertise_the_old_behaviour(option: str) -> None:
+    """GH-524: `--help` is the surface most users read, and it still lied.
+
+    All three rejected flags raise on invoke, but two of them described live
+    behaviour in `common_options` -- "Fallback OCR engine", "Disable VLM judge
+    on hard pages". A user who reads the help and never invokes gets exactly
+    the failure #142 is about: believing a constraint exists.
+
+    The wording is not pinned; the CLAIM is. A help string must say the flag is
+    removed, which is what `--no-audit` already did and what the other two now
+    copy.
+    """
+    param = next(p for p in cli.commands["process"].params if p.name == option)
+    help_text = (param.help or "").upper()
+
+    assert "REMOVED" in help_text or "REJECT" in help_text, (
+        f"--{option.replace('_', '-')} raises on invoke but its help text still "
+        f"advertises behaviour it does not have: {param.help!r}"
+    )
