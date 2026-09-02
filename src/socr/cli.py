@@ -232,6 +232,39 @@ def common_options(f):
     return f
 
 
+def _explicitly_given(name: str) -> bool:
+    """Whether the user actually typed this option, rather than Click defaulting it.
+
+    GH-168. `build_config` assigned several options unconditionally, so a value
+    loaded from `--config`/`--profile` was overwritten by the CLI's own default
+    even when the user never mentioned the option. Measured before this fix, a
+    config file setting all seven lost every one:
+
+        cost_budget 5.0 -> 0.0, max_cost_per_page 0.25 -> 0.0,
+        write_manifest True -> False, timeout 999 -> 1800,
+        judge_backend heuristic -> auto, judge_model my-judge -> "",
+        save_figures True -> False
+
+    A silently ignored setting is the "flag that lies" failure #142 names: the
+    user believes a budget is in force and scripts around it.
+
+    Click records where each parameter's value came from, which is the only
+    signal that distinguishes "not supplied" from "supplied with the value that
+    happens to be the default". Outside a Click context -- a direct call from a
+    test or library code -- the caller passed the argument deliberately, so it
+    is treated as explicit and behaviour is unchanged.
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return True
+    try:
+        from click.core import ParameterSource
+
+        return ctx.get_parameter_source(name) not in (None, ParameterSource.DEFAULT)
+    except Exception:
+        return True
+
+
 def build_config(
     primary: str | None = None,
     fallback: str | None = None,
@@ -352,7 +385,8 @@ def build_config(
     if math_model is not None:
         config.math_model = math_model
 
-    config.timeout = timeout
+    if _explicitly_given("timeout"):
+        config.timeout = timeout
     if dpi is not None:
         config.render_dpi = dpi
     if qwen_backend is not None:
@@ -369,8 +403,15 @@ def build_config(
         config.save_figures = True
         config.describe_figures = True
     else:
-        config.save_figures = save_figures
-        config.describe_figures = False
+        # GH-168: only overwrite what the user actually asked for. `--describe-figures`
+        # implies `save_figures`, so its absence must not silently clear a
+        # `save_figures: true` loaded from a config file -- nor turn
+        # `describe_figures` off when the file asked for it and the flag was not
+        # typed either way.
+        if _explicitly_given("save_figures"):
+            config.save_figures = save_figures
+        if _explicitly_given("describe_figures"):
+            config.describe_figures = False
     config.reprocess = reprocess
     config.dry_run = dry_run
     config.quiet = quiet
@@ -380,11 +421,16 @@ def build_config(
     # The config default (True from PipelineConfig or loaded YAML) is always used.
     if strict_local:
         config.strict_local = True
-    config.judge_backend = judge_backend
-    config.judge_model = judge_model
-    config.max_cost_per_page = max_cost_per_page
-    config.cost_budget = cost_budget
-    config.write_manifest = write_manifest
+    if _explicitly_given("judge_backend"):
+        config.judge_backend = judge_backend
+    if _explicitly_given("judge_model"):
+        config.judge_model = judge_model
+    if _explicitly_given("max_cost_per_page"):
+        config.max_cost_per_page = max_cost_per_page
+    if _explicitly_given("cost_budget"):
+        config.cost_budget = cost_budget
+    if _explicitly_given("write_manifest"):
+        config.write_manifest = write_manifest
     # is_flag default is False, matching PipelineConfig's own default — only ever
     # flip it on, never clobber a YAML-config True with an unset CLI flag (the
     # cli.py:371-area unconditional-override trap this ticket calls out for
