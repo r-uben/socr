@@ -237,13 +237,19 @@ def route_page(
                     # remaining work is one wedged worker exits when that worker
                     # returns, not before.
                     #
-                    # So the CLI can outlive this timeout. It is BOUNDED, not
-                    # unbounded: every provider, judge and crop call passes a
-                    # client timeout to httpx, so the worker unblocks on its own
-                    # deadline. The residual wait is (client timeout - this soft
-                    # timeout). Closing that gap means bounding the client
-                    # timeout by the soft one, or moving the call to a killable
-                    # process boundary -- tracked on #172, not done here.
+                    # So the CLI can outlive this timeout, and how far depends
+                    # on WHY the deadline fired. A merely slow provider unblocks
+                    # at its own httpx timeout -- every provider, judge and crop
+                    # call passes one -- so that residual wait is bounded. A
+                    # WEDGED socket does not: the read-timeout never fires when
+                    # the server holds the response stream open, which is the
+                    # case this soft timeout exists for and the case #172 is
+                    # about. Bounded in the easy case, unbounded in the one that
+                    # matters.
+                    #
+                    # Closing it means bounding the client timeout by the soft
+                    # one, or moving the call to a killable process boundary --
+                    # tracked on #172, not done here.
                     ex.shutdown(wait=False)
                     logger.warning(
                         "provider %s timed out on page %s (%.2fs) — escalating",

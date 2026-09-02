@@ -20,6 +20,14 @@ The real fix is bounding the client timeout by the soft one, or a killable
 process boundary. Neither is done here; #172 stays open for it. This file
 exists so the behaviour is measured rather than assumed, and so a change in
 either direction is visible.
+
+One correction worth keeping (cubic P2 on #514): an earlier version of these
+notes said the wait is bounded in general, because every network call passes a
+client timeout. That is true of a merely SLOW call. It is false for a wedged
+socket -- where the httpx read-timeout never fires because the server holds the
+response stream open -- and that is precisely the case the wall-clock deadline
+exists for, and the case #172 is about. Bounded in the easy case, unbounded in
+the one that matters.
 """
 
 from __future__ import annotations
@@ -48,21 +56,36 @@ def _run_child(body: str) -> float:
     return time.monotonic() - start
 
 
-_PREAMBLE = f"""
-    import concurrent.futures, time
-    from concurrent.futures import thread as _t
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    fut = ex.submit(lambda: time.sleep({_WEDGE_SECONDS}))
-    try:
-        fut.result(timeout=0.2)
-    except concurrent.futures.TimeoutError:
-        fut.cancel()
+# The child program, with ``{after_timeout}`` filled in. An explicit template
+# rather than string concatenation (cubic P3 on #514): the appended lines have
+# to land INSIDE the `except` clause, and with concatenation that requirement
+# lived only in the caller's indentation -- invisible in the source, and
+# silently broken by any reindent here.
+_CHILD = """
+import concurrent.futures, time
+from concurrent.futures import thread as _t
+
+ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+fut = ex.submit(lambda: time.sleep({wedge}))
+try:
+    fut.result(timeout=0.2)
+except concurrent.futures.TimeoutError:
+    fut.cancel()
+{after_timeout}
 """
+
+
+def _child(after_timeout: str) -> str:
+    """Body of the child program; *after_timeout* runs in the except clause."""
+    indented = "\n".join(
+        f"    {line}" if line.strip() else "" for line in after_timeout.strip("\n").splitlines()
+    )
+    return _CHILD.format(wedge=_WEDGE_SECONDS, after_timeout=indented)
 
 
 def test_an_abandoned_worker_holds_the_process_open() -> None:
     """The behaviour the old comments denied."""
-    lifetime = _run_child(_PREAMBLE + "        ex.shutdown(wait=False)\n")
+    lifetime = _run_child(_child("ex.shutdown(wait=False)"))
 
     assert lifetime >= _PROMPT, (
         f"the process exited in {lifetime:.1f}s, before its abandoned worker "
@@ -80,19 +103,20 @@ def test_daemonising_the_running_worker_does_not_release_exit() -> None:
     the lock it captured at thread start.
     """
     lifetime = _run_child(
-        _PREAMBLE
-        + """
-        raised = False
-        for t in list(_t._threads_queues):
-            try:
-                t.daemon = True
-            except RuntimeError:
-                raised = True
-            t._daemonic = True
-            _t._threads_queues.pop(t, None)
-        assert raised, "setting daemon on a running thread no longer raises"
-        ex.shutdown(wait=False)
+        _child(
+            """
+raised = False
+for t in list(_t._threads_queues):
+    try:
+        t.daemon = True
+    except RuntimeError:
+        raised = True
+    t._daemonic = True
+    _t._threads_queues.pop(t, None)
+assert raised, "setting daemon on a running thread no longer raises"
+ex.shutdown(wait=False)
 """
+        )
     )
 
     assert lifetime >= _PROMPT, (

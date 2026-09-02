@@ -485,8 +485,8 @@ class TableCropExtractor:
 
         The abandoned thread is NOT a daemon (GH-172) -- see the note at the
         ``ex.shutdown(wait=False)`` below, and the matching one in
-        ``route_page``. It keeps the process alive until it unblocks, which its
-        own httpx client timeout guarantees it eventually does.
+        ``route_page``. It keeps the process alive until it unblocks, and on a
+        wedged socket nothing guarantees that it does.
         """
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = ex.submit(self._reader.read, img_path)
@@ -512,9 +512,21 @@ class TableCropExtractor:
             # exits when the worker returns, and nothing short of that releases
             # it (`threading._shutdown` joins on locks captured at thread START,
             # so re-flagging the thread as daemonic afterwards changes nothing).
-            # The wait is bounded by ``self._reader``'s own httpx timeout, so
-            # the residual delay is (reader timeout - this deadline). Closing
-            # that gap is #172.
+            #
+            # How long that is depends on WHY the deadline fired, and the two
+            # cases are not alike:
+            #
+            #  - a merely slow call unblocks at ``self._reader``'s own httpx
+            #    timeout, so the residual delay is bounded;
+            #  - a WEDGED socket does not. That is the case the header comment
+            #    at the top of this file describes, and the reason this
+            #    wall-clock deadline exists at all: the httpx read-timeout does
+            #    not fire when the server never closes the response stream. The
+            #    wait is then unbounded, and it is the case #172 is about.
+            #
+            # An earlier revision of this comment claimed the httpx timeout
+            # bounds it in general. It does not, and saying so here would have
+            # sent the #172 fix looking in the wrong place.
             ex.shutdown(wait=False)
 
     def _failed_crop(self, box, reason: str):
