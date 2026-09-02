@@ -435,7 +435,15 @@ def test_encoding_suspect_abstains_and_a_numeric_reading_is_not_attached(tmp_pat
     assert len(unverifiable) == 1, "the refusal must be recorded, not silent"
     assert unverifiable[0].data["presence_status"] == "unverifiable"
     assert unverifiable[0].data["unchecked_values"], "the event does not say WHICH values"
-    assert unverifiable[0].data["crop_path"], "the crop must stay on disk as evidence"
+    # The FILE, not the path string (cubic P2 on #537). "the crop stays on disk
+    # as evidence" is the promise that makes refusing acceptable -- a reader can
+    # still check the reading by hand -- and a non-empty string proves nothing
+    # about whether anything was written.
+    crop = Path(unverifiable[0].data["crop_path"])
+    assert crop.exists(), (
+        f"the crop was not written to {crop}; refusing the reading is only "
+        "acceptable because the evidence survives"
+    )
 
     # Ruling 4, still: abstain is not reject, and the page is not demoted.
     assert "equation_region_reading_rejected" not in _kinds(state, 2), (
