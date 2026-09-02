@@ -95,6 +95,27 @@ the rendered-image hash + engine + render params) to its blob. `socr replay
 <manifest>` serves those blobs — zero model calls, bit-identical output, safe to
 run headless/HPC.
 
+### Provenance fields
+Each page's fingerprint records **who read it**, so a change of reader
+invalidates the cached page instead of silently reusing it:
+
+- `engine` — the lane that won the page. `native` means the born-digital text
+  layer; no model ran.
+- `model_version` — the resolved model tag (e.g. `qwen3-vl:30b-a3b-instruct`),
+  taken from the caller's run determinants, else the engine's `EngineResult`,
+  else the page's own `provider_model`. **Empty for a native page**, and that
+  emptiness is meaningful: it distinguishes "no model ran" from "a model ran",
+  which a placeholder string would erase.
+- `prompt_hash` — set when the caller supplied run determinants; a
+  model/backend/task/prompt swap changes it.
+
+The manifest entry's `journal` carries the same identity for every *attempt*,
+not just the winner: `engine`, `provider_id`, `model`, `backend`, `cost_usd`,
+`accepted`, `confidence`, `failure_mode`, the rejection `reason`, and
+`judge_model`. The per-page sidecar (`pages/NNN.json`) carries the winner's full
+serialised output, `provider_model` included, so "which model read page N?" is
+answerable without the manifest.
+
 ## Design principles
 - **Python owns the loop; the LLM is a stateless per-page decider.** The judge
   prompt is data (`prompts/judge_page.md`), not the orchestrator.

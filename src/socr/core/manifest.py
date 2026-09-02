@@ -1418,6 +1418,17 @@ def _select_page_output_tagged(
             engine=attempt.engine,
             audit_passed=False,
             failure_mode=attempt.failure_mode,
+            # GH-158: this page's text was produced by a model, and rebuilding
+            # the output here dropped every field saying WHICH one -- so the
+            # rejected-but-shipped page fingerprinted with no model identity and
+            # a model swap could not invalidate it. The engine name alone does
+            # not distinguish two tags of the same engine. (The whole-document
+            # branch above has the same shape, but ``_WholeDoc`` carries no
+            # provider fields to forward; that is a wider change and is not
+            # silently claimed fixed here.)
+            provider_id=attempt.provider_id,
+            provider_model=attempt.provider_model,
+            provider_backend=attempt.provider_backend,
         ), WinnerKind.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
     # a silent gap between page headers.
@@ -1706,15 +1717,48 @@ def build_manifest(
         # Resolve the run determinants for this page's engine (consensus-aware).
         base_engine = _base_engine_name(page.engine)
         determinants = fingerprint_inputs.get(base_engine) or fingerprint_inputs.get(page.engine)
+        # GH-158: the page's OWN resolved model is the last fallback, and until
+        # now it was not consulted at all. An agentic page carries
+        # ``provider_model`` (it is already written into the journal two blocks
+        # below), yet the fingerprint took the model only from the caller's
+        # ``fingerprint_inputs`` or from a doc-level ``EngineResult`` -- neither
+        # of which exists on a per-page provider run. So a page whose model was
+        # recorded correctly still fingerprinted with ``model_version=""``, and
+        # swapping the model tag left ``replay`` believing the cached page was
+        # still valid. Reading it from the page cannot invent identity: it is
+        # empty exactly when the page had no model (a native page), which is the
+        # honest value there -- no sentinel string, because "no model ran" and
+        # "the model is called n/a" must not be the same record.
+        # The page's OWN resolved model outranks every engine-level source
+        # (cubic P2 on #507). ``determinants`` and ``EngineResult.model_version``
+        # describe what was CONFIGURED for an engine; ``provider_model`` records
+        # what actually ran on this page. An agentic run can escalate a single
+        # page to a different rung, and taking the configured value there would
+        # fingerprint the page under a model that never read it -- the precise
+        # failure this ticket is named for.
+        page_model = getattr(page, "provider_model", "") or ""
         prompt_hash = ""
-        if determinants is not None:
+        if page.engine == "native":
+            # A native page had NO model, and every source below describes some
+            # other engine's model (cubic P2 on #507). On a mixed document the
+            # OCR engine's `EngineResult.model_version` is populated, so without
+            # this the native pages were stamped with a model that never read
+            # them -- erasing the very distinction this ticket argues the empty
+            # value exists to preserve. Short-circuit before any of them.
+            model_version = ""
+        elif determinants is not None:
             model, backend, task, prompt = determinants
             model_version = (
-                model or model_versions.get(base_engine) or model_versions.get(page.engine, "")
+                page_model
+                or model
+                or model_versions.get(base_engine)
+                or model_versions.get(page.engine, "")
             )
             prompt_hash = run_fingerprint(model_version, backend, task, prompt)
         else:
-            model_version = model_versions.get(base_engine) or model_versions.get(page.engine, "")
+            model_version = (
+                page_model or model_versions.get(base_engine) or model_versions.get(page.engine, "")
+            )
 
         fp = PageFingerprint(
             pdf_file_hash=handle.file_hash,
