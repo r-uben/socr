@@ -1692,15 +1692,33 @@ def build_manifest(
         # Resolve the run determinants for this page's engine (consensus-aware).
         base_engine = _base_engine_name(page.engine)
         determinants = fingerprint_inputs.get(base_engine) or fingerprint_inputs.get(page.engine)
+        # GH-158: the page's OWN resolved model is the last fallback, and until
+        # now it was not consulted at all. An agentic page carries
+        # ``provider_model`` (it is already written into the journal two blocks
+        # below), yet the fingerprint took the model only from the caller's
+        # ``fingerprint_inputs`` or from a doc-level ``EngineResult`` -- neither
+        # of which exists on a per-page provider run. So a page whose model was
+        # recorded correctly still fingerprinted with ``model_version=""``, and
+        # swapping the model tag left ``replay`` believing the cached page was
+        # still valid. Reading it from the page cannot invent identity: it is
+        # empty exactly when the page had no model (a native page), which is the
+        # honest value there -- no sentinel string, because "no model ran" and
+        # "the model is called n/a" must not be the same record.
+        page_model = getattr(page, "provider_model", "") or ""
         prompt_hash = ""
         if determinants is not None:
             model, backend, task, prompt = determinants
             model_version = (
-                model or model_versions.get(base_engine) or model_versions.get(page.engine, "")
+                model
+                or model_versions.get(base_engine)
+                or model_versions.get(page.engine, "")
+                or page_model
             )
             prompt_hash = run_fingerprint(model_version, backend, task, prompt)
         else:
-            model_version = model_versions.get(base_engine) or model_versions.get(page.engine, "")
+            model_version = (
+                model_versions.get(base_engine) or model_versions.get(page.engine, "") or page_model
+            )
 
         fp = PageFingerprint(
             pdf_file_hash=handle.file_hash,
