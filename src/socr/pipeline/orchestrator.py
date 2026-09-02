@@ -6627,7 +6627,13 @@ class UnifiedPipeline:
             try:
                 page_nums = list(range(1, state.handle.page_count + 1))
                 for pnum in page_nums:
-                    self._flush_page_sidecar(state, pnum, output_dir)
+                    # GH-485: explicitly EMPTY, not omitted. This flush runs
+                    # before the figure phase, so there is nothing to carry --
+                    # but every terminal writer now names its figure source, so
+                    # "no figures yet" and "forgot to pass them" cannot look
+                    # alike. The post-figure re-flush below supplies the real
+                    # ones.
+                    self._flush_page_sidecar(state, pnum, output_dir, extra_figures=[])
             except Exception as exc:
                 logger.warning(
                     "PP-1 [%s]: sidecar flush failed (%s)",
@@ -6882,11 +6888,21 @@ class UnifiedPipeline:
         # phase. Rewrite it once more from the exact final outputs so captions,
         # failure markers, statuses and the final-body audit event cannot diverge
         # from fragments/manifest/replay.
+        #
+        # GH-485: this LAST write must carry the figures too. It is the
+        # authoritative one on the happy path, and without `extra_figures` it
+        # scanned `state.engine_runs` only -- which the figure phase never
+        # writes to -- so it silently undid GH-171's re-flush above and shipped
+        # empty `figure_refs` again. Fixing one call site was not enough; every
+        # writer of this file needs the same sources or the last one wins.
         if has_text and final_page_outputs is not None:
             self._final_winning_outputs = {page.page_num: page for page in final_page_outputs}
+            _final_figures = list(getattr(final_result, "figures", []) or [])
             try:
                 for page in final_page_outputs:
-                    self._flush_page_sidecar(state, page.page_num, output_dir)
+                    self._flush_page_sidecar(
+                        state, page.page_num, output_dir, extra_figures=_final_figures
+                    )
             finally:
                 self._final_winning_outputs = None
 
