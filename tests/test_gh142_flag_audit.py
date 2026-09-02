@@ -135,6 +135,11 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "math_model": (AGENTIC, "equation phases"),
     "clean_equation_model": (AGENTIC, "equation phases"),
     "recover_corrupt_math": (AGENTIC, "corrupt-math recovery routing"),
+    # Landed on main after this branch was cut, and CI caught it here before it
+    # reached the audit's blind spot -- the guard's first real firing, on the
+    # exact case it was written for. Verified live rather than assumed: read at
+    # orchestrator.py:462 and :1549, both gating on `and self.config.agentic`.
+    "no_equation_region_lane": (AGENTIC, "equation_region_lane, gated in the agentic lane"),
     # -- non-agentic by design
     "fallback": (REJECTED, "GH-142: no execution reader; raises UsageError"),
     "hpc_sequential": (NON_AGENTIC, "HPC lane only"),
