@@ -133,50 +133,6 @@ def test_a_page_skipped_by_the_cascade_guard_still_leaves_a_record(tmp_path) -> 
     assert all(getattr(c, "_failed", "") == "backend_degraded" for c in crops)
 
 
-def test_a_failed_crop_forces_flag_only() -> None:
-    """#489 review (P2): partial coverage must not auto-patch.
-
-    The existing comment says patching on incomplete evidence risks data loss,
-    and gates that on `had_timeout` alone. A crop that FAILED leaves exactly the
-    same partial coverage, so it must gate too -- otherwise one failed crop
-    beside one successful crop still patches the page.
-    """
-    import ast
-    import pathlib
-
-    src = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "src"
-        / "socr"
-        / "pipeline"
-        / "orchestrator.py"
-    )
-    tree = ast.parse(src.read_text())
-
-    # Two gates decide whether a page may be patched: the initial
-    # `effective_auto_patch`, and `needs_crop_fallback`, which can turn it back
-    # ON. Gating only the first would let a failed-crop page patch by the second
-    # route, so both are pinned.
-    def _gated_rhs(name: str) -> str:
-        assigns = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
-        ]
-        gated = [a for a in assigns if "had_timeout" in ast.unparse(a.value)]
-        assert gated, f"no {name} assignment carries the coverage gate at all"
-        return ast.unparse(gated[0].value)
-
-    for name in ("effective_auto_patch", "needs_crop_fallback"):
-        rhs = _gated_rhs(name)
-        assert "had_timeout" in rhs, f"{name}: the timeout gate was lost: {rhs}"
-        assert "failed_crops" in rhs, (
-            f"{name}: a failed crop does not force flag-only, so a page with "
-            f"partial crop coverage can still be auto-patched: {rhs}"
-        )
-
-
 def _state_with_table_page(tmp_path):
     """One page whose winner is a table, ready for a crop reread."""
     from socr.core.document import DocumentHandle
@@ -284,3 +240,179 @@ def test_a_render_failure_yields_a_sentinel_from_the_extractor(tmp_path) -> None
     assert all(getattr(c, "_failed", "") == "render_failed" for c in crops), (
         f"expected render_failed, got {[getattr(c, '_failed', None) for c in crops]}"
     )
+
+
+def test_a_timed_out_crop_emits_distrust_at_the_real_caller(tmp_path) -> None:
+    """#495 item 1: the TIMEOUT emit, driven through `_reread_page_tables`.
+
+    `dualpass_crop_timeout` has been in `TABLE_DISTRUST_KINDS` and in
+    hand-built `AuditEvent` tests since GH-166, but nothing ever fed a
+    `_timed_out` crop into the orchestrator -- so deleting the emit branch left
+    every one of those green. It is the older sibling of the `_failed` emit
+    pinned above and it means the same thing: the reread never completed, so
+    the incumbent table is unverified.
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.pipeline.orchestrator import UnifiedPipeline
+    from socr.tables.extract import CropTable
+
+    state = _state_with_table_page(tmp_path / "timeout")
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN, enabled_engines=[EngineType.QWEN], quiet=True
+        )
+    )
+
+    crop = CropTable(markdown="", source="booktabs", bbox=(10.0, 10.0, 200.0, 100.0))
+    crop._timed_out = True
+
+    pipeline._reread_page_tables(state, 1, [crop], extractor=object())
+
+    kinds = [getattr(e, "kind", "") for e in state.events]
+    assert "dualpass_crop_timeout" in kinds, (
+        f"a timed-out crop produced no distrust event, so the page keeps its "
+        f"incumbent table and looks verified: {kinds}"
+    )
+    event = next(e for e in state.events if e.kind == "dualpass_crop_timeout")
+    assert event.page_num == 1
+
+    trust = build_tables_trust("d.pdf", list(state.events))
+    assert trust.untrusted_pages == [1], (
+        f"the page is still trusted after a timed-out reread: {trust.untrusted_pages}"
+    )
+
+
+def _reread_with(tmp_path, *, partial: str | None):
+    """Reconcile one page against a crop that DISAGREES with the incumbent.
+
+    ``partial`` adds a second crop that produced nothing -- ``"failed"`` or
+    ``"timeout"`` -- which is what makes the page's crop coverage partial.
+    Returns ``(patched_delta, flagged_delta, final_text)``.
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.pipeline.orchestrator import UnifiedPipeline
+    from socr.tables.extract import CropTable
+
+    state = _state_with_table_page(tmp_path)
+    incumbent = state.pages[1].best_output.text
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+            quiet=True,
+            auto_patch_tables=True,
+        )
+    )
+
+    good = CropTable(
+        markdown=incumbent.replace("1.0", "2.0"), source="booktabs", bbox=(10.0, 10.0, 200.0, 100.0)
+    )
+    crops = [good]
+    if partial is not None:
+        dud = CropTable(markdown="", source="booktabs", bbox=(10.0, 110.0, 200.0, 200.0))
+        if partial == "failed":
+            dud._failed = "read_error"
+        else:
+            dud._timed_out = True
+        crops.append(dud)
+
+    patched, flagged = pipeline._reread_page_tables(state, 1, crops, extractor=object())
+    return patched, flagged, state.pages[1].best_output.text
+
+
+def test_full_crop_coverage_still_auto_patches(tmp_path) -> None:
+    """The control the flag-only pins below are a difference FROM.
+
+    Without it, a build that never patched anything at all would satisfy them.
+    """
+    patched, _flagged, text = _reread_with(tmp_path / "clean", partial=None)
+    assert patched == 1, "a disagreeing crop with full coverage did not patch"
+    assert "2.0" in text, f"the page kept the incumbent value: {text}"
+
+
+@pytest.mark.parametrize("partial", ["failed", "timeout"])
+def test_partial_crop_coverage_flags_instead_of_patching(tmp_path, partial: str) -> None:
+    """#495 item 2: the flag-only gate as an OUTCOME, not an AST identifier.
+
+    `test_a_failed_crop_forces_flag_only` reads the source for the names
+    `had_timeout` / `failed_crops` in two assignments. That is brittle both
+    ways -- it passes on a rename that keeps the identifier and breaks on one
+    that changes it without changing behaviour. This drives the real page:
+    one crop disagreeing, one crop that produced nothing, auto-patch ON.
+
+    Patching on partial evidence is the data-loss case the gate exists for --
+    the missing crop may have covered the rest of the table.
+    """
+    patched, flagged, text = _reread_with(tmp_path / partial, partial=partial)
+
+    assert patched == 0, (
+        f"a page with one {partial} crop was auto-patched on partial coverage: {text}"
+    )
+    assert flagged >= 1, "the disagreement was neither patched nor flagged -- it vanished"
+    assert "1.0" in text, f"the incumbent text was rewritten anyway: {text}"
+
+
+def _reread_via_fallback(tmp_path, *, partial: bool):
+    """The SECOND route into a patch: the crop-repair fallback.
+
+    `effective_auto_patch` starts False here (auto-patch is off in config); the
+    fallback can turn it back ON when the incumbent table is structurally
+    broken and the crop reading strictly repairs it. Gating only the first
+    assignment would let a partial-coverage page patch by this route, so it
+    carries the same `had_timeout` / `failed_crops` gate -- and needs its own
+    outcome pin, because the flag-only tests above never reach it.
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.orchestrator import UnifiedPipeline
+    from socr.tables.extract import CropTable
+
+    # Header collapsed to one column against three-column data: a defect
+    # `page_needs_crop_repair_fallback` recognises and the crop reading fixes.
+    broken = "| Var |\n| --- |\n| a | 1.0 | 2.0 |\n| b | 3.0 | 4.0 |"
+    repaired = "| Var | Est | SE |\n| --- | --- | --- |\n| a | 1.0 | 2.0 |\n| b | 3.0 | 4.0 |"
+
+    state = _state_with_table_page(tmp_path)
+    out = PageOutput(
+        page_num=1, text=broken, status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
+    )
+    state.pages[1].attempts = [out]
+    state.pages[1].best_output = out
+
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN],
+            quiet=True,
+            auto_patch_tables=False,
+        )
+    )
+    crops = [CropTable(markdown=repaired, source="booktabs", bbox=(10.0, 10.0, 200.0, 100.0))]
+    if partial:
+        dud = CropTable(markdown="", source="booktabs", bbox=(10.0, 110.0, 200.0, 200.0))
+        dud._failed = "read_error"
+        crops.append(dud)
+
+    patched, _flagged = pipeline._reread_page_tables(state, 1, crops, extractor=object())
+    return patched, state.pages[1].best_output.text
+
+
+def test_the_crop_repair_fallback_patches_a_broken_header(tmp_path) -> None:
+    """Control for the pin below: this route really does patch."""
+    patched, text = _reread_via_fallback(tmp_path / "fb_clean", partial=False)
+    assert patched == 1, "the crop-repair fallback did not fire at all"
+    assert "Est" in text, f"the collapsed header was not repaired: {text}"
+
+
+def test_the_crop_repair_fallback_is_gated_by_partial_coverage(tmp_path) -> None:
+    """#495 item 2, second route: a failed crop must block the fallback too.
+
+    This is the route the deleted AST check was really there for -- and the
+    only one the flag-only tests above do not reach, because auto-patch is off
+    in config and the fallback is what turns it back on.
+    """
+    patched, text = _reread_via_fallback(tmp_path / "fb_partial", partial=True)
+    assert patched == 0, (
+        f"a page with a failed crop was patched through the repair fallback: {text}"
+    )
+    assert "Est" not in text, f"the incumbent text was rewritten anyway: {text}"
