@@ -220,6 +220,16 @@ class PageOutput:
     provider_model: str = ""  # resolved model name (e.g. qwen3-vl:30b-a3b-instruct)
     provider_backend: str = ""  # backend (e.g. ollama, gemini-api)
     skip_reason: str = ""  # why the rung was not tried (e.g. budget exceeded)
+    #: GH-169: what the JUDGE said about this attempt -- kept for EVERY attempt,
+    #: accepted or rejected. Distinct from ``skip_reason``, which documents why a
+    #: rung was never tried; conflating them would make "budget exceeded" and
+    #: "the judge rejected this reading" indistinguishable in the manifest.
+    #:
+    #: Before this field the reason survived only when the rejected output was
+    #: EMPTY, so an ordinary semantic rejection -- a provider that produced a
+    #: table the judge refused -- journaled as "none", and there was no way to
+    #: audit why the ladder escalated past it.
+    judge_reason: str = ""
     #: #259: how this output was refused, when socr can say. Empty means
     #: unknown -- see ``REJECTION_AMBIGUOUS_DEFERRED``, the only value written.
     rejection_class: str = ""
@@ -253,6 +263,7 @@ class PageOutput:
             "provider_model": self.provider_model,
             "provider_backend": self.provider_backend,
             "skip_reason": self.skip_reason,
+            "judge_reason": self.judge_reason,
             "rejection_class": self.rejection_class,
         }
 
@@ -276,6 +287,7 @@ class PageOutput:
             provider_model=d.get("provider_model", ""),
             provider_backend=d.get("provider_backend", ""),
             skip_reason=d.get("skip_reason", ""),
+            judge_reason=d.get("judge_reason", ""),
             rejection_class=d.get("rejection_class", ""),
         )
 
