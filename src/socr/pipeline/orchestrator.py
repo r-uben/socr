@@ -66,12 +66,17 @@ console = Console()
 JUDGE_IDENTITY_HEURISTIC = "heuristic"
 
 
-#: Config fields that gate NOTHING but still reach the run fingerprint (GH-525).
-#: Their CLI flags are rejected (GH-142); YAML can still set them, and doing so
-#: used to invalidate every terminal page for a run that behaves identically.
-#: The fingerprint records these values instead of the configured ones, so the
-#: key stays (no schema change, no mass re-fingerprinting) while a setting that
-#: changes nothing changes nothing.
+#: Baseline for the "you set something I ignore" warning (GH-525) -- and ONLY
+#: that. These fields gate nothing (GH-142 rejected their CLI flags for it) and
+#: are absent from the run fingerprint entirely, so there is nothing here to
+#: freeze; `_warn_inert_config` diffs against these values to decide whether a
+#: config is worth warning about.
+#:
+#: An earlier draft of GH-525 DID freeze them into the fingerprint, to avoid
+#: changing it for existing runs. That reason turned out not to exist --
+#: `_socr_source_digest` already invalidates every fingerprint on any source
+#: edit, by design -- so the keys were dropped instead. Do not reintroduce the
+#: freeze on the strength of a cost that is paid by every release anyway.
 #:
 #: Taken from PipelineConfig's own defaults rather than written out, so the two
 #: cannot drift: a changed default moves both together.
@@ -584,11 +589,19 @@ class UnifiedPipeline:
         """Resolved ``{model, backend, task}`` for an engine, never raising.
 
         Used to fold the model/backend/task of every configured engine that can
-        contribute text (primary, local, or fallback-chain) into the run
-        fingerprint. A swap of a secondary engine's model/task/backend changes
-        the saved output (the orchestrator routes pages to it), so it must
-        invalidate the resume cache just like a primary-engine swap. Degrades to
-        the engine name on any error so fingerprinting never breaks a run.
+        contribute text -- the primary, the local engine, and each member of
+        ``enabled_engines`` (the agentic ladder is built from those) -- into the
+        run fingerprint. A swap of a secondary engine's model/task/backend
+        changes the saved output (the orchestrator routes pages to it), so it
+        must invalidate the resume cache just like a primary-engine swap.
+        Degrades to the engine name on any error so fingerprinting never breaks
+        a run.
+
+        The FALLBACK chain is no longer among the sources (GH-525): the
+        ``fallback_chain`` field is not read for routing, so changing it alone
+        cannot select a provider. That is narrower than "its members cannot
+        contribute" (cubic P3 on #532) -- a member enabled independently still
+        can, and is fingerprinted through ``enabled_engines``.
         """
         from socr.engines.registry import get_engine
 
@@ -606,24 +619,29 @@ class UnifiedPipeline:
     def _run_fingerprint(self, engine_type: EngineType | None = None) -> str:
         """Run-config fingerprint for idempotency, from the RESOLVED run config.
 
-        Two fields are recorded at their DEFAULTS rather than as configured --
-        ``judge_hard_pages`` and ``fallback_chain`` -- because they gate nothing
-        (GH-142 / GH-525). See ``_INERT_FIELD_DEFAULTS``.
+        Three keys are deliberately ABSENT -- ``judge_hard_pages``,
+        ``fallback_chain`` and its determinants -- because none gates anything
+        (GH-142 / GH-525). See the note beside ``local_engine_determinants``
+        below for why dropping them, rather than freezing them, is free.
 
         Captures what changes *what output an input produces*: the resolved
         primary engine's model id, backend, and task, the resolved determinants
-        of every secondary engine that can contribute text (local and fallback
-        chain), and socr's
-        output-affecting orchestration flags. Stored in
+        of every secondary engine that can contribute text (the local engine and
+        each member of ``enabled_engines``, which is what the agentic ladder is
+        built from), and socr's output-affecting orchestration flags. Stored in
         :class:`DocMetadata.fingerprint` and consulted by
         :meth:`RootIndex.is_completed`, so a re-run under a different model / task
         / flag reprocesses instead of silently reusing the cached output.
 
         Round-3 expansion (HIGH): the prior ``extra`` omitted ``save_figures``
         (and figure limits), the figures/judge model+backend knobs,
-        ``fallback_chain``, ``local_engine``, ``tiered`` routing, and chunking
-        thresholds — all of which change the saved ``.md``/figures. Toggling any
-        of them now invalidates the cache.
+        ``local_engine``, ``tiered`` routing, and chunking thresholds — all of
+        which change the saved ``.md``/figures. Toggling any of them now
+        invalidates the cache.
+
+        ``fallback_chain`` was in that list and has since been removed from it
+        (GH-525): it does NOT change the saved output, because no execution path
+        reads it -- the multi-engine branches that did were deleted in #298.
 
         Knobs deliberately EXCLUDED (do not change selected output bytes):
         display/scripting (``quiet``/``verbose``/``dry_run``), force-run
@@ -643,14 +661,20 @@ class UnifiedPipeline:
             # --- routing / engine selection (all contributing engines) ---
             "primary_engine": engine_type.value,
             "local_engine": cfg.local_engine.value,
-            # Resolved model/backend/task of every secondary engine, so a swap of
-            # a local/fallback member's model invalidates the cache too.
+            # Resolved model/backend/task of the local engine, so a swap of its
+            # model invalidates the cache too. (Not the fallback chain -- see
+            # the GH-525 note below.)
             "local_engine_determinants": self._engine_determinants(cfg.local_engine),
             # GH-525: `judge_hard_pages`, `fallback_chain` and its determinants
-            # are deliberately ABSENT. None gates any phase (GH-142 rejected
-            # their flags for that), so including them made a config-only toggle
-            # invalidate every terminal page and force a reprocess producing
-            # byte-identical output.
+            # are deliberately ABSENT. Neither field is read for routing
+            # (GH-142 rejected their flags for that), so including them made a
+            # config-only toggle invalidate every terminal page and force a
+            # reprocess producing byte-identical output.
+            #
+            # Narrower than "a fallback member cannot contribute" (cubic P3 on
+            # #532): a member ENABLED independently still can, and is
+            # fingerprinted through `enabled_engines` below. What changing
+            # `fallback_chain` alone cannot do is select a provider.
             #
             # Dropping them changes this fingerprint once, for everybody. That
             # cost was the reason not to -- until `_socr_source_digest` was
