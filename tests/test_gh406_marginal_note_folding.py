@@ -25,9 +25,14 @@ fitz = pytest.importorskip("fitz")
 from socr.tables.reconstruct import rowize_from_word_list  # noqa: E402
 
 NOTE = "Running Header 2026"
+# GH-459: the note above contains a NUMERIC token (`2026`), which seeds a lane at
+# its own x and so let the alphabetic words snap to it. That green-washed the
+# keep test below: an alphabetic-only note at the same position still vanished.
+# Every keep assertion is now parametrised over both.
+ALPHA_NOTE = "Running Header"
 
 
-def _page(with_note: bool):
+def _page(with_note: bool, note: str = NOTE):
     """The ticket's own reproduction: a 4-column table plus a notes line.
 
     A hand-rolled word list does NOT reproduce this -- the first version of
@@ -51,12 +56,12 @@ def _page(with_note: bool):
         y += 25
     page.insert_text((100, y + 20), "Note: Standard errors clustered, N = 500.", fontsize=9)
     if with_note:
-        page.insert_text((550, 200), NOTE, fontsize=8, rotate=90)
+        page.insert_text((550, 200), note, fontsize=8, rotate=90)
     return doc, page
 
 
-def _regions(with_note: bool):
-    doc, page = _page(with_note)
+def _regions(with_note: bool, note: str = NOTE):
+    doc, page = _page(with_note, note)
     try:
         return rowize_from_word_list(list(page.get_text("words")))
     finally:
@@ -73,24 +78,31 @@ def test_a_marginal_note_does_not_erase_the_table() -> None:
     assert len(with_note) == len(without)
 
 
-def test_the_notes_words_are_kept_not_dropped() -> None:
+@pytest.mark.parametrize("note", [NOTE, ALPHA_NOTE], ids=["with-numeric", "alphabetic-only"])
+def test_the_notes_words_are_kept_not_dropped(note: str) -> None:
     """The fix must not become the loss it prevents (#418).
 
-    Folding attaches the words to the nearest row; it does not discard them.
+    GH-459: parametrised because the original note carries `2026`. That numeric
+    token seeds a lane at the note's x, so the alphabetic words snapped to it
+    and this test passed for the wrong reason -- an alphabetic-only note at the
+    same position was still dropped at lane assignment. The `alphabetic-only`
+    case is the one that fails without the folded-marginal keep path.
     """
-    emitted = " ".join(md for _rect, md in _regions(True))
-    tokens = set(emitted.replace("|", " ").split())
-    for word in NOTE.split():
+    emitted = " ".join(md for _rect, md in _regions(True, note))
+    tokens = emitted.replace("|", " ").split()
+    for word in note.split():
         assert word in tokens, f"{word!r} was dropped instead of folded: {emitted}"
+        assert tokens.count(word) >= 1
 
 
 def test_the_table_itself_is_unchanged_by_the_note() -> None:
-    """Scope: the note may add a column, but must not disturb the table's own.
+    """Scope: the note's words ride in the LABEL cell; data columns are untouched.
 
-    Folding puts the note's words in a lane of their own, to the right of the
-    data. That is the intended outcome -- the words are kept and the reader can
-    see they were marginal. What must not happen is the table's own cells
-    moving, which a fold that swallowed a real row would cause.
+    #460 review: a folded word used to go into whatever lane it happened to be
+    nearest, which is the misattribution this design exists to avoid. It now
+    goes to the label, so the row keeps the token without claiming a column for
+    it -- and every data column stays byte-identical to the no-note run, which
+    is the assertion that would catch a note bleeding into a value.
     """
 
     def cells(md: str) -> list[list[str]]:
@@ -106,13 +118,15 @@ def test_the_table_itself_is_unchanged_by_the_note() -> None:
     assert len(with_note) == len(without), (
         f"the note changed the ROW count: {len(with_note)} vs {len(without)}"
     )
-    width = len(without[0])
-    for got, expected in zip(with_note, without):
-        assert got[:width] == expected, (
-            f"the note disturbed the table's own cells: {got[:width]} != {expected}"
-        )
-
-    extra = [row[width:] for row in with_note]
-    assert any(any(c for c in row) for row in extra), (
-        f"the note's words are not in the extra lane: {extra}"
+    assert len(with_note[0]) == len(without[0]), (
+        f"the note added a column: {len(with_note[0])} vs {len(without[0])}"
     )
+
+    for got, expected in zip(with_note, without):
+        assert got[1:] == expected[1:], f"the note bled into a DATA column: {got} != {expected}"
+
+    labels = " ".join(row[0] for row in with_note)
+    for word in NOTE.split():
+        assert word in labels.split(), (
+            f"{word!r} is not in a label cell, so it was not kept where the design says: {labels!r}"
+        )

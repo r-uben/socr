@@ -820,6 +820,17 @@ _SPLIT_GAP_MULT = 1.5
 # y-jitter in densely-set headers where word baselines may vary by 1-2 pt.
 _SPLIT_GAP_MIN_PT = 10.0
 
+#: GH-459 marker: this word was reattached by `_fold_marginal_bands` and must
+#: be emitted even though it snaps to no lane. Not a coordinate; see that
+#: function for why it rides on the tuple.
+_FOLDED_MARGINAL = "__socr_folded_marginal__"
+
+
+def _is_folded_marginal(word: tuple) -> bool:
+    """Whether `_fold_marginal_bands` reattached this word from the margin."""
+    return len(word) > 8 and word[8] == _FOLDED_MARGINAL
+
+
 # Words within this factor × _LANE_X_TOL_PT of the nearest data-column x are
 # assigned to that column; words further left go into the label cell.
 # Using 3× the lane tolerance gives a comfortable snap radius for slight PDF
@@ -1442,7 +1453,16 @@ def _fold_marginal_bands(rows_by_y: dict) -> dict:
         return rows_by_y
     for y in marginal:
         nearest = min(folded, key=lambda k: abs(k - y))
-        folded[nearest].extend(rows_by_y[y])
+        # GH-459: tag the word as folded-marginal. `_rowize_segment` drops any
+        # word that snaps to no lane, so a folded note only survived when
+        # something seeded a lane at its x -- in the GH-406 fixture the numeric
+        # `2026` did, which green-washed that PR's own keep test. An
+        # alphabetic-only note at the same x still vanished.
+        #
+        # The tag rides as a 9th tuple element. Word tuples are only ever
+        # INDEXED in this module (`word[0]`..`word[4]`), never unpacked by
+        # arity, so the extra element is inert everywhere else.
+        folded[nearest].extend((*w, _FOLDED_MARGINAL) for w in rows_by_y[y])
     return folded
 
 
@@ -1987,6 +2007,13 @@ def _prepend_header_band(
     snap_radius = _LANE_X_TOL_PT * _LANE_SNAP_MULT
 
     def _snaps(word: tuple) -> bool:
+        # A folded margin word never snaps to a lane by construction -- that is
+        # why it was folded. Rejecting its row here would drop the whole header
+        # band and reintroduce the loss this fold exists to stop (#460 review),
+        # so it is exempt from the eligibility test; `_rowize_segment` routes it
+        # to the label cell.
+        if _is_folded_marginal(word):
+            return True
         return min(abs(c - word[0]) for c in lane_centers) <= snap_radius
 
     eligible_ys: list[int] = []
@@ -2087,13 +2114,25 @@ def _rowize_segment(
         # Data cells: assign each word to the nearest lane by x-distance.
         # A lane with no word assigned stays "" (blank / na).
         row_cells = [""] * len(lane_centers)
+        orphan_marginals: list[str] = []
         for w in row_ws:
             if w[0] < data_start_x - snap_margin:
                 continue  # already in the label
             best = min(range(len(lane_centers)), key=lambda i: abs(lane_centers[i] - w[0]))
-            if abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
+            # The tag is checked BEFORE the snap assignment, not after. #460
+            # review: with the order reversed a tagged word that happened to
+            # land within the snap radius of a real lane went into that data
+            # cell -- contradicting this block's own comment, and doing exactly
+            # the misattribution it exists to avoid. A margin note near a
+            # column's x is still a margin note.
+            if _is_folded_marginal(w):
+                orphan_marginals.append(w[4])
+            elif abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
                 existing = row_cells[best]
                 row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
+
+        if orphan_marginals:
+            label = " ".join(x for x in (label, *orphan_marginals) if x)
 
         # Always emit the label as a first cell so all rows share the same
         # column layout.  An empty label yields "" (empty first cell).
