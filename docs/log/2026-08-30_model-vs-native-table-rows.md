@@ -174,18 +174,25 @@ more.
 | **dropped** — nakamura_steinsson 2018 | **42** | **0** |
 | **dropped** — kaminska_mumtaz_sustek 2021 | **39** | **0** |
 
-**This settles the sample question against the log's own conclusion.** Nakamura p42 is
-#326's named fixture and one of the three no-grid pages, and it is one of the two
-dropped: it has no band anywhere on the page carrying three numeric tokens with two
-numeric neighbours. So the bias GH-338 suspected is real and it is not hypothetical --
-the sample excludes exactly the page the retired-#326 claim rested on. The retraction
-already recorded above stands on its own reasoning (different instruments); this is a
-second, independent reason it had to be retracted.
+**Under the recomputation, Nakamura p42 is excluded** -- it has no band anywhere on the
+page carrying three numeric tokens with two numeric neighbours. p42 is #326's named
+fixture and one of the three no-grid pages, so the bias GH-338 suspected is a real
+property of the written eligibility rule: it drops the pages where native banding fails,
+which are the pages a native-vs-model comparison most needs.
 
-Two of nine papers contribute nothing, and one contributes four of the thirteen rows,
-so the 13 are not thirteen independent documents either. That does not weaken "native is
-not a trustworthy baseline" -- native's failures here are not concentrated in one paper
--- but it is a further reason 13 rows cannot rank qwen against gemini.
+~~This settles the sample question~~ -- **corrected (GH-501).** It does not. The original
+selection script and its selected rows are gone, so agreeing on the COUNT cannot show
+that the historical 13 were these 13, and therefore cannot prove the original sample
+excluded p42. What is established is narrower and still enough to matter: the rule as
+written excludes p42, so a sample built by following it could not have spoken to #326.
+The retraction already recorded above rests on its own reasoning (different instruments)
+and does not depend on this.
+
+Two of nine papers contribute nothing, and one contributes four of the thirteen rows, so
+the 13 are not thirteen independent documents either. That is a further reason 13 rows
+cannot rank qwen against gemini. ~~native's failures here are not concentrated in one
+paper~~ -- **dropped (GH-501):** the content-free record carries no per-paper
+native-failure map, so that clause asserted a distribution nothing here measures.
 
 ## What this does NOT settle
 
