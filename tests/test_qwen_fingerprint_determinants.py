@@ -34,10 +34,14 @@ def _isolate_backend_resolution(monkeypatch):
     such a machine these tests failed while production was behaving exactly as
     designed: they asserted the Ollama answer and got the correct vLLM one.
 
-    Clearing the variable makes the DEFAULT deterministic. It does not make the
-    exported state untested: the parametrised cases below set it back
-    explicitly, so both answers are pinned rather than one of them being
-    whatever the shell happened to hold.
+    Clearing the variable makes the DEFAULT deterministic. What THIS file pins
+    is the backend-to-model mapping, via explicit `qwen_backend` values, so it
+    needs the ambient variable out of the way rather than restored.
+
+    The exported state itself -- `auto` resolving to vLLM when a server is
+    exported -- is pinned in `test_qwen_engine.py`, which is where the
+    resolution lives. (The first version of this docstring was copied verbatim
+    from that file and claimed the pinning happened here too; cubic P3 on #526.)
     """
     monkeypatch.delenv("VLLM_BASE_URL", raising=False)
 
