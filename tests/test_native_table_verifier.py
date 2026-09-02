@@ -13,7 +13,7 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import fitz
 
@@ -656,7 +656,19 @@ class TestNativeTableVerifierAuditEvents:
             record_event=events.append,
         )
 
-        decision = judge.assess(output, MagicMock())
+        gate_seen_text: list[str] = []
+        gate_seen_events_count: list[int] = []
+        original_gate = judge._apply_structural_gate
+
+        def _spy_gate(decision, out, page_num, words, rules=None, **kwargs):
+            gate_seen_text.append(out.text)
+            gate_seen_events_count.append(
+                len([e for e in events if e.kind == "table_header_repair"])
+            )
+            return original_gate(decision, out, page_num, words, rules=rules, **kwargs)
+
+        with patch.object(judge, "_apply_structural_gate", side_effect=_spy_gate):
+            decision = judge.assess(output, MagicMock())
 
         from socr.tables.reconcile import find_table_blocks
 
@@ -666,9 +678,22 @@ class TestNativeTableVerifierAuditEvents:
         assert repaired[1][-1] == "Far outcome"
         repair_events = [event for event in events if event.kind == "table_header_repair"]
         assert len(repair_events) == 1
+        assert gate_seen_events_count == [1], (
+            "table_header_repair event must be emitted before _apply_structural_gate runs"
+        )
+        assert gate_seen_text == [output.text], (
+            "the repaired text must be the text evaluated by _apply_structural_gate"
+        )
 
     def test_non_table_page_bypasses_verifier(self):
-        """Non-table page (is_table_page=False): verifier bypassed entirely."""
+        """Non-table page (is_table_page=False): NATIVE geometry verification
+        (value-guard, header-attribution) is bypassed -- there is no table to
+        check numeric drift against. This does NOT bypass the string-only
+        structural shipping gate; see
+        ``TestStructuralGateAppliesOnEarlyDelegationPaths`` for that coverage.
+        The output here is rectangular, so the gate finds nothing to reject
+        and emits no event either way -- this test only pins "no native-
+        verifier events fire", not "no gate runs"."""
         native_rows = [[(100.0, "1.1"), (100.0 + _PHYS_COL_GAP, "2.2")]]
         fitz_page = _make_fitz_page_with_words(native_rows)
         output_text = _md_table(["a", "b"], [["1", "2"]])
@@ -684,10 +709,276 @@ class TestNativeTableVerifierAuditEvents:
             record_event=events.append,
         )
         provider = MagicMock()
-        judge.assess(output, provider)
+        decision = judge.assess(output, provider)
 
+        assert decision.accept is True
         inner.assess.assert_called_once()
         assert len(events) == 0
+
+
+# --------------------------------------------------------------------------
+# P3 (GH-513 follow-up): the string-only structural gate must not be
+# bypassable. Every early-exit out of ``NativeTableVerifierJudge.assess`` that
+# still ACCEPTS a reading -- non-table-classified page, no ``get_fitz_page``
+# callable, non-success/empty output -- currently returns the inner judge's
+# decision directly, skipping ``_apply_structural_gate`` entirely (agentic.py
+# ~646-650). That is the gap the post-route recheck (orchestrator.py,
+# ``post_route_recheck``) was papering over from OUTSIDE the judge, after
+# routing had already finished. P3 closes it INSIDE the judge, before the
+# verdict, so the post-route recheck can be deleted without losing coverage.
+# --------------------------------------------------------------------------
+
+_RECTANGULAR_TABLE = "| a | b |\n| --- | --- |\n| 1 | 2 |"
+# Rows of inconsistent width -- the same shape ``structural_gate_fires``
+# (used inside ``table_output_defect``) gates on elsewhere in this file.
+_RAGGED_TABLE = "| a | b | c |\n| 1 |\n| 2 | 3 | 4 | 5 |"
+
+
+class TestStructuralGateAppliesOnEarlyDelegationPaths:
+    """Each geometry-bypass path must still run the string-only shipping gate."""
+
+    def _make_inner_judge(self, accept: bool) -> MagicMock:
+        inner = MagicMock()
+        inner.assess.return_value = AcceptDecision(accept=accept, reason="inner judge")
+        return inner
+
+    def _make_output(
+        self, page_num: int, text: str, status: PageStatus = PageStatus.SUCCESS
+    ) -> PageOutput:
+        return PageOutput(
+            page_num=page_num,
+            text=text,
+            status=status,
+            confidence=0.9,
+        )
+
+    # -- non-table-classified page ------------------------------------------
+
+    def test_non_table_page_rejects_ragged_output(self):
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        output = self._make_output(page_num=1, text=_RAGGED_TABLE)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: _make_empty_page(),
+            is_table_page=lambda pn: False,
+            record_event=events.append,
+        )
+
+        decision = judge.assess(output, MagicMock())
+
+        assert decision.accept is False, (
+            "a ragged grid must not ship even when is_table_page() is False -- "
+            "the string-only gate is content-shape based, not classification-gated"
+        )
+        fired = [e for e in events if e.kind == "table_structure_failed"]
+        assert len(fired) == 1
+
+    def test_non_table_page_accepts_rectangular_output(self):
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        output = self._make_output(page_num=1, text=_RECTANGULAR_TABLE)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: _make_empty_page(),
+            is_table_page=lambda pn: False,
+            record_event=events.append,
+        )
+
+        decision = judge.assess(output, MagicMock())
+
+        assert decision.accept is True
+        assert [e for e in events if e.kind == "table_structure_failed"] == []
+
+    # -- no get_fitz_page callable (safe test-environment fallback) ---------
+
+    def test_missing_get_fitz_page_rejects_ragged_output(self):
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        output = self._make_output(page_num=2, text=_RAGGED_TABLE)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=None,
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+
+        decision = judge.assess(output, MagicMock())
+
+        assert decision.accept is False
+        fired = [e for e in events if e.kind == "table_structure_failed"]
+        assert len(fired) == 1
+
+    def test_missing_get_fitz_page_accepts_rectangular_output(self):
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        output = self._make_output(page_num=2, text=_RECTANGULAR_TABLE)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=None,
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+
+        decision = judge.assess(output, MagicMock())
+
+        assert decision.accept is True
+
+    # -- non-success status / empty output ----------------------------------
+
+    def test_non_success_status_rejects_ragged_output(self):
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        output = self._make_output(page_num=6, text=_RAGGED_TABLE, status=PageStatus.ERROR)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: _make_empty_page(),
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+
+        decision = judge.assess(output, MagicMock())
+
+        assert decision.accept is False
+        fired = [e for e in events if e.kind == "table_structure_failed"]
+        assert len(fired) == 1
+
+    def test_non_success_status_accepts_rectangular_output(self):
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        output = self._make_output(page_num=6, text=_RECTANGULAR_TABLE, status=PageStatus.ERROR)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: _make_empty_page(),
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+
+        decision = judge.assess(output, MagicMock())
+
+        assert decision.accept is True
+        assert [e for e in events if e.kind == "table_structure_failed"] == []
+
+    def test_empty_output_passes_through_inner_verdict(self):
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        output = self._make_output(page_num=7, text="", status=PageStatus.SUCCESS)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: _make_empty_page(),
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+
+        decision = judge.assess(output, MagicMock())
+
+        assert decision.accept is True
+        assert [e for e in events if e.kind == "table_structure_failed"] == []
+
+    # -- rejecting inner decisions returned unchanged on all bypass paths --
+
+    def test_rejecting_inner_decision_is_returned_unchanged_on_every_bypass_path(self):
+        """A rejecting inner judge is passed through unchanged everywhere -- there
+        is nothing to gate on a page that is not shipping anyway."""
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=False)
+        for get_fitz_page, is_table_page, status, text, label in (
+            (
+                lambda pn: _make_empty_page(),
+                False,
+                PageStatus.SUCCESS,
+                _RAGGED_TABLE,
+                "non_table_page",
+            ),
+            (None, True, PageStatus.SUCCESS, _RAGGED_TABLE, "no_get_fitz_page"),
+            (
+                lambda pn: _make_empty_page(),
+                True,
+                PageStatus.ERROR,
+                _RAGGED_TABLE,
+                "non_success_status",
+            ),
+            (lambda pn: _make_empty_page(), True, PageStatus.SUCCESS, "", "empty_text"),
+        ):
+            events.clear()
+            output = self._make_output(page_num=3, text=text, status=status)
+            judge = NativeTableVerifierJudge(
+                inner=inner,
+                get_fitz_page=get_fitz_page,
+                is_table_page=lambda pn, v=is_table_page: v,
+                record_event=events.append,
+            )
+            decision = judge.assess(output, MagicMock())
+            assert decision.accept is False, f"{label}: should reject"
+            assert decision.reason == "inner judge", f"{label}: reason should match inner judge"
+            assert [e for e in events if e.kind == "table_structure_failed"] == [], (
+                f"{label}: no events should emit"
+            )
+
+    def test_geometry_bypass_paths_call_structural_gate_with_no_geometry(self):
+        """Every accepting geometry-bypass exit reaches ``_apply_structural_gate``
+        with ``words=None`` and ``rules=None`` -- i.e. it bypasses NATIVE
+        geometry verification, not the string-only shipping gate."""
+        from unittest.mock import patch
+
+        inner = self._make_inner_judge(accept=True)
+
+        for get_fitz_page, is_table_page, status, text, label in (
+            (
+                lambda pn: _make_empty_page(),
+                False,
+                PageStatus.SUCCESS,
+                _RECTANGULAR_TABLE,
+                "non_table_page",
+            ),
+            (None, True, PageStatus.SUCCESS, _RECTANGULAR_TABLE, "no_get_fitz_page"),
+            (
+                lambda pn: _make_empty_page(),
+                True,
+                PageStatus.ERROR,
+                _RECTANGULAR_TABLE,
+                "non_success_status",
+            ),
+            (lambda pn: _make_empty_page(), True, PageStatus.SUCCESS, "", "empty_text"),
+        ):
+            output = self._make_output(page_num=4, text=text, status=status)
+            judge = NativeTableVerifierJudge(
+                inner=inner,
+                get_fitz_page=get_fitz_page,
+                is_table_page=lambda pn, v=is_table_page: v,
+                record_event=None,
+            )
+            with patch.object(
+                NativeTableVerifierJudge,
+                "_apply_structural_gate",
+                autospec=True,
+                side_effect=NativeTableVerifierJudge._apply_structural_gate,
+            ) as gate_spy:
+                judge.assess(output, MagicMock())
+
+            assert gate_spy.call_count == 1, f"{label}: structural gate not consulted"
+            _self, _decision, _output, _page_num, words, *rest = gate_spy.call_args.args
+            rules = rest[0] if rest else gate_spy.call_args.kwargs.get("rules")
+            assert words is None, f"{label}: words must be None on a geometry-bypass path"
+            assert rules is None, f"{label}: rules must be None on a geometry-bypass path"
+
+    def test_header_repair_does_not_run_on_geometry_bypass_paths(self):
+        """``_maybe_repair_collapsed_headers`` needs a real fitz page + native
+        geometry; it must stay restricted to the classified-table,
+        usable-geometry, successful-output path and never fire here."""
+        events: list[AuditEvent] = []
+        inner = self._make_inner_judge(accept=True)
+        output = self._make_output(page_num=5, text=_RECTANGULAR_TABLE)
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=None,
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
+
+        judge.assess(output, MagicMock())
+
+        assert [e for e in events if e.kind == "table_header_repair"] == []
 
 
 # --------------------------------------------------------------------------

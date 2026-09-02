@@ -99,6 +99,38 @@ def page_failed_marker(page_num: int) -> str:
     return f"[page {page_num} failed: no usable OCR output]"
 
 
+#: Every span socr itself authors INSIDE a page body: the fail-closed page
+#: markers and the ``[socr: …]`` notes a sanitizer leaves where it removed
+#: something. These are socr's own prose about what it did, not document
+#: content, which is what makes them the one exception to "no post-verdict step
+#: adds content": a subtractive step that replaces an invented image reference
+#: with a note has removed content and added a receipt for the removal.
+#:
+#: Defined here, beside ``is_page_failed_marker``, so there is ONE recognizer.
+#: A second copy would drift, and a drifted copy is how a real addition gets
+#: waved through as "just a marker".
+SOCR_MARKER_RE = re.compile(r"\[socr:[^\]\r\n]*\]|\[page \d+ failed:[^\]\r\n]+\]")
+
+
+def socr_marker(note: str) -> str:
+    """Build one socr marker, guaranteed to match :data:`SOCR_MARKER_RE`.
+
+    Cold review round 4. The recognizer alone was a test oracle: it changed what
+    a test compared while every emitter still assembled its own prose, so
+    "socr's markers are not content" rested on nothing enforceable. Emitters
+    build their marker HERE, which makes the exception a contract -- the
+    recognizer cannot miss a marker, because the builder cannot emit one it
+    would miss.
+
+    The note is flattened to a single line and stripped of the closing bracket
+    that would end the span early. That is what keeps the guarantee true for
+    free-form text (a source path, a reason), so a marker may carry detail
+    without the detail escaping the marker.
+    """
+    flattened = " ".join(str(note or "").split()).replace("]", ")")
+    return f"[socr: {flattened}]" if flattened else "[socr: ]"
+
+
 def is_page_failed_marker(text: str) -> bool:
     """True if a page's canonical text is a failure marker (not real content).
 

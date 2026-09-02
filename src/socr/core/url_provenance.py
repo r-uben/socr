@@ -39,6 +39,8 @@ import logging
 import re
 from pathlib import Path
 
+from socr.core.manifest import socr_marker
+
 logger = logging.getLogger(__name__)
 
 # ``![alt](target)`` — the same shape OutputNormalizer strips phantoms with.
@@ -60,8 +62,13 @@ _ABSOLUTE_SCHEMES = ("http://", "https://", "data:", "file://", "ftp://")
 # asset.  The invented URL and any alt text ride in the audit event instead of
 # here — an alt text is a caption for a figure that does not exist, so keeping
 # it as prose would keep the fabrication while only removing its pointer.
-FABRICATED_IMAGE_MARKER = (
-    "[socr: fabricated image reference removed — not present in the source document]"
+# Cold review round 4: BUILT from the shared definition, never hand-written.
+# ``SOCR_MARKER_RE`` is what lets a post-verdict sanitizer count as subtractive
+# on content, and that argument is only sound if every marker it must recognise
+# came out of the one builder. A second hand-written copy here is exactly how
+# the recognizer and the emitter drift apart.
+FABRICATED_IMAGE_MARKER = socr_marker(
+    "fabricated image reference removed — not present in the source document"
 )
 
 

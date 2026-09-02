@@ -90,7 +90,7 @@ def _agentic_state(
     ]
     state.agentic_judge_model = judge_model
 
-    state.engine_runs.append(
+    state.record_engine_run(
         EngineResult(
             document_path=pdf_path,
             engine="qwen",
@@ -203,7 +203,7 @@ def test_no_ladder_snapshot_when_not_agentic(tmp_path):
     )
     state.pages[1].attempts.append(po)
     state.pages[1].best_output = po
-    state.engine_runs.append(
+    state.record_engine_run(
         EngineResult(
             document_path=pdf,
             engine="gemini",
@@ -291,7 +291,7 @@ def test_journal_backward_compat_no_provider_fields(tmp_path):
     )
     state.pages[1].attempts.append(po)
     state.pages[1].best_output = po
-    state.engine_runs.append(
+    state.record_engine_run(
         EngineResult(
             document_path=pdf,
             engine="marker",
@@ -379,7 +379,7 @@ def test_budget_skip_stub_in_journal(tmp_path):
         },
     ]
     state.agentic_judge_model = ""
-    state.engine_runs.append(
+    state.record_engine_run(
         EngineResult(
             document_path=pdf,
             engine="qwen",

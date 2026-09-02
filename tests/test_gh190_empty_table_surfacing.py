@@ -405,12 +405,13 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
                 audit_passed=True,
             )
             prof = ladder[0]
+            decision = judge.assess(out, prof)
             att = ProviderAttempt(
                 engine=prof.engine,
                 output=out,
                 cost_usd=0.0,
-                accepted=True,
-                reason="inner judge accepted",
+                accepted=decision.accept,
+                reason=decision.reason,
                 provider_id=prof.id,
                 model=prof.model,
                 backend=prof.backend,
@@ -419,7 +420,7 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
                 page_num=page_num,
                 final_output=out,
                 attempts=[att],
-                accepted=True,
+                accepted=decision.accept,
             )
 
         return _route
@@ -433,6 +434,8 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
         save_figures=False,
         write_manifest=True,
         native_first=False,
+        dual_pass_tables=False,
+        escalate_ambiguous_tables=False,
     )
 
     # 1. Run with empty table
@@ -448,6 +451,10 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
             "socr.pipeline.orchestrator.route_page",
             side_effect=_make_route_fn(EMPTY_TABLE_FIXTURE),
         ) as mock_route_empty,
+        patch(
+            "socr.pipeline.agentic.HeuristicPageJudge.assess",
+            return_value=AcceptDecision(accept=True, reason="heuristics passed"),
+        ),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
     ):
         result_empty = pipeline_empty.process(pdf_path, out_empty)
@@ -467,6 +474,10 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
             "socr.pipeline.orchestrator.route_page",
             side_effect=_make_route_fn(PAIRED_POPULATED_TABLE_FIXTURE),
         ) as mock_route_pop,
+        patch(
+            "socr.pipeline.agentic.HeuristicPageJudge.assess",
+            return_value=AcceptDecision(accept=True, reason="heuristics passed"),
+        ),
         patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
     ):
         result_pop = pipeline_pop.process(pdf_path, out_pop)

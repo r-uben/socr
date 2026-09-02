@@ -7,7 +7,8 @@ Verifies:
 - _FROM_FILE_EXPLICIT_FIELDS does not contain multi_engine.
 - PipelineConfig.from_file rejects YAML containing any of the 6 removed keys with ValueError.
 - Surviving fields deserialize and round-trip cleanly from YAML.
-- Defaults for surviving fields (agentic=True, strict_local=False, dual_pass_tables=True).
+- Defaults for surviving fields (agentic=True, strict_local=False, dual_pass_tables=False
+  as of P5 -- docs/log/2026-09-02_p3-p5-judged-bytes-ship.md).
 """
 
 from __future__ import annotations
@@ -110,4 +111,7 @@ class TestPipelineConfigSchema:
         cfg = PipelineConfig()
         assert cfg.agentic is True
         assert cfg.strict_local is False
-        assert cfg.dual_pass_tables is True
+        # P5: escalate-on-signal, not unconditional -- see test_dual_pass_tables.py
+        # ::test_phase_disabled_flag_default and TestCropRereadIsEscalationGated
+        # in test_p5_reread_on_signal.py.
+        assert cfg.dual_pass_tables is False

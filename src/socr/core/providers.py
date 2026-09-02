@@ -313,6 +313,24 @@ def execution_overrides(profile: ProviderProfile) -> dict[str, object]:
     return {}
 
 
+def profile_by_model(model: str) -> ProviderProfile | None:
+    """The named profile whose ``model`` is *model*, or ``None``.
+
+    Cold review round 3, finding 4. A judge call has to be priced by the model
+    that ran it, not by whatever OCR rung happened to win the page. The judge is
+    identified by model name (``DocumentState.agentic_judge_model``), so this is
+    the lookup that turns that name into a price. ``None`` means the model is
+    not one of the metered rungs -- socr's judges run on a host it provides, so
+    the caller prices those at the known 0.00 rather than at "unknown".
+    """
+    if not model:
+        return None
+    for prof in _ALL_PROFILES:
+        if prof.model == model:
+            return prof
+    return None
+
+
 def profile_by_id(provider_id: str) -> ProviderProfile | None:
     """The named profile whose ``id`` is *provider_id*, or ``None``.
 

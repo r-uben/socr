@@ -108,7 +108,7 @@ def test_a_figure_is_not_recorded_twice(tmp_path: Path) -> None:
     state = _state(tmp_path / "b")
     out_dir = tmp_path / "b" / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
-    state.engine_runs.append(
+    state.record_engine_run(
         EngineResult(
             document_path=state.handle.path,
             engine="qwen",

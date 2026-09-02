@@ -33,7 +33,19 @@ does not require an expensive model loop on every page.
 
 - **Single-pass is the default extract step.** Validated 2026-06-14 on a dense
   forecaster table (`qwen3-vl:30b-a3b-instruct`, one call): 120/120 summary cells
-  exact. Crop-reconcile is the tail (escalation), not the trunk.
+  exact. Crop-reconcile is an opt-in escalation tool (`--dual-pass-tables`, default
+  off), never a trunk pass over all accepted table pages. When enabled, it fires
+  only after a table verifier/routing signal. It runs after `route_page` has
+  reached its verdict, so its reconciled text is a NEW CANDIDATE: it goes back
+  through the same judge before it can ship, and the previously accepted bytes
+  ship if the judge refuses it. An accepted re-judge promotes the page as a
+  first-time acceptance would -- clearing the verdict and exhaustion state the
+  refused ladder left -- so a crop can recover a page whose whole ladder was
+  refused. It cannot recover a page whose winning attempt was an OPERATIONAL
+  failure (an errored or truncated read): a crop repairs a table, not a read that
+  never finished, so that page is refused before a judge call is spent. The crop
+  still precedes the GH-96 escalation candidate and the table-judge terminal
+  verdict.
 - **Verify is free, not a second model.** On born-digital pages PyMuPDF knows the
   column x-positions and the header fixes the column count, so a value outside its
   lane is a zero-cost red flag. This deterministic check sits *ahead* of the VLM
@@ -50,7 +62,7 @@ See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
 - `cli.py`: Click commands — `process` (default, PDF-path shorthand), `batch`,
   `engines`, `replay`, `judge-benchmark`. Agentic routing controls:
   `--strict-local`, `--judge-backend`, `--judge-model`, `--max-cost-per-page`,
-  `--cost-budget`, `--write-manifest`.
+  `--cost-budget`, `--write-manifest`, `--dual-pass-tables/--no-dual-pass-tables`.
 - `core/`:
   - `config.py`: `PipelineConfig` (single flat config), `EngineType`,
     `ENGINE_PRIORITY`, agentic flags.

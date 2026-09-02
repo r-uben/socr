@@ -267,11 +267,11 @@ class PipelineConfig:
     # flipped signs, wrong digits (0.001->0.007), swapped columns. Rejected pages
     # re-route through repair. No-ops if no vision judge model is available.
     judge_hard_pages: bool = True
-    # Dual-pass table extraction: on table pages, crop each precisely-located
-    # table (ruled or booktabs), re-read the crop with the judge VLM, and
-    # reconcile against the whole-page OCR. Crop-vs-page disagreement is a
-    # corruption flag; the crop reading is authoritative and patched in. No-ops
-    # if no vision model is available. Reuses the judge model ladder.
+    # Dual-pass table extraction: True enables a crop reread only when the shared
+    # table-verification/routing escalation signal fires. It crops each precisely
+    # located table (ruled or booktabs), re-reads it with the judge VLM, and
+    # reconciles against the whole-page OCR. No-ops if no vision model is
+    # available. Reuses the judge model ladder.
     # GH-96: re-read a table page with a cloud engine when its emitted table
     # disagrees with the page's own native text layer, and keep the result only if
     # hierarchy-aware exactness measurably improves. Automatic wherever a cloud rung
@@ -285,7 +285,10 @@ class PipelineConfig:
     # inline in the page-major loop, so an unbounded call stalls the whole document.
     escalation_timeout_sec: float = 120.0
 
-    dual_pass_tables: bool = True
+    # The crop reread is an opt-in escalation tool.  It is selected only after
+    # the shared table-disagreement signal fires; keeping this off by default
+    # also preserves the cheap ordinary accepted-page lifecycle.
+    dual_pass_tables: bool = False
     # Auto-patch the crop reading into the page on disagreement. Default OFF
     # (flag-only): the crop reader's numeric fidelity is unproven, and a silent
     # wrong patch to a research number is worse than a missed correction. Opt in

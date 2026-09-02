@@ -8,9 +8,12 @@ structured loop that operates on the DocumentState blackboard.
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
+import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,6 +38,7 @@ from socr.core.providers import (
     execution_overrides,
     is_cloud_qwen,
     profile_by_id,
+    profile_by_model,
     resolved_provenance,
 )
 from socr.core.result import (
@@ -45,7 +49,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.core.state import DocumentState, PageState
+from socr.core.state import DocumentState, PageState, add_page_cost
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.pipeline.agentic import route_page
@@ -1789,7 +1793,11 @@ class UnifiedPipeline:
             cost_usd=call_cost_usd,
         )
         if self.config.agentic:
-            state.engine_runs.append(
+            # Round 6: ``call_cost_usd`` is None whenever the model actually ran,
+            # so this lane is the one that most needs the recorder -- the page's
+            # spend is UNKNOWN, and the default 0.0 would persist a known zero
+            # and hand a resumed run budget it never had.
+            state.record_engine_run(
                 EngineResult(
                     document_path=state.handle.path,
                     engine="native+math",
@@ -1800,7 +1808,8 @@ class UnifiedPipeline:
                     pages_processed=1,
                     audit_passed=False,
                     audit_notes=[detail],
-                )
+                ),
+                page_nums=[page_num],
             )
         return page_output
 
@@ -2367,7 +2376,7 @@ class UnifiedPipeline:
         cost = self._equation_lane_call_cost(profile, calls_made)
         if ps.best_output is not None:
             ps.best_output.cost_usd = cost
-        state.engine_runs.append(
+        state.record_engine_run(
             EngineResult(
                 document_path=state.handle.path,
                 engine="native+equations",
@@ -2377,7 +2386,8 @@ class UnifiedPipeline:
                 cost=cost,
                 pages_processed=1,
                 audit_passed=True,
-            )
+            ),
+            page_nums=[page_num],
         )
 
     # ------------------------------------------------------------------
@@ -2994,6 +3004,29 @@ class UnifiedPipeline:
             return None
         return min(candidates, key=lambda p: p.cost_per_page_usd)
 
+    @staticmethod
+    def _route_page_table_escalation_signal(decision, ladder: list) -> bool:
+        """Return route evidence that should join the table score signal.
+
+        ``route_page`` deliberately owns provider/judge escalation, while the
+        table lane runs immediately after it.  A native verifier rejection that
+        caused another rung to run is therefore useful evidence even when the
+        final rung happens to look perfect to the native-text score.  Likewise,
+        an exhausted ladder on a table page should get the bounded crop/tool
+        opportunity before the later table-judge terminal is produced.
+
+        This reads the route decision and attempt reasons only.  In particular,
+        ``PageOutput.audit_passed`` is a winner-selection field, not a routing
+        signal, and must not be used here.
+        """
+        attempts = getattr(decision, "attempts", ())
+        if any(
+            not attempt.accepted and (attempt.reason or "").startswith("native_table_verifier:")
+            for attempt in attempts[:-1]
+        ):
+            return True
+        return bool(ladder) and not decision.accepted and len(attempts) >= len(ladder)
+
     def _table_page_needs_escalation(
         self, state: DocumentState, page_num: int, page, ps, bo
     ) -> bool:
@@ -3089,7 +3122,7 @@ class UnifiedPipeline:
 
     def _surface_table_scoring(
         self, state: DocumentState, page_num: int, ps, bo: PageOutput
-    ) -> None:
+    ) -> bool:
         """Score a table page against its native layer even with no escalation lane.
 
         #123 TICKET-C2: ``_table_page_needs_escalation`` is the one place both
@@ -3112,21 +3145,26 @@ class UnifiedPipeline:
         on ``_page_has_tables``: prose pages skip it entirely, and a page with
         table-like structure is exactly the page where silently shipping
         unexplained lanes or an unscorable grid is the failure this exists to
-        prevent. Chart pages still reach it — ``has_tables`` is True there, which
-        is why TICKET-B1 was needed — so the not-scorable surface keeps them.
+        prevent. A chart page reaches it only if it still has a table signal:
+        a chart WINNER is by construction a ``chart_only`` page (``has_tables``
+        False), while a chart page that also carries a table is arbitrated to
+        the table lane and keeps the not-scorable surface. The caller adds the
+        pages the GH-96 escalation lane would otherwise have scored itself, so
+        the coverage does not depend on whether that lane is live.
         """
         try:
             from socr.core.pdf import open_pdf
 
             with open_pdf(state.handle.path) as doc:
                 page = doc[page_num - 1]
-                self._table_page_needs_escalation(state, page_num, page, ps, bo)
+                return self._table_page_needs_escalation(state, page_num, page, ps, bo)
         except Exception as exc:
             logger.warning(
                 "table scoring failed on p%d (%s); no distrust events emitted",
                 page_num,
                 exc,
             )
+            return False
 
     def _escalate_table_page(
         self,
@@ -3137,6 +3175,8 @@ class UnifiedPipeline:
         profile,
         run_provider,
         pdf_path,
+        *,
+        needs_escalation: bool | None = None,
     ) -> tuple[bool, PageOutput]:
         """Re-read one table page with *profile*; keep it only if it measures better.
 
@@ -3158,7 +3198,11 @@ class UnifiedPipeline:
 
             with open_pdf(pdf_path) as doc:
                 page = doc[page_num - 1]
-                if not self._table_page_needs_escalation(state, page_num, page, ps, bo):
+                if needs_escalation is None:
+                    needs_escalation = self._table_page_needs_escalation(
+                        state, page_num, page, ps, bo
+                    )
+                if not needs_escalation:
                     return False, bo
                 incumbent_text = bo.text or ""
 
@@ -3221,8 +3265,11 @@ class UnifiedPipeline:
 
             # Cost is recorded by hand: `route_page` does this for ladder calls, and
             # a bare `run_provider` does not, so without it the document
-            # under-reports what it spent.
-            state.engine_runs.append(
+            # under-reports what it spent. Recorded against the PAGE here, ABOVE
+            # the accept/reject branch: a refused candidate is never appended to
+            # ``ps.attempts``, so this is the only place its real spend is seen
+            # (round 5).
+            state.record_engine_run(
                 EngineResult(
                     document_path=pdf_path,
                     engine=profile.engine.value,
@@ -3230,7 +3277,8 @@ class UnifiedPipeline:
                     pages=[],
                     pages_processed=1,
                     cost=profile.cost_per_page_usd,
-                )
+                ),
+                page_nums=[page_num],
             )
 
             if not decision.accepted:
@@ -3941,9 +3989,14 @@ class UnifiedPipeline:
         disables the wrapper (forward to the inner judge directly).
         """
 
-        def __init__(self, inner, timeout_sec: float | None) -> None:
+        def __init__(self, inner, timeout_sec: float | None, owner=None) -> None:
             self._inner = inner
             self._timeout_sec = timeout_sec
+            # Round 3, finding 3: the worker runs on its own thread, so the
+            # pipeline's per-invocation event binding has to be carried across
+            # explicitly. ``None`` keeps the wrapper usable standalone (tests
+            # construct it directly); the pipeline always passes itself.
+            self._owner = owner
 
         def assess(self, output, provider):
             import concurrent.futures
@@ -3953,8 +4006,22 @@ class UnifiedPipeline:
             if self._timeout_sec is None:
                 return self._inner.assess(output, provider)
 
+            owner = self._owner
+            binding = owner._current_judge_binding() if owner is not None else None
+
+            def _run():
+                if owner is not None:
+                    owner._bind_judge_events(binding)
+                    try:
+                        return self._inner.assess(output, provider)
+                    finally:
+                        owner._bind_judge_events(None)
+                return self._inner.assess(output, provider)
+
+            if owner is not None:
+                owner._enter_judge_call()
             ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = ex.submit(self._inner.assess, output, provider)
+            future = ex.submit(_run)
             try:
                 result = future.result(timeout=self._timeout_sec)
                 ex.shutdown(wait=False)
@@ -3968,6 +4035,12 @@ class UnifiedPipeline:
                     self._timeout_sec,
                 )
                 return AcceptDecision(accept=False, reason="judge timeout")
+            finally:
+                # Decremented in the CALLER exactly once, including on timeout:
+                # from here on nothing is waiting on that worker, so anything it
+                # still emits is late by definition.
+                if owner is not None:
+                    owner._leave_judge_call()
 
     # ------------------------------------------------------------------
     # Agentic: cost-aware per-page routing
@@ -4007,7 +4080,38 @@ class UnifiedPipeline:
             callers and tests can detect the HALT condition unambiguously.
 
         Optional dual-pass table rereads run inside this fused loop, so each table
-        is handled before the page is flushed and assembled.
+        is handled before the page is flushed and assembled. The crop reread runs
+        AFTER ``route_page``'s verdict, so its patched text is a new candidate and
+        goes back through the same judge (``_rejudge_crop_patched_page``) before it
+        can ship.
+
+        **Post-verdict content contract** (P3, scoped by the round-2 ruling).
+        "Judged bytes are shipped bytes" means no post-verdict step may ADD or
+        ALTER content. There are exactly three enumerated exceptions, and any new
+        one needs the same justification:
+
+          * ``_sanitize_agentic_page_image_refs`` — SUBTRACTIVE. Removes VLM
+            sentinel placeholders and fabricated image refs. An image ref is a
+            pure pointer; a pointer to something that does not exist carries
+            nothing, so removal cannot lose content.
+          * ``_guard_agentic_page_table_repetition`` — SUBTRACTIVE. Truncates a
+            runaway row repetition; every dropped line is byte-identical to one
+            that is kept.
+          * ``_attach_equation_latex_sidecars`` — ADDITIVE, and therefore GUARDED
+            by REUSING the equation lane's own guards rather than copies:
+            ``contract_delimiter_violation`` at the ``process_equation_region``
+            choke point refuses a page-assembly delimiter (and a fence that would
+            break out of the block), and ``_guard_equation_sidecar_block`` runs
+            ``region_presence_verdict`` so model LaTeX carrying a number absent
+            from the page's own source is refused.
+
+        "Adds content" is about CONTENT tokens. A subtractive helper that leaves
+        socr's own marker where it removed something (``[socr: …]``,
+        ``[page N failed: …]``, recognised by ``SOCR_MARKER_RE``) has added a
+        receipt, not content. The two subtractive helpers are pinned by
+        invariant tests (``tests/test_p35_cold_review_round2.py``,
+        ``tests/test_p35_cold_review_round3.py``): outside those marker spans,
+        every token in the output exists in the input, never the reverse.
 
         ``_classify`` remains doc-wide (``_phase_analyze``); the fused loop
         handles only the post-classification per-page lifecycle (fork C2).
@@ -4278,7 +4382,7 @@ class UnifiedPipeline:
         _judge_timeout: float | None = None
         if provider_timeout:
             _judge_timeout = max(provider_timeout.values()) if provider_timeout else None
-        judge = self._TimeoutJudge(_inner_judge, _judge_timeout)
+        judge = self._TimeoutJudge(_inner_judge, _judge_timeout, owner=self)
 
         if not self.config.quiet:
             ladder_str = " -> ".join(f"{p.engine.value}(${p.cost_per_page_usd:g})" for p in ladder)
@@ -4295,33 +4399,47 @@ class UnifiedPipeline:
             )
             return outs[0]
 
-        # -- Doc-scoped table extractor (PP-3 hoist) ----------------------------
+        # -- Lazy doc-scoped table extractor (P5) -------------------------------
+        # Crop rereads are an escalation tool, so resolving a model or probing a
+        # reader at document setup would make an otherwise clean document pay for
+        # unused work.  The initialized latch also memoizes fail-open outcomes:
+        # a missing model or construction error must not be retried on every page.
         _table_extractor = None
-        _crop_timeout: float | None = None
-        if self.config.dual_pass_tables:
+        _table_extractor_initialized = False
+        _dual_pass_tables_enabled = bool(self.config.dual_pass_tables)
+
+        def _get_table_extractor():
+            nonlocal _table_extractor, _table_extractor_initialized
+            if _table_extractor_initialized:
+                return _table_extractor
+            _table_extractor_initialized = True
+            if not _dual_pass_tables_enabled:
+                return None
             try:
                 from socr.tables.extract import TableCropExtractor, make_table_reader
 
                 _table_model = self._resolve_crop_vlm_model()
-                if _table_model:
-                    _qwen_family = ("qwen",)
-                    _crop_timeout = (
-                        DEFAULT_PROVIDER_TIMEOUTS.get(EngineType.QWEN, 120.0)
-                        if any(_table_model.lower().startswith(p) for p in _qwen_family)
-                        else 120.0
+                if not _table_model:
+                    return None
+                _qwen_family = ("qwen",)
+                _crop_timeout = (
+                    DEFAULT_PROVIDER_TIMEOUTS.get(EngineType.QWEN, 120.0)
+                    if any(_table_model.lower().startswith(p) for p in _qwen_family)
+                    else 120.0
+                )
+                _table_extractor = TableCropExtractor(
+                    make_table_reader(
+                        backend=self.config.qwen_backend,
+                        model=_table_model,
+                        timeout=_crop_timeout,
+                        vllm_url=self.config.qwen_vllm_url,
                     )
-                    _table_extractor = TableCropExtractor(
-                        make_table_reader(
-                            backend=self.config.qwen_backend,
-                            model=_table_model,
-                            timeout=_crop_timeout,
-                            vllm_url=self.config.qwen_vllm_url,
-                        )
-                    )
+                )
             except Exception as exc:
                 logger.warning(
-                    "agentic: table extractor unavailable (%s); skipping in-loop tables", exc
+                    "agentic: table extractor unavailable (%s); skipping signal rereads", exc
                 )
+            return _table_extractor
 
         # -- Doc-scoped table judge ladder rungs (GH-353 TICKET-B1) -------------
         # Constructed once per document, injected into every page's gate call.
@@ -4385,6 +4503,8 @@ class UnifiedPipeline:
         for page_num in sorted(state.pages):
             ps = state.pages[page_num]
             is_native = self._is_agentic_trusted_native(page_num, ps)
+            _route_table_signal = False
+            _winning_profile: ProviderProfile | None = ladder[0] if ladder else None
 
             # Cascade halt guard (top-of-loop): once the backend has degraded
             # (previously timed out AND failed the health probe), halt for ALL
@@ -4477,6 +4597,14 @@ class UnifiedPipeline:
                     remaining_budget=remaining,
                     provider_timeout=provider_timeout,
                 )
+                _route_table_signal = self._route_page_table_escalation_signal(decision, ladder)
+                # The profile whose reading won. Needed to re-judge a candidate
+                # produced after routing (crop reread) through the same judge
+                # with the same provider context.
+                for _att in decision.attempts:
+                    if _att.output is decision.final_output:
+                        _winning_profile = profile_by_id(_att.provider_id) or _winning_profile
+                        break
 
                 for att in decision.attempts:
                     att.output.cost_usd = att.cost_usd
@@ -4508,78 +4636,6 @@ class UnifiedPipeline:
                     ps.attempts.append(att.output)
                 ps.best_output = decision.final_output
 
-                # GH-56: deterministic header repair for collapsed multi-band tables.
-                if ps.best_output and ps.best_output.text and self._page_has_tables(page_num, ps):
-                    try:
-                        from socr.core.pdf import open_pdf
-                        from socr.tables.header_repair import repair_table_headers_on_page
-
-                        with open_pdf(state.handle.path) as _hdr_doc:
-                            _repaired_text, _hdr_n = repair_table_headers_on_page(
-                                _hdr_doc[page_num - 1],
-                                ps.best_output.text,
-                            )
-                        if _hdr_n > 0:
-                            ps.best_output.text = _repaired_text
-                            from socr.core.audit_log import AuditEvent
-
-                            state.events.append(
-                                AuditEvent(
-                                    page_num=page_num,
-                                    kind="table_header_repair",
-                                    engine=ps.best_output.engine or "",
-                                    detail=(
-                                        f"repaired {_hdr_n} too-narrow or collapsed "
-                                        "table header(s) (post-route)"
-                                    ),
-                                    data={"repair_count": _hdr_n},
-                                )
-                            )
-                    except Exception as exc:
-                        logger.debug(
-                            "agentic header repair skipped on p%d (%s)",
-                            page_num,
-                            exc,
-                        )
-
-                # GH-200: the GH-56 repair above MUTATES ps.best_output.text
-                # after the judge already accepted it -- so the shipped text
-                # is not the text the structural gate saw. Re-run the
-                # string-only terms on whatever text ships now; if repair
-                # produced a ragged/detached-label grid, a raw delimiter-width
-                # mismatch, or a residual LaTeX table command, demote in place.
-                # Routing is finished
-                # by this point -- do NOT reroute, just stop shipping it as a
-                # pass. Exactly one audit event per page: this is the sole
-                # recheck site after routing, distinct from the judge's own
-                # (pre-repair) escalation event.
-                if ps.best_output and ps.best_output.text and ps.best_output.audit_passed:
-                    from socr.tables.structure_check import table_output_defect
-
-                    _post_route_defect = table_output_defect(ps.best_output.text, None, None)
-                    if _post_route_defect:
-                        from socr.core.audit_log import AuditEvent
-
-                        ps.best_output.audit_passed = False
-                        ps.best_output.status = PageStatus.WARNING
-                        ps.best_output.failure_mode = FailureMode.NATIVE_TABLE_STRUCTURE_FAILED
-                        ps.native_table_structure_failed = True
-                        state.events.append(
-                            AuditEvent(
-                                page_num=page_num,
-                                kind="table_structure_failed",
-                                engine=ps.best_output.engine or "",
-                                detail=(
-                                    f"{_post_route_defect} defect found after "
-                                    "post-route header repair"
-                                ),
-                                data={
-                                    "defect": _post_route_defect,
-                                    "site": "post_route_recheck",
-                                },
-                            )
-                        )
-
                 # GH-90: scanned-table source-evidence fail-closed floor.
                 _source_ev_rejected = any(
                     "source_evidence_table" in (att.reason or "") for att in decision.attempts
@@ -4606,9 +4662,17 @@ class UnifiedPipeline:
                         )
 
                 # Provenance guard: when the judge rejected ALL ladder rungs for a
-                # born-digital table page, mark the page so _assemble_result treats
-                # any native-text fallback as audit-failed.
-                if not decision.accepted and self._page_has_tables(page_num, ps):
+                # born-digital table page or a page where table structure failed,
+                # mark the page so _assemble_result treats any native-text fallback as
+                # audit-failed.
+                if not decision.accepted and (
+                    self._page_has_tables(page_num, ps)
+                    or any(
+                        getattr(e, "kind", None) == "table_structure_failed"
+                        for e in state.events
+                        if getattr(e, "page_num", None) == page_num
+                    )
+                ):
                     ps.native_table_structure_failed = True
                     # TR-2: render chart region PNG crops and update placeholder
                     # paths in ps.native_text so strip_phantom_images (called in
@@ -4664,8 +4728,9 @@ class UnifiedPipeline:
                             label="Failed table page",
                         )
 
-                # Record cost so DocumentState.total_cost reflects spend.
-                state.engine_runs.append(
+                # Record cost so DocumentState.total_cost reflects spend, and
+                # against the PAGE so it survives the sidecar and resume (round 5).
+                state.record_engine_run(
                     EngineResult(
                         document_path=state.handle.path,
                         engine=decision.winning_engine,
@@ -4674,7 +4739,8 @@ class UnifiedPipeline:
                         else DocumentStatus.AUDIT_FAILED,
                         cost=decision.total_cost_usd,
                         processing_time=0.0,
-                    )
+                    ),
+                    page_nums=[page_num],
                 )
 
                 if not self.config.quiet:
@@ -4720,50 +4786,83 @@ class UnifiedPipeline:
             if bo is None:
                 continue
 
-            # PP-3: in-loop table re-read (OCR pages with tables only).
-            # Native text is character-exact — its tables need no re-read.
-            # The chart_asset clause is currently unreachable (chart winners have no
-            # table signal, so _page_has_tables already short-circuits); it is kept
-            # to match the escalation-site guard below, which IS load-bearing, and
-            # to stay correct if chart winners are ever widened to mixed pages.
+            # #123 TICKET-C2 scoring is NOT gated on the P5 signal: it must reach
+            # every page it reached before this branch, because it is the only
+            # surface `table_not_scorable` and `table_unexplained_lanes` ever get.
+            # That set is "a page with tables" (the old TICKET-C2 arm) UNION "a
+            # page the GH-96 lane would have scored itself" (the old escalation
+            # arm, which never gated on has_tables) -- native-bypass and
+            # chart-asset table pages included.
+            _lane_live = _escalation_profile is not None and not _escalation_degraded
+            _score_table_signal = False
+            if bo.text and (
+                self._page_has_tables(page_num, ps) or (_lane_live and bo.engine != "chart_asset")
+            ):
+                _score_table_signal = bool(self._surface_table_scoring(state, page_num, ps, bo))
+
+            # P5: the crop reread is an escalation tool fired by a signal, never a
+            # trunk pass over every accepted table page.  Route evidence (a native
+            # verifier rejection that forced another rung, or an exhausted ladder)
+            # joins the score HERE and only here: it is evidence that the page is
+            # worth a bounded second look, but it is not evidence that a paid
+            # provider re-read could be kept, which is what GH-96 below needs.
+            _crop_changed_text = False
             if (
-                not is_native
-                and _table_extractor is not None
-                and self._page_has_tables(page_num, ps)
+                _dual_pass_tables_enabled
+                and (_score_table_signal or _route_table_signal)
+                and not is_native
                 and bo.text
                 and bo.engine != "chart_asset"
+                and self._page_has_tables(page_num, ps)
             ):
-                try:
-                    from socr.core.pdf import open_pdf
-                    from socr.tables import locate_tables
+                # A failed/missing extractor is fail-open and memoized by the
+                # document-scoped getter above.
+                _table_extractor = _get_table_extractor()
+                if _table_extractor is not None:
+                    _accepted_text = bo.text
+                    try:
+                        from socr.core.pdf import open_pdf
+                        from socr.tables import locate_tables
 
-                    with open_pdf(state.handle.path) as _doc:
-                        _boxes = locate_tables(_doc[page_num - 1])
-                    if _boxes:
-                        _raw_crops = _table_extractor.extract(
-                            state.handle.path,
+                        with open_pdf(state.handle.path) as _doc:
+                            _boxes = locate_tables(_doc[page_num - 1])
+                        if _boxes:
+                            _raw_crops = _table_extractor.extract(
+                                state.handle.path,
+                                page_num,
+                                _boxes,
+                                cascade_probe=True,
+                            )
+                            self._reread_page_tables(state, page_num, _raw_crops, _table_extractor)
+                    except Exception as exc:
+                        logger.warning(
+                            "agentic signal table re-read errored on p%d (%s); keeping text",
                             page_num,
-                            _boxes,
-                            cascade_probe=True,
+                            exc,
                         )
-                        self._reread_page_tables(state, page_num, _raw_crops, _table_extractor)
-                except Exception as exc:
-                    logger.warning(
-                        "agentic in-loop table re-read errored on p%d (%s); keeping text",
-                        page_num,
-                        exc,
+                    bo = ps.best_output or bo
+                    # P3 / ruling step 4: the reread's patched text is a NEW
+                    # CANDIDATE, not shipped bytes. Run it back through the same
+                    # judge before it can replace what the judge already accepted.
+                    # Outside the try/except above on purpose: _reread_page_tables
+                    # patches bo.text outside its own guard, so a raise there must
+                    # still not leave unjudged bytes on the page.
+                    bo = self._rejudge_crop_patched_page(
+                        state, page_num, ps, bo, _accepted_text, judge, _winning_profile
                     )
+                    _crop_changed_text = (bo.text or "") != _accepted_text
 
             # GH-96: escalate a table page whose output disagrees with its own
             # native text layer, keeping the candidate only if exactness measurably
-            # improves. Placed here so the accepted text still flows through the
-            # equation, image-ref and repetition passes below.
-            if (
-                _escalation_profile is not None
-                and not _escalation_degraded
-                and bo.text
-                and bo.engine != "chart_asset"
-            ):
+            # improves. Driven by the SCORE, not by route evidence: an earlier rung
+            # being rejected says nothing about whether `decide_escalation` could
+            # keep a new candidate, and when the incumbent already scores 100% it
+            # provably cannot. Passing the score prevents a second scoring pass and
+            # its duplicate table_not_scorable / table_unexplained_lanes events --
+            # except when the crop reread changed the shipped bytes, where the
+            # stale score describes text that no longer ships and the page is
+            # re-scored on what does.
+            if _lane_live and bo.text and bo.engine != "chart_asset":
                 _escalation_degraded, bo = self._escalate_table_page(
                     state,
                     page_num,
@@ -4772,18 +4871,8 @@ class UnifiedPipeline:
                     _escalation_profile,
                     run_provider,
                     state.handle.path,
+                    needs_escalation=None if _crop_changed_text else _score_table_signal,
                 )
-            elif bo.text and self._page_has_tables(page_num, ps):
-                # #123 TICKET-C2: no escalation lane this page (no provider, the
-                # lane is degraded, or the lane is off) — still score against the
-                # native layer so not-scorable pages and unexplained lanes surface
-                # on a local-only run instead of shipping with no trace.
-                #
-                # Gated on _page_has_tables so prose pages skip the ~137ms scoring
-                # cost entirely: they have no table to lose. Chart pages still
-                # reach it (has_tables is True there — that is precisely why
-                # TICKET-B1 exists), so they still surface as not-scorable.
-                self._surface_table_scoring(state, page_num, ps, bo)
 
             # GH-36a/36b: per-page equation detect + crop + optional LaTeX
             # sidecar.  Runs ONLY when the flags are on (default-off).  With
@@ -5396,6 +5485,381 @@ class UnifiedPipeline:
             return self.config.judge_model
         return self._resolve_judge_model()
 
+    # -- Judge-side audit events: per-invocation ownership --------------------
+    #
+    # Round 2, finding 3. The composed page judge closes over ``state.events``
+    # through ``record_event``, so anything it emits lands on the document the
+    # instant it is emitted -- including while judging a candidate that is about
+    # to be REFUSED and never ship. ``native_table_verifier_hard_fail`` is in
+    # ``TABLE_DISTRUST_KINDS``, so one refused crop candidate was enough to mark
+    # the shipped bytes untrusted in ``tables_trust.json``.
+    #
+    # Round 3, finding 3. A temporarily swapped instance-global list does not
+    # close that: ``_TimeoutJudge`` returns a rejection while its worker keeps
+    # running, so a LATE event arrived after the swap was restored and reached
+    # the document anyway -- or, worse, landed in the scratch list of a LATER
+    # re-judge. Ownership therefore has to be per invocation, not per instance:
+    #
+    #   * every ``_judge_events_to`` block mints a token and binds (token, sink)
+    #     to the calling thread; ``_TimeoutJudge`` carries that binding into its
+    #     worker thread, so the emitter always knows whose call it is on;
+    #   * the token is RETIRED when the block exits, and an event arriving on a
+    #     retired token is dropped -- its candidate has already been disposed of;
+    #   * a worker whose wrapper could not carry a binding (a ``_TimeoutJudge``
+    #     built without an owner) is still recognised as late: it is not the
+    #     thread that drives the page loop, and no judge call is in flight.
+    _judge_event_binding: tuple | None = None
+    _judge_calls_in_flight: int = 0
+    _judge_scratch_blocks: int = 0
+
+    @property
+    def _judge_sink_state(self):
+        state = getattr(self, "_judge_sink_state_local", None)
+        if state is None:
+            state = threading.local()
+            self._judge_sink_state_local = state
+        return state
+
+    def _current_judge_binding(self):
+        return getattr(self._judge_sink_state, "binding", None)
+
+    def _bind_judge_events(self, binding) -> None:
+        self._judge_sink_state.binding = binding
+
+    def _enter_judge_call(self) -> None:
+        with self._judge_call_lock:
+            self._judge_calls_in_flight += 1
+
+    def _leave_judge_call(self) -> None:
+        with self._judge_call_lock:
+            self._judge_calls_in_flight = max(0, self._judge_calls_in_flight - 1)
+
+    @property
+    def _judge_call_lock(self):
+        lock = getattr(self, "_judge_call_lock_obj", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._judge_call_lock_obj = lock
+        return lock
+
+    def _record_judge_event(self, state: DocumentState, event) -> None:
+        binding = self._current_judge_binding()
+        if binding is not None:
+            token, sink = binding
+            if token in self._retired_judge_tokens:
+                return  # the invocation that made this call is over
+            sink.append(event)
+            return
+
+        active = self._judge_event_binding
+        if active is not None:
+            # A worker with no carried binding, emitting while a block is open:
+            # capture it rather than let it reach the document unattributed.
+            active[1].append(event)
+            return
+
+        if (
+            self._judge_scratch_blocks
+            and threading.get_ident() != getattr(self, "_judge_loop_thread", None)
+            and self._judge_calls_in_flight <= 0
+        ):
+            # Not the loop thread, nothing waiting on any judge: an abandoned
+            # worker from a call whose verdict was already taken as a rejection.
+            return
+
+        state.events.append(event)
+
+    @property
+    def _retired_judge_tokens(self) -> set:
+        retired = getattr(self, "_retired_judge_tokens_set", None)
+        if retired is None:
+            retired = set()
+            self._retired_judge_tokens_set = retired
+        return retired
+
+    @contextmanager
+    def _judge_events_to(self, sink: list):
+        """Own every judge-side event of one re-judge, on any thread."""
+        token = object()
+        previous_binding = self._judge_event_binding
+        previous_thread_binding = self._current_judge_binding()
+        self._judge_event_binding = (token, sink)
+        self._bind_judge_events((token, sink))
+        self._judge_loop_thread = threading.get_ident()
+        self._judge_scratch_blocks += 1
+        try:
+            yield
+        finally:
+            self._retired_judge_tokens.add(token)
+            self._judge_event_binding = previous_binding
+            self._bind_judge_events(previous_thread_binding)
+
+    @staticmethod
+    def _add_page_cost(ps, cost: float | None) -> None:
+        """Charge a page's recorded spend. Delegates to the one recorder.
+
+        Kept as a name because tests and older call sites reach for it; the rule
+        itself lives with the journal helper in ``socr.core.state`` so journaling
+        and recording cannot drift apart (round 6).
+        """
+        add_page_cost(ps, cost)
+
+    @staticmethod
+    def _page_total_cost(ps) -> float | None:
+        """Read the page's recorded spend. A pure reader -- it derives nothing.
+
+        Round 4 computed this by summing ``ps.attempts``, and round 5 showed why
+        that cannot work: the list omits a refused GH-96 escalation candidate
+        live, and resume rebuilds it as the single frozen winner, so the first
+        resumed run's sidecar rewrite destroyed the very total it had restored
+        and the second resume regained the rejected rung's budget.
+        ``_add_page_cost`` records the fact instead; this reads it.
+        """
+        if ps is None:
+            return None
+        return getattr(ps, "page_cost_usd", None)
+
+    def _rejudge_crop_patched_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps,
+        bo: PageOutput,
+        accepted_text: str,
+        judge,
+        provider,
+    ) -> PageOutput:
+        """Send a crop-patched page back through the judge before it can ship.
+
+        P3's invariant is that judged bytes are shipped bytes on EVERY path, and
+        ruling step 4 (``docs/log/2026-09-01_conceptual-revision.md``) says a
+        crop reread is an escalation tool that runs before the verdict, never
+        after an accept.  ``_reread_page_tables`` patches ``best_output.text``
+        after ``route_page`` has already accepted or exhausted the ladder, so
+        its output is a NEW CANDIDATE: it goes back through the same judge, with
+        the same provider context as the reading that won.
+
+        Three things follow, and all three are load-bearing (cold review round 2):
+
+        1. **The candidate is judged clean.**  It is a fresh reading, so it is
+           presented the way a first rung's output is presented -- SUCCESS, no
+           failure mode, no rejection class, ``audit_passed`` unset by any
+           earlier verdict -- and as a COPY, because the judge legitimately
+           mutates what it is handed (pre-verdict header repair,
+           ``rejection_class``) and none of that may reach shipped output unless
+           the verdict accepts.
+        2. **An acceptance PROMOTES.**  Copying only the text left the page
+           carrying the fail-closed state ladder exhaustion had stamped
+           (``audit_passed=False``, ``native_table_structure_failed``, the floor
+           PNG), so ``_grid_authored_attempt`` still refused it and the page
+           shipped the structure-class floor rather than the bytes the judge had
+           just accepted -- the recovery was invisible.  An accepting re-judge
+           therefore leaves exactly the state a first-time acceptance leaves.
+        3. **A refusal leaves no trace on the shipped bytes.**  Judge-side events
+           are captured to a scratch list; they join ``state.events`` only if the
+           candidate is accepted.  Otherwise they describe bytes that never ship,
+           and one of them (``native_table_verifier_hard_fail``) would mark the
+           page untrusted in ``tables_trust.json``.  The refusal itself is
+           recorded as exactly one ``table_reread_rejudged`` event.
+
+        Returns the output the caller must keep using.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        if bo is None:
+            return bo
+        patched_text = bo.text or ""
+        if patched_text == (accepted_text or ""):
+            return bo
+
+        # Round 3, finding 1: the crop lane is reachable on ladder exhaustion
+        # with a non-empty OPERATIONAL failure -- a provider whose read was
+        # truncated, or errored. Presenting the patched text as a fresh SUCCESS
+        # candidate would launder that failure into a terminal SUCCESS page,
+        # because the promotion below writes exactly the state a first-time
+        # acceptance writes. A crop reread repairs a TABLE; it does not repair a
+        # truncated read, and it has no evidence about the part of the page the
+        # provider never returned. Refuse before spending a judge call.
+        if (
+            bo.status is PageStatus.ERROR
+            or bo.failure_mode is FailureMode.TRUNCATED
+            or (bo.error or "").strip()
+        ):
+            self._refuse_crop_patch(
+                state,
+                page_num,
+                bo,
+                accepted_text,
+                reason=(
+                    "the winning attempt is an operational failure "
+                    f"(status={bo.status.value}, failure_mode={bo.failure_mode.value}); "
+                    "a crop reread cannot repair it"
+                ),
+                event_data={
+                    "accepted": False,
+                    "judged": False,
+                    "provider_id": getattr(provider, "id", ""),
+                },
+            )
+            return bo
+
+        candidate = replace(
+            bo,
+            text=patched_text,
+            status=PageStatus.SUCCESS,
+            failure_mode=FailureMode.NONE,
+            audit_passed=True,
+            rejection_class="",
+            judge_reason="",
+            audit_notes=list(bo.audit_notes),
+            figures=list(bo.figures),
+        )
+
+        judge_events: list = []
+        started = time.time()
+        try:
+            with self._judge_events_to(judge_events):
+                decision = judge.assess(candidate, provider)
+        except Exception as exc:
+            logger.warning(
+                "re-judge of the crop-patched p%d errored (%s); keeping the accepted text",
+                page_num,
+                exc,
+            )
+            decision = None
+        elapsed = time.time() - started
+        accepted = decision is not None and decision.accept
+
+        # Metering (round 2 finding 4, corrected in round 3). The re-judge is a
+        # second JUDGE call on a page the ladder has already paid for, and it was
+        # invisible to ``DocumentState.total_cost``, the run journal and the
+        # budget view. Round 2 attributed it to the winning OCR profile, which is
+        # wrong in both directions: a heuristic decision was journalled as the
+        # cloud engine at that engine's page price, and a paid remote judge over
+        # a local winner recorded zero.
+        #
+        # The call is priced by the model that RAN it. ``agentic_judge_model`` is
+        # the judge ``_build_page_judge`` actually built -- never re-resolved from
+        # config here, so a run degraded to heuristics cannot name the VLM that
+        # did not run. A judge model that is not one of the metered rungs runs on
+        # a host socr provides, so it costs the known 0.00 rather than "unknown".
+        judge_model = state.agentic_judge_model or JUDGE_IDENTITY_HEURISTIC
+        judge_profile = profile_by_model(judge_model)
+        judge_cost = 0.0 if judge_profile is None else judge_profile.cost_per_page_usd
+        state.record_engine_run(
+            EngineResult(
+                document_path=state.handle.path,
+                engine=judge_model,
+                status=DocumentStatus.SUCCESS if accepted else DocumentStatus.AUDIT_FAILED,
+                cost=judge_cost,
+                processing_time=elapsed,
+            ),
+            page_nums=[page_num],
+        )
+        # Durability: the sidecar persists only the winning output's
+        # ``cost_usd``, and resume rebuilds the page's ``EngineResult`` from that
+        # one field. Folding the judge call in there is what keeps a resumed
+        # run's arithmetic identical to the live one, so a partial resume cannot
+        # regain budget already spent. Same seam the equation lane uses.
+        if bo.cost_usd is None or judge_cost is None:
+            bo.cost_usd = None
+        else:
+            bo.cost_usd = bo.cost_usd + judge_cost
+
+        event_data = {
+            "accepted": accepted,
+            "judged": True,
+            "reason": (decision.reason if decision is not None else "judge errored") or "",
+            "judge_model": judge_model,
+            "judge_cost_usd": judge_cost,
+            "provider_id": getattr(provider, "id", ""),
+        }
+
+        if accepted:
+            # Promote exactly as a first-time acceptance would leave the page.
+            # The candidate's own fields are taken, so any repair the judge made
+            # before its verdict is part of the judged bytes.
+            bo.text = candidate.text
+            bo.status = candidate.status
+            bo.failure_mode = candidate.failure_mode
+            bo.rejection_class = candidate.rejection_class
+            bo.audit_passed = True
+            bo.judge_reason = decision.reason or ""
+            if decision.confidence:
+                bo.confidence = decision.confidence
+            # Exhaustion stamps set BEFORE the crop lane ran. A first-time
+            # acceptance leaves none of them, and while they stand the fail-closed
+            # floor outranks the reading that was just accepted. Facts about the
+            # NATIVE layer (``native_table_unverifiable``,
+            # ``native_table_header_unattributed``, ``native_rotated_text_shredded``)
+            # are NOT cleared: they are true of the page either way.
+            ps.native_table_structure_failed = False
+            ps.scanned_table_evidence_failed = False
+            ps.d3_floor_png_ref = ""
+            ps.rotated_shred_png_ref = ""
+            state.events.extend(judge_events)
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="table_reread_rejudged",
+                    engine=bo.engine or "",
+                    detail=(
+                        "crop reread patched the page and the judge accepted the "
+                        f"patched text ({decision.reason or 'accepted'})"
+                    ),
+                    data=event_data,
+                )
+            )
+            return bo
+
+        self._refuse_crop_patch(
+            state,
+            page_num,
+            bo,
+            accepted_text,
+            reason=event_data["reason"],
+            event_data=event_data,
+        )
+        return bo
+
+    def _refuse_crop_patch(
+        self,
+        state: DocumentState,
+        page_num: int,
+        bo: PageOutput,
+        accepted_text: str,
+        *,
+        reason: str,
+        event_data: dict,
+    ) -> None:
+        """Put back the bytes that were already judged, and say why, once.
+
+        ``bo.judge_reason`` is deliberately NOT overwritten: it records the route
+        verdict on the bytes that still ship, not a verdict on bytes that do not.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        bo.text = accepted_text or ""
+        bo.audit_notes.append(
+            f"crop reread patch refused p{page_num} ({reason}); "
+            "shipped the previously accepted text"
+        )
+        data = dict(event_data)
+        data["reason"] = reason
+        data["accepted"] = False
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="table_reread_rejudged",
+                engine=bo.engine or "",
+                detail=(
+                    f"crop reread patched the page but it was refused ({reason}); "
+                    "the previously accepted bytes ship"
+                ),
+                data=data,
+            )
+        )
+
     def _reread_page_tables(
         self,
         state: DocumentState,
@@ -5732,7 +6196,7 @@ class UnifiedPipeline:
             return self._page_has_tables(page_num, ps)
 
         def record_event(event) -> None:
-            state.events.append(event)
+            self._record_judge_event(state, event)
 
         native_judge = NativeTableVerifierJudge(
             inner=inner_judge,
@@ -6055,6 +6519,15 @@ class UnifiedPipeline:
             "engine": winning_dict.get("engine", ""),
             "provider": winning_dict.get("provider_id", ""),
             "cost_usd": winning_dict.get("cost_usd", 0.0),
+            # Cold review round 4: the WHOLE page's spend, not the winner's own
+            # per-attempt cost. The two differ exactly when the ladder paid for a
+            # rung it then rejected -- including this branch's crop-recovery path,
+            # where a paid rung is refused and a FREE local winner is promoted.
+            # Resume rebuilds the page's EngineResult from this field, so
+            # persisting only the winner handed that budget back and let a
+            # resumed run spend it a second time. ``None`` when any attempt was
+            # unmetered: an unknown subtotal must never restore as zero.
+            "page_cost_usd": self._page_total_cost(state.pages.get(page_num)),
             # Full serialised winning PageOutput.  PP-5 reconstructs a skipped
             # page's in-memory PageState.best_output from this dict (paired with
             # the fragment text) so the resumed run carries the SAME status /
@@ -6601,17 +7074,11 @@ class UnifiedPipeline:
             return
         ps.attempts.append(page_out)
         ps.best_output = page_out
-        # Fold the resumed page's cost into total_cost (budget continuity).  An
-        # EngineResult mirrors what the live route_page path appends per page.
-        state.engine_runs.append(
-            EngineResult(
-                document_path=state.handle.path,
-                engine=page_out.engine or "resumed",
-                status=DocumentStatus.SUCCESS,
-                cost=page_out.cost_usd,
-                processing_time=0.0,
-            )
-        )
+
+        # Read the sidecar BEFORE metering: the page's total spend lives there,
+        # and it is not the winning output's own cost whenever the ladder paid
+        # for a rung it rejected (round 4).
+        meta: dict = {}
         try:
             from ocr_output_contract import doc_dir_for, relative_key
 
@@ -6619,6 +7086,35 @@ class UnifiedPipeline:
             doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
             sidecar_path = doc_dir / "pages" / f"{page_num:05d}.json"
             meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.debug("PP-5: sidecar unreadable for p%d (%s)", page_num, exc)
+
+        # Fold the resumed page's cost into total_cost (budget continuity).  An
+        # EngineResult mirrors what the live route_page path appends per page.
+        # A sidecar written before ``page_cost_usd`` existed falls back to the
+        # winner's cost, which is what those runs recorded.
+        # Restored VERBATIM, never recomputed: the attempt list this resume just
+        # rebuilt holds only the frozen winner, so a recomputation here would
+        # discard every rung the original run paid for and refused -- and the
+        # assembly re-flush would then write that loss back to disk (round 5).
+        # A sidecar written before the field existed falls back to the winner's
+        # cost, which is what those runs recorded, and the fallback becomes the
+        # page's fact so the next resume is stable.
+        page_cost = meta["page_cost_usd"] if "page_cost_usd" in meta else page_out.cost_usd
+        ps.page_cost_usd = page_cost
+        state.record_engine_run(
+            EngineResult(
+                document_path=state.handle.path,
+                engine=page_out.engine or "resumed",
+                status=DocumentStatus.SUCCESS,
+                cost=page_cost,
+                processing_time=0.0,
+            ),
+            # Already recorded: the line above restored the persisted fact, and
+            # charging it again would double the page's spend on every resume.
+            page_nums=(),
+        )
+        try:
             ps.needs_ocr_enhancement = bool(meta.get("needs_ocr_enhancement", False))
             ps.native_table_structure_failed = bool(
                 meta.get("native_table_structure_failed", False)
@@ -8603,6 +9099,98 @@ class UnifiedPipeline:
 
         return results
 
+    def _guard_equation_sidecar_block(
+        self,
+        state: DocumentState,
+        page_num: int,
+        page_out,
+        result,
+        native_text: str,
+    ) -> tuple[str, bool]:
+        """Gate the ONE additive post-verdict step (cold review rounds 2-3).
+
+        "Judged bytes are shipped bytes" is scoped by ruling to mean that no
+        post-verdict step may ADD or ALTER content. Two enumerated SUBTRACTIVE
+        sanitizers are exceptions (see ``_phase_agentic``'s docstring); this
+        legacy GH-36b sidecar is the only additive one on the routed page path.
+
+        It is guarded by REUSING the two guards PR #518 built for the P4-R
+        region lane, not by re-implementing them here. Round 3 found the local
+        copies were strictly weaker, which is the whole argument against copies:
+
+        * **Assembly delimiter** — owned by ``contract_delimiter_violation`` at
+          the ``process_equation_region`` choke point, which keys on the
+          contract's OWN ``PAGE_MARKER_RE`` (case-insensitive, leading
+          whitespace, trailing text) and also refuses a code fence that would
+          break out of the sidecar block. A violation lands here as
+          ``validation_ok=False``, so the LaTeX is already unattached; nothing
+          is left for this method to do about it.
+        * **Numeric presence** — ``region_presence_verdict``, the same one-way
+          containment guard the region lane uses. It deliberately has NO
+          exponent exclusion: #518 removed one because ``x^9`` let an invented 9
+          through with an empty candidate multiset. It ABSTAINS
+          (``PRESENCE_UNVERIFIABLE``) when the page has no numeric oracle or its
+          text layer shows decode damage, so notation-only LaTeX on a prose page
+          is not convicted.
+
+        On an INVENTED verdict the LaTeX is refused and the sidecar is rebuilt
+        with the crop PNG and the native text kept, so refusing costs no
+        content. The reason handed to the rebuilt sidecar is digit-free on
+        purpose: it is shipped text, and quoting the invented number there would
+        put it back in the corpus by the back door. The numbers live in the
+        ``equation_sidecar_refused`` audit event only.
+
+        Returns ``(block_to_append, latex_attached)``.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.escalation_canary import PRESENCE_INVENTED, region_presence_verdict
+
+        block = result.sidecar_block or ""
+        latex_attached = bool(result.latex_attached)
+        if not block or not latex_attached:
+            return block, latex_attached
+
+        ps = state.pages.get(page_num)
+        verdict = region_presence_verdict(
+            native_text,
+            result.raw_latex or "",
+            encoding_suspect=bool(getattr(ps, "has_encoding_hygiene_suspect", False)),
+            corrupt_math=bool(getattr(ps, "has_corrupt_math", False)),
+        )
+        if verdict.status != PRESENCE_INVENTED:
+            return block, latex_attached
+
+        from socr.math.equation_latex import build_equation_sidecar
+
+        block, latex_attached = build_equation_sidecar(
+            crop_path=(result.crop_ref or result.crop_path),
+            native_text=native_text,
+            raw_latex="",
+            validation_ok=False,
+            validation_reason="latex carried numbers absent from the page source",
+        )
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="equation_sidecar_refused",
+                engine="equation_latex",
+                detail=(
+                    f"region {result.region_index} LaTeX refused by the numeric-presence "
+                    f"guard ({verdict.reason}); the crop and the native text are kept"
+                ),
+                data={
+                    "region_index": result.region_index,
+                    "crop_path": result.crop_path,
+                    "presence_status": verdict.status,
+                    "presence_reason": verdict.reason,
+                    "invented": list(verdict.invented),
+                    "oracle_size": verdict.oracle_size,
+                    "raw_latex": result.raw_latex,
+                },
+            )
+        )
+        return block, latex_attached
+
     def _attach_equation_latex_sidecars(
         self,
         state: DocumentState,
@@ -8684,14 +9272,20 @@ class UnifiedPipeline:
                 )
 
                 # 1C: append sidecar block to page text (never replace).
-                if result.sidecar_block:
+                # Round 2, finding 2: this is the one ADDITIVE post-verdict step,
+                # so it goes through the delimiter and numeric-presence guards
+                # before any of it can reach shipped bytes.
+                _block, _latex_attached = self._guard_equation_sidecar_block(
+                    state, page_num, po, result, native_text
+                )
+                if _block:
                     if po.text:
-                        po.text = po.text + "\n\n" + result.sidecar_block
+                        po.text = po.text + "\n\n" + _block
                     else:
-                        po.text = result.sidecar_block
+                        po.text = _block
 
                 # Provenance: emit audit event.
-                if result.latex_attached:
+                if _latex_attached:
                     accepted_total += 1
                     kind = "equation_latex_accepted"
                     detail = (
@@ -8719,7 +9313,7 @@ class UnifiedPipeline:
                             "raw_latex": result.raw_latex,
                             "validation_ok": result.validation_ok,
                             "validation_reason": result.validation_reason,
-                            "latex_attached": result.latex_attached,
+                            "latex_attached": _latex_attached,
                             "model_id": result.model_id,
                         },
                     )

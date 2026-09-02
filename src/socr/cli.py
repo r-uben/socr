@@ -59,15 +59,20 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
-        "--no-dual-pass-tables",
-        is_flag=True,
-        help="Disable dual-pass table extraction (crop + re-read located tables)",
+        "--dual-pass-tables/--no-dual-pass-tables",
+        default=None,
+        help=(
+            "Enable/disable signal-triggered dual-pass table extraction "
+            "(crop + re-read on fired table-verification/routing signals; default: off)"
+        ),
     )(f)
     f = click.option(
         "--auto-patch-tables",
         is_flag=True,
-        help="Let dual-pass auto-patch crop readings into the page (default: flag-only,"
-        " never edits)",
+        help=(
+            "Allow cell mutations only within an enabled, signal-triggered dual-pass "
+            "reread (default: flag-only, never edits)"
+        ),
     )(f)
     f = click.option(
         "--no-native-first", is_flag=True, help="Disable native-first: run VLM on all pages"
@@ -295,7 +300,7 @@ def build_config(
     fallback: str | None = None,
     no_audit: bool = False,
     no_judge_hard_pages: bool = False,
-    no_dual_pass_tables: bool = False,
+    dual_pass_tables: bool | None = None,
     auto_patch_tables: bool = False,
     no_native_first: bool = False,
     native_only: bool = False,
@@ -450,8 +455,8 @@ def build_config(
             "calls), or --strict-local / --max-cost-per-page / --cost-budget to "
             "bound model spend overall."
         )
-    if no_dual_pass_tables:
-        config.dual_pass_tables = False
+    if dual_pass_tables is not None and _explicitly_given("dual_pass_tables"):
+        config.dual_pass_tables = dual_pass_tables
     if auto_patch_tables:
         config.auto_patch_tables = True
     if no_native_first:

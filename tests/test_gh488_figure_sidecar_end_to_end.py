@@ -90,7 +90,7 @@ def _run(
     if already_in_engine_runs:
         from socr.core.result import DocumentStatus, EngineResult
 
-        state.engine_runs.append(
+        state.record_engine_run(
             EngineResult(
                 document_path=pdf,
                 engine="qwen",

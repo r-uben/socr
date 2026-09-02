@@ -466,3 +466,82 @@ class TestStructuralEscalationGate:
         decision = judge.assess(output, MagicMock())
         assert decision.accept is False
         assert decision.reason.startswith("native_table_verifier:")
+
+    @pytest.mark.parametrize(
+        "judge_factory,output_factory,label",
+        [
+            pytest.param(
+                lambda inner, events: NativeTableVerifierJudge(
+                    inner=inner,
+                    get_fitz_page=lambda pn: fitz.open().new_page(width=200, height=200),
+                    is_table_page=lambda pn: False,
+                    record_event=events.append,
+                ),
+                lambda text, status=PageStatus.SUCCESS: PageOutput(
+                    page_num=10, text=text, status=status, confidence=0.9
+                ),
+                "non_table_page",
+                id="non_table_page",
+            ),
+            pytest.param(
+                lambda inner, events: NativeTableVerifierJudge(
+                    inner=inner,
+                    get_fitz_page=None,
+                    is_table_page=lambda pn: True,
+                    record_event=events.append,
+                ),
+                lambda text, status=PageStatus.SUCCESS: PageOutput(
+                    page_num=11, text=text, status=status, confidence=0.9
+                ),
+                "missing_get_fitz_page",
+                id="missing_get_fitz_page",
+            ),
+            pytest.param(
+                lambda inner, events: NativeTableVerifierJudge(
+                    inner=inner,
+                    get_fitz_page=lambda pn: fitz.open().new_page(width=200, height=200),
+                    is_table_page=lambda pn: True,
+                    record_event=events.append,
+                ),
+                lambda text, status=PageStatus.ERROR: PageOutput(
+                    page_num=12, text=text, status=status, confidence=0.9
+                ),
+                "non_success_status",
+                id="non_success_status",
+            ),
+        ],
+    )
+    def test_structural_gate_covers_geometry_bypass_paths(
+        self, judge_factory, output_factory, label
+    ):
+        """On every geometry-bypass path, an accepting inner judge accepts a
+        rectangular control and rejects a ragged GFM table (emitting exactly one
+        table_structure_failed event); an inner rejection emits no structural event
+        and is returned unchanged."""
+        ragged_text = "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 |\n| 3 | 4 | 5 |"
+        rect_text = "| a | b |\n| --- | --- |\n| 1 | 2 |"
+
+        # 1. Accepting inner judge + ragged GFM -> rejected with table_structure_failed event
+        events: list[AuditEvent] = []
+        inner_accept = _stub_inner(accept=True)
+        judge = judge_factory(inner_accept, events)
+        decision = judge.assess(output_factory(ragged_text), MagicMock())
+        assert decision.accept is False
+        assert decision.reason == "table_structure_failed: grid_shape"
+        failed_events = [e for e in events if e.kind == "table_structure_failed"]
+        assert len(failed_events) == 1
+
+        # 2. Accepting inner judge + rectangular control -> accepted, no structural event
+        events.clear()
+        decision = judge.assess(output_factory(rect_text), MagicMock())
+        assert decision.accept is True
+        assert [e for e in events if e.kind == "table_structure_failed"] == []
+
+        # 3. Rejecting inner judge -> rejected unchanged, no structural event
+        events.clear()
+        inner_reject = _stub_inner(accept=False)
+        judge_reject = judge_factory(inner_reject, events)
+        decision = judge_reject.assess(output_factory(ragged_text), MagicMock())
+        assert decision.accept is False
+        assert decision.reason == "inner judge stub"
+        assert [e for e in events if e.kind == "table_structure_failed"] == []
