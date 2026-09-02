@@ -8,6 +8,10 @@ the full document text. HTTP engines produce per-page PageOutputs.
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ocr_output_contract import Status
 
 # Shared sentinel for the lost-content contract between _phase_assemble
 # (which composes EngineResult.error) and the CLI (which exits non-zero when
@@ -317,7 +321,7 @@ class EngineResult:
         return self.status == DocumentStatus.SUCCESS
 
 
-def contract_status_for(result: "EngineResult") -> "object":
+def contract_status_for(result: "EngineResult") -> "Status":
     """The contract ``Status`` this document's outcome maps to.
 
     GH-177. ``ocr_output_contract.RunOutcome`` documents ONE policy for single
