@@ -96,13 +96,15 @@ def test_the_notes_words_are_kept_not_dropped(note: str) -> None:
 
 
 def test_the_table_itself_is_unchanged_by_the_note() -> None:
-    """Scope: the note's words ride in the LABEL cell; data columns are untouched.
+    """Scope: EVERY table cell, stub included, is untouched by the note.
 
-    #460 review: a folded word used to go into whatever lane it happened to be
-    nearest, which is the misattribution this design exists to avoid. It now
-    goes to the label, so the row keeps the token without claiming a column for
-    it -- and every data column stays byte-identical to the no-note run, which
-    is the assertion that would catch a note bleeding into a value.
+    GH-461: the previous version of this test compared `row[1:]` only, and so
+    encoded a real defect -- #459 put the note's words in the LABEL cell, which
+    made row stubs read `| OLS 2026 |`. That is silent corruption of row
+    identity, the same class of wrongness as attaching the note to a value.
+
+    The comparison now includes column 0. The note lives in a column of its own,
+    so it can be kept without claiming to be either a stub or a datum.
     """
 
     def cells(md: str) -> list[list[str]]:
@@ -118,15 +120,16 @@ def test_the_table_itself_is_unchanged_by_the_note() -> None:
     assert len(with_note) == len(without), (
         f"the note changed the ROW count: {len(with_note)} vs {len(without)}"
     )
-    assert len(with_note[0]) == len(without[0]), (
-        f"the note added a column: {len(with_note[0])} vs {len(without[0])}"
-    )
 
+    width = len(without[0])
     for got, expected in zip(with_note, without):
-        assert got[1:] == expected[1:], f"the note bled into a DATA column: {got} != {expected}"
-
-    labels = " ".join(row[0] for row in with_note)
-    for word in NOTE.split():
-        assert word in labels.split(), (
-            f"{word!r} is not in a label cell, so it was not kept where the design says: {labels!r}"
+        assert got[:width] == expected, (
+            f"the note disturbed a table cell -- stub included: {got[:width]} != {expected}"
         )
+
+    note_cells = [row[width:] for row in with_note]
+    seen = {tok for row in note_cells for cell in row for tok in cell.split()}
+    assert seen, f"the note is not in a column of its own: {with_note}"
+    assert seen <= set(NOTE.split()), (
+        f"the note column picked up something that is not the note: {seen}"
+    )

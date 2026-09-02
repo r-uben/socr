@@ -2126,17 +2126,27 @@ def _rowize_segment(
             # the misattribution it exists to avoid. A margin note near a
             # column's x is still a margin note.
             if _is_folded_marginal(w):
+                # GH-461: a DEDICATED cell, not the label and not an existing
+                # lane. #459 put these in the label and I published the result
+                # as if it were fine -- it reads `| OLS 2026 |`, silently
+                # corrupting the row's identity. That is the same class of
+                # wrongness as attaching the note to a data value, just on the
+                # stub side, and the test I wrote then ENCODED it by comparing
+                # `row[1:]` only.
+                #
+                # The note is neither a stub nor a datum, so it gets a column of
+                # its own. `_clean_grid` drops that column when no row has one,
+                # so a page without margin notes is unaffected.
                 orphan_marginals.append(w[4])
             elif abs(lane_centers[best] - w[0]) <= _LANE_X_TOL_PT * _LANE_SNAP_MULT:
                 existing = row_cells[best]
                 row_cells[best] = (existing + " " + w[4]).strip() if existing else w[4]
 
-        if orphan_marginals:
-            label = " ".join(x for x in (label, *orphan_marginals) if x)
-
         # Always emit the label as a first cell so all rows share the same
-        # column layout.  An empty label yields "" (empty first cell).
-        grid_row = [label] + row_cells
+        # column layout.  An empty label yields "" (empty first cell). The
+        # trailing cell is GH-461's margin-note column, empty on rows that have
+        # none and dropped entirely by `_clean_grid` when no row does.
+        grid_row = [label, *row_cells, " ".join(orphan_marginals)]
         if any(c.strip() for c in grid_row):
             grid.append(grid_row)
 
