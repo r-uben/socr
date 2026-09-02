@@ -175,3 +175,112 @@ def test_a_failed_crop_forces_flag_only() -> None:
             f"{name}: a failed crop does not force flag-only, so a page with "
             f"partial crop coverage can still be auto-patched: {rhs}"
         )
+
+
+def _state_with_table_page(tmp_path):
+    """One page whose winner is a table, ready for a crop reread."""
+    from socr.core.document import DocumentHandle
+    from socr.core.result import PageOutput, PageStatus
+    from socr.core.state import DocumentState
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    pdf = tmp_path / "d.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "born digital text long enough to be a text layer.")
+    doc.save(str(pdf))
+    doc.close()
+
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    out = PageOutput(
+        page_num=1,
+        text="| Var | Est |\n| --- | --- |\n| a | 1.0 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+    )
+    state.pages[1].attempts.append(out)
+    state.pages[1].best_output = out
+    return state
+
+
+@pytest.mark.parametrize(
+    "reason", ["render_failed", "read_error", "empty_response", "backend_degraded"]
+)
+def test_a_failed_crop_emits_distrust_at_the_real_caller(tmp_path, reason: str) -> None:
+    """#492: the emit itself, driven through `_reread_page_tables`.
+
+    The tests above assert set membership and extractor sentinels; nothing fed a
+    `_failed` crop into the orchestrator, so deleting the emit branch would have
+    left them all green. `render_failed` was also the one sentinel with no
+    coverage at all -- it is parametrised here with the other three.
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.pipeline.orchestrator import UnifiedPipeline
+    from socr.tables.extract import CropTable
+
+    state = _state_with_table_page(tmp_path / reason)
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN, enabled_engines=[EngineType.QWEN], quiet=True
+        )
+    )
+
+    crop = CropTable(markdown="", source="booktabs", bbox=(10.0, 10.0, 200.0, 100.0))
+    crop._failed = reason
+
+    pipeline._reread_page_tables(state, 1, [crop], extractor=object())
+
+    kinds = [getattr(e, "kind", "") for e in state.events]
+    assert "dualpass_crop_failed" in kinds, (
+        f"a {reason} crop produced no distrust event, so the page keeps its "
+        f"incumbent table and looks verified: {kinds}"
+    )
+
+    event = next(e for e in state.events if e.kind == "dualpass_crop_failed")
+    assert event.page_num == 1
+    assert event.data.get("reason") == reason, (
+        f"the event does not say WHY the crop failed: {event.data}"
+    )
+
+    # And it must reach the trust file, which is the surface a consumer reads.
+    trust = build_tables_trust("d.pdf", list(state.events))
+    assert trust.untrusted_pages == [1], (
+        f"the page is still trusted after a failed reread: {trust.untrusted_pages}"
+    )
+
+
+def test_a_render_failure_yields_a_sentinel_from_the_extractor(tmp_path) -> None:
+    """#492 item 2: `render_failed` at its SOURCE, not hand-constructed.
+
+    The parametrised test above builds the crop directly, so it pins the
+    orchestrator's handling but not the extractor's production of this
+    particular sentinel -- deleting the `render_failed` append left the whole
+    suite green. `_render_crop` returning None is the real path.
+    """
+    from unittest.mock import patch
+
+    from socr.tables.extract import TableCropExtractor
+    from socr.tables.locate import TableBox
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    pdf = tmp_path / "t.pdf"
+    doc = fitz.open()
+    doc.new_page(width=500, height=600)
+    doc.save(str(pdf))
+    doc.close()
+
+    boxes = [TableBox(bbox=(100.0, 100.0, 460.0, 250.0), source="booktabs")]
+
+    class _NeverCalled:
+        timeout = 5.0
+
+        def read(self, *_a, **_k):
+            raise AssertionError("no read may happen when the crop did not render")
+
+    with patch.object(TableCropExtractor, "_render_crop", return_value=None):
+        crops = TableCropExtractor(_NeverCalled()).extract(pdf, 1, boxes, cascade_probe=False)
+
+    assert len(crops) == len(boxes), f"a crop that failed to RENDER left no record: {crops}"
+    assert all(getattr(c, "_failed", "") == "render_failed" for c in crops), (
+        f"expected render_failed, got {[getattr(c, '_failed', None) for c in crops]}"
+    )
