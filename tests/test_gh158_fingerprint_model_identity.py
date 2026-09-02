@@ -46,9 +46,28 @@ def _pdf(tmp_path: Path) -> Path:
     return pdf
 
 
-def _fingerprint(tmp_path: Path, *, engine: str, model: str):
-    """Fingerprint one page read by *engine* running *model*."""
-    pdf = _pdf(tmp_path)
+def _fingerprint(
+    tmp_path: Path,
+    *,
+    engine: str,
+    model: str,
+    pdf: Path | None = None,
+    reject: bool = False,
+    determinant_model: str | None = None,
+):
+    """Fingerprint one page read by *engine* running *model*.
+
+    ``pdf`` reuses an existing document, so two calls can differ ONLY by the
+    model (cubic P3 on #507: building two PDFs separately left the file hash
+    free to vary, which would have made the difference test pass for the wrong
+    reason).
+
+    ``reject`` routes the page through the rejected-but-shipped selection
+    branch, which rebuilds the output instead of shipping the attempt.
+    ``determinant_model`` supplies an engine-level configured model, which the
+    page's own model must outrank.
+    """
+    pdf = pdf if pdf is not None else _pdf(tmp_path)
     state = DocumentState(handle=DocumentHandle.from_path(pdf))
     out = PageOutput(
         page_num=1,
@@ -61,8 +80,13 @@ def _fingerprint(tmp_path: Path, *, engine: str, model: str):
         provider_backend="ollama" if model else "",
     )
     state.pages[1].attempts.append(out)
-    state.pages[1].best_output = out
-    manifest = build_manifest(state, BlobStore(tmp_path / "cache"))
+    if not reject:
+        state.pages[1].best_output = out
+
+    inputs = None
+    if determinant_model is not None:
+        inputs = {engine: (determinant_model, "ollama", "ocr", "prompt")}
+    manifest = build_manifest(state, BlobStore(tmp_path / "cache"), fingerprint_inputs=inputs)
     return manifest.entries[1].fingerprint
 
 
@@ -81,14 +105,26 @@ def test_swapping_only_the_model_tag_changes_the_fingerprint(tmp_path: Path) -> 
     Two pages identical in every other respect -- same PDF, same engine, same
     text, same DPI -- must not fingerprint alike when the model differs.
     """
-    first = _fingerprint(tmp_path / "one", engine="qwen", model="qwen3-vl:30b-a3b-instruct")
-    second = _fingerprint(tmp_path / "two", engine="qwen", model="qwen3-vl:8b")
-
-    assert first.engine == second.engine, "the control failed: these differ by more than the model"
-    assert first.model_version != second.model_version, (
-        "a model swap left the fingerprint identical, so replay would reuse a "
-        "page read by a different model"
+    pdf = _pdf(tmp_path / "doc")
+    first = _fingerprint(
+        tmp_path / "one", engine="qwen", model="qwen3-vl:30b-a3b-instruct", pdf=pdf
     )
+    second = _fingerprint(tmp_path / "two", engine="qwen", model="qwen3-vl:8b", pdf=pdf)
+
+    # Everything the cache identity is built from, except the model, must match
+    # -- otherwise the inequality below could come from anywhere.
+    assert (first.pdf_file_hash, first.page_num, first.render_dpi, first.engine) == (
+        second.pdf_file_hash,
+        second.page_num,
+        second.render_dpi,
+        second.engine,
+    ), "the control failed: these two pages differ by more than the model"
+
+    assert first != second, (
+        "a model swap left the whole fingerprint identical, so replay would "
+        "reuse a page read by a different model"
+    )
+    assert first.model_version != second.model_version
 
 
 def test_a_native_page_is_identified_by_engine_not_by_a_fake_model(tmp_path: Path) -> None:
@@ -103,4 +139,46 @@ def test_a_native_page_is_identified_by_engine_not_by_a_fake_model(tmp_path: Pat
     assert fp.engine == "native", f"a native page must say so: {fp.engine!r}"
     assert fp.model_version == "", (
         f"a native page was given a model identity it never had: {fp.model_version!r}"
+    )
+
+
+def test_a_rejected_page_keeps_the_model_that_produced_its_text(tmp_path: Path) -> None:
+    """cubic P2 on #507: the rejected-but-shipped branch REBUILDS the output.
+
+    When scoring cleared `best_output`, selection ships the rejected attempt's
+    text wrapped in a fresh `PageOutput`. That rebuild dropped every provider
+    field, so the page shipped with no model identity at all -- and a model swap
+    could not invalidate it. The engine name alone does not separate two tags of
+    the same engine.
+    """
+    pdf = _pdf(tmp_path / "doc")
+    first = _fingerprint(
+        tmp_path / "r1", engine="qwen", model="qwen3-vl:30b-a3b-instruct", pdf=pdf, reject=True
+    )
+    second = _fingerprint(tmp_path / "r2", engine="qwen", model="qwen3-vl:8b", pdf=pdf, reject=True)
+
+    assert first.model_version == "qwen3-vl:30b-a3b-instruct", (
+        f"a rejected-but-shipped page lost its model identity: {first.model_version!r}"
+    )
+    assert first != second, "two rejected pages read by different models fingerprint alike"
+
+
+def test_the_page_model_outranks_the_configured_engine_model(tmp_path: Path) -> None:
+    """cubic P2 on #507: what RAN beats what was CONFIGURED.
+
+    `fingerprint_inputs` and `EngineResult.model_version` describe an engine's
+    configured model. An agentic run can escalate one page to a different rung,
+    and taking the configured value there would fingerprint that page under a
+    model which never read it -- the precise failure this ticket is named for.
+    """
+    fp = _fingerprint(
+        tmp_path / "esc",
+        engine="qwen",
+        model="qwen3-vl:30b-a3b-instruct",
+        determinant_model="qwen3-vl:8b",
+    )
+
+    assert fp.model_version == "qwen3-vl:30b-a3b-instruct", (
+        f"the fingerprint recorded the configured model, not the one that read "
+        f"the page: {fp.model_version!r}"
     )

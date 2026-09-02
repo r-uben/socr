@@ -1404,6 +1404,17 @@ def _select_page_output_tagged(
             engine=attempt.engine,
             audit_passed=False,
             failure_mode=attempt.failure_mode,
+            # GH-158: this page's text was produced by a model, and rebuilding
+            # the output here dropped every field saying WHICH one -- so the
+            # rejected-but-shipped page fingerprinted with no model identity and
+            # a model swap could not invalidate it. The engine name alone does
+            # not distinguish two tags of the same engine. (The whole-document
+            # branch above has the same shape, but ``_WholeDoc`` carries no
+            # provider fields to forward; that is a wider change and is not
+            # silently claimed fixed here.)
+            provider_id=attempt.provider_id,
+            provider_model=attempt.provider_model,
+            provider_backend=attempt.provider_backend,
         ), WinnerKind.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
     # a silent gap between page headers.
@@ -1704,20 +1715,27 @@ def build_manifest(
         # empty exactly when the page had no model (a native page), which is the
         # honest value there -- no sentinel string, because "no model ran" and
         # "the model is called n/a" must not be the same record.
+        # The page's OWN resolved model outranks every engine-level source
+        # (cubic P2 on #507). ``determinants`` and ``EngineResult.model_version``
+        # describe what was CONFIGURED for an engine; ``provider_model`` records
+        # what actually ran on this page. An agentic run can escalate a single
+        # page to a different rung, and taking the configured value there would
+        # fingerprint the page under a model that never read it -- the precise
+        # failure this ticket is named for.
         page_model = getattr(page, "provider_model", "") or ""
         prompt_hash = ""
         if determinants is not None:
             model, backend, task, prompt = determinants
             model_version = (
-                model
+                page_model
+                or model
                 or model_versions.get(base_engine)
                 or model_versions.get(page.engine, "")
-                or page_model
             )
             prompt_hash = run_fingerprint(model_version, backend, task, prompt)
         else:
             model_version = (
-                model_versions.get(base_engine) or model_versions.get(page.engine, "") or page_model
+                page_model or model_versions.get(base_engine) or model_versions.get(page.engine, "")
             )
 
         fp = PageFingerprint(
