@@ -96,7 +96,7 @@ class TestTheWarningReachesTheRun:
     the operator rather than the cache.
     """
 
-    def _run(self, tmp_path, caplog, *, inert: bool, documents: int = 1):
+    def _run(self, tmp_path, caplog, *, inert: bool, documents: int = 1, batch: bool = False):
         import logging
         from unittest.mock import patch
 
@@ -121,8 +121,15 @@ class TestTheWarningReachesTheRun:
             caplog.at_level(logging.WARNING),
             patch.object(UnifiedPipeline, "_phase_agentic", lambda self, *a, **k: None),
         ):
-            for pdf in pdfs:
-                pipeline.process(pdf, tmp_path / "out")
+            if batch:
+                # The REAL batch entry point (cubic P2 on #529). Looping
+                # `process` myself simulated a batch and would have passed while
+                # `process_batch` regressed -- the same "drive the real caller"
+                # failure this suite keeps finding elsewhere.
+                pipeline.process_batch(tmp_path, tmp_path / "out")
+            else:
+                for pdf in pdfs:
+                    pipeline.process(pdf, tmp_path / "out")
 
         return [r.getMessage() for r in caplog.records if "judge_hard_pages" in r.getMessage()]
 
@@ -138,9 +145,23 @@ class TestTheWarningReachesTheRun:
         assert self._run(tmp_path / "quiet", caplog, inert=False) == []
 
     def test_a_batch_says_it_once_not_once_per_document(self, tmp_path, caplog) -> None:
-        """cubic P3: `process_batch` calls `process` per PDF."""
-        messages = self._run(tmp_path / "batch", caplog, inert=True, documents=3)
+        """Through `process_batch` itself, not a hand-rolled loop over `process`."""
+        messages = self._run(tmp_path / "batch", caplog, inert=True, documents=3, batch=True)
         assert len(messages) == 1, (
             f"3 documents produced {len(messages)} identical warnings; the "
             "config cannot change between them"
+        )
+
+    def test_an_empty_batch_still_reports_what_it_is_ignoring(self, tmp_path, caplog) -> None:
+        """cubic P2 on #529: nothing to process is not nothing to say.
+
+        Warning only from `process` meant a batch that found no documents --
+        an empty directory, or one where everything was already done -- reported
+        nothing, while its fingerprint ignored the fields just the same. That is
+        the silence this half of the fix exists to remove.
+        """
+        messages = self._run(tmp_path / "empty", caplog, inert=True, documents=0, batch=True)
+        assert len(messages) == 1, (
+            f"an empty batch produced {len(messages)} warnings; it ignores the "
+            "same settings a non-empty one does"
         )

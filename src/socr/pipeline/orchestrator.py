@@ -852,6 +852,38 @@ class UnifiedPipeline:
             primary["model"], primary["backend"] or "socr", primary["task"], None, extra=extra
         )
 
+    def _report_inert_config(self) -> None:
+        """Name any config field the run is ignoring, once per pipeline.
+
+        GH-525: a config that sets an inert field must not be ignored in
+        silence -- that is the same failure the rejected flags had, moved to
+        the YAML layer.
+
+        Once per PIPELINE, not per document: `process_batch` calls `process` for
+        every PDF, so an unguarded warning repeated once per file and became
+        noise an operator learns to skip. The config cannot change between those
+        calls, so one line says everything repeating it would.
+
+        Called from BOTH entry points (cubic P2 on #529). Calling it only from
+        `process` meant an empty batch -- nothing to do, everything skipped --
+        reported nothing, even though its fingerprint ignored the fields just
+        the same. The guard makes the second call a no-op.
+        """
+        if self._warned_inert_config:
+            return
+        inert = _warn_inert_config(self.config)
+        if not inert:
+            return
+        self._warned_inert_config = True
+        message = (
+            f"ignoring config field(s) {', '.join(inert)}: they gate nothing on "
+            "any path (GH-142/GH-525) and are excluded from the run fingerprint, "
+            "so setting them changes neither the output nor which pages are reused"
+        )
+        logger.warning("%s", message)
+        if not self.config.quiet:
+            console.print(f"  [yellow]{message}[/yellow]")
+
     def process(
         self,
         pdf_path: Path,
@@ -872,27 +904,7 @@ class UnifiedPipeline:
         the canon's basename-collision fix.
         """
         pdf_path = Path(pdf_path)
-        # GH-525: a config that sets an inert field must not be ignored in
-        # silence -- that is the same failure the rejected flags had, moved to
-        # the YAML layer.
-        #
-        # Once per PIPELINE, not per document: `process_batch` calls `process`
-        # for every PDF, so an unguarded warning repeated once per file and
-        # became noise the operator learns to skip (cubic P3 on #529). The
-        # config cannot change between those calls, so one line says everything
-        # repeating it would.
-        inert = [] if self._warned_inert_config else _warn_inert_config(self.config)
-        if inert:
-            self._warned_inert_config = True
-            message = (
-                f"ignoring config field(s) {', '.join(inert)}: they gate nothing "
-                "on any path (GH-142/GH-525) and are excluded from the run "
-                "fingerprint, so setting them changes neither the output nor "
-                "which pages are reused"
-            )
-            logger.warning("%s", message)
-            if not self.config.quiet:
-                console.print(f"  [yellow]{message}[/yellow]")
+        self._report_inert_config()
         out_dir = self._resolve_output_root(pdf_path, output_dir)
         self._scan_root = scan_root if scan_root is not None else pdf_path.parent
 
@@ -952,6 +964,8 @@ class UnifiedPipeline:
         contract :class:`RunOutcome`); the CLI consults it so the batch exit
         code is nonzero when any file failed (the canon's uniform exit policy).
         """
+        self._report_inert_config()
+
         from ocr_output_contract import (
             RootIndex,
             RunOutcome,
