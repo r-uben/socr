@@ -133,3 +133,62 @@ def test_the_table_itself_is_unchanged_by_the_note() -> None:
     assert seen <= set(NOTE.split()), (
         f"the note column picked up something that is not the note: {seen}"
     )
+
+
+def _left_margin_page(with_note: bool):
+    """The same table, with the note in the LEFT margin instead of the right."""
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    data = [
+        ["Model", "Beta", "SE", "t-stat"],
+        ["OLS", "1.25", "0.05", "25.0"],
+        ["IV", "1.80", "0.12", "15.0"],
+        ["GMM", "1.45", "0.08", "18.1"],
+    ]
+    cols = [140, 250, 360, 470]
+    y = 100
+    for row in data:
+        for c, cell in enumerate(row):
+            page.insert_text((cols[c], y), cell, fontsize=10)
+        y += 25
+    page.insert_text((140, y + 20), "Note: Standard errors clustered, N = 500.", fontsize=9)
+    if with_note:
+        page.insert_text((40, 200), ALPHA_NOTE, fontsize=8, rotate=90)
+    return doc, page
+
+
+def _left_cells(with_note: bool) -> list[list[str]]:
+    doc, page = _left_margin_page(with_note)
+    try:
+        regions = rowize_from_word_list(list(page.get_text("words")))
+    finally:
+        doc.close()
+    assert regions, "fixture must reconstruct"
+    return [
+        [c.strip() for c in line.strip().strip("|").split("|")]
+        for line in regions[0][1].splitlines()
+        if line.lstrip().startswith("|") and "---" not in line
+    ]
+
+
+def test_a_left_margin_note_does_not_corrupt_the_stub() -> None:
+    """#464 review: the label branch consumed a LEFT-margin note first.
+
+    The dedicated note column only ever helped notes to the RIGHT of the data.
+    A note in the left margin sits left of the data boundary, so it was
+    classified as label text before the folded-marginal check ran, and the row
+    stub stayed corrupted -- the exact defect GH-461 fixed on the other side.
+    """
+    without = _left_cells(False)
+    with_note = _left_cells(True)
+
+    assert len(with_note) == len(without), "the note changed the row count"
+    width = len(without[0])
+    for got, expected in zip(with_note, without):
+        assert got[:width] == expected, (
+            f"the left-margin note corrupted a table cell: {got[:width]} != {expected}"
+        )
+
+    seen = {tok for row in with_note for cell in row[width:] for tok in cell.split()}
+    assert seen, f"the left-margin note was dropped entirely: {with_note}"
+    assert seen <= set(ALPHA_NOTE.split())
