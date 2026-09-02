@@ -49,12 +49,37 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "socr"
 # property name would find none and wrongly convict a working flag.
 _FIELD_ALIASES = {
     "primary": "primary_engine",
-    "fallback": "fallback_chain",
     "dpi": "render_dpi",
-    # `--hpc-sequential` writes config.hpc.*, a nested section rather than a
-    # top-level field, so it is checked by its nested attribute instead.
-    "hpc_sequential": "hpc",
 }
+
+# Flags that gate BY CONSTRUCTION rather than through a config read, with the
+# construct named. An explicit exemption, never a silent skip: the first version
+# of this file skipped four flags for want of a field mapping, which is exactly
+# how a flag escapes the audit.
+#
+# `--hpc-sequential` is the one such case. Its `if hpc_sequential:` branch in
+# `cli.py` builds HPCPipeline directly off the LOCAL variable, so the flag has a
+# real effect while the two config fields it also writes -- `hpc.enabled` and
+# `hpc.sequential` -- are read nowhere in the source tree. Those dead fields are
+# a smaller finding of this same sweep, filed separately; they are not what
+# makes the flag work, so convicting the flag on them would be wrong.
+_GATES_BY_CONSTRUCTION = {
+    "hpc_sequential": "cli.py builds HPCPipeline from the local variable, not from config",
+}
+
+# Modules whose reads do NOT make a flag live for `process`. A value serialised
+# into a benchmark report is not consumed by any run (cubic P2 on #516: this is
+# how `--fallback` passed the audit while no execution path read it).
+_NON_EXECUTION_DIRS = ("benchmark/",)
+
+# Functions that compute the run FINGERPRINT rather than gate behaviour. A read
+# reached only through one of these records the value into the run identity,
+# which is the not-gating-anything case this audit exists to catch. The two
+# helpers are named because `_run_fingerprint` calls out to them, so excluding
+# only its own subtree let a fingerprint-only field pass (cubic P2 on #516).
+_FINGERPRINT_FUNCTIONS = frozenset(
+    {"_run_fingerprint", "_engine_determinants", "_resolve_primary_engine"}
+)
 
 # --- status vocabulary ------------------------------------------------------
 AGENTIC = "agentic"  # read on, or by a helper of, the default agentic path
@@ -104,7 +129,7 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "clean_equation_model": (AGENTIC, "equation phases"),
     "recover_corrupt_math": (AGENTIC, "corrupt-math recovery routing"),
     # -- non-agentic by design
-    "fallback": (NON_AGENTIC, "fallback_engine; the agentic ladder supersedes it"),
+    "fallback": (REJECTED, "GH-142: no execution reader; raises UsageError"),
     "hpc_sequential": (NON_AGENTIC, "HPC lane only"),
     # -- rejected outright
     "no_audit": (REJECTED, "GH-139: no consumer in any mode; raises UsageError"),
@@ -140,12 +165,15 @@ def test_the_classification_has_no_stale_entries() -> None:
 
 
 def _config_field_for(option_name: str) -> str | None:
+    """The config path a flag writes: ``"quiet"``, or ``"hpc.sequential"``."""
     fields = {f.name for f in dataclasses.fields(PipelineConfig)}
     for candidate in (
         _FIELD_ALIASES.get(option_name, option_name),
         option_name.removeprefix("no_"),
     ):
-        if candidate in fields:
+        # A dotted alias names a nested section; only its ROOT has to be a
+        # field of PipelineConfig.
+        if candidate.split(".", 1)[0] in fields:
             return candidate
     return None
 
@@ -158,18 +186,22 @@ class _ConfigReads(ast.NodeVisitor):
     read spelled across a line break was invisible. Text matching is the wrong
     instrument for "is this value used"; the parse tree is the right one.
 
-    The fingerprint exclusion is structural rather than a string test: any read
-    inside ``_run_fingerprint`` records the value into the run identity, which
-    is precisely the not-gating-anything case this check is for.
+    The fingerprint exclusion is structural rather than a string test: a read
+    inside ``_run_fingerprint`` -- or inside the helpers it calls, which is
+    where several such reads actually live -- records the value into the run
+    identity, which is precisely the not-gating-anything case this check is
+    for. See ``_FINGERPRINT_FUNCTIONS``.
     """
 
-    def __init__(self, field: str) -> None:
-        self.field = field
+    def __init__(self, path: str) -> None:
+        # "quiet" or "hpc.sequential": the last element is the attribute read,
+        # anything before it is the section chain below `config`.
+        *self.section, self.field = path.split(".")
         self.reads: list[int] = []
         self._skip_depth = 0
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
-        skip = node.name == "_run_fingerprint"
+        skip = node.name in _FINGERPRINT_FUNCTIONS
         self._skip_depth += skip
         self.generic_visit(node)
         self._skip_depth -= skip
@@ -179,14 +211,23 @@ class _ConfigReads(ast.NodeVisitor):
             self._skip_depth == 0
             and node.attr == self.field
             and isinstance(node.ctx, ast.Load)
-            and _names_config(node.value)
+            and _is_config_path(node.value, self.section)
         ):
             self.reads.append(node.lineno)
         self.generic_visit(node)
 
 
-def _names_config(node: ast.AST) -> bool:
-    """True for ``config`` / ``self.config`` / ``cfg`` / ``self.cfg``."""
+def _is_config_path(node: ast.AST, section: list[str]) -> bool:
+    """True when *node* is ``config`` / ``cfg`` followed by *section*.
+
+    With ``section == ["hpc"]`` this matches ``config.hpc`` and
+    ``self.config.hpc`` but not ``config`` alone, so a nested field is only
+    credited to reads of that nested field.
+    """
+    for name in reversed(section):
+        if not isinstance(node, ast.Attribute) or node.attr != name:
+            return False
+        node = node.value
     if isinstance(node, ast.Name):
         return node.id in {"config", "cfg"}
     if isinstance(node, ast.Attribute):
@@ -194,16 +235,19 @@ def _names_config(node: ast.AST) -> bool:
     return False
 
 
-def _config_read_sites(field: str) -> list[str]:
+def _config_read_sites(field_path: str) -> list[str]:
     sites: list[str] = []
     for path in sorted(_SRC.rglob("*.py")):
+        rel = str(path.relative_to(_SRC))
+        if rel.startswith(_NON_EXECUTION_DIRS):
+            continue
         try:
             tree = ast.parse(path.read_text())
         except SyntaxError:  # pragma: no cover - a broken file is its own failure
             continue
-        visitor = _ConfigReads(field)
+        visitor = _ConfigReads(field_path)
         visitor.visit(tree)
-        sites.extend(f"{path.relative_to(_SRC)}:{line}" for line in visitor.reads)
+        sites.extend(f"{rel}:{line}" for line in visitor.reads)
     return sites
 
 
@@ -222,9 +266,19 @@ def test_a_live_flag_has_a_consumer_beyond_the_fingerprint(option: str) -> None:
     read and still not gate anything useful. It cannot catch that; it catches
     the shape all three known liars had.
     """
+    if option in _GATES_BY_CONSTRUCTION:
+        # Not a skip: the exemption is asserted, so it stays visible and has to
+        # be justified in the table above rather than inferred from silence.
+        assert _GATES_BY_CONSTRUCTION[option].strip()
+        return
+
     field = _config_field_for(option)
-    if field is None:
-        pytest.skip(f"{option} has no PipelineConfig field (handled at the CLI layer)")
+    assert field is not None, (
+        f"{option} maps to no PipelineConfig field. Either add it to "
+        "_FIELD_ALIASES, or -- if it gates by construction rather than through "
+        "config -- to _GATES_BY_CONSTRUCTION with the construct named. Leaving "
+        "it unmapped would exempt it from this audit silently."
+    )
 
     # Attribute LOADS only, and never from inside `_run_fingerprint`. Both
     # exclusions are structural: assignments are `ast.Store`, so they cannot be
@@ -260,7 +314,15 @@ def test_a_rejected_flag_actually_refuses(option: str, tmp_path: Path) -> None:
     pdf.write_bytes(b"%PDF-1.4\n")
     flag = "--" + option.replace("_", "-")
 
-    result = CliRunner().invoke(cli, ["process", str(pdf), flag])
+    # A value-taking option needs one, or click refuses it for the wrong reason
+    # and the test would pass on click's own error rather than ours.
+    param = next(p for p in cli.commands["process"].params if p.name == option)
+    args = ["process", str(pdf), flag]
+    if not getattr(param, "is_flag", False):
+        choices = getattr(param.type, "choices", None)
+        args.append(choices[0] if choices else "qwen")
+
+    result = CliRunner().invoke(cli, args)
 
     assert result.exit_code != 0, f"{flag} was accepted silently despite being classified rejected"
     assert "GH-" in (result.output or ""), (

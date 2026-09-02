@@ -328,7 +328,37 @@ def build_config(
     if primary:
         config.primary_engine = EngineType(primary)
     if fallback:
-        config.fallback_engine = EngineType(fallback)
+        # GH-142. The FOURTH instance, found by the same sweep (cubic on #516).
+        # `--fallback` set `fallback_engine`, a property whose setter writes
+        # `fallback_chain`. Across the whole source tree that field is read in
+        # exactly three places: twice inside `_run_fingerprint`, and once in
+        # `benchmark calibrate --apply-config`, which serialises a FRESH
+        # PipelineConfig and never sees this value. No execution path reads it.
+        #
+        # Same shape as --no-judge-hard-pages, and the same consequence: it
+        # changes the run identity without changing behaviour, so it invalidates
+        # terminal pages and buys a reprocess that produces the same output. The
+        # multi-engine fallback branches it steered were deleted in #298; the
+        # agentic ladder supersedes them.
+        raise click.UsageError(
+            "--fallback no longer does anything and has been rejected rather "
+            "than silently ignored (GH-142).\n"
+            "\n"
+            "It set PipelineConfig.fallback_engine (writing fallback_chain), a "
+            "value no execution path reads: the multi-engine fallback branches "
+            "that consumed it were removed in #298. Its only remaining readers "
+            "are the run fingerprint and a benchmark report.\n"
+            "\n"
+            "So passing it did not change which engines ran -- it changed the run "
+            "identity, invalidating already-completed pages and forcing a "
+            "reprocess that produces the same output.\n"
+            "\n"
+            "In agentic mode -- the default -- escalation IS the fallback: a page "
+            "moves to the next rung because a judge rejected the current one. "
+            "Use --primary to choose the first rung, --strict-local to keep the "
+            "ladder on local rungs, and --table-judge-ladder to change the "
+            "table-judge order."
+        )
     if no_audit:
         # GH-139. `--no-audit` advertised "skip quality audit stage" and set
         # `audit_enabled=False`, but every consumer of that field is gone: the four
