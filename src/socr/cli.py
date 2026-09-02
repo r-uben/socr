@@ -670,9 +670,9 @@ def process(
                 "would run the sequential pipeline while your config said "
                 "otherwise.\n"
                 "\n"
-                "Set 'hpc.sequential: true' (or omit it and pass "
-                "--hpc-sequential), or set 'hpc.enabled: false' to use the "
-                "default agentic pipeline."
+                "Omit the key -- it defaults to true (GH-536) -- or set "
+                "'hpc.sequential: true'. To use the default agentic pipeline "
+                "instead, set 'hpc.enabled: false'."
             )
 
         pipeline = HPCPipeline(config)
