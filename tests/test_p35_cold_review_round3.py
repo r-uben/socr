@@ -136,7 +136,9 @@ class TestOperationalFailureIsNotLaundered:
 # ---------------------------------------------------------------------------
 
 
-def _drive_equation_seam(tmp_path: Path, raw_latex: str, native_text: str):
+def _drive_equation_seam(
+    tmp_path: Path, raw_latex: str, native_text: str, *, encoding_suspect: bool = False
+):
     """Run the REAL GH-36b seam with only the crop reader stubbed.
 
     `process_equation_region` (PR #518's choke point) therefore runs for real,
@@ -157,7 +159,7 @@ def _drive_equation_seam(tmp_path: Path, raw_latex: str, native_text: str):
     page_state = MagicMock()
     page_state.native_text = native_text
     page_state.has_corrupt_math = False
-    page_state.has_encoding_hygiene_suspect = False
+    page_state.has_encoding_hygiene_suspect = encoding_suspect
     state.pages = {1: page_state}
 
     out = PageOutput(page_num=1, text=native_text, status=PageStatus.SUCCESS, engine="qwen")
@@ -221,6 +223,49 @@ class TestEquationGuardsAreMainsGuards:
             native_text="E equals m c squared linearised",
         )
         assert "```latex" in out.text
+        assert not any(e.kind == "equation_sidecar_refused" for e in state.events)
+
+    def test_a_damaged_text_layer_refuses_a_numeric_reading(self, tmp_path: Path) -> None:
+        """GH-543: the legacy seam had GH-522's hole.
+
+        Only PRESENCE_INVENTED refused here, so an encoding-suspect page --
+        where an oracle EXISTS but cannot be trusted -- still attached a
+        crop-backed LaTeX sidecar carrying numbers nobody could check. Probing
+        the fix showed nothing covered it: removing the refusal entirely left
+        the whole equation suite green.
+        """
+        out, state = _drive_equation_seam(
+            tmp_path / "damaged",
+            raw_latex=r"y = 2x + 0.9137",
+            native_text="regression on 42 observations",
+            encoding_suspect=True,
+        )
+
+        assert "```latex" not in out.text, (
+            "an unchecked numeric reading was attached on a page whose text layer is damaged"
+        )
+        refused = [e for e in state.events if e.kind == "equation_sidecar_refused"]
+        assert len(refused) == 1, "the refusal must be recorded, not silent"
+        assert "could not check" in refused[0].detail, (
+            f"the refusal is recorded as the wrong KIND of refusal: {refused[0].detail!r}"
+        )
+        assert "![equation crop]" in out.text, "the crop must stay as evidence"
+
+    def test_a_damaged_text_layer_still_attaches_a_symbol_only_reading(
+        self, tmp_path: Path
+    ) -> None:
+        """The scoping control: nothing in it can be invented."""
+        out, state = _drive_equation_seam(
+            tmp_path / "damaged_symbols",
+            raw_latex=r"\alpha + \beta = \gamma",
+            native_text="regression on 42 observations",
+            encoding_suspect=True,
+        )
+
+        assert "```latex" in out.text, (
+            "a symbol-only reading was refused on a damaged page; it carries no "
+            "value that could be invented"
+        )
         assert not any(e.kind == "equation_sidecar_refused" for e in state.events)
 
 

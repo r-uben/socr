@@ -1632,3 +1632,89 @@ def test_r4_n2_an_unaddressable_backend_is_a_settled_refusal(tmp_path: Path) -> 
     assert second.status.value == "skipped", (
         "a configuration-settled refusal keeps the document permanently unskippable"
     )
+
+
+def test_a_no_oracle_page_still_attaches_notation_only_latex(tmp_path: Path) -> None:
+    """GH-543: the GH-522 refusal was scoped too broadly, and this is the case.
+
+    UNVERIFIABLE covers two situations. The one #522 is about is a DAMAGED text
+    layer -- an oracle exists but cannot be trusted. The other is a page with no
+    numeric oracle at all, and there a numeral in the reading is usually
+    NOTATION: the 2 in `E = mc^2`, an equation tag. Refusing on that convicts
+    notation-only LaTeX on prose pages, which
+    `test_a_page_with_no_numbers_is_unverifiable_not_invented` protects
+    deliberately on the legacy path.
+
+    So the refusal is now scoped to damaged text. This page is NOT
+    encoding-suspect and has no numeric oracle: it must still attach.
+    """
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.agentic import PageDecision
+
+    pipeline = _make_pipeline(equation_region_lane=True)
+    pdf_dir = tmp_path / "no_oracle"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf = _make_pdf(pdf_dir)
+    state = _make_state(pdf)
+    # Deliberately NOT encoding-suspect: the page text is fine, it just has no
+    # numbers for the oracle.
+    # The region's source slice must appear in the page text, or
+    # `attach_equation_sidecars_in_place` drops the reading as UNALIGNED and the
+    # test passes without the attachment it claims to pin (cubic P2 on #545 --
+    # the first version asserted only the absence of a refusal). The slice is
+    # chosen number-free so the page still has no numeric oracle, which is the
+    # condition under test.
+    source = "E equals m c squared"
+    state.pages[2].native_text = f"Prose before.\n\n{source}\n\nProse after."
+    pipeline._last_assessment = state._last_assessment
+    spy = _ModelSpy(r"E = mc^2")
+
+    def _detect(page, page_num):
+        from socr.math.detect_equations import EquationDetectionResult
+
+        if page_num != 2:
+            return EquationDetectionResult(page_num=page_num, regions=[], detection_time_s=0.0)
+        return _region(page, source_text=source)
+
+    def _routed(page_num, *args, **kwargs):
+        return PageDecision(
+            page_num=page_num,
+            final_output=PageOutput(
+                page_num=page_num, text="x", status=PageStatus.SUCCESS, engine="qwen"
+            ),
+            accepted=True,
+        )
+
+    out_dir = pdf_dir / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (
+        patch("socr.math.detect_equations.detect_display_equations", side_effect=_detect),
+        patch("socr.math.equation_latex.latex_for_crop", side_effect=spy),
+        patch("socr.pipeline.orchestrator.route_page", side_effect=_routed),
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+    ):
+        pipeline._phase_agentic(state, out_dir)
+        pipeline._phase_assemble(state, out_dir)
+
+    refused = [
+        e
+        for e in state.events
+        if e.page_num == 2 and e.kind == "equation_region_reading_unverifiable"
+    ]
+    assert refused == [], (
+        "notation-only LaTeX was refused on a page whose text layer is FINE and "
+        "simply has no numbers; the exponent in `E = mc^2` is not a data value"
+    )
+
+    # And it ATTACHED. Asserting only the absence of a refusal would pass on a
+    # reading dropped for some entirely different reason -- which is exactly
+    # what happened before the source slice above was aligned.
+    attached = [
+        e for e in state.events if e.page_num == 2 and e.kind == "equation_region_reading_attached"
+    ]
+    assert len(attached) == 1, (
+        f"the notation-only reading did not attach: {[e.kind for e in state.events if e.page_num == 2]}"
+    )
+    assert attached[0].data["presence_status"] == "unverifiable"
