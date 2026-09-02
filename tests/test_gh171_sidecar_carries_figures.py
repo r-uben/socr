@@ -184,6 +184,8 @@ def test_every_terminal_flush_carries_the_figures() -> None:
     assert len(calls) >= 3, f"expected several flush sites, found {len(calls)}"
 
     offenders: list[str] = []
+    empty_sources: list[str] = []
+    real_sources: list[str] = []
     for call in calls:
         kwargs = {kw.arg: kw.value for kw in call.keywords}
         # A provisional flush is the mid-run crash-recovery copy; it predates
@@ -194,8 +196,32 @@ def test_every_terminal_flush_carries_the_figures() -> None:
             continue
         if "extra_figures" not in kwargs:
             offenders.append(ast.unparse(call))
+            continue
+        # #487 review: presence is not enough. `extra_figures=[]` at the FINAL
+        # flush reintroduces the exact GH-485 bug while keeping a
+        # keyword-presence check green. Classify by VALUE.
+        value = kwargs["extra_figures"]
+        empty_literal = isinstance(value, ast.List) and not value.elts
+        (empty_sources if empty_literal else real_sources).append(ast.unparse(call))
 
     assert not offenders, (
         "these terminal sidecar writes do not carry the figure phase's results, "
         "so whichever runs last will wipe them:\n  " + "\n  ".join(offenders)
     )
+
+    # Exactly one terminal flush legitimately passes an empty literal: the one
+    # that runs BEFORE the figure phase. More than one means a post-figure write
+    # is passing a constant instead of the phase's results -- GH-485 again, in
+    # the shape a presence check cannot see.
+    assert len(empty_sources) == 1, (
+        f"expected exactly one pre-figure flush passing an empty source, got "
+        f"{len(empty_sources)}:\n  " + "\n  ".join(empty_sources)
+    )
+    assert len(real_sources) >= 2, (
+        f"the post-figure flushes are not passing a real figure source:\n  "
+        + "\n  ".join(real_sources)
+    )
+    for call_src in real_sources:
+        assert "figures" in call_src, (
+            f"a terminal flush passes something that is not the figure phase's results: {call_src}"
+        )
