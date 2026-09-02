@@ -134,7 +134,35 @@ def test_the_production_sites_are_the_ones_being_described() -> None:
     rhs = ast.unparse(assigns[0].value)
     assert "att.reason" in rhs, f"judge_reason is not taken from the attempt: {rhs}"
     assert "if" not in rhs, (
-        f"judge_reason is set conditionally, which is the GH-169 defect itself: {rhs}"
+        f"judge_reason is set by a conditional EXPRESSION, which is the GH-169 defect itself: {rhs}"
+    )
+
+    # #482 review: the RHS check catches a ternary but not the more natural
+    # regression -- wrapping the assignment in an `if` statement, which is how
+    # the original defect was actually written. Walk to the enclosing nodes.
+    parents: dict = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    node = assigns[0]
+    guards: list[str] = []
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.If):
+            test = ast.unparse(node.test)
+            # Only conditions on the ATTEMPT matter. The assignment legitimately
+            # sits inside page-ROUTING branches (`is_native`, chart winners,
+            # math recovery) which decide whether the page takes this path at
+            # all; a first version of this check flagged those and was too
+            # broad. The GH-169 defect was a condition on `att` -- "only when
+            # this attempt was rejected AND empty".
+            if any(isinstance(n, ast.Name) and n.id == "att" for n in ast.walk(node.test)):
+                guards.append(test)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            break
+    assert not guards, (
+        f"the judge_reason assignment sits under a per-ATTEMPT conditional, so "
+        f"it is not recorded for every attempt: {guards}"
     )
 
     # 2. the manifest journal consults it.
