@@ -202,3 +202,41 @@ of `PageState`" is NOT implementable as written until Q1 settles, because `needs
 the native-distrust flags are the inputs to the ending being merged. "Blackboard fields
 documented as facts vs decisions" is implementable and should follow S2, where the
 fact/decision line becomes concrete.
+
+## 8. Panel (Codex gpt-5.6-sol, Gemini) and synthesis — 2026-09-02
+
+**Corrections to this note.** Both panelists reject the "eight of fourteen buckets" count:
+buckets and tags were conflated. Codex's inventory: six directly tag-derivable buckets,
+six orthogonal ones (config, value-drift and fabrication events, text-grid rejection,
+chart-detection failure, ladder terminals), and two leftovers — `failed_pages` (derived
+from final text) and `native_fallback_pages` (which is not `NATIVE_FALLBACK`). Claim (ii),
+that the emission guard rewrites text after the tag is fixed, is confirmed by both.
+
+**Q1 — `NATIVE_FALLBACK`: both keep it, as a fourth ending, with a removal criterion.**
+Neither promotion to clean nor blanket flooring is a refactor; both are policy changes
+(silent upgrade that makes suspect pages resume-skippable, or deletion of readable prose).
+Ruling: keep it, and attach the exit condition Codex names — enumerate the corpus pages
+by trigger (`needs_ocr_enhancement`, `chart_asset_render_failed`, `text_grid_rejected`,
+residual native-table defects), hand-check each trigger's fidelity, and assign each
+trigger independently to N or F in a later ticket. The fourth ending is a measured
+deviation from the three-ending ruling, recorded as such.
+
+**Q2 — reason enum: both say three endings plus a typed primary reason** carried into the
+sidecar and manifest, with orthogonal alerts kept outside it. Codex's test for whether it
+is renaming rather than removing: merge only rows identical on all five surfaces (text,
+status, failure mode, CLI/audit event, resume decision). Ruling: adopt, with that matrix
+as the merge criterion.
+
+**Q3 — selection vs shipped: split.** Gemini keeps the tag as selection and relies on the
+text-derived `failed_pages`; Codex makes the public disposition name what SHIPPED, keeps
+selection provenance as a separate internal field, and computes the final disposition
+after the shared guard without moving the guard. Ruling: **Codex** — a "passing model"
+tag beside a shipped failure marker is the exact misclassification class R7 exists to
+kill; a final disposition computed after the guard closes it without touching the
+whole-doc paths the guard protects.
+
+**Staging, amended per Codex:** define the finalization-aware disposition + reason
+contract FIRST (S2 before S1), then derive buckets from it with a difference test against
+today's buckets over the golden corpus, then merge the fail-closed family, then the model
+family. Every stage byte-identity-pinned and difference-pinned. Nothing in the first two
+stages changes shipped bytes.
