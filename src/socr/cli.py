@@ -32,7 +32,15 @@ class PDFShortcutGroup(click.Group):
 def common_options(f):
     """Options shared between process and batch."""
     f = click.option("--primary", type=click.Choice(ENGINE_CHOICES), help="Primary OCR engine")(f)
-    f = click.option("--fallback", type=click.Choice(ENGINE_CHOICES), help="Fallback OCR engine")(f)
+    f = click.option(
+        "--fallback",
+        type=click.Choice(ENGINE_CHOICES),
+        help=(
+            "REMOVED — rejected with an error. No execution path reads it "
+            "(GH-142); the agentic ladder's escalation IS the fallback. Use "
+            "--primary for the first rung."
+        ),
+    )(f)
     f = click.option(
         "--no-audit",
         is_flag=True,
@@ -42,7 +50,13 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
-        "--no-judge-hard-pages", is_flag=True, help="Disable VLM judge on hard pages (tables/math)"
+        "--no-judge-hard-pages",
+        is_flag=True,
+        help=(
+            "REMOVED — rejected with an error. It gated no phase (GH-142); "
+            "agentic judges every page. Use --judge-backend heuristic to avoid "
+            "VLM judge calls."
+        ),
     )(f)
     f = click.option(
         "--no-dual-pass-tables",
