@@ -315,3 +315,35 @@ class EngineResult:
     @property
     def success(self) -> bool:
         return self.status == DocumentStatus.SUCCESS
+
+
+def contract_status_for(result: "EngineResult") -> "object":
+    """The contract ``Status`` this document's outcome maps to.
+
+    GH-177. ``ocr_output_contract.RunOutcome`` documents ONE policy for single
+    files and batches alike -- "nonzero if ANY file or page failed, including
+    partial documents" -- but only the batch path went through it. Single-file
+    `socr process` exited 0 on ``AUDIT_FAILED`` unless the error carried
+    ``LOST_CONTENT_NOTE``, so a script wrapping `process` and one wrapping
+    `batch` saw OPPOSITE signals for the same document.
+
+    Both paths now derive their status here, so the mapping cannot drift again:
+
+    - ``SUCCESS``                -> COMPLETED (exit 0)
+    - ``AUDIT_FAILED``           -> PARTIAL   (exit 1: output written, pages
+                                               failed audit -- the contract's
+                                               "partial" case exactly)
+    - anything else              -> FAILED    (exit 1)
+
+    Lost content is not a separate code: it is already ``AUDIT_FAILED`` and so
+    already nonzero. What it changes is the MESSAGE, which the CLI still
+    distinguishes -- a run that erased pages must not read like an ordinary
+    warning.
+    """
+    from ocr_output_contract import Status
+
+    if result.success and result.status is DocumentStatus.SUCCESS:
+        return Status.COMPLETED
+    if result.status is DocumentStatus.AUDIT_FAILED:
+        return Status.PARTIAL
+    return Status.FAILED

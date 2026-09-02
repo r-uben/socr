@@ -560,7 +560,11 @@ def test_cli_process_surfaces_completed_with_warnings_for_empty_table_run(
             ["process", str(pdf), "--primary", "qwen", "-o", str(tmp_path / "out1"), "-q"],
         )
 
-    assert result_empty_cli.exit_code == 0
+    # GH-177: a partial document now exits NONZERO on the single-file path too,
+    # matching batch and the contract's uniform policy. That makes this pair a
+    # stronger difference than it was -- the two runs differ in exit code as
+    # well as in message.
+    assert result_empty_cli.exit_code != 0
     assert "Completed with warnings" in result_empty_cli.output
 
     # SUCCESS result (from populated table run)

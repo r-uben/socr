@@ -549,29 +549,36 @@ def process(
     try:
         result = pipeline.process(pdf_path, output_dir)
         if not result.success:
-            from socr.core.result import DocumentStatus
+            from ocr_output_contract import Status
 
-            # A complete markdown was written but some pages failed audit (e.g.
-            # local-only run where cloud escalation is unavailable). This is a
-            # partial success, not a hard failure: keep the usable output and exit
-            # 0 with a warning rather than aborting. Only a true ERROR (no text
-            # produced) or ERASED CONTENT (pages with no usable output at all)
-            # is fatal — a batch pipeline must not record a run that lost pages
-            # as a success.
-            if result.status == DocumentStatus.AUDIT_FAILED:
-                from socr.core.result import LOST_CONTENT_NOTE
+            from socr.core.result import LOST_CONTENT_NOTE, contract_status_for
 
+            # GH-177: ONE exit policy for `process` and `batch`. This used to
+            # exit 0 on AUDIT_FAILED unless the error carried LOST_CONTENT_NOTE,
+            # while batch mapped the same status to PARTIAL and exited 1 -- so a
+            # script wrapping `socr process` and one wrapping `socr batch` saw
+            # OPPOSITE signals for the same document. The contract's RunOutcome
+            # docstring is explicit that the policy is uniform and that a
+            # partial document exits nonzero, and batch was the half obeying it.
+            #
+            # A partial run still WRITES its output; the nonzero code says
+            # "usable, but do not treat this as clean", which is what a wrapping
+            # script needs to branch on.
+            doc_status = contract_status_for(result)
+            if doc_status is Status.PARTIAL:
                 if result.error and LOST_CONTENT_NOTE in result.error:
                     raise click.ClickException(
                         f"Completed but lost content: {result.error}. "
                         "Output written; see audit_log.json."
                     )
+                # Lost content is not a different exit code -- both are nonzero
+                # -- but it must not read like an ordinary warning.
                 console.print(
                     "[yellow]Completed with warnings:[/yellow] some pages failed "
                     "audit; output written. See audit_log.json."
                 )
-            else:
-                raise click.ClickException(f"Processing failed: {result.error}")
+                raise SystemExit(1)
+            raise click.ClickException(f"Processing failed: {result.error}")
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
         raise click.Abort()
