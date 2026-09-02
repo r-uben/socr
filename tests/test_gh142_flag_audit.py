@@ -242,25 +242,46 @@ def _is_config_path(node: ast.AST, section: list[str]) -> bool:
     return False
 
 
-def _flag_constructs(option: str, class_name: str) -> bool:
-    """True when ``if <option>:`` in cli.py contains a call to *class_name*.
+def _flag_constructs(option: str, class_name: str, *, command: str = "process") -> bool:
+    """True when ``if <option>:`` inside *command* SELECTS *class_name*.
 
-    Structural, so it survives reformatting and cannot be satisfied by the name
-    appearing in a comment, an import, or a different branch.
+    Three narrowings, each closing a way the check could pass without proving
+    anything (cubic P2 on #516, round three):
+
+    - only within the `command` function, so a same-named branch in another
+      subcommand cannot satisfy the exemption for `process`;
+    - only the TAKEN body (`node.body`), never `node.orelse` -- walking the
+      whole `If` counted the else branch, and here the else builds
+      `UnifiedPipeline`, so the opposite branch's constructor would have
+      satisfied it;
+    - a call node, not a name, so a comment, an import or a type annotation
+      mentioning the class proves nothing.
     """
     tree = ast.parse((_SRC / "cli.py").read_text())
-    for node in ast.walk(tree):
+    command_fn = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == command
+        ),
+        None,
+    )
+    if command_fn is None:
+        return False
+
+    for node in ast.walk(command_fn):
         if not isinstance(node, ast.If):
             continue
         if not (isinstance(node.test, ast.Name) and node.test.id == option):
             continue
-        for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Name)
-                and inner.func.id == class_name
-            ):
-                return True
+        for statement in node.body:
+            for inner in ast.walk(statement):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == class_name
+                ):
+                    return True
     return False
 
 
