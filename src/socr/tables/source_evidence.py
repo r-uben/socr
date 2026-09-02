@@ -315,13 +315,34 @@ def verify_scanned_table(
     output_text: str,
     *,
     ocr_image_fn: OcrImageFn | None = None,
+    native_trusted: bool | None = None,
 ) -> SourceEvidenceResult:
-    """Full scanned-page pipeline: defer native, else verify or fail closed."""
-    if page_has_native_words(page):
+    """Full scanned-page pipeline: defer native, else verify or fail closed.
+
+    ``native_trusted`` is the caller's born-digital classification for this page.
+
+    GH-163: deferral used to hinge on ``page_has_native_words`` alone, and a
+    scanned page with a baked-in or corrupt OCR layer has words. Such a page
+    handed itself to the native verifier -- which checks the model's table
+    against that same untrusted layer -- so the fail-closed raster/classical
+    evidence check was skipped for exactly the pages that need it, and a
+    hallucinated table could be corroborated by a hallucinated text layer.
+
+    ``False`` means the caller classified the page as NOT trusted-native, and
+    the evidence check runs however many words the layer contains. ``None``
+    means the caller cannot tell, and the pre-GH-163 word-presence behaviour is
+    kept -- an unknown classification must not silently start failing pages
+    closed.
+    """
+    if native_trusted is not False and page_has_native_words(page):
         return SourceEvidenceResult(
             verifiable=True,
             passed=True,
-            reason="native words present; defer to native verifier",
+            reason=(
+                "native words present; defer to native verifier"
+                if native_trusted is None
+                else "trusted native page; defer to native verifier"
+            ),
             deferred=True,
         )
 

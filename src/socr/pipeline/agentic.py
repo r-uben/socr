@@ -471,11 +471,18 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
         record_event: Callable[[object], None] | None = None,
         *,
         ocr_image_fn: Callable[[object], str] | None = None,
+        native_trusted: Callable[[int], bool | None] | None = None,
     ) -> None:
         self._inner = inner
         self._get_fitz_page = get_fitz_page
         self._record_event = record_event
         self._ocr_image_fn = ocr_image_fn
+        # GH-163: the page's born-digital classification. Without it the
+        # verifier deferred on word PRESENCE, so a scanned page carrying a
+        # baked-in OCR layer skipped the evidence check and was graded against
+        # that same untrusted layer. None (no callable, or it cannot tell)
+        # keeps the pre-GH-163 behaviour.
+        self._native_trusted = native_trusted
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         from socr.tables.reconcile import find_table_blocks
@@ -493,10 +500,17 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
         page_num = output.page_num
         try:
             fitz_page = self._get_fitz_page(page_num)
+            trusted: bool | None = None
+            if self._native_trusted is not None:
+                try:
+                    trusted = self._native_trusted(page_num)
+                except Exception:  # noqa: BLE001 - unknown, not untrusted
+                    trusted = None
             result = verify_scanned_table(
                 fitz_page,
                 output.text,
                 ocr_image_fn=self._ocr_image_fn,
+                native_trusted=trusted,
             )
         except _VERIFIER_FATAL:
             raise

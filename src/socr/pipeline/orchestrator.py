@@ -4817,10 +4817,19 @@ class UnifiedPipeline:
             is_table_page=is_table_page,
             record_event=record_event,
         )
+
+        def native_trusted(page_num: int) -> bool | None:
+            # GH-163: the source-evidence verifier must select the native
+            # verifier on TRUST, not on the presence of words. A scanned page
+            # with a baked-in OCR layer has words and no trustworthy reading.
+            ps = state.pages.get(page_num)
+            return None if ps is None else bool(ps.is_born_digital)
+
         return SourceEvidenceTableJudge(
             inner=native_judge,
             get_fitz_page=get_fitz_page,
             record_event=record_event,
+            native_trusted=native_trusted,
         )
 
     def _make_page_renderer(self, state: DocumentState):
