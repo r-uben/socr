@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import re
 from pathlib import Path
 
 import click
@@ -537,10 +538,19 @@ def test_the_readme_does_not_advertise_a_rejected_flag(option: str) -> None:
     # table cell -- and the check would return green while the README told the
     # exact lie it exists to prevent. A format tweak must not be able to
     # silently disable it.
-    def _entry_flag(line: str) -> str:
-        stripped = line.strip().lstrip("-*|` \t")
-        head = stripped.split(maxsplit=1)[0] if stripped.split() else ""
-        return "--" + head.lstrip("-").strip("`,|")
+    def _entry_flag(line: str) -> str | None:
+        # Strip a LIST or TABLE marker only -- not "-", which is the flag's own
+        # prefix (cubic P2, round two: `lstrip("-*|`")` turned `- fallback
+        # engine` into `--fallback`, a false positive, and left
+        # `**--fallback**` as `--fallback**`, a miss).
+        stripped = re.sub(r"^\s*(?:[*|]|-\s)\s*", "", line).strip()
+        tokens = stripped.split()
+        if not tokens:
+            return None
+        # Trim inline formatting from the token itself, then require it to be a
+        # flag. A word that merely BECOMES one after stripping is not an entry.
+        token = tokens[0].strip("`*_|,")
+        return token if token.startswith("--") else None
 
     mentions = [line for line in readme.splitlines() if _entry_flag(line) == flag]
     if not mentions:
