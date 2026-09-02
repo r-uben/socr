@@ -759,19 +759,29 @@ class TestHeaderAttributionEndToEnd:
 
 
 # ---------------------------------------------------------------------------
-# GH-200: post-route recheck. The GH-56 header repair mutates
-# ``ps.best_output.text`` AFTER the judge already accepted it, so the shipped
-# text may not be the text the structural gate saw. If repair produces a
-# ragged/detached-label grid, the page must be demoted IN PLACE (WARNING /
-# audit_passed=False), with exactly one audit event for the page.
+# P3 (GH-513 follow-up): the standalone ``post_route_recheck`` site is
+# RETIRED. Header repair now happens exactly once, INSIDE
+# ``NativeTableVerifierJudge`` (``_maybe_repair_collapsed_headers``), and the
+# structural gate that catches a ragged/detached-label grid produced by that
+# repair now runs BEFORE the judge's verdict -- there is no longer a second,
+# post-route site that can demote an already-shipped page in place.
+#
+# This regression drives the REAL judge (no ``route_page`` stub): it patches
+# only the in-judge repair function to return a text ``check_markdown``
+# genuinely reports as ragged, then asserts the structural gate rejects the
+# reading before ``assess`` returns an accepting ``AcceptDecision`` --  i.e.
+# the page can never reach ``route_page`` as an accepted attempt in the first
+# place, because the judge itself refused it.
 # ---------------------------------------------------------------------------
 
 
 class TestPostRouteHeaderRepairRecheck:
-    def test_post_route_header_repair_recheck(self, tmp_path: Path) -> None:
-        from socr.core.config import EngineType, PipelineConfig
+    def test_repaired_ragged_grid_is_rejected_before_the_verdict(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        from socr.core.audit_log import AuditEvent
         from socr.core.providers import PROFILE_QWEN_LOCAL
-        from socr.pipeline.agentic import PageDecision, ProviderAttempt
+        from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge, route_page
 
         clean_text = (
             "| Forecast | 2026 | 2027 |\n| --- | --- | --- |\n| A | 1.2 | 1.3 |\n| B | 2.1 | 2.2 |"
@@ -787,80 +797,80 @@ class TestPostRouteHeaderRepairRecheck:
         )
 
         doc = fitz.open()
-        doc.new_page()
-        pdf_path = tmp_path / "doc.pdf"
-        doc.save(str(pdf_path))
-        doc.close()
+        page = doc.new_page()
+        # Real native geometry so the verifier's tier-1/tier-2 checks run
+        # cleanly and fall through to "no issue detected -> delegate".
+        page.insert_text((100.0, 100.0), "Forecast", fontsize=9)
+        page.insert_text((250.0, 100.0), "2026", fontsize=9)
+        page.insert_text((350.0, 100.0), "2027", fontsize=9)
+        page.insert_text((100.0, 130.0), "A", fontsize=9)
+        page.insert_text((250.0, 130.0), "1.2", fontsize=9)
+        page.insert_text((350.0, 130.0), "1.3", fontsize=9)
+        page.insert_text((100.0, 160.0), "B", fontsize=9)
+        page.insert_text((250.0, 160.0), "2.1", fontsize=9)
+        page.insert_text((350.0, 160.0), "2.2", fontsize=9)
 
-        config = PipelineConfig(
-            primary_engine=EngineType.QWEN,
-            agentic=True,
-            judge_backend="heuristic",
-            enabled_engines=[EngineType.QWEN],
-            quiet=True,
-            save_figures=False,
-            write_manifest=False,
-            native_first=False,
+        output = PageOutput(
+            page_num=1,
+            text=clean_text,
+            status=PageStatus.SUCCESS,
+            confidence=0.9,
         )
-        pipeline = UnifiedPipeline(config)
+        events: list[AuditEvent] = []
+        inner = MagicMock()
+        inner.assess.return_value = AcceptDecision(accept=True, reason="inner accepts clean text")
 
-        def _accepted_route(page_num, ladder, run_provider, judge, **kwargs):
-            out = PageOutput(
-                page_num=page_num,
-                text=clean_text,
-                status=PageStatus.SUCCESS,
-                engine="qwen",
-                audit_passed=True,
-            )
-            prof = ladder[0]
-            att = ProviderAttempt(
-                engine=prof.engine,
-                output=out,
-                cost_usd=0.0,
-                accepted=True,
-                reason="stub-accept",
-                provider_id=prof.id,
-                model=prof.model,
-                backend=prof.backend,
-            )
-            return PageDecision(page_num=page_num, final_output=out, attempts=[att])
+        judge = NativeTableVerifierJudge(
+            inner=inner,
+            get_fitz_page=lambda pn: page,
+            is_table_page=lambda pn: True,
+            record_event=events.append,
+        )
 
-        with (
-            patch.object(
-                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
-            ),
-            patch("socr.pipeline.orchestrator.route_page", side_effect=_accepted_route),
-            patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
-            patch(
-                "socr.tables.header_repair.repair_table_headers_on_page",
-                return_value=(ragged_after_repair, 1),
-            ),
-            # Force this synthetic (tableless-looking) page through the
-            # header-repair block, which is gated on ``_page_has_tables``.
-            patch.object(UnifiedPipeline, "_page_has_tables", return_value=True),
+        with patch(
+            "socr.tables.header_repair.repair_table_headers_on_page",
+            return_value=(ragged_after_repair, 1),
         ):
-            result = pipeline.process(pdf_path, tmp_path / "out")
+            decision = judge.assess(output, MagicMock())
 
-        assert result.status == DocumentStatus.AUDIT_FAILED
-
-        out_dir = tmp_path / "out"
-        audit_log_path = out_dir / "doc" / "audit_log.json"
-        if not audit_log_path.exists():
-            candidates = list(out_dir.rglob("audit_log.json"))
-            assert candidates, f"no audit_log.json found under {out_dir}"
-            audit_log_path = candidates[0]
-        audit_log = json.loads(audit_log_path.read_text())
-        events = [e for e in audit_log.get("events", []) if e.get("page_num") == 1]
-        fired = [e for e in events if e.get("kind") == "table_structure_failed"]
-        assert len(fired) == 1, f"expected exactly one audit event for page 1, got {events}"
-        assert fired[0].get("data", {}).get("site") == "post_route_recheck"
-
-        sidecar_candidates = list(out_dir.rglob("pages/00001.json"))
-        assert sidecar_candidates, f"no page sidecar found under {out_dir}"
-        sidecar = json.loads(sidecar_candidates[0].read_text())
-        winning = sidecar.get("winning_output") or sidecar
-        assert sidecar.get("status") in ("warning", "WARNING") or winning.get("status") in (
-            "warning",
-            "WARNING",
+        assert decision.accept is False, (
+            "a repaired ragged grid must be rejected by the structural gate "
+            "BEFORE the judge returns -- there is no post-route site left to "
+            "catch it after the fact"
         )
-        assert sidecar.get("audit_passed") is False or winning.get("audit_passed") is False
+        repair_fired = [e for e in events if e.kind == "table_header_repair"]
+        assert len(repair_fired) == 1, "the in-judge repair event still fires exactly once"
+        structural_fired = [e for e in events if e.kind == "table_structure_failed"]
+        assert len(structural_fired) == 1, (
+            f"expected exactly one table_structure_failed event, got {events}"
+        )
+        assert structural_fired[0].data.get("defect")
+
+        with patch(
+            "socr.tables.header_repair.repair_table_headers_on_page",
+            return_value=(ragged_after_repair, 1),
+        ):
+            page_decision = route_page(
+                page_num=1,
+                ladder=[PROFILE_QWEN_LOCAL],
+                run_provider=lambda prof, pn: PageOutput(
+                    page_num=1,
+                    text=clean_text,
+                    status=PageStatus.SUCCESS,
+                    confidence=0.9,
+                ),
+                judge=judge,
+            )
+        assert page_decision.accepted is False, (
+            "page cannot reach route_page as an accepted attempt"
+        )
+        assert page_decision.attempts[0].accepted is False
+
+    def test_post_route_recheck_site_is_gone(self, tmp_path: Path) -> None:
+        """``post_route_recheck`` is retired, not merely renamed (decision log:
+        docs/log/2026-09-02_p3-p5-judged-bytes-ship.md). No production code may
+        emit an audit event tagged with that site any more."""
+        import socr.pipeline.orchestrator as orchestrator_mod
+
+        source = Path(orchestrator_mod.__file__).read_text()
+        assert "post_route_recheck" not in source

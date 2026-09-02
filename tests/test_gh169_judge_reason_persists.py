@@ -130,7 +130,20 @@ def test_the_production_sites_are_the_ones_being_described() -> None:
         if isinstance(node, ast.Assign)
         and any(isinstance(t, ast.Attribute) and t.attr == "judge_reason" for t in node.targets)
     ]
-    assert len(assigns) == 1, f"expected exactly one judge_reason assignment, got {len(assigns)}"
+    # Cold review round 2 added a SECOND assignment: the post-route crop
+    # re-judge promotes an accepted candidate and records the verdict that
+    # accepted it. That site is legitimate and is pinned separately below; the
+    # GH-169 site is the one that reads from the attempt, and the enumeration
+    # keeps a third site from appearing unnoticed.
+    attempt_assigns = [a for a in assigns if "att.reason" in ast.unparse(a.value)]
+    assert len(attempt_assigns) == 1, (
+        f"expected exactly one per-attempt judge_reason assignment, got {len(attempt_assigns)}"
+    )
+    other_rhs = sorted(ast.unparse(a.value) for a in assigns if a is not attempt_assigns[0])
+    assert other_rhs == ["decision.reason or ''"], (
+        f"unexpected judge_reason assignment site(s) in the orchestrator: {other_rhs}"
+    )
+    assigns = attempt_assigns
     rhs = ast.unparse(assigns[0].value)
     assert "att.reason" in rhs, f"judge_reason is not taken from the attempt: {rhs}"
     assert "if" not in rhs, (

@@ -121,7 +121,10 @@ CLASSIFIED: dict[str, tuple[str, str]] = {
     "no_native_first": (AGENTIC, "native_first, read in _phase_agentic"),
     "detect_equations": (AGENTIC, "read in _phase_agentic"),
     "recover_clean_equations": (AGENTIC, "read in _phase_agentic"),
-    "no_dual_pass_tables": (AGENTIC, "dual_pass_tables, read in _phase_agentic"),
+    # P5 replaced the one-way --no-dual-pass-tables with a paired
+    # --dual-pass-tables/--no-dual-pass-tables option (default None, so a
+    # config file or profile still wins when the flag is not given).
+    "dual_pass_tables": (AGENTIC, "read in _phase_agentic; gates the crop reread"),
     "qwen_backend": (AGENTIC, "read in _phase_agentic"),
     "qwen_vllm_url": (AGENTIC, "read in _phase_agentic"),
     "judge_backend": (AGENTIC, "read by _build_page_judge"),

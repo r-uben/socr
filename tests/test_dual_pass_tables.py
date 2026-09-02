@@ -384,8 +384,11 @@ def _wire_reader(monkeypatch, reader):
 
 
 def test_phase_disabled_flag_default():
-    assert PipelineConfig().dual_pass_tables is True
-    assert PipelineConfig(dual_pass_tables=False).dual_pass_tables is False
+    """P5: dual_pass_tables now defaults False -- the crop reread is an
+    opt-in escalation tool, not an unconditional pass over every accepted
+    table page (docs/log/2026-09-02_p3-p5-judged-bytes-ship.md)."""
+    assert PipelineConfig().dual_pass_tables is False
+    assert PipelineConfig(dual_pass_tables=True).dual_pass_tables is True
 
 
 # --------------------------------------------------------------------------

@@ -1496,6 +1496,12 @@ class TestAgenticIntegration:
         assert winner["provider_id"] == "corrupt-math-region"
         assert winner["provider_model"] == config.math_model
         assert winner["cost_usd"] is None
+        # Cold review round 6: this lane journals a page EngineResult with an
+        # UNKNOWN cost, so the page's recorded spend must be unknown too. The
+        # default 0.0 would persist a KNOWN zero and let a resumed run treat
+        # unmetered spend as no spend at all.
+        assert on_result.cost is None, "control: the live document total is unknown"
+        assert sidecar["page_cost_usd"] is None
         manifest = json.loads((doc_dir / "manifest.json").read_text())
         fingerprint = manifest["entries"]["1"]["fingerprint"]
 
@@ -1617,7 +1623,7 @@ class TestAgenticIntegration:
     def test_combined_legacy_engine_keeps_corrupt_math_fingerprint(self, tmp_path):
         pdf = self._real_pdf(tmp_path, 1)
         state = DocumentState(handle=DocumentHandle.from_path(pdf))
-        state.engine_runs.append(
+        state.record_engine_run(
             EngineResult(
                 document_path=pdf,
                 engine="native+math+qwen",

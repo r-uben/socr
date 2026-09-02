@@ -80,7 +80,7 @@ class TestConstruction:
 
     def test_empty_engine_runs_and_whole_doc(self) -> None:
         state = DocumentState(handle=_make_handle())
-        assert state.engine_runs == []
+        assert state.engine_runs == ()
         assert state.whole_doc_attempts == []
 
     def test_zero_page_document(self) -> None:
@@ -630,7 +630,7 @@ class TestTelemetry:
 
     def test_total_cost_is_unknown_when_any_run_is_unmetered(self) -> None:
         state = DocumentState(handle=_make_handle(1))
-        state.engine_runs.append(
+        state.record_engine_run(
             EngineResult(
                 document_path=state.handle.path,
                 engine="native+math",

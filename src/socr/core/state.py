@@ -15,11 +15,15 @@ Design principles:
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from socr.core.born_digital import DocumentAssessment
 from socr.core.document import DocumentHandle
 from socr.core.result import DocumentStatus, EngineResult, FailureMode, PageOutput
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -102,6 +106,22 @@ class PageState:
     #: ``find_table_blocks`` fails the regional splice closed.
     native_table_region_identities: list[str] = field(default_factory=list)
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
+    #: What this page has actually SPENT, as a recorded fact rather than a
+    #: derivation (cold review rounds 4-5). Every site that journals an
+    #: ``EngineResult`` for this page adds to it: each ladder rung ``route_page``
+    #: tried, the GH-96 escalation call INCLUDING its rejected branch (which pays
+    #: for the call and then returns without appending a candidate), and the
+    #: post-route crop re-judge.
+    #:
+    #: It cannot be recomputed from ``attempts``: that list never held the
+    #: refused escalation candidate, and resume rebuilds it as the single frozen
+    #: winner -- so a derivation lost the spend of every rung the ladder paid for
+    #: and refused, and lost it again on every later sidecar rewrite.
+    #:
+    #: ``None`` means "unknown", exactly as ``DocumentState.total_cost`` uses it:
+    #: one unmetered call makes the page total unknowable, and an unknown
+    #: subtotal must never be treated as zero spend.
+    page_cost_usd: float | None = 0.0
     d3_floor_png_ref: str = ""  # TR-3: image ref string for the D3 floor PNG (empty if not saved)
     #: #263: image ref for the shredded-rotated-page floor. Deliberately NOT
     #: ``d3_floor_png_ref``: that field means "the table region was routed to
@@ -259,6 +279,31 @@ class PageState:
         return max(with_text, key=lambda a: len(a.text))
 
 
+def add_page_cost(ps, cost: float | None) -> None:
+    """Charge *cost* to a page's recorded spend (``None`` absorbing both ways).
+
+    Rounds 4-6. Page spend is a RECORDED FACT, never derived: ``attempts`` never
+    held a refused escalation candidate, and resume collapses it to the single
+    frozen winner. ``None`` means unknown, exactly as ``total_cost`` uses it --
+    an unmetered call makes the page total unknowable, and unknown never decays
+    back to a number.
+
+    Fails OPEN, loudly. The only caller that can raise here holds a page object
+    without the field, and letting that propagate would abort a lane inside its
+    own fail-open guard and silently keep the incumbent text. Under-recorded
+    spend is a warning; lost content is not recoverable.
+    """
+    if ps is None:
+        return
+    try:
+        if cost is None or getattr(ps, "page_cost_usd", 0.0) is None:
+            ps.page_cost_usd = None
+            return
+        ps.page_cost_usd = (getattr(ps, "page_cost_usd", 0.0) or 0.0) + cost
+    except Exception as exc:
+        logger.warning("page spend not recorded (%s); the page total is understated", exc)
+
+
 @dataclass
 class DocumentState:
     """Central blackboard for the OCR pipeline.
@@ -273,8 +318,21 @@ class DocumentState:
     whole_doc_attempts: list[PageOutput] = field(
         default_factory=list
     )  # page_num=0 from CLI engines
-    engine_runs: list[EngineResult] = field(
-        default_factory=list
+    #: PRIVATE. Cold review round 7: rounds 5-6 tried to hold the
+    #: "journal and record page spend in one call" contract with an AST guard,
+    #: and the review defeated it four ways -- an alias then ``append``, a
+    #: ``list(...) + [...]`` reassignment, a ``getattr`` hop, and a subclass
+    #: method that simply took the exempt name. A pattern-matcher cannot win
+    #: that game, so the contract is enforced by ENCAPSULATION instead: the
+    #: journal is private, ``engine_runs`` below is a read-only view, and every
+    #: one of those shapes now raises where it is written.
+    #: ``init=False``: the journal is not a constructor or ``dataclasses.replace``
+    #: input either (cold review round 7) -- a fresh list installed that way
+    #: would carry runs no page was charged for. Reflective writes
+    #: (``object.__setattr__``, ``__dict__``) are Python, not a contract this
+    #: class can close, and are out of scope.
+    _engine_runs: list[EngineResult] = field(
+        init=False, default_factory=list, repr=False
     )  # all EngineResult objects for telemetry
     events: list = field(default_factory=list)  # AuditEvent stream for the run audit log
     # Agentic routing ladder snapshot (B3) — populated by _phase_agentic, None otherwise.
@@ -296,9 +354,51 @@ class DocumentState:
     # Mutation helpers
     # ------------------------------------------------------------------
 
+    @property
+    def engine_runs(self) -> tuple[EngineResult, ...]:
+        """The run journal, read-only.
+
+        A tuple rather than the list itself, and a property with NO setter, so
+        ``append`` / ``extend`` / ``insert`` raise, ``+=`` and plain assignment
+        raise, and a ``getattr`` hop or a local alias inherits the same tuple --
+        every bypass the round-6 review found now fails at the line that writes
+        it. Readers only ever iterate, index or count, all of which a tuple does.
+        """
+        return tuple(self._engine_runs)
+
+    def record_engine_run(
+        self, result: EngineResult, page_nums: Sequence[int] | None = None
+    ) -> None:
+        """Journal an engine run AND charge its cost to the pages it ran on.
+
+        Cold review round 6 closed the CLASS, not the instance. Rounds 4-5 made
+        per-page spend a recorded fact and wired the sites that existed; the
+        corrupt-math recovery lane still journaled a page run with an UNKNOWN
+        cost and recorded nothing, so the page kept the default known zero and a
+        resumed run read unmetered spend as no spend. That is what a two-call
+        contract buys you: the obvious way to add a lane is the wrong way.
+
+        So this is the ONE place the private journal is appended to. Round 7 made
+        that structural rather than advisory: ``engine_runs`` is a read-only view,
+        so there is no other way in, and a small scoped guard
+        (``tests/test_p35_cold_review_round7.py``) keeps the private name from
+        being reached for outside this class.
+
+        ``page_nums`` names the pages the run is charged to. Omitted, it is taken
+        from the result's own page outputs. An EMPTY sequence means "already
+        recorded" -- the resume path, which restores the page's persisted fact
+        verbatim and must not add to it.
+        """
+        self._engine_runs.append(result)
+        charged = page_nums
+        if charged is None:
+            charged = [p.page_num for p in (result.pages or []) if getattr(p, "page_num", 0)]
+        for num in dict.fromkeys(charged):
+            add_page_cost(self.pages.get(num), result.cost)
+
     def apply_result(self, result: EngineResult) -> None:
         """Merge an engine's output into the blackboard."""
-        self.engine_runs.append(result)
+        self.record_engine_run(result)
         for page_out in result.pages:
             if page_out.page_num == 0:
                 self.whole_doc_attempts.append(page_out)

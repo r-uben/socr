@@ -607,7 +607,13 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
     columns, spanning headers, stub columns).
     → Record an AuditEvent, then delegate to the inner judge.
 
-    Scanned pages bypass cleanly (empty get_text("words")).
+    Pages that bypass native geometry verification (non-table-classified pages,
+    missing ``get_fitz_page`` callable, non-success or empty outputs, or scanned
+    pages with empty ``get_text('words')``) delegate to the inner judge; any
+    accepting inner decision still passes through the string-only structural
+    shipping gate (``_apply_structural_gate`` with ``words=None`` and
+    ``rules=None``) before shipping, preventing structurally defective tables
+    from shipping.
 
     Args:
         inner:         The wrapped judge (VLMPageJudge or HeuristicPageJudge).
@@ -642,12 +648,17 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
 
         page_num = output.page_num
 
-        # Only run the verifier on born-digital table pages
+        # Only run the verifier on born-digital table pages with usable geometry.
+        # Bypassing native geometry does NOT bypass the string-only structural
+        # gate: an accepting inner decision still passes through
+        # _apply_structural_gate with words=None and rules=None before returning.
         if not self._is_table_page(page_num) or self._get_fitz_page is None:
-            return self._inner.assess(output, provider)
+            decision = self._inner.assess(output, provider)
+            return self._apply_structural_gate(decision, output, page_num, None, None)
 
         if output.status != PageStatus.SUCCESS or not output.text.strip():
-            return self._inner.assess(output, provider)
+            decision = self._inner.assess(output, provider)
+            return self._apply_structural_gate(decision, output, page_num, None, None)
 
         try:
             fitz_page = self._get_fitz_page(page_num)
@@ -828,14 +839,17 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
     ) -> AcceptDecision:
         """GH-200: the winner-side structural/header check on whatever is ABOUT TO SHIP.
 
-        Runs on every ACCEPTING path out of ``assess`` -- the delegated-warn
-        path, the deterministic EXACT_PASS accept, the delegated-no-issue
-        path, and (grid-shape term only, ``words=None``) the verifier-
-        exception path. TR-3 (the multiset check above) proves the numbers
-        are right; it is blind by construction to header loss, detached
-        labels, and star-only row deletion (2026-08-15 hand judgement, 4/4
-        damaged pages). A rejecting inner decision is returned unchanged --
-        there is nothing to gate on a page that is not shipping anyway.
+        Runs on every ACCEPTING path out of ``assess`` -- the early-delegation
+        geometry-bypass paths (non-table page, missing ``get_fitz_page``,
+        non-success/empty output, with ``words=None`` and ``rules=None``), the
+        delegated-warn path, the deterministic EXACT_PASS accept, and the
+        delegated-no-issue path. (Verifier exceptions are rejected fail-closed
+        directly by GH-162 and do not reach the gate.) TR-3 (the multiset check
+        above) proves the numbers are right; it is blind by construction to
+        header loss, detached labels, and star-only row deletion (2026-08-15
+        hand judgement, 4/4 damaged pages). A rejecting inner decision is
+        returned unchanged -- there is nothing to gate on a page that is not
+        shipping anyway.
 
         #245: ``inner_consulted`` says whether a model has already seen this
         page on the way here. On the EXACT_PASS path it has not. When the

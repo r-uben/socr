@@ -19,6 +19,7 @@ import pytest
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import DEFAULT_PROVIDERS, TIER_LOCAL
 from socr.core.result import PageOutput, PageStatus
+from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 _ROWS = [
@@ -77,7 +78,18 @@ def pdf_path(tmp_path_factory):
 class _State:
     def __init__(self):
         self.events = []
-        self.engine_runs = []
+        # Round 7: the journal is PRIVATE and ``engine_runs`` is a read-only
+        # view. The double mirrors that shape and borrows the real recorder, so
+        # it cannot drift from the contract the production sites rely on.
+        self._engine_runs = []
+        self.pages = {}
+
+    @property
+    def engine_runs(self):
+        return tuple(self._engine_runs)
+
+    def record_engine_run(self, result, page_nums=None):
+        DocumentState.record_engine_run(self, result, page_nums)
 
 
 class _PageState:
@@ -87,6 +99,8 @@ class _PageState:
         self.native_table_structure_failed = False
         self.native_table_unverifiable = False
         self.scanned_table_evidence_failed = False
+        # Round 5: PageState records the page's spend as a fact.
+        self.page_cost_usd = 0.0
 
 
 def _pipeline(**overrides):
@@ -231,7 +245,7 @@ def test_a_non_grid_page_costs_nothing(tmp_path):
 
     assert calls == [], "a page with no table must never reach the provider"
     assert [e.kind for e in state.events] == ["table_not_scorable"]
-    assert state.engine_runs == []
+    assert state.engine_runs == ()
 
 
 # ----------------------------------------------------------------------
