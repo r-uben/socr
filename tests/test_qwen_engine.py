@@ -2,10 +2,29 @@
 
 from __future__ import annotations
 
+import pytest
+
 from socr.core.config import ENGINE_PRIORITY, EngineType, PipelineConfig
 from socr.core.providers import DEFAULT_PROVIDERS, provider_ladder
 from socr.engines.qwen import OLLAMA_MODEL, QwenEngine, resolve_qwen_intent
 from socr.engines.registry import _LOCAL_ENGINE_ORDER, get_engine
+
+
+@pytest.fixture(autouse=True)
+def _isolate_backend_resolution(monkeypatch):
+    """Decide backend resolution here, never inherit it from the shell.
+
+    GH-521. `qwen_backend` defaults to `auto`, and `auto` means vLLM whenever
+    `VLLM_BASE_URL` is exported -- which is the documented HPC deployment. So on
+    such a machine these tests failed while production was behaving exactly as
+    designed: they asserted the Ollama answer and got the correct vLLM one.
+
+    Clearing the variable makes the DEFAULT deterministic. It does not make the
+    exported state untested: the parametrised cases below set it back
+    explicitly, so both answers are pinned rather than one of them being
+    whatever the shell happened to hold.
+    """
+    monkeypatch.delenv("VLLM_BASE_URL", raising=False)
 
 
 def test_qwen_registered():
@@ -162,3 +181,53 @@ def test_agentic_local_profile_pins_instruct_model():
     assert PROFILE_QWEN_LOCAL.id == "qwen-local-instruct"
     assert PROFILE_QWEN_LOCAL.backend == "ollama"
     assert PROFILE_QWEN_LOCAL.model == OLLAMA_MODEL
+
+
+@pytest.mark.parametrize("exported", [None, "http://gpu-node:8000/v1"])
+def test_auto_resolves_by_the_environment_and_both_answers_are_pinned(monkeypatch, exported):
+    """GH-521: clearing the variable must not leave the exported state untested.
+
+    The autouse fixture makes the DEFAULT deterministic. Without this, the HPC
+    answer would be the one nobody asserts -- which is how five tests came to
+    fail on a machine where production was behaving correctly.
+
+    Both arms assert a real resolution, so a change that collapsed `auto` to one
+    backend everywhere would redden one of them rather than silently pass.
+    """
+    if exported is None:
+        monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_BASE_URL", exported)
+
+    backend, model = resolve_qwen_intent(PipelineConfig(qwen_backend="auto"))
+
+    if exported is None:
+        assert backend == "auto", "with no server exported, auto must stay on the local path"
+        assert model == OLLAMA_MODEL
+    else:
+        assert backend == "vllm", (
+            "with VLLM_BASE_URL exported, auto must resolve to vLLM -- this is "
+            "the documented HPC deployment, not an edge case"
+        )
+        assert model != OLLAMA_MODEL, (
+            "the vLLM backend was handed the Ollama model tag; the two servers "
+            "name the same model differently"
+        )
+
+
+def test_an_explicit_backend_ignores_the_environment(monkeypatch):
+    """Control: the environment decides only what `auto` means.
+
+    Without this, a resolver that read the variable unconditionally would
+    satisfy the parametrised test above while overriding an explicit choice.
+    """
+    for exported in (None, "http://gpu-node:8000/v1"):
+        if exported is None:
+            monkeypatch.delenv("VLLM_BASE_URL", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_BASE_URL", exported)
+
+        backend, _model = resolve_qwen_intent(PipelineConfig(qwen_backend="ollama"))
+        assert backend == "ollama", (
+            f"an explicit ollama backend was overridden by VLLM_BASE_URL={exported!r}"
+        )
