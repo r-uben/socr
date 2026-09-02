@@ -501,8 +501,16 @@ def test_unfingerprinted_fields_really_are_absent_from_the_fingerprint(field):
 
     # `run_fingerprint` is imported inside `_run_fingerprint`, so patching the
     # contract module is what the call resolves through.
+    #
+    # `_resolve_judge_model` is patched for hermeticity (cubic P2 on #532): it
+    # probes Ollama, so without this each parametrised case waits on a local
+    # daemon that CI does not have and a workstation may or may not -- the exact
+    # local-passes/CI-fails trap this repo documents, and the reason the fixture
+    # above does the same.
+    pipe = UnifiedPipeline(PipelineConfig(quiet=True))
+    pipe._resolve_judge_model = lambda: ""
     with patch.object(contract, "run_fingerprint", spy):
-        UnifiedPipeline(PipelineConfig(quiet=True))._run_fingerprint()
+        pipe._run_fingerprint()
 
     assert captured, "the fingerprint was not built, so this asserts nothing"
     assert field not in captured["extra"], (

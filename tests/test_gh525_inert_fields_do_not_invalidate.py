@@ -83,11 +83,17 @@ def test_the_ignored_fields_are_named_out_loud() -> None:
 
 
 @pytest.mark.parametrize("field", ["judge_hard_pages", "fallback_chain"])
-def test_the_frozen_value_is_the_config_default(field: str) -> None:
-    """Taken from PipelineConfig, never written out beside it.
+def test_the_warning_baseline_is_the_config_default(field: str) -> None:
+    """`_INERT_FIELD_DEFAULTS` is the warn-diff baseline -- nothing is frozen.
 
-    A hand-copied default would drift the day someone changes the real one, and
-    the fingerprint would then freeze a value the config no longer has.
+    Named for a freeze in an earlier draft (cubic P3 on #532): the fields are
+    ABSENT from the fingerprint now, so there is no frozen value. What this
+    dict still decides is whether a config differs enough from the defaults to
+    be worth warning about.
+
+    Taken from PipelineConfig rather than written out beside it, so the two
+    cannot drift: a changed default would otherwise make the run warn about a
+    config that set nothing.
     """
     from socr.pipeline.orchestrator import _INERT_FIELD_DEFAULTS
 
