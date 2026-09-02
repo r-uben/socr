@@ -1722,7 +1722,15 @@ def build_manifest(
                 "accepted": a.audit_passed,
                 "confidence": a.confidence,
                 "failure_mode": a.failure_mode.value,
-                "reason": getattr(a, "skip_reason", "") or a.failure_mode.value,
+                # GH-169: skip_reason first (the rung was never tried), then the
+                # judge's verdict, then the failure mode. Previously a rejected
+                # non-empty attempt fell straight through to the mode and read
+                # "none".
+                "reason": (
+                    getattr(a, "skip_reason", "")
+                    or getattr(a, "judge_reason", "")
+                    or a.failure_mode.value
+                ),
                 "judge_model": _judge_model,
             }
             for a in state.pages[page_num].attempts

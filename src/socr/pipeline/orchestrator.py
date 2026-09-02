@@ -3579,6 +3579,13 @@ class UnifiedPipeline:
                     att.output.skip_reason = (
                         att.reason if not att.accepted and not att.output.text else ""
                     )  # B3
+                    # GH-169: keep the judge's verdict for EVERY attempt, not
+                    # only the ones whose output was empty. A provider whose
+                    # reading the judge refused journaled reason "none", so the
+                    # one question the manifest exists to answer -- why did the
+                    # ladder escalate past this rung -- had no answer.
+                    att.output.judge_reason = att.reason or ""
+
                     ps.attempts.append(att.output)
                 ps.best_output = decision.final_output
 
