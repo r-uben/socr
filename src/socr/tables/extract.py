@@ -410,6 +410,7 @@ class TableCropExtractor:
                     break
                 img_path = self._render_crop(page, box, page_rect)
                 if img_path is None:
+                    out.append(self._failed_crop(box, "render_failed"))
                     continue
                 try:
                     md = self._read_with_deadline(img_path, deadline, page_num)
@@ -450,10 +451,13 @@ class TableCropExtractor:
                 except Exception as exc:
                     logger.warning("dual-pass: crop read failed p%d (%s)", page_num, exc)
                     img_path.unlink(missing_ok=True)
+                    out.append(self._failed_crop(box, "read_error"))
                     continue
                 img_path.unlink(missing_ok=True)
                 if md.strip():
                     out.append(CropTable(markdown=md, source=box.source, bbox=box.bbox))
+                else:
+                    out.append(self._failed_crop(box, "empty_response"))
         finally:
             doc.close()
         return out
@@ -489,6 +493,23 @@ class TableCropExtractor:
             # thread unblocks once Ollama finishes generating (or the process exits
             # naturally). This is the accepted trade-off in the agentic.py pattern.
             ex.shutdown(wait=False)
+
+    def _failed_crop(self, box, reason: str):
+        """A typed sentinel for a crop that was located but produced nothing.
+
+        GH-166. Render errors, reader exceptions and empty responses each did a
+        bare ``continue``, so a page whose crops ALL failed returned an empty
+        list -- indistinguishable from a page with no crops to read. The
+        incumbent table then looked verified because the check that would have
+        contradicted it left no trace.
+
+        Mirrors the existing ``_timed_out`` sentinel rather than inventing a
+        second mechanism: same ``CropTable`` shape, empty markdown, one marker
+        attribute the orchestrator reads.
+        """
+        crop = CropTable(markdown="", source=box.source, bbox=box.bbox)
+        crop._failed = reason  # type: ignore[attr-defined]
+        return crop
 
     def _render_crop(self, page, box: TableBox, page_rect) -> Path | None:
         import fitz

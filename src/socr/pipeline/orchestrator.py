@@ -4480,6 +4480,7 @@ class UnifiedPipeline:
         # for each timeout so they appear in audit_log.json.
         had_timeout = False
         crops = []
+        failed_crops: list = []
         for c in raw_crops:
             if getattr(c, "_timed_out", False):
                 had_timeout = True
@@ -4501,10 +4502,37 @@ class UnifiedPipeline:
                 bo.audit_notes.append(
                     f"dual-pass crop timeout p{page_num} ({c.source}); kept existing text"
                 )
+            elif getattr(c, "_failed", ""):
+                # GH-166: a located crop that produced nothing. Previously these
+                # were dropped inside the extractor with no sentinel at all, so
+                # a page whose crops ALL failed returned (0, 0) and left the
+                # incumbent table looking verified -- the check that would have
+                # contradicted it simply left no trace.
+                failed_crops.append(c)
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="dualpass_crop_failed",
+                        engine=bo.engine,
+                        detail=(
+                            f"crop reread produced no reading ({c._failed}); "
+                            "the incumbent table is unverified"
+                        ),
+                        data={"source": c.source, "reason": c._failed},
+                    )
+                )
+                bo.audit_notes.append(
+                    f"dual-pass crop failed p{page_num} ({c.source}, {c._failed}); "
+                    "kept existing text"
+                )
             else:
                 crops.append(c)
 
         if not crops:
+            # Every located crop failed or timed out. The page keeps its
+            # incumbent table, so a consumer must be told the verification never
+            # completed -- the per-crop events above carry that, and both kinds
+            # are in TABLE_DISTRUST_KINDS so `tables_trust.json` shows the page.
             return 0, 0
 
         # If ANY crop on this page timed out, do NOT auto-patch even when the

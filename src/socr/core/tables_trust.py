@@ -105,6 +105,21 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # digits. Without this entry, removing the marker would silently move
         # the page from "untrusted" to "trusted" in the sidecar.
         "d3_floor_model_table_kept",
+        # GH-166: a crop reread that TIMED OUT verified nothing, and the page
+        # keeps its incumbent table. The event was emitted but never listed
+        # here, so `tables_trust.json` reported no untrusted pages after an
+        # incomplete verification -- the page read as verified because the
+        # check that would have contradicted it never finished. Measured: a
+        # lone `dualpass_crop_timeout` produced `untrusted_pages=[]`, while
+        # `dualpass_flagged` on the same page produced `[3]`.
+        #
+        # It stays a distrust kind until something explicitly resolves it, the
+        # same contract as every other detection in this set.
+        "dualpass_crop_timeout",
+        # GH-166: same contract for a crop that produced no reading at all
+        # (render error, reader exception, empty response). Verification did not
+        # complete, so the page is not verified.
+        "dualpass_crop_failed",
         "source_evidence_table_reject",
         "table_row_repetition_truncated",
         # GH-96: an escalation that was refused or timed out leaves the SUSPECT

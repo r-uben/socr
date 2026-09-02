@@ -321,7 +321,20 @@ def test_extractor_fail_open_on_reader_error(tmp_path):
     doc.save(pdf)
     boxes = locate_tables(fitz.open(pdf)[0])
     crops = TableCropExtractor(_StubReader("", raises=True)).extract(pdf, 1, boxes)
-    assert crops == []  # failed read drops the table; never raises
+
+    # GH-166: this used to assert `crops == []` -- "failed read drops the
+    # table". That silence IS the defect: a page whose crops all failed was
+    # indistinguishable from a page with no crops, so the incumbent table read
+    # as verified because the check that would have contradicted it left no
+    # trace. A failed crop now comes back as a typed sentinel.
+    #
+    # The test's real point is unchanged and still asserted: extract() does not
+    # raise, and returns no usable reading.
+    assert crops, "a located crop must yield success or a typed failure sentinel"
+    assert all(getattr(c, "_failed", "") == "read_error" for c in crops), (
+        f"expected read_error sentinels, got {[getattr(c, '_failed', None) for c in crops]}"
+    )
+    assert all(not c.markdown.strip() for c in crops), "a failed crop must carry no reading"
 
 
 def test_clean_markdown_strips_fences_and_prose():
