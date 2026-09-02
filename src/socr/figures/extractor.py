@@ -1104,16 +1104,74 @@ def has_chart_marks(page) -> bool:
     page_height = page.rect.height
     page_area = page_width * page_height
 
-    # Fast path: embedded raster image present → raster chart.
+    # Fast path: an embedded raster BIG ENOUGH to be a chart.
+    #
+    # GH-167: presence alone used to be enough, so any logo, signature, header
+    # rule, publisher mark or decorative photo on an otherwise clean prose page
+    # routed that page into the chart-asset lane -- shipped as a full-page PNG
+    # and audited as if chart data had not been transcribed. The page's prose is
+    # perfectly good native text; calling it an untranscribed chart loses it.
+    #
+    # The gate is the SAME bar the vector path already applies to a cluster
+    # (``CHART_MIN_CLUSTER_AREA``): a mark too small to be a chart cluster is
+    # too small to be a raster chart. No new threshold is introduced.
+    #
+    # Measured on the PLACED rect, not the pixel dimensions: a 2000x1500 logo
+    # scaled into a 30x20pt corner is a logo, and a low-resolution scan of a
+    # figure stretched across half the page is a figure.
+    #
+    # Fail OPEN when the placement cannot be measured (older PyMuPDF, or a rect
+    # lookup that raises): an unmeasurable image keeps the pre-GH-167 answer, so
+    # this can only ever narrow the lane on evidence, never on ignorance.
     try:
         raster_images = page.get_images()
         if raster_images:
+            page_label = getattr(page, "number", "?")
+            largest = 0.0
+            measured = False
+            for image in raster_images:
+                try:
+                    rects = page.get_image_rects(image[0])
+                except Exception as exc:  # noqa: BLE001 - unmeasurable, fail open
+                    logger.debug("has_chart_marks: get_image_rects failed: %s", exc)
+                    rects = None
+                if rects is None:
+                    largest = float("inf")
+                    break
+                for rect in rects:
+                    measured = True
+                    largest = max(largest, abs(rect.width) * abs(rect.height))
+
+            if not measured and largest != float("inf"):
+                # Images exist but none resolved to a placement -- unmeasurable,
+                # so keep the old answer rather than silently dropping the lane.
+                logger.debug(
+                    "has_chart_marks p%s: raster path — %d image(s), no placement "
+                    "resolved; treating as chart (fail open)",
+                    page_label,
+                    len(raster_images),
+                )
+                return True
+
+            if largest >= CHART_MIN_CLUSTER_AREA:
+                logger.debug(
+                    "has_chart_marks p%s: raster path — %d embedded image(s), "
+                    "largest placement %.0fpt2 >= %.0f",
+                    page_label,
+                    len(raster_images),
+                    largest,
+                    CHART_MIN_CLUSTER_AREA,
+                )
+                return True
+
             logger.debug(
-                "has_chart_marks p%s: raster path — %d embedded image(s)",
-                getattr(page, "number", "?") + 1,
+                "has_chart_marks p%s: raster rejected — %d image(s), largest "
+                "placement %.0fpt2 < %.0f (logo/decoration, not a chart)",
+                page_label,
                 len(raster_images),
+                largest,
+                CHART_MIN_CLUSTER_AREA,
             )
-            return True
     except Exception as exc:
         logger.debug("has_chart_marks: get_images() failed: %s", exc)
 
