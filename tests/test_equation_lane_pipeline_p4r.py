@@ -1655,7 +1655,14 @@ def test_a_no_oracle_page_still_attaches_notation_only_latex(tmp_path: Path) -> 
     state = _make_state(pdf)
     # Deliberately NOT encoding-suspect: the page text is fine, it just has no
     # numbers for the oracle.
-    state.pages[2].native_text = "E equals m c squared, linearised"
+    # The region's source slice must appear in the page text, or
+    # `attach_equation_sidecars_in_place` drops the reading as UNALIGNED and the
+    # test passes without the attachment it claims to pin (cubic P2 on #545 --
+    # the first version asserted only the absence of a refusal). The slice is
+    # chosen number-free so the page still has no numeric oracle, which is the
+    # condition under test.
+    source = "E equals m c squared"
+    state.pages[2].native_text = f"Prose before.\n\n{source}\n\nProse after."
     pipeline._last_assessment = state._last_assessment
     spy = _ModelSpy(r"E = mc^2")
 
@@ -1664,7 +1671,7 @@ def test_a_no_oracle_page_still_attaches_notation_only_latex(tmp_path: Path) -> 
 
         if page_num != 2:
             return EquationDetectionResult(page_num=page_num, regions=[], detection_time_s=0.0)
-        return _region(page)
+        return _region(page, source_text=source)
 
     def _routed(page_num, *args, **kwargs):
         return PageDecision(
@@ -1696,3 +1703,14 @@ def test_a_no_oracle_page_still_attaches_notation_only_latex(tmp_path: Path) -> 
         "notation-only LaTeX was refused on a page whose text layer is FINE and "
         "simply has no numbers; the exponent in `E = mc^2` is not a data value"
     )
+
+    # And it ATTACHED. Asserting only the absence of a refusal would pass on a
+    # reading dropped for some entirely different reason -- which is exactly
+    # what happened before the source slice above was aligned.
+    attached = [
+        e for e in state.events if e.page_num == 2 and e.kind == "equation_region_reading_attached"
+    ]
+    assert len(attached) == 1, (
+        f"the notation-only reading did not attach: {[e.kind for e in state.events if e.page_num == 2]}"
+    )
+    assert attached[0].data["presence_status"] == "unverifiable"
