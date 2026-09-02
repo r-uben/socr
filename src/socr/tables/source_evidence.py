@@ -182,18 +182,31 @@ def build_scanned_evidence(
     page,
     *,
     ocr_image_fn: OcrImageFn | None = None,
+    include_text_layer: bool = True,
 ) -> SourceEvidenceBundle:
-    """Build local non-generative evidence for a scanned page."""
+    """Build local non-generative evidence for a scanned page.
+
+    ``include_text_layer=False`` drops ``page.get_text()`` from the evidence.
+
+    GH-163 review (cubic P1): the text layer is the FIRST source merged in, and
+    the full-page raster branch below only fires when nothing else produced any
+    evidence at all. So on a page whose text layer is not trusted, that layer
+    was still the primary corroboration -- and a model table that agreed with a
+    corrupt OCR layer verified against it. Excluding it leaves only readings
+    taken from the pixels (per-table crops, then the full page), which is the
+    independent evidence the scanned lane is supposed to provide.
+    """
     ocr_fn = ocr_image_fn or classical_ocr_pixmap
     numeric: Counter = Counter()
     content: set[str] = set()
 
-    try:
-        plain = page.get_text() or ""
-    except Exception:
-        plain = ""
-    n_plain, c_plain = _tokens_from_plain_text(plain)
-    numeric, content = _merge_evidence(numeric, content, n_plain, c_plain)
+    if include_text_layer:
+        try:
+            plain = page.get_text() or ""
+        except Exception:
+            plain = ""
+        n_plain, c_plain = _tokens_from_plain_text(plain)
+        numeric, content = _merge_evidence(numeric, content, n_plain, c_plain)
 
     table_regions_detected = False
     try:
@@ -315,13 +328,43 @@ def verify_scanned_table(
     output_text: str,
     *,
     ocr_image_fn: OcrImageFn | None = None,
+    native_trusted: bool | None = None,
 ) -> SourceEvidenceResult:
-    """Full scanned-page pipeline: defer native, else verify or fail closed."""
-    if page_has_native_words(page):
+    """Full scanned-page pipeline: defer native, else verify or fail closed.
+
+    ``native_trusted`` is the caller's born-digital classification for this page.
+
+    GH-163: deferral used to hinge on ``page_has_native_words`` alone, and a
+    scanned page with a baked-in or corrupt OCR layer has words. Such a page
+    handed itself to the native verifier -- which checks the model's table
+    against that same untrusted layer -- so the fail-closed raster/classical
+    evidence check was skipped for exactly the pages that need it, and a
+    hallucinated table could be corroborated by a hallucinated text layer.
+
+    ``False`` means the caller classified the page as NOT trusted-native, and
+    the evidence check runs however many words the layer contains -- and that
+    layer is excluded from the evidence, so the table cannot be corroborated by
+    the reading under suspicion. ``None`` means the caller cannot tell, and the
+    pre-GH-163 word-presence behaviour is kept -- an unknown classification must
+    not silently start failing pages closed.
+
+    ``True`` still requires words before deferring. Reviewers ask why (cubic P2
+    on #512): should not an explicit "trusted" select deferral on its own?  No
+    -- the native verifier has nothing to check a table against on a page with
+    no extractable words, so deferring there would skip verification entirely.
+    A classification of trusted and a page with no words is a contradiction,
+    and resolving it toward "run no check" is the fail-open direction this lane
+    exists to prevent.
+    """
+    if native_trusted is not False and page_has_native_words(page):
         return SourceEvidenceResult(
             verifiable=True,
             passed=True,
-            reason="native words present; defer to native verifier",
+            reason=(
+                "native words present; defer to native verifier"
+                if native_trusted is None
+                else "trusted native page; defer to native verifier"
+            ),
             deferred=True,
         )
 
@@ -334,5 +377,11 @@ def verify_scanned_table(
             deferred=True,
         )
 
-    bundle = build_scanned_evidence(page, ocr_image_fn=ocr_image_fn)
+    # An explicitly UNTRUSTED layer must not corroborate the model's table
+    # (cubic P1 on #512). Only pixel-derived readings count for such a page.
+    bundle = build_scanned_evidence(
+        page,
+        ocr_image_fn=ocr_image_fn,
+        include_text_layer=native_trusted is not False,
+    )
     return verify_table_tokens(bundle, tokens)
