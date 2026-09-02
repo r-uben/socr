@@ -7,16 +7,23 @@ because neither gates any phase. YAML and `PipelineConfig` can still set
 and forced a full reprocess producing byte-identical output. The same cost as
 the rejected flags, without the error that explains it.
 
-The fix records the DEFAULTS for those two fields instead of the configured
-values. That choice is deliberate over the two obvious alternatives:
+The fix DROPS the three keys -- `judge_hard_pages`, `fallback_chain` and its
+determinants -- from the fingerprint entirely.
 
-- DROPPING the keys would change the fingerprint for every existing run,
-  imposing one global reprocess to fix a problem almost nobody has hit;
-- REJECTING them at config load would break `benchmark calibrate
-  --apply-config`, which writes a YAML containing `fallback_chain`.
+That was not the first design, and the reason it became the right one is worth
+keeping. Dropping was ruled out because it changes the fingerprint for every
+existing run, imposing one global reprocess; the two fields were frozen to their
+defaults instead, to keep the keys. Then the freeze was measured and it moved
+the default fingerprint anyway -- and checking WHY turned up
+`_socr_source_digest` in the same dict, which hashes every shipped `.py` file.
+ANY source edit already invalidates every fingerprint, deliberately: "an
+output-neutral edit (a comment, a docstring) costs one needless reprocess.
+Re-OCR is cheap; a stale number in a citation corpus is not."
 
-Recording the default costs neither: the key stays, every existing fingerprint
-is unchanged, and the toggle stops mattering.
+So the cost that ruled dropping out is paid by every release, this edit
+included. It was never a reason. (The other alternative, rejecting the fields at
+config load, would break `benchmark calibrate --apply-config`, which writes a
+YAML containing `fallback_chain` -- that one is still a real objection.)
 
 Ignoring a setting SILENTLY is the failure this ticket family is about, so the
 run also says which fields it ignored. Both halves are pinned here.

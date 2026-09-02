@@ -62,12 +62,17 @@ console = Console()
 JUDGE_IDENTITY_HEURISTIC = "heuristic"
 
 
-#: Config fields that gate NOTHING but still reach the run fingerprint (GH-525).
-#: Their CLI flags are rejected (GH-142); YAML can still set them, and doing so
-#: used to invalidate every terminal page for a run that behaves identically.
-#: The fingerprint records these values instead of the configured ones, so the
-#: key stays (no schema change, no mass re-fingerprinting) while a setting that
-#: changes nothing changes nothing.
+#: Baseline for the "you set something I ignore" warning (GH-525) -- and ONLY
+#: that. These fields gate nothing (GH-142 rejected their CLI flags for it) and
+#: are absent from the run fingerprint entirely, so there is nothing here to
+#: freeze; `_warn_inert_config` diffs against these values to decide whether a
+#: config is worth warning about.
+#:
+#: An earlier draft of GH-525 DID freeze them into the fingerprint, to avoid
+#: changing it for existing runs. That reason turned out not to exist --
+#: `_socr_source_digest` already invalidates every fingerprint on any source
+#: edit, by design -- so the keys were dropped instead. Do not reintroduce the
+#: freeze on the strength of a cost that is paid by every release anyway.
 #:
 #: Taken from PipelineConfig's own defaults rather than written out, so the two
 #: cannot drift: a changed default moves both together.
@@ -602,9 +607,10 @@ class UnifiedPipeline:
     def _run_fingerprint(self, engine_type: EngineType | None = None) -> str:
         """Run-config fingerprint for idempotency, from the RESOLVED run config.
 
-        Two fields are recorded at their DEFAULTS rather than as configured --
-        ``judge_hard_pages`` and ``fallback_chain`` -- because they gate nothing
-        (GH-142 / GH-525). See ``_INERT_FIELD_DEFAULTS``.
+        Three keys are deliberately ABSENT -- ``judge_hard_pages``,
+        ``fallback_chain`` and its determinants -- because none gates anything
+        (GH-142 / GH-525). See the note beside ``local_engine_determinants``
+        below for why dropping them, rather than freezing them, is free.
 
         Captures what changes *what output an input produces*: the resolved
         primary engine's model id, backend, and task, the resolved determinants
@@ -617,9 +623,13 @@ class UnifiedPipeline:
 
         Round-3 expansion (HIGH): the prior ``extra`` omitted ``save_figures``
         (and figure limits), the figures/judge model+backend knobs,
-        ``fallback_chain``, ``local_engine``, ``tiered`` routing, and chunking
-        thresholds — all of which change the saved ``.md``/figures. Toggling any
-        of them now invalidates the cache.
+        ``local_engine``, ``tiered`` routing, and chunking thresholds — all of
+        which change the saved ``.md``/figures. Toggling any of them now
+        invalidates the cache.
+
+        ``fallback_chain`` was in that list and has since been removed from it
+        (GH-525): it does NOT change the saved output, because no execution path
+        reads it -- the multi-engine branches that did were deleted in #298.
 
         Knobs deliberately EXCLUDED (do not change selected output bytes):
         display/scripting (``quiet``/``verbose``/``dry_run``), force-run

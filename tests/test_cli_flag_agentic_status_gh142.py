@@ -89,23 +89,36 @@ _LIVE = {
 _INERT_BUT_FINGERPRINTED = {
     "chunk_size",
     "chunk_threshold",
-    # GH-525: still inert, and no longer fingerprinted from the CONFIG -- the
-    # fingerprint records their defaults, so setting them from YAML can no
-    # longer over-invalidate terminal pages. They stay in this set because they
-    # remain inert and their keys remain in the fingerprint dict.
-    "fallback_chain",
-    "judge_hard_pages",
     "local_engine",
     "tiered",
     "figures_engine",
+    # GH-530 moved this here from `_INERT_AND_UNFINGERPRINTED`, which claimed it
+    # was "absent from the fingerprint". It is not: `clean_equation_model` is in
+    # the `extra` dict `_run_fingerprint` builds. The misclassification was
+    # invisible because the guard for that set checks `_acted_on`, which filters
+    # out `<bookkeeping>` reads -- so a field read ONLY by the fingerprint
+    # satisfied both sets. Found by the assertion added below, which looks at
+    # the dict instead of the readers.
+    #
+    # Note this is the BETTER position to be in: the note on the old set warned
+    # that absence hides the field from the resume ledger in the modes where it
+    # DOES work (#133's class). Being fingerprinted means that gap does not
+    # exist for this field.
+    "clean_equation_model",
 }
 
-#: Neither read nor fingerprinted on the agentic path. Consumed only inside
-#: `_backbone_native_first` (`orchestrator.py:755, 857, 871`). Because they are
-#: absent from the fingerprint they are also invisible to the resume ledger in
-#: the modes where they DO work — the same class as the judge-model gap (#133).
+#: Not read on the agentic path, and genuinely absent from the run fingerprint.
+#:
+#: GH-525 moved these two here from `_INERT_BUT_FINGERPRINTED`: they gate
+#: nothing (GH-142 rejected their CLI flags for it) and their keys are now
+#: dropped from the fingerprint, so a YAML-only toggle can no longer invalidate
+#: terminal pages for a run that behaves identically. That absence costs nothing
+#: here -- neither field has a mode in which it DOES work, so there is no
+#: resume-ledger blind spot traded for it -- and `_warn_inert_config` names them
+#: at run start when a config sets them, so ignored is not the same as silent.
 _INERT_AND_UNFINGERPRINTED = {
-    "clean_equation_model",
+    "fallback_chain",
+    "judge_hard_pages",
 }
 
 #: NOT a deadness claim. Consumers are stubbed or unreached by this fixture:
@@ -458,3 +471,43 @@ def test_reads_outside_bookkeeping_keep_their_real_caller():
     _phase_agentic()
 
     assert calls["strict_local"] == {"_phase_agentic"}
+
+
+@pytest.mark.parametrize("field", sorted(_INERT_AND_UNFINGERPRINTED))
+def test_unfingerprinted_fields_really_are_absent_from_the_fingerprint(field):
+    """The set's NAME, asserted (GH-530).
+
+    `test_unfingerprinted_inert_fields_stay_out_of_the_fingerprint` above checks
+    `field not in _acted_on(readers)` -- but a fingerprint read is attributed to
+    `<bookkeeping>` and `_acted_on` filters that token out, so a field read ONLY
+    by `_run_fingerprint` passes it either way. The check proves the field is
+    inert; it does not prove the second half of the name.
+
+    Found by probing the GH-530 reclassification: putting `judge_hard_pages`
+    back into the fingerprint dict left this file green. This closes that, by
+    looking at the dict the fingerprint is actually built from.
+    """
+    import ocr_output_contract as contract
+
+    from socr.core.config import PipelineConfig
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    captured = {}
+    real = contract.run_fingerprint
+
+    def spy(model, backend, task, prompt, extra=None):
+        captured["extra"] = extra or {}
+        return real(model, backend, task, prompt, extra=extra)
+
+    # `run_fingerprint` is imported inside `_run_fingerprint`, so patching the
+    # contract module is what the call resolves through.
+    with patch.object(contract, "run_fingerprint", spy):
+        UnifiedPipeline(PipelineConfig(quiet=True))._run_fingerprint()
+
+    assert captured, "the fingerprint was not built, so this asserts nothing"
+    assert field not in captured["extra"], (
+        f"{field} is classified unfingerprinted but appears in the run "
+        f"fingerprint. Either move it to _INERT_BUT_FINGERPRINTED, or drop the "
+        f"key -- a config-only toggle otherwise invalidates terminal pages for a "
+        f"run that behaves identically (GH-525)."
+    )
