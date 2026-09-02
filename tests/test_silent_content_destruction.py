@@ -547,9 +547,22 @@ class TestCliExitCodes:
         assert res.exit_code != 0
         assert "lost content" in res.output.lower()
 
-    def test_plain_audit_failed_exits_zero(self, tmp_path) -> None:
+    def test_plain_audit_failed_also_exits_nonzero(self, tmp_path) -> None:
+        """GH-177: renamed from `..._exits_zero`, which encoded the bug.
+
+        `RunOutcome`'s documented policy is uniform across single-file and
+        batch -- a PARTIAL document exits nonzero -- and batch already did that
+        for the same `AUDIT_FAILED` status. Exiting 0 here meant a script
+        wrapping `socr process` and one wrapping `socr batch` saw OPPOSITE
+        signals for the same document.
+
+        The lost-content case is still distinguished, on the axis that still
+        differs: the MESSAGE. Both are nonzero; only one says content was lost.
+        """
         res = self._invoke(tmp_path, None)
-        assert res.exit_code == 0
+        assert res.exit_code != 0
+        assert "completed with warnings" in res.output.lower()
+        assert "lost content" not in res.output.lower()
 
 
 class TestFigurePhaseSuccessPath:

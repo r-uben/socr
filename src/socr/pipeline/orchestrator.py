@@ -719,6 +719,8 @@ class UnifiedPipeline:
             safe_checksum,
         )
 
+        from socr.core.result import contract_status_for
+
         input_dir = Path(input_dir)
         out_dir = self._resolve_output_root(input_dir, output_dir)
         outcome = RunOutcome()
@@ -799,16 +801,17 @@ class UnifiedPipeline:
                 )
                 continue
             results.append(result)
-            if result.success:
-                # process()->_phase_assemble already recorded this doc in the
-                # canonical RootIndex with the contract schema (model/backend/
-                # fingerprint/UTC timestamp). No legacy second write — that was
-                # the clobber that downgraded the root index to legacy shape.
+            # GH-177: one mapping, shared with the single-file path, so the two
+            # cannot drift into opposite exit codes for the same document.
+            # process()->_phase_assemble already recorded this doc in the
+            # canonical RootIndex with the contract schema (model/backend/
+            # fingerprint/UTC timestamp). No legacy second write — that was
+            # the clobber that downgraded the root index to legacy shape.
+            doc_status = contract_status_for(result)
+            if doc_status is Status.COMPLETED:
                 outcome.add(Status.COMPLETED, output_path=str(pdf))
-            elif result.status == DocumentStatus.AUDIT_FAILED:
-                outcome.add(Status.PARTIAL, detail=str(pdf))
             else:
-                outcome.add(Status.FAILED, detail=str(pdf))
+                outcome.add(doc_status, detail=str(pdf))
 
         if not self.config.quiet:
             ok = outcome.completed
