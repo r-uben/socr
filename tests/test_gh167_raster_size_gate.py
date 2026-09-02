@@ -118,3 +118,55 @@ def test_a_low_resolution_image_across_the_page_is_still_a_figure(tmp_path: Path
         "a low-resolution scan stretched across the page was dropped from the "
         "chart lane; the gate is reading pixels, not the page"
     )
+
+
+class TestFailOpenOnUnmeasurablePlacement:
+    """The deliberate fail-open branch (cubic P3 on #510).
+
+    When a placement cannot be measured, the page keeps the pre-GH-167 answer
+    and enters the chart lane. That is load-bearing -- it is what makes the gate
+    narrow only on evidence -- and nothing pinned it, so a future change could
+    have flipped routing silently.
+    """
+
+    def _small_image_page(self, tmp_path: Path) -> Path:
+        small = _SIDE / 3
+        return _page_with_image(tmp_path, rect=fitz.Rect(72, 60, 72 + small, 60 + small))
+
+    def test_a_raising_rect_lookup_keeps_the_page_in_the_chart_lane(self, tmp_path: Path) -> None:
+        pdf = self._small_image_page(tmp_path / "raises")
+        assert not _has_marks(pdf), "control: this page is rejected when it CAN be measured"
+
+        doc = fitz.open(pdf)
+        try:
+            page = doc[0]
+
+            def _boom(*_a, **_k):
+                raise RuntimeError("no rects for you")
+
+            page.get_image_rects = _boom
+            assert has_chart_marks(page), (
+                "an unmeasurable placement dropped the page from the chart lane; "
+                "the gate must narrow only on evidence, never on ignorance"
+            )
+        finally:
+            doc.close()
+
+    def test_an_image_resolving_to_no_rect_is_unmeasurable_too(self, tmp_path: Path) -> None:
+        """cubic P2: returning `[]` is as unknown as raising.
+
+        Treating only the raising case as unknown let a page with one unresolved
+        image and one small image be rejected on evidence that never covered the
+        unresolved one.
+        """
+        pdf = self._small_image_page(tmp_path / "empty")
+        doc = fitz.open(pdf)
+        try:
+            page = doc[0]
+            page.get_image_rects = lambda *_a, **_k: []
+            assert has_chart_marks(page), (
+                "an image with no resolvable placement was silently treated as "
+                "measured-and-too-small"
+            )
+        finally:
+            doc.close()
