@@ -158,8 +158,20 @@ def test_a_loaded_dry_run_is_preserved(tmp_path: Path, monkeypatch: pytest.Monke
         def process(self, *_a, **_k):
             raise AssertionError("dry_run was cleared: the pipeline ran anyway")
 
+        def _resolve_output_root(self, *_a, **_k):
+            # The dry-run path calls this. Omitting it made the command crash
+            # with AttributeError right after printing its first line -- and the
+            # test still passed, because it only looked for "Would process".
+            # #473 review: a test that observes a crash and calls it a pass is
+            # the vacuity this whole backlog is about.
+            return d / "out"
+
     monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
     result = CliRunner().invoke(cli, ["process", str(pdf), "--config", str(cfg)])
+
+    assert result.exit_code == 0, (
+        f"the dry-run path did not complete cleanly: {result.output!r}\n{result.exception!r}"
+    )
 
     # The dry-run listing is the evidence: it only happens when the loaded
     # `dry_run: true` survived. Asserted on the OUTPUT rather than the exit
