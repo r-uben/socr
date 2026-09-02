@@ -129,3 +129,15 @@ Recommendation: (b) now, (a) after one corpus run measures the equation-page rat
 - A git worktree tests its own source with `PYTHONPATH=<worktree>/src`; the
   editable install's path entry loses to it. This log was written that way while
   another session held the main checkout.
+
+## Ratified 2026-09-02
+
+- **P0** shipped (#245) and **P2** shipped (the floor half of #317), both in PR #490.
+- **P4 — owner chose (b):** equation and figure pages leave the free lane and go to
+  the ladder; LaTeX splicing and figure description stay opt-in. Before building it,
+  read the `_is_trusted_native_without_ocr` docstring: R3 already tried widening the
+  bypass exclusion to equation pages and BLOCKING 1 on #269 reverted it, because the
+  S1 acceptance path only recognises a GFM table as "a grid was authored" — forcing a
+  model rung on an equation page turned a free native SUCCESS into an accepted
+  hallucination or a false AUDIT_FAILED demotion. P4(b) therefore needs a non-GFM
+  acceptance contract for equation and figure pages first. Design pass, then build.
