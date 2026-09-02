@@ -371,7 +371,41 @@ def build_config(
             "--max-cost-per-page, or --cost-budget."
         )
     if no_judge_hard_pages:
-        config.judge_hard_pages = False
+        # GH-142. The sweep this issue asked for found the third instance of the
+        # class, and this is it. `--no-judge-hard-pages` advertised "skip the
+        # hard-page judge" and set `config.judge_hard_pages = False`. Nothing
+        # reads that field to gate anything: the phase it named is gone, and the
+        # ONLY remaining read is `_run_fingerprint`, which copies it into the
+        # run identity.
+        #
+        # That makes it worse than inert. Toggling it changes no behaviour but
+        # DOES change the fingerprint, so it invalidates every terminal page and
+        # forces a full reprocess that produces byte-identical output -- a flag
+        # that costs the user a rerun to buy nothing.
+        #
+        # Resolution 1 of the issue's preference order, as #139 did for
+        # --no-audit: reject it, loudly, and keep the flag so existing scripts
+        # get this explanation rather than click's bare "no such option".
+        raise click.UsageError(
+            "--no-judge-hard-pages no longer does anything and has been rejected "
+            "rather than silently ignored (GH-142).\n"
+            "\n"
+            "It set PipelineConfig.judge_hard_pages, which no longer gates any "
+            "phase: the separate hard-page judging pass it named was removed, and "
+            "the field's only remaining reader is the run fingerprint.\n"
+            "\n"
+            "So passing it did not skip anything -- it changed the run identity, "
+            "invalidating already-completed pages and forcing a reprocess that "
+            "produces the same output.\n"
+            "\n"
+            "In agentic mode -- the default -- every page is judged by "
+            "construction: the judge IS the routing algorithm, so there is no "
+            "separate hard-page pass to opt out of.\n"
+            "\n"
+            "To spend less on judging, use --judge-backend heuristic (no VLM "
+            "calls), or --strict-local / --max-cost-per-page / --cost-budget to "
+            "bound model spend overall."
+        )
     if no_dual_pass_tables:
         config.dual_pass_tables = False
     if auto_patch_tables:
