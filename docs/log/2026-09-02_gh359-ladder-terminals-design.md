@@ -188,3 +188,48 @@ $ grep -n "table_judge_ladder" src/socr/core/config.py
 $ wc -l src/socr/pipeline/orchestrator.py
 7824 src/socr/pipeline/orchestrator.py
 ```
+
+## Panel (Codex gpt-5.6-sol, Gemini) and synthesis — 2026-09-02
+
+**One claim of this note is wrong at the document level.** The per-page ledger does
+retry an UNVERIFIED page, but `process()` consults the document-level gate first, and
+`_resume_skippable` skips a PARTIAL document whose checksum and run fingerprint match
+("a config cannot improve a partial result", `orchestrator.py:~219-242`, verified by
+the orchestrator). So an UNVERIFIED table is not re-judged on every resume; it is never
+re-judged when the rung comes back unless the user reprocesses or the fingerprint
+changes. The cost worry inverts into a convergence worry. This is the same shape the
+equation lane closed with a root-index retry latch (PR #518, finding 5); P1 needs the
+analogue for "rung unavailable". Added to the pre-flip list.
+
+**Where the panel agrees.** Both verified that a ladder terminal never removes content
+(`manifest.py:1520-1540`). Both say the flip needs the live two-rung smoke and the
+golden-test audit for an explicit flag-off. Both name the same measurement for Q1: a
+labelled crop set with false-accept rates by outcome class (low+low, one-high, high).
+
+**Where it splits, and the recommendation.**
+
+- *Q1 two-low quorum.* Gemini: no quorum; require one high-confidence PASS. Codex: keep
+  the quorum provisionally, measure first. Recommendation: **Gemini**, because the cost
+  of being wrong is asymmetric — requiring one high PASS fails closed into UNVERIFIED,
+  which ships the text labelled; keeping the quorum can stamp a correlated double miss
+  SUCCESS. Reopen when the measurement exists.
+- *Q2 REJECTED ships text.* Gemini: ship demoted under WARNING, because a withheld table
+  is unrecoverable and per-table splicing is unsafe today. Codex: withhold floor-style,
+  because downstream readers quote bytes, not metadata. Recommendation: **Codex, for
+  consistency with the P2 ruling** — two judges refused the content, and the ruling says
+  never ship what the verifier refused; the PNG keeps it human-recoverable. The prose
+  cost is the P2 cost, already tracked by #520 (detection-level table count restores
+  regional splicing). Until then whole-page floor, as P2.
+- *Q3 fail-closed out of the box.* Gemini: not by default; offline and subscription-less
+  users get a permanently PARTIAL corpus and experience the flip as a regression.
+  Codex: yes, with a loud startup diagnostic and an explicit opt-out; fail-open when
+  verification is unavailable is the bug being fixed. Recommendation: **Codex, but only
+  after the live smoke proves both rungs on the documented setups**, with a startup line
+  that names the cause and the opt-out, and `strict_local` printing at startup that every
+  table page will be UNVERIFIED. The owner decides whether "verified-or-labelled" is the
+  product contract; the ruling of 2026-09-01 says it is.
+
+**Verdict.** The note's verdict is amended: the flip is blocked on the live smoke, the
+golden-test audit, the rung-unavailable latch, and the Q2 decision — Q2 changes shipped
+bytes, so it is design, not mechanics. Q1 and Q3 are owner rulings that can ship with the
+flip.
