@@ -46,8 +46,18 @@ FIG = FigureInfo(
 )
 
 
-def _run(tmp_path: Path, *, figures: list[FigureInfo]) -> list[dict]:
-    """Assemble one page, with the figure phase attaching *figures*."""
+def _run(
+    tmp_path: Path,
+    *,
+    figures: list[FigureInfo],
+    already_in_engine_runs: list[FigureInfo] | None = None,
+) -> list[dict]:
+    """Assemble one page, with the figure phase attaching *figures*.
+
+    `already_in_engine_runs` seeds `state.engine_runs` with figures, which is
+    the OTHER source the sidecar reads. That is the case the de-duplication
+    actually exists for -- the same figure arriving from both places.
+    """
     tmp_path.mkdir(parents=True, exist_ok=True)
     pdf = tmp_path / "d.pdf"
     doc = fitz.open()
@@ -76,6 +86,18 @@ def _run(tmp_path: Path, *, figures: list[FigureInfo]) -> list[dict]:
     )
     state.pages[1].attempts.append(out)
     state.pages[1].best_output = out
+
+    if already_in_engine_runs:
+        from socr.core.result import DocumentStatus, EngineResult
+
+        state.engine_runs.append(
+            EngineResult(
+                document_path=pdf,
+                engine="qwen",
+                status=DocumentStatus.SUCCESS,
+                figures=list(already_in_engine_runs),
+            )
+        )
 
     def _embed(self, st, result, out_dir, text):
         # Exactly what the real phase does: attach to the RESULT, not to
@@ -114,12 +136,21 @@ def test_a_run_with_no_figures_records_none(tmp_path: Path) -> None:
     assert _run(tmp_path / "none", figures=[]) == []
 
 
-def test_a_second_assemble_does_not_duplicate_the_refs(tmp_path: Path) -> None:
-    """Figure-phase retry / resume: re-running must not double the record.
+def test_a_figure_reaching_both_sources_is_recorded_once(tmp_path: Path) -> None:
+    """The case the de-duplication actually exists for.
 
-    The sidecar is rewritten by several flushes in one assemble, and a retry
-    runs them all again. De-duplication is what keeps the authoritative record
-    from growing on every attempt.
+    GH-491 review: an earlier version of this test was named for retry/resume
+    but ran `_phase_assemble` ONCE and passed `[FIG, FIG]`. Each flush rebuilds
+    `figure_refs` from scratch, so a repeated assemble could never double the
+    record anyway -- it was exercising duplicate-entries-in-one-list, not the
+    two-source case, and `state.engine_runs` stayed empty throughout.
+
+    The sidecar reads figures from `state.engine_runs` AND from the figure
+    phase's `extra_figures`. A figure present in both is exactly what the
+    de-duplication is for, so that is what this now sets up.
     """
-    refs = _run(tmp_path / "retry", figures=[FIG, FIG])
-    assert len(refs) == 1, f"the same figure was recorded more than once: {refs}"
+    refs = _run(tmp_path / "both", figures=[FIG], already_in_engine_runs=[FIG])
+    assert len(refs) == 1, (
+        f"a figure reaching the sidecar from both sources was recorded twice: {refs}"
+    )
+    assert refs[0]["image_path"] == FIG.image_path
