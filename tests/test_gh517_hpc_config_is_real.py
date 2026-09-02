@@ -100,6 +100,11 @@ def test_hpc_enabled_false_is_not_the_hpc_lane(tmp_path: Path) -> None:
 def test_a_non_sequential_hpc_config_is_refused(tmp_path: Path) -> None:
     """`sequential: false` asks for a mode that does not exist.
 
+    Still reachable after GH-536 raised the DEFAULT to true, which is the point
+    of keeping this case: the default change must make a bare enable work
+    without making the guard unreachable for someone who typed the invalid
+    value.
+
     Silently running the sequential pipeline would be the failure this ticket
     family is about: a setting that reads as a choice and is not one. The error
     must say which key and what to do, not just fail.
@@ -190,4 +195,24 @@ def test_batch_still_works_without_an_hpc_config(tmp_path: Path) -> None:
         f"an ordinary batch did not succeed (exit {result.exit_code}): "
         f"{result.output!r}. Constructing the pipeline is not the same as "
         "running, which is what this control claims."
+    )
+
+
+def test_a_bare_hpc_enabled_selects_the_lane(tmp_path: Path) -> None:
+    """GH-536: `hpc.enabled: true` alone must work.
+
+    Every positive case above writes BOTH keys, so the footgun this covers was
+    green: with `sequential` defaulting to False, a bare enable hit the GH-517
+    guard and was refused -- a guard meant for someone explicitly asking for a
+    mode that does not exist, firing on someone who asked for the only one.
+
+    Omitted and explicit-false are indistinguishable after `from_file`, so the
+    DEFAULT is what separates them. It is True now, because sequential is the
+    only HPC mode.
+    """
+    built, result = _run(tmp_path / "bare", "hpc:\n  enabled: true\n")
+
+    assert built == ["HPCPipeline"], (
+        f"a bare hpc.enabled: true did not select the HPC lane (built {built}); "
+        f"output={result.output!r}"
     )
