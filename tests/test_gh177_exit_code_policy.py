@@ -39,33 +39,28 @@ def _result(pdf: Path, status: DocumentStatus, error: str | None) -> EngineResul
 
 
 def _exit_codes(tmp_path: Path, status: DocumentStatus, error: str | None) -> tuple[int, int, str]:
-    """Exit code from `process` and from `batch`, for the SAME result."""
+    """Exit code from `process` and from `batch`, for the SAME result.
+
+    GH-472: the batch half used to stub `process_batch` itself and invent
+    `last_outcome` in the stub's `__init__` -- so reverting the production
+    recording loop in `orchestrator.process_batch` left this suite green and the
+    "cannot drift" claim was unpinned at the batch caller.
+
+    Only `UnifiedPipeline.process` is stubbed now. The REAL `process_batch`
+    runs, walks the directory, and records the outcome through
+    `contract_status_for` exactly as production does.
+    """
     from unittest.mock import patch
+
+    from socr.pipeline.orchestrator import UnifiedPipeline
 
     pdf = _pdf(tmp_path / "in")
     result = _result(pdf, status, error)
 
-    class _Stub:
-        def __init__(self, config):
-            from ocr_output_contract import RunOutcome, Status
+    def _fake_process(self, pdf_path, output_dir=None, scan_root=None):
+        return _result(Path(pdf_path), status, error)
 
-            from socr.core.result import contract_status_for
-
-            self.config = config
-            self.last_outcome = RunOutcome()
-            doc_status = contract_status_for(result)
-            if doc_status is Status.COMPLETED:
-                self.last_outcome.add(Status.COMPLETED, output_path=str(pdf))
-            else:
-                self.last_outcome.add(doc_status, detail=str(pdf))
-
-        def process(self, *_a, **_k):
-            return result
-
-        def process_batch(self, *_a, **_k):
-            return [result]
-
-    with patch("socr.pipeline.orchestrator.UnifiedPipeline", _Stub):
+    with patch.object(UnifiedPipeline, "process", _fake_process):
         single = CliRunner().invoke(cli, ["process", str(pdf), "-o", str(tmp_path / "o1"), "-q"])
         batch = CliRunner().invoke(
             cli, ["batch", str(pdf.parent), "-o", str(tmp_path / "o2"), "-q"]
