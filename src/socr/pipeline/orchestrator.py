@@ -26,6 +26,7 @@ from rich.console import Console
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
+from socr.core.audit_log import VISUAL_VALUES_NOT_TRANSCRIBED_KIND
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.manifest import (
@@ -2186,6 +2187,13 @@ class UnifiedPipeline:
             TABLE_LADDER_EVENT_KINDS
             | {TABLE_BINDING_ADJUDICATED_KIND}
             | cls.EQUATION_LANE_EVENT_KINDS
+            # GH-519: the chart lane's debt is a standing property of the page,
+            # not of the run that noticed it. GH-563 is the cautionary case: a
+            # record that lives only in memory tells the truth once and then
+            # tells the resumed operator the opposite. The note and the CLI
+            # summary below both read this event, so dropping it on resume
+            # would silently retire the debt.
+            | {VISUAL_VALUES_NOT_TRANSCRIBED_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -3355,6 +3363,51 @@ class UnifiedPipeline:
             "chart eligibility detection failed; page took the non-chart route with "
             "its chart-vs-table routing unresolved (content preserved)"
         )
+
+    @staticmethod
+    def _visual_values_not_transcribed_note(state) -> str | None:
+        """GH-519: name the pages whose figure text ships only as an image.
+
+        Mirrors ``_chart_detection_failed_note``: a consumer gating on
+        ``metadata.json`` must see the debt without opening
+        ``audit_log.json``. Read from the audit events rather than a PageState
+        flag because this kind is replayed by ``_restore_terminal_page_state``
+        (see ``resume_restore_kinds``), so the events are the durable record --
+        the flag route is what GH-563 had to undo. ``None`` on a run with no
+        chart-asset page.
+        """
+        preserved: set[int] = set()
+        lost: set[int] = set()
+        for ev in state.events:
+            if getattr(ev, "kind", "") != VISUAL_VALUES_NOT_TRANSCRIBED_KIND:
+                continue
+            data = getattr(ev, "data", None) or {}
+            (preserved if data.get("png_saved") else lost).add(ev.page_num)
+        # A page that saved its PNG on one event and failed on another is not a
+        # preserved page: the harsher sentence wins.
+        preserved -= lost
+        if not preserved and not lost:
+            return None
+
+        parts = []
+        if preserved:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in sorted(preserved))}: visual values not "
+                "transcribed; in-image text on these figures is preserved in the page image "
+                "only (no model read it)"
+            )
+        if lost:
+            # cubic P2 on #565. The debt event fires on the render-failure path
+            # too, where NO page PNG was saved -- so "preserved in the page
+            # image" is false comfort, and worse than the debt it describes.
+            # These pages are already WARNING with a chart_asset_render_failed
+            # event; the note must not quietly upgrade them.
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in sorted(lost))}: visual values not "
+                "transcribed AND the page image was not saved; in-image text on these "
+                "figures is preserved nowhere"
+            )
+        return "; ".join(parts)
 
     @staticmethod
     def _unverified_wording_split(state, pages: list[int]) -> tuple[list[int], list[int]]:
@@ -5917,6 +5970,22 @@ class UnifiedPipeline:
                     },
                 )
             )
+            state.events.append(
+                _MathChartEvent(
+                    page_num=page_num,
+                    kind=VISUAL_VALUES_NOT_TRANSCRIBED_KIND,
+                    engine="chart_asset",
+                    detail=(
+                        "in-image text on this figure -- axis labels, legend, any embedded "
+                        "table -- is preserved only in the page image; it is not in the "
+                        "markdown and no model read it"
+                        if chart_png_ref
+                        else "in-image text on this figure is preserved NOWHERE: it is not "
+                        "in the markdown, no model read it, and the page image failed to save"
+                    ),
+                    data={"png_saved": bool(chart_png_ref), "png_path": chart_png_ref},
+                )
+            )
         ps.attempts.append(math_out)
         ps.best_output = math_out
         ps.corrupt_math_hybrid = math_out
@@ -6058,6 +6127,26 @@ class UnifiedPipeline:
                     "png_saved": not chart_render_failed,
                     "png_path": chart_png_ref,
                 },
+            )
+        )
+
+        # GH-519: and the debt as a kind of its own, so counting it never means
+        # parsing the sentence above. Both events, not one replacing the other:
+        # `chart_asset_page` says what the lane DID, this says what it did not.
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=VISUAL_VALUES_NOT_TRANSCRIBED_KIND,
+                engine="chart_asset",
+                detail=(
+                    "in-image text on this figure -- axis labels, legend, any embedded "
+                    "table -- is preserved only in the page image; it is not in the "
+                    "markdown and no model read it"
+                    if not chart_render_failed
+                    else "in-image text on this figure is preserved NOWHERE: it is not in "
+                    "the markdown, no model read it, and the page image failed to save"
+                ),
+                data={"png_saved": not chart_render_failed, "png_path": chart_png_ref},
             )
         )
 
@@ -8903,6 +8992,22 @@ class UnifiedPipeline:
                         f"ladder — TABLE_REJECTED (models looked and said no; not retryable): "
                         f"{table_rejected_pages}[/red]"
                     )
+                _visual_pages = sorted(
+                    {
+                        ev.page_num
+                        for ev in state.events
+                        if getattr(ev, "kind", "") == VISUAL_VALUES_NOT_TRANSCRIBED_KIND
+                    }
+                )
+                if _visual_pages:
+                    # GH-519: the debt gets a line of its own. It is not a
+                    # failure -- the lane did the right thing -- so it is
+                    # stated, not coloured as an error.
+                    console.print(
+                        f"  [cyan]{len(_visual_pages)} chart-asset page(s): visual values not "
+                        f"transcribed; in-image text is preserved in the page image only: "
+                        f"{_visual_pages}[/cyan]"
+                    )
                 if table_unverified_pages:
                     # GH-560: same split as the document note -- an operator
                     # told "retryable on resume" will re-run, and for a
@@ -9064,6 +9169,14 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_floor_note}"
             else:
                 final_result.error = _floor_note
+        # GH-519: the chart lane's debt, at document level for the same
+        # no-silent-loss reason as every note above it.
+        _visual_note = self._visual_values_not_transcribed_note(state)
+        if _visual_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_visual_note}"
+            else:
+                final_result.error = _visual_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
