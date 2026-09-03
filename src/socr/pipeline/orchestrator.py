@@ -3365,6 +3365,29 @@ class UnifiedPipeline:
         )
 
     @staticmethod
+    def _visual_values_split(state) -> tuple[list[int], list[int]]:
+        """GH-519/566: (pages whose figure IS in a saved PNG, pages where it is not).
+
+        One derivation for the document note and the CLI summary alike. #566 is
+        why: the cubic P2 fix on #565 split the note on ``png_saved`` and left
+        the CLI line printing "preserved in the page image only" for every debt
+        page, render failures included -- the same false comfort, one surface
+        along. Two copies of a sentence drift; one cannot.
+
+        A page that saved its PNG on one event and failed on another counts as
+        lost: the harsher sentence wins.
+        """
+        preserved: set[int] = set()
+        lost: set[int] = set()
+        for ev in state.events:
+            if getattr(ev, "kind", "") != VISUAL_VALUES_NOT_TRANSCRIBED_KIND:
+                continue
+            data = getattr(ev, "data", None) or {}
+            (preserved if data.get("png_saved") else lost).add(ev.page_num)
+        preserved -= lost
+        return sorted(preserved), sorted(lost)
+
+    @staticmethod
     def _visual_values_not_transcribed_note(state) -> str | None:
         """GH-519: name the pages whose figure text ships only as an image.
 
@@ -3376,23 +3399,14 @@ class UnifiedPipeline:
         the flag route is what GH-563 had to undo. ``None`` on a run with no
         chart-asset page.
         """
-        preserved: set[int] = set()
-        lost: set[int] = set()
-        for ev in state.events:
-            if getattr(ev, "kind", "") != VISUAL_VALUES_NOT_TRANSCRIBED_KIND:
-                continue
-            data = getattr(ev, "data", None) or {}
-            (preserved if data.get("png_saved") else lost).add(ev.page_num)
-        # A page that saved its PNG on one event and failed on another is not a
-        # preserved page: the harsher sentence wins.
-        preserved -= lost
+        preserved, lost = UnifiedPipeline._visual_values_split(state)
         if not preserved and not lost:
             return None
 
         parts = []
         if preserved:
             parts.append(
-                f"page(s) {', '.join(str(n) for n in sorted(preserved))}: visual values not "
+                f"page(s) {', '.join(str(n) for n in preserved)}: visual values not "
                 "transcribed; in-image text on these figures is preserved in the page image "
                 "only (no model read it)"
             )
@@ -3403,7 +3417,7 @@ class UnifiedPipeline:
             # These pages are already WARNING with a chart_asset_render_failed
             # event; the note must not quietly upgrade them.
             parts.append(
-                f"page(s) {', '.join(str(n) for n in sorted(lost))}: visual values not "
+                f"page(s) {', '.join(str(n) for n in lost)}: visual values not "
                 "transcribed AND the page image was not saved; in-image text on these "
                 "figures is preserved nowhere"
             )
@@ -8992,21 +9006,23 @@ class UnifiedPipeline:
                         f"ladder — TABLE_REJECTED (models looked and said no; not retryable): "
                         f"{table_rejected_pages}[/red]"
                     )
-                _visual_pages = sorted(
-                    {
-                        ev.page_num
-                        for ev in state.events
-                        if getattr(ev, "kind", "") == VISUAL_VALUES_NOT_TRANSCRIBED_KIND
-                    }
-                )
-                if _visual_pages:
+                _visual_kept, _visual_lost = self._visual_values_split(state)
+                if _visual_kept:
                     # GH-519: the debt gets a line of its own. It is not a
                     # failure -- the lane did the right thing -- so it is
                     # stated, not coloured as an error.
                     console.print(
-                        f"  [cyan]{len(_visual_pages)} chart-asset page(s): visual values not "
+                        f"  [cyan]{len(_visual_kept)} chart-asset page(s): visual values not "
                         f"transcribed; in-image text is preserved in the page image only: "
-                        f"{_visual_pages}[/cyan]"
+                        f"{_visual_kept}[/cyan]"
+                    )
+                if _visual_lost:
+                    # GH-566: and the render-failure pages are NOT that. Nothing
+                    # holds their figure, so this line is a loss, not a note.
+                    console.print(
+                        f"  [red]{len(_visual_lost)} chart-asset page(s): visual values not "
+                        f"transcribed AND the page image was not saved; in-image text is "
+                        f"preserved nowhere: {_visual_lost}[/red]"
                     )
                 if table_unverified_pages:
                     # GH-560: same split as the document note -- an operator
