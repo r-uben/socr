@@ -16,6 +16,7 @@ Heuristics for distinguishing born-digital from baked-in OCR:
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -929,6 +930,28 @@ class PageAssessment:
     #: no region was examined. Used to fail-close an equal-count identity swap
     #: between y0-sorted regions and ``find_table_blocks``.
     native_table_region_identities: list[str] = field(default_factory=list)
+    #: GH-520: table regions as the DETECTOR saw them, before any
+    #: reconstruction ran.
+    #:
+    #: ``native_table_region_count`` and ``_identities`` above are produced by
+    #: the same GFM parser they would later validate: a sibling table that
+    #: failed reconstruction is simply absent from them, so a collapsed grid
+    #: could ship inside text labelled "preserved prose". That circularity is
+    #: why the P2 structure-class floor gave up its regional splice entirely
+    #: (``docs/log/2026-09-01_p2-structure-class-floor.md``). These two are the
+    #: independent signal that search concluded did not exist.
+    #:
+    #: Populated from ``page.find_tables()`` regardless of whether anything
+    #: parsed. A borderless table that only the lane-cooccupancy pass sees
+    #: contributes NOTHING here -- it has no bbox to contribute -- so the count
+    #: can be lower than ``has_tables`` implies. Any consumer must fail closed
+    #: on a mismatch rather than read a low count as "fewer tables".
+    detected_table_count: int = 0
+    #: One ``(x0, y0, x1, y1)`` per DETECTED table that had a readable bbox, in
+    #: ``find_tables()`` order. Shorter than ``detected_table_count`` when a
+    #: table has no usable bbox -- a table nobody can point at -- which a
+    #: consumer mapping blocks onto regions must treat as fail-closed.
+    detected_table_bboxes: list[tuple[float, float, float, float]] = field(default_factory=list)
     #: GH-195: one record per text-strategy grid rejected because a lane boundary
     #: split a native numeric token. The word-geometry fallback that replaced it
     #: is lossless, so this is a VISIBILITY signal, not a defect flag — the page
@@ -1330,6 +1353,13 @@ class BornDigitalDetector:
         self._last_extraction_failed_ordinals = []
         self._last_extraction_table_count = 0
         self._last_extraction_region_identities = []
+        # GH-520 (cubic P2 on #570): find_tables() runs ONCE per page. Stamping
+        # the new fields from a second call left `has_tables` and
+        # `detected_table_count` produced by two invocations whose agreement
+        # rested on PyMuPDF's per-page caching -- a claim of "cannot disagree"
+        # that the code did not actually make good on, plus a second full
+        # detection pass on the hot path of every page in the corpus.
+        self._detected_regions_this_page = self._detect_table_regions(page)
 
         try:
             blocks = page.get_text("dict").get("blocks", [])
@@ -1341,6 +1371,12 @@ class BornDigitalDetector:
         assessment.native_table_unverifiable_ordinals = list(self._last_extraction_failed_ordinals)
         assessment.native_table_region_count = self._last_extraction_table_count
         assessment.native_table_region_identities = list(self._last_extraction_region_identities)
+        # GH-520: stamped here for the same reason the direction is -- the
+        # signals body has 11 return sites and a detection signal missing from
+        # one of them is a silent zero, which a consumer reads as "no tables".
+        detected_count, detected_bboxes = self._detected_regions_this_page
+        assessment.detected_table_count = detected_count
+        assessment.detected_table_bboxes = list(detected_bboxes)
         if text_direction_is_rotated(direction):
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment
@@ -1878,16 +1914,70 @@ class BornDigitalDetector:
         ``tests/test_gh248_lane_reuse.py``, which pins this method rather than
         the helper.
         """
-        try:
-            tables = page.find_tables()
-            if len(tables.tables) > 0:
-                return True
-        except Exception:
-            pass
+        # The single source: whatever `_assess_page` measured for THIS page.
+        # `_detect_tables` is also reachable directly (tests, and any future
+        # caller), so an unset memo falls back to measuring -- it must never
+        # reuse another page's regions, which is why the memo is reset per page.
+        memo = getattr(self, "_detected_regions_this_page", None)
+        found, _bboxes = memo if memo is not None else self._detect_table_regions(page)
+        if found:
+            return True
 
         from socr.tables.reconstruct import has_numeric_columns
 
         return has_numeric_columns(page)
+
+    @staticmethod
+    def _detect_table_regions(
+        page: fitz.Page,
+    ) -> tuple[int, list[tuple[float, float, float, float]]]:
+        """``(tables found, their bboxes)`` from ``find_tables()`` on this page.
+
+        GH-520. The detection-level signal, recorded BEFORE any reconstruction
+        runs, so a consumer can ask "how many tables are on this page" without
+        asking the GFM parser whose output it is trying to validate.
+
+        ``_detect_tables`` reads this rather than calling ``find_tables()``
+        itself: two calls with two failure policies would drift, and then
+        ``has_tables`` and ``detected_table_count`` would disagree about pass 1
+        with nothing to say which was right.
+
+        The two halves are returned separately ON PURPOSE. A table whose bbox is
+        missing or unreadable still counts as found -- dropping it would quietly
+        change ``has_tables``, which has nothing to do with this ticket -- but it
+        contributes no box, so ``count > len(bboxes)``. A consumer that needs to
+        map blocks onto regions must require both to agree and fail closed
+        otherwise; a bbox-less table is a table nobody can point at.
+
+        Best effort: ``(0, [])`` on any failure. A page whose table detection
+        raised has no evidence of tables, which is what pass 2 and every
+        consumer's fail-closed branch already assume. Note the asymmetry this
+        creates, also on purpose: a borderless table seen only by the
+        lane-cooccupancy pass has no bbox and is not counted here at all.
+        """
+        try:
+            tables = getattr(page.find_tables(), "tables", []) or []
+        except Exception:
+            return 0, []
+        boxes: list[tuple[float, float, float, float]] = []
+        for table in tables:
+            bbox = getattr(table, "bbox", None)
+            if bbox is None:
+                continue
+            try:
+                x0, y0, x1, y1 = (float(v) for v in bbox)
+            except (TypeError, ValueError):
+                continue
+            # A NaN, an infinity or a zero-area rect is not somewhere a block
+            # can be mapped to. Publishing it as readable would let a consumer
+            # believe it had a region for that table (cubic P2 on #570); it
+            # falls in with the bbox-less case instead, counted but unusable.
+            if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+                continue
+            if x1 <= x0 or y1 <= y0:
+                continue
+            boxes.append((x0, y0, x1, y1))
+        return len(tables), boxes
 
     @staticmethod
     def _detect_math_fonts(page: fitz.Page) -> bool:
