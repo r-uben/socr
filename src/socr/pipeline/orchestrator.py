@@ -8,6 +8,7 @@ structured loop that operates on the DocumentState blackboard.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import tempfile
 import threading
@@ -25,8 +26,8 @@ from rich.console import Console
 
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
-from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.audit_log import VISUAL_VALUES_NOT_TRANSCRIBED_KIND
+from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.manifest import (
@@ -8168,10 +8169,19 @@ class UnifiedPipeline:
                         restored_boxes = []
                         break
                     try:
-                        restored_boxes.append(tuple(float(v) for v in box))  # type: ignore[arg-type]
+                        x0, y0, x1, y1 = (float(v) for v in box)
                     except (TypeError, ValueError):
                         restored_boxes = []
                         break
+                    # The same validity test the detector applies when it
+                    # measures one (cubic P2 on #571). The floor guard reads
+                    # len(bboxes), so a non-finite or zero-area box restored as
+                    # usable would let a matching parser count reopen the splice
+                    # on geometry the detector would itself have refused.
+                    if not all(math.isfinite(v) for v in (x0, y0, x1, y1)) or x1 <= x0 or y1 <= y0:
+                        restored_boxes = []
+                        break
+                    restored_boxes.append((x0, y0, x1, y1))
             ps.detected_table_bboxes = restored_boxes
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
             # P6 cold review round 2: carry run 1's published disposition forward

@@ -880,9 +880,9 @@ def structure_class_floor_text(p, page_num: int) -> str:
     come from ``find_tables()`` at detection time, before reconstruction runs, so
     a table that failed to parse is still counted. The splice returns behind it.
 
-    What the guard requires, and what it does not claim
-    --------------------------------------------------
-    All three of these, or the whole page floors:
+    What the guard requires
+    -----------------------
+    All four of these, or the whole page floors:
 
     * at least one table was detected -- a zero count is no evidence, not a
       licence (a borderless table seen only by the lane-cooccupancy pass
@@ -890,16 +890,35 @@ def structure_class_floor_text(p, page_num: int) -> str:
     * every detected table has a usable bbox
       (``count == len(bboxes)``) -- a table nobody can point at cannot be shown
       to be covered;
+    * **every detected table was successfully reconstructed**
+      (``native_table_region_count == count``);
     * the parser found exactly that many blocks
       (``len(find_table_blocks(text)) == count``).
 
-    The correspondence between block *i* and bbox *i* is by DOCUMENT ORDER, and
-    that is the honest description: a markdown block carries no geometry, so
-    nothing here verifies that block *i* is the text of bbox *i*. What the equal
-    counts do establish is the property round 1 lacked -- that no detected table
-    is missing from the parser's block list, so the collapsed sibling cannot be
-    the one left behind. ``splice_failed_table_regions`` replaces every block it
-    finds, so all of them are marked and none ships.
+    The third condition is the one that carries the argument, and it is the
+    exact inversion of round 1's mistake. Round 1 compared the parser's region
+    count against ITSELF, which is circular. Comparing it against the DETECTION
+    count is not: it asks "did reconstruction produce a region for every table
+    the detector found", and a sibling that collapsed makes the two disagree.
+
+    Without it, counting blocks is not enough (cubic P1 on #571): a page with
+    two detected tables, one of them collapsed and never parsed, plus an
+    unrelated pipe-shaped prose block, has two parsed blocks and two detected
+    tables. The counts match by coincidence, the splice replaces the two blocks
+    it can see, and the collapsed table ships as preserved prose -- round 1's
+    bug exactly. That is why an earlier draft of this docstring was wrong to say
+    equal counts establish "no detected table is missing from the parser's block
+    list". They do not. The reconstruction-count agreement does.
+
+    What it still does not claim
+    ----------------------------
+    Block *i* is not proven to be the text of bbox *i*. A markdown block carries
+    no geometry, so the ordering is document order and nothing verifies the
+    pairing. The guard does not need that pairing: it establishes that every
+    detected table has a reconstructed region AND that the parser sees exactly
+    as many blocks as there are tables, and ``splice_failed_table_regions``
+    then replaces every block it finds. Which marker landed on which table is
+    not a property anything downstream reads.
     """
     d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
     png_ref = getattr(p, "d3_floor_png_ref", "")
@@ -914,6 +933,11 @@ def structure_class_floor_text(p, page_num: int) -> str:
     if type(detected_count) is not int or detected_count <= 0:
         return whole_page
     if len(detected_bboxes) != detected_count:
+        return whole_page
+    # Every detected table reconstructed. Not circular: the count on the right
+    # comes from the detector, not from the parser being audited (cubic P1 on
+    # #571 -- block counting alone is satisfied by coincidence).
+    if getattr(p, "native_table_region_count", 0) != detected_count:
         return whole_page
 
     from socr.tables.reconcile import find_table_blocks

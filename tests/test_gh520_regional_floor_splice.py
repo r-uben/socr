@@ -315,3 +315,115 @@ def test_a_sidecar_without_the_signal_restores_the_safe_zero(tmp_path: Path) -> 
         "would splice on evidence its own sidecar does not carry"
     )
     assert resumed.pages[1].detected_table_bboxes == []
+
+
+# A pipe-shaped prose block that `find_table_blocks` parses as a table. It is
+# not one of the page's detected tables; it is a second block that happens to
+# make the counts add up.
+DECOY_PIPE_BLOCK = "| note | value |\n|---|---|\n| see appendix | n/a |\n| see footnote | n/a |\n"
+
+COINCIDENT_COUNT_TEXT = (
+    f"{PROSE_BEFORE}\n\n"
+    "| $n$ | const. | slope | $R^2$ |\n"
+    "|---|---|---|---|\n"
+    "| 2 | 0.03 | 0.91 | 0.44 |\n"
+    "| 5 | 0.07 | 0.85 | 0.51 |\n"
+    "\nMaturity 10 30\nconst. 0.11 0.19\nslope 0.78 0.62\n$R^2$ 0.58 0.63\n\n"
+    f"{DECOY_PIPE_BLOCK}\n"
+    f"{PROSE_AFTER}\n"
+)
+
+
+def test_equal_block_counts_are_not_correspondence(tmp_path: Path) -> None:
+    """cubic P1 on #571, and a correction to this PR's own first argument.
+
+    Two tables detected. One collapsed to ragged lines and was never parsed.
+    An unrelated pipe-shaped prose block IS parsed. So `find_table_blocks`
+    returns two blocks and the detector found two tables -- the counts match by
+    coincidence, and a guard built on counting alone splices the two blocks it
+    can see and ships the collapsed table as preserved prose. Round 1's bug,
+    reached by a different route.
+
+    The first version of this PR claimed equal counts establish that "no
+    detected table is missing from the parser's block list". They do not. What
+    does is `native_table_region_count == detected_table_count`: reconstruction
+    produced a region for every table the detector found. Here it did not, and
+    the page floors whole.
+
+    `native_table_region_count` is set to what PRODUCTION would record -- the
+    per-region verifier counts successfully reconstructed regions, and the
+    collapsed sibling is not one -- rather than left to the test helper, which
+    derives it from the same parser and would report 2.
+    """
+    from socr.tables.reconcile import find_table_blocks
+
+    assert len(find_table_blocks(COINCIDENT_COUNT_TEXT)) == 2, (
+        "fixture premise: the parser must see two blocks (the good grid and the "
+        "decoy), so the counts coincide"
+    )
+    assert COLLAPSED_UNIQUE_TOKEN in COINCIDENT_COUNT_TEXT, "fixture premise: the collapsed region"
+
+    state, ps = _floored_page(tmp_path, COINCIDENT_COUNT_TEXT, detected=2)
+    ps.native_table_region_count = 1  # what the verifier records: one region reconstructed
+
+    out = _winning_page_output(state, 1)
+
+    assert COLLAPSED_UNIQUE_TOKEN not in out.text, (
+        "the collapsed table shipped as preserved prose because an unrelated "
+        "pipe block made the counts agree"
+    )
+    assert PROSE_BEFORE not in out.text, "prose survived on a page with unprovable coverage"
+    assert MARKER in out.text
+
+
+def test_reconstruction_short_of_detection_floors(tmp_path: Path) -> None:
+    """The same guard without the decoy: a page where reconstruction produced
+    fewer regions than the detector found tables has an unaccounted-for table,
+    whatever the parser's block list happens to say."""
+    state, ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2)
+    ps.native_table_region_count = 1
+
+    out = _winning_page_output(state, 1)
+
+    assert PROSE_BEFORE not in out.text
+    assert MARKER in out.text
+
+
+def test_a_restored_degenerate_bbox_is_not_usable_evidence(tmp_path: Path) -> None:
+    """cubic P2 on #571. The detector refuses a non-finite or zero-area box when
+    it measures one; the restore accepted it, and the floor guard only reads
+    `len(bboxes)` -- so a resumed page could splice on geometry the detector
+    would itself have thrown away."""
+    import json
+
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    state, _ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2)
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN, enabled_engines=[EngineType.QWEN], quiet=True
+        )
+    )
+    pipeline._scan_root = state.handle.path.parent
+    out_dir = tmp_path / "bad_geom"
+    pipeline._flush_page_sidecar(state, 1, out_dir)
+
+    sidecar = next(out_dir.rglob("pages/00001.json"))
+    meta = json.loads(sidecar.read_text())
+    assert len(meta["detected_table_bboxes"]) == 2
+    meta["detected_table_bboxes"][1] = [5.0, 5.0, 5.0, 9.0]  # zero width
+    sidecar.write_text(json.dumps(meta, indent=2))
+
+    resumed, _ = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=0)
+    page_out = PageOutput(
+        page_num=1, text="body", status=PageStatus.SUCCESS, engine="native", audit_passed=True
+    )
+    pipeline._restore_terminal_page_state(resumed, 1, page_out, out_dir)
+
+    assert resumed.pages[1].detected_table_bboxes == [], (
+        "a degenerate bbox was restored as usable geometry; the whole list must "
+        "clear, because a shorter list is a mismatch that fails closed for the "
+        "wrong reason"
+    )
