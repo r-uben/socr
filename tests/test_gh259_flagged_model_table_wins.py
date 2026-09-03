@@ -321,6 +321,7 @@ def test_document_status_audit_event_and_cli_surface_the_kept_page(tmp_path: Pat
             quiet=True,
             save_figures=False,
             write_manifest=False,
+            table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
         )
     )
 
@@ -757,6 +758,7 @@ def test_drift_reaches_document_metadata_and_cli(tmp_path: Path, capsys) -> None
             quiet=False,
             save_figures=False,
             write_manifest=False,
+            table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
         )
     )
 

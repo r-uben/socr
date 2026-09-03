@@ -187,6 +187,10 @@ def capture(tmp_dir: Path) -> dict:
         quiet=False,
         save_figures=False,
         write_manifest=True,
+        # docs/log/2026-09-03_p1-prep-latch-and-audit.md (cold review round 1):
+        # this corpus is the P6 assemble byte-identity fixture; the flag MOVES it
+        # (events, CLI, sidecars, result_error), so it is pinned, not defaulted.
+        table_judge_ladder=False,
     )
     pipeline = orch.UnifiedPipeline(config)
 

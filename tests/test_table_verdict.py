@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import subprocess
 
+import httpx
 import pytest
 
 from socr.judge.table_verdict import (
@@ -192,6 +195,7 @@ def test_rung_result_from_output_ok_on_valid_json():
     assert result.verdict.verdict == "PASS"
     assert result.latency_sec == 1.5
     assert result.error == ""
+    assert result.unavailable is False
 
 
 def test_rung_result_from_output_not_ok_on_garbage():
@@ -199,12 +203,33 @@ def test_rung_result_from_output_not_ok_on_garbage():
     assert result.ok is False
     assert result.verdict is None
     assert result.error != ""
+    assert result.unavailable is False
 
 
 def test_rung_result_from_output_not_ok_on_empty_string():
     result = rung_result_from_output("gemini", "", latency_sec=0.0)
     assert result.ok is False
     assert result.verdict is None
+    assert result.unavailable is False
+
+
+def test_rung_result_dataclass_defaults():
+    res = RungResult(rung="test", ok=True)
+    assert res.verdict is None
+    assert res.latency_sec == 0.0
+    assert res.error == ""
+    assert res.unavailable is False
+
+
+def test_rung_result_from_output_schema_invalid_is_not_unavailable():
+    # Schema errors (missing field, bad enum) are answered-but-unusable S1 failures,
+    # not transport/reachability failures -- unavailable must stay False.
+    bad_schema = json.dumps({"verdict": "UNKNOWN", "confidence": "high", "findings": []})
+    result = rung_result_from_output("gemini", bad_schema, latency_sec=0.1)
+    assert result.ok is False
+    assert result.verdict is None
+    assert "missing/invalid 'verdict'" in result.error
+    assert result.unavailable is False
 
 
 def test_rung_callable_protocol_shape():
@@ -246,3 +271,215 @@ def test_audit_event_kinds_are_distinct_strings():
     assert len(kinds) == 3
     assert all(isinstance(k, str) for k in kinds)
     assert kinds == TABLE_LADDER_EVENT_KINDS
+
+
+# ---------------------------------------------------------------------------
+# Cold review round 3, finding 2: ONE shared classification table, every row
+# pinned. "Outage" means an external condition that can be restored WITHOUT
+# changing this code or this call; anything the next identical call would hit
+# again is a defect. Every row below still ends the table TABLE_UNVERIFIED --
+# only the retry latch differs.
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnErrnoClassification:
+    @pytest.mark.parametrize(
+        "err,outage",
+        [
+            (errno.ENOENT, True),  # binary absent -- install it
+            (errno.ENOEXEC, True),  # not an executable image -- rebuild it
+            (errno.EACCES, True),  # may not execute it -- chmod it
+            (errno.EPERM, True),
+            (errno.E2BIG, False),  # argv too large -- this call, every time
+            (errno.EPIPE, False),
+            (errno.EINVAL, False),
+            (errno.EISDIR, False),
+        ],
+        ids=lambda v: errno.errorcode.get(v, str(v)) if isinstance(v, int) else str(v),
+    )
+    def test_spawn_errno_rows(self, err: int, outage: bool) -> None:
+        from socr.judge.table_verdict import classify_spawn_oserror
+
+        assert classify_spawn_oserror(OSError(err, "x")) is outage
+
+    def test_an_errno_free_oserror_is_not_an_outage(self) -> None:
+        from socr.judge.table_verdict import classify_spawn_oserror
+
+        assert classify_spawn_oserror(OSError("no errno at all")) is False
+
+
+class TestHttpStatusClassification:
+    @pytest.mark.parametrize(
+        "status,outage",
+        [
+            (401, True),  # credentials can be restored; until then it never works
+            (403, True),
+            (407, True),  # proxy auth
+            (408, True),
+            (429, True),
+            (500, True),
+            (502, True),
+            (503, True),
+            (599, True),  # top of the server-error range
+            (400, False),  # our payload is wrong
+            (405, False),
+            (409, False),
+            (422, False),
+            (200, False),
+            # Cold review round 4: ">= 500" also swept in codes no HTTP server
+            # issues, which a broken proxy or a test double can produce.
+            (600, False),
+            (999, False),
+        ],
+    )
+    def test_status_rows(self, status: int, outage: bool) -> None:
+        from socr.judge.table_verdict import classify_http_status
+
+        assert classify_http_status(status) is outage
+
+    @pytest.mark.parametrize(
+        "body,outage",
+        [
+            # The daemon's actual missing-model shapes.
+            ('{"error":"model \'judge\' not found, try pulling it first"}', True),
+            ('{"error":"model judge:latest not found"}', True),
+            ("model not found, try pulling it first", True),
+            # Cold review round 4: a wrong ROUTE whose path happens to contain
+            # the word. A bare "model" substring read this as a missing model
+            # and latched a defect that is identical forever.
+            ('{"error":"route /api/model-info not found; use /api/chat"}', False),
+            ("404 page not found", False),
+            ("", False),
+            # The word alone, with nothing saying anything was not found.
+            ('{"error":"model parameter required"}', False),
+        ],
+    )
+    def test_404_is_an_outage_only_when_the_body_says_the_model_is_missing(
+        self, body: str, outage: bool
+    ) -> None:
+        """The one status that needs the body: ollama 404s both for a model
+        that was never pulled (pull it and the identical call works) and for a
+        route that does not exist (our own defect, forever)."""
+        from socr.judge.table_verdict import classify_http_status
+
+        assert classify_http_status(404, body) is outage
+
+    def test_the_daemons_error_field_is_what_is_read(self) -> None:
+        """Reading the documented ``error`` field rather than the whole payload
+        keeps an unrelated string elsewhere in the document from deciding it."""
+        from socr.judge.table_verdict import classify_http_status
+
+        body = '{"error":"route not found","hint":"model \'x\' not found"}'
+        assert classify_http_status(404, body) is False
+
+
+class TestRefusalMarkers:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Error: quota exceeded for this project",
+            "RESOURCE_EXHAUSTED: rate limit reached",
+            "429 Too Many Requests",
+            "request was unauthorized",
+            "authentication failed",
+            "IneligibleTierError: migrate to Antigravity",
+            "503 Service Unavailable, try again later",
+            "connection refused",
+        ],
+    )
+    def test_recognised_refusals(self, text: str) -> None:
+        from socr.judge.table_verdict import output_reads_as_refusal
+
+        assert output_reads_as_refusal(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "unknown flag: --nope",
+            "usage: agy [options]",
+            # Cold review round 4: a flag whose NAME contains a marker word.
+            # The bare "quota" marker latched this deterministic usage error
+            # and tripped the run breaker on it.
+            "unknown option --quota-project; see usage",
+            "error: --rate-limit-config must be a path",
+            "unauthorized_client is not a valid value for --mode",
+            # Cold review round 3: loose single-word markers used to make these
+            # read as outages, which is the expensive direction of the mistake.
+            "could not open /home/u/.config: permission denied",
+            "please run 'agy login' first to configure this workspace",
+            "error reading local file: connection.json is malformed",
+            "",
+        ],
+    )
+    def test_deterministic_local_errors_are_not_refusals(self, text: str) -> None:
+        from socr.judge.table_verdict import output_reads_as_refusal
+
+        assert output_reads_as_refusal(text) is False
+
+    def test_classification_is_not_limited_to_the_audit_excerpt(self) -> None:
+        """The 500-char excerpt is the AUDIT TRAIL's. Classifying on it threw
+        away any refusal printed past that cutoff -- a false negative that
+        settles the table permanently."""
+        from socr.judge.table_verdict import CLASSIFY_CAPTURE_CHARS, output_reads_as_refusal
+
+        assert CLASSIFY_CAPTURE_CHARS > 500
+        assert output_reads_as_refusal("x" * 3000 + " quota exceeded") is True
+
+    def test_both_streams_are_read(self) -> None:
+        """A CLI may print its refusal on stdout; reading only stderr is the
+        same false negative one step smaller."""
+        from socr.judge.table_verdict import output_reads_as_refusal
+
+        assert output_reads_as_refusal("", "quota exceeded") is True
+
+
+class TestAvailabilityExceptions:
+    @pytest.mark.parametrize(
+        "exc,outage",
+        [
+            (httpx.ConnectError("refused"), True),
+            (httpx.ReadTimeout("slow"), True),
+            (httpx.PoolTimeout("busy"), True),
+            (httpx.ProxyError("proxy"), True),
+            (ConnectionError("reset"), True),
+            (ConnectionResetError("reset"), True),
+            (TimeoutError("waited"), True),
+            (subprocess.TimeoutExpired(["agy"], 1.0), True),
+            # Client configuration: the URL names a scheme httpx cannot speak.
+            # Identical forever, so retrying is pure cost.
+            (httpx.UnsupportedProtocol("gopher://"), False),
+            (httpx.DecodingError("bad gzip"), False),
+            (httpx.TooManyRedirects("loop"), False),
+            (TypeError("unsupported operand"), False),
+            (AssertionError("invariant"), False),
+            (KeyError("verdict"), False),
+            (ValueError("bad literal"), False),
+            (RuntimeError("crashed"), False),
+            # A local file problem is a deterministic local defect; spawn errors
+            # go through classify_spawn_oserror instead, which reads the errno.
+            (FileNotFoundError("crop.png"), False),
+            (OSError("broken pipe"), False),
+        ],
+        ids=lambda v: type(v).__name__ if isinstance(v, BaseException) else str(v),
+    )
+    def test_exception_rows(self, exc: BaseException, outage: bool) -> None:
+        from socr.judge.table_verdict import is_availability_exception
+
+        assert is_availability_exception(exc) is outage
+
+
+class TestRungKind:
+    @pytest.mark.parametrize(
+        "rung_id,kind",
+        [
+            ("ollama:glm-5.3-flash:cloud", "ollama"),
+            ("ollama", "ollama"),
+            ("gemini", "gemini"),
+            ("unknown", "unknown"),
+            ("", ""),
+        ],
+    )
+    def test_kind_rows(self, rung_id: str, kind: str) -> None:
+        from socr.judge.table_verdict import rung_kind
+
+        assert rung_kind(rung_id) == kind

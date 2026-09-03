@@ -12,7 +12,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -53,6 +53,9 @@ from socr.core.result import (
 from socr.core.state import DocumentState, PageState, add_page_cost
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
+from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
+from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
+from socr.judge.table_verdict import RUNG_KIND_GEMINI, RUNG_KIND_OLLAMA, rung_kind
 from socr.pipeline.agentic import route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
@@ -358,27 +361,38 @@ def _cell_transcribe_prompt_digest() -> str:
         return f"unreadable-cell-transcribe-prompt:{uuid.uuid4().hex}"
 
 
-class _EquationRetryMetadata:
-    """``DocMetadata`` plus P4-R's pending-retry latch on the root entry.
+class _LatchedDocMetadata:
+    """``DocMetadata`` plus lane pending-retry latches on the root entry.
 
-    ``DocMetadata.to_entry`` is a fixed contract shape and the latch is socr-side
-    state, so it is layered on here rather than pushed into the contract.
-    Passing this to ``RootIndex.record`` keeps that method the sole author of
-    root metadata.json -- the PP-5 invariant -- while still committing the
-    status and the latch in a single save (cold review round 3, finding 5).
+    ``DocMetadata.to_entry`` is a fixed contract shape and lane retry latches
+    (equation lane, table judge ladder) are socr-side state, so they are
+    layered on here rather than pushed into the contract. Passing this to
+    ``RootIndex.record`` keeps that method the sole author of root
+    metadata.json -- the PP-5 invariant -- while still committing the status
+    and any latches in a single save (cold review round 3, finding 5).
 
     Everything other than ``to_entry`` delegates to the wrapped metadata.
+    ``to_entry()`` merges ``pending`` into the entry. Values, not just flags:
+    the table lane records WHICH rung kinds were unavailable (cold review
+    round 3, finding 1), so the resume gate can ask about those rungs instead
+    of about "some rung somewhere".
     """
 
-    def __init__(self, meta):
+    def __init__(self, meta, pending):
         self._meta = meta
+        # Accepts either a mapping of key -> value, or a plain iterable of key
+        # names for the flag-only lanes (the equation lane's original shape).
+        if isinstance(pending, Mapping):
+            self._pending = dict(pending)
+        else:
+            self._pending = {str(key): True for key in pending}
 
     def __getattr__(self, name):
         return getattr(self._meta, name)
 
     def to_entry(self) -> dict:
         entry = self._meta.to_entry()
-        entry["equation_lane_retry_pending"] = True
+        entry.update(self._pending)
         return entry
 
 
@@ -389,7 +403,8 @@ def _resume_skippable(
     fingerprint: str,
     out_dir: Path,
     *,
-    equation_lane_retry_blocks: bool = False,
+    equation_lane_retry_blocks: bool | Callable[[], bool] = False,
+    table_judge_retry_blocks: bool | Callable[[list[str]], bool] = False,
 ) -> bool:
     """Whether a doc can be skipped by the resume gate.
 
@@ -411,17 +426,57 @@ def _resume_skippable(
     unread equation. When the caller passes True -- meaning the equation lane is
     enabled on this run -- a recorded pending retry refuses the skip.
 
+    ``table_judge_retry_blocks`` (P1) applies the identical rule to the table
+    judge ladder: when a recorded entry carries ``table_judge_retry_pending``
+    and a table-judge rung is reachable now, the document skip is refused so
+    the pending table is re-judged. When the ladder is disabled, strict_local is
+    on, or all rungs remain unavailable, the entry remains skippable. The
+    predicate is evaluated lazily only when the entry actually carries the
+    latch, avoiding probes on ordinary or flag-off resumes.
+
     Re-running is then cheap rather than free: pages that DID finish are still
     restored by the per-page ledger, which is provider-aware and keeps skipping
     them, so an offline rerun re-opens the document without re-reading anything.
     """
     entry = index.files.get(rel_key)
-    if equation_lane_retry_blocks and entry and entry.get("equation_lane_retry_pending") is True:
-        return False
+    if entry:
+        if entry.get("equation_lane_retry_pending") is True:
+            blocks = (
+                equation_lane_retry_blocks()
+                if callable(equation_lane_retry_blocks)
+                else equation_lane_retry_blocks
+            )
+            if blocks:
+                return False
+        if entry.get("table_judge_retry_pending") is True:
+            # Cold review round 3, finding 1: ask about the rung(s) that were
+            # ACTUALLY unavailable. A healthy rung 1 must not stand in for a
+            # rung 2 that is still down -- that reopened the document and
+            # re-ran the whole ladder on every resume. An entry written before
+            # the rung list existed carries no kinds; the empty list means
+            # "unknown", and the predicate falls back to asking about any rung,
+            # which is the conservative reading for an old record.
+            recorded = entry.get("table_judge_retry_rungs")
+            kinds = [str(k) for k in recorded] if isinstance(recorded, list) else []
+            blocks = (
+                table_judge_retry_blocks(kinds)
+                if callable(table_judge_retry_blocks)
+                else table_judge_retry_blocks
+            )
+            if blocks:
+                return False
     if index.is_completed(rel_key, checksum, fingerprint=fingerprint):
         return True
     if not entry or entry.get("status") != "partial":
         return False
+    # NOTE (cold review round 1, finding 1): no unconditional lane-latch check
+    # belongs here. A latch records a TRANSIENT external outage, and the only
+    # question the gate asks is whether that outage is over: both lanes already
+    # refused the skip above when their rung/provider is reachable NOW. Refusing
+    # it a second time regardless of reachability would re-run the whole lane on
+    # every resume of a persistent outage -- paying timeout x tables x rungs to
+    # rediscover that the rung is still down -- which is exactly what the
+    # docstring above rules out.
     if entry.get("checksum") != checksum:
         return False
     if not entry.get("fingerprint") or entry.get("fingerprint") != fingerprint:
@@ -516,6 +571,31 @@ class UnifiedPipeline:
         #: once per document -- `process_batch` calls `process` per PDF and the
         #: config cannot change between them.
         self._warned_inert_config = False
+        #: Table-judge rung reachability, per rung kind, probed at most once per
+        #: RUN (cleared by ``_reset_table_judge_rung_probes`` at every public run
+        #: boundary) alongside the per-run refusal breaker.
+        self._table_rung_available_cache: dict[str, bool] = {}
+        self._table_rung_refused_this_run: set[str] = set()
+        #: The rung CALLABLES that refused us this run, held by identity. Cold
+        #: review round 4: the kind set alone cannot spare pages 2..N, because
+        #: the gate receives opaque callables and only the RESULT names a kind.
+        #: Positional correspondence with ``run_table_ladder``'s results gives
+        #: the mapping, so the object that produced a refusal is not called
+        #: again this run whether or not it advertises its kind.
+        self._table_rung_refused_callables: list = []
+        #: The rung callables this run has already CALLED without a refusal.
+        #: Cold review round 5: identity is authoritative for a callable we
+        #: have observed; the kind-level breaker applies only to callables we
+        #: have not. Without that split, either a batch's rebuilt rung escapes
+        #: the breaker, or a healthy same-kind sibling is wrongly dropped.
+        self._table_rung_seen_callables: list = []
+        #: The rung list handed to the CURRENT ``_run_table_judge_gate`` call.
+        #: Only used to resolve the historical positional executing identity
+        #: for a rung that advertises nothing; see ``_executing_identity``.
+        self._table_judge_gate_rungs: list = []
+        #: True while ``process_batch`` is driving ``process`` per file, so the
+        #: batch counts as ONE reachability epoch rather than one per file.
+        self._in_batch_run = False
         self._final_records = None
         # Set by process_batch: the contract RunOutcome that drives the exit code.
         from ocr_output_contract import RunOutcome
@@ -583,6 +663,7 @@ class UnifiedPipeline:
                 self._run_fingerprint(),
                 out_dir,
                 equation_lane_retry_blocks=self._equation_lane_retry_blocks_resume(),
+                table_judge_retry_blocks=self._table_judge_retry_blocks_resume,
             ):
                 return None
         except Exception as exc:  # never let the resume check break a run
@@ -605,6 +686,17 @@ class UnifiedPipeline:
         earlier run is inert history and must not force endless reprocessing.
         """
         return bool(self.config.equation_region_lane and self.config.agentic)
+
+    def _table_judge_retry_blocks_resume(self, rung_kinds: list[str] | None = None) -> bool:
+        """Whether a recorded table-judge pending retry should refuse a document skip.
+
+        Only when the ladder is enabled, strict_local is false, and one of the
+        rungs THAT WAS UNAVAILABLE is attemptable now (cold review round 3,
+        finding 1). ``rung_kinds`` empty or None means the record does not say
+        which rung failed -- an entry written before the list existed -- and the
+        question falls back to "is any rung reachable", the conservative reading.
+        """
+        return bool(self._table_judge_rung_available_now(rung_kinds))
 
     def _invalidate_root_entry_for_rerun(
         self, pdf_path: Path, out_dir: Path
@@ -1027,6 +1119,13 @@ class UnifiedPipeline:
         the canon's basename-collision fix.
         """
         pdf_path = Path(pdf_path)
+        # Cold review round 3, new finding 1: a public run starts a fresh
+        # reachability epoch. A pipeline object outlives a run, and a cache
+        # that never resets means a rung that came back between runs is never
+        # observed. Suppressed under ``process_batch``, which is ONE run whose
+        # pre-gate and per-file answers must agree.
+        if not self._in_batch_run:
+            self._reset_table_judge_rung_probes()
         self._report_inert_config()
         out_dir = self._resolve_output_root(pdf_path, output_dir)
         self._scan_root = scan_root if scan_root is not None else pdf_path.parent
@@ -1087,6 +1186,7 @@ class UnifiedPipeline:
         contract :class:`RunOutcome`); the CLI consults it so the batch exit
         code is nonzero when any file failed (the canon's uniform exit policy).
         """
+        self._reset_table_judge_rung_probes()
         self._report_inert_config()
 
         from ocr_output_contract import (
@@ -1126,6 +1226,13 @@ class UnifiedPipeline:
             return []
 
         to_process = []
+
+        # Cold review round 3, finding 1: the pre-gate predicate is now
+        # per-file, because each entry names the rung kinds IT is waiting on.
+        # The run-local memoization that used to live here would have collapsed
+        # those different questions into one answer; the per-kind cache on the
+        # pipeline does the memoizing instead, so a batch still probes each rung
+        # kind at most once.
         for pdf in pdfs:
             # Resume gate via the canon: an unreadable input (safe_checksum None)
             # is NEVER treated as completed — it falls through to process(), which
@@ -1139,6 +1246,7 @@ class UnifiedPipeline:
                 run_fp,
                 out_dir,
                 equation_lane_retry_blocks=self._equation_lane_retry_blocks_resume(),
+                table_judge_retry_blocks=self._table_judge_retry_blocks_resume,
             )
             if already_done and not self.config.reprocess:
                 if self.config.verbose:
@@ -1167,35 +1275,45 @@ class UnifiedPipeline:
         results: list[EngineResult] = []
         start = time.time()
 
-        for pdf in to_process:
-            # Thread the BATCH input dir as scan_root so each per-doc key is the
-            # path relative to input_dir (subtree-mirrored), NOT the basename.
-            try:
-                result = self.process(pdf, out_dir, scan_root=input_dir)
-            except Exception as exc:  # one bad file must not abort the batch
-                logger.warning("batch: %s failed: %s", pdf.name, exc)
-                outcome.add(Status.FAILED, detail=str(pdf))
-                results.append(
-                    EngineResult(
-                        document_path=pdf,
-                        engine="none",
-                        status=DocumentStatus.ERROR,
-                        error=str(exc),
+        # Cold review round 3, new finding 1: the batch is ONE reachability
+        # epoch. It was reset on entry above, and the per-file ``process`` calls
+        # below must not reset it again, or the pre-gate's admission decision and
+        # the per-file resume decision could disagree inside one run. ``finally``
+        # so an exception cannot leave the pipeline believing it is still in a batch.
+        self._in_batch_run = True
+        try:
+            for pdf in to_process:
+                # Thread the BATCH input dir as scan_root so each per-doc key is the
+                # path relative to input_dir (subtree-mirrored), NOT the basename.
+                try:
+                    result = self.process(pdf, out_dir, scan_root=input_dir)
+                except Exception as exc:  # one bad file must not abort the batch
+                    logger.warning("batch: %s failed: %s", pdf.name, exc)
+                    outcome.add(Status.FAILED, detail=str(pdf))
+                    results.append(
+                        EngineResult(
+                            document_path=pdf,
+                            engine="none",
+                            status=DocumentStatus.ERROR,
+                            error=str(exc),
+                        )
                     )
-                )
-                continue
-            results.append(result)
-            # GH-177: one mapping, shared with the single-file path, so the two
-            # cannot drift into opposite exit codes for the same document.
-            # process()->_phase_assemble already recorded this doc in the
-            # canonical RootIndex with the contract schema (model/backend/
-            # fingerprint/UTC timestamp). No legacy second write — that was
-            # the clobber that downgraded the root index to legacy shape.
-            doc_status = contract_status_for(result)
-            if doc_status is Status.COMPLETED:
-                outcome.add(Status.COMPLETED, output_path=str(pdf))
-            else:
-                outcome.add(doc_status, detail=str(pdf))
+                    continue
+                results.append(result)
+                # GH-177: one mapping, shared with the single-file path, so the two
+                # cannot drift into opposite exit codes for the same document.
+                # process()->_phase_assemble already recorded this doc in the
+                # canonical RootIndex with the contract schema (model/backend/
+                # fingerprint/UTC timestamp). No legacy second write — that was
+                # the clobber that downgraded the root index to legacy shape.
+                doc_status = contract_status_for(result)
+                if doc_status is Status.COMPLETED:
+                    outcome.add(Status.COMPLETED, output_path=str(pdf))
+                else:
+                    outcome.add(doc_status, detail=str(pdf))
+
+        finally:
+            self._in_batch_run = False
 
         if not self.config.quiet:
             ok = outcome.completed
@@ -3715,6 +3833,250 @@ class UnifiedPipeline:
             make_gemini_rung(self.config),
         ]
 
+    #: The rung kinds the gate builds, in ladder order. Named here so the
+    #: "which rung recovered" question has one list to widen to.
+    TABLE_JUDGE_RUNG_KINDS: tuple[str, ...] = (RUNG_KIND_OLLAMA, RUNG_KIND_GEMINI)
+
+    def _table_judge_rung_available_now(self, rung_kinds: list[str] | None = None) -> bool:
+        """Whether a table-judge rung worth retrying is attemptable now.
+
+        Cold review round 2, finding 1: the gate's notion of reachability and
+        the rungs' notion of "unavailable" must be the SAME notion, or this
+        function authorizes a state transition its own evidence cannot
+        support. It used to answer True on ``shutil.which`` alone and on a
+        bare ``/api/tags`` liveness ping -- both of which say yes to a rung
+        that is guaranteed to fail again.
+
+        Cold review round 3, finding 1: and it must be asked about the RIGHT
+        rung. ``rung_kinds`` names the kinds the latch recorded as unavailable;
+        only those are asked. Empty or None means the record does not say, and
+        the question widens to "any rung", which is what an entry written
+        before the rung list existed deserves.
+
+        Each rung kind owns one cheap, no-model reachability function:
+
+        * ``ollama`` -- daemon up AND the configured judge model actually pulled.
+        * ``gemini`` -- on PATH AND a trivial no-model health invocation succeeds.
+
+        Both rungs are cloud rungs, so the ladder and ``strict_local`` gates
+        are checked before touching either external seam.
+        """
+        if not self.config.table_judge_ladder or self.config.strict_local:
+            return False
+
+        kinds = [k for k in (rung_kinds or []) if k]
+        if not kinds:
+            kinds = list(self.TABLE_JUDGE_RUNG_KINDS)
+        return any(self._table_judge_rung_kind_available_now(kind) for kind in kinds)
+
+    def _table_judge_rung_kind_available_now(self, kind: str) -> bool:
+        """Reachability of ONE rung kind, probed at most once per run.
+
+        The resume gate asks per file and the batch pre-gate per candidate: a
+        subprocess health check plus an HTTP model listing must not be paid per
+        document. The cache is cleared at every public run boundary
+        (``process`` / ``process_batch``), never at construction only, so a
+        long-lived pipeline object cannot carry a stale "unreachable" from one
+        run into the next (cold review round 3, new finding 1).
+        """
+        if kind in self._table_rung_refused_this_run:
+            # Cold review round 3, new finding 2: this rung already refused us
+            # for a recognised external reason on a REAL call in this run. It
+            # will refuse the next table identically, so the rest of the run
+            # treats it as unreachable. The page latch still persists, so a
+            # LATER run retries it.
+            return False
+        cached = self._table_rung_available_cache.get(kind)
+        if cached is None:
+            cached = self._probe_table_judge_rung_kind(kind)
+            self._table_rung_available_cache[kind] = cached
+        return cached
+
+    def _probe_table_judge_rung_kind(self, kind: str) -> bool:
+        """The uncached, per-kind probe. Best effort: an unexpected exception
+        means that rung is not attemptable, never a broken run."""
+        try:
+            if kind == RUNG_KIND_GEMINI:
+                return bool(table_judge_gemini_rung_reachable(self.config.table_judge_rung2_binary))
+            if kind == RUNG_KIND_OLLAMA:
+                return bool(
+                    table_judge_ollama_rung_reachable(
+                        self.config.table_judge_rung1_model,
+                        self.config.table_judge_rung1_host,
+                    )
+                )
+        except Exception as exc:
+            logger.debug("table-judge rung %r availability probe failed: %s", kind, exc)
+            return False
+        # An unrecognised kind (an injected test rung, or a synthesized
+        # "unknown" from the whole-ladder guard) has no probe of its own. It
+        # cannot be shown reachable, so it does not reopen a document on its
+        # own -- but it also does not veto the kinds that can be probed.
+        logger.debug("table-judge rung kind %r has no reachability probe", kind)
+        return False
+
+    def _reset_table_judge_rung_probes(self) -> None:
+        """Start a fresh reachability epoch for one public run.
+
+        Cold review round 3, new finding 1. ``process_batch`` is ONE run: it
+        resets once and its nested ``process`` calls do not reset again, so the
+        pre-gate's answer and the per-file answers agree for the whole batch.
+        A bare ``process`` call is its own run and resets on entry.
+        """
+        self._table_rung_available_cache = {}
+        self._table_rung_refused_this_run = set()
+        self._table_rung_refused_callables = []
+        self._table_rung_seen_callables = []
+
+    def _executing_identity(self, rr, executed_rungs: list, index: int) -> str:
+        """Who actually ran this rung result. Identity first, position last.
+
+        Resolution order (cold review round 5):
+
+        1. The tag the rung callable carries (``executing``), matched to the
+           callable that produced THIS result -- ``run_table_ladder`` appends
+           one result per call, in order, so within the list actually executed
+           the index is a true identity. That list is not the configured
+           ladder once the breaker has filtered it.
+        2. The rung KIND, mapped to the configured identity for that kind.
+           This covers a synthesized refused result, which had no executor.
+        3. The callable's position in the list handed to the gate, which is the
+           historical rule and stays correct for an unfiltered ladder of rungs
+           that do not advertise themselves.
+
+        An unrecognised rung with no tag and no position resolves to "" rather
+        than borrowing a configured identity it never had.
+        """
+        if index < len(executed_rungs):
+            tagged = getattr(executed_rungs[index], "executing", "") or ""
+            if tagged:
+                return tagged
+
+        kind = rung_kind(rr.rung or "")
+        if kind == RUNG_KIND_OLLAMA:
+            return self.config.table_judge_rung1_model
+        if kind == RUNG_KIND_GEMINI:
+            return self.config.table_judge_rung2_binary
+
+        if index < len(executed_rungs):
+            configured = self._table_judge_rung_position(executed_rungs[index])
+            if configured == 0:
+                return self.config.table_judge_rung1_model
+            if configured == 1:
+                return self.config.table_judge_rung2_binary
+        return ""
+
+    def _table_judge_rung_position(self, rung) -> int:
+        """The callable's index in the rung list this gate call was given.
+
+        Set for the duration of one ``_run_table_judge_gate`` call; -1 when the
+        callable is not one of them.
+        """
+        for position, candidate in enumerate(self._table_judge_gate_rungs):
+            if candidate is rung:
+                return position
+        return -1
+
+    def _table_rung_callable_refused(self, rung) -> bool:
+        """Whether this rung callable is off the table for the rest of this run.
+
+        Cold review round 5. Two questions, answered in order:
+
+        1. **Identity.** Did THIS object refuse us? Authoritative, and the only
+           thing that can distinguish two same-kind callables.
+        2. **Identity again, the other way.** Have we already called this object
+           without a refusal? Then it is fine, whatever its kind. This is what
+           keeps a healthy sibling alive when a same-kind neighbour refused.
+        3. **Kind.** An object we have never called, of a kind that refused us
+           earlier in this run, is the SAME rung rebuilt -- which is exactly
+           what ``_build_table_judge_rungs`` does for every document in a
+           batch. Calling it again re-pays the refusal we already know about.
+        """
+        if any(rung is refused for refused in self._table_rung_refused_callables):
+            return True
+        if any(rung is seen for seen in self._table_rung_seen_callables):
+            return False
+        kind = getattr(rung, "rung_kind", "") or ""
+        return bool(kind) and kind in self._table_rung_refused_this_run
+
+    def _live_table_judge_rungs(self, rungs) -> list:
+        """The rungs still worth calling on THIS page.
+
+        Cold review round 4, item 6. The per-run breaker used to live only in
+        the reachability seam, which is a resume decision -- so within one run
+        every remaining page still called the rung that had already refused
+        page 1. Filtering here is what actually stops the amplification.
+        """
+        if not self._table_rung_refused_this_run and not self._table_rung_refused_callables:
+            return list(rungs)
+        return [rung for rung in rungs if not self._table_rung_callable_refused(rung)]
+
+    def _record_table_rung_refusals(self, rungs_used, result) -> None:
+        """Record refusals from ONE ladder run, by kind and by callable identity.
+
+        ``run_table_ladder`` calls ``rungs_used`` in order and appends one
+        result per call, so ``rung_results[i]`` came from ``rungs_used[i]``.
+        That positional correspondence is the only reliable way back from a
+        result to the object that produced it.
+        """
+        for index, rr in enumerate(getattr(result, "rung_results", []) or []):
+            if index >= len(rungs_used):
+                continue
+            rung = rungs_used[index]
+            if getattr(rr, "refusal", False):
+                if not any(rung is refused for refused in self._table_rung_refused_callables):
+                    self._table_rung_refused_callables.append(rung)
+            elif not any(rung is seen for seen in self._table_rung_seen_callables):
+                self._table_rung_seen_callables.append(rung)
+        self._note_table_rung_refusals([result])
+
+    def _refused_ladder_result(self, table_id: str):
+        """The terminal for a table whose whole ladder is refused this run.
+
+        Not the same thing as the empty-rung (strict_local / configured-off)
+        terminal, which is settled by configuration and must not latch. This
+        one IS transient: the synthesized results name the refused kinds so the
+        page latches and a LATER run retries them.
+        """
+        from socr.judge.table_ladder import TableLadderOutcome, TableLadderResult
+        from socr.judge.table_verdict import RungResult
+
+        return TableLadderResult(
+            table_id=table_id,
+            outcome=TableLadderOutcome.UNVERIFIED,
+            rung_results=[
+                RungResult(
+                    rung=kind,
+                    ok=False,
+                    error="rung refused earlier in this run; not called again",
+                    unavailable=True,
+                    refusal=True,
+                )
+                for kind in sorted(self._table_rung_refused_this_run)
+            ],
+        )
+
+    def _note_table_rung_refusals(self, table_results) -> None:
+        """Trip the per-run breaker for any rung that refused us on a real call.
+
+        Cold review round 3, new finding 2. A quota or credential refusal is
+        not a per-table fact: the next table in this run gets the same answer.
+        Without this, a batch pre-gate can admit every latched document and
+        every table in every one of them pays the same refused call -- the exact
+        cost amplification the latch was added to prevent.
+        """
+        for result in table_results or []:
+            for rr in result.rung_results:
+                if getattr(rr, "refusal", False):
+                    kind = rung_kind(rr.rung)
+                    if kind not in self._table_rung_refused_this_run:
+                        logger.info(
+                            "table judge rung %r refused (%s); not retried again this run",
+                            kind,
+                            rr.error,
+                        )
+                    self._table_rung_refused_this_run.add(kind)
+
     # ------------------------------------------------------------------
     # GH-359 ruling 5: mechanical binding evidence at the gate.
     #
@@ -3844,6 +4206,8 @@ class UnifiedPipeline:
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
             TABLE_LADDER_UNVERIFIED_KIND,
+            RungResult,
+            is_availability_exception,
         )
         from socr.tables.binding import BindingResult
         from socr.tables.witness import WitnessScope, prepare_table_witnesses
@@ -3852,6 +4216,11 @@ class UnifiedPipeline:
         forced_by_binding: dict = {}
         markdown_by_table: dict[str, str] = {}
         scope_by_table: dict[str, str] = {}
+        # table_id -> the callables that ACTUALLY ran for it, in call order.
+        # The audit trail's executing identity is resolved from these, never
+        # from a result's position in the configured ladder (round 5).
+        executed_rungs_by_table: dict[str, list] = {}
+        self._table_judge_gate_rungs = list(rungs)
 
         try:
             with prepare_table_witnesses(state.handle.path, page_num, bo.text) as witnesses:
@@ -3895,14 +4264,25 @@ class UnifiedPipeline:
                             )
                         )
                         continue
+
+                    # Cold review round 4, item 6: re-asked per table, because a
+                    # refusal on the PREVIOUS table must spare this one.
+                    live_rungs = self._live_table_judge_rungs(rungs)
+                    if not live_rungs:
+                        # Every configured rung refused us earlier in this run.
+                        # Unlike the empty-rung case above this is transient, so
+                        # the terminal names the refused kinds and latches.
+                        table_results.append(self._refused_ladder_result(witness.table_id))
+                        continue
                     try:
                         prompt_scope = "page" if witness.scope is WitnessScope.PAGE else "located"
                         with table_judge_prompt_scope(prompt_scope):
-                            table_results.append(
-                                run_table_ladder(
-                                    rungs, witness.crop_path, witness.markdown, witness.table_id
-                                )
+                            ladder_result = run_table_ladder(
+                                live_rungs, witness.crop_path, witness.markdown, witness.table_id
                             )
+                        executed_rungs_by_table[witness.table_id] = list(live_rungs)
+                        self._record_table_rung_refusals(live_rungs, ladder_result)
+                        table_results.append(ladder_result)
                     except Exception as exc:
                         logger.warning(
                             "table judge ladder errored on p%d table %s (%s: %s); UNVERIFIED",
@@ -3916,6 +4296,19 @@ class UnifiedPipeline:
                             TableLadderResult(
                                 table_id=witness.table_id,
                                 outcome=TableLadderOutcome.UNVERIFIED,
+                                rung_results=[
+                                    RungResult(
+                                        rung="unknown",
+                                        ok=False,
+                                        error=f"{type(exc).__name__}: {exc}",
+                                        # Cold review round 2, finding 2: same
+                                        # typed rule as the ladder's own guard.
+                                        # A transport failure is an outage; a
+                                        # defect in this machinery is not, and
+                                        # must not be retried on every resume.
+                                        unavailable=is_availability_exception(exc),
+                                    )
+                                ],
                             )
                         )
         except Exception as exc:
@@ -3940,6 +4333,29 @@ class UnifiedPipeline:
             )
             ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
             return
+
+        # Cold review round 3, new finding 2: a rung that refused us on a real
+        # call is done for this run, whatever this page's terminal turns out to
+        # be. Recorded before the latch derivation so a refusal on an ACCEPTED
+        # page still spares the rest of the run.
+        self._note_table_rung_refusals(table_results)
+
+        # P1 retry latch: derive the page latch from the terminal's cause
+        # BEFORE any mechanical-binding ACCEPTED-to-UNVERIFIED clamp changes
+        # the outcome. Set when at least one table's original ladder result is
+        # UNVERIFIED and contains an unavailable rung result -- and record WHICH
+        # rung kinds those were (cold review round 3, finding 1), so resume asks
+        # about the rung that actually failed rather than about any rung.
+        unavailable_kinds = {
+            rung_kind(rr.rung)
+            for result in table_results
+            if result.outcome is TableLadderOutcome.UNVERIFIED
+            for rr in result.rung_results
+            if rr.unavailable
+        }
+        if unavailable_kinds:
+            ps.table_judge_retry_pending = True
+            ps.table_judge_retry_rungs = sorted(unavailable_kinds)
 
         # GH-359 ruling 5: a genuine mechanical contradiction withholds
         # acceptance. REJECTED is untouched (ceiling on accept, not a
@@ -4020,21 +4436,27 @@ class UnifiedPipeline:
             # GH-353 review fix (post-A3 "agy" amendment): ``RungResult.rung``
             # names the judge model FAMILY ("gemini"), not the literal binary
             # that ran it (``agy``, per config) -- and rung 1's model is
-            # exactly as config-dependent as rung 2's binary. Record BOTH
-            # rungs' configured executing identity, positionally (index 0 =
-            # rung 1, index 1 = rung 2 -- the only shape ``_build_table_judge
-            # _rungs`` ever constructs), so a sidecar reader never has to
-            # guess what actually produced a verdict. Deliberately minimal:
-            # no latencies, no verdict duplication -- ``detail`` above
-            # already says what happened; this only says who executed it.
+            # exactly as config-dependent as rung 2's binary. Record the
+            # executing identity so a sidecar reader never has to guess what
+            # actually produced a verdict. Deliberately minimal: no latencies,
+            # no verdict duplication -- ``detail`` above already says what
+            # happened; this only says who executed it.
+            #
+            # Cold review round 5: derived from IDENTITY, never from the
+            # position of a result in the configured ladder. That mapping was
+            # true only while every run called rungs 1 and 2 in order; once the
+            # refusal breaker could hand the ladder a filtered sublist, a lone
+            # surviving rung 2 was recorded as having been executed by rung 1's
+            # model. Synthesized refused results have no executor at all and
+            # are sorted by kind, so their indices were never ladder positions
+            # either. False provenance in a citation corpus's audit trail is
+            # exactly the failure this trail exists to prevent.
             rung_trail = [
                 {
                     "rung": rr.rung,
                     "ok": rr.ok,
-                    "executing": (
-                        self.config.table_judge_rung1_model
-                        if idx == 0
-                        else self.config.table_judge_rung2_binary
+                    "executing": self._executing_identity(
+                        rr, executed_rungs_by_table.get(result.table_id) or [], idx
                     ),
                 }
                 for idx, rr in enumerate(result.rung_results)
@@ -6898,6 +7320,14 @@ class UnifiedPipeline:
             "figure_refs": figure_refs,
         }
 
+        # P1: sparse table retry latch -- persisted ONLY when True so default-off
+        # sidecars remain byte-identical and satisfy P6 disposition persistence contracts.
+        if bool(getattr(ps, "table_judge_retry_pending", False)):
+            payload["table_judge_retry_pending"] = True
+            rungs = list(getattr(ps, "table_judge_retry_rungs", []) or [])
+            if rungs:
+                payload["table_judge_retry_rungs"] = rungs
+
         tmp_path = sidecar_path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.rename(sidecar_path)
@@ -7046,6 +7476,24 @@ class UnifiedPipeline:
             # silently re-clamps a table whose contradictions were
             # already disproved.
             self._apply_binding_adjudication_meta(state, page_num, meta)
+
+            # P1: the sidecar was written by a run whose table judge ladder
+            # encountered transient rung unavailability. When a rung is attemptable
+            # NOW, refuse the skip so the page is re-judged. When rungs remain
+            # unavailable, do not force reprocessing here: permit an otherwise-valid
+            # D1b REJECTED restore (which carries the latch forward in
+            # _restore_terminal_page_state), while UNVERIFIED pages will fall through
+            # to reprocess via the audit/status gate below.
+            if meta.get("table_judge_retry_pending") is True:
+                sidecar_rungs = meta.get("table_judge_retry_rungs")
+                if self._table_judge_rung_available_now(
+                    [str(k) for k in sidecar_rungs] if isinstance(sidecar_rungs, list) else []
+                ):
+                    logger.debug(
+                        "PP-5: p%d not resumed; table judge rung was unavailable, reachable now",
+                        page_num,
+                    )
+                    return None
 
             # GH-353 TICKET-D1b: the table judge ladder's REJECTED terminal is a
             # DELIBERATE exception to "doubt reprocesses" -- a REJECTED verdict is
@@ -7430,6 +7878,12 @@ class UnifiedPipeline:
             # while STILL offline keeps saying so and is re-read on the first
             # run that has a provider.
             ps.equation_lane_retry_pending = bool(meta.get("equation_lane_retry_pending", False))
+            # P1: restore table retry latch (sparse key defaults to False when omitted).
+            ps.table_judge_retry_pending = bool(meta.get("table_judge_retry_pending", False))
+            restored_rungs = meta.get("table_judge_retry_rungs")
+            ps.table_judge_retry_rungs = (
+                [str(k) for k in restored_rungs] if isinstance(restored_rungs, list) else []
+            )
             ps.judge_rejected = bool(meta.get("judge_rejected", False))
             # MAJOR 7(b): restore the S1 resume-idempotency flag so
             # ``_reaches_structure_class_branch`` can re-derive the bucket
@@ -8758,9 +9212,41 @@ class UnifiedPipeline:
             #
             # Fail-closed: if that save raises, NOTHING is recorded, the outer
             # handler logs it, and the next run reprocesses the document.
-            index_meta = meta
+            pending: dict = {}
             if any(getattr(p, "equation_lane_retry_pending", False) for p in state.pages.values()):
-                index_meta = _EquationRetryMetadata(meta)
+                pending["equation_lane_retry_pending"] = True
+            if any(getattr(p, "table_judge_retry_pending", False) for p in state.pages.values()):
+                pending["table_judge_retry_pending"] = True
+                # Cold review round 3, finding 1: the UNION of the rung kinds
+                # every latched page is waiting on. The document is worth
+                # reopening as soon as any one of them is back.
+                #
+                # Cold review round 4, new finding 1: UNKNOWN is the top element
+                # of that union, not the empty set. A latched page restored from
+                # a record written before this field existed carries no kinds and
+                # means "some rung, we cannot say which". Unioning it as nothing
+                # narrowed the document to the kinds the OTHER pages happened to
+                # name, and a recovery of the unnamed rung was then missed
+                # forever. If any latched page is unknown, the document is
+                # unknown: the key is omitted, and the gate widens to any rung.
+                latched_pages = [
+                    p
+                    for p in state.pages.values()
+                    if getattr(p, "table_judge_retry_pending", False)
+                ]
+                any_unknown = any(
+                    not (getattr(p, "table_judge_retry_rungs", []) or []) for p in latched_pages
+                )
+                doc_rungs = sorted(
+                    {
+                        kind
+                        for p in latched_pages
+                        for kind in (getattr(p, "table_judge_retry_rungs", []) or [])
+                    }
+                )
+                if doc_rungs and not any_unknown:
+                    pending["table_judge_retry_rungs"] = doc_rungs
+            index_meta = _LatchedDocMetadata(meta, pending) if pending else meta
             RootIndex(output_dir).record(rel_key, index_meta)
         except Exception as exc:  # never lose output over a metadata write
             logger.warning("metadata write failed (non-fatal): %s", exc)

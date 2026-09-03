@@ -110,7 +110,12 @@ def _multi_rung_state(tmp_path: Path):
 class TestMultiRungSpendSurvivesTwoResumes:
     def test_live_first_resume_and_second_resume_all_agree(self, tmp_path: Path) -> None:
         state, ps, bo = _multi_rung_state(tmp_path / "live")
-        config = PipelineConfig(quiet=True, judge_backend="heuristic", reprocess=True)
+        config = PipelineConfig(
+            quiet=True,
+            judge_backend="heuristic",
+            reprocess=True,
+            table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+        )
         pipeline = UnifiedPipeline(config)
         pipeline._rejudge_crop_patched_page(state, 1, ps, bo, "old", _Accept(), PROFILE_MISTRAL)
         live_cost = state.total_cost
@@ -155,7 +160,13 @@ class TestMultiRungSpendSurvivesTwoResumes:
         inflate the live total, which sums ``engine_runs`` alone."""
         state, ps, bo = _multi_rung_state(tmp_path / "nodouble")
         route_cost = PROFILE_GEMINI.cost_per_page_usd + PROFILE_MISTRAL.cost_per_page_usd
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True, reprocess=True))
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                reprocess=True,
+                table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+            )
+        )
         pipeline._rejudge_crop_patched_page(state, 1, ps, bo, "old", _Accept(), PROFILE_MISTRAL)
         assert state.total_cost == route_cost + PROFILE_GEMINI.cost_per_page_usd
 
@@ -183,7 +194,12 @@ class TestRejectedEscalationSpendIsRecorded:
         ps.attempts.append(incumbent)
         ps.best_output = incumbent
 
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True))
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+            )
+        )
 
         def _run_provider(profile, page_num):
             # Measures no better than the incumbent, so decide_escalation refuses
@@ -228,7 +244,12 @@ class TestRejectedEscalationSpendIsRecorded:
 class TestOldSidecarUpgradesToAFact:
     def test_missing_field_falls_back_then_is_written_back(self, tmp_path: Path) -> None:
         state, ps, bo = _multi_rung_state(tmp_path / "old")
-        config = PipelineConfig(quiet=True, judge_backend="heuristic", reprocess=True)
+        config = PipelineConfig(
+            quiet=True,
+            judge_backend="heuristic",
+            reprocess=True,
+            table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+        )
         pipeline = UnifiedPipeline(config)
         out_dir = tmp_path / "out"
         with patch.object(pipeline, "_resolve_judge_model", return_value=None):

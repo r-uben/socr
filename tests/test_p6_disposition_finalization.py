@@ -384,6 +384,8 @@ def test_final_body_table_validation_replaces_post_transform_page_all_surfaces_a
             quiet=True,
             enabled_engines=[EngineType.GEMINI],
             primary_engine=EngineType.GEMINI,
+            # docs/log/2026-09-03_p1-prep-latch-and-audit.md (cold review round 1)
+            table_judge_ladder=False,
         )
     )
     pipeline._scan_root = pdf_path.parent

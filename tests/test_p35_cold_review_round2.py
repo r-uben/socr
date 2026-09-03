@@ -124,7 +124,7 @@ def _run_pipeline(
         native_first=True,
         dual_pass_tables=dual_pass_tables,
         escalate_ambiguous_tables=escalate_ambiguous_tables,
-        table_judge_ladder=False,
+        table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
     )
     pipeline = UnifiedPipeline(config)
 
@@ -275,7 +275,13 @@ class TestPostVerdictHelpersAreSubtractive:
     def test_image_ref_sanitizer_only_removes_tokens(self, tmp_path: Path) -> None:
         from socr.core.state import DocumentState
 
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True, save_figures=False))
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                save_figures=False,
+                table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+            )
+        )
         state = MagicMock(spec=DocumentState)
         state.events = []
         state.pages = {}

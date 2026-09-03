@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import fitz
+import httpx
 import pytest
 
 from socr.core.audit_log import AuditEvent
@@ -519,6 +520,337 @@ class TestLadderOutcomes:
         assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
         assert _events_of_kind(state, TABLE_LADDER_REJECTED_KIND)
         assert _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
+
+
+# ---------------------------------------------------------------------------
+# P1 prep item 1 — the rung-unavailable retry latch, derived at the gate
+# BEFORE any mechanical-binding clamp (docs/log/2026-09-02_gh359-ladder-
+# terminals-design.md, "Panel and synthesis"; PR #518's
+# ``equation_lane_retry_pending`` is the shape to reuse).
+#
+# The latch is causal, not merely "an unavailable rung occurred somewhere
+# in the trail": it fires only when the terminal actually is UNVERIFIED
+# *because* the missing answer prevented resolution. A REJECTED terminal (a
+# real FAIL is on record) or an ACCEPTED terminal (a real high PASS is on
+# record) is a content verdict the retry latch must leave alone, even when
+# an earlier rung in the same table's trail was unavailable.
+#
+# Contract these tests hold the gate to:
+#   * ``PageState.table_judge_retry_pending: bool = False``
+#   * ``_run_table_judge_gate`` sets it True per the causal table below,
+#     using each ``RungResult.unavailable`` bit from the rung split.
+#   * a rung callable that raises latches ONLY when the exception is an
+#     availability shape (``is_availability_exception``); a programming error
+#     ends the table UNVERIFIED without latching (cold review round 2).
+# ---------------------------------------------------------------------------
+
+
+def _unavailable_rung_result(rung: str = "fake") -> RungResult:
+    return RungResult(rung=rung, ok=False, error="simulated transport failure", unavailable=True)
+
+
+def _content_not_s1_rung_result(rung: str = "fake") -> RungResult:
+    """¬S1 that is NOT rung-unavailable (e.g. a parse failure) -- content-shaped."""
+    return RungResult(rung=rung, ok=False, error="no JSON object found", unavailable=False)
+
+
+class TestRetryLatchCausalClassification:
+    def test_unavailable_then_fail_rejects_and_does_not_latch(self, tmp_path: Path) -> None:
+        """C-then-B: rung 1 unavailable, rung 2 FAILs -> REJECTED, no latch.
+
+        A real content verdict is on record; the missing rung-1 answer did
+        not prevent resolution, so retrying buys nothing.
+        """
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        rungs = [
+            _QueueRung([_unavailable_rung_result("fake1")], rung_id="fake1"),
+            _QueueRung(
+                [RungResult(rung="fake2", ok=True, verdict=_fail_verdict())], rung_id="fake2"
+            ),
+        ]
+        pipeline._run_table_judge_gate(state, 1, ps, bo, rungs)
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
+        assert ps.table_judge_retry_pending is False
+
+    def test_unavailable_then_high_pass_accepts_and_does_not_latch(self, tmp_path: Path) -> None:
+        """C-then-high-PASS: rung 1 unavailable, rung 2 PASSes high -> ACCEPTED, no latch."""
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        rungs = [
+            _QueueRung([_unavailable_rung_result("fake1")], rung_id="fake1"),
+            _QueueRung(
+                [RungResult(rung="fake2", ok=True, verdict=_pass_verdict("high"))], rung_id="fake2"
+            ),
+        ]
+        pipeline._run_table_judge_gate(state, 1, ps, bo, rungs)
+
+        assert ps.table_ladder_disposition is None
+        assert ps.table_judge_retry_pending is False
+
+    def test_unavailable_then_low_pass_is_unverified_and_latches(self, tmp_path: Path) -> None:
+        """C-then-low-PASS: no quorum, exhausts UNVERIFIED -- the missing
+        rung-1 answer is exactly why resolution failed. Latch."""
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        rungs = [
+            _QueueRung([_unavailable_rung_result("fake1")], rung_id="fake1"),
+            _QueueRung(
+                [RungResult(rung="fake2", ok=True, verdict=_pass_verdict("low"))], rung_id="fake2"
+            ),
+        ]
+        pipeline._run_table_judge_gate(state, 1, ps, bo, rungs)
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert ps.table_judge_retry_pending is True
+
+    def test_fail_then_unavailable_is_unverified_and_latches(self, tmp_path: Path) -> None:
+        """B-then-C: rung 1 FAILs, rung 2 (the tiebreak) never answers.
+
+        The stronger judge never voted; the missing answer is why the ladder
+        could not resolve. Latch."""
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        rungs = [
+            _QueueRung(
+                [RungResult(rung="fake1", ok=True, verdict=_fail_verdict())], rung_id="fake1"
+            ),
+            _QueueRung([_unavailable_rung_result("fake2")], rung_id="fake2"),
+        ]
+        pipeline._run_table_judge_gate(state, 1, ps, bo, rungs)
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert ps.table_judge_retry_pending is True
+
+    def test_unavailable_then_unavailable_latches(self, tmp_path: Path) -> None:
+        """C-then-C: neither rung ever answered. Latch."""
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        rungs = [
+            _QueueRung([_unavailable_rung_result("fake1")], rung_id="fake1"),
+            _QueueRung([_unavailable_rung_result("fake2")], rung_id="fake2"),
+        ]
+        pipeline._run_table_judge_gate(state, 1, ps, bo, rungs)
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert ps.table_judge_retry_pending is True
+
+    @pytest.mark.parametrize(
+        "exc,latches",
+        [
+            # Transport shapes: the rung could not be reached. Retry when it returns.
+            (ConnectionError("connection refused"), True),
+            (TimeoutError("read timed out"), True),
+            (httpx.ConnectError("no route to host"), True),
+            # Software defects: deterministic, and retrying only reproduces them.
+            (TypeError("unsupported operand"), False),
+            (AssertionError("invariant broken"), False),
+            (KeyError("verdict"), False),
+            (ValueError("bad literal"), False),
+            (RuntimeError("rung process crashed"), False),
+        ],
+        ids=lambda v: type(v).__name__ if isinstance(v, BaseException) else str(v),
+    )
+    def test_only_availability_exceptions_latch(
+        self, tmp_path: Path, exc: BaseException, latches: bool
+    ) -> None:
+        """Cold review round 2, finding 2. A rung is contractually non-raising,
+        so ANY exception escaping one is unexpected -- but unavailability is a
+        TYPED classification, not "something went wrong". A transport failure
+        latches; a programming error must not, or every resume re-runs the
+        ladder to reproduce the same crash forever.
+
+        The terminal is UNVERIFIED either way: the classification decides
+        whether it is worth retrying, never whether the table is trusted."""
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        def _raising_rung(crop_path, markdown, prior_findings):
+            raise exc
+
+        pipeline._run_table_judge_gate(state, 1, ps, bo, [_raising_rung])
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert ps.table_judge_retry_pending is latches
+
+    def test_mixed_multi_table_rejected_plus_unavailable_still_latches(
+        self, tmp_path: Path
+    ) -> None:
+        """One table on the page REJECTS (content verdict); a second table on
+        the SAME page is unavailable and unresolved. The page-level reducer
+        gives REJECTED precedence for ``table_ladder_disposition`` (A4), but
+        the latch must still fire, or the second table's unresolved status
+        never gets retried once the missing rung comes back (D1b would skip
+        the whole page forever via the REJECTED resume exception)."""
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        from socr.tables.witness import TableWitness, WitnessScope, WitnessStatus
+
+        crop_path = tmp_path / "crop.png"
+        crop_path.write_bytes(b"fake-png")
+        witnesses = [
+            TableWitness(
+                table_id="p1-t0",
+                page_num=1,
+                block_index=0,
+                markdown=_TABLE_MD,
+                status=WitnessStatus.LOCATED,
+                crop_path=crop_path,
+                scope=WitnessScope.LOCATED,
+            ),
+            TableWitness(
+                table_id="p1-t1",
+                page_num=1,
+                block_index=1,
+                markdown=_TABLE_MD,
+                status=WitnessStatus.LOCATED,
+                crop_path=crop_path,
+                scope=WitnessScope.LOCATED,
+            ),
+        ]
+
+        class _Ctx:
+            def __enter__(self):
+                return witnesses
+
+            def __exit__(self, *a):
+                return False
+
+        # Table 0 -> REJECTED (single FAIL rung). Table 1 -> unavailable,
+        # unresolved. _QueueRung is consumed in call order across BOTH
+        # tables' ladder runs, so queue table 0's then table 1's result.
+        rung = _QueueRung(
+            [
+                RungResult(rung="fake", ok=True, verdict=_fail_verdict()),
+                _unavailable_rung_result("fake"),
+            ]
+        )
+        with patch("socr.tables.witness.prepare_table_witnesses", return_value=_Ctx()):
+            pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
+        assert ps.table_judge_retry_pending is True, (
+            "a mixed page (one REJECTED table, one unavailable/unresolved table) "
+            "must still latch -- otherwise the unresolved table is never re-judged"
+        )
+
+
+class TestRetryLatchNonLatchingControls:
+    """Every shape that must NOT set the latch -- content refusals, parse
+    failures, missing witnesses, and configured-off/strict_local empty rung
+    lists, all of which the run fingerprint already describes or which are
+    real content verdicts, not rung outages."""
+
+    def test_fail_fail_content_rejection_does_not_latch(self, tmp_path: Path) -> None:
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        pipeline._run_table_judge_gate(state, 1, ps, bo, [_reject_rung()])
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
+        assert ps.table_judge_retry_pending is False
+
+    def test_low_low_content_uncertainty_without_unavailable_rung_does_not_latch(
+        self, tmp_path: Path
+    ) -> None:
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        rungs = [
+            _QueueRung(
+                [RungResult(rung="fake1", ok=True, verdict=_pass_verdict("low"))], rung_id="fake1"
+            ),
+            _QueueRung(
+                [RungResult(rung="fake2", ok=True, verdict=_pass_verdict("low"))], rung_id="fake2"
+            ),
+        ]
+        pipeline._run_table_judge_gate(state, 1, ps, bo, rungs)
+
+        assert ps.table_ladder_disposition is None  # ruling 1 quorum: accepted
+        assert ps.table_judge_retry_pending is False
+
+    def test_content_not_s1_parse_failure_does_not_latch(self, tmp_path: Path) -> None:
+        """A ¬S1 that is NOT rung-unavailable (malformed/garbage answer)."""
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        rung = _QueueRung([_content_not_s1_rung_result("fake1")], rung_id="fake1")
+        pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert ps.table_judge_retry_pending is False, (
+            "a parse/schema failure is content-shaped -- retrying immediately "
+            "hits the same junk, so it must not latch"
+        )
+
+    def test_missing_witness_does_not_latch(self, tmp_path: Path) -> None:
+        pipeline = _make_pipeline()
+        pdf_path = _borderless_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        pipeline._run_table_judge_gate(state, 1, ps, bo, [_accept_rung()])
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert ps.table_judge_retry_pending is False
+
+    def test_empty_rung_list_configured_off_does_not_latch(self, tmp_path: Path) -> None:
+        """rungs=[] (flag off / strict_local) is the fingerprint's own signal,
+        not transient unavailability -- toggling the flag already reprocesses
+        via the fingerprint, so this must not also set the latch."""
+        pipeline = _make_pipeline()
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_TABLE_MD)
+
+        pipeline._run_table_judge_gate(state, 1, ps, bo, [])
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert ps.table_judge_retry_pending is False
+
+    def test_default_page_state_has_no_latch(self, tmp_path: Path) -> None:
+        pdf_path = _ruled_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        assert state.pages[1].table_judge_retry_pending is False
 
 
 # ---------------------------------------------------------------------------

@@ -128,7 +128,7 @@ def _run_pipeline(tmp_path: Path):
         native_first=True,
         dual_pass_tables=False,
         escalate_ambiguous_tables=False,
-        table_judge_ladder=False,
+        table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
     )
     pipeline = UnifiedPipeline(config)
 

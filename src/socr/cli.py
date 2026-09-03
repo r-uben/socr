@@ -562,6 +562,35 @@ def build_config(
     return config
 
 
+def _report_strict_local_ladder_diagnostic(config: PipelineConfig) -> None:
+    """Report startup diagnostic when strict_local and table_judge_ladder are both active.
+
+    When table_judge_ladder and strict_local are both true, both table-judge
+    rungs are cloud services (ollama-cloud, gemini CLI). Under strict_local,
+    neither rung can be reached, so every table page will be demoted to
+    TABLE_UNVERIFIED and documents containing table pages cannot finish cleanly
+    (table-free documents can still finish cleanly). Dropping either flag is the
+    opt-out.
+
+    Cold review round 1, finding 3: ``--dry-run`` is checked HERE rather than
+    at each call site. ``process`` returns at its own dry-run gate before
+    reaching this helper, but ``batch`` defers dry-run to ``process_batch``, so
+    a call-site-only rule made the two commands disagree -- ``socr batch
+    --dry-run --strict-local --table-judge-ladder`` printed a startup warning
+    about a run it was never going to start.
+    """
+    if config.dry_run:
+        return
+    if config.table_judge_ladder and config.strict_local and not config.quiet:
+        console.print(
+            "[yellow]Notice:[/yellow] --table-judge-ladder and --strict-local are both enabled. "
+            "Both table-judge rungs are cloud services, so every table page will be "
+            "TABLE_UNVERIFIED and documents containing table pages cannot finish cleanly "
+            "(table-free documents can still finish cleanly). "
+            "To resolve, drop either flag (--strict-local or --table-judge-ladder)."
+        )
+
+
 # --- Commands ---
 
 
@@ -692,6 +721,7 @@ def process(
         # --unified is kept as a backwards-compatible no-op.
         from socr.pipeline.orchestrator import UnifiedPipeline
 
+        _report_strict_local_ladder_diagnostic(config)
         pipeline = UnifiedPipeline(config)
 
     try:
@@ -791,6 +821,7 @@ def batch(
     # --unified is a no-op kept for backwards compatibility.
     from socr.pipeline.orchestrator import UnifiedPipeline
 
+    _report_strict_local_ladder_diagnostic(config)
     pipeline = UnifiedPipeline(config)
 
     # Handle --limit by pre-filtering

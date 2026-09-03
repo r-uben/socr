@@ -54,17 +54,28 @@ this.
 
 from __future__ import annotations
 
+import logging
+import shutil
 import subprocess
 import time
 from pathlib import Path
 
 from socr.core.config import PipelineConfig
 from socr.judge.table_prompt import build_table_judge_prompt
-from socr.judge.table_verdict import Finding, RungResult, rung_result_from_output
+from socr.judge.table_verdict import (
+    RUNG_KIND_GEMINI,
+    Finding,
+    RungResult,
+    classify_spawn_oserror,
+    output_reads_as_refusal,
+    rung_result_from_output,
+)
 
 #: Rung identifier recorded on every `RungResult` this module produces —
 #: names the judge model FAMILY (gemini), not the literal binary (`agy`).
-RUNG_ID = "gemini"
+RUNG_ID = RUNG_KIND_GEMINI
+
+logger = logging.getLogger(__name__)
 
 #: Bytes of stderr kept in the error message on a non-zero exit — enough for
 #: a human to see the cause in the audit trail without unbounded growth.
@@ -88,6 +99,59 @@ def _run_gemini_cli(
         timeout=timeout_sec,
         check=False,
         cwd=cwd,
+    )
+
+
+#: Cold review round 2, finding 1. The health handshake: the cheapest
+#: invocation that proves the CLI itself runs, with no model call, no prompt
+#: and no quota spend. Both ``gemini`` and ``agy`` accept it.
+_HEALTH_ARGV_TAIL = ("--version",)
+
+#: Bounded separately from the judge timeout: this is a version print, and a
+#: resume gate must not block on it.
+_HEALTH_TIMEOUT_SEC = 10.0
+
+
+def gemini_rung_reachable(binary: str, timeout: float = _HEALTH_TIMEOUT_SEC) -> bool:
+    """Whether rung 2 could be attempted right now: installed AND it runs.
+
+    Cold review round 2, finding 1. ``shutil.which`` alone was the resume
+    gate's whole test, and it answers True for a CLI that is present but
+    broken -- unconfigured, half-installed, or shadowed by something that is
+    not the CLI at all. The gate then refuses the document skip, the ladder
+    runs, the rung fails the same way it failed last time, and the latch is
+    re-set: an outage that never ends re-pays the full ladder on every resume.
+
+    So reachability is: on PATH, AND a trivial no-model invocation succeeds.
+    This makes no model call and spends no quota, which also bounds what it
+    can see -- a CLI whose credentials or quota are exhausted still prints its
+    version. That residue is deliberate and is the ONE retry per resume the
+    latch is for; what this closes is the CLI that will never work at all.
+    """
+    if shutil.which(binary) is None:
+        return False
+    try:
+        completed = _run_health_check([binary, *_HEALTH_ARGV_TAIL], timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("table judge rung 2 health check for %r failed: %s", binary, exc)
+        return False
+    return completed.returncode == 0
+
+
+def _run_health_check(argv: list[str], timeout_sec: float) -> subprocess.CompletedProcess[str]:
+    """Module-local subprocess seam for the health handshake.
+
+    Separate from ``_run_gemini_cli``: that one is pinned to the crop's
+    scratch directory so the judge call cannot read ambient repo context,
+    while this one takes no input at all and needs no workspace. Tests patch
+    THIS function, so the reachability rule is exercised without a real CLI.
+    """
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
+        check=False,
     )
 
 
@@ -149,6 +213,7 @@ def judge_table_gemini(
             ok=False,
             latency_sec=time.monotonic() - start,
             error=f"gemini rung binary {binary!r} not found: {exc}",
+            unavailable=True,
         )
     except subprocess.TimeoutExpired:
         return RungResult(
@@ -156,23 +221,45 @@ def judge_table_gemini(
             ok=False,
             latency_sec=time.monotonic() - start,
             error=f"gemini rung ({binary}) timed out after {timeout_sec}s",
+            unavailable=True,
         )
     except OSError as exc:
+        # Cold review round 3: for the remaining spawn errors the ERRNO decides.
+        # ENOEXEC/EACCES/EPERM describe the ENVIRONMENT -- rebuild or chmod the
+        # binary and the identical call works, so they are outages, like the
+        # missing-binary case above. Every other errno describes THIS call:
+        # E2BIG (an argv the kernel will not accept, which an oversized prompt
+        # produces) is reproduced exactly by every retry, so it must not latch.
         return RungResult(
             rung=RUNG_ID,
             ok=False,
             latency_sec=time.monotonic() - start,
             error=f"gemini rung ({binary}) transport error: {exc}",
+            unavailable=classify_spawn_oserror(exc),
         )
     latency_sec = time.monotonic() - start
 
     if completed.returncode != 0:
+        # Cold review rounds 2 and 3: a nonzero exit is not automatically an
+        # outage. It is one when the CLI names an external refusal, or when the
+        # CLI itself cannot be reached at all. A usage or configuration error
+        # is deterministic: it ends the table UNVERIFIED without latching, so
+        # resume does not repeat it forever.
+        #
+        # Classification reads the FULL captured output, both streams. The
+        # 500-char excerpt below is the audit trail's, and using it to classify
+        # discarded any refusal printed past that cutoff -- a false negative
+        # that settles the table permanently.
+        refusal = output_reads_as_refusal(completed.stderr or "", completed.stdout or "")
+        unavailable = refusal or not gemini_rung_reachable(binary)
         stderr_tail = (completed.stderr or "")[:_STDERR_ERROR_CHARS]
         return RungResult(
             rung=RUNG_ID,
             ok=False,
             latency_sec=latency_sec,
             error=f"gemini rung ({binary}) exited {completed.returncode}: {stderr_tail}",
+            unavailable=unavailable,
+            refusal=refusal,
         )
 
     return rung_result_from_output(RUNG_ID, completed.stdout, latency_sec)
@@ -192,4 +279,11 @@ def make_gemini_rung(config: PipelineConfig):
     ) -> RungResult:
         return judge_table_gemini(crop_path, markdown, prior_findings, config)
 
+    # Cold review round 5: see the matching note in ``table_rung_ollama``. The
+    # executing identity is the BINARY, which is what this rung actually
+    # controls -- ``agy`` has no per-call model selector, so the model is
+    # unconfirmed and must not be claimed here.
+    _rung.rung_kind = RUNG_KIND_GEMINI
+    _rung.rung_id = RUNG_ID
+    _rung.executing = config.table_judge_rung2_binary
     return _rung

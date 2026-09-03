@@ -181,7 +181,10 @@ class _ScriptedRung:
 # ---------------------------------------------------------------------------
 
 
-def _make_config(**overrides) -> PipelineConfig:
+def _make_config(
+    table_judge_ladder: bool = False,
+    **overrides,
+) -> PipelineConfig:
     kwargs = dict(
         primary_engine=EngineType.QWEN,
         agentic=True,
@@ -190,10 +193,12 @@ def _make_config(**overrides) -> PipelineConfig:
         quiet=True,
         save_figures=False,
         write_manifest=False,
-        table_judge_ladder=True,
     )
     kwargs.update(overrides)
-    return PipelineConfig(**kwargs)
+    return PipelineConfig(
+        table_judge_ladder=table_judge_ladder,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+        **kwargs,
+    )
 
 
 def _route_page_per_page(text_by_page: dict[int, str]):
