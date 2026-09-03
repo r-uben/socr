@@ -203,6 +203,14 @@ class PageState:
     #: latch are all untouched. In-run state: the durable record is the audit
     #: event, which carries ``witness_scope`` and ``rung_trail`` of its own.
     table_unverified_unwitnessed: bool = False
+    #: GH-560 (cubic P2): the other half. True when at least one UNVERIFIED
+    #: table on this page ended for a reason a later run genuinely can repair
+    #: -- a rung outage, or a binding contradiction whose acceptance was
+    #: withheld. A page can carry BOTH flags: one table with no witness beside
+    #: one whose rung was down. Reporting only the first would tell an operator
+    #: not to bother re-running a page half of which a re-run would fix, which
+    #: is the same lie #560 is about, pointing the other way.
+    table_unverified_retryable: bool = False
     #: GH-367: per-table_id record of the last binding-contradiction
     #: adjudication on this page (``{"status": "lifted"|"held", ...}``).
     #: Restored from the sidecar so a resumed run does not silently

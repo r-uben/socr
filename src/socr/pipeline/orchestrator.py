@@ -3398,7 +3398,19 @@ class UnifiedPipeline:
         unwitnessed = sorted(
             n for n in unverified if getattr(state.pages[n], "table_unverified_unwitnessed", False)
         )
-        retryable = [n for n in unverified if n not in set(unwitnessed)]
+        # A page appears in BOTH lists when it holds both kinds of terminal
+        # (cubic P2 on #562): one table with no witness beside one whose rung
+        # was down. Reporting only the first would tell an operator not to
+        # bother re-running a page half of which a re-run repairs -- the same
+        # lie #560 is about, pointing the other way. A page carrying neither
+        # flag (a disposition restored from a sidecar, say) keeps the retryable
+        # wording, which is what it said before this change.
+        retryable = [
+            n
+            for n in unverified
+            if getattr(state.pages[n], "table_unverified_retryable", False)
+            or not getattr(state.pages[n], "table_unverified_unwitnessed", False)
+        ]
         if retryable:
             parts.append(
                 f"page(s) {', '.join(str(n) for n in retryable)}: "
@@ -4609,8 +4621,11 @@ class UnifiedPipeline:
                     },
                 )
             )
-            if unwitnessed:
-                ps.table_unverified_unwitnessed = True
+            if kind == TABLE_LADDER_UNVERIFIED_KIND:
+                if unwitnessed:
+                    ps.table_unverified_unwitnessed = True
+                else:
+                    ps.table_unverified_retryable = True
 
         page_result = reduce_page_ladder(table_results)
         if page_result.outcome is TableLadderOutcome.REJECTED:
@@ -8875,7 +8890,12 @@ class UnifiedPipeline:
                         for n in table_unverified_pages
                         if getattr(state.pages[n], "table_unverified_unwitnessed", False)
                     ]
-                    _retryable = [n for n in table_unverified_pages if n not in set(_unwitnessed)]
+                    _retryable = [
+                        n
+                        for n in table_unverified_pages
+                        if getattr(state.pages[n], "table_unverified_retryable", False)
+                        or not getattr(state.pages[n], "table_unverified_unwitnessed", False)
+                    ]
                     if _retryable:
                         console.print(
                             f"  [yellow]{len(_retryable)} table page(s) could not be "

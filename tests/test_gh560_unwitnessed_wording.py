@@ -170,6 +170,36 @@ def test_the_document_note_separates_the_two(tmp_path: Path) -> None:
     )
 
 
+def test_a_page_holding_both_kinds_reports_both(tmp_path: Path) -> None:
+    """cubic P2 on #562. A page can hold an unwitnessed table beside one whose
+    rung was down. A page-level flag that reported only the first would tell an
+    operator not to bother re-running a page half of which a re-run repairs --
+    the same lie #560 is about, pointing the other way.
+
+    The page is in BOTH lists, because both sentences are true of it.
+    """
+    pipeline = _pipeline()
+    state = _run(_borderless_pdf(tmp_path / "mb"), [])
+    ps = state.pages[1]
+    assert ps.table_unverified_unwitnessed is True
+    assert ps.table_unverified_retryable is False, (
+        "the borderless fixture already produced a retryable terminal, so "
+        "setting the flag below would not be adding the second kind"
+    )
+    # The second table on the same page: located, and its rung was unavailable.
+    ps.table_unverified_retryable = True
+
+    note = pipeline._table_judge_ladder_note(state)
+    assert note is not None
+    assert "no table witness could be prepared" in note, (
+        f"the unwitnessed half vanished from the note: {note}"
+    )
+    assert "retryable on resume" in note, f"the retryable half vanished from the note: {note}"
+    assert note.count("page(s) 1") == 2, (
+        f"page 1 holds both kinds and must appear in both sentences: {note}"
+    )
+
+
 def test_the_disposition_and_the_latch_are_untouched(tmp_path: Path) -> None:
     """#560 asks for wording only. If this fix moved the page out of
     TABLE_UNVERIFIED, or started latching a no-witness terminal, it would be
