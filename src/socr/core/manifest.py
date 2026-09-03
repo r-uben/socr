@@ -852,38 +852,78 @@ def structure_class_floor_applies(p) -> bool:
 
 
 def structure_class_floor_text(p, page_num: int) -> str:
-    """P2 / GH-317: fail-closed text representation for an exhausted structure-class page.
+    """P2 / GH-317 / GH-520: fail-closed text for an exhausted structure-class page.
 
-    The WHOLE page becomes the standard unverifiable-table marker plus the
-    existing ``d3_floor_png_ref``. No regional splice, and therefore no native
-    prose: on this ending nothing on the page can be proven to be outside a
-    table region.
+    Every table on the page becomes the standard unverifiable-table marker plus
+    the ``d3_floor_png_ref``. The page's prose survives ONLY when the page's
+    tables can be enumerated independently of the parser that produced them;
+    otherwise the whole page becomes the marker and no native byte ships.
 
-    Cold review rounds 1 and 2, finding 1. Round 1 shipped a regional splice
-    via ``splice_all_table_regions``, which proves only that it replaced every
-    block ITS OWN PARSER could find -- so a page with two detected tables where
-    reconstruction emitted one as valid GFM and collapsed the other to ragged
-    lines replaced the parseable one and shipped the collapsed one. Round 1's
-    fix required coverage against ``native_table_region_count`` /
-    ``native_table_region_identities``, which does NOT close it: those are
-    recorded by ``_verify_regions`` (born_digital.py:2186-2217) counting only
-    separator-bearing regions of ``table_regions``, and ``table_regions`` is
-    itself built only from SUCCESSFUL reconstructions (born_digital.py:1939-2003).
-    A sibling that failed reconstruction is absent from the count, so the check
-    agrees with the very parser it is meant to audit and passes.
+    Why the guard is what it is
+    ---------------------------
+    Cold review rounds 1 and 2, finding 1. Round 1 shipped a regional splice via
+    ``splice_all_table_regions``, which proves only that it replaced every block
+    ITS OWN PARSER could find -- so a page with two detected tables, one emitted
+    as valid GFM and the other collapsed to ragged lines, replaced the parseable
+    one and shipped the collapsed one inside text labelled "preserved prose".
+    Round 1's fix required coverage against ``native_table_region_count`` /
+    ``native_table_region_identities``, which does not close it: those are
+    recorded by ``_verify_regions`` over ``table_regions``, and ``table_regions``
+    is built only from SUCCESSFUL reconstructions. A sibling that failed
+    reconstruction is absent from the count, so the check agrees with the very
+    parser it is meant to audit.
 
-    Splicing safely needs an INDEPENDENT, detection-level region count recorded
-    BEFORE reconstruction. No such signal exists today: ``_detect_tables``
-    (born_digital.py:1766-1804) reduces ``page.find_tables()`` to a bool and
-    discards the count, and no ``PageAssessment``/``PageState`` field carries a
-    detection-level count or bbox list. Until one exists, a regional splice on
-    this ending cannot be justified, so it is gone. The cost -- native prose on
-    a floored page -- is recorded as a known limitation in
-    docs/log/2026-09-01_p2-structure-class-floor.md.
+    P2 therefore removed the splice entirely and accepted the cost -- the page's
+    prose -- as a known limitation, pending an independent signal.
+
+    GH-520 records that signal: ``detected_table_count`` / ``detected_table_bboxes``
+    come from ``find_tables()`` at detection time, before reconstruction runs, so
+    a table that failed to parse is still counted. The splice returns behind it.
+
+    What the guard requires, and what it does not claim
+    --------------------------------------------------
+    All three of these, or the whole page floors:
+
+    * at least one table was detected -- a zero count is no evidence, not a
+      licence (a borderless table seen only by the lane-cooccupancy pass
+      contributes no bbox and is not counted at all, so zero is common);
+    * every detected table has a usable bbox
+      (``count == len(bboxes)``) -- a table nobody can point at cannot be shown
+      to be covered;
+    * the parser found exactly that many blocks
+      (``len(find_table_blocks(text)) == count``).
+
+    The correspondence between block *i* and bbox *i* is by DOCUMENT ORDER, and
+    that is the honest description: a markdown block carries no geometry, so
+    nothing here verifies that block *i* is the text of bbox *i*. What the equal
+    counts do establish is the property round 1 lacked -- that no detected table
+    is missing from the parser's block list, so the collapsed sibling cannot be
+    the one left behind. ``splice_failed_table_regions`` replaces every block it
+    finds, so all of them are marked and none ships.
     """
     d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
     png_ref = getattr(p, "d3_floor_png_ref", "")
-    return f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+    whole_page = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+
+    native_text = getattr(p, "native_text", "") or ""
+    if not native_text.strip():
+        return whole_page
+
+    detected_count = getattr(p, "detected_table_count", 0)
+    detected_bboxes = getattr(p, "detected_table_bboxes", []) or []
+    if type(detected_count) is not int or detected_count <= 0:
+        return whole_page
+    if len(detected_bboxes) != detected_count:
+        return whole_page
+
+    from socr.tables.reconcile import find_table_blocks
+
+    blocks = find_table_blocks(native_text)
+    if len(blocks) != detected_count:
+        return whole_page
+
+    spliced = splice_all_table_regions(native_text, d3_marker, png_ref)
+    return spliced if spliced else whole_page
 
 
 class PageEnding(str, Enum):

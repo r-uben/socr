@@ -1412,13 +1412,21 @@ def test_mixed_validity_page_ships_neither_sibling(tmp_path: Path) -> None:
     ids=["clean-gfm", "mixed-validity", "collapsed-only", "no-table", "empty"],
 )
 def test_floor_text_is_independent_of_the_native_layer(tmp_path: Path, native_text: str) -> None:
-    """The property that replaces coverage: the floor cannot leak native bytes.
+    """The fail-closed DEFAULT: with no detection evidence, nothing native ships.
 
     Whatever the native layer holds -- a clean grid, a mixed-validity page, a
     collapsed region with no grid at all, or nothing -- the floor text is the
-    same two elements. Because the builder never reads ``native_text``, there
-    is no enumeration to get wrong and nothing for a future parser change to
-    invalidate. That is exactly what round 1's splice could not offer.
+    same two elements. That was P2's unconditional property, and GH-520 makes
+    it conditional: the splice returns for a page whose tables can be
+    enumerated independently of the parser (``detected_table_count`` /
+    ``detected_table_bboxes``, recorded before reconstruction by #570).
+
+    These fixtures carry no such signal, which is the case that must keep
+    behaving exactly as it did -- a page the detector could not enumerate is
+    still a page whose coverage is unprovable. The conditional half is pinned
+    in ``test_gh520_regional_floor_splice.py``, including the mixed-validity
+    reproducer WITH the signal, where the counts disagree and the page still
+    floors whole.
     """
     from socr.core.manifest import structure_class_floor_text
 
@@ -1444,6 +1452,11 @@ def test_region_metadata_cannot_reopen_the_splice(tmp_path: Path) -> None:
     parser, exactly as production does -- must no longer change the floor.
     Without this, a future change could quietly reinstate the circular check
     and every other test here would still pass.
+
+    Still true after GH-520 reopened the splice, and more load-bearing than
+    before: the splice now has a door, and this pins that the circular signal
+    is not a key to it. Its counterpart with the detection signal present is
+    ``test_the_parser_derived_count_still_cannot_reopen_the_splice``.
     """
     from socr.tables.reconcile import find_table_blocks, table_grid_identity
 

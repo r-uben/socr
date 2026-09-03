@@ -7606,6 +7606,23 @@ class UnifiedPipeline:
             "figure_refs": figure_refs,
         }
 
+        # GH-520: the detection-level signal the structure-class floor reads. It
+        # must survive a resume or a skipped page reaches a different floor
+        # verdict than the run that measured it (the GH-563 shape).
+        #
+        # Written ONLY when a table was detected, following the retry latch
+        # below: a page with no detected table is the overwhelming majority and
+        # restores the same safe zero from an absent key, so writing it would
+        # change the byte shape of nearly every sidecar in the corpus for no
+        # information -- which is what the P6 stage-C surface oracle exists to
+        # catch, and did.
+        _detected_count = int(getattr(ps, "detected_table_count", 0) or 0) if ps else 0
+        if _detected_count > 0:
+            payload["detected_table_count"] = _detected_count
+            payload["detected_table_bboxes"] = [
+                list(b) for b in (getattr(ps, "detected_table_bboxes", []) or [])
+            ]
+
         # P1: sparse table retry latch -- persisted ONLY when True so default-off
         # sidecars remain byte-identical and satisfy P6 disposition persistence contracts.
         if bool(getattr(ps, "table_judge_retry_pending", False)):
@@ -8135,6 +8152,27 @@ class UnifiedPipeline:
                 ps.native_table_region_identities = list(raw_idents)
             else:
                 ps.native_table_region_identities = []
+            raw_detected = meta.get("detected_table_count")
+            ps.detected_table_count = (
+                raw_detected if type(raw_detected) is int and raw_detected >= 0 else 0
+            )
+            raw_boxes = meta.get("detected_table_bboxes")
+            restored_boxes: list[tuple[float, float, float, float]] = []
+            if isinstance(raw_boxes, list):
+                for box in raw_boxes:
+                    if not isinstance(box, (list, tuple)) or len(box) != 4:
+                        # A malformed entry makes the whole list untrustworthy:
+                        # the floor guard reads len(bboxes), and a short list
+                        # silently becomes a mismatch that fails closed for the
+                        # wrong reason. Drop it all and restore the safe zero.
+                        restored_boxes = []
+                        break
+                    try:
+                        restored_boxes.append(tuple(float(v) for v in box))  # type: ignore[arg-type]
+                    except (TypeError, ValueError):
+                        restored_boxes = []
+                        break
+            ps.detected_table_bboxes = restored_boxes
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
             # P6 cold review round 2: carry run 1's published disposition forward
             # so a resumed re-flush reproduces the sidecar byte for byte. A

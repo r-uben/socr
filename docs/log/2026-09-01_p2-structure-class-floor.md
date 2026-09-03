@@ -328,6 +328,27 @@ signal the regional splice can return: allow it only when the number of parsed
 GFM blocks equals the detection-level count. That is a detector change and wants
 its own ticket.
 
+**Closed 2026-09-03 (GH-520).** `PageAssessment.detected_table_count` /
+`detected_table_bboxes` landed in #570, taken from `find_tables()` at detection
+time and pinned as independent of reconstruction. `structure_class_floor_text`
+splices again behind a three-part guard: at least one table detected, every
+detected table carrying a usable bbox, and the parser finding exactly that many
+blocks. Anything else floors whole, so the default in this document is still
+what a page without the signal gets.
+
+Two things the guard does NOT claim, stated here because the limitation above
+was believed for a day longer than it should have been:
+
+- The correspondence between block *i* and bbox *i* is by document order. A
+  markdown block carries no geometry, so nothing verifies that block *i* is the
+  text of bbox *i*. What equal counts establish is the property round 1 lacked
+  -- that no detected table is missing from the parser's block list, so the
+  collapsed sibling cannot be the one left behind.
+- A borderless table seen only by the lane-cooccupancy pass contributes no bbox
+  and is not counted at all, so `detected_table_count == 0` is common on
+  exactly the pages where the parser is least trustworthy. Zero is treated as
+  no evidence, never as "no tables to cover".
+
 ### Second-order consequence, pinned rather than papered over
 
 A document whose every page floors carries no text, so `_phase_assemble` writes
