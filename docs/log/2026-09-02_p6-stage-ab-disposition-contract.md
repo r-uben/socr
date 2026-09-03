@@ -255,12 +255,14 @@ now sits below the whole import block, asserted structurally: last top-level imp
   ADDED, not removed: `test_a_guard_rewritten_page_keeps_its_tag_derived_bucket` pins why
   these read the tag rather than the disposition, and
   `test_the_flag_derived_buckets_ignore_the_record_entirely` pins the inverse.
-* `tests/test_gh292_hybrid_bucket_matches_the_tag.py::test_the_orchestrator_bucket_itself_reads_the_tag`
-  — the AST pin now accepts a `CORRUPT_MATH_HYBRID` member of any tag vocabulary
-  (`SelectionProvenance`, `PagePrimaryReason`, `WinnerKind`) instead of `PagePrimaryReason`
-  alone. GH-292's actual demand — ask the manifest which ending selection took, never
-  re-derive it — is unchanged, and the assertion that forbids reading the `PageState` flag
-  back is untouched.
+* `tests/test_gh292_hybrid_bucket_matches_the_tag.py` — the AST pin accepts a
+  `CORRUPT_MATH_HYBRID` member of any tag vocabulary (`SelectionProvenance`,
+  `PagePrimaryReason`, `WinnerKind`) instead of `PagePrimaryReason` alone. GH-292's actual
+  demand — ask the manifest which ending selection took, never re-derive it — is unchanged,
+  and `test_the_orchestrator_bucket_does_not_re_derive_the_page_state_flag`, the assertion
+  that forbids reading the `PageState` flag back, is untouched. (Stage C then replaced this
+  file's behavioural pins with `TestTheOrchestratorBucketReadsTheShippedDisposition`, which
+  asks for the exact disposition pair; the AST pin above survived that rewrite.)
 * `tests/test_gh317_structure_class_floor.py` — four sites retargeted from
   `_final_winning_outputs` to `record=`. The assertions themselves are unchanged.
 * `tests/test_r7_winner_kind_tags.py`'s bijection pin is untouched by this round: 15 selector
@@ -347,18 +349,20 @@ reviewer's free-form timeout marker, plus a control that ordinary prose is untou
 
 **Reproduced: yes** (the emission-guard-rewritten hybrid still emits
 `corrupt_math_hybrid_shipped` and its CLI line). **Ruling applied as given: behaviour
-preservation wins in this stage.** The provenance derivation stays; what changed is that
-the compromise is now stated identically in all four places the ruling names — the
-helper's docstring in `orchestrator.py`, the bucket test module docstring, this log, and
-the design note's new §9:
+preservation won in stage B.** The provenance derivation stayed in stage B to preserve
+behaviour across the initial rollout, while documenting that the three selection-shaped
+buckets would migrate to exact shipped `PageDisposition` pairs in stage C.
 
-> provenance-derived in stage B to preserve behaviour; migrates to shipped disposition in
-> stage C, where the CLI change is intended and pinned.
-
-Nothing anywhere calls `SelectionProvenance` the public contract; the docstrings say
-explicitly that it is not, and that the public contract is `PageDisposition`.
-`test_a_guard_rewritten_page_keeps_its_tag_derived_bucket` is the assertion stage C
-inverts.
+**Landed Stage-C resolution:** Stage C (`docs/log/2026-09-03_p6-stage-c-shipped-buckets.md`)
+landed the migration of `structure_class_model_pages`, `structure_class_floor_pages`, and
+`corrupt_math_hybrid_pages` to exact public `PageDisposition` pair equality in
+`_derive_disposition_buckets`. `SelectionProvenance` is strictly internal and is never
+read for bucket membership. The inverted test is
+`tests/test_p6_disposition_buckets.py::test_a_guard_rewritten_hybrid_is_absent_from_migrated_buckets_but_keeps_flag_membership`
+(alongside `tests/test_p6_stage_c_bucket_contract.py::TestGuardRewrittenPagesUsingTheRealCorpus::test_rewritten_hybrid_page_is_absent_from_all_three_migrated_buckets`),
+which proves that guard-rewritten pages (`(FAIL_CLOSED_MARKER, INVALID_TABLE_EMISSION)`)
+are excluded from all three migrated buckets while genuine structure-class floors
+(`(FAIL_CLOSED_MARKER, STRUCTURE_CLASS)`) remain in `structure_class_floor_pages`.
 
 ### Finding 5 (blocking) — the flagged-model event lost the candidate's defect
 
@@ -407,8 +411,8 @@ work either.
   fields. Narrowed to the PDF hash nested inside it; the rest of the object is now
   compared.
 * `_events` dropped `AuditEvent.engine`, which the acceptance bar names. Added.
-* No regeneration command was checked in. Added
-  `tests/regenerate_p6_prechange.py`, which exports the pre-change sources with
+* No regeneration command was checked in. Added the
+  `socr-regenerate-p6-prechange` project entry point, which exports the pre-change sources with
   `git archive HEAD src` and runs the same corpus against them.
   `--print-only` reports the normalized SHA-256 and whether the checked-in file matches.
 

@@ -1,5 +1,190 @@
 {
-  "cli": "\nAssemble:\n  2 page(s) produced no usable output: [2, 6]\n  2 table page(s) shipped a MODEL reading over a failed-closed native table region (verify against the source image before citing): [3, 5]\n  2 table page(s) hit the D3 fail-closed floor (unverifiable region \u2192 explicit failure marker): [2, 4]\n  Output: <TMP>/out/p6_corpus/p6_corpus.md\n  Manifest: <TMP>/out/p6_corpus/manifest.json (replayable)\n  Audit log: <TMP>/out/p6_corpus/audit_log.json (2 d3_floor_model_table_kept, 2 page_failed, 2 table_region_unverifiable)\n  Table trust: 4 page(s) with untrusted tables (4 flag(s)): 2, 3, 4, 5\n",
+  "audit_log": [
+    {
+      "counts": {
+        "corrupt_math_hybrid_shipped": 2,
+        "d3_floor_model_table_kept": 2,
+        "page_failed": 5,
+        "structure_class_ladder_exhausted_floor": 1,
+        "structure_class_model_table_kept": 2,
+        "table_region_unverifiable": 2,
+        "table_structure_failed": 2
+      },
+      "event_count": 16,
+      "events": [
+        {
+          "data": {
+            "d3_floor": true
+          },
+          "detail": "per-region geometry verifier hard-failed (geometry_impossible_collapse) and OCR ladder also failed; D3 fail-closed: explicit failed-table marker shipped \u2014 no collapsed/ragged table emitted",
+          "engine": "native",
+          "kind": "table_region_unverifiable",
+          "page_num": 2
+        },
+        {
+          "data": {},
+          "detail": "no usable OCR output; failure marker shipped",
+          "engine": "",
+          "kind": "page_failed",
+          "page_num": 2
+        },
+        {
+          "data": {
+            "d3_floor_superseded": true
+          },
+          "detail": "the native table region failed geometry/header verification and no OCR rung was accepted, but a model attempt authored a grid; the model's reading ships FLAGGED instead of the failed-table marker \u2014 verify it against the source image before citing",
+          "engine": "gemini",
+          "kind": "d3_floor_model_table_kept",
+          "page_num": 3
+        },
+        {
+          "data": {
+            "d3_floor": true
+          },
+          "detail": "per-region geometry verifier hard-failed (geometry_impossible_collapse) and OCR ladder also failed; D3 fail-closed: explicit failed-table marker shipped \u2014 no collapsed/ragged table emitted",
+          "engine": "native",
+          "kind": "table_region_unverifiable",
+          "page_num": 4
+        },
+        {
+          "data": {
+            "d3_floor_superseded": true
+          },
+          "detail": "the native table region failed geometry/header verification and no OCR rung was accepted, but a model attempt authored a grid; the model's reading ships FLAGGED instead of the failed-table marker \u2014 verify it against the source image before citing",
+          "engine": "gemini",
+          "kind": "d3_floor_model_table_kept",
+          "page_num": 5
+        },
+        {
+          "data": {},
+          "detail": "no usable OCR output; failure marker shipped",
+          "engine": "",
+          "kind": "page_failed",
+          "page_num": 6
+        },
+        {
+          "data": {
+            "structure_class_model_kept": true
+          },
+          "detail": "structure-class page (table); native may not author the grid (C1), and a model attempt did -- the model's reading ships instead of native, flagged per its own status",
+          "engine": "gemini",
+          "kind": "structure_class_model_table_kept",
+          "page_num": 8
+        },
+        {
+          "data": {
+            "structure_class_model_kept": true
+          },
+          "detail": "structure-class page (table); native may not author the grid (C1), and a model attempt did -- the model's reading ships instead of native, flagged per its own status",
+          "engine": "gemini",
+          "kind": "structure_class_model_table_kept",
+          "page_num": 9
+        },
+        {
+          "data": {},
+          "detail": "no usable OCR output; failure marker shipped",
+          "engine": "",
+          "kind": "page_failed",
+          "page_num": 9
+        },
+        {
+          "data": {
+            "defect": "table_latex_leak",
+            "site": "final_body"
+          },
+          "detail": "table_latex_leak defect found in exact final page body",
+          "engine": "gemini",
+          "kind": "table_structure_failed",
+          "page_num": 9
+        },
+        {
+          "data": {
+            "structure_class_floor": true
+          },
+          "detail": "every usable grid candidate was refused/absent; marker plus page image was selected, and the native geometry grid was withheld (fail-closed floor)",
+          "engine": "native",
+          "kind": "structure_class_ladder_exhausted_floor",
+          "page_num": 10
+        },
+        {
+          "data": {},
+          "detail": "no usable OCR output; failure marker shipped",
+          "engine": "",
+          "kind": "page_failed",
+          "page_num": 10
+        },
+        {
+          "data": {
+            "audit_passed": false,
+            "cost_usd": 0.0,
+            "crop_paths": [],
+            "provider_backend": "",
+            "provider_id": "",
+            "provider_model": ""
+          },
+          "detail": "native prose plus crop-backed equation candidate(s) shipped WARNING; LaTeX passed at most a syntax gate and mathematical fidelity remains unverified",
+          "engine": "native+math",
+          "kind": "corrupt_math_hybrid_shipped",
+          "page_num": 11
+        },
+        {
+          "data": {
+            "audit_passed": false,
+            "cost_usd": 0.0,
+            "crop_paths": [],
+            "provider_backend": "",
+            "provider_id": "",
+            "provider_model": ""
+          },
+          "detail": "native prose plus crop-backed equation candidate(s) shipped WARNING; LaTeX passed at most a syntax gate and mathematical fidelity remains unverified",
+          "engine": "native+math",
+          "kind": "corrupt_math_hybrid_shipped",
+          "page_num": 12
+        },
+        {
+          "data": {},
+          "detail": "no usable OCR output; failure marker shipped",
+          "engine": "",
+          "kind": "page_failed",
+          "page_num": 12
+        },
+        {
+          "data": {
+            "defect": "table_width_mismatch",
+            "site": "final_body"
+          },
+          "detail": "table_width_mismatch defect found in exact final page body",
+          "engine": "native+math",
+          "kind": "table_structure_failed",
+          "page_num": 12
+        }
+      ],
+      "pdf_filename": "p6_corpus.pdf"
+    }
+  ],
+  "buckets": {
+    "corrupt_math_hybrid_pages": [
+      11,
+      12
+    ],
+    "d3_floor_pages": [
+      2,
+      4
+    ],
+    "d3_model_table_pages": [
+      3,
+      5
+    ],
+    "flagged_model_pages": [],
+    "structure_class_floor_pages": [
+      10
+    ],
+    "structure_class_model_pages": [
+      8,
+      9
+    ]
+  },
+  "cli": "\nAssemble:\n  5 page(s) produced no usable output: [2, 6, 9, 10, 12]\n  2 page(s) shipped crop-backed equation candidate(s); mathematical fidelity remains unverified: [11, 12]\n  2 structure-class page(s) shipped the model's grid reading over native (native may not author a grid): [8, 9]\n  1 structure-class page(s) hit the fail-closed floor (usable grid candidates refused/absent; marker plus page image selected; native geometry grid withheld): [10]\n  2 table page(s) shipped a MODEL reading over a failed-closed native table region (verify against the source image before citing): [3, 5]\n  2 table page(s) hit the D3 fail-closed floor (unverifiable region \u2192 explicit failure marker): [2, 4]\n  Output: <TMP>/out/p6_corpus/p6_corpus.md\n  Manifest: <TMP>/out/p6_corpus/manifest.json (replayable)\n  Audit log: <TMP>/out/p6_corpus/audit_log.json (2 corrupt_math_hybrid_shipped, 2 d3_floor_model_table_kept, 5 page_failed, 1 structure_class_ladder_exhausted_floor, 2 structure_class_model_table_kept, 2 table_region_unverifiable, 2 table_structure_failed)\n  Table trust: 8 page(s) with untrusted tables (9 flag(s)): 2, 3, 4, 5, 8, 9, 10, 12\n",
   "doc_status": "DocumentStatus.AUDIT_FAILED",
   "events": [
     [
@@ -37,13 +222,100 @@
       "page_failed",
       "",
       "no usable OCR output; failure marker shipped"
+    ],
+    [
+      8,
+      "structure_class_model_table_kept",
+      "gemini",
+      "structure-class page (table); native may not author the grid (C1), and a model attempt did -- the model's reading ships instead of native, flagged per its own status"
+    ],
+    [
+      9,
+      "page_failed",
+      "",
+      "no usable OCR output; failure marker shipped"
+    ],
+    [
+      9,
+      "structure_class_model_table_kept",
+      "gemini",
+      "structure-class page (table); native may not author the grid (C1), and a model attempt did -- the model's reading ships instead of native, flagged per its own status"
+    ],
+    [
+      9,
+      "table_structure_failed",
+      "gemini",
+      "table_latex_leak defect found in exact final page body"
+    ],
+    [
+      10,
+      "page_failed",
+      "",
+      "no usable OCR output; failure marker shipped"
+    ],
+    [
+      10,
+      "structure_class_ladder_exhausted_floor",
+      "native",
+      "every usable grid candidate was refused/absent; marker plus page image was selected, and the native geometry grid was withheld (fail-closed floor)"
+    ],
+    [
+      11,
+      "corrupt_math_hybrid_shipped",
+      "native+math",
+      "native prose plus crop-backed equation candidate(s) shipped WARNING; LaTeX passed at most a syntax gate and mathematical fidelity remains unverified"
+    ],
+    [
+      12,
+      "corrupt_math_hybrid_shipped",
+      "native+math",
+      "native prose plus crop-backed equation candidate(s) shipped WARNING; LaTeX passed at most a syntax gate and mathematical fidelity remains unverified"
+    ],
+    [
+      12,
+      "page_failed",
+      "",
+      "no usable OCR output; failure marker shipped"
+    ],
+    [
+      12,
+      "table_structure_failed",
+      "native+math",
+      "table_width_mismatch defect found in exact final page body"
     ]
   ],
+  "legacy_resume": {
+    "buckets": {
+      "corrupt_math_hybrid_pages": [],
+      "d3_floor_pages": [],
+      "d3_model_table_pages": [],
+      "flagged_model_pages": [],
+      "structure_class_floor_pages": [],
+      "structure_class_model_pages": []
+    },
+    "disposition": [
+      "model_output",
+      "accepted_output"
+    ],
+    "flag_restored": true,
+    "resumed_disposition": null,
+    "selection_provenance": "passing_best_output",
+    "winning_output": {
+      "audit_passed": true,
+      "engine": "gemini",
+      "status": "success",
+      "text_is_the_model_grid": true
+    }
+  },
   "manifest": [
     {
       "entries": {
         "1": {
           "blob_ref": "af31675f866f135060d0498acf873c4643c9f5456c93468444a75cf59701a640",
+          "disposition": {
+            "ending": "native_prose",
+            "primary_reason": "clean_native_prose"
+          },
           "fingerprint": {
             "assembly_version": "3",
             "engine": "native",
@@ -57,8 +329,120 @@
           "journal": [],
           "page_num": 1
         },
+        "10": {
+          "blob_ref": "bc40160e2abf779b6bd49e99b5c6fecda5e0c7a7890268bd8308669f6556496e",
+          "disposition": {
+            "ending": "fail_closed_marker",
+            "primary_reason": "structure_class"
+          },
+          "fingerprint": {
+            "assembly_version": "3",
+            "engine": "native",
+            "image_hash": "",
+            "model_version": "",
+            "normalizer_version": "3",
+            "page_num": 10,
+            "prompt_hash": "",
+            "render_dpi": 300
+          },
+          "journal": [
+            {
+              "accepted": true,
+              "backend": "",
+              "confidence": 0.0,
+              "cost_usd": 0.0,
+              "engine": "native",
+              "failure_mode": "none",
+              "judge_model": "",
+              "model": "",
+              "provider_id": "",
+              "reason": "none"
+            },
+            {
+              "accepted": false,
+              "backend": "",
+              "confidence": 0.0,
+              "cost_usd": 0.0,
+              "engine": "qwen",
+              "failure_mode": "audit_failed",
+              "judge_model": "",
+              "model": "",
+              "provider_id": "",
+              "reason": "audit_failed"
+            }
+          ],
+          "page_num": 10
+        },
+        "11": {
+          "blob_ref": "598c3fdb3e3dc058f30918b66b553aa48db7c83ae000fcaeb0f94b17e76afd66",
+          "disposition": {
+            "ending": "model_output",
+            "primary_reason": "corrupt_math_hybrid"
+          },
+          "fingerprint": {
+            "assembly_version": "3",
+            "engine": "native+math",
+            "image_hash": "08b88b192dc08fc66dc642350e9d3c2dd90b1b2dda90e9e6ff5ecb2793ec1851",
+            "model_version": "",
+            "normalizer_version": "3",
+            "page_num": 11,
+            "prompt_hash": "",
+            "render_dpi": 300
+          },
+          "journal": [
+            {
+              "accepted": false,
+              "backend": "",
+              "confidence": 0.0,
+              "cost_usd": 0.0,
+              "engine": "native+math",
+              "failure_mode": "audit_failed",
+              "judge_model": "",
+              "model": "",
+              "provider_id": "",
+              "reason": "audit_failed"
+            }
+          ],
+          "page_num": 11
+        },
+        "12": {
+          "blob_ref": "9e3a1a71aaeb90fbb88c0dca71cf4ace0802730f347e2b99c47cf49bc1e6de11",
+          "disposition": {
+            "ending": "fail_closed_marker",
+            "primary_reason": "invalid_table_emission"
+          },
+          "fingerprint": {
+            "assembly_version": "3",
+            "engine": "native+math",
+            "image_hash": "20e1ff5e600c87897bc1cd0a77862175435f897168290aa47536735a28cf90c1",
+            "model_version": "",
+            "normalizer_version": "3",
+            "page_num": 12,
+            "prompt_hash": "",
+            "render_dpi": 300
+          },
+          "journal": [
+            {
+              "accepted": false,
+              "backend": "",
+              "confidence": 0.0,
+              "cost_usd": 0.0,
+              "engine": "native+math",
+              "failure_mode": "audit_failed",
+              "judge_model": "",
+              "model": "",
+              "provider_id": "",
+              "reason": "audit_failed"
+            }
+          ],
+          "page_num": 12
+        },
         "2": {
           "blob_ref": "7fefaf5a0e883a6d8244c7f5f05c4bdbeac61a33f5a1a1fbeca6dec43b6f5a81",
+          "disposition": {
+            "ending": "fail_closed_marker",
+            "primary_reason": "native_table_unverifiable"
+          },
           "fingerprint": {
             "assembly_version": "3",
             "engine": "native",
@@ -87,6 +471,10 @@
         },
         "3": {
           "blob_ref": "2464290d15a20872c3f227c9420de235b40d963bc1bd0787ee755802b39378a1",
+          "disposition": {
+            "ending": "model_output",
+            "primary_reason": "native_table_unverifiable"
+          },
           "fingerprint": {
             "assembly_version": "3",
             "engine": "gemini",
@@ -127,6 +515,10 @@
         },
         "4": {
           "blob_ref": "9ab10f282d69bbe94e83cf767bcc4dd40e43187109b41defe01ff3209a5ef124",
+          "disposition": {
+            "ending": "model_output",
+            "primary_reason": "accepted_output"
+          },
           "fingerprint": {
             "assembly_version": "3",
             "engine": "qwen",
@@ -167,6 +559,10 @@
         },
         "5": {
           "blob_ref": "8d07b226ffbdd6b975418d2681a1e3663805209d06ab1206a9a3b96d1617503c",
+          "disposition": {
+            "ending": "model_output",
+            "primary_reason": "accepted_output"
+          },
           "fingerprint": {
             "assembly_version": "3",
             "engine": "qwen",
@@ -219,6 +615,10 @@
         },
         "6": {
           "blob_ref": "ee6e83476f3a6f0ebf8fbb56750ea2e945d915f496088a47151ea64ca413bfaf",
+          "disposition": {
+            "ending": "fail_closed_marker",
+            "primary_reason": "no_usable_output"
+          },
           "fingerprint": {
             "assembly_version": "3",
             "engine": "",
@@ -234,6 +634,10 @@
         },
         "7": {
           "blob_ref": "60d6c02e1296e142fea1a13e09fcfaa674f3637da1016601b69749497fbbfdaf",
+          "disposition": {
+            "ending": "model_output",
+            "primary_reason": "accepted_output"
+          },
           "fingerprint": {
             "assembly_version": "3",
             "engine": "qwen",
@@ -259,26 +663,348 @@
             }
           ],
           "page_num": 7
+        },
+        "8": {
+          "blob_ref": "9598aba8cc17ea63cb2aa7871908552f241931ef243524a3d0ff9ba1957e402f",
+          "disposition": {
+            "ending": "model_output",
+            "primary_reason": "structure_class"
+          },
+          "fingerprint": {
+            "assembly_version": "3",
+            "engine": "gemini",
+            "image_hash": "e23e943c9459d73287cf2eb356c09031660a60fef7bd636f3d7d44f823da52f0",
+            "model_version": "",
+            "normalizer_version": "3",
+            "page_num": 8,
+            "prompt_hash": "",
+            "render_dpi": 300
+          },
+          "journal": [
+            {
+              "accepted": true,
+              "backend": "",
+              "confidence": 0.0,
+              "cost_usd": 0.0,
+              "engine": "native",
+              "failure_mode": "none",
+              "judge_model": "",
+              "model": "",
+              "provider_id": "",
+              "reason": "none"
+            },
+            {
+              "accepted": false,
+              "backend": "",
+              "confidence": 0.0,
+              "cost_usd": 0.0,
+              "engine": "gemini",
+              "failure_mode": "none",
+              "judge_model": "",
+              "model": "",
+              "provider_id": "",
+              "reason": "none"
+            }
+          ],
+          "page_num": 8
+        },
+        "9": {
+          "blob_ref": "2a2d957e541e0fe453568ad2bf795d11e9d6a3004fd4c8723afc46b5256a825f",
+          "disposition": {
+            "ending": "fail_closed_marker",
+            "primary_reason": "invalid_table_emission"
+          },
+          "fingerprint": {
+            "assembly_version": "3",
+            "engine": "gemini",
+            "image_hash": "5127aa04e8fa93b5d144e18dac3642f514ee67db1dbabc20c5860f310a412176",
+            "model_version": "",
+            "normalizer_version": "3",
+            "page_num": 9,
+            "prompt_hash": "",
+            "render_dpi": 300
+          },
+          "journal": [
+            {
+              "accepted": true,
+              "backend": "",
+              "confidence": 0.0,
+              "cost_usd": 0.0,
+              "engine": "native",
+              "failure_mode": "none",
+              "judge_model": "",
+              "model": "",
+              "provider_id": "",
+              "reason": "none"
+            },
+            {
+              "accepted": false,
+              "backend": "",
+              "confidence": 0.0,
+              "cost_usd": 0.0,
+              "engine": "gemini",
+              "failure_mode": "none",
+              "judge_model": "",
+              "model": "",
+              "provider_id": "",
+              "reason": "none"
+            }
+          ],
+          "page_num": 9
         }
       },
-      "page_count": 7,
+      "page_count": 12,
       "pdf_filename": "p6_corpus.pdf",
       "render_dpi": 300,
       "schema_version": "1"
     }
   ],
   "markdown": {
-    "p6_corpus/p6_corpus.md": "## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table \u2014 see image]\n\n## Page 3\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table \u2014 kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted \u2014 verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n",
+    "p6_corpus/p6_corpus.md": "## Page 1\n\nOrdinary prose with no table on it at all.\n\n## Page 2\n\n[page 2 failed: unverifiable table \u2014 see image]\n\n## Page 3\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table \u2014 kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted \u2014 verify against the page image before citing]\n\n## Page 4\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 5\n\nThe regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n## Page 6\n\n[page 6 failed: no usable OCR output]\n\n## Page 7\n\nPlain model prose for page seven.\n\n## Page 8\n\n| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |\n\n## Page 9\n\n[page 9 failed: invalid table emission \u2014 table_latex_leak]\n\n## Page 10\n\n[page 10 failed: unverifiable table \u2014 see image]\n\n## Page 11\n\nnative prose plus crop-backed region candidate\n\n## Page 12\n\n[page 12 failed: invalid table emission \u2014 table_width_mismatch]\n",
     "p6_corpus/pages/00001.md": "Ordinary prose with no table on it at all.",
     "p6_corpus/pages/00002.md": "[page 2 failed: unverifiable table \u2014 see image]",
     "p6_corpus/pages/00003.md": "The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table \u2014 kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted \u2014 verify against the page image before citing]",
     "p6_corpus/pages/00004.md": "The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
     "p6_corpus/pages/00005.md": "The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.",
     "p6_corpus/pages/00006.md": "[page 6 failed: no usable OCR output]",
-    "p6_corpus/pages/00007.md": "Plain model prose for page seven."
+    "p6_corpus/pages/00007.md": "Plain model prose for page seven.",
+    "p6_corpus/pages/00008.md": "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |",
+    "p6_corpus/pages/00009.md": "[page 9 failed: invalid table emission \u2014 table_latex_leak]",
+    "p6_corpus/pages/00010.md": "[page 10 failed: unverifiable table \u2014 see image]",
+    "p6_corpus/pages/00011.md": "native prose plus crop-backed region candidate",
+    "p6_corpus/pages/00012.md": "[page 12 failed: invalid table emission \u2014 table_width_mismatch]"
   },
+  "metadata": {
+    "metadata.json": {
+      "files": {
+        "p6_corpus.pdf": {
+          "backend": "socr",
+          "error": "page(s) 2, 6, 9, 10, 12 produced no usable output; corrupt equation candidate unverified on page(s) 11, 12; untrusted tables on 7 page(s), 7 flag(s) (see tables_trust.json); page(s) 10: structure-class ladder exhausted; fail-closed floor shipped (marker plus page image, native geometry grid withheld); invalid final table emission on page(s) 9, 12",
+          "model": "none",
+          "pages": 12,
+          "status": "partial"
+        }
+      },
+      "version": "1"
+    },
+    "p6_corpus/metadata.json": {
+      "backend": "socr",
+      "error": "page(s) 2, 6, 9, 10, 12 produced no usable output; corrupt equation candidate unverified on page(s) 11, 12; untrusted tables on 7 page(s), 7 flag(s) (see tables_trust.json); page(s) 10: structure-class ladder exhausted; fail-closed floor shipped (marker plus page image, native geometry grid withheld); invalid final table emission on page(s) 9, 12",
+      "key": "p6_corpus.pdf",
+      "model": "none",
+      "pages": 12,
+      "status": "partial",
+      "version": "1"
+    }
+  },
+  "page_contract": [
+    {
+      "disposition": [
+        "native_prose",
+        "clean_native_prose"
+      ],
+      "is_failure_marker": false,
+      "page_label": "clean_born_digital",
+      "page_num": 1,
+      "selection_provenance": "native_clean",
+      "winning_output": {
+        "audit_passed": true,
+        "engine": "native",
+        "failure_mode": "none",
+        "status": "success",
+        "text": "Ordinary prose with no table on it at all.\n"
+      }
+    },
+    {
+      "disposition": [
+        "fail_closed_marker",
+        "native_table_unverifiable"
+      ],
+      "is_failure_marker": true,
+      "page_label": "d3_floor",
+      "page_num": 2,
+      "selection_provenance": "unverifiable_table_native",
+      "winning_output": {
+        "audit_passed": false,
+        "engine": "native",
+        "failure_mode": "native_table_structure_failed",
+        "status": "error",
+        "text": "[page 2 failed: unverifiable table \u2014 see image]\n\n![p](figures/p.png)"
+      }
+    },
+    {
+      "disposition": [
+        "model_output",
+        "native_table_unverifiable"
+      ],
+      "is_failure_marker": false,
+      "page_label": "d3_model_kept",
+      "page_num": 3,
+      "selection_provenance": "unverifiable_table_model_kept",
+      "winning_output": {
+        "audit_passed": false,
+        "engine": "gemini",
+        "failure_mode": "model_table_over_failed_floor",
+        "status": "warning",
+        "text": "The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n\n[page 3: unverifiable table \u2014 kept a model reading over the failed-table marker; the native table region failed verification and no OCR rung was accepted \u2014 verify against the page image before citing]\n\n![p](figures/p.png)\n"
+      }
+    },
+    {
+      "disposition": [
+        "model_output",
+        "accepted_output"
+      ],
+      "is_failure_marker": false,
+      "page_label": "cold_review_shape_one",
+      "page_num": 4,
+      "selection_provenance": "passing_best_output",
+      "winning_output": {
+        "audit_passed": true,
+        "engine": "qwen",
+        "failure_mode": "none",
+        "status": "success",
+        "text": "The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n"
+      }
+    },
+    {
+      "disposition": [
+        "model_output",
+        "accepted_output"
+      ],
+      "is_failure_marker": false,
+      "page_label": "cold_review_shape_two",
+      "page_num": 5,
+      "selection_provenance": "passing_best_output",
+      "winning_output": {
+        "audit_passed": true,
+        "engine": "qwen",
+        "failure_mode": "none",
+        "status": "success",
+        "text": "The regressions are reported below.\n\n$$y_{t+1} = \\alpha + \\beta x_t + \\varepsilon_{t+1}$$\n\n| | const. | slope | $R^2$ |\n|---|---|---|---|\n| one | -0.04 | 0.06 | 0.00 |\n| two | 1.96 | -0.06 | 0.23 |\n\nThe estimates are reported to two decimals.\n"
+      }
+    },
+    {
+      "disposition": [
+        "fail_closed_marker",
+        "no_usable_output"
+      ],
+      "is_failure_marker": true,
+      "page_label": "no_text_failure",
+      "page_num": 6,
+      "selection_provenance": "no_text_marker",
+      "winning_output": {
+        "audit_passed": false,
+        "engine": "",
+        "failure_mode": "none",
+        "status": "error",
+        "text": "[page 6 failed: no usable OCR output]"
+      }
+    },
+    {
+      "disposition": [
+        "model_output",
+        "accepted_output"
+      ],
+      "is_failure_marker": false,
+      "page_label": "passing_model",
+      "page_num": 7,
+      "selection_provenance": "passing_best_output",
+      "winning_output": {
+        "audit_passed": true,
+        "engine": "qwen",
+        "failure_mode": "none",
+        "status": "success",
+        "text": "Plain model prose for page seven.\n"
+      }
+    },
+    {
+      "disposition": [
+        "model_output",
+        "structure_class"
+      ],
+      "is_failure_marker": false,
+      "page_label": "struct_model_passing",
+      "page_num": 8,
+      "selection_provenance": "structure_class_grid_flagged",
+      "winning_output": {
+        "audit_passed": false,
+        "engine": "gemini",
+        "failure_mode": "model_output_flagged",
+        "status": "warning",
+        "text": "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |"
+      }
+    },
+    {
+      "disposition": [
+        "fail_closed_marker",
+        "invalid_table_emission"
+      ],
+      "is_failure_marker": true,
+      "page_label": "struct_model_rewritten",
+      "page_num": 9,
+      "selection_provenance": "structure_class_grid_flagged",
+      "winning_output": {
+        "audit_passed": false,
+        "engine": "gemini",
+        "failure_mode": "table_emission_invalid",
+        "status": "error",
+        "text": "[page 9 failed: invalid table emission \u2014 table_latex_leak]"
+      }
+    },
+    {
+      "disposition": [
+        "fail_closed_marker",
+        "structure_class"
+      ],
+      "is_failure_marker": true,
+      "page_label": "struct_floor",
+      "page_num": 10,
+      "selection_provenance": "structure_class_floor",
+      "winning_output": {
+        "audit_passed": false,
+        "engine": "native",
+        "failure_mode": "structure_class_ladder_exhausted",
+        "status": "error",
+        "text": "[page 10 failed: unverifiable table \u2014 see image]"
+      }
+    },
+    {
+      "disposition": [
+        "model_output",
+        "corrupt_math_hybrid"
+      ],
+      "is_failure_marker": false,
+      "page_label": "hybrid_clean",
+      "page_num": 11,
+      "selection_provenance": "corrupt_math_hybrid",
+      "winning_output": {
+        "audit_passed": false,
+        "engine": "native+math",
+        "failure_mode": "audit_failed",
+        "status": "warning",
+        "text": "native prose plus crop-backed region candidate"
+      }
+    },
+    {
+      "disposition": [
+        "fail_closed_marker",
+        "invalid_table_emission"
+      ],
+      "is_failure_marker": true,
+      "page_label": "hybrid_rewritten",
+      "page_num": 12,
+      "selection_provenance": "corrupt_math_hybrid",
+      "winning_output": {
+        "audit_passed": false,
+        "engine": "native+math",
+        "failure_mode": "table_emission_invalid",
+        "status": "error",
+        "text": "[page 12 failed: invalid table emission \u2014 table_width_mismatch]"
+      }
+    }
+  ],
   "result_audit_passed": false,
-  "result_error": "page(s) 2, 6 produced no usable output; untrusted tables on 4 page(s), 4 flag(s) (see tables_trust.json)",
+  "result_error": "page(s) 2, 6, 9, 10, 12 produced no usable output; corrupt equation candidate unverified on page(s) 11, 12; untrusted tables on 7 page(s), 7 flag(s) (see tables_trust.json); page(s) 10: structure-class ladder exhausted; fail-closed floor shipped (marker plus page image, native geometry grid withheld); invalid final table emission on page(s) 9, 12",
   "result_status": "DocumentStatus.AUDIT_FAILED",
   "sidecars": {
     "p6_corpus/pages/00001.json": {
@@ -289,6 +1015,10 @@
       "chart_asset_render_failed": false,
       "cost_usd": 0.0,
       "d3_floor_png_ref": "",
+      "disposition": {
+        "ending": "native_prose",
+        "primary_reason": "clean_native_prose"
+      },
       "engine": "native",
       "equation_lane_retry_pending": false,
       "failure_mode": "none",
@@ -362,6 +1092,10 @@
       "chart_asset_render_failed": false,
       "cost_usd": 0.0,
       "d3_floor_png_ref": "![p](figures/p.png)",
+      "disposition": {
+        "ending": "fail_closed_marker",
+        "primary_reason": "native_table_unverifiable"
+      },
       "engine": "native",
       "equation_lane_retry_pending": false,
       "failure_mode": "native_table_structure_failed",
@@ -429,6 +1163,10 @@
       "chart_asset_render_failed": false,
       "cost_usd": 0.0,
       "d3_floor_png_ref": "![p](figures/p.png)",
+      "disposition": {
+        "ending": "model_output",
+        "primary_reason": "native_table_unverifiable"
+      },
       "engine": "gemini",
       "equation_lane_retry_pending": false,
       "failure_mode": "model_table_over_failed_floor",
@@ -496,6 +1234,10 @@
       "chart_asset_render_failed": false,
       "cost_usd": 0.0,
       "d3_floor_png_ref": "![p](figures/p.png)",
+      "disposition": {
+        "ending": "model_output",
+        "primary_reason": "accepted_output"
+      },
       "engine": "qwen",
       "equation_lane_retry_pending": false,
       "failure_mode": "none",
@@ -563,6 +1305,10 @@
       "chart_asset_render_failed": false,
       "cost_usd": 0.0,
       "d3_floor_png_ref": "![p](figures/p.png)",
+      "disposition": {
+        "ending": "model_output",
+        "primary_reason": "accepted_output"
+      },
       "engine": "qwen",
       "equation_lane_retry_pending": false,
       "failure_mode": "none",
@@ -628,6 +1374,10 @@
       "chart_asset_render_failed": false,
       "cost_usd": 0.0,
       "d3_floor_png_ref": "",
+      "disposition": {
+        "ending": "fail_closed_marker",
+        "primary_reason": "no_usable_output"
+      },
       "engine": "",
       "equation_lane_retry_pending": false,
       "failure_mode": "none",
@@ -686,6 +1436,10 @@
       "chart_asset_render_failed": false,
       "cost_usd": 0.0,
       "d3_floor_png_ref": "",
+      "disposition": {
+        "ending": "model_output",
+        "primary_reason": "accepted_output"
+      },
       "engine": "qwen",
       "equation_lane_retry_pending": false,
       "failure_mode": "none",
@@ -735,6 +1489,521 @@
         "status": "success",
         "text": "Plain model prose for page seven."
       }
+    },
+    "p6_corpus/pages/00008.json": {
+      "audit_events": [
+        {
+          "data": {
+            "structure_class_model_kept": true
+          },
+          "detail": "structure-class page (table); native may not author the grid (C1), and a model attempt did -- the model's reading ships instead of native, flagged per its own status",
+          "engine": "gemini",
+          "kind": "structure_class_model_table_kept"
+        }
+      ],
+      "audit_passed": false,
+      "binding_adjudication": {},
+      "chart_asset_detection_failed": false,
+      "chart_asset_render_failed": false,
+      "cost_usd": 0.0,
+      "d3_floor_png_ref": "",
+      "disposition": {
+        "ending": "model_output",
+        "primary_reason": "structure_class"
+      },
+      "engine": "gemini",
+      "equation_lane_retry_pending": false,
+      "failure_mode": "model_output_flagged",
+      "figure_refs": [],
+      "judge_rejected": false,
+      "native_rotated_text_shredded": false,
+      "native_table_content_defect": "",
+      "native_table_emission_defect": "",
+      "native_table_header_unattributed": false,
+      "native_table_region_count": 0,
+      "native_table_region_identities": [],
+      "native_table_structure_defective": false,
+      "native_table_structure_failed": false,
+      "native_table_unverifiable": false,
+      "native_table_unverifiable_ordinals": [],
+      "needs_ocr_enhancement": false,
+      "page_cost_usd": 0.0,
+      "page_fingerprint": "sha256:9598aba8cc17ea63cb2aa7871908552f241931ef243524a3d0ff9ba1957e402f",
+      "page_num": 8,
+      "provider": "",
+      "rotated_shred_png_ref": "",
+      "scanned_table_evidence_failed": false,
+      "socr_version": "2.5.0",
+      "status": "warning",
+      "structure_class_model_kept": true,
+      "table_ladder_disposition": null,
+      "table_ladder_incomplete": false,
+      "terminal": true,
+      "winning_output": {
+        "audit_notes": [],
+        "audit_passed": false,
+        "confidence": 0.0,
+        "cost_usd": 0.0,
+        "engine": "gemini",
+        "error": "",
+        "escalated_from": "",
+        "failure_mode": "model_output_flagged",
+        "figures": [],
+        "judge_reason": "",
+        "page_num": 8,
+        "processing_time": 0.0,
+        "provider_backend": "",
+        "provider_id": "",
+        "provider_model": "",
+        "rejection_class": "ambiguous_deferred",
+        "skip_reason": "",
+        "status": "warning",
+        "text": "| n | slope | R2 |\n|---|---|---|\n| 1 | 0.03 | 0.91 |"
+      }
+    },
+    "p6_corpus/pages/00009.json": {
+      "audit_events": [
+        {
+          "data": {},
+          "detail": "no usable OCR output; failure marker shipped",
+          "engine": "",
+          "kind": "page_failed"
+        },
+        {
+          "data": {
+            "structure_class_model_kept": true
+          },
+          "detail": "structure-class page (table); native may not author the grid (C1), and a model attempt did -- the model's reading ships instead of native, flagged per its own status",
+          "engine": "gemini",
+          "kind": "structure_class_model_table_kept"
+        },
+        {
+          "data": {
+            "defect": "table_latex_leak",
+            "site": "final_body"
+          },
+          "detail": "table_latex_leak defect found in exact final page body",
+          "engine": "gemini",
+          "kind": "table_structure_failed"
+        }
+      ],
+      "audit_passed": false,
+      "binding_adjudication": {},
+      "chart_asset_detection_failed": false,
+      "chart_asset_render_failed": false,
+      "cost_usd": 0.0,
+      "d3_floor_png_ref": "",
+      "disposition": {
+        "ending": "fail_closed_marker",
+        "primary_reason": "invalid_table_emission"
+      },
+      "engine": "gemini",
+      "equation_lane_retry_pending": false,
+      "failure_mode": "table_emission_invalid",
+      "figure_refs": [],
+      "judge_rejected": false,
+      "native_rotated_text_shredded": false,
+      "native_table_content_defect": "",
+      "native_table_emission_defect": "",
+      "native_table_header_unattributed": false,
+      "native_table_region_count": 0,
+      "native_table_region_identities": [],
+      "native_table_structure_defective": false,
+      "native_table_structure_failed": false,
+      "native_table_unverifiable": false,
+      "native_table_unverifiable_ordinals": [],
+      "needs_ocr_enhancement": false,
+      "page_cost_usd": 0.0,
+      "page_fingerprint": "",
+      "page_num": 9,
+      "provider": "",
+      "rotated_shred_png_ref": "",
+      "scanned_table_evidence_failed": false,
+      "socr_version": "2.5.0",
+      "status": "error",
+      "structure_class_model_kept": true,
+      "table_ladder_disposition": null,
+      "table_ladder_incomplete": false,
+      "terminal": true,
+      "winning_output": {
+        "audit_notes": [
+          "invalid final table emission: table_latex_leak"
+        ],
+        "audit_passed": false,
+        "confidence": 0.0,
+        "cost_usd": 0.0,
+        "engine": "gemini",
+        "error": "invalid final table emission: table_latex_leak",
+        "escalated_from": "",
+        "failure_mode": "table_emission_invalid",
+        "figures": [],
+        "judge_reason": "",
+        "page_num": 9,
+        "processing_time": 0.0,
+        "provider_backend": "",
+        "provider_id": "",
+        "provider_model": "",
+        "rejection_class": "ambiguous_deferred",
+        "skip_reason": "",
+        "status": "error",
+        "text": "[page 9 failed: invalid table emission \u2014 table_latex_leak]"
+      }
+    },
+    "p6_corpus/pages/00010.json": {
+      "audit_events": [
+        {
+          "data": {},
+          "detail": "no usable OCR output; failure marker shipped",
+          "engine": "",
+          "kind": "page_failed"
+        },
+        {
+          "data": {
+            "structure_class_floor": true
+          },
+          "detail": "every usable grid candidate was refused/absent; marker plus page image was selected, and the native geometry grid was withheld (fail-closed floor)",
+          "engine": "native",
+          "kind": "structure_class_ladder_exhausted_floor"
+        }
+      ],
+      "audit_passed": false,
+      "binding_adjudication": {},
+      "chart_asset_detection_failed": false,
+      "chart_asset_render_failed": false,
+      "cost_usd": 0.0,
+      "d3_floor_png_ref": "",
+      "disposition": {
+        "ending": "fail_closed_marker",
+        "primary_reason": "structure_class"
+      },
+      "engine": "native",
+      "equation_lane_retry_pending": false,
+      "failure_mode": "structure_class_ladder_exhausted",
+      "figure_refs": [],
+      "judge_rejected": false,
+      "native_rotated_text_shredded": false,
+      "native_table_content_defect": "",
+      "native_table_emission_defect": "",
+      "native_table_header_unattributed": false,
+      "native_table_region_count": 0,
+      "native_table_region_identities": [],
+      "native_table_structure_defective": false,
+      "native_table_structure_failed": false,
+      "native_table_unverifiable": false,
+      "native_table_unverifiable_ordinals": [],
+      "needs_ocr_enhancement": false,
+      "page_cost_usd": 0.0,
+      "page_fingerprint": "",
+      "page_num": 10,
+      "provider": "",
+      "rotated_shred_png_ref": "",
+      "scanned_table_evidence_failed": false,
+      "socr_version": "2.5.0",
+      "status": "error",
+      "structure_class_model_kept": false,
+      "table_ladder_disposition": null,
+      "table_ladder_incomplete": false,
+      "terminal": true,
+      "winning_output": {
+        "audit_notes": [],
+        "audit_passed": false,
+        "confidence": 0.0,
+        "cost_usd": 0.0,
+        "engine": "native",
+        "error": "",
+        "escalated_from": "",
+        "failure_mode": "structure_class_ladder_exhausted",
+        "figures": [],
+        "judge_reason": "",
+        "page_num": 10,
+        "processing_time": 0.0,
+        "provider_backend": "",
+        "provider_id": "",
+        "provider_model": "",
+        "rejection_class": "",
+        "skip_reason": "",
+        "status": "error",
+        "text": "[page 10 failed: unverifiable table \u2014 see image]"
+      }
+    },
+    "p6_corpus/pages/00011.json": {
+      "audit_events": [
+        {
+          "data": {
+            "audit_passed": false,
+            "cost_usd": 0.0,
+            "crop_paths": [],
+            "provider_backend": "",
+            "provider_id": "",
+            "provider_model": ""
+          },
+          "detail": "native prose plus crop-backed equation candidate(s) shipped WARNING; LaTeX passed at most a syntax gate and mathematical fidelity remains unverified",
+          "engine": "native+math",
+          "kind": "corrupt_math_hybrid_shipped"
+        }
+      ],
+      "audit_passed": false,
+      "binding_adjudication": {},
+      "chart_asset_detection_failed": false,
+      "chart_asset_render_failed": false,
+      "cost_usd": 0.0,
+      "d3_floor_png_ref": "",
+      "disposition": {
+        "ending": "model_output",
+        "primary_reason": "corrupt_math_hybrid"
+      },
+      "engine": "native+math",
+      "equation_lane_retry_pending": false,
+      "failure_mode": "audit_failed",
+      "figure_refs": [],
+      "judge_rejected": false,
+      "native_rotated_text_shredded": false,
+      "native_table_content_defect": "",
+      "native_table_emission_defect": "",
+      "native_table_header_unattributed": false,
+      "native_table_region_count": 0,
+      "native_table_region_identities": [],
+      "native_table_structure_defective": false,
+      "native_table_structure_failed": false,
+      "native_table_unverifiable": false,
+      "native_table_unverifiable_ordinals": [],
+      "needs_ocr_enhancement": false,
+      "page_cost_usd": 0.0,
+      "page_fingerprint": "sha256:598c3fdb3e3dc058f30918b66b553aa48db7c83ae000fcaeb0f94b17e76afd66",
+      "page_num": 11,
+      "provider": "",
+      "rotated_shred_png_ref": "",
+      "scanned_table_evidence_failed": false,
+      "socr_version": "2.5.0",
+      "status": "warning",
+      "structure_class_model_kept": false,
+      "table_ladder_disposition": null,
+      "table_ladder_incomplete": false,
+      "terminal": true,
+      "winning_output": {
+        "audit_notes": [],
+        "audit_passed": false,
+        "confidence": 0.0,
+        "cost_usd": 0.0,
+        "engine": "native+math",
+        "error": "",
+        "escalated_from": "",
+        "failure_mode": "audit_failed",
+        "figures": [],
+        "judge_reason": "",
+        "page_num": 11,
+        "processing_time": 0.0,
+        "provider_backend": "",
+        "provider_id": "",
+        "provider_model": "",
+        "rejection_class": "",
+        "skip_reason": "",
+        "status": "warning",
+        "text": "native prose plus crop-backed region candidate"
+      }
+    },
+    "p6_corpus/pages/00012.json": {
+      "audit_events": [
+        {
+          "data": {},
+          "detail": "no usable OCR output; failure marker shipped",
+          "engine": "",
+          "kind": "page_failed"
+        },
+        {
+          "data": {
+            "audit_passed": false,
+            "cost_usd": 0.0,
+            "crop_paths": [],
+            "provider_backend": "",
+            "provider_id": "",
+            "provider_model": ""
+          },
+          "detail": "native prose plus crop-backed equation candidate(s) shipped WARNING; LaTeX passed at most a syntax gate and mathematical fidelity remains unverified",
+          "engine": "native+math",
+          "kind": "corrupt_math_hybrid_shipped"
+        },
+        {
+          "data": {
+            "defect": "table_width_mismatch",
+            "site": "final_body"
+          },
+          "detail": "table_width_mismatch defect found in exact final page body",
+          "engine": "native+math",
+          "kind": "table_structure_failed"
+        }
+      ],
+      "audit_passed": false,
+      "binding_adjudication": {},
+      "chart_asset_detection_failed": false,
+      "chart_asset_render_failed": false,
+      "cost_usd": 0.0,
+      "d3_floor_png_ref": "",
+      "disposition": {
+        "ending": "fail_closed_marker",
+        "primary_reason": "invalid_table_emission"
+      },
+      "engine": "native+math",
+      "equation_lane_retry_pending": false,
+      "failure_mode": "table_emission_invalid",
+      "figure_refs": [],
+      "judge_rejected": false,
+      "native_rotated_text_shredded": false,
+      "native_table_content_defect": "",
+      "native_table_emission_defect": "",
+      "native_table_header_unattributed": false,
+      "native_table_region_count": 0,
+      "native_table_region_identities": [],
+      "native_table_structure_defective": false,
+      "native_table_structure_failed": false,
+      "native_table_unverifiable": false,
+      "native_table_unverifiable_ordinals": [],
+      "needs_ocr_enhancement": false,
+      "page_cost_usd": 0.0,
+      "page_fingerprint": "",
+      "page_num": 12,
+      "provider": "",
+      "rotated_shred_png_ref": "",
+      "scanned_table_evidence_failed": false,
+      "socr_version": "2.5.0",
+      "status": "error",
+      "structure_class_model_kept": false,
+      "table_ladder_disposition": null,
+      "table_ladder_incomplete": false,
+      "terminal": true,
+      "winning_output": {
+        "audit_notes": [
+          "invalid final table emission: table_width_mismatch"
+        ],
+        "audit_passed": false,
+        "confidence": 0.0,
+        "cost_usd": 0.0,
+        "engine": "native+math",
+        "error": "invalid final table emission: table_width_mismatch",
+        "escalated_from": "",
+        "failure_mode": "table_emission_invalid",
+        "figures": [],
+        "judge_reason": "",
+        "page_num": 12,
+        "processing_time": 0.0,
+        "provider_backend": "",
+        "provider_id": "",
+        "provider_model": "",
+        "rejection_class": "",
+        "skip_reason": "",
+        "status": "error",
+        "text": "[page 12 failed: invalid table emission \u2014 table_width_mismatch]"
+      }
     }
-  }
+  },
+  "tables_trust": [
+    {
+      "counts_by_kind": {
+        "d3_floor_model_table_kept": 2,
+        "structure_class_ladder_exhausted_floor": 1,
+        "structure_class_model_table_kept": 2,
+        "table_region_unverifiable": 2,
+        "table_structure_failed": 2
+      },
+      "pages": {
+        "10": {
+          "details": [
+            "structure_class_ladder_exhausted_floor: every usable grid candidate was refused/absent; marker plus page image was selected, and the native geometry grid was withheld (fail-closed floor)"
+          ],
+          "flagged": true,
+          "patch_eligible": false,
+          "reasons": [
+            "structure_class_ladder_exhausted_floor"
+          ]
+        },
+        "12": {
+          "details": [
+            "table_structure_failed: table_width_mismatch defect found in exact final page body"
+          ],
+          "flagged": true,
+          "patch_eligible": false,
+          "reasons": [
+            "table_structure_failed"
+          ]
+        },
+        "2": {
+          "details": [
+            "table_region_unverifiable: per-region geometry verifier hard-failed (geometry_impossible_collapse) and OCR ladder also failed; D3 fail-closed: explicit failed-table marker shipped \u2014 no collapsed/ragged table emitted"
+          ],
+          "flagged": true,
+          "patch_eligible": false,
+          "reasons": [
+            "table_region_unverifiable"
+          ]
+        },
+        "3": {
+          "details": [
+            "d3_floor_model_table_kept: the native table region failed geometry/header verification and no OCR rung was accepted, but a model attempt authored a grid; the model's reading ships FLAGGED instead of the failed-table marker \u2014 verify it against the source image before citing"
+          ],
+          "flagged": true,
+          "patch_eligible": false,
+          "reasons": [
+            "d3_floor_model_table_kept"
+          ]
+        },
+        "4": {
+          "details": [
+            "table_region_unverifiable: per-region geometry verifier hard-failed (geometry_impossible_collapse) and OCR ladder also failed; D3 fail-closed: explicit failed-table marker shipped \u2014 no collapsed/ragged table emitted"
+          ],
+          "flagged": true,
+          "patch_eligible": false,
+          "reasons": [
+            "table_region_unverifiable"
+          ]
+        },
+        "5": {
+          "details": [
+            "d3_floor_model_table_kept: the native table region failed geometry/header verification and no OCR rung was accepted, but a model attempt authored a grid; the model's reading ships FLAGGED instead of the failed-table marker \u2014 verify it against the source image before citing"
+          ],
+          "flagged": true,
+          "patch_eligible": false,
+          "reasons": [
+            "d3_floor_model_table_kept"
+          ]
+        },
+        "8": {
+          "details": [
+            "structure_class_model_table_kept: structure-class page (table); native may not author the grid (C1), and a model attempt did -- the model's reading ships instead of native, flagged per its own status"
+          ],
+          "flagged": true,
+          "patch_eligible": false,
+          "reasons": [
+            "structure_class_model_table_kept"
+          ]
+        },
+        "9": {
+          "details": [
+            "structure_class_model_table_kept: structure-class page (table); native may not author the grid (C1), and a model attempt did -- the model's reading ships instead of native, flagged per its own status",
+            "table_structure_failed: table_latex_leak defect found in exact final page body"
+          ],
+          "flagged": true,
+          "patch_eligible": false,
+          "reasons": [
+            "structure_class_model_table_kept",
+            "table_structure_failed"
+          ]
+        }
+      },
+      "patch_eligible_pages": [],
+      "pdf_filename": "p6_corpus.pdf",
+      "resolved_by_escalation": [],
+      "table_flags_n": 9,
+      "untrusted_page_count": 8,
+      "untrusted_pages": [
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        10,
+        12
+      ]
+    }
+  ]
 }

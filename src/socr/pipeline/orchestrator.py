@@ -28,7 +28,12 @@ from socr.audit.scorer import FailureModeScorer
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
-from socr.core.manifest import FinalizedPageRecord
+from socr.core.manifest import (
+    FinalizedPageRecord,
+    PageDisposition,
+    PageEnding,
+    PagePrimaryReason,
+)
 from socr.core.normalizer import (
     MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS,
     OutputNormalizer,
@@ -60,27 +65,34 @@ from socr.pipeline.agentic import route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 
+#: Exact PageDisposition contract pairs for the three migrated buckets (P6 stage C).
+_MIGRATED_DISPOSITION_BUCKETS: dict[str, PageDisposition] = {
+    "structure_class_model_pages": PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    "structure_class_floor_pages": PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    "corrupt_math_hybrid_pages": PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.CORRUPT_MATH_HYBRID
+    ),
+}
+
 
 def _derive_disposition_buckets(
     state: DocumentState, records: list[FinalizedPageRecord]
 ) -> dict[str, set[int]]:
-    """The six selection-shaped assemble buckets, with EXACTLY their pre-P6 membership.
+    """The six selection-shaped assemble buckets.
 
-    **Three buckets are provenance-derived in stage B to preserve behaviour; they
-    migrate to the shipped disposition in stage C, where the CLI change is intended
-    and pinned.** Those three are ``structure_class_model_pages``,
-    ``structure_class_floor_pages`` and ``corrupt_math_hybrid_pages``.
-
-    ``SelectionProvenance`` is NOT the public contract and this is not a claim that it
-    should be. The public contract is ``PageDisposition``, which names the bytes that
-    shipped; the buckets do not read it yet only because reading it changes behaviour
-    now. A page whose ``CORRUPT_MATH_HYBRID`` candidate is then replaced by the
-    emission guard ships ``FAIL_CLOSED_MARKER / INVALID_TABLE_EMISSION``, so deriving
-    from the disposition would correctly drop it from this bucket -- and with it the
-    ``corrupt_math_hybrid_shipped`` audit event and the "shipped crop-backed equation
-    candidate(s)" CLI line. That is the RIGHT outcome and the WRONG stage: stage A/B
-    is byte-preserving, so the change belongs in stage C with a difference test that
-    states the intended CLI and audit-kind change rather than smuggling it in here.
+    **Three buckets are disposition-derived** (``structure_class_model_pages``,
+    ``structure_class_floor_pages``, ``corrupt_math_hybrid_pages``). Each is keyed
+    on exact equality with the public ``PageDisposition`` that shipped (see
+    :data:`_MIGRATED_DISPOSITION_BUCKETS`). ``SelectionProvenance`` is never read for
+    membership: a page whose candidate was rewritten by the post-selection emission
+    guard ships ``FAIL_CLOSED_MARKER / INVALID_TABLE_EMISSION`` and is absent from all
+    three buckets. A genuine structure-class floor ships
+    ``FAIL_CLOSED_MARKER / STRUCTURE_CLASS`` and remains in
+    ``structure_class_floor_pages``.
 
     **Three buckets stay flag-derived** (``d3_model_table_pages``, ``d3_floor_pages``,
     ``flagged_model_pages``). These are not questions about which branch won at all.
@@ -95,13 +107,9 @@ def _derive_disposition_buckets(
     events, CLI lines and tables-trust note.
 
     Whether a native-lane verdict SHOULD outrank a passing winner is a real question,
-    and a separate one from the stage-C migration above.
-
-    ``tests/conftest.py`` holds the pre-change predicates and asserts this function
-    reproduces them on every ``_phase_assemble`` the whole suite drives.
+    and a separate one from the disposition derivation above.
     """
     from socr.core.manifest import (
-        SelectionProvenance,
         d3_floor_kept_model_output,
         flagged_model_page_output,
     )
@@ -110,18 +118,14 @@ def _derive_disposition_buckets(
     struct_floor: set[int] = set()
     corrupt_math: set[int] = set()
 
-    _STRUCTURE_CLASS_MODEL_TAGS = (
-        SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
-        SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
-    )
     for r in records:
         pn = r.output.page_num
-        tag = r.selection_provenance
-        if tag in _STRUCTURE_CLASS_MODEL_TAGS:
+        disp = r.disposition
+        if disp == _MIGRATED_DISPOSITION_BUCKETS["structure_class_model_pages"]:
             struct_model.add(pn)
-        elif tag is SelectionProvenance.STRUCTURE_CLASS_FLOOR:
+        elif disp == _MIGRATED_DISPOSITION_BUCKETS["structure_class_floor_pages"]:
             struct_floor.add(pn)
-        elif tag is SelectionProvenance.CORRUPT_MATH_HYBRID:
+        elif disp == _MIGRATED_DISPOSITION_BUCKETS["corrupt_math_hybrid_pages"]:
             corrupt_math.add(pn)
 
     # The three native-lane verdicts, unchanged from the pre-P6 assemble predicates.
@@ -526,6 +530,82 @@ def _table_ladder_terminal(p) -> FailureMode | None:
         return disposition
     fm = p.best_output.failure_mode if p.best_output else None
     return fm if fm in _LADDER_TERMINAL_MODES else None
+
+
+_ORTHOGONAL_ASSEMBLE_BUCKET_NAMES = (
+    "native_only_distrust_pages",
+    "value_drift_pages",
+    "fabricated_ref_pages",
+    "text_grid_rejected_pages",
+    "chart_detection_failed_pages",
+    "table_rejected_pages",
+    "table_unverified_pages",
+)
+
+
+def _derive_orthogonal_assemble_buckets(state: DocumentState) -> dict[str, list[int]]:
+    """Derive the assemble buckets that are orthogonal to page selection.
+
+    These predicates intentionally remain based on configuration, page flags,
+    events, and ladder terminals.  The helper is an observation seam only: it
+    does not mutate ``state`` or invoke any extraction, chart, verifier, ladder,
+    selector, reconstruction, or emission code.
+
+    ``_phase_assemble`` supplies the current pipeline config on the private
+    assemble-state context because ``native_only`` is pipeline configuration,
+    not a property of ``DocumentState`` itself.  States created without that
+    context use the normal ``False`` default, matching ``PipelineConfig``.
+    """
+    config = getattr(state, "_assemble_config", None)
+    native_only = bool(getattr(config, "native_only", False))
+
+    native_only_distrust_pages = [
+        n
+        for n, p in sorted(state.pages.items())
+        if p.is_born_digital
+        and p.native_text
+        and native_only
+        and getattr(p, "native_table_unverifiable", False)
+        and not p.native_table_structure_failed
+        and p.attempts
+        and all((a.engine or "").startswith("native") for a in p.attempts)
+        and not (p.best_output and p.best_output.audit_passed)
+    ]
+    value_drift_pages = sorted(
+        {
+            getattr(e, "page_num", 0)
+            for e in state.events
+            if getattr(e, "kind", "") == "table_value_drift_unadjudicated"
+            and getattr(e, "page_num", 0)
+        }
+    )
+    fabricated_ref_pages = sorted(
+        n for n, p in state.pages.items() if getattr(p, "fabricated_image_refs", 0)
+    )
+    text_grid_rejected_pages = sorted(
+        n for n, p in state.pages.items() if getattr(p, "text_grid_rejected", False)
+    )
+    chart_detection_failed_pages = sorted(
+        n for n, p in state.pages.items() if getattr(p, "chart_asset_detection_failed", False)
+    )
+    table_rejected_pages = sorted(
+        n for n, p in state.pages.items() if _table_ladder_terminal(p) == FailureMode.TABLE_REJECTED
+    )
+    table_unverified_pages = sorted(
+        n
+        for n, p in state.pages.items()
+        if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
+    )
+
+    return {
+        "native_only_distrust_pages": native_only_distrust_pages,
+        "value_drift_pages": value_drift_pages,
+        "fabricated_ref_pages": fabricated_ref_pages,
+        "text_grid_rejected_pages": text_grid_rejected_pages,
+        "chart_detection_failed_pages": chart_detection_failed_pages,
+        "table_rejected_pages": table_rejected_pages,
+        "table_unverified_pages": table_unverified_pages,
+    }
 
 
 class UnifiedPipeline:
@@ -8231,29 +8311,17 @@ class UnifiedPipeline:
         # fabrication, text-grid rejection, chart-detection failure, and
         # table-ladder rejected/unverified) are alerts or post-selection events,
         # not PageDisposition, so they remain flag/config/event/terminal-derived.
-
-        # GH-211 MAJOR-2: under --native-only the OCR ladder never runs, so a
-        # page demoted purely because the extraction-time TR-3 geometry check
-        # flagged it (``native_table_unverifiable``) never had an OCR attempt
-        # -- "OCR tried and never passed" (the native_fallback wording below)
-        # would be a lie for these pages. Split them into their own bucket so
-        # the audit log and CLI can say "native distrusted, OCR never run"
-        # instead. Guarded by ``all(... startswith("native"))`` so the narrow
-        # rotated+table exception (which DOES still route through OCR even
-        # under --native-only, see ``_is_trusted_native_without_ocr``) is
-        # correctly excluded and keeps the "OCR tried and failed" wording.
-        native_only_distrust_pages = [
-            n
-            for n, p in sorted(state.pages.items())
-            if p.is_born_digital
-            and p.native_text
-            and self.config.native_only
-            and getattr(p, "native_table_unverifiable", False)
-            and not p.native_table_structure_failed
-            and p.attempts
-            and all((a.engine or "").startswith("native") for a in p.attempts)
-            and not (p.best_output and p.best_output.audit_passed)
-        ]
+        # Keep the pipeline config on this assemble-only state context so the
+        # one-argument helper can remain a pure state observation seam.
+        state._assemble_config = self.config
+        orthogonal_buckets = _derive_orthogonal_assemble_buckets(state)
+        native_only_distrust_pages = orthogonal_buckets["native_only_distrust_pages"]
+        value_drift_pages = orthogonal_buckets["value_drift_pages"]
+        fabricated_ref_pages = orthogonal_buckets["fabricated_ref_pages"]
+        text_grid_rejected_pages = orthogonal_buckets["text_grid_rejected_pages"]
+        chart_detection_failed_pages = orthogonal_buckets["chart_detection_failed_pages"]
+        table_rejected_pages = orthogonal_buckets["table_rejected_pages"]
+        table_unverified_pages = orthogonal_buckets["table_unverified_pages"]
 
         def _kept_defect(page_num: int) -> str:
             # ``best_output``, not the finalized record (cold review round 2,
@@ -8265,14 +8333,6 @@ class UnifiedPipeline:
             bo_ = ps_.best_output if ps_ else None
             return kept_table_grid_defect(bo_.text) if bo_ and bo_.text else ""
 
-        value_drift_pages = sorted(
-            {
-                getattr(e, "page_num", 0)
-                for e in state.events
-                if getattr(e, "kind", "") == "table_value_drift_unadjudicated"
-                and getattr(e, "page_num", 0)
-            }
-        )
         # Contract: native_fallback_pages means OCR was tried for a
         # non-S1/non-D3/non-flagged-model reason and native bytes ultimately shipped
         # demoted; it is intentionally not equivalent to the DEMOTED_NATIVE ending
@@ -8408,9 +8468,6 @@ class UnifiedPipeline:
             # by later document-level transformations.
             final_text = self._guard_fabricated_image_refs_document(state, final_text, doc_dir)
 
-        fabricated_ref_pages = sorted(
-            n for n, p in state.pages.items() if getattr(p, "fabricated_image_refs", 0)
-        )
         # The document-level sweep has no PageState to increment, so its removals
         # ride on the page-0 document event it records.  Without this term the
         # sweep could redact a fabricated ref and still leave the run SUCCESS.
@@ -8447,14 +8504,6 @@ class UnifiedPipeline:
         # one: content shipped, and a named value on it is disputed.
         pages_ok = pages_ok and not value_drift_pages
         pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
-        # GH-195: a page whose table grid was actively destroying values and had
-        # to be rejected and rebuilt must not leave the run reporting a clean
-        # SUCCESS. AUDIT_FAILED, not ERROR: the rebuild is lossless, so the page
-        # ships correct values and the CLI's "completed with warnings, output
-        # written" path is the honest one.
-        text_grid_rejected_pages = sorted(
-            n for n, p in state.pages.items() if getattr(p, "text_grid_rejected", False)
-        )
         pages_ok = pages_ok and not text_grid_rejected_pages
         # GH-318: chart eligibility raised and the page took the non-chart route
         # without the pipeline ever learning whether it was a chart. The text it
@@ -8462,9 +8511,6 @@ class UnifiedPipeline:
         # so the run must not report a clean SUCCESS. AUDIT_FAILED, not ERROR: the
         # fail-soft route is deliberate (#297) and the content is kept, so this is
         # the "completed with warnings, output written" path.
-        chart_detection_failed_pages = sorted(
-            n for n, p in state.pages.items() if getattr(p, "chart_asset_detection_failed", False)
-        )
         pages_ok = pages_ok and not chart_detection_failed_pages
 
         # GH-353: table judge ladder terminals (C2). Keyed off
@@ -8483,16 +8529,6 @@ class UnifiedPipeline:
         # reasoning as every other pairing above: one bucket per disposition,
         # because they need distinct audit kinds, CLI wording and (D1b,
         # later) distinct resume policy.
-        table_rejected_pages = sorted(
-            n
-            for n, p in state.pages.items()
-            if _table_ladder_terminal(p) == FailureMode.TABLE_REJECTED
-        )
-        table_unverified_pages = sorted(
-            n
-            for n, p in state.pages.items()
-            if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
-        )
         pages_ok = pages_ok and not table_rejected_pages and not table_unverified_pages
 
         if has_text and pages_ok:

@@ -23,12 +23,9 @@ the same fixture, and the only thing that varies is which source tree computed i
 No provider is consulted -- ``_phase_assemble`` never routes -- so the pin holds
 identically with and without a local ladder.
 
-Two families of field are excluded from the byte comparison, both for reasons that
-are not behaviour:
+One family of field is excluded from the byte comparison, for reasons that are not
+behaviour:
 
-* ``disposition`` -- stage A's ADDITIVE sidecar/manifest field. Its presence is the
-  ticket. :meth:`TestPreChangeByteIdentity.test_disposition_is_the_only_added_key`
-  pins that it is the ONLY key either surface gained.
 * ``socr_source_digest`` / ``run_fingerprint`` -- these move whenever ANY source
   byte changes, which is what they are for; and ``input_checksum`` /
   ``pdf_file_hash``, which hash a PyMuPDF-written PDF that embeds a creation
@@ -36,9 +33,18 @@ are not behaviour:
   excluded: the manifest entry's ``fingerprint`` object is compared in full, minus
   the PDF hash nested in it.
 
+``disposition`` is NOT excluded (cold review round 1, finding 1). It was, while this
+module and stage C shared a capture that had been written stripped -- which made the
+one field both stages are about invisible to the comparison. The shared baseline is
+now regenerated at the stage-A/B HEAD WITH the field, so stage A's persistence is
+already present on both sides here and is compared like any other key;
+:meth:`TestPreChangeByteIdentity.test_disposition_is_present_and_no_key_moved` pins
+that it is on every sidecar and manifest entry and that neither surface gained or
+lost any other key.
+
 Regenerate the pinned capture with::
 
-    PYTHONPATH=<worktree>/src ~/venvs/socr/bin/python tests/regenerate_p6_prechange.py
+    PYTHONPATH=/Users/rubenffuertes/repos/tools/socr-p6c/src uv run socr-regenerate-p6-prechange
 
 which exports the pre-change sources with ``git archive HEAD src`` and runs this same
 corpus against them.
@@ -50,9 +56,15 @@ import json
 from pathlib import Path
 
 import pytest
-
-from conftest import P6_BUCKET_NAMES, old_disposition_buckets
+from conftest import P6_BUCKET_NAMES, assert_stage_c_disposition_buckets, old_disposition_buckets
 from p6_corpus_fixture import build_corpus_state, capture, make_pdf
+from p6_stage_c_oracle import (
+    VOLATILE_KEYS,
+    apply_stage_c_patch,
+    assert_capture_diff_matches_oracle,
+    normalize_capture,
+)
+
 from socr.core.manifest import finalized_page_records
 from socr.pipeline.orchestrator import _derive_disposition_buckets
 
@@ -60,35 +72,7 @@ pytest.importorskip("fitz")
 
 PRECHANGE = Path(__file__).parent / "fixtures" / "p6" / "prechange_assemble.json"
 
-#: Fields excluded from the byte comparison. See the module docstring.
-#:
-#: Narrowed in cold review round 2 (finding 7): the manifest entry's whole
-#: ``fingerprint`` object used to be dropped, which also hid its ``engine``,
-#: ``model_version``, ``image_hash``, ``prompt_hash``, ``render_dpi`` and the two
-#: version fields -- every one of them behaviour-relevant. Only the PDF hash NESTED
-#: inside it is volatile, and it is named here on its own.
-VOLATILE_KEYS = frozenset(
-    {
-        # Stage A's additive field. Its presence is pinned separately, by
-        # test_disposition_is_the_only_added_key.
-        "disposition",
-        # Move whenever any source byte changes, which is what they are for.
-        "socr_source_digest",
-        "run_fingerprint",
-        # Hash a PyMuPDF-written PDF, which embeds a creation timestamp and is not
-        # byte-stable between runs at all.
-        "input_checksum",
-        "pdf_file_hash",
-    }
-)
-
-
-def _normalize(obj):
-    if isinstance(obj, dict):
-        return {k: _normalize(v) for k, v in obj.items() if k not in VOLATILE_KEYS}
-    if isinstance(obj, list):
-        return [_normalize(v) for v in obj]
-    return obj
+_normalize = normalize_capture
 
 
 def _new_buckets(state) -> dict[str, set[int]]:
@@ -119,9 +103,11 @@ class TestColdReviewD3Shapes:
         assert 5 in old["d3_model_table_pages"], "fixture no longer builds the reviewed shape"
         assert new["d3_model_table_pages"] == old["d3_model_table_pages"]
 
-    def test_every_bucket_matches_the_pre_change_predicate(self, tmp_path: Path) -> None:
+    def test_every_bucket_matches_the_stage_c_contract(self, tmp_path: Path) -> None:
+        """Adjusted from old blanket every-bucket check to the stage-C two-rule contract."""
         state = build_corpus_state(make_pdf(tmp_path))
-        assert _new_buckets(state) == old_disposition_buckets(state)
+        records = finalized_page_records(state)
+        assert_stage_c_disposition_buckets(state, records, _new_buckets(state))
 
     def test_the_reviewed_pages_are_not_disposition_derivable(self, tmp_path: Path) -> None:
         """Why the two D3 buckets stay flag-derived, stated as a test rather than a claim.
@@ -146,7 +132,7 @@ class TestAssembleFixtureCoverage:
     """The autouse guard is armed, and it covers every assemble-driving module."""
 
     def test_the_guard_actually_compares_on_a_real_phase_assemble(self, tmp_path: Path) -> None:
-        """Not "installed" -- REACHED. One real assemble, one recorded comparison.
+        """Not "installed" -- REACHED. One real assemble, both recorded comparisons.
 
         Cold review round 2, finding 8. If ``_phase_assemble`` stops calling the
         helper, calls an imported alias, or a later patch displaces the wrapper,
@@ -154,55 +140,137 @@ class TestAssembleFixtureCoverage:
         """
         import conftest
 
-        assert conftest.GUARD_CALL_LOG == [], "the log is cleared per test"
+        assert conftest.DISPOSITION_GUARD_CALL_LOG == [], "the log is cleared per test"
+        assert conftest.ORTHOGONAL_GUARD_CALL_LOG == [], "the log is cleared per test"
         capture(tmp_path)
-        assert len(conftest.GUARD_CALL_LOG) == 1, (
-            "one _phase_assemble must produce exactly one bucket comparison"
+        assert len(conftest.DISPOSITION_GUARD_CALL_LOG) == 1, (
+            "one _phase_assemble must produce exactly one disposition bucket comparison"
         )
-        compared = conftest.GUARD_CALL_LOG[0]
-        assert set(compared) == set(P6_BUCKET_NAMES)
+        assert len(conftest.ORTHOGONAL_GUARD_CALL_LOG) == 1, (
+            "one _phase_assemble must produce exactly one orthogonal bucket comparison"
+        )
+        disp_compared = conftest.DISPOSITION_GUARD_CALL_LOG[0]
+        assert set(disp_compared) == set(P6_BUCKET_NAMES)
         # ...and it compared a real document, not an empty one.
-        assert compared["d3_floor_pages"] == {4} or compared["d3_floor_pages"] == {2, 4}
+        assert disp_compared["d3_floor_pages"] == {4} or disp_compared["d3_floor_pages"] == {2, 4}
 
-    def test_removing_the_guard_leaves_nothing_compared(self, tmp_path: Path, monkeypatch) -> None:
-        """The control that makes the assertion above load-bearing.
+        orth_compared = conftest.ORTHOGONAL_GUARD_CALL_LOG[0]
+        assert set(orth_compared) == set(conftest.ORTHOGONAL_BUCKET_NAMES)
 
-        With the wrapper replaced by the production function the same real assemble
-        records no comparison at all, so a green run of the test above is evidence
-        the monkeypatch is doing work rather than evidence that nothing checks.
-        """
+    def test_removing_the_disposition_guard_leaves_disposition_log_empty(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The control that makes the disposition assertion above load-bearing."""
         import conftest
+
         from socr.pipeline import orchestrator as orch
 
         monkeypatch.setattr(
             orch, "_derive_disposition_buckets", orch._derive_disposition_buckets.__wrapped__
         )
-        conftest.GUARD_CALL_LOG.clear()
+        conftest.DISPOSITION_GUARD_CALL_LOG.clear()
+        conftest.ORTHOGONAL_GUARD_CALL_LOG.clear()
         capture(tmp_path)
-        assert conftest.GUARD_CALL_LOG == []
+        assert conftest.DISPOSITION_GUARD_CALL_LOG == []
+        assert len(conftest.ORTHOGONAL_GUARD_CALL_LOG) == 1
+
+    def test_removing_the_orthogonal_guard_leaves_orthogonal_log_empty(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The control that makes the orthogonal assertion above load-bearing."""
+        import conftest
+
+        from socr.pipeline import orchestrator as orch
+
+        monkeypatch.setattr(
+            orch,
+            "_derive_orthogonal_assemble_buckets",
+            orch._derive_orthogonal_assemble_buckets.__wrapped__,
+        )
+        conftest.DISPOSITION_GUARD_CALL_LOG.clear()
+        conftest.ORTHOGONAL_GUARD_CALL_LOG.clear()
+        capture(tmp_path)
+        assert conftest.ORTHOGONAL_GUARD_CALL_LOG == []
+        assert len(conftest.DISPOSITION_GUARD_CALL_LOG) == 1
+
+    def test_removing_both_guards_leaves_both_logs_empty(self, tmp_path: Path, monkeypatch) -> None:
+        """Bypassing both wrappers leaves both call logs empty."""
+        import conftest
+
+        from socr.pipeline import orchestrator as orch
+
+        monkeypatch.setattr(
+            orch, "_derive_disposition_buckets", orch._derive_disposition_buckets.__wrapped__
+        )
+        monkeypatch.setattr(
+            orch,
+            "_derive_orthogonal_assemble_buckets",
+            orch._derive_orthogonal_assemble_buckets.__wrapped__,
+        )
+        conftest.DISPOSITION_GUARD_CALL_LOG.clear()
+        conftest.ORTHOGONAL_GUARD_CALL_LOG.clear()
+        capture(tmp_path)
+        assert conftest.DISPOSITION_GUARD_CALL_LOG == []
+        assert conftest.ORTHOGONAL_GUARD_CALL_LOG == []
 
     def test_guard_is_installed(self) -> None:
         from socr.pipeline import orchestrator as orch
 
-        assert orch._derive_disposition_buckets.__name__ == "_checked", (
-            "the conftest difference guard is not wrapping the production derivation"
+        assert getattr(orch._derive_disposition_buckets, "__wrapped__", None) is not None, (
+            "the conftest difference guard is not wrapping the disposition derivation"
+        )
+        assert getattr(orch._derive_orthogonal_assemble_buckets, "__wrapped__", None) is not None, (
+            "the conftest difference guard is not wrapping the orthogonal derivation"
         )
 
-    def test_guard_catches_a_membership_change(self, tmp_path: Path) -> None:
-        """Negative control: the guard must actually fail when membership moves.
-
-        Without it, a guard that silently stopped comparing would be
-        indistinguishable from a guard that passes.
-        """
-        from conftest import assert_buckets_unchanged
+    def test_guard_catches_flag_derived_bucket_perturbation(self, tmp_path: Path) -> None:
+        """Negative control: the guard must fail when a flag-derived bucket is perturbed."""
+        from conftest import assert_stage_c_disposition_buckets
 
         state = build_corpus_state(make_pdf(tmp_path))
-        assert_buckets_unchanged(state, _new_buckets(state))
+        records = finalized_page_records(state)
+        buckets = _new_buckets(state)
+        assert_stage_c_disposition_buckets(state, records, buckets)
 
-        moved = _new_buckets(state)
-        moved["d3_floor_pages"] = moved["d3_floor_pages"] - {4}
-        with pytest.raises(AssertionError, match="changed assemble bucket membership"):
-            assert_buckets_unchanged(state, moved)
+        moved = dict(buckets)
+        moved["d3_floor_pages"] = (
+            moved["d3_floor_pages"] - {4}
+            if 4 in moved["d3_floor_pages"]
+            else moved["d3_floor_pages"] | {99}
+        )
+        with pytest.raises(AssertionError, match="flag-derived bucket 'd3_floor_pages'"):
+            assert_stage_c_disposition_buckets(state, records, moved)
+
+    def test_guard_catches_disposition_derived_bucket_perturbation(self, tmp_path: Path) -> None:
+        """Negative control: the guard must fail when a disposition-derived bucket is perturbed."""
+        from conftest import assert_stage_c_disposition_buckets
+
+        state = build_corpus_state(make_pdf(tmp_path))
+        records = finalized_page_records(state)
+        buckets = _new_buckets(state)
+        assert_stage_c_disposition_buckets(state, records, buckets)
+
+        moved = dict(buckets)
+        moved["structure_class_model_pages"] = moved["structure_class_model_pages"] ^ {8}
+        with pytest.raises(
+            AssertionError, match="disposition-derived bucket 'structure_class_model_pages'"
+        ):
+            assert_stage_c_disposition_buckets(state, records, moved)
+
+    def test_guard_catches_orthogonal_bucket_perturbation(self, tmp_path: Path) -> None:
+        """Negative control: the guard must fail when an orthogonal bucket is perturbed."""
+        from conftest import assert_orthogonal_buckets_unchanged
+
+        from socr.pipeline.orchestrator import _derive_orthogonal_assemble_buckets
+
+        state = build_corpus_state(make_pdf(tmp_path))
+        orth = _derive_orthogonal_assemble_buckets(state)
+        assert_orthogonal_buckets_unchanged(state, orth)
+
+        moved = dict(orth)
+        moved["native_only_distrust_pages"] = [99]
+        with pytest.raises(AssertionError, match="orthogonal assemble bucket membership changed"):
+            assert_orthogonal_buckets_unchanged(state, moved)
 
     def test_every_assemble_driving_module_runs_under_the_guard(self) -> None:
         """Enumerated, so a new assemble fixture cannot quietly escape the guard.
@@ -223,41 +291,53 @@ class TestAssembleFixtureCoverage:
 
 
 class TestPreChangeByteIdentity:
-    """Every surface the acceptance bar names, against the pre-change capture."""
+    """Every surface the acceptance bar names, against pre-change capture via the oracle."""
 
     @pytest.fixture(scope="class")
     def prechange(self) -> dict:
         return json.loads(PRECHANGE.read_text())
 
+    @pytest.fixture(scope="class")
+    def patched_prechange(self, prechange) -> dict:
+        return apply_stage_c_patch(normalize_capture(prechange))
+
     @pytest.fixture
     def current(self, tmp_path: Path) -> dict:
         return capture(tmp_path)
 
-    def test_document_status(self, prechange, current) -> None:
-        assert current["doc_status"] == prechange["doc_status"]
-        assert current["result_status"] == prechange["result_status"]
-        assert current["result_audit_passed"] == prechange["result_audit_passed"]
+    def test_document_status(self, patched_prechange, current) -> None:
+        assert current["doc_status"] == patched_prechange["doc_status"]
+        assert current["result_status"] == patched_prechange["result_status"]
+        assert current["result_audit_passed"] == patched_prechange["result_audit_passed"]
 
-    def test_metadata_notes(self, prechange, current) -> None:
-        assert current["result_error"] == prechange["result_error"]
+    def test_metadata_notes(self, patched_prechange, current) -> None:
+        assert current["result_error"] == patched_prechange["result_error"]
 
-    def test_audit_events(self, prechange, current) -> None:
-        assert _normalize(current["events"]) == prechange["events"]
+    def test_audit_events(self, patched_prechange, current) -> None:
+        assert normalize_capture(current["events"]) == patched_prechange["events"]
 
-    def test_cli_summary_lines(self, prechange, current) -> None:
-        assert current["cli"] == prechange["cli"]
+    def test_cli_summary_lines(self, patched_prechange, current) -> None:
+        assert current["cli"] == patched_prechange["cli"]
 
-    def test_final_markdown_and_fragments(self, prechange, current) -> None:
-        assert current["markdown"] == prechange["markdown"]
+    def test_final_markdown_and_fragments(self, patched_prechange, current) -> None:
+        assert current["markdown"] == patched_prechange["markdown"]
 
-    def test_sidecars(self, prechange, current) -> None:
-        assert _normalize(current["sidecars"]) == prechange["sidecars"]
+    def test_sidecars(self, patched_prechange, current) -> None:
+        assert normalize_capture(current["sidecars"]) == patched_prechange["sidecars"]
 
-    def test_manifest(self, prechange, current) -> None:
-        assert _normalize(current["manifest"]) == prechange["manifest"]
+    def test_manifest(self, patched_prechange, current) -> None:
+        assert normalize_capture(current["manifest"]) == patched_prechange["manifest"]
 
-    def test_disposition_is_the_only_added_key(self, current) -> None:
-        """Stage A's persistence is additive: nothing else appeared, nothing left."""
+    def test_exact_delta_matches_shared_oracle(self, prechange, current) -> None:
+        assert_capture_diff_matches_oracle(prechange, current)
+
+    def test_disposition_is_present_and_no_key_moved(self, current) -> None:
+        """Every sidecar and manifest entry carries ``disposition``, and no key moved.
+
+        The baseline is the stage-A/B HEAD, which already persisted the field, so
+        this is a presence-and-stability pin rather than the additive-diff it was
+        while the capture was written with ``disposition`` stripped out.
+        """
         raw = json.loads(PRECHANGE.read_text())
         for name, sidecar in current["sidecars"].items():
             gained = set(sidecar) - set(raw["sidecars"][name]) - VOLATILE_KEYS
