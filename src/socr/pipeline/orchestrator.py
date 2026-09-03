@@ -3865,8 +3865,16 @@ class UnifiedPipeline:
             return False
 
         kinds = [k for k in (rung_kinds or []) if k]
-        if not kinds:
-            kinds = list(self.TABLE_JUDGE_RUNG_KINDS)
+        # GH-554: a kind with no probe of its own -- the ``"unknown"`` the
+        # whole-ladder guard synthesizes, or an injected test rung -- can never
+        # be shown reachable. Keeping it as the ONLY question is not the
+        # conservative reading it looks like: it latches the skip permanently
+        # shut, even when every real rung is back. Such a record says no more
+        # than an empty one does, so it widens the same way. A record that also
+        # names a real kind keeps that kind alone -- the unknown adds no
+        # information, the real kind does.
+        probeable = [k for k in kinds if k in self.TABLE_JUDGE_RUNG_KINDS]
+        kinds = probeable or list(self.TABLE_JUDGE_RUNG_KINDS)
         return any(self._table_judge_rung_kind_available_now(kind) for kind in kinds)
 
     def _table_judge_rung_kind_available_now(self, kind: str) -> bool:
@@ -3909,9 +3917,11 @@ class UnifiedPipeline:
             logger.debug("table-judge rung %r availability probe failed: %s", kind, exc)
             return False
         # An unrecognised kind (an injected test rung, or a synthesized
-        # "unknown" from the whole-ladder guard) has no probe of its own. It
-        # cannot be shown reachable, so it does not reopen a document on its
-        # own -- but it also does not veto the kinds that can be probed.
+        # "unknown" from the whole-ladder guard) has no probe of its own, so it
+        # cannot be shown reachable and never reopens a document on its own.
+        # Nor does it veto the kinds that can be probed: the caller drops
+        # unprobeable kinds before asking, and widens to every configured kind
+        # when nothing probeable is left (GH-554).
         logger.debug("table-judge rung kind %r has no reachability probe", kind)
         return False
 
