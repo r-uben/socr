@@ -233,3 +233,37 @@ labelled crop set with false-accept rates by outcome class (low+low, one-high, h
 golden-test audit, the rung-unavailable latch, and the Q2 decision — Q2 changes shipped
 bytes, so it is design, not mechanics. Q1 and Q3 are owner rulings that can ship with the
 flip.
+## Owner rulings on the ladder flip — 2026-09-03
+
+**Q1 — two low-confidence passes.** Ruled: not a quorum (B). Tiebreak order, cheapest
+first: (1) the free binding check — rows AND columns from native word geometry, never the
+numeric multiset alone (matching numbers prove nothing about placement); (2) if it
+abstains (no text layer) or fails to decide, a doubt-focused adjudicator: a third-vendor
+CLI rung (Kimi or Grok, for independence from the two readers) that blindly transcribes
+ONLY the cells the two readers doubted, from the crop, and the table is verified iff those
+cells agree with the extraction; (3) otherwise UNVERIFIED. The adjudicator reuses the
+cell-transcription machinery built for the binding clamp (GH-367) and runs only on the
+low+low minority.
+
+**Q2 — a table both readers rejected.** Ruled: withhold it floor-style (marker + page
+image, prose kept via the GH-520 regional splice), NOT shipped as a warning — but only
+after the same two guards as Q1 have failed to clear it: (1) the free binding check
+(rows and columns) overrules the readers if it passes; (2) otherwise the third-vendor
+adjudicator blindly transcribes the cells the readers flagged; if they match the
+extraction the readers were wrong and the table ships; if not, withhold. Known ways a
+rejection is wrong, recorded so the guards are aimed: spanning headers / panels / notes
+rows read as misalignment; a bad crop (cut header, rotation) fooling both readers
+identically; decoy-tuned prompts over-triggering on dense tables. A table is hidden only
+when readers AND (geometry OR blind transcription) agree.
+
+**Q3 — default posture.** Ruled: ON by default, fail-closed (a table that cannot be
+verified ships UNVERIFIED, never SUCCESS), with the startup line (already shipped in
+#553) naming the cause and the opt-out when no rung is reachable, and the strict-local
+line saying every table page will be UNVERIFIED.
+
+**Consequence for the flip build (one ticket, after these rulings):** (a) the tiebreak
+chain for low+low and for REJECTED — binding check as overruling evidence, then the
+doubt-focused third-vendor cell adjudicator as a CLI rung, then the terminal; (b) the
+REJECTED withhold path on top of the GH-520 regional floor; (c) `table_judge_ladder`
+default True with the golden-test audit guard already in place. Corpus run with the flag
+on afterwards to replace the smoke's four pages with shipped rates.
