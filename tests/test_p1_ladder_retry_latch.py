@@ -582,6 +582,95 @@ class TestSingleFileRetryLatch:
             "a pre-rung-list latch must still reopen when some rung is reachable"
         )
 
+    def _rewrite_recorded_rungs(self, out_dir: Path, kinds: list[str]) -> None:
+        """Rewrite the persisted rung list, root entry and page sidecars alike.
+
+        The whole-ladder guard in ``_run_table_judge_gate`` synthesizes
+        ``RungResult(rung="unknown", unavailable=True)`` when the ladder itself
+        escapes for an availability-shaped reason, and the latch derivation
+        writes ``["unknown"]``. Reproducing that shape by rewriting the record
+        keeps the test on the persisted contract rather than on the escape,
+        which the per-rung catch in ``table_ladder`` now makes hard to reach.
+        """
+        import json
+
+        from ocr_output_contract import RootIndex
+
+        index = RootIndex(out_dir)
+        rel_key = next(iter(index.files))
+        index.files[rel_key]["table_judge_retry_rungs"] = list(kinds)
+        index.save()
+        for sidecar in out_dir.rglob("pages/*.json"):
+            meta = json.loads(sidecar.read_text())
+            if meta.get("table_judge_retry_rungs") is not None:
+                meta["table_judge_retry_rungs"] = list(kinds)
+                sidecar.write_text(json.dumps(meta, indent=2))
+
+    def _latched_unknown_document(self, tmp_path: Path) -> tuple[Path, Path]:
+        pdf = _ruled_pdf(tmp_path / "src")
+        out_dir = tmp_path / "out"
+        rung = _QueueRung([_unavailable(RUNG_KIND_GEMINI)])
+        with self._rung_kind_seam(gemini=False, ollama=False):
+            _process_run(pdf, out_dir, rungs=[rung], available=None)
+        self._rewrite_recorded_rungs(out_dir, ["unknown"])
+        return pdf, out_dir
+
+    def test_an_unknown_rung_latch_reopens_when_a_real_rung_returns(self, tmp_path: Path) -> None:
+        """GH-554. ``["unknown"]`` names no probeable rung, so asking about it
+        answers False forever and the skip never lifts -- the exact opposite of
+        what an empty list (which widens) does, from a record that carries no
+        more information. It must widen the same way."""
+        pdf, out_dir = self._latched_unknown_document(tmp_path)
+
+        recovering = _QueueRung([_pass("high")])
+        with self._rung_kind_seam(gemini=False, ollama=True):
+            result_2 = _process_run(pdf, out_dir, rungs=[recovering], available=None)
+
+        assert result_2.status.value != "skipped", (
+            'an ["unknown"] latch did not reopen when a configured rung returned'
+        )
+
+    def test_an_unknown_rung_latch_still_skips_while_no_rung_is_reachable(
+        self, tmp_path: Path
+    ) -> None:
+        """Difference control. Without this, the test above would pass against a
+        gate that had simply stopped latching at all: the widening must reopen
+        on a REACHABLE rung, not on every resume."""
+        pdf, out_dir = self._latched_unknown_document(tmp_path)
+
+        recovering = _QueueRung([_pass("high")])
+        with self._rung_kind_seam(gemini=False, ollama=False):
+            result_2 = _process_run(pdf, out_dir, rungs=[recovering], available=None)
+
+        assert result_2.status.value == "skipped", (
+            "the document reopened with no rung reachable, so the reopen above "
+            "measures nothing about reachability"
+        )
+        assert not recovering.calls, (
+            f"the ladder was re-run on an unreachable rung ({len(recovering.calls)} calls)"
+        )
+
+    def test_a_named_rung_beside_an_unknown_is_not_widened_away(self, tmp_path: Path) -> None:
+        """The widening is a last resort, not a rule. A record naming a real
+        kind alongside ``"unknown"`` still asks only about the real kind: the
+        unknown adds no information, and widening on it would resurrect the
+        cross-rung stand-in that cold review round 3 removed."""
+        pdf = _ruled_pdf(tmp_path / "src")
+        out_dir = tmp_path / "out"
+        rung = _QueueRung([_unavailable(RUNG_KIND_GEMINI)])
+        with self._rung_kind_seam(gemini=False, ollama=False):
+            _process_run(pdf, out_dir, rungs=[rung], available=None)
+        self._rewrite_recorded_rungs(out_dir, [RUNG_KIND_GEMINI, "unknown"])
+
+        recovering = _QueueRung([_pass("high")])
+        with self._rung_kind_seam(gemini=False, ollama=True):
+            result_2 = _process_run(pdf, out_dir, rungs=[recovering], available=None)
+
+        assert result_2.status.value == "skipped", (
+            "a healthy ollama reopened a document whose recorded failure was "
+            "gemini; the unknown entry widened the question it should not have"
+        )
+
     def test_a_quota_refusal_is_not_re_paid_by_the_rest_of_the_run(self, tmp_path: Path) -> None:
         """Cold review round 3, new finding 2. A recognised refusal on a REAL
         call is not a per-table fact: the next table gets the same answer. The
