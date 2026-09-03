@@ -2,8 +2,19 @@
 
 **Date:** 2026-09-03
 **Script:** `docs/log/2026-09-03_large-raster-frequency.py`
-**Corpus:** 277 PDFs, the local papers library. 0 unreadable files, 1 unreadable page
-(a malformed page tree).
+**Corpus:** 277 PDFs, the local papers library. 0 unreadable files; **64 pages excluded
+as unreadable**, and **207 born-digital pages carried a raster whose placement could not
+be measured**.
+
+Both exclusions are reported by the script and are stated here because they bound the
+number below. The 64 are outside the denominator entirely. The 207 are inside it but
+under-counted in the numerator: production `has_chart_marks` fails *open* on an
+unmeasurable placement, so up to 207 more pages could reach the lane than the 1530 below.
+That moves the figure the same direction as the conclusion, so it does not weaken it.
+
+(An earlier draft of this log said "1 unreadable page", inferred from the single MuPDF
+error visible in the console rather than counted. The script did not report the tally at
+all until cubic asked for it on #557; it is 64.)
 
 #511 set its own acceptance: *"how often does a large non-chart raster actually appear on
 a born-digital page in the corpus? If the answer is 'rarely', the current fail-toward-chart
@@ -81,6 +92,9 @@ Two, in fact.
   over-count the *denominator* and so give a lower bound; it inflates the numerator too,
   by exactly the pages that carry a big image. The wrong version looked entirely
   reasonable.
+- **"1 unreadable page".** Stated in the first draft of this log from the one MuPDF error
+  visible in the console, not from a count -- because the script tallied the exclusions and
+  never printed them. It is 64. A number that is not printed is a number nobody checks.
 - **`reaches_the_lane`.** The sweep originally asked "would vector evidence route this page
   anyway?" via `has_chart_marks`. It cannot: `has_chart_marks` takes the raster fast path,
   so a page that just cleared the area gate answers True *because of that raster*. The two
