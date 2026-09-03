@@ -7475,10 +7475,6 @@ class UnifiedPipeline:
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
             self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
-            from socr.judge.table_verdict import (
-                TABLE_BINDING_ADJUDICATED_KIND,
-                TABLE_LADDER_EVENT_KINDS,
-            )
 
             # P4-R joins the allowlist for the same reason D1a wrote it: the
             # lane's dispositions -- above all a presence-guard REJECTION --
