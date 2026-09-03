@@ -189,13 +189,22 @@ def test_a_table_without_a_readable_bbox_still_counts_but_contributes_no_box() -
     class _Page:
         def find_tables(self):
             class _R:
-                tables = [_Table((0.0, 0.0, 10.0, 10.0)), _Table(None), _Table("nonsense")]
+                tables = [
+                    _Table((0.0, 0.0, 10.0, 10.0)),
+                    _Table(None),
+                    _Table("nonsense"),
+                    # cubic P2 on #570: degenerate and non-finite geometry is
+                    # not somewhere a block can be mapped to either.
+                    _Table((5.0, 5.0, 5.0, 9.0)),
+                    _Table((0.0, 0.0, float("inf"), 3.0)),
+                    _Table((0.0, 0.0, float("nan"), 3.0)),
+                ]
 
             return _R()
 
     count, boxes = BornDigitalDetector._detect_table_regions(_Page())
-    assert count == 3, "a table with an unusable bbox stopped being a table"
-    assert boxes == [(0.0, 0.0, 10.0, 10.0)]
+    assert count == 6, "a table with an unusable bbox stopped being a table"
+    assert boxes == [(0.0, 0.0, 10.0, 10.0)], f"an unusable bbox was published as readable: {boxes}"
     assert count > len(boxes), (
         "the mismatch a consumer fails closed on is not observable, so the "
         "fail-closed branch can never be reached"
@@ -213,3 +222,39 @@ def test_a_detector_failure_is_no_evidence_of_tables() -> None:
             raise RuntimeError("table detection died")
 
     assert BornDigitalDetector._detect_table_regions(_Page()) == (0, [])
+
+
+def test_the_detector_measures_its_regions_once_per_page(tmp_path: Path) -> None:
+    """cubic P2 on #570, and a correction to this PR's first claim.
+
+    The first version stamped the new fields from a SECOND
+    ``_detect_table_regions`` call. That made "`has_tables` and the count
+    cannot disagree" false -- they came from two `find_tables()` invocations
+    whose agreement rested on PyMuPDF's per-page caching, not on a shared
+    result -- and added a detection pass on the hot path of every page.
+
+    Counting the calls is the only way to tell: both versions produce identical
+    numbers on every fixture in this file.
+
+    Scoped to this helper on purpose. ``extract_structured`` calls
+    ``find_tables()`` for its own reasons, which predates this ticket; what is
+    pinned here is that GH-520 added no pass of its own.
+    """
+    pdf = _pdf(tmp_path / "once", "once.pdf", tables=2)
+
+    calls: list[int] = []
+    real = BornDigitalDetector._detect_table_regions
+
+    def _counting(page):
+        calls.append(1)
+        return real(page)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(BornDigitalDetector, "_detect_table_regions", staticmethod(_counting))
+        page = _assess(pdf)
+
+    assert page.detected_table_count == 2, "the assessment did not go through the real path"
+    assert len(calls) == 1, (
+        f"the region detector ran {len(calls)} times for one page; `has_tables` "
+        "and the count are not reading one shared result"
+    )

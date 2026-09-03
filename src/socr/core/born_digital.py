@@ -16,6 +16,7 @@ Heuristics for distinguishing born-digital from baked-in OCR:
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -1352,6 +1353,13 @@ class BornDigitalDetector:
         self._last_extraction_failed_ordinals = []
         self._last_extraction_table_count = 0
         self._last_extraction_region_identities = []
+        # GH-520 (cubic P2 on #570): find_tables() runs ONCE per page. Stamping
+        # the new fields from a second call left `has_tables` and
+        # `detected_table_count` produced by two invocations whose agreement
+        # rested on PyMuPDF's per-page caching -- a claim of "cannot disagree"
+        # that the code did not actually make good on, plus a second full
+        # detection pass on the hot path of every page in the corpus.
+        self._detected_regions_this_page = self._detect_table_regions(page)
 
         try:
             blocks = page.get_text("dict").get("blocks", [])
@@ -1366,9 +1374,9 @@ class BornDigitalDetector:
         # GH-520: stamped here for the same reason the direction is -- the
         # signals body has 11 return sites and a detection signal missing from
         # one of them is a silent zero, which a consumer reads as "no tables".
-        detected_count, detected_bboxes = self._detect_table_regions(page)
+        detected_count, detected_bboxes = self._detected_regions_this_page
         assessment.detected_table_count = detected_count
-        assessment.detected_table_bboxes = detected_bboxes
+        assessment.detected_table_bboxes = list(detected_bboxes)
         if text_direction_is_rotated(direction):
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment
@@ -1906,7 +1914,12 @@ class BornDigitalDetector:
         ``tests/test_gh248_lane_reuse.py``, which pins this method rather than
         the helper.
         """
-        found, _bboxes = self._detect_table_regions(page)
+        # The single source: whatever `_assess_page` measured for THIS page.
+        # `_detect_tables` is also reachable directly (tests, and any future
+        # caller), so an unset memo falls back to measuring -- it must never
+        # reuse another page's regions, which is why the memo is reset per page.
+        memo = getattr(self, "_detected_regions_this_page", None)
+        found, _bboxes = memo if memo is not None else self._detect_table_regions(page)
         if found:
             return True
 
@@ -1954,6 +1967,14 @@ class BornDigitalDetector:
             try:
                 x0, y0, x1, y1 = (float(v) for v in bbox)
             except (TypeError, ValueError):
+                continue
+            # A NaN, an infinity or a zero-area rect is not somewhere a block
+            # can be mapped to. Publishing it as readable would let a consumer
+            # believe it had a region for that table (cubic P2 on #570); it
+            # falls in with the bbox-less case instead, counted but unusable.
+            if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+                continue
+            if x1 <= x0 or y1 <= y0:
                 continue
             boxes.append((x0, y0, x1, y1))
         return len(tables), boxes
