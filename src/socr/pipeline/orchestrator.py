@@ -1952,6 +1952,15 @@ class UnifiedPipeline:
             # this the record was dropped on resume and the guarantee held only
             # until the next run.
             "equation_region_reading_unverifiable",
+            # GH-540: the legacy seam's refusal, for the same reason and one
+            # stronger. The shipped markdown does say a reading was withheld --
+            # an HTML comment beside the crop carries the validation reason --
+            # but the WITHHELD READING ITSELF (`raw_latex`) lives only in this
+            # event. Drop it on resume and nobody can tell what was refused, only
+            # that something was. Replaying it also removes an asymmetry with no
+            # principle behind it: the region lane's refusal survived a resume
+            # and the legacy one did not.
+            "equation_sidecar_refused",
             "equation_region_reading_unvalidated",
             "equation_region_reading_unaligned",
             "equation_region_reading_unsafe_markup",
@@ -1959,6 +1968,27 @@ class UnifiedPipeline:
             "equation_lane_detection_failed",
         }
     )
+
+    @classmethod
+    def resume_restore_kinds(cls) -> frozenset[str]:
+        """Audit-event kinds `_restore_terminal_page_state` replays.
+
+        A method rather than an inline expression (cubic P2 on #551) so a test
+        can drive the REAL assembly. The guard for it previously rebuilt this
+        union from the same three sources: dropping a term here left that test
+        green while the filter silently stopped replaying a whole family --
+        exactly the failure the guard exists to catch, reproduced in the guard.
+        """
+        from socr.judge.table_verdict import (
+            TABLE_BINDING_ADJUDICATED_KIND,
+            TABLE_LADDER_EVENT_KINDS,
+        )
+
+        return frozenset(
+            TABLE_LADDER_EVENT_KINDS
+            | {TABLE_BINDING_ADJUDICATED_KIND}
+            | cls.EQUATION_LANE_EVENT_KINDS
+        )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
     #: POSTs to ``{host}/api/generate`` -- the Ollama generate API -- so a
@@ -7445,21 +7475,13 @@ class UnifiedPipeline:
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
             self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
-            from socr.judge.table_verdict import (
-                TABLE_BINDING_ADJUDICATED_KIND,
-                TABLE_LADDER_EVENT_KINDS,
-            )
 
             # P4-R joins the allowlist for the same reason D1a wrote it: the
             # lane's dispositions -- above all a presence-guard REJECTION --
             # are the only record that a reading was looked at and refused.
             # Dropping them on resume would leave a page that silently ships
             # native prose with no trace of the refusal.
-            restore_kinds = (
-                TABLE_LADDER_EVENT_KINDS
-                | {TABLE_BINDING_ADJUDICATED_KIND}
-                | self.EQUATION_LANE_EVENT_KINDS
-            )
+            restore_kinds = self.resume_restore_kinds()
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue

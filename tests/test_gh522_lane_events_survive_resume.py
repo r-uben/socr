@@ -37,10 +37,6 @@ _NOT_REPLAYED: dict[str, str] = {
     # Informational and per-region: it records that a region was found, which the
     # restored page's own outcome already implies. Not evidence of a decision.
     "equation_region_detected": "informational; the page's restored outcome implies it",
-    # A refusal record, and therefore the same class as the GH-522 one this file
-    # was written for -- filed rather than fixed here, because it belongs to the
-    # sidecar guard's design and not to this ticket.
-    "equation_sidecar_refused": "refusal record; replay status is GH-540, open",
 }
 
 
@@ -82,6 +78,21 @@ def test_every_emitted_lane_event_is_replayed_or_explicitly_not() -> None:
     )
 
 
+def test_the_legacy_sidecar_refusal_is_replayed() -> None:
+    """GH-540: the legacy seam's refusal, decided rather than left inherited.
+
+    The shipped markdown does say a reading was withheld -- an HTML comment
+    beside the crop carries the validation reason -- so the output is not
+    silent. But the WITHHELD READING ITSELF (`raw_latex`) lives only in this
+    event, and dropping it on resume leaves nobody able to say WHAT was refused,
+    only that something was.
+
+    That, plus the asymmetry: the region lane's refusal survived a resume and
+    this one did not, for no principle.
+    """
+    assert "equation_sidecar_refused" in UnifiedPipeline.EQUATION_LANE_EVENT_KINDS
+
+
 def test_the_unverifiable_refusal_is_replayed() -> None:
     """The specific entry, named, because it carries the evidence pointer.
 
@@ -108,3 +119,28 @@ def test_not_replayed_entries_carry_a_reason() -> None:
     """An empty reason is an oversight wearing a decision's clothes."""
     empty = [k for k, why in _NOT_REPLAYED.items() if not why.strip()]
     assert not empty, f"listed as not replayed with no reason: {empty}"
+
+
+def test_a_refusal_actually_survives_the_replay_filter() -> None:
+    """The allowlist is a means; surviving the filter is the end.
+
+    Membership tests above assert a name is in a frozenset. This calls the
+    assembly `_restore_terminal_page_state` itself uses, so dropping a TERM from
+    the union -- not just an entry from the set -- is caught.
+
+    The first version rebuilt that union from the same three sources (cubic P2
+    on #551). Editing the real one would have left this green while the filter
+    silently stopped replaying a whole family: the failure this guard exists to
+    catch, reproduced inside the guard.
+    """
+    restore_kinds = UnifiedPipeline.resume_restore_kinds()
+
+    for kind in ("equation_sidecar_refused", "equation_region_reading_unverifiable"):
+        assert kind in restore_kinds, (
+            f"{kind} does not survive the resume filter, so the record of a "
+            "withheld reading exists only on the run that produced it"
+        )
+
+    # And the control: a kind nobody replays must NOT slip through, or the
+    # assertion above would hold for any string at all.
+    assert "equation_region_detected" not in restore_kinds
