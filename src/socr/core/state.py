@@ -105,6 +105,15 @@ class PageState:
     #: regions. Empty when identity was not captured. A mismatch against
     #: ``find_table_blocks`` fails the regional splice closed.
     native_table_region_identities: list[str] = field(default_factory=list)
+    #: GH-520: the DETECTION-level table count and bboxes, from
+    #: ``find_tables()`` before any reconstruction ran. Unlike
+    #: ``native_table_region_count`` above -- which the GFM parser produces and
+    #: which therefore agrees with whatever that parser managed -- these two can
+    #: contradict it, which is the only reason the structure-class floor is
+    #: allowed to splice regionally again. Persisted and restored, so a resumed
+    #: page reaches the same verdict as the run that measured it.
+    detected_table_count: int = 0
+    detected_table_bboxes: list[tuple[float, float, float, float]] = field(default_factory=list)
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     #: What this page has actually SPENT, as a recorded fact rather than a
     #: derivation (cold review rounds 4-5). Every site that journals an
@@ -508,6 +517,12 @@ class DocumentState:
                     ps.native_table_region_identities = list(
                         getattr(pa, "native_table_region_identities", []) or []
                     )
+                    # GH-520: the independent signal, carried alongside the
+                    # parser-derived one it exists to contradict.
+                    ps.detected_table_count = getattr(pa, "detected_table_count", 0)
+                    ps.detected_table_bboxes = [
+                        tuple(b) for b in (getattr(pa, "detected_table_bboxes", []) or [])
+                    ]
                     # GH-195: carry the text-strategy grid rejection onto the page
                     # so it can reach page status and document status.
                     if getattr(pa, "text_grid_rejections", None):
