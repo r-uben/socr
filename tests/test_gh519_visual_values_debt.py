@@ -194,3 +194,42 @@ def test_the_corpus_count_uses_the_production_predicate(tmp_path: Path) -> None:
     assert "visual values not transcribed" in report, (
         "the debt count is tallied but not reported, which is how the last one went unnoticed"
     )
+
+
+def test_a_render_failure_does_not_claim_the_image_preserved_it(tmp_path: Path) -> None:
+    """cubic P2 on #565. The debt event fires on the render-failure path too,
+    where no page PNG was saved at all.
+
+    "Preserved in the page image only" is then false comfort, and worse than
+    the debt it describes: an operator reading it believes the figure survived
+    somewhere. The page is already WARNING with a `chart_asset_render_failed`
+    event; the note must not quietly upgrade it.
+    """
+    pdf = _make_vector_chart_pdf(_dir(tmp_path, "rf"))
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf)
+    pipeline._last_assessment = state._last_assessment
+
+    with (
+        patch("socr.pipeline.orchestrator.route_page"),
+        patch.object(
+            UnifiedPipeline,
+            "_render_chart_page_png",
+            side_effect=RuntimeError("render died"),
+        ),
+    ):
+        pipeline._phase_agentic(state, tmp_path / "orf")
+
+    events = _debt_events(state)
+    assert len(events) == 1, f"expected the debt event on the failure path too: {events}"
+    assert events[0].data.get("png_saved") is False, (
+        "the render did not actually fail, so this test measures the happy path"
+    )
+    assert "NOWHERE" in events[0].detail
+
+    note = pipeline._visual_values_not_transcribed_note(state)
+    assert note is not None
+    assert "preserved nowhere" in note, f"the note lost the render failure: {note}"
+    assert "preserved in the page image" not in note, (
+        f"the note claims the image preserved a figure that was never saved: {note}"
+    )

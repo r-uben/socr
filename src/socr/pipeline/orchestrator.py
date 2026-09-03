@@ -3376,20 +3376,38 @@ class UnifiedPipeline:
         the flag route is what GH-563 had to undo. ``None`` on a run with no
         chart-asset page.
         """
-        pages = sorted(
-            {
-                ev.page_num
-                for ev in state.events
-                if getattr(ev, "kind", "") == VISUAL_VALUES_NOT_TRANSCRIBED_KIND
-            }
-        )
-        if not pages:
+        preserved: set[int] = set()
+        lost: set[int] = set()
+        for ev in state.events:
+            if getattr(ev, "kind", "") != VISUAL_VALUES_NOT_TRANSCRIBED_KIND:
+                continue
+            data = getattr(ev, "data", None) or {}
+            (preserved if data.get("png_saved") else lost).add(ev.page_num)
+        # A page that saved its PNG on one event and failed on another is not a
+        # preserved page: the harsher sentence wins.
+        preserved -= lost
+        if not preserved and not lost:
             return None
-        return (
-            f"page(s) {', '.join(str(n) for n in pages)}: visual values not transcribed; "
-            "in-image text on these figures is preserved in the page image only "
-            "(no model read it)"
-        )
+
+        parts = []
+        if preserved:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in sorted(preserved))}: visual values not "
+                "transcribed; in-image text on these figures is preserved in the page image "
+                "only (no model read it)"
+            )
+        if lost:
+            # cubic P2 on #565. The debt event fires on the render-failure path
+            # too, where NO page PNG was saved -- so "preserved in the page
+            # image" is false comfort, and worse than the debt it describes.
+            # These pages are already WARNING with a chart_asset_render_failed
+            # event; the note must not quietly upgrade them.
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in sorted(lost))}: visual values not "
+                "transcribed AND the page image was not saved; in-image text on these "
+                "figures is preserved nowhere"
+            )
+        return "; ".join(parts)
 
     @staticmethod
     def _unverified_wording_split(state, pages: list[int]) -> tuple[list[int], list[int]]:
@@ -5961,6 +5979,9 @@ class UnifiedPipeline:
                         "in-image text on this figure -- axis labels, legend, any embedded "
                         "table -- is preserved only in the page image; it is not in the "
                         "markdown and no model read it"
+                        if chart_png_ref
+                        else "in-image text on this figure is preserved NOWHERE: it is not "
+                        "in the markdown, no model read it, and the page image failed to save"
                     ),
                     data={"png_saved": bool(chart_png_ref), "png_path": chart_png_ref},
                 )
@@ -6121,6 +6142,9 @@ class UnifiedPipeline:
                     "in-image text on this figure -- axis labels, legend, any embedded "
                     "table -- is preserved only in the page image; it is not in the "
                     "markdown and no model read it"
+                    if not chart_render_failed
+                    else "in-image text on this figure is preserved NOWHERE: it is not in "
+                    "the markdown, no model read it, and the page image failed to save"
                 ),
                 data={"png_saved": not chart_render_failed, "png_path": chart_png_ref},
             )
