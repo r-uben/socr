@@ -8,23 +8,27 @@ the doc-level resume gate first.
 
 Measured here, through ``process()`` end to end:
 
-- run 1, figure phase raises -> the document is recorded SUCCESS anyway, with a
-  terminal sidecar carrying ``figure_refs == []``
-- run 2, figure phase healthy -> **SKIPPED**. The repair never happens.
-- run 3, same but ``--reprocess`` -> SUCCESS, complete ``figure_refs``.
+- run 1, figure phase raises -> the document ships SUCCESS with the OCR intact
+  and a sidecar carrying ``figure_refs == []``, but its record stays PROVISIONAL
+- run 2, figure phase healthy -> re-enters the phase and repairs the record,
+  with no flag
 
-So repair through the user-visible path requires ``--reprocess`` today. That is
-pinned as a DIFFERENCE between runs 2 and 3 -- identical code and identical
-inputs, one flag apart -- rather than as an absolute outcome, because the
-absolute one is provider-dependent and this file must mean the same thing on a
-machine with no ollama. (Verified: identical results with the ollama host
-pointed at a closed port.)
+**Inverted by GH-503**, exactly as the note below the original version asked for.
+This file used to pin the opposite: run 2 was SKIPPED and only ``--reprocess``
+repaired anything. That was the figure phase's own stated design not holding --
+the pre-figures metadata write says a crash there "leaves a retryable record
+instead of a skipped-forever doc", and the crash handler finalised the record a
+few lines later, overwriting the ``:pre-figures`` suffix that promise depends
+on. The record now stays provisional when the phase raised.
 
-Whether run 2 SHOULD skip is a product question, not a test one. The figure
-phase's own comment says a crash there "leaves a retryable record instead of a
-skipped-forever doc", and the crash handler then finalises the record anyway --
-a contradiction filed separately. This file pins today's behaviour so that
-change, when it comes, cannot happen silently.
+The pins are DIFFERENCES between two runs in the same process, never absolute
+outcomes: a page's status and audit verdict are provider-dependent, and this
+file must mean the same thing on a machine with no ollama. (Verified: identical
+results with the ollama host pointed at a closed port.)
+
+The difference that matters is between a run whose figure phase CRASHED and one
+whose figure phase SUCCEEDED. Only the first stays retryable; the second must
+still skip, or the fix would have replaced skipped-forever with never-skipped.
 """
 
 from __future__ import annotations
@@ -113,53 +117,101 @@ def _crashed_run(tmp_path: Path) -> tuple[Path, Path]:
     return pdf, out_dir
 
 
-def test_a_plain_rerun_does_not_repair_the_figure_record(tmp_path: Path) -> None:
-    """Today's behaviour, pinned so it cannot change without someone noticing.
+def test_a_plain_rerun_repairs_the_figure_record(tmp_path: Path) -> None:
+    """GH-503. The user-visible path: no flag, no lore, the record is repaired.
 
-    The doc-level resume gate sees a completed record with a matching
-    fingerprint and checksum, so the second run never reaches the figure phase.
-    The user sees a successful document whose provenance is permanently empty.
+    Before the fix the doc-level resume gate matched a COMPLETED record whose
+    figure phase had never completed, so run 2 never reached the phase and the
+    provenance stayed permanently empty under a SUCCESS.
     """
     pdf, out_dir = _crashed_run(tmp_path)
 
     result = _process(pdf, out_dir, figure_phase="ok")
 
-    assert result.status is DocumentStatus.SKIPPED, (
-        f"the plain re-run was not skipped ({result.status}); if repair is now "
-        "reachable without --reprocess, this test should be inverted, not deleted"
+    assert result.status is not DocumentStatus.SKIPPED, (
+        "the plain re-run was skipped, so a document whose figure phase died is "
+        "still repairable only with --reprocess"
     )
-    assert _figure_refs(out_dir) == [], (
-        "the figure record was repaired by a plain re-run -- good news, but the "
-        "test below no longer measures a difference"
+    assert len(_figure_refs(out_dir)) == 1, (
+        f"the re-run was not skipped but repaired nothing: {_figure_refs(out_dir)}"
     )
-
-
-def test_reprocess_reaches_the_figure_phase_and_repairs_it(tmp_path: Path) -> None:
-    """The same document, the same code, one flag apart.
-
-    Pinned as a difference rather than an absolute outcome: a page's status and
-    audit verdict are provider-dependent, but "these two runs differ, and this
-    is how" holds on a machine with no provider at all.
-    """
-    pdf, out_dir = _crashed_run(tmp_path)
-
-    skipped = _process(pdf, out_dir, figure_phase="ok")
-    assert skipped.status is DocumentStatus.SKIPPED
-    without_reprocess = _figure_refs(out_dir)
-
-    repaired = _process(pdf, out_dir, figure_phase="ok", reprocess=True)
-    with_reprocess = _figure_refs(out_dir)
-
-    assert repaired.status is not DocumentStatus.SKIPPED, (
-        "--reprocess did not force a re-run, so the figure phase was never "
-        "re-entered and the record cannot be repaired at all"
-    )
-    assert without_reprocess == [] and len(with_reprocess) == 1, (
-        f"--reprocess made no difference to the figure record: "
-        f"{without_reprocess} vs {with_reprocess}"
-    )
-
-    ref = with_reprocess[0]
+    ref = _figure_refs(out_dir)[0]
     assert ref["image_path"] == FIG.image_path
     assert ref["bbox"] == list(FIG.bbox)
     assert ref["engine"] == "qwen", "the caption engine is missing from the repaired record"
+
+
+def test_a_run_whose_figure_phase_succeeded_is_still_skipped(tmp_path: Path) -> None:
+    """The difference control, and the whole reason the fix is scoped to the
+    crash handler.
+
+    Without this, the test above would be satisfied by a pipeline that had
+    simply stopped honouring the resume gate at all -- trading skipped-forever
+    for never-skipped, which re-runs every completed document on every pass.
+    """
+    pdf = _born_digital_pdf(tmp_path / "src")
+    out_dir = tmp_path / "out"
+
+    first = _process(pdf, out_dir, figure_phase="ok")
+    assert first.status is DocumentStatus.SUCCESS
+    assert len(_figure_refs(out_dir)) == 1, (
+        "run 1 recorded no figures, so run 2 below is not the clean case"
+    )
+
+    second = _process(pdf, out_dir, figure_phase="ok")
+
+    assert second.status is DocumentStatus.SKIPPED, (
+        f"a document whose figure phase SUCCEEDED was reprocessed ({second.status}); "
+        "the record is being left provisional unconditionally"
+    )
+
+
+def test_reprocess_still_forces_a_re_run_of_a_clean_document(tmp_path: Path) -> None:
+    """``--reprocess`` is no longer the only route to repair, but it is still a
+    route past the resume gate. Pinned as a difference between two runs of a
+    CLEAN document, one flag apart, so the flag cannot quietly stop working now
+    that the crash path no longer depends on it."""
+    pdf = _born_digital_pdf(tmp_path / "src")
+    out_dir = tmp_path / "out"
+
+    _process(pdf, out_dir, figure_phase="ok")
+
+    skipped = _process(pdf, out_dir, figure_phase="ok")
+    forced = _process(pdf, out_dir, figure_phase="ok", reprocess=True)
+
+    assert skipped.status is DocumentStatus.SKIPPED
+    assert forced.status is not DocumentStatus.SKIPPED, (
+        "--reprocess no longer forces a re-run of an already-completed document"
+    )
+
+
+def test_the_crashed_run_records_the_loss_in_the_audit_trail(tmp_path: Path) -> None:
+    """GH-503, no-silent-loss: the console line scrolls away, so the failure has
+    to survive in the record a later reader actually has.
+
+    Read from ``audit_log.json``, which carries every event. The per-page
+    sidecars cannot witness this one: it is appended with ``page_num=0`` because
+    the figure phase is document-scoped, and ``_flush_page_sidecar`` filters
+    ``audit_events`` to its own page. An assertion made there would be green
+    whether or not the handler appended anything at all (cubic P2 on #559).
+    """
+    pdf, out_dir = _crashed_run(tmp_path)
+
+    logs = list(out_dir.rglob("audit_log.json"))
+    assert logs, "no audit_log.json was written"
+    events = [ev for log in logs for ev in json.loads(log.read_text()).get("events", [])]
+    assert events, f"audit_log.json carried no events: {[str(p) for p in logs]}"
+    failures = [ev for ev in events if ev.get("kind") == "figure_phase_failed"]
+    assert failures, (
+        "the figure phase died and left no durable record of it; the kinds "
+        f"present were {sorted({ev.get('kind') for ev in events})}"
+    )
+    assert "caption engine died" in (failures[0].get("detail") or ""), (
+        f"the event does not say what failed: {failures[0]}"
+    )
+
+    metadata = [json.loads(m.read_text()) for m in out_dir.rglob("metadata.json")]
+    assert metadata, "no metadata.json was written"
+    assert any(m.get("status") != "completed" for m in metadata), (
+        f"the crashed run was recorded COMPLETED: {[m.get('status') for m in metadata]}"
+    )

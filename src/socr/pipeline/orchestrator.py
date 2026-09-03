@@ -8983,6 +8983,10 @@ class UnifiedPipeline:
         # VLM call inside ``_describe_and_embed_figures`` on ``describe_figures``
         # so ``--save-figures`` alone never produces caption prose.
         runs_figures = (self.config.save_figures or self.config.describe_figures) and has_text
+        # GH-503: set by the figure phase's crash handler, and read by every
+        # later metadata write in this method. A metadata write that forgets it
+        # re-finalises the record and restores the skipped-forever bug.
+        figure_phase_failed = False
         if has_text:
             saved_path = self._save_markdown(state, final_text, output_dir)
             if not self.config.quiet:
@@ -9001,20 +9005,51 @@ class UnifiedPipeline:
                     final_text,
                 )
             except Exception as exc:
+                # GH-503: the record STAYS provisional. The pre-figures write a
+                # few lines up says a crash here "leaves a retryable record
+                # instead of a skipped-forever doc"; finalising it in this
+                # handler overwrote exactly the suffix that promise depends on,
+                # so an ordinary re-run of a document whose figure phase died
+                # was SKIPPED and its provenance stayed empty forever under a
+                # SUCCESS. Only --reprocess repaired it, and nothing told the
+                # operator to reach for it.
+                #
+                # The cost is that a PERSISTENTLY failing figure phase
+                # reprocesses on every run. That is what retryable means, and it
+                # is the lesser evil against shipping empty provenance silently.
+                figure_phase_failed = True
                 logger.warning("figure phase failed (%s); keeping the un-embedded markdown", exc)
                 if not self.config.quiet:
                     console.print(
                         f"  [yellow]Figure phase failed ({exc}); output saved "
-                        "without figure descriptions[/yellow]"
+                        "without figure descriptions. The record stays retryable: "
+                        "a plain re-run will re-enter the figure phase[/yellow]"
                     )
+                # Durable, page-independent record of the loss. The console line
+                # scrolls away; the audit trail is what a later reader has.
+                from socr.core.audit_log import AuditEvent as _FigureCrashEvent
+
+                state.events.append(
+                    _FigureCrashEvent(
+                        page_num=0,
+                        kind="figure_phase_failed",
+                        engine="",
+                        detail=f"{type(exc).__name__}: {exc}",
+                        data={"record_left_provisional": True},
+                    )
+                )
                 embedded_text = final_text
             if embedded_text != final_text:
                 final_text = embedded_text
                 final_result.pages[0].text = final_text
                 self._save_markdown(state, final_text, output_dir)
-            # Always finalize the record (real fingerprint, final status),
-            # replacing the provisional pre-figures entry.
-            self._write_metadata(state, final_result, output_dir, has_text)
+            # Finalize the record (real fingerprint, final status), replacing
+            # the provisional pre-figures entry -- unless the phase raised, in
+            # which case there is nothing to finalize and the provisional entry
+            # is the honest one (GH-503).
+            self._write_metadata(
+                state, final_result, output_dir, has_text, provisional=figure_phase_failed
+            )
 
             # GH-171: and re-flush the sidecars, for the same reason the flush
             # was already moved below the audit-event append (see the MAJOR 6(a)
@@ -9099,7 +9134,15 @@ class UnifiedPipeline:
                             )
                         )
                     self._save_markdown(state, final_text, output_dir)
-                    self._write_metadata(state, final_result, output_dir, has_text)
+                    self._write_metadata(
+                        state,
+                        final_result,
+                        output_dir,
+                        has_text,
+                        # GH-503: the LAST writer wins, so this one carries the
+                        # flag too or the fix above is undone here.
+                        provisional=figure_phase_failed,
+                    )
             else:
                 logger.warning(
                     "GH-226 final-body guard: split yielded %d page(s), expected %d; "
