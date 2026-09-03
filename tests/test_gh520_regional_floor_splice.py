@@ -453,3 +453,54 @@ def test_a_restored_degenerate_bbox_is_not_usable_evidence(tmp_path: Path) -> No
         "not match the safe zero its own comment promises"
     )
     assert PROSE_BEFORE not in _winning_page_output(resumed, 1).text
+
+
+@pytest.mark.parametrize(
+    "bad_boxes",
+    ["not-a-list", {"a": 1}, 7, None],
+    ids=["string", "dict", "int", "null"],
+)
+def test_a_malformed_bbox_container_also_zeroes_the_count(tmp_path: Path, bad_boxes) -> None:
+    """cubic P2 on #573, and a hole in the fix one commit earlier.
+
+    The per-entry validation runs inside a loop over the list. When the value is
+    not a list at all the loop never runs, so nothing marked the record invalid
+    and the restore kept a positive count beside empty boxes -- the exact state
+    the safe-zero normalisation was added to eliminate.
+
+    The two keys are written together, so a positive count beside anything that
+    is not a list is a corrupt record.
+    """
+    import json
+
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    state, _ps = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=2)
+    pipeline = UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN, enabled_engines=[EngineType.QWEN], quiet=True
+        )
+    )
+    pipeline._scan_root = state.handle.path.parent
+    out_dir = tmp_path / f"bad_container_{type(bad_boxes).__name__}"
+    pipeline._flush_page_sidecar(state, 1, out_dir)
+
+    sidecar = next(out_dir.rglob("pages/00001.json"))
+    meta = json.loads(sidecar.read_text())
+    meta["detected_table_bboxes"] = bad_boxes
+    sidecar.write_text(json.dumps(meta, indent=2))
+
+    resumed, _ = _floored_page(tmp_path, TWO_PARSEABLE_TABLES, detected=0)
+    page_out = PageOutput(
+        page_num=1, text="body", status=PageStatus.SUCCESS, engine="native", audit_passed=True
+    )
+    pipeline._restore_terminal_page_state(resumed, 1, page_out, out_dir)
+
+    assert resumed.pages[1].detected_table_bboxes == []
+    assert resumed.pages[1].detected_table_count == 0, (
+        f"a {type(bad_boxes).__name__} bbox container left a positive count "
+        f"({resumed.pages[1].detected_table_count}) beside empty boxes"
+    )
+    assert PROSE_BEFORE not in _winning_page_output(resumed, 1).text

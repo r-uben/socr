@@ -8159,7 +8159,13 @@ class UnifiedPipeline:
             )
             raw_boxes = meta.get("detected_table_bboxes")
             restored_boxes: list[tuple[float, float, float, float]] = []
-            _detected_invalid = False
+            # GH-572 (cubic P2 on #573): the CONTAINER counts as malformed too.
+            # The two keys are written together, so a positive count beside
+            # anything that is not a list is a corrupt record -- and skipping
+            # the loop below left `_detected_invalid` false, restoring exactly
+            # the positive-count-with-no-boxes state this normalisation exists
+            # to eliminate.
+            _detected_invalid = ps.detected_table_count > 0 and not isinstance(raw_boxes, list)
             if isinstance(raw_boxes, list):
                 for box in raw_boxes:
                     if not isinstance(box, (list, tuple)) or len(box) != 4:
