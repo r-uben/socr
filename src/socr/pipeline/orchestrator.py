@@ -1952,6 +1952,15 @@ class UnifiedPipeline:
             # this the record was dropped on resume and the guarantee held only
             # until the next run.
             "equation_region_reading_unverifiable",
+            # GH-540: the legacy seam's refusal, for the same reason and one
+            # stronger. The shipped markdown does say a reading was withheld --
+            # an HTML comment beside the crop carries the validation reason --
+            # but the WITHHELD READING ITSELF (`raw_latex`) lives only in this
+            # event. Drop it on resume and nobody can tell what was refused, only
+            # that something was. Replaying it also removes an asymmetry with no
+            # principle behind it: the region lane's refusal survived a resume
+            # and the legacy one did not.
+            "equation_sidecar_refused",
             "equation_region_reading_unvalidated",
             "equation_region_reading_unaligned",
             "equation_region_reading_unsafe_markup",
