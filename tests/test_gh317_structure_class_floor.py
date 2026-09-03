@@ -493,6 +493,7 @@ def _pipeline():
             quiet=True,
             save_figures=False,
             write_manifest=False,
+            table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
         )
     )
 
@@ -876,6 +877,7 @@ def _hermetic_agentic_pipeline(tmp_path: Path, *, grid_qualifies: bool):
         quiet=True,
         save_figures=False,
         write_manifest=False,
+        table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
     )
     pipeline = UnifiedPipeline(config)
     pipeline._scan_root = pdf_path.parent
@@ -1007,6 +1009,7 @@ def test_phase_agentic_renders_and_flushes_floor_png_only_for_no_grid_arm(
             quiet=True,
             save_figures=False,
             write_manifest=False,
+            table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
         )
         pipeline = UnifiedPipeline(config)
         pipeline._scan_root = pdf_path.parent
@@ -1208,6 +1211,7 @@ def test_paired_process_regression(tmp_path: Path, caplog: pytest.LogCaptureFixt
             quiet=True,
             save_figures=False,
             write_manifest=True,
+            table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
         )
         pipeline = UnifiedPipeline(config)
         out_dir = tmp_path / out_name

@@ -111,7 +111,13 @@ class TestFabricatedRefSanitizerIsSubtractiveOnContent:
     """The cold reviewer's round-2 canary, as the CONTENT-token check."""
 
     def _run(self, tmp_path: Path):
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True, save_figures=False))
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                save_figures=False,
+                table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+            )
+        )
         state = type("_State", (), {"events": [], "pages": {}})()
         before = "Revenue 42.8.\n\n![chart](https://example.invalid/invented999.png)"
         out = PageOutput(page_num=1, text=before, status=PageStatus.SUCCESS, engine="qwen")
@@ -195,7 +201,13 @@ class TestPageSpendSurvivesResume:
             )
         )
         state.agentic_judge_model = PROFILE_GEMINI.model
-        pipeline = UnifiedPipeline(PipelineConfig(quiet=True, reprocess=True))
+        pipeline = UnifiedPipeline(
+            PipelineConfig(
+                quiet=True,
+                reprocess=True,
+                table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
+            )
+        )
         pipeline._rejudge_crop_patched_page(state, 1, ps, bo, "old", _Accept(), PROFILE_MISTRAL)
         judge_cost = PROFILE_GEMINI.cost_per_page_usd
         assert state.total_cost == route_cost + judge_cost

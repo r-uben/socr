@@ -436,6 +436,7 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
         native_first=False,
         dual_pass_tables=False,
         escalate_ambiguous_tables=False,
+        table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
     )
 
     # 1. Run with empty table

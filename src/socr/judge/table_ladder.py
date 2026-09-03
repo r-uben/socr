@@ -47,12 +47,20 @@ standing in for a corroboration that an infra failure could not provide.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Sequence
 
-from socr.judge.table_verdict import RungCallable, RungResult, TableJudgeVerdict
+from socr.judge.table_verdict import (
+    RungCallable,
+    RungResult,
+    TableJudgeVerdict,
+    is_availability_exception,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class TableLadderOutcome(str, Enum):
@@ -129,7 +137,34 @@ def run_table_ladder(
     last_index = len(rungs) - 1
 
     for index, rung in enumerate(rungs):
-        result = rung(crop_path, markdown, None)
+        try:
+            result = rung(crop_path, markdown, None)
+        except Exception as exc:
+            rung_id = (
+                getattr(rung, "rung_id", "") or getattr(rung, "__name__", "") or type(exc).__name__
+            )
+            # Cold review round 2, finding 2. A rung is contractually
+            # non-raising, so ANY exception here is unexpected -- but the cause
+            # decides whether it is an outage. A transport failure latches and
+            # is retried when the rung returns; a TypeError/AssertionError from
+            # our own code is deterministic, and latching it would make every
+            # resume re-run the ladder to reproduce the same crash. The
+            # traceback is logged either way; the table still ends UNVERIFIED.
+            unavailable = is_availability_exception(exc)
+            logger.warning(
+                "table judge rung %s raised %s: %s (unavailable=%s)",
+                rung_id,
+                type(exc).__name__,
+                exc,
+                unavailable,
+                exc_info=True,
+            )
+            result = RungResult(
+                rung=rung_id,
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                unavailable=unavailable,
+            )
         rung_results.append(result)
         is_last = index == last_index
 

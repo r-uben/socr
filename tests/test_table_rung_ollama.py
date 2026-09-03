@@ -90,6 +90,7 @@ class TestBuildOllamaRung:
         assert result.verdict is not None
         assert result.verdict.verdict == "PASS"
         assert result.verdict.findings == []
+        assert result.unavailable is False
 
         # Exact outgoing JSON payload (model, format, images, stream=False).
         payload = captured["payload"]
@@ -113,6 +114,7 @@ class TestBuildOllamaRung:
         assert result.ok is True
         assert result.verdict.verdict == "FAIL"
         assert result.verdict.findings[0].code is FindingCode.MISSING_VALUE
+        assert result.unavailable is False
 
     def test_prior_findings_do_not_reach_the_prompt(
         self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
@@ -173,6 +175,7 @@ class TestBuildOllamaRung:
         assert result.ok is False
         assert result.verdict is None
         assert result.error
+        assert result.unavailable is False
 
     def test_timeout_is_s1_failure_without_sleeping(
         self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
@@ -192,6 +195,7 @@ class TestBuildOllamaRung:
         assert result.verdict is None
         assert "timed out" in result.error.lower() or "TimeoutException" in result.error
         assert slept == []
+        assert result.unavailable is True
 
     def test_connection_error_is_s1_failure(self, monkeypatch: pytest.MonkeyPatch, crop_path: Path):
         def _raise_connect(host: str, payload: dict, timeout: float) -> str:
@@ -204,13 +208,16 @@ class TestBuildOllamaRung:
 
         assert result.ok is False
         assert result.verdict is None
+        assert result.unavailable is True
 
     def test_http_status_error_is_s1_failure(
         self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
     ):
         def _raise_status(host: str, payload: dict, timeout: float) -> str:
             request = httpx.Request("POST", "http://localhost:11434/api/chat")
-            response = httpx.Response(404, request=request)
+            response = httpx.Response(
+                404, request=request, text='{"error":"model not found, try pulling it first"}'
+            )
             raise httpx.HTTPStatusError("404 not found", request=request, response=response)
 
         monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise_status)
@@ -220,13 +227,15 @@ class TestBuildOllamaRung:
 
         assert result.ok is False
         assert result.verdict is None
+        assert result.unavailable is True
 
     def test_missing_crop_file_is_s1_failure_not_an_exception(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """The crop read (`Path.read_bytes`) sits inside the same try/except
-        as the network call — a missing/unreadable crop must classify as ¬S1
-        like any other rung failure, never propagate as OSError."""
+        """The crop read (`Path.read_bytes`) sits inside the preparation block
+        before the network call — a missing/unreadable crop must classify as ¬S1
+        like any other rung failure, never propagate as OSError, and not be
+        marked unavailable."""
         monkeypatch.setattr(
             "socr.judge.table_rung_ollama._post_chat",
             lambda host, payload, timeout: PASS_JSON,
@@ -239,6 +248,202 @@ class TestBuildOllamaRung:
         assert result.ok is False
         assert result.verdict is None
         assert result.error
+        assert result.unavailable is False
+
+    # -----------------------------------------------------------------
+    # P1 prep item 1 (docs/log/2026-09-02_gh359-ladder-terminals-design.md,
+    # "Panel and synthesis"): split the ¬S1 causes above by whether the rung
+    # was actually reachable. httpx transport/status failures mean the host
+    # could not be reached or refused the call -- exactly the shape the
+    # retry latch exists for. A malformed JSON answer or an unreadable local
+    # crop are NOT rung outages: the daemon is up and answering, so a retry
+    # right now would hit the identical failure, and latching on it would
+    # never converge.
+    #
+    # ``RungResult.unavailable`` carries that bit. Cold review round 2
+    # narrowed the status branch: a response means the daemon ANSWERED, so
+    # only statuses describing the service as unusable (5xx, 429, 408, and
+    # 404 for a model that is not pulled) are outages. A 400 on our own
+    # payload is a defect in this code and must not latch.
+    # -----------------------------------------------------------------
+
+    def test_timeout_is_unavailable(self, monkeypatch: pytest.MonkeyPatch, crop_path: Path):
+        def _raise_timeout(host: str, payload: dict, timeout: float) -> str:
+            raise httpx.TimeoutException("timed out")
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise_timeout)
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is True
+
+    def test_connection_error_is_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
+    ):
+        def _raise_connect(host: str, payload: dict, timeout: float) -> str:
+            raise httpx.ConnectError("no daemon")
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise_connect)
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is True
+
+    def test_http_status_error_is_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
+    ):
+        def _raise_status(host: str, payload: dict, timeout: float) -> str:
+            request = httpx.Request("POST", "http://localhost:11434/api/chat")
+            response = httpx.Response(
+                404, request=request, text='{"error":"model not found, try pulling it first"}'
+            )
+            raise httpx.HTTPStatusError("404 not found", request=request, response=response)
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise_status)
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is True
+
+    def test_bad_request_status_is_not_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
+    ):
+        """Cold review round 2, finding 2. A 400 means the daemon answered and
+        rejected OUR payload -- a deterministic defect in this code, not an
+        outage. Latching it would re-run the ladder on every resume to send the
+        same malformed request again."""
+
+        def _raise_status(host: str, payload: dict, timeout: float) -> str:
+            request = httpx.Request("POST", "http://localhost:11434/api/chat")
+            response = httpx.Response(400, request=request)
+            raise httpx.HTTPStatusError("400 bad request", request=request, response=response)
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise_status)
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is False
+
+    @pytest.mark.parametrize("status_code", [429, 500, 503])
+    def test_service_states_are_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path, status_code: int
+    ):
+        """Rate limiting and server errors describe the SERVICE as unusable,
+        which is exactly what the latch is for."""
+
+        def _raise_status(host: str, payload: dict, timeout: float) -> str:
+            request = httpx.Request("POST", "http://localhost:11434/api/chat")
+            response = httpx.Response(status_code, request=request)
+            raise httpx.HTTPStatusError(str(status_code), request=request, response=response)
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise_status)
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is True
+
+    @pytest.mark.parametrize("status", [401, 403, 407])
+    def test_credential_refusals_are_outages_and_trip_the_breaker(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path, status: int
+    ):
+        """Cold review round 3. Credentials, a revoked token or a proxy can be
+        restored, and until they are the rung cannot succeed -- exactly the
+        state the latch remembers. They are also REFUSALS: the same run's next
+        table would be refused identically, so the gate stops asking."""
+
+        def _raise_status(host: str, payload: dict, timeout: float) -> str:
+            request = httpx.Request("POST", "http://localhost:11434/api/chat")
+            response = httpx.Response(status, request=request)
+            raise httpx.HTTPStatusError(str(status), request=request, response=response)
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise_status)
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is True
+        assert result.refusal is True
+
+    def test_a_route_404_is_a_defect_not_a_missing_model(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
+    ):
+        """404 is the one ambiguous status. A body that does not say the model
+        is missing means we asked for a route that does not exist -- our own
+        defect, identical forever."""
+
+        def _raise_status(host: str, payload: dict, timeout: float) -> str:
+            request = httpx.Request("POST", "http://localhost:11434/api/chatt")
+            response = httpx.Response(404, request=request, text="404 page not found")
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise_status)
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is False
+
+    @pytest.mark.parametrize(
+        "exc,unavailable",
+        [
+            (httpx.ConnectError("refused"), True),
+            (httpx.ReadTimeout("slow"), True),
+            # Client configuration and response-decoding problems are ours.
+            (httpx.UnsupportedProtocol("gopher://x"), False),
+            (httpx.DecodingError("bad gzip"), False),
+            (httpx.TooManyRedirects("loop"), False),
+        ],
+        ids=lambda v: type(v).__name__ if isinstance(v, BaseException) else str(v),
+    )
+    def test_transport_errors_use_the_shared_classifier(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path, exc, unavailable: bool
+    ):
+        def _raise(host: str, payload: dict, timeout: float) -> str:
+            raise exc
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _raise)
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is unavailable
+
+    def test_malformed_json_is_not_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
+    ):
+        """The daemon answered; the answer was junk. Content-shaped, not a
+        rung outage -- must not latch a retry."""
+        monkeypatch.setattr(
+            "socr.judge.table_rung_ollama._post_chat",
+            lambda host, payload, timeout: "not json at all",
+        )
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        result = rung(crop_path, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is False
+
+    def test_unreadable_crop_is_not_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """A local preparation failure (missing/unreadable crop) is not the
+        rung being down -- the daemon was never even contacted."""
+        monkeypatch.setattr(
+            "socr.judge.table_rung_ollama._post_chat",
+            lambda host, payload, timeout: PASS_JSON,
+        )
+        rung = build_ollama_rung("glm-5.3-flash:cloud", host=None, timeout=600.0)
+        missing_crop = tmp_path / "does-not-exist.png"
+
+        result = rung(missing_crop, "| a |\n| - |\n| 1 |", None)
+
+        assert result.ok is False
+        assert result.unavailable is False
 
     def test_host_resolves_through_the_shared_gh222_resolver(
         self, monkeypatch: pytest.MonkeyPatch, crop_path: Path
@@ -282,3 +487,54 @@ class TestNoRealPostChat:
         no-op guard that never fires."""
         with pytest.raises(AssertionError, match="network must not run"):
             _post_chat("http://localhost:11434", {"model": "x"}, 1.0)
+
+
+class TestOllamaRungReachable:
+    """Cold review round 2, finding 1: the resume gate's reachability notion
+    for rung 1 -- daemon up AND the judge model actually pulled.
+
+    A bare ``/api/tags`` liveness ping was not enough: a healthy daemon that
+    never pulled the model answers it and then fails every judge call.
+    """
+
+    def _tags(self, monkeypatch: pytest.MonkeyPatch, models: list[str] | None, *, fail=None):
+        def _get(url: str, timeout: float = 5.0):
+            if fail is not None:
+                raise fail
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200, request=request, json={"models": [{"name": m} for m in (models or [])]}
+            )
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama.httpx.get", _get)
+
+    def test_model_listed_is_reachable(self, monkeypatch: pytest.MonkeyPatch):
+        from socr.judge.table_rung_ollama import ollama_rung_reachable
+
+        self._tags(monkeypatch, ["glm-5.3-flash:cloud", "other:latest"])
+        assert ollama_rung_reachable("glm-5.3-flash:cloud", "http://localhost:11434") is True
+
+    def test_daemon_up_but_model_not_pulled_is_not_reachable(self, monkeypatch: pytest.MonkeyPatch):
+        from socr.judge.table_rung_ollama import ollama_rung_reachable
+
+        self._tags(monkeypatch, ["something-else:latest"])
+        assert ollama_rung_reachable("glm-5.3-flash:cloud", "http://localhost:11434") is False
+
+    def test_implicit_latest_tag_matches(self, monkeypatch: pytest.MonkeyPatch):
+        from socr.judge.table_rung_ollama import ollama_rung_reachable
+
+        self._tags(monkeypatch, ["judge:latest"])
+        assert ollama_rung_reachable("judge", "http://localhost:11434") is True
+
+    def test_a_family_prefix_does_not_satisfy_an_exact_tag(self, monkeypatch: pytest.MonkeyPatch):
+        """#133's rule, reused: availability means the pull, not the family."""
+        from socr.judge.table_rung_ollama import ollama_rung_reachable
+
+        self._tags(monkeypatch, ["qwen3-vl:30b-a3b-instruct"])
+        assert ollama_rung_reachable("qwen3-vl:8b", "http://localhost:11434") is False
+
+    def test_transport_failure_is_not_reachable(self, monkeypatch: pytest.MonkeyPatch):
+        from socr.judge.table_rung_ollama import ollama_rung_reachable
+
+        self._tags(monkeypatch, None, fail=httpx.ConnectError("refused"))
+        assert ollama_rung_reachable("glm-5.3-flash:cloud", "http://localhost:11434") is False

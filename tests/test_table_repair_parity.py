@@ -1003,6 +1003,7 @@ class TestEndToEndParity:
             quiet=True,
             save_figures=False,
             write_manifest=False,
+            table_judge_ladder=False,  # docs/log/2026-09-03_p1-prep-latch-and-audit.md
         )
         pipeline = UnifiedPipeline(config)
 

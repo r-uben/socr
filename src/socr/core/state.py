@@ -198,6 +198,19 @@ class PageState:
     #: Restored from the sidecar so a resumed run does not silently
     #: re-clamp a table whose contradictions were already disproved.
     binding_adjudication: dict = field(default_factory=dict)
+    #: P1 retry latch: transient external state absent from the run fingerprint.
+    #: Set when at least one table on this page reached an UNVERIFIED terminal
+    #: caused by an unavailable table judge rung (transport failure, missing
+    #: binary, or unexpected exception), so resume re-judges the page when the
+    #: rung returns rather than restoring a terminal caused by a temporary outage.
+    table_judge_retry_pending: bool = False
+    #: Which rung KINDS ("ollama", "gemini") were unavailable when that latch
+    #: was set. Cold review round 3: a bare bit let a healthy rung 1 stand in
+    #: for a rung 2 that was still down, so resume reopened the document and
+    #: re-ran the whole ladder every time. Empty means "not recorded" -- a
+    #: sidecar written before this field existed -- and the gate then falls
+    #: back to asking about any rung.
+    table_judge_retry_rungs: list[str] = field(default_factory=list)
 
     def is_structure_class(self) -> bool:
         """C2: pages whose native branch may never author a GRID.
