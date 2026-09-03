@@ -916,7 +916,7 @@ def structure_class_floor_text(p, page_num: int) -> str:
     no geometry, so the ordering is document order and nothing verifies the
     pairing. The guard does not need that pairing: it establishes that every
     detected table has a reconstructed region AND that the parser sees exactly
-    as many blocks as there are tables, and ``splice_failed_table_regions``
+    as many blocks as there are tables, and ``splice_all_table_regions``
     then replaces every block it finds. Which marker landed on which table is
     not a property anything downstream reads.
     """

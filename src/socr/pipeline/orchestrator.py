@@ -8159,6 +8159,13 @@ class UnifiedPipeline:
             )
             raw_boxes = meta.get("detected_table_bboxes")
             restored_boxes: list[tuple[float, float, float, float]] = []
+            # GH-572 (cubic P2 on #573): the CONTAINER counts as malformed too.
+            # The two keys are written together, so a positive count beside
+            # anything that is not a list is a corrupt record -- and skipping
+            # the loop below left `_detected_invalid` false, restoring exactly
+            # the positive-count-with-no-boxes state this normalisation exists
+            # to eliminate.
+            _detected_invalid = ps.detected_table_count > 0 and not isinstance(raw_boxes, list)
             if isinstance(raw_boxes, list):
                 for box in raw_boxes:
                     if not isinstance(box, (list, tuple)) or len(box) != 4:
@@ -8167,11 +8174,13 @@ class UnifiedPipeline:
                         # silently becomes a mismatch that fails closed for the
                         # wrong reason. Drop it all and restore the safe zero.
                         restored_boxes = []
+                        _detected_invalid = True
                         break
                     try:
                         x0, y0, x1, y1 = (float(v) for v in box)
                     except (TypeError, ValueError):
                         restored_boxes = []
+                        _detected_invalid = True
                         break
                     # The same validity test the detector applies when it
                     # measures one (cubic P2 on #571). The floor guard reads
@@ -8180,9 +8189,17 @@ class UnifiedPipeline:
                     # on geometry the detector would itself have refused.
                     if not all(math.isfinite(v) for v in (x0, y0, x1, y1)) or x1 <= x0 or y1 <= y0:
                         restored_boxes = []
+                        _detected_invalid = True
                         break
                     restored_boxes.append((x0, y0, x1, y1))
             ps.detected_table_bboxes = restored_boxes
+            if _detected_invalid:
+                # GH-572: zero the COUNT too, so the restored state matches what
+                # the comments above say -- the safe zero. Clearing only the
+                # boxes fails closed today by length mismatch, but leaves a
+                # count that a later guard reading the count alone would take as
+                # evidence, on geometry the detector itself would have refused.
+                ps.detected_table_count = 0
             ps.d3_floor_png_ref = str(meta.get("d3_floor_png_ref", ""))
             # P6 cold review round 2: carry run 1's published disposition forward
             # so a resumed re-flush reproduces the sidecar byte for byte. A

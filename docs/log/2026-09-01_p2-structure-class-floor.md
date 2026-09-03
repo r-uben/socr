@@ -331,19 +331,40 @@ its own ticket.
 **Closed 2026-09-03 (GH-520).** `PageAssessment.detected_table_count` /
 `detected_table_bboxes` landed in #570, taken from `find_tables()` at detection
 time and pinned as independent of reconstruction. `structure_class_floor_text`
-splices again behind a three-part guard: at least one table detected, every
-detected table carrying a usable bbox, and the parser finding exactly that many
-blocks. Anything else floors whole, so the default in this document is still
-what a page without the signal gets.
+splices again behind a **four-part** guard: at least one table detected, every
+detected table carrying a usable bbox, `native_table_region_count ==
+detected_table_count`, and the parser finding exactly that many blocks. Anything
+else floors whole, so the default in this document is still what a page without
+the signal gets.
 
-Two things the guard does NOT claim, stated here because the limitation above
-was believed for a day longer than it should have been:
+The third condition carries the argument, and it is the exact inversion of round
+1's mistake. Round 1 compared the parser's region count against ITSELF, which is
+circular. Comparing it against the DETECTION count is not: it asks whether
+reconstruction produced a region for every table the detector found, and a
+collapsed sibling makes the two disagree.
 
-- The correspondence between block *i* and bbox *i* is by document order. A
-  markdown block carries no geometry, so nothing verifies that block *i* is the
-  text of bbox *i*. What equal counts establish is the property round 1 lacked
-  -- that no detected table is missing from the parser's block list, so the
-  collapsed sibling cannot be the one left behind.
+**A three-part guard was drafted first and was wrong** (cubic P1 on #571).
+Counting parsed blocks against the detection count is satisfied by coincidence:
+a page with two detected tables, one collapsed and never parsed, plus an
+unrelated pipe-shaped prose block, has two parsed blocks and two detected
+tables. The splice replaces the two blocks it can see and the collapsed table
+ships as preserved prose -- round 1's bug by another route. The draft claimed
+equal counts establish "no detected table is missing from the parser's block
+list"; they do not.
+
+*(This correction was written during #571 and never reached the file: the
+heredoc that applied it failed its own assertion, and the pytest run chained
+after it on the next line still succeeded, so the commit that claimed to record
+it recorded nothing. Landed for real in GH-572. The same shape as the
+"piping masks exit codes" trap -- a command whose failure is invisible because
+something after it succeeded.)*
+
+Two things the guard still does not claim:
+
+- Block *i* is not proven to be the text of bbox *i*. A markdown block carries
+  no geometry. The guard does not need that pairing -- it establishes that every
+  detected table has a reconstructed region and that the parser sees exactly as
+  many blocks as there are tables, and the splice replaces every block it finds.
 - A borderless table seen only by the lane-cooccupancy pass contributes no bbox
   and is not counted at all, so `detected_table_count == 0` is common on
   exactly the pages where the parser is least trustworthy. Zero is treated as
