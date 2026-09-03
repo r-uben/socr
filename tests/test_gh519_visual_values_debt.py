@@ -302,13 +302,19 @@ def test_the_cli_line_does_not_claim_the_image_on_a_render_failure(tmp_path: Pat
     state = _make_state_with_page(pdf)
     pipeline._last_assessment = state._last_assessment
 
+    # One output dir for both phases, as `process()` passes: a split tree leaves
+    # assemble reading a different place than the agentic phase wrote, so the
+    # test would stop reflecting production the moment assemble consulted those
+    # pages or figures (cubic P3 on #567).
+    out_dir = tmp_path / "csout"
+
     with (
         patch("socr.pipeline.orchestrator.route_page"),
         patch.object(
             UnifiedPipeline, "_render_chart_page_png", side_effect=RuntimeError("render died")
         ),
     ):
-        pipeline._phase_agentic(state, tmp_path / "csout")
+        pipeline._phase_agentic(state, out_dir)
 
     kept, lost = pipeline._visual_values_split(state)
     assert lost == [1] and kept == [], (
@@ -318,7 +324,7 @@ def test_the_cli_line_does_not_claim_the_image_on_a_render_failure(tmp_path: Pat
     printed: list[str] = []
     pipeline.config.quiet = False
     with patch("socr.pipeline.orchestrator.console.print", side_effect=printed.append):
-        pipeline._phase_assemble(state, tmp_path / "csasm")
+        pipeline._phase_assemble(state, out_dir)
 
     debt_lines = [line for line in printed if "visual values not transcribed" in line]
     assert debt_lines, f"the debt never reached the CLI summary: {printed}"
