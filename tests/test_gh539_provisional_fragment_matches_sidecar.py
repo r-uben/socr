@@ -36,7 +36,13 @@ from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 _INVALID_TABLE_BODY = "Prose above.\n\n| a | b | c |\n|---|---|\n| 1 | 2 | 3 |\n\nProse below.\n"
 
 
-def _flush(tmp_path: Path, body: str, *, native_fallback: str | None = None):
+def _flush(
+    tmp_path: Path,
+    body: str,
+    *,
+    native_fallback: str | None = None,
+    whole_doc: str | None = None,
+):
     """Drive the REAL in-loop provisional flush inside `_phase_agentic`.
 
     Building the guarded text in the test and writing the two files by hand
@@ -66,6 +72,21 @@ def _flush(tmp_path: Path, body: str, *, native_fallback: str | None = None):
     )
     state = DocumentState(handle=DocumentHandle.from_path(pdf))
 
+    if whole_doc is not None:
+        # A whole-document CLI attempt: `_whole_doc_page_texts` recovers this
+        # page's text by splitting it, and the sidecar selects from THAT. If the
+        # fragment's selection is not given the same snapshot, the two describe
+        # different winners.
+        state.whole_doc_attempts.append(
+            PageOutput(
+                page_num=0,
+                text=whole_doc,
+                status=PageStatus.SUCCESS,
+                engine="qwen",
+                audit_passed=True,
+            )
+        )
+
     if native_fallback is not None:
         # A REJECTED OCR attempt with a native-text fallback available: the
         # selection the sidecar makes is not `ps.best_output`, which is the
@@ -75,16 +96,19 @@ def _flush(tmp_path: Path, body: str, *, native_fallback: str | None = None):
 
     def _routed(page_num, *_a, **_k):
         rejected = native_fallback is not None
+        # The whole-document branch is consulted only when the per-page attempt
+        # FAILED -- a passing one wins outright -- so that case routes a failure.
+        failed = whole_doc is not None
         return PageDecision(
             page_num=page_num,
             final_output=PageOutput(
                 page_num=page_num,
-                text=body,
-                status=PageStatus.SUCCESS,
+                text="" if failed else body,
+                status=PageStatus.ERROR if failed else PageStatus.SUCCESS,
                 engine="qwen",
-                audit_passed=not rejected,
+                audit_passed=not (rejected or failed),
             ),
-            accepted=not rejected,
+            accepted=not (rejected or failed),
         )
 
     out_dir = tmp_path / "out"
@@ -153,8 +177,45 @@ def test_a_page_whose_winner_is_not_best_output_still_agrees(tmp_path: Path) -> 
         native_fallback="Native prose recovered from the text layer.",
     )
 
-    assert fragment.strip() == sidecar["winning_output"]["text"].strip(), (
+    # The scenario has to be REAL (cubic P3 on #549). Both artefacts now come
+    # from `finalized_page_record`, so the equality holds whenever the two paths
+    # finalise the same record -- INCLUDING if selection regressed and the
+    # rejected best_output won both while the native fallback never engaged.
+    # The test would stay green while the divergence it is named for went
+    # unexercised.
+    winner = sidecar["winning_output"]["text"]
+    assert "Native prose recovered" in winner, (
+        f"the native fallback never shipped, so the winner IS best_output and "
+        f"this test measures nothing: {winner!r}"
+    )
+    assert "| a | b | c |" not in winner, "the rejected attempt's table shipped anyway"
+
+    assert fragment.strip() == winner.strip(), (
         "the fragment and sidecar disagree on a page whose shipped winner is "
         "not best_output:\n"
-        f"fragment={fragment!r}\nsidecar ={sidecar['winning_output']['text']!r}"
+        f"fragment={fragment!r}\nsidecar ={winner!r}"
+    )
+
+
+def test_a_whole_document_attempt_selects_the_same_winner(tmp_path: Path) -> None:
+    """cubic P1 on #549: same function, same page, DIFFERENT inputs.
+
+    `finalized_page_record` takes `whole_doc` as an argument. Omitting it makes
+    the fragment's selection reconsider a CLI whole-document attempt differently
+    from the sidecar, which passes `_whole_doc_page_texts(state)` -- two
+    selections again, one argument down from the previous round.
+    """
+    fragment, sidecar = _flush(
+        tmp_path / "whole_doc",
+        _INVALID_TABLE_BODY,
+        whole_doc="## Page 1\n\nRecovered from the whole-document attempt.\n",
+    )
+
+    winner = sidecar["winning_output"]["text"]
+    assert "Recovered from the whole-document attempt" in winner, (
+        f"the whole-document recovery never engaged, so this test measures nothing: {winner!r}"
+    )
+    assert fragment.strip() == winner.strip(), (
+        "the fragment and sidecar describe different winners on a page with a "
+        f"whole-document attempt:\nfragment={fragment!r}\nsidecar ={winner!r}"
     )

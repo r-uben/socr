@@ -5141,6 +5141,7 @@ class UnifiedPipeline:
                 from ocr_output_contract import PAGE_MARKER_RE
 
                 from socr.core.manifest import (
+                    _whole_doc_page_texts,
                     finalized_page_record,
                     structure_class_floor_applies,
                     structure_class_floor_text,
@@ -5174,7 +5175,19 @@ class UnifiedPipeline:
                     # attempt overridden by a flagged native-text fallback.
                     #
                     # One selection, one finalisation, one set of bytes.
-                    _raw_body = finalized_page_record(state, page_num).output.text or ""
+                    # ...and the same whole-document snapshot (cubic P1 on
+                    # #549). `finalized_page_record` takes `whole_doc` as an
+                    # ARGUMENT: omitting it makes the selection reconsider a CLI
+                    # whole-document attempt differently from the sidecar, which
+                    # passes `_whole_doc_page_texts(state)`. Same function, same
+                    # page, different inputs -- two selections again, one
+                    # argument down from the last one.
+                    _raw_body = (
+                        finalized_page_record(
+                            state, page_num, _whole_doc_page_texts(state)
+                        ).output.text
+                        or ""
+                    )
                 _stripped = _raw_body.lstrip()
                 _m = PAGE_MARKER_RE.match(_stripped)
                 _body = _stripped[_m.end() :].lstrip("\n") if _m else _raw_body
