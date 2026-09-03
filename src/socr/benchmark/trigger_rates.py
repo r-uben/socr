@@ -1,5 +1,9 @@
 """P4-M: how many free-lane pages would each candidate equation trigger move?
 
+Also (GH-519) how many of them reach the chart-asset lane, and so ship their
+in-image text in the page PNG and nowhere in the markdown. That count is the
+size of a debt the pipeline records but nobody had measured.
+
 No model calls. Runs the born-digital detector over a set of PDFs and, for every
 page that takes the free native lane today (born-digital, native text, no OCR
 enhancement, no table signal), records which equation-detector term fired and how
@@ -25,6 +29,7 @@ import fitz
 
 from socr.core.born_digital import BornDigitalDetector, math_font_char_count
 from socr.core.pdf import open_pdf
+from socr.figures.extractor import has_chart_marks
 
 #: Buckets for the math-font character count, chosen to expose the shape of the
 #: distribution, not to define a threshold. The threshold, if any, is picked from
@@ -44,6 +49,7 @@ class PageRow:
     page: int
     free_lane: bool
     chart_asset_lane: bool
+    chart_marks: bool
     font_term: bool
     regex_term: bool
     corrupt_term: bool
@@ -58,6 +64,7 @@ class Tally:
     table_pages: int = 0
     free_lane: int = 0
     chart_asset: int = 0
+    chart_marks: int = 0
     rows: list[PageRow] = field(default_factory=list)
 
 
@@ -100,6 +107,20 @@ def measure(pdfs: list[Path]) -> Tally:
                 if chart:
                     tally.chart_asset += 1
                 page = doc[pa.page_num - 1]
+                # GH-519: the size of the chart lane's untranscribed debt, asked
+                # of the PRODUCTION predicate rather than of a figure signal.
+                # ``has_figures`` is not the routing gate: it says a figure was
+                # detected, while the lane fires on ``has_chart_marks``, which
+                # applies the GH-167/#510 placed-area gate and the vector-cluster
+                # test. Counting the first would report a debt the pipeline does
+                # not actually incur -- and a local re-derivation of the gate
+                # would drift from it the first time the gate moved.
+                try:
+                    marks = bool(has_chart_marks(page))
+                except Exception:  # noqa: BLE001 - one bad page is not the corpus
+                    marks = False
+                if marks:
+                    tally.chart_marks += 1
                 raw_text = page.get_text("text")
                 tally.rows.append(
                     PageRow(
@@ -107,6 +128,7 @@ def measure(pdfs: list[Path]) -> Tally:
                         page=pa.page_num,
                         free_lane=True,
                         chart_asset_lane=chart,
+                        chart_marks=marks,
                         font_term=BornDigitalDetector._detect_math_fonts(page),
                         regex_term=det._detect_equations(raw_text),
                         corrupt_term=pa.has_corrupt_math,
@@ -136,6 +158,13 @@ def report(tally: Tally) -> str:
         if tally.pages
         else "- no pages",
         f"- of which chart-asset lane (raster present, still no model): {tally.chart_asset}",
+        # GH-519: the debt, as a number. Every one of these pages ships its
+        # in-image text -- axis labels, legends, embedded tables -- in the page
+        # PNG and nowhere in the markdown, and emits
+        # `visual_values_not_transcribed` saying so.
+        f"- of which carry a chart-sized raster by the PRODUCTION predicate "
+        f"(`has_chart_marks`), i.e. visual values not transcribed: "
+        f"{_pct(tally.chart_marks, free)}",
         "",
         "## Free-lane pages each candidate trigger would move to the ladder",
         "",

@@ -39,6 +39,22 @@ _ESCALATION_MODES = {
 }
 
 
+#: GH-519: the chart-asset lane's debt, said outright and addressable.
+#:
+#: The lane preserves a figure page's native prose and its page PNG, and the
+#: existing ``chart_asset_page`` event says in prose that data values are not
+#: transcribed. A figure with in-image text -- axis labels, a legend, an
+#: embedded table -- ships that text nowhere in the markdown, and nothing
+#: counted how often that happened. ``docs/log/2026-09-02_p4-structure-lane-
+#: design.md`` section 7 (Q3) ruled that figures are done for preservation, not
+#: for machine-readable extraction, and that the debt must be VISIBLE rather
+#: than buried.
+#:
+#: A kind of its own, rather than more prose inside ``chart_asset_page``,
+#: because a consumer counting the debt should not have to parse a sentence.
+VISUAL_VALUES_NOT_TRANSCRIBED_KIND = "visual_values_not_transcribed"
+
+
 @dataclass
 class AuditEvent:
     """One notable event during a run.
