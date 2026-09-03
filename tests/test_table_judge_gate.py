@@ -298,7 +298,6 @@ class TestWitnessFailOpen:
         }
         assert "no table witness could be prepared" in events[0].detail
         assert "retryable on resume" not in events[0].detail
-        assert ps.table_unverified_unwitnessed is True
 
     def test_count_mismatch_ambiguous_is_judged_not_abstained(self, tmp_path: Path) -> None:
         """1 box, 2 emitted blocks -> count mismatch -> AMBIGUOUS with a page

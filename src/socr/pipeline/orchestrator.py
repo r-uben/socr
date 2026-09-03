@@ -3357,6 +3357,48 @@ class UnifiedPipeline:
         )
 
     @staticmethod
+    def _unverified_wording_split(state, pages: list[int]) -> tuple[list[int], list[int]]:
+        """Split TABLE_UNVERIFIED pages into (retryable, unwitnessed).
+
+        GH-563: derived from the page's own ``table_ladder_unverified`` events,
+        never from in-run PageState flags. #562 used flags, and they did not
+        survive a resume -- the sidecar persists ``table_ladder_incomplete`` and
+        not those -- so a SKIPPED no-witness page came back with empty flags and
+        the note fell through to "retryable on resume". That is the exact empty
+        promise #560 was filed against, re-told to the one operator least able
+        to check it.
+
+        The events are the durable record: ``_restore_terminal_page_state``
+        replays every ``TABLE_LADDER_EVENT_KINDS`` event with its ``data``
+        intact, so ``retryable: False`` is present on resume as it was on the
+        first run. One source, and the resumed run reads what the original run
+        wrote.
+
+        A page with no unverified event at all -- a disposition reached through
+        ``best_output.failure_mode`` with no terminal of its own -- keeps the
+        retryable wording, which is what it said before any of this.
+        """
+        from socr.judge.table_verdict import TABLE_LADDER_UNVERIFIED_KIND
+
+        by_page: dict[int, list] = {}
+        for ev in state.events:
+            if getattr(ev, "kind", "") == TABLE_LADDER_UNVERIFIED_KIND:
+                by_page.setdefault(getattr(ev, "page_num", 0), []).append(ev)
+
+        retryable: list[int] = []
+        unwitnessed: list[int] = []
+        for page_num in pages:
+            events = by_page.get(page_num) or []
+            marked = [(getattr(ev, "data", None) or {}).get("retryable") is False for ev in events]
+            if any(marked):
+                unwitnessed.append(page_num)
+            # A page can hold BOTH kinds, and then both sentences are true of
+            # it (cubic P2 on #562). No event at all falls here too.
+            if not marked or not all(marked):
+                retryable.append(page_num)
+        return retryable, unwitnessed
+
+    @staticmethod
     def _table_judge_ladder_note(state) -> str | None:
         """GH-353: document-level one-liner naming the table judge ladder terminals.
 
@@ -3395,22 +3437,7 @@ class UnifiedPipeline:
         # re-run reaches the same empty witness. Split so neither group carries
         # the other's claim. The BUCKET is untouched: this is wording only, and
         # the page is still TABLE_UNVERIFIED for document status.
-        unwitnessed = sorted(
-            n for n in unverified if getattr(state.pages[n], "table_unverified_unwitnessed", False)
-        )
-        # A page appears in BOTH lists when it holds both kinds of terminal
-        # (cubic P2 on #562): one table with no witness beside one whose rung
-        # was down. Reporting only the first would tell an operator not to
-        # bother re-running a page half of which a re-run repairs -- the same
-        # lie #560 is about, pointing the other way. A page carrying neither
-        # flag (a disposition restored from a sidecar, say) keeps the retryable
-        # wording, which is what it said before this change.
-        retryable = [
-            n
-            for n in unverified
-            if getattr(state.pages[n], "table_unverified_retryable", False)
-            or not getattr(state.pages[n], "table_unverified_unwitnessed", False)
-        ]
+        retryable, unwitnessed = UnifiedPipeline._unverified_wording_split(state, unverified)
         if retryable:
             parts.append(
                 f"page(s) {', '.join(str(n) for n in retryable)}: "
@@ -4621,11 +4648,6 @@ class UnifiedPipeline:
                     },
                 )
             )
-            if kind == TABLE_LADDER_UNVERIFIED_KIND:
-                if unwitnessed:
-                    ps.table_unverified_unwitnessed = True
-                else:
-                    ps.table_unverified_retryable = True
 
         page_result = reduce_page_ladder(table_results)
         if page_result.outcome is TableLadderOutcome.REJECTED:
@@ -8885,17 +8907,9 @@ class UnifiedPipeline:
                     # GH-560: same split as the document note -- an operator
                     # told "retryable on resume" will re-run, and for a
                     # no-witness terminal that run changes nothing.
-                    _unwitnessed = [
-                        n
-                        for n in table_unverified_pages
-                        if getattr(state.pages[n], "table_unverified_unwitnessed", False)
-                    ]
-                    _retryable = [
-                        n
-                        for n in table_unverified_pages
-                        if getattr(state.pages[n], "table_unverified_retryable", False)
-                        or not getattr(state.pages[n], "table_unverified_unwitnessed", False)
-                    ]
+                    _retryable, _unwitnessed = self._unverified_wording_split(
+                        state, table_unverified_pages
+                    )
                     if _retryable:
                         console.print(
                             f"  [yellow]{len(_retryable)} table page(s) could not be "

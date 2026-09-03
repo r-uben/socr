@@ -1,4 +1,4 @@
-"""GH-560: a terminal that cannot be retried must not say it is retryable.
+"""GH-560 / GH-563: a terminal that cannot be retried must not say it is retryable.
 
 The 2026-09-03 live two-rung smoke found table ``p4-t0`` ending
 ``TABLE_UNVERIFIED`` with an EMPTY ``rung_trail`` and ``witness_scope: "none"``
@@ -124,7 +124,6 @@ def test_a_witness_with_no_crop_is_not_called_retryable(tmp_path: Path) -> None:
     )
     assert "no table witness could be prepared" in event.detail
     assert event.data.get("retryable") is False
-    assert state.pages[1].table_unverified_unwitnessed is True
 
 
 def test_a_located_witness_with_no_rung_keeps_the_retryable_wording(tmp_path: Path) -> None:
@@ -148,7 +147,6 @@ def test_a_located_witness_with_no_rung_keeps_the_retryable_wording(tmp_path: Pa
         f"a genuine rung outage lost its retryable wording: {event.detail}"
     )
     assert "retryable" not in event.data, "an outage must not be marked unretryable"
-    assert state.pages[1].table_unverified_unwitnessed is False
 
 
 def test_the_document_note_separates_the_two(tmp_path: Path) -> None:
@@ -172,22 +170,31 @@ def test_the_document_note_separates_the_two(tmp_path: Path) -> None:
 
 def test_a_page_holding_both_kinds_reports_both(tmp_path: Path) -> None:
     """cubic P2 on #562. A page can hold an unwitnessed table beside one whose
-    rung was down. A page-level flag that reported only the first would tell an
-    operator not to bother re-running a page half of which a re-run repairs --
-    the same lie #560 is about, pointing the other way.
+    rung was down. Reporting only the first would tell an operator not to bother
+    re-running a page half of which a re-run repairs -- the same lie #560 is
+    about, pointing the other way.
 
-    The page is in BOTH lists, because both sentences are true of it.
+    The page is in BOTH sentences, because both are true of it.
     """
+    from socr.core.audit_log import AuditEvent
+
     pipeline = _pipeline()
     state = _run(_borderless_pdf(tmp_path / "mb"), [])
-    ps = state.pages[1]
-    assert ps.table_unverified_unwitnessed is True
-    assert ps.table_unverified_retryable is False, (
-        "the borderless fixture already produced a retryable terminal, so "
-        "setting the flag below would not be adding the second kind"
+    event = _unverified_event(state)
+    assert event.data.get("retryable") is False
+
+    # The second table on the same page: located, its rung unavailable. That is
+    # an unverified terminal with no `retryable` marker, exactly as the gate
+    # writes one.
+    state.events.append(
+        AuditEvent(
+            page_num=1,
+            kind=TABLE_LADDER_UNVERIFIED_KIND,
+            engine="qwen",
+            detail="table p1-t1 unverified by the judge ladder (infra problem, retryable on resume)",
+            data={"table_id": "p1-t1", "rung_trail": [], "witness_scope": "located"},
+        )
     )
-    # The second table on the same page: located, and its rung was unavailable.
-    ps.table_unverified_retryable = True
 
     note = pipeline._table_judge_ladder_note(state)
     assert note is not None
@@ -213,4 +220,55 @@ def test_the_disposition_and_the_latch_are_untouched(tmp_path: Path) -> None:
     assert not getattr(ps, "table_judge_retry_pending", False), (
         "a no-witness terminal now latches for retry -- the exact semantics "
         "#560 asked to keep unchanged"
+    )
+
+
+def test_the_wording_survives_a_resume(tmp_path: Path) -> None:
+    """GH-563, the leftover from #562 and the reason the split moved off flags.
+
+    #562 derived the split from two in-run PageState flags. The sidecar persists
+    `table_ladder_incomplete` and not those, and `_restore_terminal_page_state`
+    restores only that one -- so a SKIPPED no-witness page came back with empty
+    flags, fell through to the default, and the note said "retryable on resume"
+    again. The same empty promise #560 was filed against, re-told to the one
+    operator least able to check it.
+
+    The durable record is the audit event, which resume replays with its `data`
+    intact. This drives the real restore path rather than re-asserting the flag
+    the fix removed.
+    """
+    import json
+
+    pipeline = _pipeline()
+    first = _run(_borderless_pdf(tmp_path / "rb"), [])
+    original = pipeline._table_judge_ladder_note(first)
+    assert original is not None and "no table witness could be prepared" in original
+
+    # The sidecar payload a resumed run reads back, built from the real flush.
+    out_dir = tmp_path / "out"
+    pipeline._flush_page_sidecar(first, 1, out_dir)
+    sidecar = next(out_dir.rglob("pages/00001.json"))
+    meta = json.loads(sidecar.read_text())
+    assert any(
+        ev.get("kind") == TABLE_LADDER_UNVERIFIED_KIND for ev in meta.get("audit_events", [])
+    ), "the terminal did not reach the sidecar, so the resume below restores nothing"
+
+    # A fresh run over the same document, with nothing in memory. This is the
+    # real restore entry point, reading the sidecar just flushed above.
+    resumed, page_out = _state(_borderless_pdf(tmp_path / "rb"))
+    resumed.pages[1].attempts.clear()
+    resumed.pages[1].best_output = None
+    assert not resumed.events
+    pipeline._restore_terminal_page_state(resumed, 1, page_out, out_dir)
+
+    resumed_note = pipeline._table_judge_ladder_note(resumed)
+    assert resumed_note is not None, (
+        "the resumed page produced no note; the disposition was not restored and "
+        "this test is not measuring the wording it claims to"
+    )
+    assert "no table witness could be prepared" in resumed_note, (
+        f"the resumed note lost the unwitnessed wording: {resumed_note}"
+    )
+    assert "retryable on resume" not in resumed_note, (
+        f"a resumed no-witness page promises a retry again: {resumed_note}"
     )
