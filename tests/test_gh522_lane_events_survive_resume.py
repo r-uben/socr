@@ -124,22 +124,16 @@ def test_not_replayed_entries_carry_a_reason() -> None:
 def test_a_refusal_actually_survives_the_replay_filter() -> None:
     """The allowlist is a means; surviving the filter is the end.
 
-    Membership tests above assert a name is in a frozenset. This drives
-    `_restore_terminal_page_state`'s actual filter expression with a sidecar
-    payload, so a change to how `restore_kinds` is assembled -- not just to the
-    set -- is caught.
-    """
-    from socr.judge.table_verdict import (
-        TABLE_BINDING_ADJUDICATED_KIND,
-        TABLE_LADDER_EVENT_KINDS,
-    )
-    from socr.pipeline.orchestrator import UnifiedPipeline
+    Membership tests above assert a name is in a frozenset. This calls the
+    assembly `_restore_terminal_page_state` itself uses, so dropping a TERM from
+    the union -- not just an entry from the set -- is caught.
 
-    restore_kinds = (
-        TABLE_LADDER_EVENT_KINDS
-        | {TABLE_BINDING_ADJUDICATED_KIND}
-        | UnifiedPipeline.EQUATION_LANE_EVENT_KINDS
-    )
+    The first version rebuilt that union from the same three sources (cubic P2
+    on #551). Editing the real one would have left this green while the filter
+    silently stopped replaying a whole family: the failure this guard exists to
+    catch, reproduced inside the guard.
+    """
+    restore_kinds = UnifiedPipeline.resume_restore_kinds()
 
     for kind in ("equation_sidecar_refused", "equation_region_reading_unverifiable"):
         assert kind in restore_kinds, (

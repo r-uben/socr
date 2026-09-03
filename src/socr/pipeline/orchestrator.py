@@ -1969,6 +1969,27 @@ class UnifiedPipeline:
         }
     )
 
+    @classmethod
+    def resume_restore_kinds(cls) -> frozenset[str]:
+        """Audit-event kinds `_restore_terminal_page_state` replays.
+
+        A method rather than an inline expression (cubic P2 on #551) so a test
+        can drive the REAL assembly. The guard for it previously rebuilt this
+        union from the same three sources: dropping a term here left that test
+        green while the filter silently stopped replaying a whole family --
+        exactly the failure the guard exists to catch, reproduced in the guard.
+        """
+        from socr.judge.table_verdict import (
+            TABLE_BINDING_ADJUDICATED_KIND,
+            TABLE_LADDER_EVENT_KINDS,
+        )
+
+        return frozenset(
+            TABLE_LADDER_EVENT_KINDS
+            | {TABLE_BINDING_ADJUDICATED_KIND}
+            | cls.EQUATION_LANE_EVENT_KINDS
+        )
+
     #: The backends the lane's transport can actually address. ``latex_for_crop``
     #: POSTs to ``{host}/api/generate`` -- the Ollama generate API -- so a
     #: profile serving the same model over vLLM, Gemini or anything else is NOT
@@ -7464,11 +7485,7 @@ class UnifiedPipeline:
             # are the only record that a reading was looked at and refused.
             # Dropping them on resume would leave a page that silently ships
             # native prose with no trace of the refusal.
-            restore_kinds = (
-                TABLE_LADDER_EVENT_KINDS
-                | {TABLE_BINDING_ADJUDICATED_KIND}
-                | self.EQUATION_LANE_EVENT_KINDS
-            )
+            restore_kinds = self.resume_restore_kinds()
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
