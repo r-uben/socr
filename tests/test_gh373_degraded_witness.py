@@ -27,7 +27,9 @@ from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import PageOutput, PageStatus
 from socr.judge.table_prompt import build_table_judge_prompt
 from socr.judge.table_verdict import Finding, FindingCode, RungResult, TableJudgeVerdict
+from _adjudicator_doubles import mismatching_adjudicator
 from socr.pipeline.orchestrator import UnifiedPipeline
+from socr.tables.binding import BindingEvidence
 
 _TABLE_MD = (
     "| c0 | c1 | c2 | c3 |\n"
@@ -136,9 +138,16 @@ def _fail() -> RungResult:
             verdict="FAIL",
             confidence="high",
             findings=[
+                # GH-575 (cold review round 1, finding 1): a CANONICAL cell
+                # reference, because a reader rejection now reaches a withhold
+                # only through the blind adjudicator, and the adjudicator is
+                # only asked about cells the readers localized. A bare
+                # ``"header"`` names no coordinate, so the chain would end
+                # UNVERIFIED for want of a question -- the no-doubt-set path,
+                # not the count-mismatch rejection this file measures.
                 Finding(
                     code=FindingCode.HEADER_MANGLED,
-                    where="header",
+                    where="H1C1",
                     detail="spanning header missing",
                 )
             ],
@@ -223,6 +232,18 @@ def _process(
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
         patch.object(pipeline, "_build_table_judge_rungs", return_value=rungs),
         patch.object(pipeline, "_binding_contradiction_for_witness", return_value=None),
+        # GH-575: the binding EVIDENCE is a terminal in its own right now, so
+        # isolating the clamp alone no longer isolates bind() from the readers'
+        # verdict; and a reader rejection is withheld only when a blind third
+        # reader looked and disagreed.
+        patch.object(
+            pipeline,
+            "_binding_evidence_for_witness",
+            return_value=(None, BindingEvidence.ABSTAIN),
+        ),
+        patch.object(
+            pipeline, "_build_table_cell_adjudicator", return_value=mismatching_adjudicator()
+        ),
     ]
     with ExitStack() as stack:
         for p in patches:
@@ -231,7 +252,13 @@ def _process(
 
 
 def _rejected(error: str | None) -> bool:
-    return "table_rejected" in (error or "")
+    # P1 (owner ruling Q2, 2026-09-03): a reader rejection no guard clears is
+    # now reported as ``table_withheld`` -- the same reader verdict with the
+    # table's bytes withheld. This file pins WHERE the ladder ends on a
+    # degraded (count-mismatch) witness, not which of the two labels it
+    # carries, so the predicate accepts both.
+    text = error or ""
+    return "table_rejected" in text or "table_withheld" in text
 
 
 def _unverified(error: str | None) -> bool:

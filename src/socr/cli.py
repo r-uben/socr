@@ -7,6 +7,11 @@ from rich.console import Console
 
 from socr import __version__
 from socr.core.config import EngineType, PipelineConfig
+
+# Imported under the exact names the reachability diagnostic patches, so a
+# test can stub the probe without a live daemon or a live binary on PATH.
+from socr.judge.table_rung_gemini import gemini_rung_reachable
+from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
 from socr.review import html as review_html
 
 console = Console()
@@ -249,14 +254,19 @@ def common_options(f):
         help="Write a replayable manifest + blob cache",
     )(f)
     f = click.option(
-        "--table-judge-ladder",
-        is_flag=True,
+        "--table-judge-ladder/--no-table-judge-ladder",
+        "table_judge_ladder",
+        default=None,
         help=(
-            "GH-353: gate emitted table pages behind a two-rung acceptance judge "
+            "Gate emitted table pages behind a two-rung acceptance judge "
             "(ollama-cloud glm-5.3-flash, then the gemini CLI) before shipping. "
-            "Default off. --strict-local + this flag makes both rungs unavailable, "
-            "so every table page is demoted to UNVERIFIED rather than shipped "
-            "unjudged."
+            "ON by default and fail-closed: a table that cannot be verified "
+            "ships UNVERIFIED, never SUCCESS, and a table both readers reject "
+            "that neither the geometry guard nor a blind cell transcription "
+            "clears is WITHHELD -- its content does not ship at all, only a "
+            "failure marker plus the page image. --strict-local makes both "
+            "rungs unreachable, so every table page is UNVERIFIED. Opt out "
+            "with --no-table-judge-ladder."
         ),
     )(f)
     return f
@@ -333,7 +343,7 @@ def build_config(
     max_cost_per_page: float = 0.0,
     cost_budget: float = 0.0,
     write_manifest: bool = False,
-    table_judge_ladder: bool = False,
+    table_judge_ladder: bool | None = None,
 ) -> PipelineConfig:
     """Build PipelineConfig from CLI options."""
     if config_path or profile:
@@ -547,14 +557,15 @@ def build_config(
         config.cost_budget = cost_budget
     if _explicitly_given("write_manifest"):
         config.write_manifest = write_manifest
-    # is_flag default is False, matching PipelineConfig's own default — only ever
-    # flip it on, never clobber a YAML-config True with an unset CLI flag (the
-    # cli.py:371-area unconditional-override trap this ticket calls out for
-    # judge_backend/judge_model/max_cost_per_page/cost_budget/write_manifest
-    # above, which DOES clobber YAML because those options carry non-None
-    # defaults of their own).
-    if table_judge_ladder:
-        config.table_judge_ladder = True
+    # P1 (owner ruling Q3): tri-state. Now that the config default is True,
+    # a plain boolean CLI parameter could no longer express "the user said
+    # nothing" -- an omitted flag would arrive as False and clobber a YAML
+    # ``table_judge_ladder: true`` back off (and, before the flip, an omitted
+    # flag could not express an explicit off at all). ``None`` means the user
+    # typed neither spelling, so whatever the config file said survives; either
+    # spelling is an explicit instruction and wins.
+    if table_judge_ladder is not None:
+        config.table_judge_ladder = bool(table_judge_ladder)
 
     if output_dir:
         config.output_dir = output_dir
@@ -587,8 +598,64 @@ def _report_strict_local_ladder_diagnostic(config: PipelineConfig) -> None:
             "Both table-judge rungs are cloud services, so every table page will be "
             "TABLE_UNVERIFIED and documents containing table pages cannot finish cleanly "
             "(table-free documents can still finish cleanly). "
-            "To resolve, drop either flag (--strict-local or --table-judge-ladder)."
+            "To resolve, drop either flag (--strict-local or --no-table-judge-ladder)."
         )
+
+
+def _any_table_judge_reader_reachable(config: PipelineConfig) -> bool:
+    """Whether either READER rung can be reached right now, probed once each.
+
+    Reader-only on purpose. The blind-cell adjudicator is a different role: it
+    answers "what token is in this cell", never "is this table faithful", so
+    its being reachable says nothing about whether any table can be judged and
+    must not suppress the warning below.
+
+    Best effort -- a probe that raises means that rung is not attemptable, and
+    never a failed startup.
+    """
+    for probe in (
+        lambda: table_judge_ollama_rung_reachable(
+            config.table_judge_rung1_model, config.table_judge_rung1_host
+        ),
+        lambda: gemini_rung_reachable(config.table_judge_rung2_binary),
+    ):
+        try:
+            if probe():
+                return True
+        except Exception:  # noqa: BLE001 - a broken probe is "not reachable"
+            continue
+    return False
+
+
+def _report_no_reader_ladder_diagnostic(config: PipelineConfig) -> None:
+    """P1 (owner ruling Q3): say so when the ladder is on and nobody can judge.
+
+    The flip makes "verified or labelled" the out-of-box contract. On a machine
+    with no reachable reader rung -- air-gapped, no subscription, daemon down --
+    that contract means every table page ships UNVERIFIED and no document with
+    a table finishes clean. The ruling is that this is correct behaviour, and
+    that the user must be TOLD, at startup, with the cause and the exact
+    opt-out; experiencing it as an unexplained regression is the failure mode
+    the line exists to prevent.
+
+    Suppressed by ``--quiet`` and ``--dry-run`` (one rule, in one place, as the
+    strict-local helper does), and by ``strict_local``, which already gets the
+    more specific line above.
+    """
+    if config.dry_run or config.quiet or not config.table_judge_ladder:
+        return
+    if config.strict_local:
+        return
+    if _any_table_judge_reader_reachable(config):
+        return
+    console.print(
+        "[yellow]Notice:[/yellow] the table-judge ladder is on (default) but no judge rung is "
+        "reachable, so every table page will ship UNVERIFIED and no document containing a "
+        "table can finish cleanly. Cause: neither the ollama-cloud rung "
+        f"({config.table_judge_rung1_model}) nor the CLI rung "
+        f"({config.table_judge_rung2_binary}) answered a reachability check. "
+        "To opt out and ship tables unjudged, pass --no-table-judge-ladder."
+    )
 
 
 # --- Commands ---
@@ -722,6 +789,7 @@ def process(
         from socr.pipeline.orchestrator import UnifiedPipeline
 
         _report_strict_local_ladder_diagnostic(config)
+        _report_no_reader_ladder_diagnostic(config)
         pipeline = UnifiedPipeline(config)
 
     try:
@@ -822,6 +890,7 @@ def batch(
     from socr.pipeline.orchestrator import UnifiedPipeline
 
     _report_strict_local_ladder_diagnostic(config)
+    _report_no_reader_ladder_diagnostic(config)
     pipeline = UnifiedPipeline(config)
 
     # Handle --limit by pre-filtering

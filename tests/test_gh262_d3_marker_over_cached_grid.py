@@ -898,6 +898,9 @@ def test_document_audit_metadata_and_trust_sidecar_surface_the_superseded_floor(
             quiet=True,
             save_figures=False,
             write_manifest=False,
+            # P1 golden audit: pin the ladder off; this test is about the D3
+            # superseded-floor mechanism, not table-judge-ladder verification.
+            table_judge_ladder=False,
         )
     )
     out_dir = tmp_path / "out"

@@ -250,9 +250,9 @@ bytes, so it is design, not mechanics. Q1 and Q3 are owner rulings that can ship
 flip.
 ## Owner rulings on the ladder flip — 2026-09-03
 
-> **None of this section is implemented.** It records what the flip build must do, and
-> the flip is blocked (see the Verdict above). Read every ruling below as *shall*, never
-> as *does*. Today the ladder accepts a low+low PASS without asking whether a doubt set
+> **Implemented 2026-09-03** by the P1 ladder-flip build (`docs/log/2026-09-03_p1-ladder-flip.md`).
+> Until that merge the flip was blocked (see the Verdict above); read every ruling below
+> as the contract the build was reviewed against. Today the ladder accepts a low+low PASS without asking whether a doubt set
 > exists, a GH-367 adjudication can lift a binding clamp, and a REJECTED terminal stays
 > REJECTED without a second clearance — which is precisely the set of gaps these rulings
 > exist to close. (Stated because a cubic review on #577 read three of the rulings as

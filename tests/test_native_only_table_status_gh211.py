@@ -68,6 +68,13 @@ def _run_native_only(tmp_path: Path, *, agentic: bool, unverifiable: bool):
             save_figures=False,
             write_manifest=True,
             quiet=False,
+            # P1 (owner ruling Q3, 2026-09-03): the table-judge ladder is ON by
+            # default and fail-closed, so a table page on a machine with no
+            # reachable rung ships UNVERIFIED and the document is no longer
+            # SUCCESS. This test is about a different lane, so the flag is
+            # PINNED off rather than the assertion weakened
+            # (docs/log/2026-09-03_p1-ladder-flip.md, "Test audit").
+            table_judge_ladder=False,
         )
     )
     pipeline.bd_detector = _FixedDetector(assessment)

@@ -32,6 +32,13 @@ _SCOPE_NOTE_PATHS = {
 
 _MARKDOWN_PLACEHOLDER = "{{EMITTED_MARKDOWN}}"
 _SCOPE_PLACEHOLDER = "{{SCOPE_NOTE}}"
+#: Cold review round 2, N1: the coordinate contract is spliced, not
+#: restated. The same fragment goes into the blind-transcription prompt.
+_GRAMMAR_PLACEHOLDER = "{{CELL_REF_GRAMMAR}}"
+#: Cold review round 4: the worked examples go to the READER prompt only.
+#: They necessarily show cells with contents in them, and the blind
+#: transcription prompt may carry no cell contents at all.
+_EXAMPLES_PLACEHOLDER = "{{CELL_REF_EXAMPLES}}"
 
 _SCOPE: ContextVar[str] = ContextVar("socr_table_judge_scope", default="located")
 
@@ -100,8 +107,12 @@ def build_table_judge_prompt(
     # substitution; there is no Python copy of that sentence.
     resolved = _SCOPE.get() if scope is None else scope
     note = load_table_judge_scope_note(resolved)
+    from socr.judge.table_verdict import load_cell_ref_examples, load_cell_ref_grammar
+
     return (
         load_table_judge_prompt()
+        .replace(_GRAMMAR_PLACEHOLDER, load_cell_ref_grammar())
+        .replace(_EXAMPLES_PLACEHOLDER, load_cell_ref_examples())
         .replace(_SCOPE_PLACEHOLDER, note)
         .replace(_MARKDOWN_PLACEHOLDER, markdown)
     )

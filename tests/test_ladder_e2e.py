@@ -376,24 +376,32 @@ class TestRejectedTerminal:
         )
 
         # Page disposition: the demotion is per-page, not document-wide.
-        assert state_on.pages[SHIFT_PAGE].table_ladder_disposition == FailureMode.TABLE_REJECTED
+        # GH-575 (cold review round 1, finding 1): this fixture is a genuine
+        # row-label shift, so native geometry ACTIVELY contradicts the emitted
+        # grid -- and an active contradiction is terminal, ending the table
+        # UNVERIFIED without asking the blind adjudicator. Withholding requires
+        # a blind reader to have looked and disagreed, which cannot happen
+        # here. Every surface below moves with the label; the
+        # per-page-not-document-wide property this test exists for is
+        # unchanged, and so is the flag-off/flag-on difference.
+        assert state_on.pages[SHIFT_PAGE].table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         assert state_on.pages[CLEAN_PAGE].table_ladder_disposition is None
 
         # Document status.
         assert result_on.status == DocumentStatus.AUDIT_FAILED
-        assert "table_rejected" in (result_on.error or "")
+        assert "table_unverified" in (result_on.error or "")
         assert str(SHIFT_PAGE) in (result_on.error or "")
 
         # metadata.json note.
         meta_on = _metadata(tmp_path / "on_out", pdf_on)
         assert meta_on["status"] == "partial"
-        assert "table_rejected" in meta_on["error"]
+        assert "table_unverified" in meta_on["error"]
         assert str(SHIFT_PAGE) in meta_on["error"]
 
         # CLI summary.
         _pipe_on._print_summary(result_on, state_on)
         captured = capsys.readouterr()
-        assert "table_rejected" in captured.out
+        assert "table_unverified" in captured.out
 
 
 class TestPlainUnverifiedTerminal:

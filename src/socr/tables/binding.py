@@ -83,6 +83,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from enum import Enum
 
 from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import (
@@ -1087,6 +1088,45 @@ class BindingResult:
         purpose: an incompletely-checked table is not a passing table
         (MAJOR 2)."""
         return self.fully_checked and self.no_known_contradiction
+
+
+class BindingEvidence(str, Enum):
+    """What one binding attempt actually establishes, as three closed values.
+
+    P1 (owner rulings Q1/Q2). The gate's older helper was
+    contradiction-only: it returned a ``BindingResult`` when something
+    disagreed and ``None`` otherwise, which collapsed "structurally proven
+    correct" and "nothing was checkable" into the same falsy answer. The
+    ruled guard chain has to tell those apart -- a PASS overrules a reader
+    outright, an ABSTAIN falls through to the blind-cell adjudicator.
+
+    * ``PASS`` -- rows AND columns fully checked and nothing disagreed
+      (``BindingResult.structural_agreement``). Never inferred from a
+      matching numeric multiset: matching numbers prove "not invented",
+      never "correctly placed", which is exactly the GH-273 shape.
+    * ``CONTRADICT`` -- something that WAS checked disagreed: a contradicted
+      cell, a row-label contradiction, or an unbound native/model cell (the
+      dropped/invented-digit signal).
+    * ``ABSTAIN`` -- no box, no native words, ``bind()`` failed, or coverage
+      gaps left the question open. "We do not know", not "it matched".
+    """
+
+    PASS = "pass"
+    CONTRADICT = "contradict"
+    ABSTAIN = "abstain"
+
+
+def classify_binding_evidence(result: BindingResult) -> BindingEvidence:
+    """Classify one ``BindingResult`` into the three-way evidence vocabulary.
+
+    Contradiction is asked FIRST: a table that disagreed somewhere is
+    contradicted even if other regions were fully checked and agreed.
+    """
+    if not result.no_known_contradiction:
+        return BindingEvidence.CONTRADICT
+    if result.structural_agreement:
+        return BindingEvidence.PASS
+    return BindingEvidence.ABSTAIN
 
 
 def _best_lane_column_map(

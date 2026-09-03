@@ -262,10 +262,14 @@ class TestRowLabelShiftComposesWithLadder:
 
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
 
-    def test_shifted_labels_with_rejecting_real_rung_stays_rejected(self, tmp_path: Path) -> None:
-        """The clamp is a ceiling on acceptance, not a floor on rejection:
-        when the real (last) rung independently answers FAIL, the ladder's
-        own REJECTED terminal is untouched by the mechanical clamp."""
+    def test_shifted_labels_with_rejecting_real_rung_is_unverified_by_the_contradiction(
+        self, tmp_path: Path
+    ) -> None:
+        """A reader FAIL over an ACTIVE row-label contradiction ends UNVERIFIED.
+
+        GH-575: the mechanical contradiction is terminal and the blind
+        adjudicator is never asked, so the readers' FAIL cannot become a
+        content rejection or a withhold on this page."""
         pipeline = _make_pipeline()
         pdf_path = _row_shift_pdf(tmp_path)
         state = _make_state(pdf_path)
@@ -275,10 +279,26 @@ class TestRowLabelShiftComposesWithLadder:
         rung = _reject_rung()
         pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
-        events = _events_of_kind(state, "table_ladder_rejected")
+        # GH-575 (cold review round 1, finding 1). This fixture's native
+        # geometry ACTIVELY contradicts the emitted grid -- that is the whole
+        # point of a row-label shift -- and an active contradiction is now a
+        # terminal: the table ends UNVERIFIED and the blind adjudicator is
+        # never asked. Withholding needs a blind reader to have disagreed, and
+        # here nobody was allowed to look.
+        #
+        # GH-575 SUPERSEDES ruling 5's "the clamp never claims a rejected
+        # page" for the contradiction case, deliberately and in one direction
+        # only: mechanical evidence still cannot turn anything into a content
+        # REJECTION, but an active contradiction now settles the terminal
+        # before the readers' verdict is consulted, so the event that ships is
+        # the contradiction's. The reader FAIL reaching neither REJECTED nor
+        # WITHHELD is the assertion that says so.
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert not _events_of_kind(state, "table_ladder_withheld")
+        assert not _events_of_kind(state, "table_ladder_rejected")
+        events = _events_of_kind(state, "table_ladder_unverified")
         assert len(events) == 1
-        assert "mechanical binding check found a contradiction" not in events[0].detail
+        assert "mechanical binding check found a contradiction" in events[0].detail
 
     def test_shifted_labels_with_no_rungs_available_is_unverified(self, tmp_path: Path) -> None:
         """GH-359 ruling 5: no CLI available plus a mechanical
@@ -416,3 +436,207 @@ class TestProcessFlagDifference:
 
         assert result.status == DocumentStatus.SUCCESS
         assert "table_rejected" not in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# P1 (task t5): the three-way binding evidence classification.
+#
+# ``_binding_contradiction_for_witness`` was CONTRADICTION-ONLY: it returns a
+# ``BindingResult`` iff a genuine cell/row-label contradiction fired, else
+# None -- collapsing "structurally proven correct" and "nothing checkable"
+# into the same falsy value. Q1/Q2's guard chain needs to tell those apart:
+# a full PASS overrules a reader outright; an ABSTAIN falls through to the
+# blind-cell adjudicator instead of stopping the chain.
+#
+# ``classify_binding_evidence`` is the pure, BindingResult-only classifier
+# (no PDF, no pipeline) this ticket adds; the gate-level refactor
+# (``_binding_evidence_for_witness`` returning ``(BindingResult, BindingEvidence)``)
+# is exercised via the fixtures already defined above in this file.
+# ---------------------------------------------------------------------------
+
+from socr.tables.binding import (  # noqa: E402
+    BindingEvidence,
+    BindingResult,
+    ColumnHeaderPath,
+    ContradictedCell,
+    MatchedCell,
+    RowLabelContradiction,
+    classify_binding_evidence,
+)
+
+
+def _fully_checked_result(*, contradicted: bool) -> BindingResult:
+    """A BindingResult that IS ``fully_checked`` -- every lane/row/cell was
+    resolved -- and either agrees (PASS candidate) or disagrees (CONTRADICT)."""
+    matched = (
+        [] if contradicted else [MatchedCell(row_path=("RowA",), col_path=("OLS",), value="100")]
+    )
+    contradicted_cells = (
+        [
+            ContradictedCell(
+                row_path=("RowA",),
+                col_path=("OLS",),
+                native_token="100",
+                model_token="999",
+            )
+        ]
+        if contradicted
+        else []
+    )
+    return BindingResult(
+        matched_cells=matched,
+        contradicted_cells=contradicted_cells,
+        row_label_contradictions=[],
+        native_unbound=[],
+        model_unbound=[],
+        ambiguous_count=0,
+        row_binding_unverifiable=False,
+        row_label_unverifiable=False,
+        column_binding_unverifiable=False,
+        column_header_paths=[ColumnHeaderPath(lane=0, path=("OLS",), spans_lanes=1)],
+    )
+
+
+class TestClassifyBindingEvidence:
+    def test_fully_checked_no_contradiction_is_pass(self) -> None:
+        result = _fully_checked_result(contradicted=False)
+        assert result.structural_agreement is True
+        assert classify_binding_evidence(result) is BindingEvidence.PASS
+
+    def test_fully_checked_with_contradicted_cells_is_contradict(self) -> None:
+        result = _fully_checked_result(contradicted=True)
+        assert classify_binding_evidence(result) is BindingEvidence.CONTRADICT
+
+    def test_row_label_contradiction_is_contradict_even_if_otherwise_checked(self) -> None:
+        result = BindingResult(
+            row_label_contradictions=[
+                RowLabelContradiction(row_path=("RowA",), candidate_label="RowB", native_bbox=None)
+            ],
+            row_binding_unverifiable=False,
+            row_label_unverifiable=False,
+            column_binding_unverifiable=False,
+        )
+        assert classify_binding_evidence(result) is BindingEvidence.CONTRADICT
+
+    def test_default_unverifiable_result_is_abstain(self) -> None:
+        """The dataclass default (no box / no native words path): nothing was
+        checked, nothing to disagree with -- ABSTAIN, not PASS."""
+        result = BindingResult()
+        assert result.structural_agreement is False
+        assert classify_binding_evidence(result) is BindingEvidence.ABSTAIN
+
+    def test_partially_checked_with_no_contradiction_is_abstain_not_pass(self) -> None:
+        """The numeric multiset alone must never produce PASS: a row/column
+        left unverifiable means real coverage gaps, even with zero
+        contradictions recorded."""
+        result = BindingResult(
+            row_binding_unverifiable=True,
+            row_label_unverifiable=False,
+            column_binding_unverifiable=False,
+        )
+        assert result.no_known_contradiction is True
+        assert result.fully_checked is False
+        assert classify_binding_evidence(result) is BindingEvidence.ABSTAIN
+
+    def test_ambiguous_cell_with_no_contradiction_is_abstain(self) -> None:
+        result = BindingResult(
+            row_binding_unverifiable=False,
+            row_label_unverifiable=False,
+            column_binding_unverifiable=False,
+            ambiguous_count=1,
+        )
+        assert classify_binding_evidence(result) is BindingEvidence.ABSTAIN
+
+    def test_unbound_native_or_model_cells_are_contradict_not_abstain(self) -> None:
+        """``no_known_contradiction`` already treats native_unbound/model_unbound
+        (the dropped/invented-digit C4 signal) as evidence of disagreement --
+        the classifier must not silently soften that back to ABSTAIN."""
+        from socr.tables.binding import UnboundCell
+
+        result = BindingResult(
+            row_binding_unverifiable=False,
+            row_label_unverifiable=False,
+            column_binding_unverifiable=False,
+            native_unbound=[UnboundCell(row_path=("RowA",), col_path=("OLS",), token="100")],
+        )
+        assert classify_binding_evidence(result) is BindingEvidence.CONTRADICT
+
+
+class TestBindingEvidenceIsClosed:
+    def test_exactly_three_members(self) -> None:
+        assert {e.name for e in BindingEvidence} == {"PASS", "CONTRADICT", "ABSTAIN"}
+
+
+# ---------------------------------------------------------------------------
+# Gate-level refactor: the E1 clamp's existing behaviour (contradiction ->
+# TABLE_UNVERIFIED, absence of coverage -> neutral) must survive verbatim
+# through the new evidence-typed helper. These reuse the row-shift/no-native
+# fixtures already defined in this file.
+# ---------------------------------------------------------------------------
+
+
+class TestGateBindingEvidenceHelper:
+    def test_shifted_labels_classify_as_contradict_at_the_gate(self, tmp_path: Path) -> None:
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+
+        from socr.tables.witness import prepare_table_witnesses
+
+        with prepare_table_witnesses(pdf_path, 1, _SHIFTED_MD) as witnesses:
+            assert witnesses, "fixture premise: the table region must be located"
+            binding_result, evidence = pipeline._binding_evidence_for_witness(
+                state, 1, witnesses[0]
+            )
+
+        assert binding_result is not None
+        assert evidence is BindingEvidence.CONTRADICT
+
+    def test_correct_labels_classify_as_pass_at_the_gate(self, tmp_path: Path) -> None:
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+
+        from socr.tables.witness import prepare_table_witnesses
+
+        with prepare_table_witnesses(pdf_path, 1, _CORRECT_MD) as witnesses:
+            assert witnesses
+            _binding_result, evidence = pipeline._binding_evidence_for_witness(
+                state, 1, witnesses[0]
+            )
+
+        assert evidence is BindingEvidence.PASS
+
+    def test_no_native_words_classifies_as_abstain_at_the_gate(self, tmp_path: Path) -> None:
+        pipeline = _make_pipeline()
+        pdf_path = _no_native_words_pdf(tmp_path)
+        state = _make_state(pdf_path)
+
+        from socr.tables.witness import prepare_table_witnesses
+
+        with prepare_table_witnesses(pdf_path, 1, _CORRECT_MD) as witnesses:
+            assert witnesses
+            _binding_result, evidence = pipeline._binding_evidence_for_witness(
+                state, 1, witnesses[0]
+            )
+
+        assert evidence is BindingEvidence.ABSTAIN
+
+    def test_e1_clamp_unchanged_for_high_pass_with_contradiction(self, tmp_path: Path) -> None:
+        """The GH-367 E1 clamp/adjudicate path for an already-accepted high
+        PASS with a contradiction must be untouched by this refactor -- this
+        task does not let structural_agreement lift an existing conviction."""
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_SHIFTED_MD)
+
+        rung = _accept_rung("high")
+        with patch.object(pipeline, "_transcribe_cell_token", return_value=None):
+            pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
+
+        # Unchanged from TestRowLabelShiftComposesWithLadder above: a genuine
+        # contradiction still caps acceptance at UNVERIFIED, never REJECTED,
+        # even though the underlying evidence is now typed CONTRADICT.
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED

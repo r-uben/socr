@@ -42,7 +42,9 @@ from socr.judge.table_verdict import (
     RungResult,
     TableJudgeVerdict,
 )
+from _adjudicator_doubles import mismatching_adjudicator
 from socr.pipeline.orchestrator import UnifiedPipeline
+from socr.tables.binding import BindingEvidence
 
 # ---------------------------------------------------------------------------
 # Fixtures: minimal PDFs with a known table-locator shape (mirrors B0's own
@@ -108,7 +110,11 @@ def _fail_verdict() -> TableJudgeVerdict:
     return TableJudgeVerdict(
         verdict="FAIL",
         confidence="high",
-        findings=[Finding(code=FindingCode.FABRICATED_VALUE, where="r1c1", detail="not in crop")],
+        # GH-575 (cold review round 1, finding 1): CANONICAL and uppercase.
+        # ``"r1c1"`` does not parse, so the readers localize nothing, the blind
+        # adjudicator has no question to ask, and every rejection would end
+        # UNVERIFIED on the no-doubt-set path instead of the rejection path.
+        findings=[Finding(code=FindingCode.FABRICATED_VALUE, where="R1C1", detail="not in crop")],
     )
 
 
@@ -167,8 +173,25 @@ def _make_config(**overrides) -> PipelineConfig:
     return PipelineConfig(**kwargs)
 
 
-def _make_pipeline(config: PipelineConfig | None = None) -> UnifiedPipeline:
-    return UnifiedPipeline(config or _make_config())
+def _make_pipeline(config: PipelineConfig | None = None, *, adjudicator="mismatch"):
+    """A pipeline whose guard chain is hermetic and controlled.
+
+    GH-575 put two things between a reader FAIL and the terminal: the native
+    binding EVIDENCE (an active contradiction is terminal on its own) and the
+    blind adjudicator (an active mismatch is the only route to a withhold).
+    Neither may be left to the fixture's real geometry or to whatever daemon
+    happens to be running, so both are pinned here:
+
+    * geometry ABSTAINS, unless a test patches it back;
+    * ``adjudicator="mismatch"`` (default) disagrees, so a reader rejection
+      reaches the withhold these tests are about; ``None`` removes it, which
+      is the "no adjudicator configured" path.
+    """
+    pipeline = UnifiedPipeline(config or _make_config())
+    pipeline._binding_evidence_for_witness = lambda *a, **kw: (None, BindingEvidence.ABSTAIN)
+    adj = mismatching_adjudicator() if adjudicator == "mismatch" else adjudicator
+    pipeline._build_table_cell_adjudicator = lambda: adj
+    return pipeline
 
 
 def _make_state(pdf_path: Path, page_count: int = 1) -> DocumentState:
@@ -463,8 +486,16 @@ class TestLadderOutcomes:
         rung = _reject_rung()
         pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
-        events = _events_of_kind(state, TABLE_LADDER_REJECTED_KIND)
+        # P1 (owner ruling Q2, 2026-09-03,
+        # docs/log/2026-09-02_gh359-ladder-terminals-design.md): a reader
+        # rejection that neither ruled guard clears is WITHHELD, not
+        # REJECTED. The table's bytes no longer ship, so the terminal, the
+        # audit kind and the document surfaces all change with it.
+        from socr.judge.table_verdict import TABLE_LADDER_WITHHELD_KIND
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_WITHHELD
+        assert _events_of_kind(state, TABLE_LADDER_REJECTED_KIND) == []
+        events = _events_of_kind(state, TABLE_LADDER_WITHHELD_KIND)
         assert len(events) == 1
         assert events[0].data == {
             "table_id": "p1-t0",
@@ -526,8 +557,15 @@ class TestLadderOutcomes:
         with patch("socr.tables.witness.prepare_table_witnesses", return_value=_Ctx()):
             pipeline._run_table_judge_gate(state, 1, ps, bo, [_reject_rung()])
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
-        assert _events_of_kind(state, TABLE_LADDER_REJECTED_KIND)
+        # P1 (owner ruling Q2): the rejected table is now WITHHELD, and the
+        # page reducer's precedence widens with it -- WITHHELD > REJECTED >
+        # UNVERIFIED. The property this test pins is unchanged: the stronger
+        # per-table terminal decides the page, and BOTH tables keep their own
+        # audit event.
+        from socr.judge.table_verdict import TABLE_LADDER_WITHHELD_KIND
+
+        assert ps.table_ladder_disposition == FailureMode.TABLE_WITHHELD
+        assert _events_of_kind(state, TABLE_LADDER_WITHHELD_KIND)
         assert _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
 
 
@@ -584,7 +622,12 @@ class TestRetryLatchCausalClassification:
         ]
         pipeline._run_table_judge_gate(state, 1, ps, bo, rungs)
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
+        # P1 (owner ruling Q2, 2026-09-03,
+        # docs/log/2026-09-02_gh359-ladder-terminals-design.md): a reader
+        # rejection that neither ruled guard clears is WITHHELD, not
+        # REJECTED. The table's bytes no longer ship, so the terminal, the
+        # audit kind and the document surfaces all change with it.
+        assert ps.table_ladder_disposition == FailureMode.TABLE_WITHHELD
         assert ps.table_judge_retry_pending is False
 
     def test_unavailable_then_high_pass_accepts_and_does_not_latch(self, tmp_path: Path) -> None:
@@ -765,9 +808,12 @@ class TestRetryLatchCausalClassification:
         with patch("socr.tables.witness.prepare_table_witnesses", return_value=_Ctx()):
             pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
+        # P1 (owner ruling Q2): table 0's rejection is now a withhold, so the
+        # page-level reduction is WITHHELD. The latch question is untouched and
+        # is what this test exists for.
+        assert ps.table_ladder_disposition == FailureMode.TABLE_WITHHELD
         assert ps.table_judge_retry_pending is True, (
-            "a mixed page (one REJECTED table, one unavailable/unresolved table) "
+            "a mixed page (one withheld table, one unavailable/unresolved table) "
             "must still latch -- otherwise the unresolved table is never re-judged"
         )
 
@@ -787,7 +833,12 @@ class TestRetryLatchNonLatchingControls:
 
         pipeline._run_table_judge_gate(state, 1, ps, bo, [_reject_rung()])
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_REJECTED
+        # P1 (owner ruling Q2, 2026-09-03,
+        # docs/log/2026-09-02_gh359-ladder-terminals-design.md): a reader
+        # rejection that neither ruled guard clears is WITHHELD, not
+        # REJECTED. The table's bytes no longer ship, so the terminal, the
+        # audit kind and the document surfaces all change with it.
+        assert ps.table_ladder_disposition == FailureMode.TABLE_WITHHELD
         assert ps.table_judge_retry_pending is False
 
     def test_low_low_content_uncertainty_without_unavailable_rung_does_not_latch(
@@ -809,7 +860,11 @@ class TestRetryLatchNonLatchingControls:
         ]
         pipeline._run_table_judge_gate(state, 1, ps, bo, rungs)
 
-        assert ps.table_ladder_disposition is None  # ruling 1 quorum: accepted
+        # P1 (owner ruling Q1, 2026-09-03): two low-confidence PASSes are no
+        # longer a quorum. With no geometry evidence and no cleared cell, the
+        # table stays UNVERIFIED -- and that is a CONTENT-shaped uncertainty,
+        # so it still must not latch, which is what this test is about.
+        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         assert ps.table_judge_retry_pending is False
 
     def test_content_not_s1_parse_failure_does_not_latch(self, tmp_path: Path) -> None:
@@ -942,8 +997,13 @@ class TestProcessFlagDifference:
         # (page_num=0) -- per-page terminals surface via result.error, the
         # same C2-established surface tests/test_ladder_status_surfacing.py
         # asserts against, not a per-page PageOutput in this list.
-        assert result_on.status == DocumentStatus.AUDIT_FAILED
-        assert "table_rejected" in (result_on.error or "")
+        # P1 (owner ruling Q2): the page's single table is withheld whole, so
+        # the page ships only the marker and the document has no content --
+        # ERROR under the pre-existing no-content rule, with the withhold named
+        # in the document note.
+        assert result_on.status == DocumentStatus.ERROR
+        assert result_on.status != result_off.status
+        assert "table_withheld" in (result_on.error or "")
 
     def test_native_lane_is_witnessed_too(self, tmp_path: Path) -> None:
         """The former F1 shape: a born-digital native page with a defective
@@ -980,8 +1040,10 @@ class TestProcessFlagDifference:
         ):
             result = pipeline.process(pdf_path, tmp_path / "native_out")
 
-        assert result.status == DocumentStatus.AUDIT_FAILED
-        assert "table_rejected" in (result.error or "")
+        # P1 (owner ruling Q2): withheld whole -> no content -> ERROR. The
+        # point of this test is unchanged: the native lane is judged too.
+        assert result.status == DocumentStatus.ERROR
+        assert "table_withheld" in (result.error or "")
 
     def test_flag_off_makes_zero_witness_calls(self, tmp_path: Path) -> None:
         """Sentinel: with the flag off, the gate is never entered, so witness

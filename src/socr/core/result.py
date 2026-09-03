@@ -104,6 +104,20 @@ class FailureMode(str, Enum):
     #: is weaker than an active rejection: nothing said the table is wrong,
     #: but nothing could confirm it either.
     TABLE_UNVERIFIED = "table_unverified"
+    #: P1 (owner ruling Q2, 2026-09-03): the readers rejected the table AND
+    #: neither ruled guard could clear it -- native geometry did not overrule
+    #: them, and a blind third-vendor transcription of the exact cells they
+    #: flagged either disagreed, could not be resolved, or could not be made.
+    #:
+    #: NOT a reuse of ``TABLE_REJECTED``, and the difference is the shipped
+    #: bytes, not the wording. A REJECTED page ships its table text demoted
+    #: under a warning, so a downstream reader who quotes the markdown quotes
+    #: measured-bad numbers. A WITHHELD page ships NO table bytes at all: the
+    #: table region is replaced by the fail-closed marker plus the page image
+    #: reference, and the prose outside the region survives through the GH-520
+    #: regional splice. Conflating them would make every historical rejected
+    #: page look, on replay, like one whose content was withheld.
+    TABLE_WITHHELD = "table_withheld"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The

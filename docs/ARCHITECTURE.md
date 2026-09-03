@@ -58,6 +58,49 @@ does not require an expensive model loop on every page.
 
 See `docs/log/2026-06-14_general-extraction-method.md` (issue #49).
 
+## The table-judge ladder — ON by default, fail-closed
+
+Every table page socr emits is judged before it ships. The ladder is two
+independent readers, cheapest first: an ollama-cloud vision judge, then a
+Gemini-family CLI. Each answers PASS or FAIL with a confidence. It is **on by
+default** since 2026-09-03 (owner ruling Q3,
+`docs/log/2026-09-02_gh359-ladder-terminals-design.md`); opt out with
+`--no-table-judge-ladder`.
+
+**Fail-closed** is the contract the default encodes: a table socr cannot
+verify never ships SUCCESS. On a machine with no reachable rung — air-gapped,
+no subscription, daemon down — every table page ships UNVERIFIED and the
+document is PARTIAL. That is deliberate. Shipping an unwitnessed table as
+clean is the bug the ladder exists to fix. The CLI says so at startup, names
+the cause, and prints the opt-out.
+
+Four terminals, and the difference between the last two is the shipped bytes:
+
+| Terminal | What it means | What ships |
+|---|---|---|
+| ACCEPTED | a reader approved it, or a guard overruled a reader | the table |
+| TABLE_UNVERIFIED | nobody could answer (outage, timeout, unparseable) | the table, page demoted; retryable on resume |
+| TABLE_REJECTED | legacy label, kept for replay of older runs | the table, page demoted |
+| TABLE_WITHHELD | a reader rejected it and no guard cleared it | **no table bytes** — a failure marker plus the page image; prose outside the region is kept |
+
+**The two guards.** Neither of the two soft endings is settled by the readers
+alone. When the ladder ends with two low-confidence PASSes, and when it ends
+with a rejection, the same chain runs in the same order:
+
+1. **Native geometry** (free, local). `bind()` checks rows AND columns against
+   the page's own word layer. A pass overrules the readers
+   (`verified_by_geometry`). A matching set of numbers is never enough on its
+   own — matching numbers prove "not invented", never "correctly placed".
+2. **Blind cell transcription** (one call, a third vendor). The cells the
+   readers themselves doubted are transcribed from the crop by a model that is
+   shown neither the emitted table nor the readers' opinions. Every doubted
+   cell agreeing with the extraction clears it
+   (`verified_by_blind_cell_transcription`); anything less does not.
+
+A table is hidden only when the readers AND the guards agree. Every guard call
+is metered and is refused before it is made when the per-page cap or the
+document budget cannot cover it.
+
 ## Modules
 - `cli.py`: Click commands — `process` (default, PDF-path shorthand), `batch`,
   `engines`, `replay`, `judge-benchmark`. Agentic routing controls:
