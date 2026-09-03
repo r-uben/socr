@@ -12,23 +12,24 @@ could not have been made from the ticket's own list.
 
 ## The count
 
-**2801 born-digital pages — 19.51% — fire at least one trigger.** A page can fire more
+**2975 born-digital pages — 20.72% — fire at least one trigger.** A page can fire more
 than one.
 
 | trigger | pages | % of born-digital | papers |
 | --- | ---: | ---: | ---: |
 | `needs_ocr_enhancement` | 2205 | 15.36% | 158 |
 | `text_grid_rejected` | 479 | 3.34% | 138 |
-| native table defect (**lower bound**) | 331 | 2.31% | 126 |
+| native table defect (**lower bound**) | 600 | 4.18% | 167 |
 | `chart_asset_render_failed` | — | not measurable | — |
 
 Two of those cells need reading carefully.
 
-**The defect column is a lower bound, not a count.** Two members of that union —
-`native_table_structure_failed` and `native_table_structure_defective` — are PageState
-flags the orchestrator sets during its own native ship, not detector output. What the
-detector exposes is the TR-3 per-region hard fail and the GH-371 ordinals, and that is what
-is counted.
+**The defect column is a lower bound, not a count.** One member of that union —
+`native_table_structure_failed` — is an orchestrator PageState flag set during the
+pipeline's own native ship, so no corpus sweep can see it. The other three
+(`native_table_unverifiable` via the TR-3 hard fail and the GH-371 ordinals,
+`native_table_structure_defective`, `native_table_header_unattributed`) are all on
+`PageAssessment` and all counted here.
 
 **`chart_asset_render_failed` is not measurable this way at all.** It is a PNG render/save
 failure; nothing about a PDF predicts it. Reported as "not measurable" rather than as zero,
@@ -65,7 +66,7 @@ the ticket, not an optimisation of it.
 `PageState.text_grid_rejected` says it outright: *"The word-geometry rebuild is lossless,
 so the page keeps its text — but it is demoted to WARNING and the document to
 AUDIT_FAILED, because the issue requires the rejection to surface at page and document
-status, not only in a log."* `_winning_page_output` agrees in its own comment: *"the text
+status, not only in a log."* `_select_page_output_tagged` agrees in its own comment: *"the text
 is the lossless word-geometry rebuild and is unchanged"*.
 
 So this trigger demotes for **visibility**, not because anything is wrong with the text.
@@ -90,7 +91,8 @@ and the selector both said the opposite. Corrected in this change.
 - **A fidelity measurement for `has_corrupt_math`**, which decides 92% of the trigger. The
   useful next number is the distribution of corrupt-glyph counts per page: a page with one
   mangled subscript and a page with two hundred are not the same decision, and the
-  detector already counts them (`_detect_corrupt_math`).
+  detector already counts them -- in `_count_math_corruption`, which returns the
+  number; `_detect_corrupt_math` only thresholds it to a bool and discards the count.
 - **A surfacing plan for `text_grid_rejected`** before it can move, per finding 2.
 - **`chart_asset_render_failed` needs a different instrument** — an induced-failure run,
   not a corpus sweep.

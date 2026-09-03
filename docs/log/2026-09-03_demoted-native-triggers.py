@@ -16,22 +16,21 @@ The four triggers, and which of them this sweep can see:
 * native table defect         -- the union of ``native_table_structure_failed``,
                                  ``native_table_unverifiable``,
                                  ``native_table_structure_defective`` and
-                                 ``native_table_header_unattributed``. Only the
-                                 assessment-visible members are MEASURED here;
-                                 see the caveat below.
+                                 ``native_table_header_unattributed``. Every
+                                 member the DETECTOR exposes is measured; see
+                                 the caveat below for the one that is not.
 * ``chart_asset_render_failed`` -- NOT measurable without a real run. It is a
                                  PNG render/save failure, so it needs the render
                                  to fail; nothing about a PDF predicts it. Its
                                  count here is structurally zero and is reported
                                  as "not measurable", never as "does not occur".
 
-**The caveat that decides how to read the numbers.** Two members of the defect
-union are set during the pipeline's own native ship, not by the detector:
-``native_table_structure_failed`` and ``native_table_structure_defective`` are
-PageState flags the orchestrator sets. What the detector exposes is
-``has_unverifiable_table_region`` (the TR-3 per-region hard fail) and the
-GH-371 ordinals. So the defect column here is a LOWER BOUND on that trigger, and
-the sweep says so rather than presenting it as the count.
+**The caveat that decides how to read the numbers.** ``native_table_structure_failed``
+is an orchestrator PageState flag set during the pipeline's own native ship, not
+detector output, so no corpus sweep can see it. The other three members are all
+on ``PageAssessment`` and all counted here. So the defect column is a LOWER
+BOUND on that trigger, and the sweep says so rather than presenting it as the
+count.
 
 Content-free per the 2026-08-22 measurement convention: counts and basenames
 only, never page text.
@@ -111,8 +110,15 @@ def _page_triggers(assessment) -> set[str]:
         fired.add("needs_ocr_enhancement")
     if getattr(assessment, "text_grid_rejections", None):
         fired.add("text_grid_rejected")
-    if getattr(assessment, "has_unverifiable_table_region", False) or getattr(
-        assessment, "native_table_unverifiable_ordinals", None
+    # Every member of the defect union the DETECTOR exposes (cubic P2 on #576).
+    # ``native_table_structure_failed`` is the one that stays out: it is an
+    # orchestrator PageState flag set during the native ship, which is why this
+    # column is a lower bound rather than the count.
+    if (
+        getattr(assessment, "has_unverifiable_table_region", False)
+        or getattr(assessment, "native_table_unverifiable_ordinals", None)
+        or getattr(assessment, "native_table_structure_defective", False)
+        or getattr(assessment, "native_table_header_unattributed", False)
     ):
         fired.add("native_table_defect_lower_bound")
     return fired
@@ -140,7 +146,11 @@ def main() -> int:
     for path in pdfs:
         try:
             assessment = detector.detect(path)
-        except Exception:  # noqa: BLE001 - an unreadable file is not a measurement
+        except Exception as exc:  # noqa: BLE001 - an unreadable file is not a measurement
+            # Named, not swallowed (cubic P2 on #576). A silent skip lets the
+            # sweep publish corpus totals with a hole in them and no way to see
+            # which file made it -- the GH-511 sweep lost a whole run that way.
+            print(f"  skipped {path.name}: {type(exc).__name__}: {exc}", file=sys.stderr)
             tally["unreadable_pdf"] += 1
             continue
         tally["paper"] += 1

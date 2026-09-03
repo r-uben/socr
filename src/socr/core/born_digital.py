@@ -960,7 +960,7 @@ class PageAssessment:
     #:
     #: GH-548: this used to end "the page is not demoted on it", and that is
     #: false. ``PageState.text_grid_rejected`` carries it forward and
-    #: ``_winning_page_output`` ORs it into ``native_demoted``, so the page
+    #: ``_select_page_output_tagged`` ORs it into ``native_demoted``, so the page
     #: ships WARNING / ``audit_passed=False`` and the document AUDIT_FAILED --
     #: deliberately, because GH-195 required the rejection to surface at page
     #: and document status rather than only in a log. Both PageState's docstring
