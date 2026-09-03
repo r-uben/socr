@@ -219,3 +219,40 @@ def test_a_whole_document_attempt_selects_the_same_winner(tmp_path: Path) -> Non
         "the fragment and sidecar describe different winners on a page with a "
         f"whole-document attempt:\nfragment={fragment!r}\nsidecar ={winner!r}"
     )
+
+
+def test_one_provisional_flush_selects_once(tmp_path: Path) -> None:
+    """GH-550: agreement by construction, not by coincidence.
+
+    GH-539 made the fragment and the sidecar agree by calling
+    `finalized_page_record` in both. Same function, same inputs -- so they
+    agreed, but only because someone kept the two call sites aligned by hand.
+    #549 spent three rounds on exactly that class: same function one argument
+    apart, then the same guard on a different output. A second call is a second
+    chance to diverge.
+
+    Counting the calls is the only way to pin "once". An equality assertion
+    cannot tell one selection from two that happen to match today, which is
+    precisely the state this refactor removes.
+    """
+    from unittest.mock import patch
+
+    import socr.core.manifest as manifest_mod
+
+    calls: list[int] = []
+    real = manifest_mod.finalized_page_record
+
+    def _counting(state, page_num, whole_doc=None, saved_text=None):
+        calls.append(page_num)
+        return real(state, page_num, whole_doc, saved_text)
+
+    with patch.object(manifest_mod, "finalized_page_record", _counting):
+        fragment, sidecar = _flush(tmp_path / "once", _INVALID_TABLE_BODY)
+
+    assert calls == [1], (
+        f"the provisional flush selected {len(calls)} time(s) for one page: "
+        f"{calls}. Two selections agree only until their inputs drift."
+    )
+    # The agreement still holds -- the point is that it now holds by
+    # construction rather than by two calls matching.
+    assert fragment.strip() == sidecar["winning_output"]["text"].strip()

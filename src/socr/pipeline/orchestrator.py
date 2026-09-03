@@ -5173,57 +5173,36 @@ class UnifiedPipeline:
                 from socr.core.manifest import (
                     _whole_doc_page_texts,
                     finalized_page_record,
-                    structure_class_floor_applies,
-                    structure_class_floor_text,
                 )
 
-                # Strip any leading ## Page N marker from bo.text so the
-                # provisional fragment body matches what assemble would produce
-                # (modulo post-strip/post-figure transforms, which run later).
-                # For structure_class_floor_applies pages, derive from the
-                # finalized floor text so the provisional fragment and sidecar agree.
-                if structure_class_floor_applies(ps):
-                    _raw_body = structure_class_floor_text(ps, page_num)
-                else:
-                    # GH-539: the SAME selection AND the same guard the
-                    # provisional sidecar uses. The fragment wrote `bo.text`
-                    # raw, so for a passing output carrying a width-mismatched
-                    # GFM table the fragment held the invalid table while the
-                    # sidecar beside it said `error / table_emission_invalid`.
-                    # `_rewrite_all_fragments` corrects the fragment at assemble
-                    # time, so the final `.md` was always right -- but a crash in
-                    # between left two files on disk contradicting each other,
-                    # which is the one thing this crash-recovery copy exists to
-                    # prevent.
-                    #
-                    # `finalized_page_record`, not `_apply_table_emission_guard`
-                    # on `bo` (cubic P2 on #549): the same guard applied to a
-                    # DIFFERENT output is still two finalisations. `bo` is the
-                    # raw per-page attempt, and the sidecar selects its winner --
-                    # they diverge exactly in the fallback cases
-                    # `_flush_page_sidecar` documents, e.g. a rejected OCR
-                    # attempt overridden by a flagged native-text fallback.
-                    #
-                    # One selection, one finalisation, one set of bytes.
-                    # ...and the same whole-document snapshot (cubic P1 on
-                    # #549). `finalized_page_record` takes `whole_doc` as an
-                    # ARGUMENT: omitting it makes the selection reconsider a CLI
-                    # whole-document attempt differently from the sidecar, which
-                    # passes `_whole_doc_page_texts(state)`. Same function, same
-                    # page, different inputs -- two selections again, one
-                    # argument down from the last one.
-                    _raw_body = (
-                        finalized_page_record(
-                            state, page_num, _whole_doc_page_texts(state)
-                        ).output.text
-                        or ""
-                    )
+                # GH-550: select and finalise ONCE, then hand the same record to
+                # both writers.
+                #
+                # GH-539 made the two agree by calling `finalized_page_record`
+                # for the fragment while `_flush_page_sidecar` called it again.
+                # Same function and same inputs, so they agreed -- but that is a
+                # coincidence maintained by hand, and #549 spent three rounds on
+                # exactly this class: same function, one argument apart; same
+                # guard, different output. A second call is a second chance to
+                # diverge.
+                #
+                # The `structure_class_floor_text` special case goes too: the
+                # floor disposition already lives inside the record, so deriving
+                # it separately was a third path to the same bytes.
+                _record = finalized_page_record(state, page_num, _whole_doc_page_texts(state))
+
+                # Strip any leading ## Page N marker so the provisional fragment
+                # body matches what assemble would produce (modulo
+                # post-strip/post-figure transforms, which run later).
+                _raw_body = _record.output.text or ""
                 _stripped = _raw_body.lstrip()
                 _m = PAGE_MARKER_RE.match(_stripped)
                 _body = _stripped[_m.end() :].lstrip("\n") if _m else _raw_body
 
                 self._flush_page_fragment(state, page_num, _body, output_dir)
-                self._flush_page_sidecar(state, page_num, output_dir, terminal=False)
+                self._flush_page_sidecar(
+                    state, page_num, output_dir, terminal=False, record=_record
+                )
             except Exception as exc:
                 logger.debug(
                     "PP-2 provisional flush failed for p%d (%s); continuing",
