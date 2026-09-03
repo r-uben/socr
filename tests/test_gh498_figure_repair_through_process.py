@@ -187,22 +187,31 @@ def test_reprocess_still_forces_a_re_run_of_a_clean_document(tmp_path: Path) -> 
 
 def test_the_crashed_run_records_the_loss_in_the_audit_trail(tmp_path: Path) -> None:
     """GH-503, no-silent-loss: the console line scrolls away, so the failure has
-    to survive in the record a later reader actually has."""
+    to survive in the record a later reader actually has.
+
+    Read from ``audit_log.json``, which carries every event. The per-page
+    sidecars cannot witness this one: it is appended with ``page_num=0`` because
+    the figure phase is document-scoped, and ``_flush_page_sidecar`` filters
+    ``audit_events`` to its own page. An assertion made there would be green
+    whether or not the handler appended anything at all (cubic P2 on #559).
+    """
     pdf, out_dir = _crashed_run(tmp_path)
 
-    sidecars = list(out_dir.rglob("pages/*.json"))
-    assert len(sidecars) == 1
-    kinds = [ev.get("kind") for ev in json.loads(sidecars[0].read_text()).get("audit_events", [])]
-    metadata = [
-        json.loads(p.read_text())
-        for p in out_dir.rglob("metadata.json")
-        if p.parent.name != out_dir.name
-    ]
-    assert metadata, "no per-doc metadata.json was written"
+    logs = list(out_dir.rglob("audit_log.json"))
+    assert logs, "no audit_log.json was written"
+    events = [ev for log in logs for ev in json.loads(log.read_text()).get("events", [])]
+    assert events, f"audit_log.json carried no events: {[str(p) for p in logs]}"
+    failures = [ev for ev in events if ev.get("kind") == "figure_phase_failed"]
+    assert failures, (
+        "the figure phase died and left no durable record of it; the kinds "
+        f"present were {sorted({ev.get('kind') for ev in events})}"
+    )
+    assert "caption engine died" in (failures[0].get("detail") or ""), (
+        f"the event does not say what failed: {failures[0]}"
+    )
+
+    metadata = [json.loads(m.read_text()) for m in out_dir.rglob("metadata.json")]
+    assert metadata, "no metadata.json was written"
     assert any(m.get("status") != "completed" for m in metadata), (
         f"the crashed run was recorded COMPLETED: {[m.get('status') for m in metadata]}"
     )
-    # The event is page-independent (page_num=0), so it does not have to appear
-    # in a per-page sidecar; the assertion that matters is the record status
-    # above. Kinds are read only to keep the failure message informative.
-    assert kinds is not None
