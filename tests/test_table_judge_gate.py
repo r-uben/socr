@@ -284,11 +284,21 @@ class TestWitnessFailOpen:
         assert len(events) == 1
         # No rung ever ran for a witness that was never LOCATED -- an empty
         # rung trail, not an absent one (GH-353 rung-trail follow-up).
+        #
+        # GH-560: and the record says so outright. This terminal used to be
+        # labelled "infra problem, retryable on resume" like a rung outage,
+        # which promised a retry nothing performs -- the P1 latch correctly
+        # does not fire for a no-witness terminal, so the document is skipped
+        # on the next run.
         assert events[0].data == {
             "table_id": "p1-t0",
             "rung_trail": [],
             "witness_scope": "none",
+            "retryable": False,
         }
+        assert "no table witness could be prepared" in events[0].detail
+        assert "retryable on resume" not in events[0].detail
+        assert ps.table_unverified_unwitnessed is True
 
     def test_count_mismatch_ambiguous_is_judged_not_abstained(self, tmp_path: Path) -> None:
         """1 box, 2 emitted blocks -> count mismatch -> AMBIGUOUS with a page
