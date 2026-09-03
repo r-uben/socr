@@ -10,7 +10,14 @@ the pins, #359 and its leftover #381 are both CLOSED, and every ruling has a `pr
 level difference test (`tests/test_gh359_ladder_terminals.py`). What remains before the
 flip is not design but evidence and mechanics, listed at the end.
 
-One fact frames all three: **a ladder terminal never removes content.** The manifest guard
+One fact framed all three: **a ladder terminal never removes content.**
+
+**Superseded for REJECTED by the Q2 ruling below (GH-575).** Q2 withholds a
+both-readers-rejected table floor-style -- marker plus page image, prose kept via the
+GH-520 regional splice -- so on that one terminal a ladder terminal *does* remove content,
+and it also supersedes #322's ship-demoted framing. The sentence still holds for every
+other terminal, and the paragraph below it is left as written because it is the reasoning
+the rulings were made against. The manifest guard
 (`src/socr/core/manifest.py:1507-1542`) demotes the finalized page to
 `WARNING`/`audit_passed=False` with the terminal as `failure_mode`; the table text ships.
 Every pin below chooses a *label plus a retry policy*, not a content gate. The corpus rule
@@ -245,6 +252,21 @@ cells agree with the extraction; (3) otherwise UNVERIFIED. The adjudicator reuse
 cell-transcription machinery built for the binding clamp (GH-367) and runs only on the
 low+low minority.
 
+Two conditions on that rule, pinned in GH-575 because both make it accept where it must
+not:
+
+- **An empty or missing doubt set is UNVERIFIED, never verified.** A low+low PASS may
+  emit no cell-level doubt list at all, and "verified iff those cells agree with the
+  extraction" is *vacuously true* over an empty set -- which restamps SUCCESS on exactly
+  the pages this terminal exists to catch. No cells named means nothing was checked. The
+  alternative, if the adjudicator call is worth paying for, is a whole-table blind
+  re-read; what is not available is acceptance.
+- **A binding check that actively FAILS ends it at UNVERIFIED.** The chain hands the
+  adjudicator the cases where binding *abstained* or could not decide. An active bind
+  FAIL is evidence, and letting a third-vendor transcription overrule it puts a model's
+  reading above the page's own geometry -- the inversion GH-273 and the binding clamp
+  exist to prevent.
+
 **Q2 — a table both readers rejected.** Ruled: withhold it floor-style (marker + page
 image, prose kept via the GH-520 regional splice), NOT shipped as a warning — but only
 after the same two guards as Q1 have failed to clear it: (1) the free binding check
@@ -253,13 +275,30 @@ adjudicator blindly transcribes the cells the readers flagged; if they match the
 extraction the readers were wrong and the table ships; if not, withhold. Known ways a
 rejection is wrong, recorded so the guards are aimed: spanning headers / panels / notes
 rows read as misalignment; a bad crop (cut header, rotation) fooling both readers
-identically; decoy-tuned prompts over-triggering on dense tables. A table is hidden only
-when readers AND (geometry OR blind transcription) agree.
+identically; decoy-tuned prompts over-triggering on dense tables.
+
+A table is hidden only when **the readers reject it AND the binding check does not clear
+it AND the blind transcription does not clear it** — and *abstain is not clear*. A guard
+that cannot answer (no text layer for the binding check, no reachable rung for the
+adjudicator) has not cleared the table; it has said nothing.
+
+*(Corrected in GH-575. The closing sentence read "hidden only when readers AND (geometry
+OR blind transcription) agree", which is De Morgan-wrong against the procedure directly
+above it: it withholds as soon as ONE guard agrees with the readers, where the procedure
+withholds only after BOTH fail to clear, and it left abstain undefined. The procedure was
+right and the summary sentence was wrong, which is the more dangerous way round -- a
+summary is what gets implemented.)*
 
 **Q3 — default posture.** Ruled: ON by default, fail-closed (a table that cannot be
-verified ships UNVERIFIED, never SUCCESS), with the startup line (already shipped in
-#553) naming the cause and the opt-out when no rung is reachable, and the strict-local
-line saying every table page will be UNVERIFIED.
+verified ships UNVERIFIED, never SUCCESS), with a startup line naming the cause and the
+opt-out when no rung is reachable, and the strict-local line saying every table page will
+be UNVERIFIED.
+
+*(GH-575: this said the startup line was "already shipped in #553". Only half of it was.
+#553 shipped `_report_strict_local_ladder_diagnostic`, which fires on the
+`--strict-local` + `--table-judge-ladder` combination specifically. The general "no rung
+reachable -> name the cause and the opt-out" line does not exist yet and is owed with the
+flip.)*
 
 **Consequence for the flip build (one ticket, after these rulings):** (a) the tiebreak
 chain for low+low and for REJECTED — binding check as overruling evidence, then the
