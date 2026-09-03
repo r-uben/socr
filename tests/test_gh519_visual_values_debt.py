@@ -233,3 +233,102 @@ def test_a_render_failure_does_not_claim_the_image_preserved_it(tmp_path: Path) 
     assert "preserved in the page image" not in note, (
         f"the note claims the image preserved a figure that was never saved: {note}"
     )
+
+
+def test_the_math_plus_chart_path_records_the_debt_too(tmp_path: Path) -> None:
+    """GH-566. The kind is appended in TWO places, and only one was pinned.
+
+    A corrupt-equation page that ALSO won chart arbitration goes through
+    ``_agentic_math_recovery_page``, which carries its own copy of the emit.
+    #565's PR body claimed removing the emit fails a test; that was true of the
+    chart-lane site only. Deleting the append here left the suite green, so a
+    page in this state could silently lose the disposition, the note and the
+    CLI count -- the same class of gap #565 called out in its own first attempt.
+    """
+    from socr.core.result import PageOutput, PageStatus
+
+    pdf = _make_vector_chart_pdf(_dir(tmp_path, "mc"))
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf)
+    ps = state.pages[1]
+
+    recovered = PageOutput(
+        page_num=1,
+        text="native prose with $x^2$ recovered",
+        status=PageStatus.SUCCESS,
+        engine="native+math",
+        audit_passed=True,
+    )
+    figures_dir = tmp_path / "mcfigs"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch.object(UnifiedPipeline, "_recover_corrupt_math_page", return_value=recovered):
+        pipeline._agentic_math_recovery_page(
+            state,
+            1,
+            ps,
+            tmp_path / "mcout",
+            chart_winner_pages={1},
+            chart_figures_dir=figures_dir,
+        )
+
+    events = _debt_events(state)
+    assert len(events) == 1, (
+        "the math+chart path did not record the debt; a corrupt-math page that "
+        f"also won chart arbitration loses it silently: {state.events}"
+    )
+    assert events[0].page_num == 1
+    assert events[0].data.get("png_saved") is True, (
+        "the chart PNG did not render, so this test measures the failure path "
+        "rather than the emit it claims to"
+    )
+
+    note = pipeline._visual_values_not_transcribed_note(state)
+    assert note is not None and "page(s) 1" in note, (
+        f"the math+chart debt reached no document note: {note}"
+    )
+
+
+def test_the_cli_line_does_not_claim_the_image_on_a_render_failure(tmp_path: Path) -> None:
+    """GH-566 item 2, measured at the printed line.
+
+    The note learned to say "preserved nowhere" on a render failure and the CLI
+    line did not, so the same false comfort survived one surface along. An
+    assertion on the split alone would NOT have caught that -- the split was
+    already right -- which is why this reads what an operator actually sees.
+    """
+    pdf = _make_vector_chart_pdf(_dir(tmp_path, "cs"))
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf)
+    pipeline._last_assessment = state._last_assessment
+
+    with (
+        patch("socr.pipeline.orchestrator.route_page"),
+        patch.object(
+            UnifiedPipeline, "_render_chart_page_png", side_effect=RuntimeError("render died")
+        ),
+    ):
+        pipeline._phase_agentic(state, tmp_path / "csout")
+
+    kept, lost = pipeline._visual_values_split(state)
+    assert lost == [1] and kept == [], (
+        f"the render failure did not reach the split: kept={kept} lost={lost}"
+    )
+
+    printed: list[str] = []
+    pipeline.config.quiet = False
+    with patch("socr.pipeline.orchestrator.console.print", side_effect=printed.append):
+        pipeline._phase_assemble(state, tmp_path / "csasm")
+
+    debt_lines = [line for line in printed if "visual values not transcribed" in line]
+    assert debt_lines, f"the debt never reached the CLI summary: {printed}"
+    assert any("preserved nowhere" in line for line in debt_lines), (
+        f"the CLI summary did not report the render failure: {debt_lines}"
+    )
+    assert not any("preserved in the page image" in line for line in debt_lines), (
+        f"the CLI line still claims the image preserved a figure that was never saved: {debt_lines}"
+    )
+
+    note = pipeline._visual_values_not_transcribed_note(state)
+    assert note is not None and "preserved nowhere" in note
+    assert "preserved in the page image" not in note
