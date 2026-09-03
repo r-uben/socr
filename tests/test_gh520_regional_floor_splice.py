@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from socr.core.manifest import _winning_page_output, structure_class_floor_text
-from socr.core.result import FailureMode
+from socr.core.result import FailureMode, PageStatus
 from test_gh317_structure_class_floor import (
     COLLAPSED_UNIQUE_TOKEN,
     MIXED_VALIDITY_NATIVE_TEXT,
@@ -99,6 +99,11 @@ def test_both_regions_parse_so_the_prose_survives(tmp_path: Path) -> None:
     out = _winning_page_output(state, 1)
 
     assert out.failure_mode is FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED
+    # GH-572: the page is still a FAILURE that happens to retain prose. Pinning
+    # only the failure_mode would let a later "has text -> SUCCESS" change land
+    # quietly, and a floored page stamped SUCCESS is the silent-loss shape.
+    assert out.status is PageStatus.ERROR, f"the spliced floor is no longer ERROR: {out.status}"
+    assert out.audit_passed is False, "the spliced floor passed its audit"
     assert MARKER in out.text, "the failed-table marker did not ship"
     assert PROSE_BEFORE in out.text, "the prose before the tables was withheld"
     assert PROSE_BETWEEN in out.text, "the prose between the tables was withheld"
@@ -277,6 +282,18 @@ def test_the_detection_signal_survives_a_resume(tmp_path: Path) -> None:
     )
     assert len(resumed.pages[1].detected_table_bboxes) == 2
 
+    # GH-572: and the verdict, not just the fields. A restore that fills these
+    # in while breaking the floor path would satisfy every assertion above and
+    # still ship a different page than run 1 did -- which is the whole claim
+    # this test's name makes.
+    resumed_out = _winning_page_output(resumed, 1)
+    assert PROSE_BEFORE in resumed_out.text, (
+        "the resumed page floored whole where run 1 kept its prose"
+    )
+    assert MARKER in resumed_out.text
+    assert UNIQUE_NATIVE_ROW not in resumed_out.text
+    assert resumed_out.status is PageStatus.ERROR
+
 
 def test_a_sidecar_without_the_signal_restores_the_safe_zero(tmp_path: Path) -> None:
     """The key is written only when a table was detected, so most sidecars --
@@ -427,3 +444,12 @@ def test_a_restored_degenerate_bbox_is_not_usable_evidence(tmp_path: Path) -> No
         "clear, because a shorter list is a mismatch that fails closed for the "
         "wrong reason"
     )
+    # GH-572: and the count with it. Clearing only the boxes fails closed today
+    # by length mismatch, but leaves a count that a later guard reading the
+    # count alone would take as evidence -- on geometry the detector itself
+    # would have refused.
+    assert resumed.pages[1].detected_table_count == 0, (
+        "the boxes cleared and the count did not, so the restored state does "
+        "not match the safe zero its own comment promises"
+    )
+    assert PROSE_BEFORE not in _winning_page_output(resumed, 1).text
