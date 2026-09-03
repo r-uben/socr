@@ -193,6 +193,24 @@ class PageState:
     #: unwitnessed one. This flag withholds that exception so the page is
     #: reprocessed and the unwitnessed table finally gets a look.
     table_ladder_incomplete: bool = False
+    #: GH-560: True when at least one UNVERIFIED table on this page ended with
+    #: an EMPTY rung trail -- no rung ever ran, because no table witness could
+    #: be prepared. The generic TABLE_UNVERIFIED wording calls that "infra
+    #: problem, retryable on resume", and nothing retries it: the P1 latch
+    #: correctly does not fire for a no-witness terminal, so the document is
+    #: skipped on resume and the label promises a retry that cannot happen.
+    #: Used for WORDING only -- the disposition, the assemble buckets and the
+    #: latch are all untouched. In-run state: the durable record is the audit
+    #: event, which carries ``witness_scope`` and ``rung_trail`` of its own.
+    table_unverified_unwitnessed: bool = False
+    #: GH-560 (cubic P2): the other half. True when at least one UNVERIFIED
+    #: table on this page ended for a reason a later run genuinely can repair
+    #: -- a rung outage, or a binding contradiction whose acceptance was
+    #: withheld. A page can carry BOTH flags: one table with no witness beside
+    #: one whose rung was down. Reporting only the first would tell an operator
+    #: not to bother re-running a page half of which a re-run would fix, which
+    #: is the same lie #560 is about, pointing the other way.
+    table_unverified_retryable: bool = False
     #: GH-367: per-table_id record of the last binding-contradiction
     #: adjudication on this page (``{"status": "lifted"|"held", ...}``).
     #: Restored from the sidecar so a resumed run does not silently

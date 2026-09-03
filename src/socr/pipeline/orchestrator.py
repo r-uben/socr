@@ -3390,11 +3390,38 @@ class UnifiedPipeline:
                 f"{FailureMode.TABLE_REJECTED.value} (table judge ladder rejected; "
                 "not retryable)"
             )
-        if unverified:
+        # GH-560: a page whose UNVERIFIED terminal came from a table with no
+        # witness at all is not retryable -- no rung was ever asked, and a
+        # re-run reaches the same empty witness. Split so neither group carries
+        # the other's claim. The BUCKET is untouched: this is wording only, and
+        # the page is still TABLE_UNVERIFIED for document status.
+        unwitnessed = sorted(
+            n for n in unverified if getattr(state.pages[n], "table_unverified_unwitnessed", False)
+        )
+        # A page appears in BOTH lists when it holds both kinds of terminal
+        # (cubic P2 on #562): one table with no witness beside one whose rung
+        # was down. Reporting only the first would tell an operator not to
+        # bother re-running a page half of which a re-run repairs -- the same
+        # lie #560 is about, pointing the other way. A page carrying neither
+        # flag (a disposition restored from a sidecar, say) keeps the retryable
+        # wording, which is what it said before this change.
+        retryable = [
+            n
+            for n in unverified
+            if getattr(state.pages[n], "table_unverified_retryable", False)
+            or not getattr(state.pages[n], "table_unverified_unwitnessed", False)
+        ]
+        if retryable:
             parts.append(
-                f"page(s) {', '.join(str(n) for n in unverified)}: "
+                f"page(s) {', '.join(str(n) for n in retryable)}: "
                 f"{FailureMode.TABLE_UNVERIFIED.value} (table judge ladder exhausted "
                 "without an answer; retryable on resume)"
+            )
+        if unwitnessed:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in unwitnessed)}: "
+                f"{FailureMode.TABLE_UNVERIFIED.value} (no table witness could be "
+                "prepared, so no rung ran; not retryable)"
             )
         return "; ".join(parts)
 
@@ -4500,6 +4527,7 @@ class UnifiedPipeline:
         table_results = clamped_results
 
         for result in table_results:
+            unwitnessed = False
             if result.outcome is TableLadderOutcome.ACCEPTED:
                 kind = TABLE_LADDER_ACCEPTED_KIND
                 detail = f"table {result.table_id} accepted by the judge ladder"
@@ -4520,6 +4548,32 @@ class UnifiedPipeline:
                         f"table {result.table_id} unverified: mechanical binding check found a "
                         "contradiction (acceptance withheld; retryable on resume)"
                     )
+            elif (
+                not result.rung_results
+                and scope_by_table.get(result.table_id, "none") == WitnessScope.NONE.value
+            ):
+                # GH-560: no rung ever ran AND no table witness was ever
+                # located, so there was nothing to send. Calling that "infra
+                # problem, retryable on resume" promises a retry that cannot
+                # happen: the P1 latch correctly does not fire for a no-witness
+                # terminal (there is no unavailable rung to wait for), so the
+                # document is skipped on the next run and the label is a lie.
+                #
+                # The empty rung trail is NOT sufficient on its own. A witness
+                # that was located and then found no reachable rung has an empty
+                # trail too, and that one genuinely IS retryable -- the rung can
+                # come back. #560 named the empty trail as the pin; the witness
+                # is what actually separates the two.
+                #
+                # Latch semantics are deliberately unchanged; only the wording
+                # is, because the wording is what was wrong.
+                kind = TABLE_LADDER_UNVERIFIED_KIND
+                unwitnessed = True
+                detail = (
+                    f"table {result.table_id} not judged: no table witness could be "
+                    "prepared, so no rung ran (not retryable -- a re-run reaches the "
+                    "same empty witness)"
+                )
             else:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
                 detail = f"table {result.table_id} unverified by the judge ladder (infra problem, retryable on resume)"
@@ -4561,9 +4615,17 @@ class UnifiedPipeline:
                         "table_id": result.table_id,
                         "rung_trail": rung_trail,
                         "witness_scope": scope_by_table.get(result.table_id, "none"),
+                        # GH-560: stated, not left to be inferred from an empty
+                        # rung_trail by every consumer separately.
+                        **({"retryable": False} if unwitnessed else {}),
                     },
                 )
             )
+            if kind == TABLE_LADDER_UNVERIFIED_KIND:
+                if unwitnessed:
+                    ps.table_unverified_unwitnessed = True
+                else:
+                    ps.table_unverified_retryable = True
 
         page_result = reduce_page_ladder(table_results)
         if page_result.outcome is TableLadderOutcome.REJECTED:
@@ -8820,11 +8882,32 @@ class UnifiedPipeline:
                         f"{table_rejected_pages}[/red]"
                     )
                 if table_unverified_pages:
-                    console.print(
-                        f"  [yellow]{len(table_unverified_pages)} table page(s) could not be "
-                        f"judged — TABLE_UNVERIFIED (ladder exhausted without an answer; "
-                        f"retryable on resume): {table_unverified_pages}[/yellow]"
-                    )
+                    # GH-560: same split as the document note -- an operator
+                    # told "retryable on resume" will re-run, and for a
+                    # no-witness terminal that run changes nothing.
+                    _unwitnessed = [
+                        n
+                        for n in table_unverified_pages
+                        if getattr(state.pages[n], "table_unverified_unwitnessed", False)
+                    ]
+                    _retryable = [
+                        n
+                        for n in table_unverified_pages
+                        if getattr(state.pages[n], "table_unverified_retryable", False)
+                        or not getattr(state.pages[n], "table_unverified_unwitnessed", False)
+                    ]
+                    if _retryable:
+                        console.print(
+                            f"  [yellow]{len(_retryable)} table page(s) could not be "
+                            f"judged — TABLE_UNVERIFIED (ladder exhausted without an answer; "
+                            f"retryable on resume): {_retryable}[/yellow]"
+                        )
+                    if _unwitnessed:
+                        console.print(
+                            f"  [yellow]{len(_unwitnessed)} table page(s) were not judged — "
+                            f"TABLE_UNVERIFIED (no table witness could be prepared, so no rung "
+                            f"ran; not retryable): {_unwitnessed}[/yellow]"
+                        )
 
         # MAJOR 6(a) on #269: only the SIDECAR flush belongs here, after the
         # bucket derivation and audit-event-append block above.
