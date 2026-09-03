@@ -5941,6 +5941,15 @@ class UnifiedPipeline:
                     "chart asset retained alongside corrupt-equation recovery"
                 )
             else:
+                # GH-568: the FLAG too, not only the event. The chart-only path
+                # sets it (PP-7-R1) so `_winning_page_output`, the sidecar and
+                # every disposition trigger that ORs it stay honest; this path
+                # appended the event alone, leaving the audit log saying the
+                # render failed while PageState and the sidecar said it had
+                # not. The math hybrid already ships WARNING, so this is not a
+                # SUCCESS restamp today -- it is a metadata lie for the
+                # consumers that read the flag, resume included.
+                ps.chart_asset_render_failed = True
                 state.events.append(
                     _MathChartEvent(
                         page_num=page_num,

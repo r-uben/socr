@@ -338,3 +338,85 @@ def test_the_cli_line_does_not_claim_the_image_on_a_render_failure(tmp_path: Pat
     note = pipeline._visual_values_not_transcribed_note(state)
     assert note is not None and "preserved nowhere" in note
     assert "preserved in the page image" not in note
+
+
+def _math_chart_page(tmp_path: Path, name: str, *, render_fails: bool):
+    """One page through ``_agentic_math_recovery_page`` as a chart winner."""
+    from socr.core.result import PageOutput, PageStatus
+
+    pdf = _make_vector_chart_pdf(_dir(tmp_path, name))
+    pipeline = _make_agentic_pipeline()
+    state = _make_state_with_page(pdf)
+    ps = state.pages[1]
+    recovered = PageOutput(
+        page_num=1,
+        text="native prose with $x^2$ recovered",
+        status=PageStatus.SUCCESS,
+        engine="native+math",
+        audit_passed=True,
+    )
+    figures_dir = tmp_path / f"{name}figs"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    patches = [patch.object(UnifiedPipeline, "_recover_corrupt_math_page", return_value=recovered)]
+    if render_fails:
+        patches.append(
+            patch.object(
+                UnifiedPipeline, "_render_chart_page_png", side_effect=RuntimeError("render died")
+            )
+        )
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        for pt in patches:
+            stack.enter_context(pt)
+        pipeline._agentic_math_recovery_page(
+            state,
+            1,
+            ps,
+            tmp_path / f"{name}out",
+            chart_winner_pages={1},
+            chart_figures_dir=figures_dir,
+        )
+    return pipeline, state, ps
+
+
+def test_the_math_chart_render_failure_sets_the_pagestate_flag(tmp_path: Path) -> None:
+    """GH-568. The chart-only path sets ``chart_asset_render_failed`` (PP-7-R1);
+    this path appended the EVENT alone.
+
+    The audit log then said the render failed while PageState and the sidecar
+    said it had not -- a metadata lie for every consumer that reads the flag:
+    the sidecar flush, the resume restore of that meta, and the disposition
+    triggers that OR it. Not a SUCCESS restamp today only because the math
+    hybrid already ships WARNING.
+    """
+    import json
+
+    pipeline, state, ps = _math_chart_page(tmp_path, "mf", render_fails=True)
+
+    assert any(getattr(e, "kind", "") == "chart_asset_render_failed" for e in state.events), (
+        "the render did not fail, so this test measures the happy path"
+    )
+    assert ps.chart_asset_render_failed is True, (
+        "the event says the render failed and PageState says it did not; the "
+        "sidecar and every disposition consumer read the flag"
+    )
+
+    out_dir = tmp_path / "mfout_sidecar"
+    pipeline._scan_root = state.handle.path.parent
+    pipeline._flush_page_sidecar(state, 1, out_dir)
+    meta = json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
+    assert meta.get("chart_asset_render_failed") is True, (
+        f"the flag did not reach the sidecar a resume reads back: {meta.get('chart_asset_render_failed')}"
+    )
+
+
+def test_a_successful_math_chart_render_leaves_the_flag_alone(tmp_path: Path) -> None:
+    """Difference control. Without it, unconditionally setting the flag would
+    satisfy the test above and mark every math+chart page as a render failure."""
+    _pipeline_, _state_, ps = _math_chart_page(tmp_path, "ms", render_fails=False)
+
+    assert ps.chart_asset_render_failed is False, (
+        "a page whose chart PNG rendered fine is flagged as a render failure"
+    )
