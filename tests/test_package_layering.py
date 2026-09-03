@@ -4,6 +4,10 @@ DAG encoded here:
 
 * ``socr.benchmark`` MAY import ``socr.core`` and ``socr.tables``.
 * ``socr.tables`` and ``socr.core`` MUST NOT import ``socr.benchmark``.
+* NOTHING under ``socr`` except ``socr.devtools`` itself may import
+  ``socr.devtools``: it is a developer-only regeneration tool that ships in the
+  package only so ``[project.scripts]`` can name an entry point, and no runtime
+  path may come to depend on it.
 * A private (``_``-prefixed) name MUST NOT be imported across first-level
   ``socr.*`` packages.
 
@@ -140,6 +144,22 @@ def _benchmark_offenders(rel: str, imports: list[tuple[int, str, tuple[str, ...]
     ]
 
 
+def _targets_devtools(mod: str, names: tuple[str, ...]) -> bool:
+    if mod == "socr.devtools" or mod.startswith("socr.devtools."):
+        return True
+    return mod == "socr" and "devtools" in names
+
+
+def _devtools_offenders(rel: str, imports: list[tuple[int, str, tuple[str, ...]]]) -> list[str]:
+    if _file_package(rel) == "devtools":
+        return []
+    return [
+        f"{rel}:{lineno} imports {mod}"
+        for lineno, mod, names in imports
+        if _targets_devtools(mod, names)
+    ]
+
+
 def _private_name_keys(
     rel: str, imports: list[tuple[int, str, tuple[str, ...]]]
 ) -> list[tuple[int, str, str]]:
@@ -170,6 +190,44 @@ def test_tables_and_core_do_not_import_benchmark() -> None:
             offenders.extend(_benchmark_offenders(rel, _collect_imports(path.read_text(), rel)))
     assert not offenders, (
         "socr.tables / socr.core must not import socr.benchmark:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_no_socr_module_imports_devtools() -> None:
+    """``socr.devtools`` is a packaged developer tool, not a runtime dependency.
+
+    It exists under ``src/socr`` only so ``[project.scripts]`` can name
+    ``socr-regenerate-p6-prechange`` as an entry point (the repo rule: Python
+    entry points live in ``pyproject.toml``, never ``python <file>``). It ships
+    in the wheel, so without this rule a runtime import could quietly grow and
+    put a git-archive-and-subprocess harness on a user's OCR path.
+    """
+    offenders: list[str] = []
+    for path in SRC.rglob("*.py"):
+        rel = path.relative_to(SRC).as_posix()
+        offenders.extend(_devtools_offenders(rel, _collect_imports(path.read_text(), rel)))
+    assert not offenders, (
+        "no socr module outside socr.devtools may import socr.devtools:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_devtools_imports_only_the_standard_library() -> None:
+    """The tool drives an archived source tree through a subprocess.
+
+    Importing ``socr`` here would defeat that: the capture must come from the
+    ARCHIVED revision's package, never from the running one. The only ``import
+    socr`` in the file is inside the runner source string executed by the
+    isolated child interpreter, which ``ast`` does not see as an import.
+    """
+    offenders: list[str] = []
+    for path in (SRC / "devtools").rglob("*.py"):
+        rel = path.relative_to(SRC).as_posix()
+        for lineno, mod, _names in _collect_imports(path.read_text(), rel):
+            if mod == "socr" or mod.startswith("socr."):
+                offenders.append(f"{rel}:{lineno} imports {mod}")
+    assert not offenders, (
+        "socr.devtools must not import the running socr package:\n  " + "\n  ".join(offenders)
     )
 
 
@@ -250,6 +308,27 @@ def test_relative_import_of_benchmark_is_caught(rel: str, source: str) -> None:
 def test_dynamic_import_of_benchmark_is_caught(rel: str, source: str) -> None:
     hits = _benchmark_offenders(rel, _collect_imports(source, rel))
     assert hits, f"dynamic import of benchmark slipped through:\n{source}"
+
+
+@pytest.mark.parametrize(
+    "rel, source",
+    [
+        ("cli.py", "from socr.devtools import regenerate_p6_prechange\n"),
+        ("cli.py", "from .devtools.regenerate_p6_prechange import main\n"),
+        ("core/manifest.py", "from .. import devtools\n"),
+        ("pipeline/orchestrator.py", "import socr.devtools.regenerate_p6_prechange\n"),
+        ("core/foo.py", "__import__('socr.devtools')\n"),
+    ],
+)
+def test_import_of_devtools_is_caught(rel: str, source: str) -> None:
+    hits = _devtools_offenders(rel, _collect_imports(source, rel))
+    assert hits, f"import of devtools slipped through:\n{source}"
+
+
+def test_devtools_may_import_itself() -> None:
+    """The rule is about crossing INTO devtools, not about its internals."""
+    source = "from socr.devtools.regenerate_p6_prechange import normalize\n"
+    assert _devtools_offenders("devtools/__init__.py", _collect_imports(source, "devtools")) == []
 
 
 def test_dynamic_import_nonliteral_is_out_of_scope() -> None:

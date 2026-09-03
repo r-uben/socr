@@ -1,15 +1,13 @@
-"""P6 Stage B: how the six mandated assemble buckets are derived, and why.
+"""P6 Stage C: how the six mandated assemble buckets are derived, and why.
 
 Design: §2 and §8 of ``docs/log/2026-09-02_p6-selector-collapse-design.md``, as amended
 by cold review rounds 1 and 2.
 
-Three buckets are **provenance-derived in stage B to preserve behaviour; they migrate
-to the shipped disposition in stage C, where the CLI change is intended and pinned**:
-``structure_class_model_pages``, ``structure_class_floor_pages``,
-``corrupt_math_hybrid_pages``. ``SelectionProvenance`` is not the public contract and
-nothing here says it is -- the public contract is ``PageDisposition``, and these
-buckets do not read it yet only because reading it changes CLI lines and audit kinds
-that stage A/B must hold still.
+Three buckets are derived from the exact shipped ``PageDisposition`` pair:
+``structure_class_model_pages``, ``structure_class_floor_pages``, and
+``corrupt_math_hybrid_pages``. ``SelectionProvenance`` is internal selection
+provenance, not the public contract: a post-selection guard may rewrite a selected
+page's bytes and disposition, so bucket membership follows what actually ships.
 
 Three are flag-derived and read ``PageState`` directly: ``d3_model_table_pages``,
 ``d3_floor_pages``, ``flagged_model_pages``. Those are native-lane verdicts a page can
@@ -73,21 +71,19 @@ def _rejected_attempt(page_num: int, text: str) -> PageOutput:
 
 
 # ---------------------------------------------------------------------------
-# Pinned six bucket contract pairs
+# Pinned six bucket contracts
 # ---------------------------------------------------------------------------
 
-#: Provenance-derived in stage B to preserve behaviour; migrates to the shipped
-#: disposition in stage C, where the CLI change is intended and pinned. The two differ
-#: by the post-selection guards, which can rewrite any ending to
-#: ``INVALID_TABLE_EMISSION`` and would drop a page out of its bucket -- correctly, but
-#: not in a byte-preserving stage.
-TAG_DERIVED_BUCKET_TAGS = {
-    "structure_class_model_pages": (
-        SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
-        SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
+DISPOSITION_BUCKET_PAIRS = {
+    "structure_class_model_pages": PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
     ),
-    "structure_class_floor_pages": (SelectionProvenance.STRUCTURE_CLASS_FLOOR,),
-    "corrupt_math_hybrid_pages": (SelectionProvenance.CORRUPT_MATH_HYBRID,),
+    "structure_class_floor_pages": PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    "corrupt_math_hybrid_pages": PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.CORRUPT_MATH_HYBRID
+    ),
 }
 
 #: The three that are NOT tag-derivable. Each is keyed on a native-lane verdict a page
@@ -98,46 +94,84 @@ TAG_DERIVED_BUCKET_TAGS = {
 FLAG_DERIVED_BUCKETS = ("d3_model_table_pages", "d3_floor_pages", "flagged_model_pages")
 
 
-@pytest.mark.parametrize("bucket_name, tags", sorted(TAG_DERIVED_BUCKET_TAGS.items()))
-def test_each_tag_derived_bucket_matches_its_pinned_selection_tags(
-    tmp_path, bucket_name, tags
+@pytest.mark.parametrize("bucket_name, disposition", sorted(DISPOSITION_BUCKET_PAIRS.items()))
+def test_each_migrated_bucket_matches_its_exact_disposition_pair(
+    tmp_path, bucket_name, disposition
 ) -> None:
-    """Each tag-derived bucket is derived unconditionally from its pinned tag set."""
-    state = _new_state(tmp_path, page_count=2)
-    for tag in tags:
+    """The exact shipped pair claims the page for every provenance value."""
+    state = _new_state(tmp_path, page_count=1)
+    for provenance in SelectionProvenance:
         matching_rec = FinalizedPageRecord(
             output=PageOutput(page_num=1, text="text"),
-            disposition=PageDisposition(
-                ending=PageEnding.MODEL_OUTPUT, primary_reason=PagePrimaryReason.ACCEPTED_OUTPUT
-            ),
-            selection_provenance=tag,
-        )
-        non_matching_rec = FinalizedPageRecord(
-            output=PageOutput(page_num=2, text="text"),
-            disposition=PageDisposition(
-                ending=PageEnding.NATIVE_PROSE, primary_reason=PagePrimaryReason.CLEAN_NATIVE_PROSE
-            ),
-            selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+            disposition=disposition,
+            selection_provenance=provenance,
         )
 
-        buckets = _derive_disposition_buckets(state, [matching_rec, non_matching_rec])
-        assert buckets[bucket_name] == {1}, tag
+        buckets = _derive_disposition_buckets(state, [matching_rec])
+        assert buckets[bucket_name] == {1}, (bucket_name, provenance)
         for other_name, pages in buckets.items():
+            if other_name not in DISPOSITION_BUCKET_PAIRS:
+                continue
             if other_name != bucket_name:
-                assert 1 not in pages, (tag, other_name)
+                assert 1 not in pages, (bucket_name, provenance, other_name)
 
 
-def test_a_guard_rewritten_page_keeps_its_tag_derived_bucket(tmp_path) -> None:
-    """The stage-B compromise, stated as a test so stage C has something to flip.
+def test_a_former_provenance_with_a_different_disposition_claims_no_migrated_bucket(
+    tmp_path,
+) -> None:
+    """A former selection tag cannot override the final shipped disposition."""
+    state = _new_state(tmp_path, page_count=1)
+    rewritten = PageDisposition(
+        ending=PageEnding.FAIL_CLOSED_MARKER,
+        primary_reason=PagePrimaryReason.INVALID_TABLE_EMISSION,
+    )
+    former_provenance = {
+        "structure_class_model_pages": (
+            SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
+            SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
+        ),
+        "structure_class_floor_pages": (SelectionProvenance.STRUCTURE_CLASS_FLOOR,),
+        "corrupt_math_hybrid_pages": (SelectionProvenance.CORRUPT_MATH_HYBRID,),
+    }
 
-    A page whose final text tripped the table-emission guard carries
-    ``(FAIL_CLOSED_MARKER, INVALID_TABLE_EMISSION)`` no matter which branch chose it.
-    In stage B its bucket membership does not move, because moving it changes the
-    document's CLI lines and audit kinds and stage A/B holds those byte-identical.
-    Stage C is where this assertion inverts, together with a difference test that
-    states the intended CLI and audit-kind change.
+    for bucket_name, provenances in former_provenance.items():
+        for provenance in provenances:
+            rec = FinalizedPageRecord(
+                output=PageOutput(page_num=1, text="text"),
+                disposition=rewritten,
+                selection_provenance=provenance,
+            )
+            buckets = _derive_disposition_buckets(state, [rec])
+            for migrated_name in DISPOSITION_BUCKET_PAIRS:
+                assert 1 not in buckets[migrated_name], (
+                    bucket_name,
+                    provenance,
+                    migrated_name,
+                )
+
+
+def test_a_guard_rewritten_hybrid_is_absent_from_migrated_buckets_but_keeps_flag_membership(
+    tmp_path,
+) -> None:
+    """A guard-rewritten hybrid loses stale shipped-bucket membership only.
+
+    Its independent native-lane flag remains eligible for the flag-derived bucket;
+    those PageState facts are orthogonal to the shipped disposition.
     """
     state = _new_state(tmp_path, page_count=1)
+    page = state.pages[1]
+    _bd(page)
+    page.native_table_structure_defective = True
+    flagged = PageOutput(
+        page_num=1,
+        text="| x | y |\n|---|---|\n| 3 | 4 |",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+    )
+    setattr(flagged, "rejection_class", "ambiguous_deferred")
+    page.attempts.append(flagged)
+    page.best_output = flagged
     rec = FinalizedPageRecord(
         output=PageOutput(page_num=1, text="text"),
         disposition=PageDisposition(
@@ -146,7 +180,10 @@ def test_a_guard_rewritten_page_keeps_its_tag_derived_bucket(tmp_path) -> None:
         ),
         selection_provenance=SelectionProvenance.CORRUPT_MATH_HYBRID,
     )
-    assert _derive_disposition_buckets(state, [rec])["corrupt_math_hybrid_pages"] == {1}
+    buckets = _derive_disposition_buckets(state, [rec])
+    for name in DISPOSITION_BUCKET_PAIRS:
+        assert 1 not in buckets[name], name
+    assert 1 in buckets["flagged_model_pages"]
 
 
 @pytest.mark.parametrize("bucket_name", FLAG_DERIVED_BUCKETS)
@@ -633,4 +670,4 @@ def test_the_six_orthogonal_buckets_are_untouched_by_the_disposition_derivation(
         f"_derive_disposition_buckets must return exactly the six mandated "
         f"buckets, not {set(buckets.keys()) & orthogonal}"
     )
-    assert set(buckets.keys()) == set(TAG_DERIVED_BUCKET_TAGS) | set(FLAG_DERIVED_BUCKETS)
+    assert set(buckets.keys()) == set(DISPOSITION_BUCKET_PAIRS) | set(FLAG_DERIVED_BUCKETS)

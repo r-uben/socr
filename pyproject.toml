@@ -66,6 +66,7 @@ all = ["deepseek-ocr-cli>=0.1.0", "nougat-ocr-cli>=0.1.2", "gemini-ocr-cli>=0.2.
 
 [project.scripts]
 socr = "socr.cli:main"
+socr-regenerate-p6-prechange = "socr.devtools.regenerate_p6_prechange:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]

@@ -65,6 +65,7 @@ or a guarded import, so a run against the pre-S1 baseline fails on BEHAVIOUR
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -1505,4 +1506,220 @@ def test_structure_class_bucket_membership_survives_resume(tmp_path: Path) -> No
     assert _reaches_structure_class_branch(ps3) is True, (
         "WITH the persisted flag restored, the resumed page must be counted "
         "as reaching the S1 branch again, matching what run 1 actually shipped"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P6 stage C: the resumed page's stage-C bucket membership.
+#
+# ``resumed_disposition`` (persisted from run 1's sidecar) is the PUBLIC source
+# of bucket membership on resume -- it is what ``finalized_page_records`` reads
+# to build the record whose ``.disposition`` the stage-C buckets compare against.
+# ``structure_class_model_kept_on_resume`` is a SEPARATE mechanism: it lets
+# ``_reaches_structure_class_branch`` / ``structure_class_grid_winner`` recover
+# the winning candidate and engine for selection/reconstruction on a page whose
+# ``attempts`` collapsed to one frozen output. The two are not two routes to the
+# same membership fact -- one is what assemble counts, the other is what
+# selection re-derives -- and this test keeps them separate rather than treating
+# either as redundant with the other.
+# ---------------------------------------------------------------------------
+
+
+def test_stage_c_bucket_membership_survives_resume_via_the_public_disposition(
+    tmp_path: Path,
+) -> None:
+    """After a real sidecar restore, the stage-C disposition-derived bucket
+    claims the resumed page exactly as it claimed the live run -- because both
+    read ``FinalizedPageRecord.disposition``, and resume's own record is built
+    from ``ps.resumed_disposition`` when a terminal record has not (yet)
+    re-run finalization.
+    """
+    from socr.core.manifest import finalized_page_records
+
+    _derive_disposition_buckets = _real_derive_disposition_buckets()
+    pipeline = _make_stage_c_resume_pipeline()
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    pdf_path = _born_digital_pdf(tmp_path)
+    state1 = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    ps1 = state1.pages[1]
+    ps1.is_born_digital = True
+    ps1.has_tables = True
+    ps1.native_text = NATIVE_FLATTENED
+    native_attempt = PageOutput(
+        page_num=1,
+        text=NATIVE_FLATTENED,
+        status=PageStatus.SUCCESS,
+        engine="native",
+        audit_passed=True,
+    )
+    model_attempt = PageOutput(
+        page_num=1,
+        text=MODEL_GRID,
+        status=PageStatus.SUCCESS,
+        engine="gemini",
+        audit_passed=True,
+    )
+    ps1.attempts.extend([native_attempt, model_attempt])
+    ps1.best_output = native_attempt
+
+    live_records = finalized_page_records(state1)
+    live_buckets = _derive_disposition_buckets(state1, live_records)
+    assert 1 in live_buckets["structure_class_model_pages"], (
+        "fixture sanity: the live run must land in the bucket under test"
+    )
+
+    pipeline._flush_page_sidecar(state1, 1, output_dir)
+
+    state3 = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    ps3 = state3.pages[1]
+    ps3.is_born_digital = True
+    ps3.has_tables = True
+    ps3.native_text = NATIVE_FLATTENED
+    pipeline._restore_terminal_page_state(state3, 1, model_attempt, output_dir)
+
+    resumed_records = finalized_page_records(state3)
+    resumed_buckets = _derive_disposition_buckets(state3, resumed_records)
+    assert 1 in resumed_buckets["structure_class_model_pages"], (
+        "the resumed page dropped out of the stage-C bucket -- "
+        "resumed_disposition did not survive the restore"
+    )
+
+
+def test_a_legacy_sidecar_without_a_disposition_resumes_as_an_ordinary_passing_page(
+    tmp_path: Path,
+) -> None:
+    """A pre-stage-A sidecar carries no ``disposition`` key at all.
+
+    Cold review round 2 REVERSED what this test asserts. It used to pin that
+    ``structure_class_model_kept_on_resume`` recovers stage-C bucket membership
+    for such a page -- but that was never HEAD's behaviour, only the behaviour
+    of a stage-C edit added to satisfy this test. Resume collapses ``attempts``
+    to the single frozen winner, so selection returns ``PASSING_BEST_OUTPUT``
+    and finalization calls the page ``(MODEL_OUTPUT, ACCEPTED_OUTPUT)``: an
+    ordinary passing model page, absent from ``structure_class_model_pages``.
+
+    Stage C must not move that. The page was never guard-rewritten, so
+    `.troupe/spec.md` requires it byte-identical, and "resume unchanged" is a
+    separate line of the same spec. Reporting a legacy resume differently may
+    well be worth doing -- the flag IS the only surviving record of what run 1
+    published -- but it changes a page's public disposition, its bucket, its
+    audit kind, its CLI line and its re-flushed sidecar, so it needs its own
+    scope and its own enumerated differences. It is not stage C.
+
+    The pin is two-sided: the same scenario, captured on the stage-A/B HEAD by
+    `git archive` into ``tests/fixtures/p6/prechange_assemble.json``, must equal
+    what this tree produces now. The named assertions below are the readable
+    half; the fixture comparison is the half that cannot drift.
+    """
+    import p6_corpus_fixture
+
+    from socr.core.manifest import PageEnding, PagePrimaryReason, SelectionProvenance
+
+    measured = p6_corpus_fixture.legacy_resume_capture(tmp_path)
+
+    # Fixture sanity: the legacy flag came back and no disposition did. Without
+    # both, every assertion below is about some other page shape.
+    assert measured["flag_restored"] is True
+    assert measured["resumed_disposition"] is None
+
+    assert measured["selection_provenance"] == SelectionProvenance.PASSING_BEST_OUTPUT.value
+    assert measured["disposition"] == [
+        PageEnding.MODEL_OUTPUT.value,
+        PagePrimaryReason.ACCEPTED_OUTPUT.value,
+    ]
+    assert measured["buckets"]["structure_class_model_pages"] == []
+
+    # The BYTES were never at stake: the model's grid ships either way. Only the
+    # reporting was, which is why this is a disposition question and not a
+    # content-loss one.
+    assert measured["winning_output"]["text_is_the_model_grid"] is True
+    assert measured["winning_output"]["engine"] == "gemini"
+    assert measured["winning_output"]["audit_passed"] is True
+
+    archived = json.loads(
+        (Path(__file__).parent / "fixtures" / "p6" / "prechange_assemble.json").read_text()
+    )["legacy_resume"]
+    assert measured == archived, (
+        "stage C moved the legacy-resume result away from the stage-A/B HEAD "
+        "captured in tests/fixtures/p6/prechange_assemble.json"
+    )
+
+
+def test_a_rewritten_hybrid_sidecar_is_not_silently_resumed_into_a_bucket(
+    tmp_path: Path,
+) -> None:
+    """A ``(FAIL_CLOSED_MARKER, INVALID_TABLE_EMISSION)`` page is a failure-marker
+    body: ``_load_terminal_page`` rejects failure-marker bodies outright (its
+    existing conservative gate, unrelated to P6), so this is not a resume path
+    that could put such a page back into a migrated bucket. This test pins the
+    ADJACENT, stage-C-relevant fact instead: a finalized record carrying that
+    disposition can never enter a migrated bucket, built directly (no resume
+    machinery needed to demonstrate it).
+    """
+    from socr.core.manifest import (
+        FinalizedPageRecord,
+        PageDisposition,
+        PageEnding,
+        PagePrimaryReason,
+        SelectionProvenance,
+    )
+
+    _derive_disposition_buckets = _real_derive_disposition_buckets()
+
+    state = DocumentState(handle=DocumentHandle.from_path(_born_digital_pdf(tmp_path)))
+    rec = FinalizedPageRecord(
+        output=PageOutput(page_num=1, text="[page 1 failed: invalid table emission]"),
+        disposition=PageDisposition(
+            ending=PageEnding.FAIL_CLOSED_MARKER,
+            primary_reason=PagePrimaryReason.INVALID_TABLE_EMISSION,
+        ),
+        # Provenance still says a grid/hybrid was CHOSEN -- the exact shape the
+        # migration is about: chosen-but-not-shipped must not claim a bucket.
+        selection_provenance=SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
+    )
+    buckets = _derive_disposition_buckets(state, [rec])
+    for name in (
+        "structure_class_model_pages",
+        "structure_class_floor_pages",
+        "corrupt_math_hybrid_pages",
+    ):
+        assert 1 not in buckets[name], name
+
+
+def _real_derive_disposition_buckets():
+    """The production ``_derive_disposition_buckets``, unwrapped.
+
+    ``tests/conftest.py`` installs an autouse guard around this symbol that
+    compares against ``old_disposition_buckets`` (the pre-P6 provenance
+    predicate reconstructed from the LIVE ``PageState``, not from records).
+    That comparison is calibrated for calls ``_phase_assemble`` itself makes;
+    called directly here on a hand-restored resume state, the two references
+    can legitimately disagree for reasons the resume tests below are
+    specifically measuring (this is the resume gap the stage-C migration
+    closes) -- so these tests read the real function directly rather than
+    going through the wrapper and asserting on ITS drift message instead of
+    their own.
+    """
+    from socr.pipeline import orchestrator as orch
+
+    return getattr(
+        orch._derive_disposition_buckets, "__wrapped__", orch._derive_disposition_buckets
+    )
+
+
+def _make_stage_c_resume_pipeline():
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    return UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=EngineType.QWEN,
+            agentic=False,
+            enabled_engines=[EngineType.QWEN],
+            quiet=True,
+            save_figures=False,
+            write_manifest=False,
+        )
     )

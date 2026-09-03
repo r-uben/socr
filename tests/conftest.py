@@ -1,18 +1,37 @@
-"""Test-only seam holding the PRE-CHANGE assemble bucket predicates (P6 stage A/B).
+"""Test-only seam holding the stage-C assemble bucket contract (P6 stage C).
 
-Stage A/B is behaviour-preserving: the six selection-shaped assemble buckets must
-have EXACTLY the membership the deleted `_phase_assemble` predicates produced. The
-predicates below are reconstructed verbatim from `git show HEAD:src/socr/pipeline/
-orchestrator.py` (the `_phase_assemble` bucket block) so the difference can be
-asserted mechanically rather than argued.
+Stage C implements a two-rule assemble bucket contract:
+
+1. **Flag-derived assemble buckets** (`d3_model_table_pages`, `d3_floor_pages`,
+   `flagged_model_pages`) remain based on native-lane verdicts and PageState flags,
+   matching the pre-change predicates in :func:`old_disposition_buckets` exactly.
+2. **Migrated disposition buckets** (`structure_class_model_pages`,
+   `structure_class_floor_pages`, `corrupt_math_hybrid_pages`) are derived solely
+   from exact `PageDisposition` pair equality on finalized page records:
+   - ``structure_class_model_pages`` -> ``(MODEL_OUTPUT, STRUCTURE_CLASS)``
+   - ``structure_class_floor_pages`` -> ``(FAIL_CLOSED_MARKER, STRUCTURE_CLASS)``
+   - ``corrupt_math_hybrid_pages``   -> ``(MODEL_OUTPUT, CORRUPT_MATH_HYBRID)``
+   ``SelectionProvenance`` is never read for membership in these three buckets.
+3. **Orthogonal assemble buckets** (`native_only_distrust_pages`, `value_drift_pages`,
+   `fabricated_ref_pages`, `text_grid_rejected_pages`, `chart_detection_failed_pages`,
+   `table_rejected_pages`, `table_unverified_pages`) remain based on configuration,
+   page flags, events, and table-ladder terminals, matching
+   :func:`old_orthogonal_assemble_buckets` exactly.
 
 Two things live here:
 
-* :func:`old_disposition_buckets` -- the pre-change predicates, reconstructed.
-* an autouse guard that wraps `orchestrator._derive_disposition_buckets` for the
-  WHOLE suite, so every fixture that drives `_phase_assemble` (34 modules, plus
-  the PP-2 golden corpus fixture) asserts old-membership == new-membership on
-  every real assemble, with no per-module opt-in to forget.
+* :func:`old_disposition_buckets` -- the pre-change predicates, kept verbatim as
+  the stage-A/B reference.
+* :func:`old_orthogonal_assemble_buckets` -- the pre-extraction orthogonal assemble
+  predicates.
+* :func:`assert_stage_c_disposition_buckets` -- stage-C two-rule assertion for
+  disposition buckets.
+* :func:`assert_orthogonal_buckets_unchanged` -- exact equality assertion for
+  orthogonal assemble buckets.
+* an autouse guard that wraps `orchestrator._derive_disposition_buckets` and
+  `orchestrator._derive_orthogonal_assemble_buckets` for the WHOLE suite, so every
+  fixture that drives `_phase_assemble` asserts conformance on every real assemble,
+  with no per-module opt-in to forget.
 
 The seam is test-only. Production code carries no pre-change path.
 """
@@ -21,9 +40,15 @@ from __future__ import annotations
 
 import pytest
 
-#: The six selection-shaped buckets stage B re-derives. `native_fallback_pages`,
-#: `failed_pages` and the six orthogonal buckets are deliberately NOT here: they
-#: stay flag/event/text-derived and their production code is untouched.
+from socr.core.manifest import (
+    PageDisposition,
+    PageEnding,
+    PagePrimaryReason,
+    finalized_page_records,
+)
+from socr.pipeline.orchestrator import _ORTHOGONAL_ASSEMBLE_BUCKET_NAMES
+
+#: The six selection-shaped buckets.
 P6_BUCKET_NAMES = (
     "d3_model_table_pages",
     "d3_floor_pages",
@@ -32,6 +57,29 @@ P6_BUCKET_NAMES = (
     "structure_class_floor_pages",
     "corrupt_math_hybrid_pages",
 )
+
+#: The three flag-derived bucket names.
+FLAG_DERIVED_BUCKET_NAMES = (
+    "d3_model_table_pages",
+    "d3_floor_pages",
+    "flagged_model_pages",
+)
+
+#: The three migrated disposition bucket names and their exact PageDisposition pairs.
+STAGE_C_MIGRATED_DISPOSITION_BUCKETS: dict[str, PageDisposition] = {
+    "structure_class_model_pages": PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    "structure_class_floor_pages": PageDisposition(
+        PageEnding.FAIL_CLOSED_MARKER, PagePrimaryReason.STRUCTURE_CLASS
+    ),
+    "corrupt_math_hybrid_pages": PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.CORRUPT_MATH_HYBRID
+    ),
+}
+
+#: The seven orthogonal bucket names.
+ORTHOGONAL_BUCKET_NAMES = _ORTHOGONAL_ASSEMBLE_BUCKET_NAMES
 
 
 def old_disposition_buckets(state) -> dict[str, set[int]]:
@@ -91,51 +139,160 @@ def old_disposition_buckets(state) -> dict[str, set[int]]:
     }
 
 
+def old_orthogonal_assemble_buckets(state) -> dict[str, list[int]]:
+    """The pre-refactor orthogonal assemble predicates, copied without simplification."""
+    from socr.core.result import FailureMode
+    from socr.pipeline.orchestrator import _table_ladder_terminal
+
+    config = getattr(state, "_assemble_config", None)
+    native_only = bool(getattr(config, "native_only", False))
+    native_only_distrust_pages = [
+        n
+        for n, p in sorted(state.pages.items())
+        if p.is_born_digital
+        and p.native_text
+        and native_only
+        and getattr(p, "native_table_unverifiable", False)
+        and not p.native_table_structure_failed
+        and p.attempts
+        and all((a.engine or "").startswith("native") for a in p.attempts)
+        and not (p.best_output and p.best_output.audit_passed)
+    ]
+    value_drift_pages = sorted(
+        {
+            getattr(e, "page_num", 0)
+            for e in state.events
+            if getattr(e, "kind", "") == "table_value_drift_unadjudicated"
+            and getattr(e, "page_num", 0)
+        }
+    )
+    fabricated_ref_pages = sorted(
+        n for n, p in state.pages.items() if getattr(p, "fabricated_image_refs", 0)
+    )
+    text_grid_rejected_pages = sorted(
+        n for n, p in state.pages.items() if getattr(p, "text_grid_rejected", False)
+    )
+    chart_detection_failed_pages = sorted(
+        n for n, p in state.pages.items() if getattr(p, "chart_asset_detection_failed", False)
+    )
+    table_rejected_pages = sorted(
+        n for n, p in state.pages.items() if _table_ladder_terminal(p) == FailureMode.TABLE_REJECTED
+    )
+    table_unverified_pages = sorted(
+        n
+        for n, p in state.pages.items()
+        if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
+    )
+
+    return {
+        "native_only_distrust_pages": native_only_distrust_pages,
+        "value_drift_pages": value_drift_pages,
+        "fabricated_ref_pages": fabricated_ref_pages,
+        "text_grid_rejected_pages": text_grid_rejected_pages,
+        "chart_detection_failed_pages": chart_detection_failed_pages,
+        "table_rejected_pages": table_rejected_pages,
+        "table_unverified_pages": table_unverified_pages,
+    }
+
+
 @pytest.fixture
 def p6_old_buckets():
     """Expose the pre-change predicates to a test that wants them explicitly."""
     return old_disposition_buckets
 
 
-def assert_buckets_unchanged(state, new: dict[str, set[int]]) -> None:
-    """Raise unless *new* has exactly the pre-change membership for *state*."""
+@pytest.fixture
+def p6_old_orthogonal_buckets():
+    """Expose the pre-extraction orthogonal predicates to a test that wants them explicitly."""
+    return old_orthogonal_assemble_buckets
+
+
+def assert_stage_c_disposition_buckets(state, records, new: dict[str, set[int]]) -> None:
+    """Raise unless *new* satisfies the stage-C two-rule contract for *state* and *records*."""
+    if records is None:
+        records = finalized_page_records(state)
+
     old = old_disposition_buckets(state)
+
+    # Rule 1: The three flag-derived buckets must match old_disposition_buckets(state) exactly.
+    for name in FLAG_DERIVED_BUCKET_NAMES:
+        expected = old[name]
+        actual = new.get(name, set())
+        if actual != expected:
+            raise AssertionError(
+                f"Stage-C contract violation on flag-derived bucket '{name}': "
+                f"expected={sorted(expected)}, actual={sorted(actual)}. "
+                "Violated rule: flag-derived buckets must match "
+                "old_disposition_buckets(state) exactly."
+            )
+
+    # Rule 2: For each migrated bucket, membership must equal page numbers of records whose
+    # disposition equals the bucket's exact pair.
+    for name, target_pair in STAGE_C_MIGRATED_DISPOSITION_BUCKETS.items():
+        expected = {r.output.page_num for r in records if r.disposition == target_pair}
+        actual = new.get(name, set())
+        if actual != expected:
+            raise AssertionError(
+                f"Stage-C contract violation on disposition-derived bucket '{name}': "
+                f"expected={sorted(expected)}, actual={sorted(actual)}. "
+                f"Violated rule: migrated bucket '{name}' must equal page numbers of records "
+                f"whose disposition equals {target_pair}."
+            )
+
+
+def assert_orthogonal_buckets_unchanged(state, new: dict[str, list[int]]) -> None:
+    """Raise unless *new* has exactly the pre-extraction orthogonal membership for *state*."""
+    old = old_orthogonal_assemble_buckets(state)
     if new != old:
         drift = {
-            name: {"old": sorted(old[name]), "new": sorted(new[name])}
-            for name in P6_BUCKET_NAMES
-            if old[name] != new[name]
+            name: {"old": old.get(name, []), "new": new.get(name, [])}
+            for name in _ORTHOGONAL_ASSEMBLE_BUCKET_NAMES
+            if old.get(name, []) != new.get(name, [])
         }
-        raise AssertionError(f"P6 stage B changed assemble bucket membership: {drift}")
+        raise AssertionError(
+            f"P6 orthogonal assemble bucket membership changed: {drift}. "
+            "Violated rule: orthogonal assemble buckets must match "
+            "old_orthogonal_assemble_buckets(state) exactly."
+        )
 
 
-#: One entry per comparison the guard actually PERFORMED, appended by the wrapper and
-#: cleared at the start of every test. Cold review round 2, finding 8: without this a
-#: guard that is installed but never reached looks exactly like a guard that passes.
-#: ``tests/test_p6_stage_ab_difference.py`` asserts a real ``_phase_assemble`` fills it,
-#: and that removing the monkeypatch leaves it empty.
-GUARD_CALL_LOG: list[dict[str, set[int]]] = []
+#: Separate call logs for disposition and orthogonal assemble bucket derivations.
+DISPOSITION_GUARD_CALL_LOG: list[dict[str, set[int]]] = []
+ORTHOGONAL_GUARD_CALL_LOG: list[dict[str, list[int]]] = []
+
+#: Backwards-compatibility alias for tests referencing GUARD_CALL_LOG.
+GUARD_CALL_LOG = DISPOSITION_GUARD_CALL_LOG
 
 
 @pytest.fixture(autouse=True)
 def _p6_bucket_difference_guard(monkeypatch):
-    """Assert old-membership == new-membership on EVERY real `_phase_assemble`.
+    """Assert stage-C disposition contract and orthogonal equality on EVERY real `_phase_assemble`.
 
-    This is the difference pin the stage A/B acceptance bar asks for, applied to
-    every fixture in the suite that drives assemble rather than to a hand-picked
-    list. It pins a DIFFERENCE (old vs new derivation of the same run), never an
-    absolute tuple, so it is provider-state independent and hermetic in CI.
+    This pins the stage-C two-rule contract across every fixture in the suite that drives
+    assemble.
     """
     from socr.pipeline import orchestrator as _orch
 
-    real = _orch._derive_disposition_buckets
-    GUARD_CALL_LOG.clear()
+    real_disp = _orch._derive_disposition_buckets
+    real_orth = _orch._derive_orthogonal_assemble_buckets
 
-    def _checked(state, records):
-        new = real(state, records)
-        assert_buckets_unchanged(state, new)
-        GUARD_CALL_LOG.append({name: set(pages) for name, pages in new.items()})
+    DISPOSITION_GUARD_CALL_LOG.clear()
+    ORTHOGONAL_GUARD_CALL_LOG.clear()
+
+    def _checked_disp(state, records):
+        new = real_disp(state, records)
+        assert_stage_c_disposition_buckets(state, records, new)
+        DISPOSITION_GUARD_CALL_LOG.append({name: set(pages) for name, pages in new.items()})
         return new
 
-    _checked.__wrapped__ = real
-    monkeypatch.setattr(_orch, "_derive_disposition_buckets", _checked)
+    _checked_disp.__wrapped__ = getattr(real_disp, "__wrapped__", real_disp)
+    monkeypatch.setattr(_orch, "_derive_disposition_buckets", _checked_disp)
+
+    def _checked_orth(state):
+        new = real_orth(state)
+        assert_orthogonal_buckets_unchanged(state, new)
+        ORTHOGONAL_GUARD_CALL_LOG.append({name: list(pages) for name, pages in new.items()})
+        return new
+
+    _checked_orth.__wrapped__ = getattr(real_orth, "__wrapped__", real_orth)
+    monkeypatch.setattr(_orch, "_derive_orthogonal_assemble_buckets", _checked_orth)
