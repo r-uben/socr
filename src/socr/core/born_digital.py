@@ -954,8 +954,18 @@ class PageAssessment:
     detected_table_bboxes: list[tuple[float, float, float, float]] = field(default_factory=list)
     #: GH-195: one record per text-strategy grid rejected because a lane boundary
     #: split a native numeric token. The word-geometry fallback that replaced it
-    #: is lossless, so this is a VISIBILITY signal, not a defect flag — the page
-    #: is not demoted on it. Empty on a page where every grid rendered cleanly.
+    #: is lossless, so this is a VISIBILITY signal about how the text was built,
+    #: not a claim that the text is wrong. Empty on a page where every grid
+    #: rendered cleanly.
+    #:
+    #: GH-548: this used to end "the page is not demoted on it", and that is
+    #: false. ``PageState.text_grid_rejected`` carries it forward and
+    #: ``_winning_page_output`` ORs it into ``native_demoted``, so the page
+    #: ships WARNING / ``audit_passed=False`` and the document AUDIT_FAILED --
+    #: deliberately, because GH-195 required the rejection to surface at page
+    #: and document status rather than only in a log. Both PageState's docstring
+    #: and the selector said so; only this one disagreed, and it is the one a
+    #: reader of the detector meets first.
     text_grid_rejections: list[dict] = field(default_factory=list)
     #: #136: mid-band encoding corruption of the COSMETIC class (lost spaces, fused
     #: words) — the page is trustworthy for content but its text layer is suspect.
