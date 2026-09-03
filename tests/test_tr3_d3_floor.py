@@ -311,6 +311,13 @@ class TestAuditEventDistinctness:
             quiet=True,
             save_figures=False,
             write_manifest=False,
+            # P1 (owner ruling Q3, 2026-09-03): the table-judge ladder is ON by
+            # default and fail-closed, so a table page on a machine with no
+            # reachable rung ships UNVERIFIED and the document is no longer
+            # SUCCESS. This test is about a different lane, so the flag is
+            # PINNED off rather than the assertion weakened
+            # (docs/log/2026-09-03_p1-ladder-flip.md, "Test audit").
+            table_judge_ladder=False,
         )
         pipeline = UnifiedPipeline(config)
 
@@ -425,6 +432,9 @@ class TestDocumentStatusDemotion:
             quiet=True,
             save_figures=False,
             write_manifest=False,
+            # P1 golden audit: pin the ladder off; this class is about D3-floor
+            # demotion, not table-judge-ladder verification.
+            table_judge_ladder=False,
         )
         pipeline = UnifiedPipeline(config)
 

@@ -26,7 +26,8 @@ from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.judge.table_verdict import Finding, FindingCode, RungResult, TableJudgeVerdict
 from socr.core.state import DocumentHandle, DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
-from socr.tables.binding import BindingResult, ContradictedCell
+from _adjudicator_doubles import mismatching_adjudicator
+from socr.tables.binding import BindingEvidence, BindingResult, ContradictedCell
 
 _TABLE_MD = (
     "| c0 | c1 | c2 | c3 |\n"
@@ -104,7 +105,14 @@ def _fail(code: FindingCode = FindingCode.FABRICATED_VALUE) -> RungResult:
         verdict=TableJudgeVerdict(
             verdict="FAIL",
             confidence="high",
-            findings=[Finding(code=code, where="cell", detail="judge rejects")],
+            # GH-575 (cold review round 1, finding 1): ``where`` must be a
+            # CANONICAL cell reference, because after the ruling a reader
+            # rejection reaches a withhold only through the blind adjudicator,
+            # and the adjudicator is only given cells the readers actually
+            # localized. A vague ``"cell"`` names no coordinate, so the chain
+            # would end UNVERIFIED for want of a question to ask -- which is
+            # the no-doubt-set path, not the rejection path these rulings pin.
+            findings=[Finding(code=code, where="R1C1", detail="judge rejects")],
         ),
     )
 
@@ -195,6 +203,27 @@ def _process(
         patches.append(
             patch.object(pipeline, "_binding_contradiction_for_witness", return_value=None)
         )
+        # GH-575 made the binding EVIDENCE load-bearing in its own right (a
+        # CONTRADICT is now a terminal, not just a clamp), so isolating the
+        # clamp alone no longer isolates bind() from these rulings: the ruled
+        # PDF's native geometry contradicts the emitted grid, which would end
+        # every rejection UNVERIFIED before the readers' verdict mattered.
+        patches.append(
+            patch.object(
+                pipeline,
+                "_binding_evidence_for_witness",
+                return_value=(None, BindingEvidence.ABSTAIN),
+            )
+        )
+    # GH-575: a reader rejection is withheld only when a blind third reader
+    # looked and disagreed. Injecting a mismatching adjudicator keeps every
+    # ruling in this file about WHERE THE READERS end the ladder, instead of
+    # silently re-pinning the "no adjudicator configured" path.
+    patches.append(
+        patch.object(
+            pipeline, "_build_table_cell_adjudicator", return_value=mismatching_adjudicator()
+        )
+    )
     from contextlib import ExitStack
 
     with ExitStack() as stack:
@@ -204,7 +233,18 @@ def _process(
 
 
 def _rejected(error: str | None) -> bool:
-    return "table_rejected" in (error or "")
+    """Whether the document note names a reader rejection of a table.
+
+    P1 (owner ruling Q2, 2026-09-03): the gate no longer ships a reader
+    rejection under ``table_rejected`` -- an uncleared rejection becomes
+    ``table_withheld``, which is the same reader verdict with stronger
+    consequences (the table's bytes do not ship). Every GH-359 ruling this
+    file pins is about WHERE the ladder ends, not about which of the two
+    labels the ending carries, so the predicate widens to both rather than
+    each test being rewritten to chase the label.
+    """
+    text = error or ""
+    return "table_rejected" in text or "table_withheld" in text
 
 
 def _unverified(error: str | None) -> bool:
@@ -467,7 +507,14 @@ class TestRuling6ChokePoint:
             result_skip = pipeline_skip.process(pdf_skip, tmp_path / "skip_out")
 
         assert _rejected(result_live.error) is True
-        assert result_live.status == DocumentStatus.AUDIT_FAILED
+        # P1 (owner ruling Q2): the live arm's rejected table is now withheld
+        # whole, so the page ships only the marker and the document has no
+        # content -- ERROR under the pre-existing no-content rule. The
+        # DIFFERENCE this test pins (live reaches a content terminal, the
+        # skipped helper reaches only the assemble backfill's UNVERIFIED) is
+        # unchanged.
+        assert result_live.status == DocumentStatus.ERROR
+        assert result_live.status != result_skip.status
         assert _unverified(result_skip.error) is True
         assert _rejected(result_skip.error) is False
         assert result_skip.status == DocumentStatus.AUDIT_FAILED
@@ -498,9 +545,14 @@ class TestRuling7NotATableIsRejected:
 
         assert _rejected(result_nat.error) is True
         assert _rejected(result_ok.error) is False
-        # Not a figure reroute: the emitted table markdown still ships.
-        assert "10" in result_nat.markdown
-        assert "| 11 |" in result_nat.markdown or "11" in result_nat.markdown
+        # P1 (owner ruling Q2) SUPERSEDES the "keeps the markdown" half of this
+        # ruling: a NOT_A_TABLE rejection no reader guard can clear is now
+        # WITHHELD, so the table's own bytes deliberately do NOT ship. What
+        # ruling 7 was actually about survives intact and is what is pinned
+        # here: the page is not rerouted to the figure lane, and the accepted
+        # control arm still ships its table.
+        assert "| 11 |" in result_ok.markdown or "11" in result_ok.markdown
+        assert "| 11 |" not in result_nat.markdown
         assert not result_nat.figures
 
 
@@ -572,6 +624,17 @@ class TestAssembleWriterOfIncomplete:
                 return_value=[_QueueRung([_fail(), _fail()])],
             ),
             patch.object(pipeline, "_binding_contradiction_for_witness", return_value=None),
+            # GH-575: isolate bind() from the READERS' verdict here too, and
+            # give the chain a blind adjudicator that disagrees -- that is the
+            # only route from a reader rejection to a withhold.
+            patch.object(
+                pipeline,
+                "_binding_evidence_for_witness",
+                return_value=(None, BindingEvidence.ABSTAIN),
+            ),
+            patch.object(
+                pipeline, "_build_table_cell_adjudicator", return_value=mismatching_adjudicator()
+            ),
             patch("socr.tables.witness._locate_boxes", _ruled_only),
             patch("socr.tables.witness.prepare_table_witnesses", _witnesses),
         ]
@@ -596,7 +659,10 @@ class TestAssembleWriterOfIncomplete:
         _pipeline, _result, out_dir, _pdf = self._run(tmp_path, witness_both=False)
         meta = self._sidecar(out_dir)
 
-        assert meta.get("table_ladder_disposition") == FailureMode.TABLE_REJECTED.value
+        # P1 (owner ruling Q2): the witnessed table's FAIL is now a withhold.
+        # What GH-381 pins is unchanged: the page carries BOTH the content
+        # verdict and the completeness miss for the table nobody witnessed.
+        assert meta.get("table_ladder_disposition") == FailureMode.TABLE_WITHHELD.value
         assert meta.get("table_ladder_incomplete") is True
 
     def test_witnessing_every_table_leaves_the_page_complete(self, tmp_path: Path) -> None:
@@ -606,7 +672,7 @@ class TestAssembleWriterOfIncomplete:
         _pipeline, _result, out_dir, _pdf = self._run(tmp_path, witness_both=True)
         meta = self._sidecar(out_dir)
 
-        assert meta.get("table_ladder_disposition") == FailureMode.TABLE_REJECTED.value
+        assert meta.get("table_ladder_disposition") == FailureMode.TABLE_WITHHELD.value
         assert not meta.get("table_ladder_incomplete")
 
     def test_the_incomplete_page_is_reprocessed_and_the_complete_one_is_kept(

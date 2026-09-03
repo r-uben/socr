@@ -267,8 +267,18 @@ def test_table_judge_verdict_dataclass_defaults():
 
 
 def test_audit_event_kinds_are_distinct_strings():
-    kinds = {TABLE_LADDER_ACCEPTED_KIND, TABLE_LADDER_REJECTED_KIND, TABLE_LADDER_UNVERIFIED_KIND}
-    assert len(kinds) == 3
+    # P1 (owner ruling Q2, 2026-09-03): four terminals, not three. Extended
+    # deliberately with the ruling cited, not weakened -- the assertion still
+    # pins distinctness, string-ness and exact set equality.
+    from socr.judge.table_verdict import TABLE_LADDER_WITHHELD_KIND
+
+    kinds = {
+        TABLE_LADDER_ACCEPTED_KIND,
+        TABLE_LADDER_REJECTED_KIND,
+        TABLE_LADDER_UNVERIFIED_KIND,
+        TABLE_LADDER_WITHHELD_KIND,
+    }
+    assert len(kinds) == 4
     assert all(isinstance(k, str) for k in kinds)
     assert kinds == TABLE_LADDER_EVENT_KINDS
 

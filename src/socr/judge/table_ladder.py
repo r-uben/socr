@@ -22,10 +22,20 @@ Per-table resolution (GH-359):
 
 - **A, high confidence** — accept immediately at the current rung.
 - **A, low confidence** — needs corroboration from a *real PASS witness*
-  (any confidence). Escalate with no findings. If that was the last rung,
-  the table is accepted only if the immediately preceding rung was itself
-  a real PASS; a lone low-confidence PASS exhausts to ``TABLE_UNVERIFIED``
-  (ruling 1).
+  (any confidence). Escalate with no findings. A lone low-confidence PASS
+  at the last rung exhausts to ``TABLE_UNVERIFIED`` (ruling 1).
+
+  **SUPERSEDED for the low+low ending (owner ruling Q1, 2026-09-03,
+  ``docs/log/2026-09-02_gh359-ladder-terminals-design.md``).** Two
+  low-confidence PASSes are NO LONGER a quorum. Judge errors are correlated
+  on hard tables (same crop, same model class) and SUCCESS is the only state
+  that stamps the corpus clean, so accepting on two diffident witnesses is
+  exactly the false-accept the corpus rule exists to prevent. The ladder now
+  ends that path ``UNVERIFIED`` with ``pending=TableLadderPending.TWO_LOW_PASS``
+  and ``final_verdict=None``, and the GATE runs the ruled tiebreak chain
+  (native geometry, then a blind third-vendor cell adjudicator). Fail-closed
+  by construction: a caller that ignores ``pending`` sees UNVERIFIED, never
+  an accept.
 - **B** — escalate as tiebreak. CLI₂ may overrule CLI₁ FAIL with a
   high-confidence PASS (ruling 2: "FAIL trusted at any rung" is dropped).
   Exhausting the ladder on B is a content problem: ``TABLE_REJECTED``.
@@ -40,9 +50,9 @@ for signature compatibility.
 A high-confidence PASS at any rung ends the ladder in ``TABLE_ACCEPTED``
 immediately — a table is never held hostage by an earlier B or C once a
 later rung actually looked and approved with confidence. A low-confidence
-PASS only accepts when a preceding rung already answered PASS (any
-confidence): two real witnesses in agreement, never one weak witness
-standing in for a corroboration that an infra failure could not provide.
+PASS never accepts on its own, and (since the Q1 ruling) not with a second
+low-confidence PASS either: that ending is handed to the gate's guard chain
+as a pending decision.
 """
 
 from __future__ import annotations
@@ -74,6 +84,27 @@ class TableLadderOutcome(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     UNVERIFIED = "unverified"
+    #: P1 (owner ruling Q2): the readers rejected the table and neither ruled
+    #: guard cleared it, so its bytes do not ship. Produced by the GATE, never
+    #: by ``run_table_ladder`` itself -- this module has no geometry oracle and
+    #: no adjudicator, so it can only hand a REJECTED to the caller.
+    WITHHELD = "withheld"
+
+
+class TableLadderPending(str, Enum):
+    """A terminal the ladder cannot settle alone, handed to the gate.
+
+    P1 (owner ruling Q1). The ladder is a pure module with no geometry, no
+    subprocess, no config and no cost accounting, so it cannot run the ruled
+    tiebreak itself. It names the situation instead, and the gate -- which
+    has the page, the binding oracle and the adjudicator -- decides.
+
+    The accompanying ``outcome`` is always ``UNVERIFIED``: a caller that
+    never looks at ``pending`` gets the fail-closed answer.
+    """
+
+    #: Two consecutive low-confidence PASSes. Formerly accepted as a quorum.
+    TWO_LOW_PASS = "two_low_pass"
 
 
 @dataclass
@@ -90,6 +121,9 @@ class TableLadderResult:
     outcome: TableLadderOutcome
     rung_results: list[RungResult] = field(default_factory=list)
     final_verdict: TableJudgeVerdict | None = None
+    #: Set only on a terminal the gate must finish deciding (Q1's two-low
+    #: ending). ``None`` on every other transition.
+    pending: TableLadderPending | None = None
 
     @property
     def accepted(self) -> bool:
@@ -197,18 +231,17 @@ def run_table_ladder(
                     final_verdict=verdict,
                 )
             if is_last:
-                if prior_was_pass:
-                    return TableLadderResult(
-                        table_id=table_id,
-                        outcome=TableLadderOutcome.ACCEPTED,
-                        rung_results=rung_results,
-                        final_verdict=verdict,
-                    )
+                # Owner ruling Q1 (2026-09-03): two low-confidence PASSes are
+                # not a quorum. The ending is UNVERIFIED with the pending
+                # value, so the gate runs the geometry / blind-cell chain.
+                # A lone low PASS was already UNVERIFIED and stays so, with
+                # no pending value -- there is no second reader to doubt.
                 return TableLadderResult(
                     table_id=table_id,
                     outcome=TableLadderOutcome.UNVERIFIED,
                     rung_results=rung_results,
                     final_verdict=None,
+                    pending=(TableLadderPending.TWO_LOW_PASS if prior_was_pass else None),
                 )
             prior_was_pass = True
             continue
@@ -233,15 +266,22 @@ def run_table_ladder(
 def reduce_page_ladder(table_results: Sequence[TableLadderResult]) -> PageLadderResult:
     """Reduce every table's ladder result on a page to one page outcome.
 
-    Rule: any REJECTED table makes the page REJECTED; else any UNVERIFIED
-    table makes the page UNVERIFIED; else the page is ACCEPTED. A page with
+    Rule (P1 precedence): any WITHHELD table makes the page WITHHELD; else
+    any REJECTED table makes the page REJECTED; else any UNVERIFIED table
+    makes the page UNVERIFIED; else the page is ACCEPTED. A page with
     no tables is ACCEPTED (nothing to reject or fail to verify). Every
     per-table result is kept in the returned ``table_results`` regardless
     of which one decided the page outcome.
     """
     results = list(table_results)
 
-    if any(result.outcome is TableLadderOutcome.REJECTED for result in results):
+    if any(result.outcome is TableLadderOutcome.WITHHELD for result in results):
+        # P1: WITHHELD outranks everything. One withheld table on the page
+        # means the page ships no bytes for that table, which is a stronger
+        # statement about the page than any other terminal, and a page cannot
+        # be simultaneously "text demoted" and "text withheld".
+        outcome = TableLadderOutcome.WITHHELD
+    elif any(result.outcome is TableLadderOutcome.REJECTED for result in results):
         outcome = TableLadderOutcome.REJECTED
     elif any(result.outcome is TableLadderOutcome.UNVERIFIED for result in results):
         outcome = TableLadderOutcome.UNVERIFIED

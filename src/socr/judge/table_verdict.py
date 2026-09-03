@@ -27,6 +27,7 @@ import errno
 import json
 import re
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -35,6 +36,152 @@ from typing import Protocol
 import httpx
 
 from socr.judge.judge import _extract_json
+
+# --------------------------------------------------------------------------
+# Cell reference grammar and resolver
+# --------------------------------------------------------------------------
+
+_CELL_REF_RE = re.compile(r"^([RH])([1-9]\d*)C([1-9]\d*)$")
+
+#: The ONE definition of the coordinate contract, as policy data rather than
+#: prose duplicated per prompt (cold review round 2, N1).
+#:
+#: It used to be written out twice, and the two copies disagreed about which
+#: physical column ``C1`` is. Splicing one file into every prompt that mentions
+#: a cell is what makes that class of drift impossible rather than merely
+#: fixed. ``tests/test_cell_ref_grammar.py`` closes the loop by checking the
+#: worked examples against ``resolve_cell_refs``.
+#:
+#: The RULE and the EXAMPLES are two files on purpose (cold review round 4).
+#: A worked example has to show cells with contents in them, and the
+#: blind-transcription prompt may not contain cell contents AT ALL: a
+#: value-bearing example is an answer key handed to a reader whose only value
+#: is that it has seen nothing but the image. The rule below carries no cell
+#: contents and goes to both prompts; the examples go to the reader prompt
+#: only, and even there every cell holds its own reference rather than a
+#: plausible value.
+_CELL_REF_GRAMMAR_PATH = Path(__file__).resolve().parent.parent / "prompts" / "cell_ref_grammar.md"
+_CELL_REF_EXAMPLES_PATH = (
+    Path(__file__).resolve().parent.parent / "prompts" / "cell_ref_examples.md"
+)
+
+
+def load_cell_ref_examples() -> str:
+    """The worked examples for the coordinate rule, verbatim.
+
+    READER PROMPT ONLY. Never spliced into the blind-transcription prompt --
+    see ``load_cell_ref_grammar``'s note and
+    ``tests/test_cell_ref_grammar.py::TestTheBlindPromptCarriesNoAnswers``.
+    """
+    return _CELL_REF_EXAMPLES_PATH.read_text(encoding="utf-8").strip()
+
+
+def load_cell_ref_grammar() -> str:
+    """The canonical cell-reference RULE, verbatim. Safe for every prompt.
+
+    Carries no cell contents of any kind, so it can be shown to a blind
+    reader without telling it what anyone expects to be there.
+    """
+    return _CELL_REF_GRAMMAR_PATH.read_text(encoding="utf-8").strip()
+
+
+@dataclass(frozen=True)
+class CellRef:
+    """A canonical, value-free coordinate for a single table cell.
+
+    1-indexed to match human/judge descriptions ("row 2, column 3").
+    Can refer to a body cell (``R2C3``) or a header cell (``H1C2``).
+    """
+
+    row: int
+    col: int
+    is_header: bool = False
+
+    def __str__(self) -> str:
+        prefix = "H" if self.is_header else "R"
+        return f"{prefix}{self.row}C{self.col}"
+
+
+def parse_cell_ref(text: str) -> CellRef:
+    """Parse a canonical cell reference string into a ``CellRef``.
+
+    Canonical grammar:
+      - Body cell: ``R<row>C<col>`` with 1-indexed integers (e.g. ``R2C3``).
+      - Header cell: ``H<row>C<col>`` with 1-indexed integers (e.g. ``H1C2``).
+
+    Raises ``ValueError`` on any non-canonical, malformed, or 0-indexed string.
+    """
+    if not isinstance(text, str):
+        raise ValueError(f"cell ref must be a string: {text!r}")
+    m = _CELL_REF_RE.match(text)
+    if not m:
+        raise ValueError(f"malformed cell reference: {text!r}")
+    kind, row_str, col_str = m.groups()
+    return CellRef(row=int(row_str), col=int(col_str), is_header=(kind == "H"))
+
+
+def resolve_cell_refs(
+    markdown: str,
+    refs: Sequence[CellRef | str],
+) -> dict[CellRef, str] | None:
+    """Resolve a collection of cell references against an emitted markdown table.
+
+    Uses ``socr.tables.binding.parse_grid`` to extract the table grid.
+    If the markdown does not parse as a table grid, or if ANY reference is
+    malformed, missing, out of range, or invalid, returns ``None`` (fails closed;
+    the whole set is unresolved).
+
+    Returns a mapping from ``CellRef`` to the raw cell token string in the grid.
+    If ``refs`` is empty and the markdown contains a valid grid, returns ``{}``.
+    """
+    if not isinstance(markdown, str):
+        return None
+    from socr.tables.binding import parse_grid
+
+    grid = parse_grid(markdown)
+    if grid is None:
+        return None
+    if not refs:
+        return {}
+
+    resolved: dict[CellRef, str] = {}
+    for item in refs:
+        if isinstance(item, CellRef):
+            ref = item
+        elif isinstance(item, str):
+            try:
+                ref = parse_cell_ref(item)
+            except ValueError:
+                return None
+        else:
+            return None
+
+        # Cold review round 3, NEW A: ``C<k>`` is the k-th PHYSICAL column,
+        # counting from the leftmost, for header and body rows alike. Header
+        # refs used to be offset by one, on the assumption that the first
+        # column is always a name column that headings do not number. Nothing
+        # in this repo detects such a column -- ``parse_grid`` accepts any
+        # equal-width table of two or more columns, and a table whose first
+        # column holds values is explicitly supported -- so on such a table the
+        # prompts described a column that does not exist and every header
+        # coordinate named the wrong physical cell. A correct blind reading of
+        # one heading could then be compared against its neighbour and withhold
+        # a correct table.
+        row_cells = (
+            grid.header_rows[ref.row - 1]
+            if ref.is_header and 1 <= ref.row <= len(grid.header_rows)
+            else grid.rows[ref.row - 1]
+            if not ref.is_header and 1 <= ref.row <= len(grid.rows)
+            else None
+        )
+        if row_cells is None:
+            return None
+        if not (1 <= ref.col <= len(row_cells)):
+            return None
+        resolved[ref] = row_cells[ref.col - 1]
+
+    return resolved
+
 
 # --------------------------------------------------------------------------
 # Verdict schema
@@ -96,6 +243,7 @@ class TableJudgeVerdict:
     verdict: str  # "PASS" | "FAIL"
     confidence: str  # "high" | "low"
     findings: list[Finding] = field(default_factory=list)
+    doubts: list[str] = field(default_factory=list)
     raw: str = ""  # raw rung output, kept for the audit journal / debugging
 
     @property
@@ -113,9 +261,10 @@ def parse_table_verdict(text: str) -> TableJudgeVerdict:
     Raises ``TableVerdictParseError`` for anything that is not a trustworthy
     verdict: empty output, non-JSON, a non-object JSON value, a missing or
     invalid ``verdict``/``confidence``, a malformed ``findings`` entry, an
-    unknown finding ``code``, or a PASS/FAIL whose findings list disagrees
-    with the empty-iff-PASS rule. Every one of these IS the S1 failure —
-    callers must not fall back to treating it as FAIL.
+    unknown finding ``code``, a PASS/FAIL whose findings list disagrees
+    with the empty-iff-PASS rule, or invalid ``doubts`` for the verdict/confidence.
+    Every one of these IS the S1 failure — callers must not fall back to treating
+    it as FAIL.
     """
     if not text or not text.strip():
         raise TableVerdictParseError("empty rung output")
@@ -164,7 +313,39 @@ def parse_table_verdict(text: str) -> TableJudgeVerdict:
     if verdict == "FAIL" and not findings:
         raise TableVerdictParseError("FAIL verdict must carry at least one finding")
 
-    return TableJudgeVerdict(verdict=verdict, confidence=confidence, findings=findings, raw=text)
+    raw_doubts = data.get("doubts")
+    doubts: list[str] = []
+    if raw_doubts is not None:
+        if not isinstance(raw_doubts, list):
+            raise TableVerdictParseError(f"'doubts' is not a list: {raw_doubts!r}")
+        if verdict == "PASS" and confidence == "high" and raw_doubts:
+            raise TableVerdictParseError("high-confidence PASS must not carry doubts")
+        if verdict == "FAIL" and raw_doubts:
+            raise TableVerdictParseError("FAIL verdict must not carry doubts")
+        if verdict == "PASS" and confidence == "low":
+            if not raw_doubts:
+                raise TableVerdictParseError("low-confidence PASS must carry at least one doubt")
+            for item in raw_doubts:
+                if not isinstance(item, str):
+                    raise TableVerdictParseError(f"doubt is not a string: {item!r}")
+                try:
+                    parse_cell_ref(item)
+                except ValueError as exc:
+                    raise TableVerdictParseError(
+                        f"malformed doubt cell reference: {item!r}"
+                    ) from exc
+                doubts.append(item)
+    else:
+        if verdict == "PASS" and confidence == "low":
+            raise TableVerdictParseError("low-confidence PASS must carry at least one doubt")
+
+    return TableJudgeVerdict(
+        verdict=verdict,
+        confidence=confidence,
+        findings=findings,
+        doubts=doubts,
+        raw=text,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -222,6 +403,20 @@ class RungResult:
 #: its prefix: "gemini", or "ollama:<model>".
 RUNG_KIND_OLLAMA = "ollama"
 RUNG_KIND_GEMINI = "gemini"
+#: P1: the blind cell-transcription ADJUDICATOR's kind. Deliberately NOT a
+#: reader kind -- it is kept out of ``TABLE_JUDGE_RUNG_KINDS`` so that the
+#: adjudicator being reachable can never satisfy "some reader can look at
+#: this table". It IS latchable and probeable in its own right: an
+#: adjudicator outage is a reason to retry the page later, just like a
+#: reader outage, and recovery must be asked about THIS kind (cold review
+#: round 1, finding 2) rather than widened to the readers.
+#:
+#: Named for the ROLE, not the vendor. The adjudicator rides the ollama
+#: transport (cold review round 1, finding 4) but is a different model from
+#: a different vendor than reader rung 1, so it needs an identity of its own:
+#: ``"ollama"`` would make the two indistinguishable in the latch, and a
+#: vendor name would have to be rewritten on the next model swap.
+RUNG_KIND_CELL_ADJUDICATOR = "adjudicator"
 
 
 def rung_kind(rung_id: str) -> str:
@@ -478,6 +673,13 @@ def rung_result_from_output(rung: str, text: str, latency_sec: float) -> RungRes
 TABLE_LADDER_ACCEPTED_KIND = "table_ladder_accepted"
 TABLE_LADDER_REJECTED_KIND = "table_ladder_rejected"
 TABLE_LADDER_UNVERIFIED_KIND = "table_ladder_unverified"
+#: P1 (owner ruling Q2): the FOURTH terminal. A table two readers rejected
+#: and neither guard could clear ships NO table bytes -- the region is
+#: replaced by the failed-table marker plus the page image. Distinct from
+#: ``table_ladder_rejected`` on purpose: rejected shipped the text demoted
+#: under a warning, withheld ships none of it, and conflating them would
+#: make every historical rejected page look like a withhold on replay.
+TABLE_LADDER_WITHHELD_KIND = "table_ladder_withheld"
 #: GH-367: supporting evidence for a clamp lift/hold. Not a fourth
 #: terminal — the three kinds above remain the only content outcomes.
 #: Kept out of ``TABLE_LADDER_EVENT_KINDS`` so the GH-359 drift guard
@@ -491,5 +693,17 @@ TABLE_LADDER_EVENT_KINDS: frozenset[str] = frozenset(
         TABLE_LADDER_ACCEPTED_KIND,
         TABLE_LADDER_REJECTED_KIND,
         TABLE_LADDER_UNVERIFIED_KIND,
+        # P1: widened DELIBERATELY from GH-359's three terminals to four. The
+        # drift guard exists so a terminal is never added by accident; this one
+        # is added by owner ruling Q2 and is recorded in
+        # docs/log/2026-09-03_p1-ladder-flip.md.
+        TABLE_LADDER_WITHHELD_KIND,
     }
 )
+
+#: The two acceptance reasons the guard chain can produce, recorded on the
+#: ``table_ladder_accepted`` event's ``data["reason"]``. An ordinary ladder
+#: acceptance carries no reason value at all -- these name the two ways the
+#: READERS were overruled, which is a different fact and must be legible as one.
+REASON_VERIFIED_BY_GEOMETRY = "verified_by_geometry"
+REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION = "verified_by_blind_cell_transcription"

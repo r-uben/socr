@@ -588,7 +588,7 @@ class TestRenderChartPagePng:
 # ---------------------------------------------------------------------------
 
 
-def _make_agentic_pipeline(save_figures: bool = False):
+def _make_agentic_pipeline(save_figures: bool = False, table_judge_ladder: bool = True):
     from socr.core.config import EngineType, PipelineConfig
     from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -599,6 +599,7 @@ def _make_agentic_pipeline(save_figures: bool = False):
         quiet=True,
         native_first=True,
         save_figures=save_figures,
+        table_judge_ladder=table_judge_ladder,
     )
     return UnifiedPipeline(cfg)
 
@@ -711,7 +712,8 @@ def _run_chart_detection_case(tmp_path: Path, *, fail_detector: bool):
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     pdf = _make_vector_chart_pdf(tmp_path)
-    pipeline = _make_agentic_pipeline()
+    # P1 golden audit: pin the ladder off; this test is about chart detection
+    pipeline = _make_agentic_pipeline(table_judge_ladder=False)
     state = _make_state_with_page(pdf, has_tables=True, native_text="Table 1 data")
     pipeline._last_assessment = state._last_assessment
     routed_output = PageOutput(
@@ -1293,6 +1295,13 @@ def test_assemble_reports_non_success_for_render_failed_chart_page(tmp_path: Pat
         agentic=False,
         quiet=True,
         native_first=True,
+        # P1 (owner ruling Q3, 2026-09-03): the table-judge ladder is ON by
+        # default and fail-closed, so a table page on a machine with no
+        # reachable rung ships UNVERIFIED and the document is no longer
+        # SUCCESS. This test is about a different lane, so the flag is
+        # PINNED off rather than the assertion weakened
+        # (docs/log/2026-09-03_p1-ladder-flip.md, "Test audit").
+        table_judge_ladder=False,
     )
     pipeline = UnifiedPipeline(cfg)
 

@@ -227,5 +227,12 @@ def test_finder_flags_a_module_qualified_attribute_call() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_default_pipeline_config_has_the_ladder_off() -> None:
-    assert PipelineConfig().table_judge_ladder is False
+def test_default_pipeline_config_has_the_ladder_on() -> None:
+    """P1 (owner ruling Q3, 2026-09-03): the default flipped to True.
+
+    This module's REAL job -- the AST guard below, which forces every golden /
+    byte-identity / replay module to pin the flag explicitly -- is unchanged
+    and is what made the flip safe. This one assertion existed to record the
+    pre-flip state; it now records the post-flip one.
+    """
+    assert PipelineConfig().table_judge_ladder is True

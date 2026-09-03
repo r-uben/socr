@@ -261,6 +261,10 @@ def test_watched_kinds_are_real_emitted_kinds():
         "table_row_repetition_truncated",
         "table_ladder_rejected",
         "table_ladder_unverified",
+        # P1 (owner ruling Q2): emitted by the gate through the shared
+        # ``TABLE_LADDER_WITHHELD_KIND`` constant, exactly like the two
+        # terminals above, so it is not a ``kind="..."`` literal in the source.
+        "table_ladder_withheld",
     }
     unknown = TABLE_DISTRUST_KINDS - literals - dynamic - pending
 
@@ -579,15 +583,22 @@ def test_ladder_kinds_match_judge_table_verdict():
         TABLE_LADDER_EVENT_KINDS,
         TABLE_LADDER_REJECTED_KIND,
         TABLE_LADDER_UNVERIFIED_KIND,
+        TABLE_LADDER_WITHHELD_KIND,
     )
 
     assert TABLE_LADDER_ACCEPTED_KIND == "table_ladder_accepted"
     assert TABLE_LADDER_REJECTED_KIND == "table_ladder_rejected"
     assert TABLE_LADDER_UNVERIFIED_KIND == "table_ladder_unverified"
+    # P1 (owner ruling Q2, 2026-09-03): widened from three terminals to four,
+    # deliberately. The drift guard's job is to catch a terminal added by
+    # accident; this one is added by ruling and recorded in
+    # docs/log/2026-09-03_p1-ladder-flip.md.
+    assert TABLE_LADDER_WITHHELD_KIND == "table_ladder_withheld"
     assert TABLE_LADDER_EVENT_KINDS == {
         "table_ladder_accepted",
         "table_ladder_rejected",
         "table_ladder_unverified",
+        "table_ladder_withheld",
     }
     assert TABLE_LADDER_ACCEPTED_KIND in RESOLVING_KINDS
     assert TABLE_LADDER_ACCEPTED_KIND not in WHOLE_PAGE_RESOLVING_KINDS, (

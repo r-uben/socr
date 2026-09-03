@@ -33,6 +33,8 @@ EXPECTED_KEYS = (
     "chart_detection_failed_pages",
     "table_rejected_pages",
     "table_unverified_pages",
+    # P1 (owner ruling Q2, 2026-09-03): the fourth table terminal.
+    "table_withheld_pages",
 )
 
 
@@ -79,6 +81,9 @@ def _old_orthogonal_assemble_buckets(state):
         for n, p in state.pages.items()
         if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
     )
+    table_withheld_pages = sorted(
+        n for n, p in state.pages.items() if _table_ladder_terminal(p) == FailureMode.TABLE_WITHHELD
+    )
     return {
         "native_only_distrust_pages": native_only_distrust_pages,
         "value_drift_pages": value_drift_pages,
@@ -87,6 +92,7 @@ def _old_orthogonal_assemble_buckets(state):
         "chart_detection_failed_pages": chart_detection_failed_pages,
         "table_rejected_pages": table_rejected_pages,
         "table_unverified_pages": table_unverified_pages,
+        "table_withheld_pages": table_withheld_pages,
     }
 
 

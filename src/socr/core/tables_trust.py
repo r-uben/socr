@@ -139,6 +139,13 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # keeps the two copies from diverging silently.
         "table_ladder_rejected",
         "table_ladder_unverified",
+        # P1 (owner ruling Q2): the table's bytes did NOT ship -- the region
+        # is a fail-closed marker plus the page image. Registered here for the
+        # same reason the other two terminals are: a consumer reading the
+        # trust index must be able to see that this page held a table nobody
+        # could vouch for, and must be able to tell "withheld" from "shipped
+        # but distrusted".
+        "table_ladder_withheld",
         # #123 TICKET-C1: two more shapes of the same no-silent-content-loss rule.
         # "table_unexplained_lanes" — the native layer supports a column the
         # emitted table has no home for; a threshold-free fact once B2's lane
@@ -191,6 +198,11 @@ LADDER_TERMINAL_NOTES: dict[str, str] = {
     "table_ladder_rejected": ("judge ladder rejected this table: content problem, not retryable"),
     "table_ladder_unverified": (
         "judge ladder could not verify this table: infra problem, retryable on resume"
+    ),
+    "table_ladder_withheld": (
+        "judge ladder rejected this table and neither the native-geometry guard nor a "
+        "blind cell transcription cleared it: the table's content was WITHHELD "
+        "(marker plus page image), not shipped"
     ),
 }
 

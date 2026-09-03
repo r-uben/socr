@@ -67,6 +67,18 @@ AUTO_ENGINE_ORDER: list[EngineType] = [
 # never a reject, per the GH-353 design (docs/log/2026-08-30_table-judge-ladder.md).
 TABLE_JUDGE_TIMEOUT_SEC_DEFAULT: float = 600.0
 
+# P1 blind-cell ADJUDICATOR model, served over the same ollama ``/api/chat``
+# transport as reader rung 1. Named, not inlined, because it is a measured
+# choice and not a preference: the 2026-09-03 live image-transport probe put a
+# synthetic crop whose target cell reads ``0.058`` in front of three paths --
+# ``cursor-agent -p --model kimi-k3-max`` answered ``0.92`` (it never received
+# the image), while ollama-hosted ``kimi-k2.6:cloud`` and ``glm-5.3-flash:cloud``
+# both answered ``0.058``. Kimi is the adjudicator because it is a different
+# VENDOR (Moonshot) from reader rung 1 (Zhipu) and reader rung 2 (Google), which
+# is where the independence the ruling asks for actually lives; the transport is
+# shared because it is the one proven to carry pixels.
+TABLE_JUDGE_ADJUDICATOR_MODEL_DEFAULT: str = "kimi-k2.6:cloud"
+
 
 @dataclass
 class HPCConfig:
@@ -320,12 +332,21 @@ class PipelineConfig:
 
     # --- GH-353: table judge ladder ---
     # Two-rung table-page acceptance gate: CLI1 (ollama-cloud vision judge) -> CLI2
-    # (gemini CLI) -> terminal disposition (REJECTED/UNVERIFIED). Design:
+    # (gemini CLI) -> terminal disposition. Design:
     # docs/log/2026-08-30_table-judge-ladder.md; CLI1 seat decided by the GH-356
-    # bake-off (docs/log/2026-08-30_gh356-bakeoff.md). Default OFF: golden/
-    # byte-identity tests must stay byte-identical with the flag off, and the gate
-    # itself (TICKET-B1) has not landed yet.
-    table_judge_ladder: bool = False
+    # bake-off (docs/log/2026-08-30_gh356-bakeoff.md).
+    #
+    # P1, owner ruling Q3 (2026-09-03,
+    # docs/log/2026-09-02_gh359-ladder-terminals-design.md): default ON, and
+    # FAIL-CLOSED. The contract this changes is deliberate and is the point:
+    # a table socr cannot verify never ships SUCCESS. On a machine with no
+    # reachable rung every table page ships UNVERIFIED, which is a labelled,
+    # recoverable outcome -- the alternative, shipping unwitnessed tables as
+    # clean, is the bug being fixed. The CLI prints a startup line naming the
+    # cause and the opt-out (``--no-table-judge-ladder``) when no reader rung
+    # is reachable, and another when ``strict_local`` makes every rung
+    # unreachable by configuration.
+    table_judge_ladder: bool = True
     # CLI1 rung: ollama-cloud vision judge model. glm-5.3-flash:cloud won the
     # GH-356 bake-off outright (every verdict + code correct across all three
     # rounds, including the GH-273 binding-shift case two other candidates missed).
@@ -359,6 +380,33 @@ class PipelineConfig:
     # UNVERIFIED (never a silent PASS, never an exception) rather than call out.
     # This field only documents the interaction; TICKET-B1 implements the gate.
     table_judge_timeout_sec: float = TABLE_JUDGE_TIMEOUT_SEC_DEFAULT
+
+    # --- P1 (owner rulings Q1/Q2, docs/log/2026-09-02_gh359-ladder-terminals-design.md):
+    # the blind cell-transcription ADJUDICATOR. Not a third reader rung: it never
+    # produces a PASS/FAIL verdict and never enters ``run_table_ladder``. It is
+    # asked one question only -- "what token is in these cells?" -- from the crop
+    # alone, and the gate compares its answer to the extraction.
+    #
+    # Independence is by MODEL and VENDOR, not by transport (cold review round 1,
+    # finding 4). It reaches ``TABLE_JUDGE_ADJUDICATOR_MODEL_DEFAULT`` through the
+    # SAME ollama ``/api/chat`` path reader rung 1 uses, because that path is the
+    # one proven to put the crop's pixels in front of the model: a live probe on
+    # a synthetic crop reading 0.058 had ``cursor-agent -p --model kimi-k3-max``
+    # answer 0.92 (blind), while ollama-hosted ``kimi-k2.6:cloud`` and
+    # ``glm-5.3-flash:cloud`` both answered 0.058. A model that never saw the
+    # image can still emit a schema-valid guessable token and clear a table.
+    table_judge_adjudicator_model: str = TABLE_JUDGE_ADJUDICATOR_MODEL_DEFAULT
+    # Ollama host for the adjudicator. Its own field rather than rung 1's, so a
+    # deployment can serve the adjudicator's model from a different endpoint.
+    # None resolves like ``ollama_host`` (OLLAMA_HOST, then the localhost default).
+    table_judge_adjudicator_host: str | None = None
+    # Known cost of one adjudicator call. Subscription-backed, so the honest
+    # default is a KNOWN zero -- never None, which would mean "unmetered" and
+    # silently poison ``DocumentState.total_cost`` for every downstream budget
+    # decision. Validated at load: a NEGATIVE rate would CREATE budget on every
+    # call and let later paid calls slip past a cap the user set (cold review
+    # round 1, finding 9).
+    table_judge_adjudicator_cost_per_call_usd: float = 0.0
 
     # --- Batch flags ---
     reprocess: bool = False
@@ -412,6 +460,41 @@ class PipelineConfig:
         _vllm_env = os.environ.get("VLLM_BASE_URL")
         if _vllm_env and self.qwen_vllm_url == "http://localhost:8000/v1":
             self.qwen_vllm_url = _vllm_env
+        self.validate_costs()
+
+    def validate_costs(self) -> None:
+        """Reject a spend rate that cannot mean what a rate means.
+
+        Cold review round 1, finding 9. ``table_judge_adjudicator_cost_per_call_usd``
+        is compared against the per-page cap and the remaining document budget
+        BEFORE a call and then recorded as that call's cost. A negative rate
+        therefore passes every pre-call check and *reduces* the document's
+        total after each call, manufacturing budget for later paid calls that
+        the user's cap was set to forbid. A NaN or an infinity is worse: every
+        comparison against NaN is False, so the cap silently stops existing.
+
+        Checked at construction AND after a YAML restore, because
+        ``from_file`` assigns fields onto an already-constructed object and
+        would otherwise never re-enter ``__post_init__``.
+        """
+        import math
+
+        rate = self.table_judge_adjudicator_cost_per_call_usd
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "table_judge_adjudicator_cost_per_call_usd must be a number, got "
+                f"{self.table_judge_adjudicator_cost_per_call_usd!r}"
+            ) from exc
+        if not math.isfinite(rate) or rate < 0:
+            raise ValueError(
+                "table_judge_adjudicator_cost_per_call_usd must be a finite, "
+                f"non-negative number of USD; got {rate!r}. A negative rate would "
+                "create budget instead of consuming it, and a non-finite one "
+                "disables the per-page cap silently."
+            )
+        self.table_judge_adjudicator_cost_per_call_usd = rate
 
     def get_engines_by_priority(self) -> list[EngineType]:
         """Get enabled engines sorted by priority."""
@@ -493,6 +576,8 @@ class PipelineConfig:
                 "typo cannot silently drop a setting."
             )
 
+        # A value restored from YAML never passed through ``__post_init__``.
+        config.validate_costs()
         return config
 
     @classmethod

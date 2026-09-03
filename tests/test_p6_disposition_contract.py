@@ -56,10 +56,19 @@ def test_page_primary_reason_is_a_normalized_cause_not_a_row_rename() -> None:
     removing" failure §8 names and rules against.
     """
     PagePrimaryReason = manifest.PagePrimaryReason
+    # The invariant is SEMANTIC, not a magic count: the normalized cause
+    # vocabulary must stay strictly smaller than the selector it normalizes.
+    # The literal ``< 15`` this replaced was the same statement with the
+    # selector's size frozen into it, so a legitimate new cause (P1's
+    # TABLE_JUDGE_WITHHELD) failed a guard that was not about it. Stated
+    # against SelectionProvenance itself, the guard cannot go stale and is
+    # not weakened -- it still forbids one member per selector row.
     n = len(list(PagePrimaryReason))
-    assert n < 15, (
-        f"PagePrimaryReason has {n} members -- normalization must merge causes "
-        "that answer the same question, not carry one member per selector row"
+    rows = len(list(manifest.SelectionProvenance))
+    assert n < rows, (
+        f"PagePrimaryReason has {n} members against {rows} selector rows -- "
+        "normalization must merge causes that answer the same question, not "
+        "carry one member per selector row"
     )
     names = {m.name for m in PagePrimaryReason}
     for required in (
@@ -72,6 +81,9 @@ def test_page_primary_reason_is_a_normalized_cause_not_a_row_rename() -> None:
         "UNACCEPTED_OUTPUT_KEPT",
         "NO_USABLE_OUTPUT",
         "INVALID_TABLE_EMISSION",
+        # P1 (owner ruling Q2): a withheld table is a cause socr can name
+        # exactly, so it must not fall back to SHIPPED_FAILURE_MARKER.
+        "TABLE_JUDGE_WITHHELD",
     ):
         assert required in names, f"PagePrimaryReason is missing {required}"
 

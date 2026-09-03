@@ -9,6 +9,7 @@ import pytest
 from socr.judge.table_ladder import (
     PageLadderResult,
     TableLadderOutcome,
+    TableLadderPending,
     TableLadderResult,
     reduce_page_ladder,
     run_table_ladder,
@@ -163,16 +164,48 @@ def test_not_s1_then_low_confidence_pass_at_last_rung_is_unverified():
     assert len(result.rung_results) == 2
 
 
-def test_low_confidence_pass_then_low_confidence_pass_accepts():
-    """Two real low-confidence PASS witnesses in agreement are sufficient
-    corroboration and accept."""
+def test_low_confidence_pass_then_low_confidence_pass_is_pending_not_accepted():
+    """SUPERSEDED by the 2026-09-03 owner ruling (Q1). Two real low-confidence
+    PASS witnesses in agreement are no longer a self-sufficient quorum -- the
+    GH-359 sentence this test used to pin ("two witnesses in agreement, never
+    one weak witness") is exactly what Q1 overturns: the table is UNVERIFIED
+    with the TWO_LOW_PASS pending value, so the gate can run the ruled
+    geometry/blind-cell tiebreak chain instead of silently accepting."""
     rung1 = _rung(_pass("rung1", "low"))
     rung2 = _rung(_pass("rung2", "low"))
 
     result = run_table_ladder([rung1, rung2], CROP, MARKDOWN, table_id="t0")
 
-    assert result.outcome is TableLadderOutcome.ACCEPTED
-    assert result.final_verdict.confidence == "low"
+    assert result.outcome is TableLadderOutcome.UNVERIFIED
+    assert result.final_verdict is None
+    assert result.pending is TableLadderPending.TWO_LOW_PASS
+    # The two reader verdicts remain available for the gate to pull doubts from.
+    assert len(result.rung_results) == 2
+    assert result.rung_results[0].verdict.confidence == "low"
+    assert result.rung_results[1].verdict.confidence == "low"
+
+
+@pytest.mark.parametrize(
+    "transition,rungs_factory",
+    [
+        ("single_high_pass", lambda: [_rung(_pass("r1", "high"))]),
+        ("lone_low_pass", lambda: [_rung(_pass("r1", "low"))]),
+        ("fail_then_high_pass", lambda: [_rung(_fail("r1")), _rung(_pass("r2", "high"))]),
+        ("fail_then_low_pass", lambda: [_rung(_fail("r1")), _rung(_pass("r2", "low"))]),
+        ("fail_then_fail", lambda: [_rung(_fail("r1")), _rung(_fail("r2"))]),
+        ("not_s1_then_low_pass", lambda: [_rung(_not_s1("r1")), _rung(_pass("r2", "low"))]),
+        ("not_s1_then_not_s1", lambda: [_rung(_not_s1("r1")), _rung(_not_s1("r2"))]),
+        (
+            "low_pass_then_high_pass",
+            lambda: [_rung(_pass("r1", "low")), _rung(_pass("r2", "high"))],
+        ),
+    ],
+)
+def test_pending_is_none_on_every_other_transition(transition, rungs_factory):
+    """Table-driven pin: TWO_LOW_PASS is present ONLY on the low-low ending."""
+    result = run_table_ladder(rungs_factory(), CROP, MARKDOWN, table_id="t0")
+
+    assert result.pending is None, f"{transition} unexpectedly carries a pending value"
 
 
 # --------------------------------------------------------------------------

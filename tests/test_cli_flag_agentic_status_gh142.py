@@ -176,6 +176,13 @@ _UNEXERCISED = {
     "table_judge_rung1_host",
     "table_judge_rung2_binary",
     "table_judge_timeout_sec",
+    # P1: the blind-cell adjudicator's identity and per-call cost. Same
+    # classification and the same reason as the rung fields above -- read and
+    # fingerprinted only when the ladder flag is on, and only on the two ruled
+    # guard-chain paths (a two-low PASS pair, or a reader rejection).
+    "table_judge_adjudicator_model",
+    "table_judge_adjudicator_host",
+    "table_judge_adjudicator_cost_per_call_usd",
 }
 
 #: `_warn_inert_config` reads the inert fields in order to REPORT that they are

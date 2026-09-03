@@ -41,6 +41,8 @@ absolute status tuple pinned from one machine.
 from __future__ import annotations
 
 import copy
+import shutil as _stdlib_shutil
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -58,6 +60,46 @@ from socr.judge.table_verdict import (
     TableJudgeVerdict,
 )
 from socr.pipeline.orchestrator import UnifiedPipeline
+
+# P1: captured at collection time, BEFORE the suite-wide autouse fixture
+# ``_table_judge_rungs_are_absent`` (tests/conftest.py) monkeypatches
+# ``table_rung_gemini.shutil.which`` / ``._run_health_check`` to force every
+# gemini rung unreachable. That fixture exists so the ordinary tests in this
+# file (and the rest of the suite) stay hermetic on a dev machine that
+# happens to have ``agy`` on PATH -- but the two ``..._through_the_real_seam``
+# / ``..._does_not_read_as_recovered`` tests below exist PRECISELY to drive
+# the real reachability seam against a controlled stub binary
+# (``_health_cli``). Left under the autouse patch, ``shutil.which`` always
+# answers None and the stub's exit code is never consulted, so a "recovered"
+# CLI can never read as reachable -- the tests would be unable to pass no
+# matter what the seam actually does. These references are plain function
+# objects grabbed before any monkeypatching, so they stay the real
+# implementations regardless of what conftest does to the module attribute.
+_REAL_GEMINI_WHICH = _stdlib_shutil.which
+from socr.judge.table_rung_gemini import (  # noqa: E402
+    _run_health_check as _REAL_GEMINI_RUN_HEALTH_CHECK,
+)
+
+
+@contextmanager
+def _real_gemini_reachability_seam():
+    """Undo the autouse hermetic patch for rung 2's reachability probe only.
+
+    Rung 1 (ollama) stays forced-unreachable by ``_rung1_unreachable()`` as
+    every caller already does; this only restores ``shutil.which`` and the
+    health-check subprocess call for the gemini/``agy`` rung so a real stub
+    binary's exit code is what decides reachability, which is the entire
+    point of the two real-seam tests.
+    """
+    with (
+        patch("socr.judge.table_rung_gemini.shutil.which", new=_REAL_GEMINI_WHICH),
+        patch(
+            "socr.judge.table_rung_gemini._run_health_check",
+            new=_REAL_GEMINI_RUN_HEALTH_CHECK,
+        ),
+    ):
+        yield
+
 
 _TABLE_MD = (
     "| c0 | c1 | c2 | c3 |\n"
@@ -397,7 +439,7 @@ class TestSingleFileRetryLatch:
 
         # The latch must name the rung kind the real seam will be asked about.
         pending_rung = _QueueRung([_pass("high"), _unavailable(RUNG_KIND_GEMINI), _pass("low")])
-        with _rung1_unreachable():
+        with _rung1_unreachable(), _real_gemini_reachability_seam():
             _process_run(
                 pdf,
                 out_dir,
@@ -413,7 +455,7 @@ class TestSingleFileRetryLatch:
 
         still_broken_rung = _QueueRung([])  # must never be called
         routed_2: list[int] = []
-        with _rung1_unreachable():
+        with _rung1_unreachable(), _real_gemini_reachability_seam():
             result_2 = _process_run(
                 pdf,
                 out_dir,
@@ -444,7 +486,7 @@ class TestSingleFileRetryLatch:
 
         # The latch must name the rung kind the real seam will be asked about.
         pending_rung = _QueueRung([_pass("high"), _unavailable(RUNG_KIND_GEMINI), _pass("low")])
-        with _rung1_unreachable():
+        with _rung1_unreachable(), _real_gemini_reachability_seam():
             _process_run(
                 pdf,
                 out_dir,
@@ -458,7 +500,7 @@ class TestSingleFileRetryLatch:
 
         recovering_rung = _QueueRung([_pass("high")])
         routed_2: list[int] = []
-        with _rung1_unreachable():
+        with _rung1_unreachable(), _real_gemini_reachability_seam():
             result_2 = _process_run(
                 pdf,
                 out_dir,
@@ -1246,12 +1288,19 @@ class TestSingleFileRetryLatch:
             assert not meta.get("table_judge_retry_pending")
 
         never_called = _QueueRung([])
-        result_2 = _process_run(pdf, out_dir, rungs=[never_called], available=True)
+        _process_run(pdf, out_dir, rungs=[never_called], available=True)
 
-        assert result_2.status.value == "skipped", (
-            "a content-only REJECTED page has no rung-unavailable cause and must not latch"
+        # P1 (owner ruling Q2, 2026-09-03): this page's terminal is now
+        # WITHHELD, not REJECTED, and a fully withheld single-table page ships
+        # no content -- so the DOCUMENT status moved from "partial" to "error"
+        # under the pre-existing no-content rule, and the document-level resume
+        # gate never skips an error document. That is a status change the
+        # ruling makes, not the latch leaking: the assertion this test exists
+        # for is that no rung is called again, which the per-page ledger's
+        # content-terminal exception still guarantees.
+        assert never_called.calls == [], (
+            "a content-only withheld page has no rung-unavailable cause and must not be re-judged"
         )
-        assert never_called.calls == []
 
     def test_content_only_unverified_does_not_reopen_when_reachability_changes(
         self, tmp_path: Path

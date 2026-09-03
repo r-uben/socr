@@ -920,12 +920,26 @@ def structure_class_floor_text(p, page_num: int) -> str:
     then replaces every block it finds. Which marker landed on which table is
     not a property anything downstream reads.
     """
+    return table_floor_text_for_source(p, page_num, getattr(p, "native_text", "") or "")
+
+
+def table_floor_text_for_source(p, page_num: int, source_text: str) -> str:
+    """The GH-520 four-condition coverage check plus splice, over ANY source.
+
+    Factored out of ``structure_class_floor_text`` for P1's withhold path,
+    which must splice the SELECTED output's text -- a model winner, not
+    necessarily the native layer. Substituting ``p.native_text`` there would
+    ship a different page's bytes than the one selection chose.
+
+    The conditions themselves are unchanged and unweakened: they are the
+    argument, and the docstring above is where that argument lives.
+    """
     d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
     png_ref = getattr(p, "d3_floor_png_ref", "")
     whole_page = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
 
-    native_text = getattr(p, "native_text", "") or ""
-    if not native_text.strip():
+    source_text = source_text or ""
+    if not source_text.strip():
         return whole_page
 
     detected_count = getattr(p, "detected_table_count", 0)
@@ -942,11 +956,11 @@ def structure_class_floor_text(p, page_num: int) -> str:
 
     from socr.tables.reconcile import find_table_blocks
 
-    blocks = find_table_blocks(native_text)
+    blocks = find_table_blocks(source_text)
     if len(blocks) != detected_count:
         return whole_page
 
-    spliced = splice_all_table_regions(native_text, d3_marker, png_ref)
+    spliced = splice_all_table_regions(source_text, d3_marker, png_ref)
     return spliced if spliced else whole_page
 
 
@@ -987,6 +1001,11 @@ class PagePrimaryReason(str, Enum):
     UNACCEPTED_OUTPUT_KEPT = "unaccepted_output_kept"
     NO_USABLE_OUTPUT = "no_usable_output"
     INVALID_TABLE_EMISSION = "invalid_table_emission"
+    #: P1 (owner ruling Q2): the page shipped a fail-closed marker in place of a
+    #: table because the readers rejected it and neither ruled guard cleared it.
+    #: Distinct from SHIPPED_FAILURE_MARKER, which means socr cannot attribute
+    #: the marker it is looking at; here it can, exactly.
+    TABLE_JUDGE_WITHHELD = "table_judge_withheld"
     #: The shipped bytes are a recognised failure marker that selection did not
     #: account for. The page shipped no content, and socr will not name a cause it
     #: cannot read off the bytes.
@@ -1717,7 +1736,7 @@ def _apply_table_emission_guard(output: PageOutput, page_num: int) -> PageOutput
 #: because these are OUTCOMES the ladder reducer writes on ``PageState``, not
 #: an allowlist of soft-refusal dispositions on a single attempt.
 _LADDER_TERMINAL_FAILURE_MODES: frozenset[FailureMode] = frozenset(
-    {FailureMode.TABLE_REJECTED, FailureMode.TABLE_UNVERIFIED}
+    {FailureMode.TABLE_REJECTED, FailureMode.TABLE_UNVERIFIED, FailureMode.TABLE_WITHHELD}
 )
 
 
@@ -1746,6 +1765,42 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
     disposition = getattr(p, "table_ladder_disposition", None)
     if disposition not in _LADDER_TERMINAL_FAILURE_MODES:
         return output
+
+    if disposition is FailureMode.TABLE_WITHHELD:
+        # P1 (owner ruling Q2). REJECTED and UNVERIFIED are LABELS: the text
+        # ships, demoted. WITHHELD is not -- the readers refused this table
+        # and neither guard cleared it, so its bytes do not ship at all.
+        #
+        # Rewritten HERE, in the guard that already runs before
+        # ``finalized_page_records`` / ``canonical_page_texts``, so the saved
+        # .md, the page fragment, the sidecar's winning_output, the manifest
+        # blob and replay all see the same bytes. The splice reads the
+        # SELECTED output's text -- never ``p.native_text``, which on a model
+        # winner is a different page.
+        #
+        # Prose survives only under GH-520's four coverage conditions;
+        # otherwise the whole page floors, exactly as the structure-class
+        # floor does, because an unenumerable table cannot be shown to have
+        # been covered by the splice.
+        text = output.text or ""
+        from socr.tables.reconcile import find_table_blocks
+
+        already_withheld = f"failed: unverifiable table" in text and not find_table_blocks(text)
+        # A page that ALREADY shipped the fail-closed floor (the structure-class
+        # floor reached the same page first) carries no table bytes and may have
+        # legitimately kept its prose through GH-520's own coverage proof.
+        # Re-running the coverage check over that already-spliced text sees zero
+        # table blocks, fails the count condition, and floors the whole page --
+        # destroying prose the floor was entitled to keep. Nothing is left to
+        # withhold, so only the label changes.
+        return replace(
+            output,
+            text=text if already_withheld else table_floor_text_for_source(p, page_num, text),
+            status=PageStatus.ERROR,
+            audit_passed=False,
+            failure_mode=disposition,
+        )
+
     if output.audit_passed:
         return replace(
             output,
@@ -1843,7 +1898,30 @@ def _select_and_finalize_page(
         except (KeyError, ValueError, TypeError):
             logger.debug("P6: unreadable persisted disposition on p%d; recomputing", page_num)
 
-    if _TABLE_EMISSION_FAILED_RE.fullmatch(text):
+    withheld = (
+        p is not None and getattr(p, "table_ladder_disposition", None) is FailureMode.TABLE_WITHHELD
+    )
+    if withheld and base.primary_reason is not PagePrimaryReason.STRUCTURE_CLASS:
+        # P1 (owner ruling Q2). Named BEFORE the byte-derived branches below,
+        # because those cannot see this cause. A whole-page withhold falls into
+        # the generic marker family (SHIPPED_FAILURE_MARKER, "socr cannot say
+        # which lane"), and a REGIONAL withhold is not a marker page at all --
+        # it would keep selection's own base, publishing a page whose table was
+        # deliberately removed as an ordinary accepted model output. socr knows
+        # exactly why these bytes look like this, so it says so.
+        #
+        # A page that ALSO shipped the structure-class floor is the exception
+        # above: it keeps ``STRUCTURE_CLASS``, which is the more specific
+        # diagnosis (no attempt authored a grid at all) and -- load-bearing --
+        # is what the resume gate reads to refuse the content-terminal skip for
+        # a floored page. The failure mode still says TABLE_WITHHELD, and the
+        # page still lands in the withheld bucket and note, both of which read
+        # ``PageState.table_ladder_disposition`` first.
+        disposition = PageDisposition(
+            ending=PageEnding.FAIL_CLOSED_MARKER,
+            primary_reason=PagePrimaryReason.TABLE_JUDGE_WITHHELD,
+        )
+    elif _TABLE_EMISSION_FAILED_RE.fullmatch(text):
         # The emission guard's own rewrite outranks whatever branch selected the
         # page: the body it replaced is gone, and the defect it names is the most
         # specific true statement about what shipped.

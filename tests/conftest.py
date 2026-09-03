@@ -38,6 +38,8 @@ The seam is test-only. Production code carries no pre-change path.
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from socr.core.manifest import (
@@ -183,6 +185,16 @@ def old_orthogonal_assemble_buckets(state) -> dict[str, list[int]]:
         for n, p in state.pages.items()
         if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
     )
+    # P1 (owner ruling Q2, 2026-09-03): a FOURTH orthogonal table bucket. Added
+    # to this pre-refactor oracle deliberately, not to make a failing guard go
+    # quiet: the guard's job is to prove the P6 extraction did not change
+    # membership, and a new terminal that did not exist when the oracle was
+    # written is a deliberate extension of the vocabulary, not drift. The three
+    # table buckets stay mutually exclusive because ``_table_ladder_terminal``
+    # returns exactly one mode per page.
+    table_withheld_pages = sorted(
+        n for n, p in state.pages.items() if _table_ladder_terminal(p) == FailureMode.TABLE_WITHHELD
+    )
 
     return {
         "native_only_distrust_pages": native_only_distrust_pages,
@@ -192,6 +204,7 @@ def old_orthogonal_assemble_buckets(state) -> dict[str, list[int]]:
         "chart_detection_failed_pages": chart_detection_failed_pages,
         "table_rejected_pages": table_rejected_pages,
         "table_unverified_pages": table_unverified_pages,
+        "table_withheld_pages": table_withheld_pages,
     }
 
 
@@ -296,3 +309,47 @@ def _p6_bucket_difference_guard(monkeypatch):
 
     _checked_orth.__wrapped__ = getattr(real_orth, "__wrapped__", real_orth)
     monkeypatch.setattr(_orch, "_derive_orthogonal_assemble_buckets", _checked_orth)
+
+
+# ---------------------------------------------------------------------------
+# P1 (owner ruling Q3): the ladder is ON by default from 2026-09-03, so any
+# test that builds a pipeline without overriding ``_build_table_judge_rungs``
+# now constructs REAL rungs -- an ollama HTTP client (used by reader rung 1 AND,
+# on its own model, by the blind-cell adjudicator) and a CLI subprocess.
+#
+# On a developer machine those are present (ollama up, ``agy`` on PATH), so the
+# suite would make live model calls: slow,
+# quota-spending, and above all MACHINE-DEPENDENT in exactly the way
+# CLAUDE.md's #253/#257 note warns about -- the same test would take one path
+# here and a different one in CI, where none of the three exists.
+#
+# This fixture pins the suite to CI's environment: no daemon, no binaries. It
+# does not weaken any assertion and it does not touch the ladder flag -- a
+# test that wants a rung still injects one, exactly as before.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _table_judge_rungs_are_absent(monkeypatch):
+    import httpx
+
+    def _no_daemon(*_args, **_kwargs):
+        raise httpx.ConnectError("no ollama daemon (hermetic test environment)")
+
+    def _no_binary(*_args, **_kwargs):
+        raise FileNotFoundError("judge CLI not installed (hermetic test environment)")
+
+    for module_path, seams in (
+        ("socr.judge.table_rung_ollama", ("_post_chat",)),
+        ("socr.judge.table_rung_gemini", ("_run_gemini_cli", "_run_health_check")),
+    ):
+        module = importlib.import_module(module_path)
+        for seam in seams:
+            monkeypatch.setattr(
+                module,
+                seam,
+                _no_daemon if module_path.endswith("ollama") else _no_binary,
+                raising=True,
+            )
+    monkeypatch.setattr("socr.judge.table_rung_ollama.httpx.get", _no_daemon, raising=True)
+    monkeypatch.setattr("socr.judge.table_rung_gemini.shutil.which", lambda _b: None)

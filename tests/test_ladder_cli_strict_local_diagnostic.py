@@ -104,12 +104,21 @@ class TestProcessDiagnostic:
         out = _invoke_process(pdf, tmp_path / "out2", [])
         assert _DIAGNOSTIC_SUBSTRING not in out
 
-    def test_strict_local_only_does_not_print(self, tmp_path: Path) -> None:
+    def test_strict_local_with_the_ladder_explicitly_off_does_not_print(
+        self, tmp_path: Path
+    ) -> None:
+        """P1 (owner ruling Q3): --strict-local ALONE no longer names the
+        no-ladder case, because the ladder is now on by default -- strict-local
+        plus the default IS the pair the diagnostic is about. The control this
+        test provides (only the PAIR prints) is kept by turning the ladder
+        explicitly off."""
         pdf = _pdf(tmp_path / "src3")
-        out = _invoke_process(pdf, tmp_path / "out3", ["--strict-local"])
+        out = _invoke_process(pdf, tmp_path / "out3", ["--strict-local", "--no-table-judge-ladder"])
         assert _DIAGNOSTIC_SUBSTRING not in out
 
     def test_table_judge_ladder_only_does_not_print(self, tmp_path: Path) -> None:
+        """The other half of the pair: the ladder without strict-local gets the
+        generic no-reader line (a different message), never this one."""
         pdf = _pdf(tmp_path / "src4")
         out = _invoke_process(pdf, tmp_path / "out4", ["--table-judge-ladder"])
         assert _DIAGNOSTIC_SUBSTRING not in out

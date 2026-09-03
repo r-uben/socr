@@ -62,10 +62,44 @@ from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
 from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
-from socr.judge.table_verdict import RUNG_KIND_GEMINI, RUNG_KIND_OLLAMA, rung_kind
+from socr.judge.table_cell_guard import GuardDisposition, evaluate_cell_guard
+from socr.judge.table_rung_ollama import (
+    adjudicator_rung_reachable as table_judge_adjudicator_reachable,
+)
+from socr.judge.table_verdict import (
+    RUNG_KIND_CELL_ADJUDICATOR,
+    RUNG_KIND_GEMINI,
+    RUNG_KIND_OLLAMA,
+    rung_kind,
+)
 from socr.pipeline.agentic import route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
+
+
+def _latched_rung_kinds(state: "DocumentState", page_nums) -> list[str]:
+    """The rung KINDS whose recovery could reopen these pages.
+
+    Cold review round 1, finding 8. The page-level ``table_judge_retry_pending``
+    boolean says only THAT something latched; ``table_judge_retry_rungs`` says
+    WHICH. Reading only the boolean and then naming the adjudicator is wrong
+    whenever the latch belongs to a reader: table A is withheld after a blind
+    mismatch while table B on the same page could not reach ``gemini``, and the
+    page reducer yields WITHHELD plus a ``gemini`` latch. Telling that user the
+    adjudicator was unavailable sends them to fix the wrong provider.
+
+    Returns [] when nothing latched, so callers can say nothing rather than
+    guess. A latched page written before the kind list existed contributes no
+    kind, which reads as "unspecified" rather than as a false name.
+    """
+    kinds: set[str] = set()
+    for num in page_nums:
+        ps = state.pages.get(num)
+        if not getattr(ps, "table_judge_retry_pending", False):
+            continue
+        kinds.update(k for k in (getattr(ps, "table_judge_retry_rungs", []) or []) if k)
+    return sorted(kinds)
+
 
 #: Exact PageDisposition contract pairs for the three migrated buckets (P6 stage C).
 _MIGRATED_DISPOSITION_BUCKETS: dict[str, PageDisposition] = {
@@ -334,9 +368,23 @@ def _table_judge_prompt_digest() -> str:
     import hashlib
 
     from socr.judge.table_prompt import load_table_judge_prompt, load_table_judge_scope_note
+    from socr.judge.table_verdict import load_cell_ref_examples, load_cell_ref_grammar
 
     try:
-        blob = load_table_judge_prompt() + "\0" + load_table_judge_scope_note("page")
+        # Cold review round 2, N1: the coordinate grammar is spliced in from
+        # its own file, so a wording-only edit THERE changes what every rung is
+        # asked without touching this template. It is part of the prompt's
+        # identity and must move the digest. Round 4 split the worked examples
+        # into a second reader-only file; both are spliced here, so both count.
+        blob = (
+            load_table_judge_prompt()
+            + "\0"
+            + load_table_judge_scope_note("page")
+            + "\0"
+            + load_cell_ref_grammar()
+            + "\0"
+            + load_cell_ref_examples()
+        )
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
     except OSError:
         # An unreadable prompt file must not silently degrade to "no prompt
@@ -365,6 +413,30 @@ def _cell_transcribe_prompt_digest() -> str:
         import uuid
 
         return f"unreadable-cell-transcribe-prompt:{uuid.uuid4().hex}"
+
+
+def _table_cells_transcribe_prompt_digest() -> str:
+    """SHA-256 of the blind cell-transcription prompt, read at call time.
+
+    P1: a wording-only edit to ``prompts/table_cells_transcribe.md`` changes
+    what the adjudicator is asked, and therefore what can clear a table,
+    without moving any identity or timeout knob. Same non-caching rule as
+    ``_table_judge_prompt_digest``.
+    """
+    import hashlib
+
+    from socr.judge.table_rung_ollama import load_table_cells_transcribe_prompt
+    from socr.judge.table_verdict import load_cell_ref_grammar
+
+    try:
+        # The spliced coordinate grammar is part of what the adjudicator is
+        # asked (cold review round 2, N1).
+        blob = load_table_cells_transcribe_prompt() + "\0" + load_cell_ref_grammar()
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except OSError:
+        import uuid
+
+        return f"unreadable-table-cells-transcribe-prompt:{uuid.uuid4().hex}"
 
 
 class _LatchedDocMetadata:
@@ -501,7 +573,14 @@ def _resume_skippable(
 #: ``_LADDER_TERMINAL_FAILURE_MODES`` -- that name is private to C3's guard
 #: and this predicate reads a different (pre-guard) surface, see
 #: ``_table_ladder_terminal`` below.
-_LADDER_TERMINAL_MODES = (FailureMode.TABLE_REJECTED, FailureMode.TABLE_UNVERIFIED)
+_LADDER_TERMINAL_MODES = (
+    FailureMode.TABLE_REJECTED,
+    FailureMode.TABLE_UNVERIFIED,
+    # P1 (owner ruling Q2): the fourth terminal. Listed FIRST-class here,
+    # not folded into TABLE_REJECTED, because the bucket a page lands in is
+    # what the CLI summary and the document status derivation read.
+    FailureMode.TABLE_WITHHELD,
+)
 
 
 def _table_ladder_terminal(p) -> FailureMode | None:
@@ -542,6 +621,7 @@ _ORTHOGONAL_ASSEMBLE_BUCKET_NAMES = (
     "chart_detection_failed_pages",
     "table_rejected_pages",
     "table_unverified_pages",
+    "table_withheld_pages",
 )
 
 
@@ -598,6 +678,13 @@ def _derive_orthogonal_assemble_buckets(state: DocumentState) -> dict[str, list[
         for n, p in state.pages.items()
         if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
     )
+    # P1: mutually exclusive with the other two by construction --
+    # ``_table_ladder_terminal`` returns exactly one mode per page, and the
+    # page reducer's precedence (WITHHELD > REJECTED > UNVERIFIED) decides
+    # which one a mixed page carries.
+    table_withheld_pages = sorted(
+        n for n, p in state.pages.items() if _table_ladder_terminal(p) == FailureMode.TABLE_WITHHELD
+    )
 
     return {
         "native_only_distrust_pages": native_only_distrust_pages,
@@ -607,6 +694,7 @@ def _derive_orthogonal_assemble_buckets(state: DocumentState) -> dict[str, list[
         "chart_detection_failed_pages": chart_detection_failed_pages,
         "table_rejected_pages": table_rejected_pages,
         "table_unverified_pages": table_unverified_pages,
+        "table_withheld_pages": table_withheld_pages,
     }
 
 
@@ -1068,6 +1156,23 @@ class UnifiedPipeline:
             # a previously lifted sidecar.
             "cell_transcribe_prompt_digest": (
                 _cell_transcribe_prompt_digest() if cfg.table_judge_ladder else None
+            ),
+            # P1: the blind cell-transcription adjudicator. Its identity, its
+            # per-call cost and its prompt all change what a table page ends up
+            # labelled, so a resumed run must not reuse a page judged under a
+            # different adjudicator. Gated on the ladder flag exactly like the
+            # rung entries above: with the ladder off none of it runs.
+            "table_judge_adjudicator_model": (
+                cfg.table_judge_adjudicator_model if cfg.table_judge_ladder else None
+            ),
+            "table_judge_adjudicator_host": (
+                cfg.table_judge_adjudicator_host if cfg.table_judge_ladder else None
+            ),
+            "table_judge_adjudicator_cost_per_call_usd": (
+                cfg.table_judge_adjudicator_cost_per_call_usd if cfg.table_judge_ladder else None
+            ),
+            "table_cells_transcribe_prompt_digest": (
+                _table_cells_transcribe_prompt_digest() if cfg.table_judge_ladder else None
             ),
             # --- figures ---
             # ``save_figures`` controls PNG extraction + image-ref embedding.
@@ -3491,9 +3596,44 @@ class UnifiedPipeline:
             for n, p in state.pages.items()
             if _table_ladder_terminal(p) == FailureMode.TABLE_UNVERIFIED
         )
-        if not rejected and not unverified:
+        # P1 (owner ruling Q2): the withhold terminal gets its own clause, and
+        # it says the thing the other two do not -- the table's BYTES did not
+        # ship. A consumer gating on metadata.json must be able to tell "we
+        # shipped this table but distrust it" from "we did not ship it".
+        withheld = sorted(
+            n
+            for n, p in state.pages.items()
+            if _table_ladder_terminal(p) == FailureMode.TABLE_WITHHELD
+        )
+        if not rejected and not unverified and not withheld:
             return None
         parts = []
+        if withheld:
+            # Name the rung(s) the latch actually recorded (cold review round 1,
+            # finding 8) -- never a fixed "adjudicator", which is a guess that is
+            # wrong exactly when a sibling table latched on a reader.
+            latched_kinds = _latched_rung_kinds(state, withheld)
+            latched = any(
+                getattr(state.pages.get(n), "table_judge_retry_pending", False) for n in withheld
+            )
+            if latched_kinds:
+                retry_note = (
+                    f"; rung(s) {', '.join(latched_kinds)} were unavailable, "
+                    "so this is retryable on resume"
+                )
+            elif latched:
+                retry_note = (
+                    "; a table-judge rung was unavailable (kind not recorded), "
+                    "so this is retryable on resume"
+                )
+            else:
+                retry_note = ""
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in withheld)}: "
+                f"{FailureMode.TABLE_WITHHELD.value} (table judge ladder rejected it and "
+                "neither the geometry guard nor a blind cell transcription cleared it; "
+                f"the table's content was WITHHELD, not shipped{retry_note})"
+            )
         if rejected:
             parts.append(
                 f"page(s) {', '.join(str(n) for n in rejected)}: "
@@ -4039,6 +4179,23 @@ class UnifiedPipeline:
     #: "which rung recovered" question has one list to widen to.
     TABLE_JUDGE_RUNG_KINDS: tuple[str, ...] = (RUNG_KIND_OLLAMA, RUNG_KIND_GEMINI)
 
+    #: Every kind that owns a probe of its own -- the two READER rungs plus the
+    #: blind-cell ADJUDICATOR. Cold review round 1, finding 2: the adjudicator
+    #: is latchable, so it must also be ASKABLE. Filtering the persisted kinds
+    #: through the reader-only tuple erased ``"adjudicator"`` from the record
+    #: and then widened the question to "is any reader up", which is the wrong
+    #: provider in both directions -- a live reader reopened a document whose
+    #: adjudicator was still down (re-paying the same failure every resume),
+    #: and a recovered adjudicator never reopened one whose readers were down.
+    #: This tuple is what the record is filtered through; the READER tuple
+    #: above stays reader-only, because "can anyone READ this table" is a
+    #: different question and the adjudicator never answers it.
+    TABLE_JUDGE_PROBEABLE_KINDS: tuple[str, ...] = (
+        RUNG_KIND_OLLAMA,
+        RUNG_KIND_GEMINI,
+        RUNG_KIND_CELL_ADJUDICATOR,
+    )
+
     def _table_judge_rung_available_now(self, rung_kinds: list[str] | None = None) -> bool:
         """Whether a table-judge rung worth retrying is attemptable now.
 
@@ -4059,6 +4216,11 @@ class UnifiedPipeline:
 
         * ``ollama`` -- daemon up AND the configured judge model actually pulled.
         * ``gemini`` -- on PATH AND a trivial no-model health invocation succeeds.
+        * ``adjudicator`` -- daemon up AND the configured ADJUDICATOR model
+          pulled. Its own model, on its own host field: the adjudicator shares
+          a transport with reader rung 1 but not a model, so rung 1 being
+          reachable is no evidence at all about it (cold review round 1,
+          finding 2).
 
         Both rungs are cloud rungs, so the ladder and ``strict_local`` gates
         are checked before touching either external seam.
@@ -4075,7 +4237,7 @@ class UnifiedPipeline:
         # than an empty one does, so it widens the same way. A record that also
         # names a real kind keeps that kind alone -- the unknown adds no
         # information, the real kind does.
-        probeable = [k for k in kinds if k in self.TABLE_JUDGE_RUNG_KINDS]
+        probeable = [k for k in kinds if k in self.TABLE_JUDGE_PROBEABLE_KINDS]
         kinds = probeable or list(self.TABLE_JUDGE_RUNG_KINDS)
         return any(self._table_judge_rung_kind_available_now(kind) for kind in kinds)
 
@@ -4113,6 +4275,13 @@ class UnifiedPipeline:
                     table_judge_ollama_rung_reachable(
                         self.config.table_judge_rung1_model,
                         self.config.table_judge_rung1_host,
+                    )
+                )
+            if kind == RUNG_KIND_CELL_ADJUDICATOR:
+                return bool(
+                    table_judge_adjudicator_reachable(
+                        self.config.table_judge_adjudicator_model,
+                        self.config.table_judge_adjudicator_host,
                     )
                 )
         except Exception as exc:
@@ -4310,17 +4479,28 @@ class UnifiedPipeline:
     # (ruling 4: crop + markdown, nothing else).
     # ------------------------------------------------------------------
 
-    def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
+    def _binding_evidence_for_witness(self, state: DocumentState, page_num: int, witness):
         """Run the mechanical binding check for one LOCATED witness.
 
-        Returns the ``BindingResult`` when a GH-273-class contradiction was
-        found, else None (no box, no native words, an unparseable
-        candidate, or nothing checkable disagreed). Never raises: a
-        page-open/geometry failure is logged and treated as an absence of
-        evidence.
+        P1 refactor. Returns ``(BindingResult | None, BindingEvidence)``.
+
+        The old helper was contradiction-only: it returned a ``BindingResult``
+        iff a GH-273-class contradiction fired and ``None`` otherwise, which
+        gave the caller no way to distinguish "structurally proven correct"
+        from "nothing was checkable". The ruled guard chain needs exactly that
+        distinction -- a PASS overrules a reader, an ABSTAIN falls through to
+        the blind-cell adjudicator -- so the classification is now typed and
+        the contradiction question is a caller-side predicate.
+
+        The E1 clamp is UNCHANGED by this: its caller still asks only
+        "is this CONTRADICT?", which is the same set of results the old helper
+        returned truthily. Never raises: a page-open/geometry failure is
+        logged and treated as an absence of evidence (ABSTAIN).
         """
+        from socr.tables.binding import BindingEvidence, classify_binding_evidence
+
         if witness.box is None:
-            return None
+            return None, BindingEvidence.ABSTAIN
 
         from socr.core.pdf import open_pdf
         from socr.tables.binding import bind
@@ -4335,9 +4515,9 @@ class UnifiedPipeline:
                 type(exc).__name__,
                 exc,
             )
-            return None
+            return None, BindingEvidence.ABSTAIN
         if not words:
-            return None
+            return None, BindingEvidence.ABSTAIN
 
         try:
             binding_result = bind(words, witness.markdown, region=witness.box.bbox)
@@ -4350,13 +4530,224 @@ class UnifiedPipeline:
                 exc,
                 exc_info=True,
             )
-            return None
+            return None, BindingEvidence.ABSTAIN
 
-        # GH-359 ruling 5: fully_checked is not a gate. Only a genuine
-        # cell/label contradiction withholds acceptance.
+        return binding_result, classify_binding_evidence(binding_result)
+
+    def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
+        """The E1 clamp's question, unchanged: is there a genuine contradiction?
+
+        Returns the ``BindingResult`` when ``bind()`` found a GH-273-class
+        contradiction, else None. GH-359 ruling 5 is preserved verbatim:
+        ``fully_checked`` is not a gate, so a structurally clean binding is
+        still None here -- only a cell/row-label contradiction withholds
+        acceptance.
+        """
+        binding_result, _evidence = self._binding_evidence_for_witness(state, page_num, witness)
+        if binding_result is None:
+            return None
         if binding_result.contradicted_cells or binding_result.row_label_contradictions:
             return binding_result
         return None
+
+    def _build_table_cell_adjudicator(self):
+        """The blind-cell adjudicator callable, or None when it cannot run.
+
+        ``strict_local`` forbids cloud egress and the adjudicator is a cloud
+        CLI, so it is not built at all there -- the guard chain then falls
+        through to its fail-closed terminal without ever attempting egress,
+        exactly as ``_build_table_judge_rungs`` does for the readers. A
+        separate method so tests can inject a fake without a real binary.
+        """
+        if not self.config.table_judge_ladder or self.config.strict_local:
+            return None
+        from socr.judge.table_rung_ollama import make_ollama_cell_adjudicator
+
+        return make_ollama_cell_adjudicator(
+            self.config.table_judge_adjudicator_model,
+            self.config.table_judge_adjudicator_host,
+            self.config.table_judge_timeout_sec,
+        )
+
+    def _any_table_judge_reader_reachable(self) -> bool:
+        """Whether ANY READER rung could look at a table right now.
+
+        Reader-only by construction (critique t3): the blind-cell adjudicator
+        answers "what token is in this cell", never "is this table faithful",
+        so its reachability must not satisfy the predicate that decides
+        whether tables can be judged at all. The startup diagnostic and this
+        share one answer so they cannot disagree.
+        """
+        return any(
+            self._table_judge_rung_kind_available_now(kind) for kind in self.TABLE_JUDGE_RUNG_KINDS
+        )
+
+    @staticmethod
+    def _doubted_cell_refs(result) -> list[str]:
+        """The cell references the READERS themselves named, in order.
+
+        Q1 reads the two low-confidence PASSes' ``doubts`` (the PASS-legal,
+        value-free field the verdict schema gained for exactly this); Q2 reads
+        the FAIL verdicts' ``findings[].where``. Both are filtered through the
+        canonical grammar, so a structural finding that names a region rather
+        than a cell (``NOT_A_TABLE``, a prose-only ``STRUCTURE_MERGED``)
+        contributes nothing -- and a table whose ONLY complaints are
+        structural therefore cannot be cleared by a cell transcription. That
+        is fail-closed on purpose: clearing a table on the subset of cells
+        that happened to be checkable would answer a question nobody asked.
+        """
+        from socr.judge.table_verdict import parse_cell_ref
+
+        refs: list[str] = []
+        for rr in getattr(result, "rung_results", []) or []:
+            verdict = getattr(rr, "verdict", None)
+            if verdict is None:
+                continue
+            candidates = list(getattr(verdict, "doubts", []) or [])
+            candidates += [f.where for f in (getattr(verdict, "findings", []) or []) if f.where]
+            for candidate in candidates:
+                try:
+                    parse_cell_ref(candidate)
+                except (ValueError, TypeError):
+                    continue
+                if candidate not in refs:
+                    refs.append(candidate)
+        return refs
+
+    def _resolve_table_guard_chain(
+        self,
+        state: DocumentState,
+        page_num: int,
+        witness,
+        result,
+        evidence,
+        adjudicator,
+        guard_reason_by_table: dict,
+        guard_detail_by_table: dict,
+        guard_cleared_ids: set,
+        guard_unavailable_kinds: set,
+    ):
+        """P1: finish the two ruled terminals the ladder cannot settle alone.
+
+        GH-575, implemented literally after cold review round 1, finding 1.
+        There is exactly ONE state machine and both callers share it:
+
+        * ``BindingEvidence.PASS`` -- geometry checked rows AND columns and
+          nothing disagreed. ACCEPTED, "verified by geometry", on both paths.
+        * ``BindingEvidence.CONTRADICT`` -- geometry ACTIVELY disagrees.
+          UNVERIFIED on both paths, and **the adjudicator does not run**. The
+          previous build continued past a contradiction on the REJECTED path,
+          which let a lucky blind token publish a table that native geometry
+          had just contradicted, labelled "verified by blind cell
+          transcription". The adjudicator therefore sees only ABSTAIN cases.
+        * blind transcription MISMATCHED -- the adjudicator looked and read
+          something else. This is the ONLY route to WITHHELD, and only when
+          the readers had already rejected the table. Two independent
+          refusals of the same bytes is the bar the ruling sets.
+        * anything else that fails to clear -- an empty or unresolvable doubt
+          set, no adjudicator, an outage, a refusal, a malformed answer, a
+          budget refusal, or an internal error -- UNVERIFIED. Nobody
+          established anything against the table, so it keeps its bytes and
+          its label. Only the OUTAGE and REFUSAL cases latch for retry; a
+          budget refusal and a deterministic defect reproduce identically and
+          would make the document permanently unskippable for nothing.
+
+        Never raises; every failure inside the chain is fail-closed.
+        """
+        from socr.judge.table_ladder import TableLadderOutcome, TableLadderPending
+        from socr.judge.table_verdict import (
+            REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION,
+            REASON_VERIFIED_BY_GEOMETRY,
+            resolve_cell_refs,
+        )
+
+        two_low = getattr(result, "pending", None) is TableLadderPending.TWO_LOW_PASS
+        rejected = result.outcome is TableLadderOutcome.REJECTED
+        if not (two_low or rejected):
+            return result
+
+        refs = self._doubted_cell_refs(result)
+        resolved = resolve_cell_refs(witness.markdown, refs) if refs else {}
+        extraction_tokens = (
+            {str(ref): token for ref, token in resolved.items()} if resolved is not None else {}
+        )
+
+        def _unverified():
+            """The shared fail-closed terminal: labelled, bytes kept."""
+            if result.outcome is TableLadderOutcome.UNVERIFIED:
+                return result
+            return replace(result, outcome=TableLadderOutcome.UNVERIFIED, final_verdict=None)
+
+        # Cold review round 1, finding 3: the adjudicator goes through the SAME
+        # per-run breaker as the readers. A quota or credential refusal is not a
+        # per-table fact -- the next table, and the next document in the batch,
+        # gets the identical answer -- so once it has refused us on a real call
+        # nothing else in this run pays for it again. The page still latches, so
+        # a LATER run retries.
+        #
+        # Cold review round 2, N3: the suppression is passed DOWN rather than
+        # latched here. Only the guard knows whether this particular table
+        # would have reached the adjudicator at all; a table geometry cleared
+        # or contradicted, or one whose readers localized nothing, must not be
+        # marked retryable for a call it was never going to make.
+        live_adjudicator = adjudicator
+        suppressed = adjudicator is not None and (
+            RUNG_KIND_CELL_ADJUDICATOR in self._table_rung_refused_this_run
+        )
+        if suppressed:
+            live_adjudicator = None
+
+        try:
+            decision = evaluate_cell_guard(
+                state=state,
+                page_num=page_num,
+                crop_path=witness.crop_path,
+                extraction_tokens=extraction_tokens,
+                requested_refs=refs,
+                geometry_evidence=evidence,
+                adjudicator=live_adjudicator,
+                config=self.config,
+                adjudicator_suppressed=suppressed,
+            )
+        except Exception as exc:
+            logger.warning(
+                "table guard chain errored on p%d table %s (%s: %s); fail closed",
+                page_num,
+                witness.table_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            guard_detail_by_table[witness.table_id] = f"guard chain error: {type(exc).__name__}"
+            # An internal error is not evidence against the table (GH-575).
+            return _unverified()
+
+        guard_detail_by_table[witness.table_id] = decision.detail
+        if decision.unavailable:
+            guard_unavailable_kinds.add(RUNG_KIND_CELL_ADJUDICATOR)
+        if decision.refusal and RUNG_KIND_CELL_ADJUDICATOR not in (
+            self._table_rung_refused_this_run
+        ):
+            logger.info(
+                "blind-cell adjudicator refused (%s); not called again this run",
+                decision.detail,
+            )
+            self._table_rung_refused_this_run.add(RUNG_KIND_CELL_ADJUDICATOR)
+
+        if decision.disposition is GuardDisposition.VERIFIED_BY_GEOMETRY:
+            guard_reason_by_table[witness.table_id] = REASON_VERIFIED_BY_GEOMETRY
+        elif decision.disposition is GuardDisposition.VERIFIED_BY_BLIND_CELL_TRANSCRIPTION:
+            guard_reason_by_table[witness.table_id] = REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION
+        elif rejected and decision.disposition is GuardDisposition.MISMATCHED:
+            # The ONLY route to WITHHELD: the readers rejected the table, the
+            # binding check did not clear it, and a blind third vendor read a
+            # different token out of the crop.
+            return replace(result, outcome=TableLadderOutcome.WITHHELD, final_verdict=None)
+        else:
+            return _unverified()
+
+        guard_cleared_ids.add(witness.table_id)
+        return replace(result, outcome=TableLadderOutcome.ACCEPTED)
 
     def _run_table_judge_gate(
         self,
@@ -4418,14 +4809,27 @@ class UnifiedPipeline:
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
             TABLE_LADDER_UNVERIFIED_KIND,
+            TABLE_LADDER_WITHHELD_KIND,
             RungResult,
             is_availability_exception,
         )
-        from socr.tables.binding import BindingResult
+        from socr.tables.binding import BindingEvidence, BindingResult
         from socr.tables.witness import WitnessScope, prepare_table_witnesses
 
         # table_id -> BindingResult iff bind() found a GH-273-class contradiction.
         forced_by_binding: dict = {}
+        # P1: table_id -> the acceptance reason the ruled guard chain produced
+        # (empty for an ordinary ladder acceptance -- the two values name the
+        # two ways the READERS were overruled, which is a different fact).
+        guard_reason_by_table: dict[str, str] = {}
+        guard_detail_by_table: dict[str, str] = {}
+        #: Tables the guard chain cleared. Exempt from the E1 clamp below --
+        #: see the comment at the clamp for why that is not a hole.
+        guard_cleared_ids: set[str] = set()
+        #: Rung kinds the guard chain found unavailable, merged into the P1
+        #: latch alongside the reader kinds.
+        guard_unavailable_kinds: set[str] = set()
+        adjudicator = self._build_table_cell_adjudicator()
         markdown_by_table: dict[str, str] = {}
         scope_by_table: dict[str, str] = {}
         # table_id -> the callables that ACTUALLY ran for it, in call order.
@@ -4457,7 +4861,7 @@ class UnifiedPipeline:
                         )
                         continue
 
-                    binding = self._binding_contradiction_for_witness(state, page_num, witness)
+                    binding, evidence = self._binding_evidence_for_witness(state, page_num, witness)
                     if isinstance(binding, BindingResult) and (
                         binding.contradicted_cells or binding.row_label_contradictions
                     ):
@@ -4494,6 +4898,22 @@ class UnifiedPipeline:
                             )
                         executed_rungs_by_table[witness.table_id] = list(live_rungs)
                         self._record_table_rung_refusals(live_rungs, ladder_result)
+                        # P1 (owner rulings Q1/Q2): the two soft terminals are
+                        # not settled by the ladder. Run the ruled guard chain
+                        # HERE, inside the witness context manager, because the
+                        # crop is a temp file the context owns.
+                        ladder_result = self._resolve_table_guard_chain(
+                            state,
+                            page_num,
+                            witness,
+                            ladder_result,
+                            evidence,
+                            adjudicator,
+                            guard_reason_by_table,
+                            guard_detail_by_table,
+                            guard_cleared_ids,
+                            guard_unavailable_kinds,
+                        )
                         table_results.append(ladder_result)
                     except Exception as exc:
                         logger.warning(
@@ -4565,6 +4985,11 @@ class UnifiedPipeline:
             for rr in result.rung_results
             if rr.unavailable
         }
+        # P1: an adjudicator outage is a retry reason in exactly the same way a
+        # reader outage is -- the page could not be decided for a transient
+        # external cause. A deterministic guard defect and a budget refusal are
+        # NOT in this set and must never latch.
+        unavailable_kinds |= guard_unavailable_kinds
         if unavailable_kinds:
             ps.table_judge_retry_pending = True
             ps.table_judge_retry_rungs = sorted(unavailable_kinds)
@@ -4584,6 +5009,15 @@ class UnifiedPipeline:
         }
         for table_id, binding in forced_by_binding.items():
             if table_id not in accepted_ids:
+                continue
+            if table_id in guard_cleared_ids:
+                # P1: this table was accepted by the ruled guard chain, which
+                # already consulted the SAME binding evidence first and then
+                # got an independent blind transcription of the exact cells in
+                # doubt. Re-clamping it here would make the ruling inert on
+                # the one path it was written for (Q2's "binding check passes
+                # ... else the adjudicator"), and would re-pay the GH-367
+                # adjudication for evidence already gathered.
                 continue
             record = self._adjudicate_clamped_table(
                 state,
@@ -4616,6 +5050,7 @@ class UnifiedPipeline:
                 forced_by_binding.get(result.table_id) is not None
                 and result.outcome is TableLadderOutcome.ACCEPTED
                 and result.table_id not in lifted_ids
+                and result.table_id not in guard_cleared_ids
             ):
                 result = replace(result, outcome=TableLadderOutcome.UNVERIFIED)
             clamped_results.append(result)
@@ -4625,7 +5060,21 @@ class UnifiedPipeline:
             unwitnessed = False
             if result.outcome is TableLadderOutcome.ACCEPTED:
                 kind = TABLE_LADDER_ACCEPTED_KIND
-                detail = f"table {result.table_id} accepted by the judge ladder"
+                reason = guard_reason_by_table.get(result.table_id, "")
+                if reason:
+                    detail = (
+                        f"table {result.table_id} accepted: the readers were overruled "
+                        f"({guard_detail_by_table.get(result.table_id, reason)})"
+                    )
+                else:
+                    detail = f"table {result.table_id} accepted by the judge ladder"
+            elif result.outcome is TableLadderOutcome.WITHHELD:
+                kind = TABLE_LADDER_WITHHELD_KIND
+                detail = (
+                    f"table {result.table_id} WITHHELD: the readers rejected it and neither "
+                    f"guard cleared it ({guard_detail_by_table.get(result.table_id, 'not cleared')}) "
+                    "-- no table bytes ship for this region"
+                )
             elif result.outcome is TableLadderOutcome.REJECTED:
                 kind = TABLE_LADDER_REJECTED_KIND
                 detail = f"table {result.table_id} rejected by the judge ladder (content problem, not retryable)"
@@ -4710,6 +5159,13 @@ class UnifiedPipeline:
                         "table_id": result.table_id,
                         "rung_trail": rung_trail,
                         "witness_scope": scope_by_table.get(result.table_id, "none"),
+                        # P1: the two overruling reasons. Absent on an ordinary
+                        # ladder acceptance, which is a different fact.
+                        **(
+                            {"reason": guard_reason_by_table[result.table_id]}
+                            if guard_reason_by_table.get(result.table_id)
+                            else {}
+                        ),
                         # GH-560: stated, not left to be inferred from an empty
                         # rung_trail by every consumer separately.
                         **({"retryable": False} if unwitnessed else {}),
@@ -4718,7 +5174,9 @@ class UnifiedPipeline:
             )
 
         page_result = reduce_page_ladder(table_results)
-        if page_result.outcome is TableLadderOutcome.REJECTED:
+        if page_result.outcome is TableLadderOutcome.WITHHELD:
+            ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+        elif page_result.outcome is TableLadderOutcome.REJECTED:
             ps.table_ladder_disposition = FailureMode.TABLE_REJECTED
         elif page_result.outcome is TableLadderOutcome.UNVERIFIED:
             ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
@@ -5803,6 +6261,25 @@ class UnifiedPipeline:
             # (assemble catches residual markdown tables those pages still emit).
             if self.config.table_judge_ladder:
                 self._run_table_judge_gate(state, page_num, ps, bo, _table_judge_rungs)
+                # P1 (owner ruling Q2): a withheld page ships a failure marker
+                # in place of the table, so the human's ONLY route back to the
+                # numbers is the page image. Rendered here, right after the
+                # gate, because every other floor's PNG decision is made
+                # earlier in this loop and none of them can see a disposition
+                # the gate has not produced yet. Only when no ref exists: an
+                # earlier floor may already have rendered one for this page.
+                if (
+                    ps.table_ladder_disposition is FailureMode.TABLE_WITHHELD
+                    and not getattr(ps, "d3_floor_png_ref", "")
+                    and _chart_figures_dir is not None
+                ):
+                    ps.d3_floor_png_ref = self._render_d3_floor_png(
+                        state.handle.path,
+                        page_num,
+                        _chart_figures_dir,
+                        stem="failed_table",
+                        label="Failed table page",
+                    )
 
             # GH-318: this page's chart-vs-table routing was never decided --
             # the eligibility detector raised and the page fell through to the
@@ -7842,11 +8319,40 @@ class UnifiedPipeline:
             floor_shipped = (
                 winning.get("failure_mode") == FailureMode.STRUCTURE_CLASS_LADDER_EXHAUSTED.value
             )
-            is_ladder_rejected = (
-                disposition_raw == FailureMode.TABLE_REJECTED.value
+            # P1 (owner ruling Q2): WITHHELD is a CONTENT terminal for exactly
+            # the same reason REJECTED is -- the readers looked and said no, and
+            # then two independent guards failed to overrule them. It gets the
+            # same exception, forfeited under the same two conditions. The one
+            # extra thing it needs is below: a withheld page's fragment may BE a
+            # whole-page failure marker (that is what withholding produces when
+            # the GH-520 coverage proof does not hold), and the unconditional
+            # marker refusal further down would otherwise defeat the exception
+            # silently and re-judge the page forever.
+            is_content_terminal = (
+                disposition_raw
+                in (FailureMode.TABLE_REJECTED.value, FailureMode.TABLE_WITHHELD.value)
                 and not bool(meta.get("table_ladder_incomplete"))
                 and not floor_shipped
             )
+            if is_content_terminal and disposition_raw == FailureMode.TABLE_WITHHELD.value:
+                # A withheld page that ALSO shipped the structure-class floor
+                # forfeits the exception, the same way a REJECTED one does. The
+                # shipped failure mode now says TABLE_WITHHELD on both, so the
+                # floor is read from the persisted page DISPOSITION instead --
+                # ``_select_and_finalize_page`` deliberately keeps
+                # ``STRUCTURE_CLASS`` there for exactly this. A floored page is
+                # never skippable: nothing authored a grid, so "we read the
+                # table and rejected it" is not what happened.
+                persisted = meta.get("disposition")
+                if (
+                    isinstance(persisted, dict)
+                    and persisted.get("primary_reason") == "structure_class"
+                ):
+                    is_content_terminal = False
+            is_ladder_withheld = (
+                is_content_terminal and disposition_raw == FailureMode.TABLE_WITHHELD.value
+            )
+            is_ladder_rejected = is_content_terminal
 
             if not is_ladder_rejected:
                 # Status MUST be SUCCESS.  A page written terminal at assemble time
@@ -7881,7 +8387,14 @@ class UnifiedPipeline:
                 return None
 
             # A page-failure marker body is honesty, not content: never skip it.
-            if not body.strip() or is_page_failed_marker(body):
+            # P1 exception: a WITHHELD page's marker is not an unfinished page,
+            # it is the finished, ruled outcome -- the table's bytes were
+            # deliberately not shipped. Refusing it here would make every
+            # withheld page reprocess on every resume and never converge, which
+            # is the failure the content-terminal exception exists to prevent.
+            if not body.strip():
+                return None
+            if is_page_failed_marker(body) and not is_ladder_withheld:
                 return None
 
             try:
@@ -8435,6 +8948,7 @@ class UnifiedPipeline:
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
             TABLE_LADDER_UNVERIFIED_KIND,
+            TABLE_LADDER_WITHHELD_KIND,
         )
         from socr.tables.reconcile import find_table_blocks
 
@@ -8442,6 +8956,12 @@ class UnifiedPipeline:
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
             TABLE_LADDER_UNVERIFIED_KIND,
+            # P1: a withheld table WAS witnessed and WAS adjudicated -- it is a
+            # terminal like any other. Omitting it here would make assemble
+            # believe no terminal exists for that table, add a second
+            # UNVERIFIED event for it, and mark every withheld page incomplete
+            # -- which then forfeits the resume exception forever.
+            TABLE_LADDER_WITHHELD_KIND,
         }
         observed: set[tuple[int, str]] = set()
         for event in state.events:
@@ -8452,10 +8972,21 @@ class UnifiedPipeline:
                 observed.add((event.page_num, table_id))
 
         for page_num, page_text in enumerate(page_texts, start=1):
-            if not page_text or is_page_failed_marker(page_text):
-                continue
             page_state = state.pages.get(page_num)
             if page_state is None:
+                continue
+            # P1: a WITHHELD page's shipped text is the fail-closed rewrite --
+            # the table bytes are gone by design. Enumerating blocks from it
+            # would find none, and the completeness sweep would conclude every
+            # table was witnessed. Enumerate from what the page EMITTED
+            # instead, so a sibling table nobody looked at is still caught and
+            # the page still forfeits the resume skip.
+            if page_state.table_ladder_disposition is FailureMode.TABLE_WITHHELD:
+                emitted = page_state.best_output.text if page_state.best_output else ""
+                page_text = emitted or page_text
+            elif not page_text or is_page_failed_marker(page_text):
+                continue
+            if not page_text:
                 continue
             for table_index, _block in enumerate(find_table_blocks(page_text)):
                 table_id = f"p{page_num}-t{table_index}"
@@ -8466,7 +8997,14 @@ class UnifiedPipeline:
                 # table keeps that content verdict, but this flag withholds
                 # D1b's resume skip so the unwitnessed table is looked at.
                 page_state.table_ladder_incomplete = True
-                if page_state.table_ladder_disposition is not FailureMode.TABLE_REJECTED:
+                # P1: WITHHELD joins REJECTED as a page-level verdict the
+                # backfill must not overwrite. Both are stronger statements
+                # than "unverified", and the completeness miss is recorded by
+                # the flag above, not by weakening the disposition.
+                if page_state.table_ladder_disposition not in (
+                    FailureMode.TABLE_REJECTED,
+                    FailureMode.TABLE_WITHHELD,
+                ):
                     page_state.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
                 state.events.append(
                     AuditEvent(
@@ -8583,6 +9121,7 @@ class UnifiedPipeline:
         chart_detection_failed_pages = orthogonal_buckets["chart_detection_failed_pages"]
         table_rejected_pages = orthogonal_buckets["table_rejected_pages"]
         table_unverified_pages = orthogonal_buckets["table_unverified_pages"]
+        table_withheld_pages = orthogonal_buckets["table_withheld_pages"]
 
         def _kept_defect(page_num: int) -> str:
             # ``best_output``, not the finalized record (cold review round 2,
@@ -8790,7 +9329,17 @@ class UnifiedPipeline:
         # reasoning as every other pairing above: one bucket per disposition,
         # because they need distinct audit kinds, CLI wording and (D1b,
         # later) distinct resume policy.
-        pages_ok = pages_ok and not table_rejected_pages and not table_unverified_pages
+        # P1 (owner ruling Q2): a withheld page can never be part of a clean
+        # document. Whether the result is AUDIT_FAILED or ERROR is then decided
+        # by ``has_text`` below, unchanged: a regional withhold that kept its
+        # prose still has text (AUDIT_FAILED), while a page withheld whole ships
+        # only the marker and follows the existing no-content ERROR rule.
+        pages_ok = (
+            pages_ok
+            and not table_rejected_pages
+            and not table_unverified_pages
+            and not table_withheld_pages
+        )
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -8814,6 +9363,7 @@ class UnifiedPipeline:
             or value_drift_pages
             or table_rejected_pages
             or table_unverified_pages
+            or table_withheld_pages
         ):
             from socr.core.audit_log import AuditEvent
 
@@ -9074,6 +9624,29 @@ class UnifiedPipeline:
                         f" floor (unverifiable region → explicit failure marker): "
                         f"{d3_floor_pages}[/red]"
                     )
+                if table_withheld_pages:
+                    _withheld_latched = [
+                        n
+                        for n in table_withheld_pages
+                        if getattr(state.pages.get(n), "table_judge_retry_pending", False)
+                    ]
+                    console.print(
+                        f"  [red]{len(table_withheld_pages)} table page(s) WITHHELD — "
+                        f"TABLE_WITHHELD (the judge ladder rejected the table and neither the "
+                        f"geometry guard nor a blind cell transcription cleared it; the "
+                        f"table's content was NOT shipped, see the page image): "
+                        f"{table_withheld_pages}[/red]"
+                    )
+                    if _withheld_latched:
+                        _withheld_kinds = _latched_rung_kinds(state, _withheld_latched)
+                        _which = (
+                            ", ".join(_withheld_kinds) if _withheld_kinds else "kind not recorded"
+                        )
+                        console.print(
+                            f"  [yellow]  of those, {len(_withheld_latched)} had a table-judge "
+                            f"rung unavailable ({_which}) and are retryable on resume: "
+                            f"{_withheld_latched}[/yellow]"
+                        )
                 if table_rejected_pages:
                     console.print(
                         f"  [red]{len(table_rejected_pages)} table page(s) failed the judge "

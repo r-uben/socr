@@ -27,13 +27,26 @@ is also blank in the markdown is correct, not a finding. Only raise MISSING_VALU
 when the image shows a value — a number, dash, star, or other mark — that the
 markdown omits. Do not penalize legitimately blank cells.
 
+{{CELL_REF_GRAMMAR}}
+
+{{CELL_REF_EXAMPLES}}
+
 Respond with ONLY a JSON object, no prose, no code fences, exactly this schema:
-{"verdict":"PASS"|"FAIL","confidence":"high"|"low","findings":[{"code":"MISSING_VALUE"|"FABRICATED_VALUE"|"WRONG_BINDING"|"HEADER_MANGLED"|"STRUCTURE_MERGED"|"NOT_A_TABLE","where":"<cell/row/col ref>","detail":"<one sentence>"}]}
+{"verdict":"PASS"|"FAIL","confidence":"high"|"low","doubts":["<cell ref RxCy or HxCy>"],"findings":[{"code":"MISSING_VALUE"|"FABRICATED_VALUE"|"WRONG_BINDING"|"HEADER_MANGLED"|"STRUCTURE_MERGED"|"NOT_A_TABLE","where":"<cell ref RxCy/HxCy or description>","detail":"<one sentence>"}]}
 
 findings must be empty if and only if verdict is PASS. "confidence" is "low" when
 you are uncertain of the verdict (e.g. the crop is faint, cramped, or ambiguous)
 and "high" otherwise — a low-confidence PASS or FAIL should still be reported
 honestly rather than forced to "high".
+
+When verdict is PASS and confidence is low, you MUST provide a non-empty "doubts" list
+identifying the exact cells (e.g. ["R2C3"]) that caused the uncertainty, without including
+their values. When confidence is high or verdict is FAIL, "doubts" must be empty (or omitted).
+
+For FAIL findings that are cell-localizable (such as MISSING_VALUE, FABRICATED_VALUE,
+WRONG_BINDING, or cell-specific HEADER_MANGLED), you must use the same canonical reference
+(e.g. "R2C3" or "H1C2") in findings[].where. Structural findings (such as NOT_A_TABLE or
+STRUCTURE_MERGED) may remain non-cell-localizable.
 
 Emitted markdown:
 {{EMITTED_MARKDOWN}}

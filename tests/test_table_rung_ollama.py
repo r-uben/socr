@@ -538,3 +538,327 @@ class TestOllamaRungReachable:
 
         self._tags(monkeypatch, None, fail=httpx.ConnectError("refused"))
         assert ollama_rung_reachable("glm-5.3-flash:cloud", "http://localhost:11434") is False
+
+
+# ==========================================================================
+# P1: the blind cell-transcription ADJUDICATOR, on this same transport.
+#
+# Cold review round 1, finding 4. The adjudicator used to be reached through
+# ``cursor-agent -p`` with the crop named as ``@<path>`` inside the prompt
+# text -- a transport nobody had proven. A live probe disproved it: on a
+# synthetic crop whose target cell reads 0.058, ``cursor-agent -p --model
+# kimi-k3-max`` answered 0.92 (it never received the image), while the same
+# crop POSTed to the ollama daemon was read correctly by ``kimi-k2.6:cloud``
+# (0.058) and by ``glm-5.3-flash:cloud`` (0.058). A blind reader that never
+# saw the crop can still emit a schema-valid, guessable token and clear a
+# table nobody looked at, so these tests exist to keep the PIXELS on the wire.
+# ==========================================================================
+
+
+class TestAdjudicatorIdentity:
+    def test_the_identity_is_the_configured_model_never_a_constant(self):
+        from socr.judge.table_rung_ollama import adjudicator_rung_id, make_ollama_cell_adjudicator
+        from socr.judge.table_verdict import RUNG_KIND_CELL_ADJUDICATOR, rung_kind
+
+        adj = make_ollama_cell_adjudicator("some-other-model:cloud", None, 5.0)
+        assert adj.rung_id == adjudicator_rung_id("some-other-model:cloud")
+        assert adj.executing == "some-other-model:cloud"
+        # Its own KIND, distinct from the reader rung that shares the
+        # transport -- otherwise the latch could not tell them apart.
+        assert adj.rung_kind == RUNG_KIND_CELL_ADJUDICATOR
+        assert rung_kind(adj.rung_id) == RUNG_KIND_CELL_ADJUDICATOR
+        assert rung_kind(adj.rung_id) != rung_kind(_rung_id("some-other-model:cloud"))
+
+
+class TestAdjudicatorPayload:
+    def test_the_request_carries_the_crop_bytes_and_only_coordinates(self, crop_path: Path):
+        import base64
+        import json
+
+        from socr.judge.table_rung_ollama import make_ollama_cell_adjudicator
+
+        seen = {}
+
+        def _fake_post(host, payload, timeout):
+            seen["payload"] = payload
+            return json.dumps({"R1C2": "11", "H1C1": "yr"})
+
+        adj = make_ollama_cell_adjudicator("kimi-k2.6:cloud", "http://h:1", 7.0)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("socr.judge.table_rung_ollama._post_chat", _fake_post)
+            result = adj(crop_path, ["R1C2", "H1C1"])
+
+        assert result.ok is True
+        assert result.tokens == {"R1C2": "11", "H1C1": "yr"}
+        payload = seen["payload"]
+        assert payload["model"] == "kimi-k2.6:cloud"
+        assert payload["format"] == "json"
+        assert payload["stream"] is False
+        # The pixels, verbatim.
+        assert payload["messages"][0]["images"] == [
+            base64.b64encode(crop_path.read_bytes()).decode("ascii")
+        ]
+        # Coordinates, and nothing from THIS table that could be agreed with.
+        # The spliced coordinate grammar carries a fixed worked example (round
+        # 2, N1) that is identical for every table and corroborates nothing, so
+        # it is excluded -- and asserted present, so it cannot be dropped to
+        # make this pass.
+        from socr.judge.table_verdict import load_cell_ref_grammar
+
+        prompt = payload["messages"][0]["content"]
+        grammar = load_cell_ref_grammar()
+        assert grammar in prompt
+        assert "R1C2" in prompt and "H1C1" in prompt
+        assert "11" not in prompt.replace(grammar, "")
+
+    def test_the_public_call_has_no_parameter_for_the_extraction(self):
+        import inspect
+
+        from socr.judge.table_rung_ollama import transcribe_cells_ollama
+
+        params = set(inspect.signature(transcribe_cells_ollama).parameters)
+        assert params == {"crop_path", "cell_refs", "model", "host", "timeout"}
+
+
+class TestAdjudicatorClassification:
+    """Typed unavailability, inherited from the reader rung verbatim."""
+
+    def _adj(self):
+        from socr.judge.table_rung_ollama import make_ollama_cell_adjudicator
+
+        return make_ollama_cell_adjudicator("kimi-k2.6:cloud", "http://h:1", 5.0)
+
+    def _run(self, crop_path, raiser_or_text):
+        def _fake_post(host, payload, timeout):
+            if isinstance(raiser_or_text, BaseException):
+                raise raiser_or_text
+            return raiser_or_text
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("socr.judge.table_rung_ollama._post_chat", _fake_post)
+            return self._adj()(crop_path, ["R1C2"])
+
+    def test_a_connection_error_is_an_outage(self, crop_path: Path):
+        result = self._run(crop_path, httpx.ConnectError("no daemon"))
+        assert result.ok is False
+        assert result.unavailable is True
+        assert result.refusal is False
+
+    def test_a_quota_status_is_an_outage_AND_a_refusal(self, crop_path: Path):
+        response = httpx.Response(429, request=httpx.Request("POST", "http://h:1/api/chat"))
+        result = self._run(
+            crop_path, httpx.HTTPStatusError("429", request=response.request, response=response)
+        )
+        assert result.unavailable is True
+        assert result.refusal is True
+
+    def test_a_malformed_body_is_a_defect_that_never_latches(self, crop_path: Path):
+        result = self._run(crop_path, "this is not json")
+        assert result.ok is False
+        assert result.unavailable is False
+        assert result.refusal is False
+
+    def test_a_partial_answer_is_a_defect_not_a_partial_clearance(self, crop_path: Path):
+        """Strict by construction: clearing a table on fewer cells than were
+        asked about would answer a question nobody put."""
+        import json
+
+        def _fake_post(host, payload, timeout):
+            return json.dumps({"R1C2": "11"})
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("socr.judge.table_rung_ollama._post_chat", _fake_post)
+            result = self._adj()(crop_path, ["R1C2", "R3C4"])
+        assert result.ok is False
+        assert result.unavailable is False
+
+    def test_an_unrequested_extra_cell_is_a_defect(self, crop_path: Path):
+        import json
+
+        def _fake_post(host, payload, timeout):
+            return json.dumps({"R1C2": "11", "R9C9": "guessed"})
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("socr.judge.table_rung_ollama._post_chat", _fake_post)
+            result = self._adj()(crop_path, ["R1C2"])
+        assert result.ok is False
+
+    def test_a_missing_crop_is_a_defect_and_makes_no_request(self, tmp_path: Path):
+        called = []
+
+        def _fake_post(host, payload, timeout):
+            called.append(payload)
+            return "{}"
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("socr.judge.table_rung_ollama._post_chat", _fake_post)
+            result = self._adj()(tmp_path / "nope.png", ["R1C2"])
+        assert result.ok is False
+        assert result.unavailable is False
+        assert called == []
+
+
+class TestAdjudicatorReachability:
+    def test_the_probe_asks_about_the_adjudicators_own_model(self, monkeypatch):
+        """Cold review round 1, finding 2: reader rung 1 being pulled says
+        nothing about whether the adjudicator's model is."""
+        from socr.judge.table_rung_ollama import adjudicator_rung_reachable
+
+        asked = []
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"models": [{"name": "glm-5.3-flash:cloud"}]}
+
+        def _get(url, timeout=None):
+            asked.append(url)
+            return _Resp()
+
+        monkeypatch.setattr("socr.judge.table_rung_ollama.httpx.get", _get)
+        assert adjudicator_rung_reachable("glm-5.3-flash:cloud", "http://h:1") is True
+        assert adjudicator_rung_reachable("kimi-k2.6:cloud", "http://h:1") is False
+        assert asked, "the probe must actually ask the daemon"
+
+
+class TestUnreadableIsItsOwnWireState:
+    """Cold review round 2, N2.
+
+    Prompt rules 2 and 3 both used to say "return the empty string", so
+    "I looked and the cell is blank" and "I could not read this cell at all"
+    arrived as the same token. The guard has no way to tell those apart, so a
+    NON-reading could withhold a rejected table against a non-empty
+    extraction, or clear one against an empty extraction. The wire schema now
+    carries the difference: a string is a reading, ``null`` is not.
+    """
+
+    def _adj(self):
+        from socr.judge.table_rung_ollama import make_ollama_cell_adjudicator
+
+        return make_ollama_cell_adjudicator("kimi-k2.6:cloud", "http://h:1", 5.0)
+
+    def _answer(self, crop_path, body):
+        def _fake_post(host, payload, timeout):
+            return body
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("socr.judge.table_rung_ollama._post_chat", _fake_post)
+            return self._adj()(crop_path, ["R1C1", "R1C2"])
+
+    def test_null_is_a_successful_typed_non_reading_not_a_defect(self, crop_path: Path):
+        import json
+
+        result = self._answer(crop_path, json.dumps({"R1C1": None, "R1C2": "11"}))
+        assert result.ok is True
+        assert result.unreadable == ("R1C1",)
+        # And it carries NO token, so nothing downstream can compare it.
+        assert result.tokens == {"R1C2": "11"}
+
+    def test_the_empty_string_stays_a_reading(self, crop_path: Path):
+        import json
+
+        result = self._answer(crop_path, json.dumps({"R1C1": "", "R1C2": "11"}))
+        assert result.ok is True
+        assert result.unreadable == ()
+        assert result.tokens == {"R1C1": "", "R1C2": "11"}
+
+    def test_a_null_still_has_to_be_a_requested_key(self, crop_path: Path):
+        """Strictness is unchanged: ``null`` is a legal VALUE, not a licence to
+        answer about cells nobody asked about or to omit ones they did."""
+        import json
+
+        assert self._answer(crop_path, json.dumps({"R1C1": None})).ok is False
+        assert (
+            self._answer(crop_path, json.dumps({"R1C1": None, "R1C2": "11", "R9C9": None})).ok
+            is False
+        )
+
+    def test_a_non_string_non_null_value_is_still_a_defect(self, crop_path: Path):
+        import json
+
+        result = self._answer(crop_path, json.dumps({"R1C1": 11, "R1C2": "11"}))
+        assert result.ok is False
+        assert result.unavailable is False
+
+    def test_the_prompt_asks_for_the_two_states_separately(self):
+        from socr.judge.table_rung_ollama import build_blind_cell_prompt
+
+        prompt = build_blind_cell_prompt(["R1C1"])
+        assert "`null`" in prompt
+        # The two rules must not resolve to the same answer any more.
+        assert prompt.count("return the empty string for it") == 0
+
+
+class TestAMalformedResponseBodyNeverEscapesAsAnException:
+    """Cold review round 3, NEW C.
+
+    ``_post_chat`` returned ``message.content`` untyped, and both callers reach
+    for string methods on it. A daemon -- or a proxy in front of one --
+    answering ``{"message": {"content": 1}}`` escaped as an ``AttributeError``
+    out of two functions that both promise a typed failure result instead. The
+    body is type-checked at the seam now, and the wrong shape is a DEFECT: it
+    reproduces on the next call, so it must never latch.
+    """
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._body
+
+    def _post(self, monkeypatch, body):
+        # The suite's autouse hermeticity fixture stubs ``_post_chat`` itself,
+        # but the seam under test IS ``_post_chat``. ``_post_chat`` was bound
+        # at this module's import, before any fixture ran, so restoring that
+        # reference exercises the real body-shape validation while ``httpx``
+        # stays firmly mocked.
+        monkeypatch.setattr("socr.judge.table_rung_ollama._post_chat", _post_chat)
+        monkeypatch.setattr(
+            "socr.judge.table_rung_ollama.httpx.post", lambda *a, **k: self._Resp(body)
+        )
+
+    BAD_BODIES = [
+        {"message": {"content": 1}},
+        {"message": {"content": None}},
+        {"message": {"content": ["a"]}},
+        {"message": "not an object"},
+        ["not an object at all"],
+    ]
+
+    @pytest.mark.parametrize("body", BAD_BODIES)
+    def test_the_adjudicator_returns_a_deterministic_failure(
+        self, monkeypatch, crop_path: Path, body
+    ):
+        from socr.judge.table_rung_ollama import make_ollama_cell_adjudicator
+
+        self._post(monkeypatch, body)
+        result = make_ollama_cell_adjudicator("m:cloud", "http://h:1", 5.0)(crop_path, ["R1C1"])
+
+        assert result.ok is False
+        assert result.unavailable is False
+        assert result.refusal is False
+        assert result.tokens == {} and result.unreadable == ()
+
+    @pytest.mark.parametrize("body", BAD_BODIES)
+    def test_the_reader_rung_returns_a_deterministic_failure(
+        self, monkeypatch, crop_path: Path, body
+    ):
+        """The reader shares the seam and the same never-raises contract."""
+        self._post(monkeypatch, body)
+        result = build_ollama_rung("m:cloud", "http://h:1", 5.0)(crop_path, "| a |\n| - |\n", None)
+
+        assert result.ok is False
+        assert result.unavailable is False
+        assert result.verdict is None
+
+    def test_a_well_formed_body_still_works(self, monkeypatch, crop_path: Path):
+        """The control: type-checking the body must not reject a real one."""
+        self._post(monkeypatch, {"message": {"content": PASS_JSON}})
+        result = build_ollama_rung("m:cloud", "http://h:1", 5.0)(crop_path, "| a |\n| - |\n", None)
+        assert result.ok is True
