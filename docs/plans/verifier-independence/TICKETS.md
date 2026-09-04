@@ -87,10 +87,12 @@ fixtures under `tests/fixtures/replay_binding/`, no corpus, no provider),
 **read-only import** of `orchestrator._render_adjudication_crop` — B1 owns that file.
 **Done when:** `~/venvs/socr/bin/socr-replay-binding ~/Data/socr/ladder-run2-2026-09-04`
 prints 7 rows; on the **unchanged tree**, each row explicitly compares the **fresh** `bind()`
-result (contradiction item signatures, native labels, item set) against the frozen sidecar's
-recorded `binding_adjudication` — not merely echo of recorded `status` / lifted-held counts
-(reproducing `1 lifted / 6 held` from recorded statuses alone is vacuous); a hermetic fixture
-forces at least one bind delta (desk soft); `~/venvs/socr/bin/pytest tests/test_replay_binding.py -q`
+result against the frozen sidecar's recorded `binding_adjudication` as a **multiset**
+(`native_token` / `model_token` / `kind`, duplicate counts preserved) — not merely echo of
+recorded `status` / lifted-held counts (reproducing `1 lifted / 6 held` from recorded
+statuses alone is vacuous); a hermetic fixture perturbs the native words and the test
+asserts **the exact expected delta** is reported **and** the recorded sidecar bytes are
+unchanged; `~/venvs/socr/bin/pytest tests/test_replay_binding.py -q`
 exits 0 with `ollama` and `qwen-ocr` absent from `PATH`; `uvx ruff@0.16.0 format --check .`
 clean.
 
@@ -125,11 +127,14 @@ accepting more. Do **not** touch `native_rows.py`.
 **Files:** `src/socr/tables/binding.py`, `tests/test_binding.py`,
 `tests/test_tr1_rowizer.py`, `tests/test_gh331_stub_labels.py`,
 `tests/test_table_header_gh146.py`, `tests/fixtures/replay_binding/` (controls).
-**Done when:** on frozen replay, **3/3 target tables cleared of false native-label clamps**
-(that remain native-side-blocked after A1b); **N/N unresolved target labels reconstructed**
-against the rendered source, where **N = A1b's native-side subset only** (`shredded_label`,
-`bbox_truncated`) — `absent_text`, `neighbour_capture`, and `other` are logged on their own
-line and **out of that denominator**; **zero false accepts** on the row-swap and
+**Done when:** on frozen replay, **3/3 target tables cleared of false native-label clamps**;
+**N/N unresolved target labels reconstructed** against the rendered source, where **N =
+A1b's native-side subset only** (`shredded_label`, `bbox_truncated`), with A1b's
+classifications **frozen before repair starts** (A2 may not reclassify); all three target
+tables appear in the report regardless; `absent_text`, `neighbour_capture`, and `other`
+are logged on their own line, **out of that denominator**, and keep their justified
+dispositions. If A1b's findings invalidate 3/3, the gate is **revised explicitly in
+TICKETS.md before implementation** — never shrunk silently; **zero false accepts** on the row-swap and
 neighbouring-label controls; A1 output for the 4 non-target tables byte-identical before/after;
 full suite green; ruff format clean.
 
@@ -161,9 +166,13 @@ with timings on and off; existing golden/byte-identity tests unchanged. Patches:
 **Problem:** Run-2's 8.0 min/page is confounded (three `socr_source_digest` values mid-run) and
 has no per-stage breakdown. B2 establishes a **fresh** timed baseline under **one digest** with
 B1 in tree — not an explanation of the confounded 8.0.
-**Do:** Re-run `run.sh` from the frozen corpus with B1 in the tree; **assert every sidecar's
-`socr_source_digest` is identical before tabulating** (else the run is discarded, not
-reported); tabulate `timings_s` per stage per page, log the breakdown. No code change; no
+**Do:** Before running: record the intended source digest from the checkout
+(`_socr_source_digest()` on the B1 tree) and verify the resolved package path
+(`~/venvs/socr/bin/python -c "import socr; print(socr.__file__)"`) points at that
+checkout — a consistently wrong editable install passes a sidecars-agree check. Re-run
+`run.sh` from the frozen corpus; **assert all 20 sidecars are present and each
+`socr_source_digest` equals the intended digest** before tabulating (else the run is
+discarded, not reported); tabulate `timings_s` per stage per page, log the breakdown. No code change; no
 claim about run 2's minutes.
 **Files:** `docs/plans/verifier-independence/logs/YYYY-MM-DD_B2-latency.md`.
 **Done when:** the log has a per-stage table (20 pages × stages) and one line naming the
@@ -221,10 +230,12 @@ transcriber is **never called**. Any `process()` test patches
 Resume skip identical with and without `cell_bbox` / `abstained`. **Deterministic
 frozen-replay gate** (A2's 3/3 clears targets before C2b; C3 is report-only): for every
 item still contradicted on the frozen corpus after A2, C1's truth table applied to the
-frozen page predicts `geometry-addressed` or `abstained`; the ticket log records that
-prediction per item **before** implementation, and `socr-replay-binding` asserts the
-implementation matches it item-for-item (no OCR). At least one real frozen item must be
-geometry-addressed — a C2b that abstains on all of them fails. Do not invent a live
+frozen page predicts `geometry-addressed` or `abstained`; the prediction is a **separately
+committed, reviewed artifact** (`logs/YYYY-MM-DD_C2b-prediction.md`, referenced by commit
+SHA in the ticket log) landed **before C2b starts**, and `socr-replay-binding` asserts
+the implementation matches it item-for-item (no OCR). **Feasibility checkpoint:** if the
+prediction finds no frozen item geometry-addressable, C2b returns to the owner for scope
+revision — correct abstention must never force invented correspondence. Do not invent a live
 ACCEPTED quota. Full suite green; ruff format clean.
 
 ### TICKET-C3 — ladder corpus re-run and report · TODO · depends-on: C2b, B2 · wave 6 · agent: claude
