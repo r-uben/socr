@@ -476,6 +476,77 @@ _PRESENTATION_MARKS = (
 # "1.5" or "12.034" are untouched).
 _LEADING_DECIMAL_RE = re.compile(r"^([\(\[]?-?)\.(?=\d)")
 
+# GH-582: a VLM routinely re-typesets a plain native value/label as inline
+# math -- "-0.06" becomes "$-0.06$", "Adjusted R2" becomes
+# "Adjusted $\text{R}^2$". None of that changes the value or the label; it
+# is presentation, same class as the markdown-emphasis/Unicode-mark
+# stripping above -- but the two comparisons need different amounts of
+# stripping, so ``strip_math_presentation`` has two modes rather than one
+# blanket pass:
+#
+# * Numeric path (default, ``label=False``): unwraps ONE balanced
+#   delimiter pair that encloses the WHOLE token -- ``$...$`` or
+#   ``\(...\)`` -- and nothing else. The interior must not contain
+#   another instance of that same delimiter, so a malformed double-wrap
+#   like ``$$43$`` is not treated as a wrapper either (it would otherwise
+#   unwrap to ``$43``, which the existing currency-prefix strip then turns
+#   into the false numeric match ``43``). A stray/embedded delimiter
+#   (``4$3``, ``43$``) is not a wrapper and is left untouched, so it stays
+#   exactly as non-numeric as it is without this function; the numeric
+#   regexes downstream (``_NUM_TOKEN_RE`` / ``_NUMERIC_RE``) then still
+#   reject it. ``^``/``_`` script markers are NEVER dropped here: an
+#   exponent or subscript changes what the token means (``$10^2$`` is the
+#   expression "10 to the power 2", not the decimal "102"), so it must stay
+#   non-numeric, same as on a version of this module without this fix.
+# * Label path (``label=True``): row/parent labels are folded through
+#   ``normalize_label()`` immediately after this call, which already
+#   discards ``$``/``\``/``{``/``}``/``^``/``_`` as punctuation -- so it is
+#   safe, and necessary to avoid a footnote-marker-regex mismatch between
+#   the two sides, to unwrap ``\text{}``/``\mathrm{}``/``\textbf{}`` to
+#   their content (repeated, so nested wraps fully unwrap), flatten every
+#   ``^``/``_`` script marker (braced or bare) while keeping the scripted
+#   content, and only then drop the math delimiters -- wherever in the
+#   label they occur, not just a whole-token wrap.
+_MATH_WHOLE_DOLLAR_RE = re.compile(r"^\$([^$]+)\$$")
+_MATH_WHOLE_PAREN_RE = re.compile(r"^\\\(([^()]+)\\\)$")
+_MATH_DOLLAR_RE = re.compile(r"\$")
+_MATH_TEXT_WRAP_RE = re.compile(r"\\(?:text|mathrm|textbf)\{([^{}]*)\}")
+_MATH_SCRIPT_BRACE_RE = re.compile(r"[\^_]\{([^{}]*)\}")
+_MATH_SCRIPT_BARE_RE = re.compile(r"[\^_](\S)")
+
+
+def strip_math_presentation(tok: str, *, label: bool = False) -> str:
+    r"""Strip inline-math wrapping so a LaTeX-decorated token compares equal
+    to the plain-text value/label it renders (GH-582).
+
+    Shared by the binder's cell comparison (``label=False``, the default)
+    and its row-label comparison and by ``adjudication.tokens_agree``
+    (``label=True`` for the ``row_label`` kind), so a candidate cell or
+    label wrapped in inline math is compared on its content, not convicted
+    (cell) or held undisprovable (label) purely for its typesetting.
+    Column-header span confirmation (``binding._norm_header_text``) is a
+    separate, non-convicting path and does not use this helper.
+
+    ``label=False`` unwraps one balanced ``$...$``/``\(...\)`` pair around
+    the WHOLE token and leaves everything else -- including ``^``/``_`` --
+    untouched. ``label=True`` additionally unwraps
+    ``\text{}``/``\mathrm{}``/``\textbf{}`` and flattens ``^``/``_``
+    script markers anywhere in the string, then drops the delimiters: see
+    the two mode comments above the regexes for why the two paths differ.
+    """
+    text = tok.strip()
+    if not label:
+        m = _MATH_WHOLE_DOLLAR_RE.match(text) or _MATH_WHOLE_PAREN_RE.match(text)
+        return m.group(1).strip() if m else text
+    prev = None
+    while prev != text:
+        prev = text
+        text = _MATH_TEXT_WRAP_RE.sub(r"\1", text)
+    text = _MATH_SCRIPT_BRACE_RE.sub(r"\1", text)
+    text = _MATH_SCRIPT_BARE_RE.sub(r"\1", text)
+    text = _MATH_DOLLAR_RE.sub("", text)
+    return text.strip()
+
 
 def strip_presentation(tok: str) -> str:
     """Remove presentation-only decoration from a would-be numeric token.
@@ -506,6 +577,7 @@ def strip_presentation(tok: str) -> str:
     which ``_normalize_numeric_token`` already handles and which carry meaning
     (the econ negative convention).
     """
+    tok = strip_math_presentation(tok)
     tok = tok.strip().replace(" ", " ").strip()
     for mark in _PRESENTATION_MARKS:
         while tok.startswith(mark):

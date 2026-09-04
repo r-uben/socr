@@ -153,6 +153,52 @@ def test_gh206_notation_fix_does_not_admit_prose_tokens(raw):
     assert not is_numeric_token(raw)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "4$3",  # stray/embedded $, not a wrapper
+        "43$",  # trailing-only $, not a balanced whole-token wrap
+        "$10^2$",  # exponent changes the value: an expression, not "102"
+        "1_2",  # bare subscript marker outside any math wrap
+        "(/997)",  # documented codebook/corruption string, not a $-case
+        "/53",  # ditto
+        "LoIic6",  # ditto
+        "$�43$",  # U+FFFD replacement char: encoding garbage
+        "$43$",  # BMP private-use char: encoding garbage
+        "$$43$",  # doubled leading $: interior contains the delimiter,
+        # not a single balanced wrap -- must not unwrap to "$43" and then
+        # fall into the currency-prefix strip as a false numeric match
+        "$43$$",  # doubled trailing $, same reasoning
+        "$$",  # only delimiters, no content at all
+    ],
+)
+def test_gh582_numeric_path_leaves_non_wrapped_and_garbage_tokens_alone(raw):
+    """GH-582: ``strip_math_presentation`` (numeric path, the one
+    ``is_numeric_token``/``_normalize_numeric_token`` route through) only
+    unwraps ONE balanced ``$...$``/``\\(...\\)`` pair around the WHOLE
+    token. A stray or embedded delimiter is not a wrapper and is left
+    alone; a numeric ``^``/``_`` script marker is never dropped in this
+    path (an exponent/subscript changes the value, it is not
+    typesetting); and encoding garbage inside a wrap still fails the
+    numeric regexes on its own merits. Every case here must stay exactly
+    as non-numeric as it was before GH-582."""
+    assert not is_numeric_token(raw)
+
+
+def test_gh582_numeric_path_unwraps_a_balanced_whole_token_wrap():
+    """GH-582: the two shapes the issue actually reports -- ``$...$`` and
+    ``\\(...\\)`` fully enclosing a numeric cell -- now compare on value.
+    A clean, unsigned wrap (``$43$``) takes the identical balanced-wrapper
+    path as the signed decimal the issue reports (``$-0.06$``); there is
+    no principled reason to unwrap one and not the other, so both change."""
+    assert is_numeric_token("$-0.06$")
+    assert _normalize_numeric_token("$-0.06$") == "-0.06"
+    assert is_numeric_token(r"\(0.5\)")
+    assert _normalize_numeric_token(r"\(0.5\)") == "0.5"
+    assert is_numeric_token("$43$")
+    assert _normalize_numeric_token("$43$") == "43"
+
+
 def test_content_labels_were_never_the_bug():
     """Documented for the record: the content tokenizer scans, so bold was fine.
 

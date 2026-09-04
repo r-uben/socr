@@ -55,6 +55,24 @@ class TestTokensAgree:
         assert not tokens_agree("RowA", "RowB", kind="row_label")
         assert not tokens_agree("100", "200", kind="cell")
 
+    def test_inline_math_wrapped_cell_agrees_with_plain_value(self) -> None:
+        """GH-582: a VLM cell typeset as inline math must be disprovable by
+        the raster transcriber, not held forever because the wrap defeats
+        ``is_numeric_token`` on the model side of the comparison."""
+        assert tokens_agree("$-0.06$", "−0.06", kind="cell")
+        # A genuinely different value stays a disagreement even wrapped.
+        assert not tokens_agree("$-0.06$", "−0.60", kind="cell")
+        # A malformed doubled delimiter is not a balanced whole-token wrap;
+        # it must not unwrap to "$43" and fall into the currency-prefix
+        # strip as a false numeric match (GH-582 round-2 review).
+        assert not tokens_agree("$$43$", "43", kind="cell")
+
+    def test_inline_math_wrapped_label_agrees_with_plain_label(self) -> None:
+        """GH-582: ``\\text{}``/``^`` math notation around a row label must
+        fold to the same key as its plain-text rendering."""
+        assert tokens_agree("Adjusted $\\text{R}^2$", "Adjusted R2", kind="row_label")
+        assert not tokens_agree("Adjusted $\\text{R}^2$", "Constant", kind="row_label")
+
 
 class TestAdjudicate:
     def test_encoding_garbage_disproves_without_transcriber(self) -> None:
