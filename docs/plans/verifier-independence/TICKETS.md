@@ -44,6 +44,10 @@ prerequisite — every ticket touches a bounded seam.
   `:5522-5637` (`_adjudicate_clamped_table` … `_render_adjudication_crop`),
   `:5550` (call site of `adjudicate`), `:5643-5651 _apply_binding_adjudication_meta`
   (round-trips the record into the sidecar).
+- **Contradiction types:** `ContradictionItem` is defined and built in
+  `adjudication.py:70` / `:152-181` (`items_from_binding`, `_item_from_cell`,
+  `_item_from_row_label`). `binding.py` never names it; it owns `ContradictedCell`
+  (`:1002`) and `RowLabelContradiction` (`:1011`), each already carrying `native_bbox`.
 - **Geometry that exists:** `src/socr/tables/locate.py:169 _horizontal_rules` → raw
   `(y, x0, x1)` rules. `:122 bands_from_rules` groups them into **whole-table** boxes
   and discards the intermediate rules — **no row-band helper exists yet**. Ruled tables
@@ -93,15 +97,19 @@ clean.
 ### TICKET-A1b — failed-disproof autopsy · TODO · depends-on: A1 · wave 2 · agent: claude
 **Problem:** The 8 failed disproofs and the 3 native-label-blocked tables have never been
 looked at cell by cell, and the "native bbox truncates the crop" claim is a hypothesis.
-**Do:** Run A1 on the frozen corpus. Render the 8 failed-disproof crops; hand-classify
+**Do:** Run A1 on the frozen corpus. Census **all 12** class-(c) items the run-2 log counts
+(8 on the three target tables, 2 on doc05 p1, 1 on doc07 p1, and one the log does not
+allocate — find it). Render the 8 failed-disproof crops; hand-classify
 each as `absent_text` / `shredded_label` / `bbox_truncated` / `neighbour_capture` /
 `other`, with the rendered crop attached. State explicitly, per crop, whether the padded
 crop did or did not cover the printed label. Write the hand-read label file A1 consumes.
 **Files:** `docs/plans/verifier-independence/logs/YYYY-MM-DD_A1b-autopsy.md`,
 `~/Data/socr/ladder-run2-2026-09-04/labels.json` (hand-read, outside git).
-**Done when:** the log names a class for all 8 crops, identifies which of the 3 blocked
-tables are `shredded_label` vs `bbox_truncated`, and answers the hypothesis in one line
-with a count (`N of 8 crops truncated by native_bbox`).
+**Done when:** the log names a class for all 8 crops and locates all 12 class-(c) items,
+identifies which of the 3 blocked tables are `shredded_label` vs `bbox_truncated`, states
+**N = the count of native-side (`shredded_label` + `bbox_truncated`) target labels** (A2's
+denominator), and answers the hypothesis in one line with a count (`M of 8 crops
+truncated by native_bbox`).
 
 ### TICKET-A2 — binder row-label repair (#331 / #418 / #146) · TODO · depends-on: A1b · wave 3
 **Problem:** The binder's own rowizer truncates, runs-on, or shreds row labels on the 3 target
@@ -153,8 +161,10 @@ with timings on and off; existing golden/byte-identity tests unchanged. Patches:
 **Problem:** Run-2's 8.0 min/page is confounded (three `socr_source_digest` values mid-run) and
 has no per-stage breakdown. B2 establishes a **fresh** timed baseline under **one digest** with
 B1 in tree — not an explanation of the confounded 8.0.
-**Do:** Re-run `run.sh` from the frozen corpus with B1 in the tree, tabulate `timings_s`
-per stage per page, log the breakdown. No code change.
+**Do:** Re-run `run.sh` from the frozen corpus with B1 in the tree; **assert every sidecar's
+`socr_source_digest` is identical before tabulating** (else the run is discarded, not
+reported); tabulate `timings_s` per stage per page, log the breakdown. No code change; no
+claim about run 2's minutes.
 **Files:** `docs/plans/verifier-independence/logs/YYYY-MM-DD_B2-latency.md`.
 **Done when:** the log has a per-stage table (20 pages × stages) and one line naming the
 stage that owns > 50 % of wall-clock, or stating no stage does.
@@ -209,10 +219,13 @@ cell and the item is disproved; (2) no per-row rules → `abstained`, not dispro
 transcriber is **never called**. Any `process()` test patches
 `_available_engines_for_agentic`, `_resolve_judge_model`, `_transcribe_cell_token`.
 Resume skip identical with and without `cell_bbox` / `abstained`. **Deterministic
-frozen-replay gate** (A2's 3/3 clears targets before C2b; C3 is report-only): known
-geometry-addressable disputes on the frozen corpus must disprove via `cell_bbox`; known
-no-row-rule / booktabs cases must `abstain` (transcriber never called). Do not invent a
-live ACCEPTED quota. Full suite green; ruff format clean.
+frozen-replay gate** (A2's 3/3 clears targets before C2b; C3 is report-only): for every
+item still contradicted on the frozen corpus after A2, C1's truth table applied to the
+frozen page predicts `geometry-addressed` or `abstained`; the ticket log records that
+prediction per item **before** implementation, and `socr-replay-binding` asserts the
+implementation matches it item-for-item (no OCR). At least one real frozen item must be
+geometry-addressed — a C2b that abstains on all of them fails. Do not invent a live
+ACCEPTED quota. Full suite green; ruff format clean.
 
 ### TICKET-C3 — ladder corpus re-run and report · TODO · depends-on: C2b, B2 · wave 6 · agent: claude
 **Problem:** "The free lane witnesses the model" needs a number on the same 20 pages —
