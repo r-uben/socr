@@ -1,0 +1,35 @@
+{
+  "binding_adjudication": {
+    "p1-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "2Y Treasury yield",
+          "native_token": "Treasury yield",
+          "row_path": [
+            "Treasury yield"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Treasury yield"
+          ],
+          [],
+          "Treasury yield",
+          "2Y Treasury yield"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 1,
+  "winning_output": {
+    "text": "| Label | Value |\n| :--- | :--- |\n| 2Y Treasury yield | 0.48 |\n| Term premium | 0.12 |\n"
+  }
+}

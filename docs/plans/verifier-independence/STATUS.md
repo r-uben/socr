@@ -31,7 +31,7 @@ gate; `tests/` is flat. Nothing dispatched.
 
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
-| A1  | native reference | TODO | — | 1 |
+| A1  | native reference | DONE | — | 1 |
 | B1  | latency | TODO | — | 1 |
 | A1b | native reference | TODO | A1 | 2 (claude) |
 | B2  | latency | TODO | B1 | 2 (claude) |
@@ -54,3 +54,10 @@ gate; `tests/` is flat. Nothing dispatched.
 ## Next action
 
 Wave 1 dispatch: A1 on `feat/vi-A1-replay-binding` ∥ B1 on `feat/vi-B1-stage-timings`.
+
+A1 done 2026-09-05 on `feat/vi-A1-replay-binding`
+(`/Users/rubenffuertes/repos/.worktrees/socr-vi-A1`), see
+`docs/log/2026-09-05_vi-a1-replay-binding.md`. Corpus replay: 7/7 rows,
+exact multiset match on the unchanged tree (one row needed a D3
+fail-closed-marker cache fallback, folded into the harness). A1b can
+dispatch once this branch merges.
