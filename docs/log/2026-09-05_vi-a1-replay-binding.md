@@ -30,6 +30,31 @@ case. On the real corpus, `doc01` p2 (the only fail-closed-marker case)
 still has a single provenance-matching cache candidate, so it still
 replays exactly as before.
 
+## Second revision (third commit): conflicting provenance ENGINES, one level up
+
+Follow-up review finding: `_provenance_engine_by_table` (as revised above)
+took the FIRST `table_binding_adjudicated` event when a table had more
+than one — the same silent-choice hole one level up from the cache-side
+one, just documented as "never happens in practice" rather than fixed.
+
+Replaced with `_provenance_engines_by_table` (plural): it collects the
+DISTINCT `engine` values across every `table_binding_adjudicated` event
+for that table_id (repeating the same engine collapses to one element,
+which is not ambiguous). `_select_candidate_for_table` now checks this
+FIRST: two or more distinct engines named -> the row is `unreplayable`
+with `"provenance itself is ambiguous"` in the note, and `bind()` is never
+called — even when the cache side alone would look unambiguous (each
+engine has exactly one matching candidate). Only after provenance agrees
+on a single engine does cache-side candidate selection run as before.
+
+Fixture extended with a fourth page (`doc00` p4): two adjudication events
+naming `qwen` and `gemini`, each with exactly one cache candidate.
+Confirmed via `test_conflicting_provenance_engines_is_unreplayable_and
+_never_calls_bind` (bind() monkeypatched to raise if called; sidecar
+bytes unchanged). Real-corpus replay is unaffected — every table on the
+frozen corpus has exactly one `table_binding_adjudicated` event, so this
+never fires there; the 7/7 exact match is unchanged (see below).
+
 ## What changed
 
 - `src/socr/benchmark/replay_binding.py` (new): given a frozen corpus
@@ -102,10 +127,12 @@ list its own hash). All 152 data files under `in/` and `out/` pass.
 ## Tests
 
 `PYTHONPATH=<worktree>/src ~/venvs/socr/bin/pytest tests/test_replay_binding.py -q`
-— 11 passed (added `test_ambiguous_provenance_is_unreplayable_and_never_calls_bind`,
-which monkeypatches `bind` to raise if called and asserts it is not, plus a
-sidecar-bytes-unchanged check on the ambiguous page). Every test in the
-file strips any PATH entry containing
+— 12 passed (`test_ambiguous_provenance_is_unreplayable_and_never_calls_bind`
+for the cache-side collision, `test_conflicting_provenance_engines_is
+_unreplayable_and_never_calls_bind` for the provenance-side collision;
+both monkeypatch `bind` to raise if called and assert a
+sidecar-bytes-unchanged invariant). Every test in the file strips any PATH
+entry containing
 `ollama` or `qwen-ocr` (autouse fixture) and asserts `shutil.which` returns
 `None` for both, proving the module makes no provider call — it never
 opens a network connection or shells out; the only I/O is the frozen PDF

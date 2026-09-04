@@ -28,6 +28,11 @@ Lays out a MINIATURE version of a frozen corpus directory
   shape, but TWO distinct cache candidates share the recorded provenance
   engine: ambiguous, so the row must come back ``unreplayable`` and
   ``bind()`` must never be called for it.
+- ``corpus/out/doc00/doc00/pages/00004.json`` — same fail-closed-marker
+  shape, but the table has TWO ``table_binding_adjudicated`` events naming
+  DIFFERENT engines. Each engine has exactly one matching cache candidate
+  (so the cache side ALONE would look unambiguous) — provenance itself is
+  what is ambiguous here, one level up from the cache-collision case.
 """
 
 from __future__ import annotations
@@ -73,6 +78,21 @@ P3_CANDIDATE_LABELS = {"Credit spread": "3Y Credit spread", "Term spread": "Term
 #: the table (different row-label defect) -- both claim engine "qwen".
 P3_ALT_CANDIDATE_LABELS = {"Credit spread": "10Y Credit spread", "Term spread": "Term spread"}
 
+#: page 4: same shape again, used for the CONFLICTING-PROVENANCE-ENGINES
+#: case -- two table_binding_adjudicated events name different engines,
+#: each with exactly one cache candidate.
+P4_ROWS = [
+    {"label": "Breakeven inflation", "Value": "0.83"},
+    {"label": "Real yield", "Value": "0.19"},
+]
+P4_CANDIDATE_LABELS = {"Breakeven inflation": "5Y Breakeven inflation", "Real yield": "Real yield"}
+#: The gemini-provenance candidate for page 4: textually distinct, ALSO
+#: relocates the table (own row-label defect).
+P4_GEMINI_CANDIDATE_LABELS = {
+    "Breakeven inflation": "10Y Breakeven inflation",
+    "Real yield": "Real yield",
+}
+
 
 def _draw_ruled_table(page, rows: list[dict], top: float, label_col: str = "label") -> None:
     import fitz  # noqa: F401  (imported for side effect parity with table_ladder fixture)
@@ -111,6 +131,8 @@ def generate_pdf(out_path: Path) -> None:
     _draw_ruled_table(page2, P2_ROWS, TOP)
     page3 = doc.new_page()
     _draw_ruled_table(page3, P3_ROWS, TOP)
+    page4 = doc.new_page()
+    _draw_ruled_table(page4, P4_ROWS, TOP)
     doc.save(str(out_path))
     doc.close()
 
@@ -157,10 +179,13 @@ def main() -> None:
     md2 = _markdown_for(P2_ROWS, P2_CANDIDATE_LABELS)
     md3 = _markdown_for(P3_ROWS, P3_CANDIDATE_LABELS)
     md3_alt = _markdown_for(P3_ROWS, P3_ALT_CANDIDATE_LABELS)
+    md4 = _markdown_for(P4_ROWS, P4_CANDIDATE_LABELS)
+    md4_gemini = _markdown_for(P4_ROWS, P4_GEMINI_CANDIDATE_LABELS)
 
     ba1, table_id1 = _binding_adjudication_for(pdf_path, 1, md1)
     ba2, table_id2 = _binding_adjudication_for(pdf_path, 2, md2)
     ba3, table_id3 = _binding_adjudication_for(pdf_path, 3, md3)
+    ba4, table_id4 = _binding_adjudication_for(pdf_path, 4, md4)
 
     pages_dir = corpus_dir / "out" / "doc00" / "doc00" / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -222,12 +247,49 @@ def main() -> None:
         json.dumps(cache_entry3b, indent=2, sort_keys=True) + "\n"
     )
 
+    # Page 4: same fail-closed-marker shape, but the table has TWO
+    # table_binding_adjudicated events naming DIFFERENT engines. Each
+    # engine has exactly one cache candidate -- the cache side alone would
+    # look unambiguous; provenance itself is the ambiguity here.
+    marker4 = D3_MARKER.format(page_num=4)
+    sidecar4 = {
+        "page_num": 4,
+        "winning_output": {"text": f"{marker4}\n\n![Failed table page 4](figures/x.png)"},
+        "binding_adjudication": {table_id4: ba4},
+        "audit_events": [
+            {
+                "kind": "table_binding_adjudicated",
+                "engine": "qwen",
+                "data": {"table_id": table_id4},
+            },
+            {
+                "kind": "table_binding_adjudicated",
+                "engine": "gemini",
+                "data": {"table_id": table_id4},
+            },
+        ],
+    }
+    (pages_dir / "00004.json").write_text(json.dumps(sidecar4, indent=2, sort_keys=True) + "\n")
+
+    cache_entry4_qwen = {"page_num": 4, "engine": "qwen", "text": md4}
+    (cache_dir / "aa0000000000000000000000000000000000000000000000000000000000004.json").write_text(
+        json.dumps(cache_entry4_qwen, indent=2, sort_keys=True) + "\n"
+    )
+    cache_entry4_gemini = {"page_num": 4, "engine": "gemini", "text": md4_gemini}
+    (cache_dir / "aa0000000000000000000000000000000000000000000000000000000000005.json").write_text(
+        json.dumps(cache_entry4_gemini, indent=2, sort_keys=True) + "\n"
+    )
+
     print(f"Generated: {pdf_path}")
     print(f"Generated: {pages_dir / '00001.json'} (table_id={table_id1})")
     print(f"Generated: {pages_dir / '00002.json'} (table_id={table_id2}, fail-closed marker)")
     print(
         f"Generated: {pages_dir / '00003.json'} "
-        f"(table_id={table_id3}, fail-closed marker, ambiguous provenance)"
+        f"(table_id={table_id3}, fail-closed marker, ambiguous cache provenance)"
+    )
+    print(
+        f"Generated: {pages_dir / '00004.json'} "
+        f"(table_id={table_id4}, fail-closed marker, conflicting provenance engines)"
     )
 
 

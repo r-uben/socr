@@ -52,17 +52,21 @@ reproduce the binding.
 
 `_select_candidate_for_table` recovers it from the page's own
 `cache/*.json` route/extract entries, by **provenance only, never by
-running `bind()`**: it reads the `table_binding_adjudicated` audit event
-recorded for this exact `table_id` (`judge.table_verdict
-.TABLE_BINDING_ADJUDICATED_KIND`; carries the winning `engine`), then
-looks for the cache entries on this `page_num` whose own `engine` field
-matches. Scoring a candidate by how well it reproduces the recorded
-contradiction was tried and rejected in review: that would let `bind()`
-choose its own input, so a change to `bind()` under test (A2's row-label
-repair) could silently swap which candidate is treated as ground truth out
-from under the regression it is supposed to be measured against. Exactly
-one provenance match -> used, noted. Zero or more than one distinct
-candidate -> the row is `unreplayable` (`ReplayRow.unreplayable`) and
+running `bind()`**: it collects EVERY `table_binding_adjudicated` audit
+event recorded for this exact `table_id` (`judge.table_verdict
+.TABLE_BINDING_ADJUDICATED_KIND`; each carries a winning `engine`) --
+distinct engine VALUES across those events, not just the first event, are
+what "provenance" means here -- then looks for the cache entries on this
+`page_num` whose own `engine` field matches. Scoring a candidate by how
+well it reproduces the recorded contradiction was tried and rejected in
+review: that would let `bind()` choose its own input, so a change to
+`bind()` under test (A2's row-label repair) could silently swap which
+candidate is treated as ground truth out from under the regression it is
+supposed to be measured against. Exactly one provenance engine AND exactly
+one cache candidate for it -> used, noted. Two or more `table_binding
+_adjudicated` events naming DIFFERENT engines (provenance itself
+ambiguous), or zero/more-than-one distinct cache candidate for the single
+agreed engine -> the row is `unreplayable` (`ReplayRow.unreplayable`) and
 `bind()` is never called for it.
 
 **The persisted `binding_adjudication[<table_id]].items[]` records do NOT
@@ -156,10 +160,12 @@ class PageRecord:
     cache_dir: Path
     model_markdown: str
     is_fail_closed_marker: bool
-    #: table_id -> the winning ``engine`` recorded on this table's OWN
-    #: ``table_binding_adjudicated`` audit event, or ``None`` when no such
-    #: event exists. The only provenance signal candidate selection uses.
-    provenance_engine_by_table: dict = field(default_factory=dict)
+    #: table_id -> the DISTINCT ``engine`` values across every
+    #: ``table_binding_adjudicated`` audit event recorded for that exact
+    #: table_id (empty frozenset when no such event exists). The only
+    #: provenance signal candidate selection uses -- more than one distinct
+    #: value means provenance itself is ambiguous, not just the cache side.
+    provenance_engines_by_table: dict = field(default_factory=dict)
     binding_adjudication: dict = field(default_factory=dict)
 
 
@@ -190,28 +196,30 @@ def discover_pages(corpus_dir: Path) -> list[PageRecord]:
                 cache_dir=sidecar_path.parents[1] / "cache",
                 model_markdown=model_markdown,
                 is_fail_closed_marker=_is_fail_closed_marker(model_markdown, page_num),
-                provenance_engine_by_table=_provenance_engine_by_table(data, adjudication),
+                provenance_engines_by_table=_provenance_engines_by_table(data, adjudication),
                 binding_adjudication=adjudication,
             )
         )
     return records
 
 
-def _provenance_engine_by_table(sidecar: dict, adjudication: dict) -> dict:
-    """table_id -> the ``engine`` recorded on the ``table_binding_adjudicated``
-    audit event for that exact table_id, or ``None`` when there is no such
-    event (or more than one, which never happens in practice but is not
-    trusted blindly — the first is used and the ambiguity is not silently
-    hidden downstream: ``_select_candidate_for_table`` still requires the
-    CACHE side to be unambiguous)."""
-    by_table: dict = dict.fromkeys(adjudication)
+def _provenance_engines_by_table(sidecar: dict, adjudication: dict) -> dict:
+    """table_id -> the frozenset of DISTINCT ``engine`` values across every
+    ``table_binding_adjudicated`` audit event recorded for that exact
+    table_id. Every matching event is collected, not just the first: two
+    events naming different engines means provenance ITSELF is ambiguous
+    for that table, which is a different (and prior) question from whether
+    the cache side later resolves to one candidate — repeating the SAME
+    engine collapses to one element, which is not ambiguous."""
+    by_table: dict = {table_id: set() for table_id in adjudication}
     for event in sidecar.get("audit_events") or []:
         if not isinstance(event, dict) or event.get("kind") != TABLE_BINDING_ADJUDICATED_KIND:
             continue
         table_id = (event.get("data") or {}).get("table_id")
-        if table_id in by_table and by_table[table_id] is None:
-            by_table[table_id] = event.get("engine") or None
-    return by_table
+        engine = event.get("engine") or None
+        if table_id in by_table and engine:
+            by_table[table_id].add(engine)
+    return {table_id: frozenset(engines) for table_id, engines in by_table.items()}
 
 
 def _is_fail_closed_marker(text: str, page_num: int) -> bool:
@@ -259,14 +267,23 @@ def _select_candidate_for_table(record: PageRecord, table_id: str) -> tuple[str 
     if not record.is_fail_closed_marker:
         return record.model_markdown, ""
 
-    engine = record.provenance_engine_by_table.get(table_id)
-    if not engine:
+    engines = record.provenance_engines_by_table.get(table_id, frozenset())
+    if len(engines) == 0:
         return (
             None,
             "winning_output.text is the D3 fail-closed marker and no "
             f"table_binding_adjudicated audit event recorded a winning "
             f"engine for {table_id!r}; unreplayable",
         )
+    if len(engines) > 1:
+        return (
+            None,
+            "winning_output.text is the D3 fail-closed marker and "
+            f"table_binding_adjudicated audit events for {table_id!r} name "
+            f"conflicting engines {sorted(engines)!r}; provenance itself is "
+            f"ambiguous; unreplayable",
+        )
+    (engine,) = engines
 
     candidates = _cache_candidate_texts(record.cache_dir, record.page_num)
     matches = [(source, text) for source, cand_engine, text in candidates if cand_engine == engine]

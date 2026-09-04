@@ -47,14 +47,15 @@ def test_discover_pages_finds_all_fixture_pages():
         ("doc00", 1),
         ("doc00", 2),
         ("doc00", 3),
+        ("doc00", 4),
     }
 
 
 def test_replay_corpus_row_shape_matches_recorded_table_count():
     """Same contract the real corpus proves at 7 rows (one row per recorded
-    table): here, 3 recorded tables -> 3 rows, exactly."""
+    table): here, 4 recorded tables -> 4 rows, exactly."""
     rows = replay_corpus(FIXTURE_CORPUS)
-    assert len(rows) == 3
+    assert len(rows) == 4
     assert all(isinstance(r, ReplayRow) for r in rows)
 
 
@@ -116,6 +117,39 @@ def test_ambiguous_provenance_is_unreplayable_and_never_calls_bind(monkeypatch):
     assert before == after
 
 
+def test_conflicting_provenance_engines_is_unreplayable_and_never_calls_bind(monkeypatch):
+    """Page 4: the table has TWO table_binding_adjudicated events naming
+    DIFFERENT engines, each with exactly one matching cache candidate (so
+    the CACHE side alone would look unambiguous). Provenance itself is
+    what is ambiguous here -- one level up from the cache-collision case
+    -- and must also come back unreplayable without ever calling bind()."""
+    import socr.benchmark.replay_binding as replay_binding_module
+
+    def _bind_must_not_be_called(*args, **kwargs):
+        raise AssertionError("bind() was called for an unreplayable row")
+
+    monkeypatch.setattr(replay_binding_module, "bind", _bind_must_not_be_called)
+
+    sidecar_path = FIXTURE_CORPUS / "out" / "doc00" / "doc00" / "pages" / "00004.json"
+    before = sidecar_path.read_bytes()
+
+    record4 = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 4)
+    assert record4.provenance_engines_by_table["p4-t0"] == frozenset({"qwen", "gemini"})
+
+    rows = replay_page(record4, labels=None)
+    p4 = next(r for r in rows if r.table_id == "p4-t0")
+
+    assert p4.unreplayable is True
+    assert p4.multiset_match is False
+    assert p4.added == ()
+    assert p4.removed == ()
+    assert "conflicting engines" in p4.note
+    assert "provenance itself is" in p4.note
+
+    after = sidecar_path.read_bytes()
+    assert before == after
+
+
 def test_perturbed_recorded_items_report_exact_delta():
     """A hermetic fixture perturbs the RECORDED sidecar (simulating what a
     binder change on this tree would produce relative to an old recording)
@@ -148,7 +182,7 @@ def test_perturbed_recorded_items_report_exact_delta():
         cache_dir=record.cache_dir,
         model_markdown=record.model_markdown,
         is_fail_closed_marker=record.is_fail_closed_marker,
-        provenance_engine_by_table=record.provenance_engine_by_table,
+        provenance_engines_by_table=record.provenance_engines_by_table,
         binding_adjudication=perturbed_adjudication,
     )
 
@@ -176,6 +210,7 @@ def test_report_formats_without_raising():
     assert "p1-t0" in report
     assert "p2-t0" in report
     assert "p3-t0" in report
+    assert "p4-t0" in report
     assert "UNREPLAYABLE" in report
 
 
@@ -188,6 +223,7 @@ def test_main_cli_exits_zero_and_prints_rows(capsys):
     assert "p1-t0" in out
     assert "p2-t0" in out
     assert "p3-t0" in out
+    assert "p4-t0" in out
 
 
 def test_labels_file_reported_when_absent_from_table(tmp_path):
