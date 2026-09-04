@@ -405,6 +405,108 @@ def test_symbolic_row_labels_fail_closed_as_unverifiable():
 
 
 # ---------------------------------------------------------------------------
+# GH-582: inline-math wrapping is presentation, not a value/label change
+# ---------------------------------------------------------------------------
+
+
+def test_inline_math_wrapped_numeric_cells_bind_identically_to_plain():
+    """GH-582: wrapping every numeric cell in ``$...$`` must not change a
+    single matched/contradicted cell. Same native geometry, same candidate
+    values, differing only in whether each cell carries inline-math
+    delimiters -- the two ``BindingResult``s must be identical on the
+    fields that record what was compared, and the wrapped run must convict
+    zero cells."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 100, 110, "Large T"),
+        w(150, 100, 180, 110, "0.05"),
+        w(50, 130, 100, 140, "Small T"),
+        w(150, 130, 180, 140, "0.07"),
+    ]
+    plain = """
+|         | OLS  |
+|---------|------|
+| Large T | 0.05 |
+| Small T | 0.07 |
+"""
+    wrapped = """
+|         | OLS  |
+|---------|------|
+| Large T | $0.05$ |
+| Small T | $0.07$ |
+"""
+
+    plain_result = bind(words, plain)
+    wrapped_result = bind(words, wrapped)
+
+    assert wrapped_result.contradicted_cells == []
+    assert [(m.row_path, m.value) for m in plain_result.matched_cells] == [
+        (m.row_path, m.value) for m in wrapped_result.matched_cells
+    ]
+    assert plain_result.contradicted_cells == wrapped_result.contradicted_cells
+    assert plain_result.row_label_contradictions == wrapped_result.row_label_contradictions
+    assert plain_result.structural_agreement == wrapped_result.structural_agreement is True
+
+
+def test_inline_math_wrapped_numeric_cell_is_bound_then_compared_not_convicted():
+    """GH-582: the previous fixture wraps every numeric cell, so with the
+    three source edits reverted, ``_candidate_row_multiset`` sees no
+    numeric candidate row at all and row anchoring fails before the cell
+    walk ever runs -- it does not exercise the reported defect
+    (``binding.py`` ~1572: an already-BOUND ``$-0.06$`` cell convicted as
+    "not a numeric token at all"). Here the OLS lane is plain, so the row
+    binds through it on both the reverted and the fixed source; only the
+    IV lane is wrapped, so the cell walk reaches the actual comparison.
+    Reverting the three source edits reproduces the issue's exact
+    contradiction pair (``−0.06``, ``$-0.06$``); the fix clears it."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(240, 70, 270, 80, "IV"),
+        w(50, 100, 100, 110, "Large T"),
+        w(150, 100, 180, 110, "0.05"),
+        w(250, 100, 280, 110, "−0.06"),
+    ]
+    candidate = """
+|         | OLS  | IV      |
+|---------|------|---------|
+| Large T | 0.05 | $-0.06$ |
+"""
+
+    result = bind(words, candidate)
+
+    assert not result.row_binding_unverifiable
+    assert result.contradicted_cells == []
+    assert [(m.row_path, m.value) for m in result.matched_cells] == [
+        (("Large T",), "0.05"),
+        (("Large T",), "−0.06"),
+    ]
+    assert result.structural_agreement is True
+
+
+def test_text_wrapped_header_style_row_label_is_not_a_contradiction():
+    """GH-582: a row label re-typeset as ``\\text{}``/``^`` math (the
+    Pflueger-Rinaldi corpus shape: native ``Adjusted R2`` vs. model
+    ``Adjusted $\\text{R}^2$``) must fold to the same key as its plain-text
+    rendering, not convict as a shifted/invented label."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Adjusted R2"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                        | OLS  |
+|------------------------|------|
+| Adjusted $\text{R}^2$  | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.contradicted_cells == []
+    assert result.structural_agreement is True
+
+
+# ---------------------------------------------------------------------------
 # 7. A dropped NATIVE row must not vanish silently (BLOCKING 1)
 # ---------------------------------------------------------------------------
 
