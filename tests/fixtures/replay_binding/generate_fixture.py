@@ -18,10 +18,16 @@ Lays out a MINIATURE version of a frozen corpus directory
   actually produces for this PDF+markdown pair (computed here, not
   hand-typed, so the fixture cannot silently drift from ``bind()``'s own
   behaviour).
-- ``corpus/out/doc00/doc00/pages/00002.json`` + matching cache entry — the
-  D3 fail-closed-marker fallback path: ``winning_output.text`` is the
-  marker; the real candidate text only exists in
-  ``cache/aa/<hash>.json``.
+- ``corpus/out/doc00/doc00/pages/00002.json`` + matching cache entry +
+  ``audit_events`` — the D3 fail-closed-marker fallback path:
+  ``winning_output.text`` is the marker; the real candidate text only
+  exists in ``cache/aa/<hash>.json``, identified BY PROVENANCE (the
+  ``table_binding_adjudicated`` audit event's ``engine`` field), never by
+  running ``bind()`` on candidates and picking the best-scoring one.
+- ``corpus/out/doc00/doc00/pages/00003.json`` — same fail-closed-marker
+  shape, but TWO distinct cache candidates share the recorded provenance
+  engine: ambiguous, so the row must come back ``unreplayable`` and
+  ``bind()`` must never be called for it.
 """
 
 from __future__ import annotations
@@ -55,6 +61,17 @@ P2_ROWS = [
     {"label": "Real rate", "Value": "0.33"},
 ]
 P2_CANDIDATE_LABELS = {"Inflation swap": "5Y Inflation swap", "Real rate": "Real rate"}
+
+#: page 3: same shape again, used for the AMBIGUOUS-provenance case (two
+#: distinct cache candidates both claiming the recorded engine).
+P3_ROWS = [
+    {"label": "Credit spread", "Value": "0.61"},
+    {"label": "Term spread", "Value": "0.27"},
+]
+P3_CANDIDATE_LABELS = {"Credit spread": "3Y Credit spread", "Term spread": "Term spread"}
+#: A second, textually distinct candidate for page 3 that ALSO relocates
+#: the table (different row-label defect) -- both claim engine "qwen".
+P3_ALT_CANDIDATE_LABELS = {"Credit spread": "10Y Credit spread", "Term spread": "Term spread"}
 
 
 def _draw_ruled_table(page, rows: list[dict], top: float, label_col: str = "label") -> None:
@@ -92,6 +109,8 @@ def generate_pdf(out_path: Path) -> None:
     _draw_ruled_table(page1, P1_ROWS, TOP)
     page2 = doc.new_page()
     _draw_ruled_table(page2, P2_ROWS, TOP)
+    page3 = doc.new_page()
+    _draw_ruled_table(page3, P3_ROWS, TOP)
     doc.save(str(out_path))
     doc.close()
 
@@ -103,7 +122,7 @@ def _binding_adjudication_for(pdf_path: Path, page_num: int, markdown: str) -> d
 
     sys.path.insert(0, str(HERE.parents[2] / "src"))
     from socr.core.pdf import open_pdf
-    from socr.tables.adjudication import ContradictionItem, items_from_binding
+    from socr.tables.adjudication import items_from_binding
     from socr.tables.binding import bind
     from socr.tables.witness import WitnessStatus, prepare_table_witnesses
 
@@ -136,9 +155,12 @@ def main() -> None:
 
     md1 = _markdown_for(P1_ROWS, P1_CANDIDATE_LABELS)
     md2 = _markdown_for(P2_ROWS, P2_CANDIDATE_LABELS)
+    md3 = _markdown_for(P3_ROWS, P3_CANDIDATE_LABELS)
+    md3_alt = _markdown_for(P3_ROWS, P3_ALT_CANDIDATE_LABELS)
 
     ba1, table_id1 = _binding_adjudication_for(pdf_path, 1, md1)
     ba2, table_id2 = _binding_adjudication_for(pdf_path, 2, md2)
+    ba3, table_id3 = _binding_adjudication_for(pdf_path, 3, md3)
 
     pages_dir = corpus_dir / "out" / "doc00" / "doc00" / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -149,25 +171,64 @@ def main() -> None:
         "page_num": 1,
         "winning_output": {"text": md1},
         "binding_adjudication": {table_id1: ba1},
+        "audit_events": [],
     }
     (pages_dir / "00001.json").write_text(json.dumps(sidecar1, indent=2, sort_keys=True) + "\n")
 
-    marker = D3_MARKER.format(page_num=2)
+    marker2 = D3_MARKER.format(page_num=2)
     sidecar2 = {
         "page_num": 2,
-        "winning_output": {"text": f"{marker}\n\n![Failed table page 2](figures/x.png)"},
+        "winning_output": {"text": f"{marker2}\n\n![Failed table page 2](figures/x.png)"},
         "binding_adjudication": {table_id2: ba2},
+        "audit_events": [
+            {
+                "kind": "table_binding_adjudicated",
+                "engine": "qwen",
+                "data": {"table_id": table_id2},
+            }
+        ],
     }
     (pages_dir / "00002.json").write_text(json.dumps(sidecar2, indent=2, sort_keys=True) + "\n")
 
-    cache_entry = {"page_num": 2, "text": md2}
+    cache_entry2 = {"page_num": 2, "engine": "qwen", "text": md2}
     (cache_dir / "aa0000000000000000000000000000000000000000000000000000000000001.json").write_text(
-        json.dumps(cache_entry, indent=2, sort_keys=True) + "\n"
+        json.dumps(cache_entry2, indent=2, sort_keys=True) + "\n"
+    )
+
+    # Page 3: same fail-closed-marker shape, but TWO cache candidates share
+    # the recorded provenance engine -- ambiguous, must come back
+    # unreplayable, bind() must never be called for it.
+    marker3 = D3_MARKER.format(page_num=3)
+    sidecar3 = {
+        "page_num": 3,
+        "winning_output": {"text": f"{marker3}\n\n![Failed table page 3](figures/x.png)"},
+        "binding_adjudication": {table_id3: ba3},
+        "audit_events": [
+            {
+                "kind": "table_binding_adjudicated",
+                "engine": "qwen",
+                "data": {"table_id": table_id3},
+            }
+        ],
+    }
+    (pages_dir / "00003.json").write_text(json.dumps(sidecar3, indent=2, sort_keys=True) + "\n")
+
+    cache_entry3a = {"page_num": 3, "engine": "qwen", "text": md3}
+    (cache_dir / "aa0000000000000000000000000000000000000000000000000000000000002.json").write_text(
+        json.dumps(cache_entry3a, indent=2, sort_keys=True) + "\n"
+    )
+    cache_entry3b = {"page_num": 3, "engine": "qwen", "text": md3_alt}
+    (cache_dir / "aa0000000000000000000000000000000000000000000000000000000000003.json").write_text(
+        json.dumps(cache_entry3b, indent=2, sort_keys=True) + "\n"
     )
 
     print(f"Generated: {pdf_path}")
     print(f"Generated: {pages_dir / '00001.json'} (table_id={table_id1})")
     print(f"Generated: {pages_dir / '00002.json'} (table_id={table_id2}, fail-closed marker)")
+    print(
+        f"Generated: {pages_dir / '00003.json'} "
+        f"(table_id={table_id3}, fail-closed marker, ambiguous provenance)"
+    )
 
 
 if __name__ == "__main__":

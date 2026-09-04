@@ -41,16 +41,20 @@ def _no_provider_on_path(monkeypatch, tmp_path):
     assert shutil.which("qwen-ocr") is None
 
 
-def test_discover_pages_finds_both_fixture_pages():
+def test_discover_pages_finds_all_fixture_pages():
     records = discover_pages(FIXTURE_CORPUS)
-    assert {(r.doc_slug, r.page_num) for r in records} == {("doc00", 1), ("doc00", 2)}
+    assert {(r.doc_slug, r.page_num) for r in records} == {
+        ("doc00", 1),
+        ("doc00", 2),
+        ("doc00", 3),
+    }
 
 
-def test_replay_corpus_seven_row_shape_on_two_page_fixture():
+def test_replay_corpus_row_shape_matches_recorded_table_count():
     """Same contract the real corpus proves at 7 rows (one row per recorded
-    table): here, 2 recorded tables -> 2 rows, exactly."""
+    table): here, 3 recorded tables -> 3 rows, exactly."""
     rows = replay_corpus(FIXTURE_CORPUS)
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert all(isinstance(r, ReplayRow) for r in rows)
 
 
@@ -69,14 +73,47 @@ def test_fresh_bind_matches_frozen_record_on_unchanged_tree():
     assert p1.removed == ()
 
 
-def test_fail_closed_marker_falls_back_to_cache_candidate():
+def test_fail_closed_marker_falls_back_to_cache_candidate_by_provenance():
     """Page 2's winning_output.text is the D3 marker; the real candidate
-    text only exists in cache/. Replay must recover it and still match."""
+    text only exists in cache/, identified by the ``table_binding_adjudicated``
+    audit event's engine, never by scoring candidates against bind()."""
     rows = replay_corpus(FIXTURE_CORPUS)
     p2 = next(r for r in rows if r.table_id == "p2-t0")
+    assert p2.unreplayable is False
     assert p2.multiset_match is True
     assert "fail-closed marker" in p2.note
+    assert "by provenance" in p2.note
     assert "cache/aa/" in p2.note
+
+
+def test_ambiguous_provenance_is_unreplayable_and_never_calls_bind(monkeypatch):
+    """Page 3: two distinct cache candidates share the recorded provenance
+    engine. The row must come back unreplayable, and ``bind()`` -- the
+    function under test -- must NEVER be called to break the tie (that was
+    the rejected design: letting bind() choose its own input)."""
+    import socr.benchmark.replay_binding as replay_binding_module
+
+    def _bind_must_not_be_called(*args, **kwargs):
+        raise AssertionError("bind() was called for an unreplayable row")
+
+    monkeypatch.setattr(replay_binding_module, "bind", _bind_must_not_be_called)
+
+    sidecar_path = FIXTURE_CORPUS / "out" / "doc00" / "doc00" / "pages" / "00003.json"
+    before = sidecar_path.read_bytes()
+
+    record3 = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 3)
+    rows = replay_page(record3, labels=None)
+    p3 = next(r for r in rows if r.table_id == "p3-t0")
+
+    assert p3.unreplayable is True
+    assert p3.multiset_match is False
+    assert p3.added == ()
+    assert p3.removed == ()
+    assert "ambiguous" in p3.note
+    assert "2 distinct cache candidates" in p3.note
+
+    after = sidecar_path.read_bytes()
+    assert before == after
 
 
 def test_perturbed_recorded_items_report_exact_delta():
@@ -111,6 +148,7 @@ def test_perturbed_recorded_items_report_exact_delta():
         cache_dir=record.cache_dir,
         model_markdown=record.model_markdown,
         is_fail_closed_marker=record.is_fail_closed_marker,
+        provenance_engine_by_table=record.provenance_engine_by_table,
         binding_adjudication=perturbed_adjudication,
     )
 
@@ -137,6 +175,8 @@ def test_report_formats_without_raising():
     report = format_report(rows)
     assert "p1-t0" in report
     assert "p2-t0" in report
+    assert "p3-t0" in report
+    assert "UNREPLAYABLE" in report
 
 
 def test_main_cli_exits_zero_and_prints_rows(capsys):
@@ -147,6 +187,7 @@ def test_main_cli_exits_zero_and_prints_rows(capsys):
     out = capsys.readouterr().out
     assert "p1-t0" in out
     assert "p2-t0" in out
+    assert "p3-t0" in out
 
 
 def test_labels_file_reported_when_absent_from_table(tmp_path):

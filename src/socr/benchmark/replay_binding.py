@@ -48,14 +48,22 @@ the D3 fail-closed marker (`f"[page {page_num} failed: unverifiable table
 — see image]"`, `disposition.ending == "fail_closed_marker"`) -- this
 happened to `doc01` page 2 in the frozen run-2 corpus. The marker carries
 no table block at all, so the sidecar's OWN `winning_output.text` cannot
-reproduce the binding. `_candidate_markdown_for_page` detects the marker
-and falls back to the page's own `cache/*.json` route/extract entries
-(matched by `page_num`), scoring each candidate by how many of the page's
-recorded tables it relocates and how well its fresh multiset matches the
-recorded one -- the candidate that produced the recorded contradiction in
-the first place scores highest. This is a best-effort reconstruction, not
-a guarantee: it is reported in ``ReplayRow.note`` whenever it fires so a
-reader can see it happened.
+reproduce the binding.
+
+`_select_candidate_for_table` recovers it from the page's own
+`cache/*.json` route/extract entries, by **provenance only, never by
+running `bind()`**: it reads the `table_binding_adjudicated` audit event
+recorded for this exact `table_id` (`judge.table_verdict
+.TABLE_BINDING_ADJUDICATED_KIND`; carries the winning `engine`), then
+looks for the cache entries on this `page_num` whose own `engine` field
+matches. Scoring a candidate by how well it reproduces the recorded
+contradiction was tried and rejected in review: that would let `bind()`
+choose its own input, so a change to `bind()` under test (A2's row-label
+repair) could silently swap which candidate is treated as ground truth out
+from under the regression it is supposed to be measured against. Exactly
+one provenance match -> used, noted. Zero or more than one distinct
+candidate -> the row is `unreplayable` (`ReplayRow.unreplayable`) and
+`bind()` is never called for it.
 
 **The persisted `binding_adjudication[<table_id]].items[]` records do NOT
 carry `native_bbox`** (`adjudication.ContradictionItem.to_record` omits
@@ -86,6 +94,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from socr.core.pdf import open_pdf
+from socr.judge.table_verdict import TABLE_BINDING_ADJUDICATED_KIND
 from socr.tables.adjudication import ContradictionItem, items_from_binding
 from socr.tables.binding import bind
 from socr.tables.witness import TableWitness, WitnessStatus, prepare_table_witnesses
@@ -129,6 +138,10 @@ class ReplayRow:
     final_disposition: str
     label_accuracy: str
     crop_coverage: str
+    #: True iff no single candidate markdown could be identified BY
+    #: PROVENANCE (see module docstring) — ``bind()`` was never called for
+    #: this row and every fresh_* field is a placeholder, not a result.
+    unreplayable: bool = False
     note: str = ""
 
 
@@ -143,6 +156,10 @@ class PageRecord:
     cache_dir: Path
     model_markdown: str
     is_fail_closed_marker: bool
+    #: table_id -> the winning ``engine`` recorded on this table's OWN
+    #: ``table_binding_adjudicated`` audit event, or ``None`` when no such
+    #: event exists. The only provenance signal candidate selection uses.
+    provenance_engine_by_table: dict = field(default_factory=dict)
     binding_adjudication: dict = field(default_factory=dict)
 
 
@@ -173,10 +190,28 @@ def discover_pages(corpus_dir: Path) -> list[PageRecord]:
                 cache_dir=sidecar_path.parents[1] / "cache",
                 model_markdown=model_markdown,
                 is_fail_closed_marker=_is_fail_closed_marker(model_markdown, page_num),
+                provenance_engine_by_table=_provenance_engine_by_table(data, adjudication),
                 binding_adjudication=adjudication,
             )
         )
     return records
+
+
+def _provenance_engine_by_table(sidecar: dict, adjudication: dict) -> dict:
+    """table_id -> the ``engine`` recorded on the ``table_binding_adjudicated``
+    audit event for that exact table_id, or ``None`` when there is no such
+    event (or more than one, which never happens in practice but is not
+    trusted blindly — the first is used and the ambiguity is not silently
+    hidden downstream: ``_select_candidate_for_table`` still requires the
+    CACHE side to be unambiguous)."""
+    by_table: dict = dict.fromkeys(adjudication)
+    for event in sidecar.get("audit_events") or []:
+        if not isinstance(event, dict) or event.get("kind") != TABLE_BINDING_ADJUDICATED_KIND:
+            continue
+        table_id = (event.get("data") or {}).get("table_id")
+        if table_id in by_table and by_table[table_id] is None:
+            by_table[table_id] = event.get("engine") or None
+    return by_table
 
 
 def _is_fail_closed_marker(text: str, page_num: int) -> bool:
@@ -186,15 +221,16 @@ def _is_fail_closed_marker(text: str, page_num: int) -> bool:
     return f"[page {page_num} failed: unverifiable table" in text
 
 
-def _cache_candidate_texts(cache_dir: Path, page_num: int) -> list[tuple[str, str]]:
-    """``(source_label, text)`` for every cached route/extract attempt on
-    *page_num*, sorted by cache filename for determinism. Route/extract
-    cache entries are keyed by content hash, not page, so every ``*.json``
-    under *cache_dir* is opened and filtered by its own ``page_num`` field;
-    never raises on a malformed cache entry."""
+def _cache_candidate_texts(cache_dir: Path, page_num: int) -> list[tuple[str, str, str]]:
+    """``(source_label, engine, text)`` for every cached route/extract
+    attempt on *page_num* whose own text is not itself a fail-closed
+    marker, sorted by cache filename for determinism. Route/extract cache
+    entries are keyed by content hash, not page, so every ``*.json`` under
+    *cache_dir* is opened and filtered by its own ``page_num`` field; never
+    raises on a malformed cache entry."""
     if not cache_dir.is_dir():
         return []
-    candidates: list[tuple[str, str]] = []
+    candidates: list[tuple[str, str, str]] = []
     for cache_path in sorted(cache_dir.glob("*/*.json")):
         try:
             entry = json.loads(cache_path.read_text())
@@ -205,53 +241,56 @@ def _cache_candidate_texts(cache_dir: Path, page_num: int) -> list[tuple[str, st
         text = entry.get("text")
         if not text or _is_fail_closed_marker(text, page_num):
             continue
-        candidates.append((f"cache/{cache_path.parent.name}/{cache_path.name}", text))
+        candidates.append(
+            (f"cache/{cache_path.parent.name}/{cache_path.name}", entry.get("engine") or "", text)
+        )
     return candidates
 
 
-def _candidate_markdown_for_page(record: PageRecord) -> tuple[str, str]:
-    """The best-effort model markdown to replay this page's tables against.
+def _select_candidate_for_table(record: PageRecord, table_id: str) -> tuple[str | None, str]:
+    """The model markdown to replay *table_id* against, chosen BY
+    PROVENANCE ONLY -- never by calling ``bind()`` (see module docstring).
 
-    Returns ``(text, source_note)``; ``source_note`` is empty when
-    ``winning_output.text`` was usable directly, and otherwise names which
-    cache entry was substituted and why, scored by how many of this page's
-    RECORDED tables it relocates and how closely its fresh multiset matches
-    what was recorded (see module docstring).
+    Returns ``(text, note)``. ``text`` is ``None`` iff the table is
+    unreplayable (no provenance engine recorded, or the cache side is
+    empty / ambiguous for that engine) -- callers MUST NOT call ``bind()``
+    in that case.
     """
     if not record.is_fail_closed_marker:
         return record.model_markdown, ""
 
-    candidates = _cache_candidate_texts(record.cache_dir, record.page_num)
-    best_source = ""
-    best_text = record.model_markdown
-    best_score = (-1, -1)
-    for source, text in candidates:
-        located = 0
-        matched = 0
-        for table_id, recorded in record.binding_adjudication.items():
-            recorded_counter = Counter(_recorded_item_key(r) for r in (recorded.get("items") or []))
-            items, note = replay_table(record.pdf_path, record.page_num, text, table_id)
-            if note:
-                continue
-            located += 1
-            fresh_counter = Counter(_item_key(item) for item in items)
-            if fresh_counter == recorded_counter:
-                matched += 1
-        score = (located, matched)
-        if score > best_score:
-            best_score, best_source, best_text = score, source, text
-
-    if best_score[0] <= 0:
+    engine = record.provenance_engine_by_table.get(table_id)
+    if not engine:
         return (
-            record.model_markdown,
-            "winning_output.text is the D3 fail-closed marker; no cache "
-            "candidate relocated any recorded table",
+            None,
+            "winning_output.text is the D3 fail-closed marker and no "
+            f"table_binding_adjudicated audit event recorded a winning "
+            f"engine for {table_id!r}; unreplayable",
         )
+
+    candidates = _cache_candidate_texts(record.cache_dir, record.page_num)
+    matches = [(source, text) for source, cand_engine, text in candidates if cand_engine == engine]
+    distinct_texts = {text for _source, text in matches}
+
+    if len(distinct_texts) == 0:
+        return (
+            None,
+            "winning_output.text is the D3 fail-closed marker; no cache "
+            f"candidate on this page has provenance engine {engine!r}; unreplayable",
+        )
+    if len(distinct_texts) > 1:
+        sources = ", ".join(source for source, _text in matches)
+        return (
+            None,
+            f"winning_output.text is the D3 fail-closed marker; "
+            f"{len(distinct_texts)} distinct cache candidates share "
+            f"provenance engine {engine!r} ({sources}); ambiguous, unreplayable",
+        )
+    source, text = matches[0]
     return (
-        best_text,
+        text,
         f"winning_output.text is the D3 fail-closed marker; substituted "
-        f"{best_source} ({best_score[1]}/{best_score[0]} recorded tables "
-        f"exact-matched)",
+        f"{source} by provenance (engine={engine!r})",
     )
 
 
@@ -299,19 +338,11 @@ def _final_disposition(status: str) -> str:
 
 def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
     rows: list[ReplayRow] = []
-    candidate_markdown, source_note = _candidate_markdown_for_page(record)
     for table_id, recorded in sorted(record.binding_adjudication.items()):
         recorded_items = recorded.get("items") or []
         recorded_counter = Counter(_recorded_item_key(r) for r in recorded_items)
 
-        fresh_items, note = replay_table(
-            record.pdf_path, record.page_num, candidate_markdown, table_id
-        )
-        note = " | ".join(part for part in (source_note, note) if part)
-        fresh_counter = Counter(_item_key(item) for item in fresh_items)
-
-        added = tuple(sorted((fresh_counter - recorded_counter).elements()))
-        removed = tuple(sorted((recorded_counter - fresh_counter).elements()))
+        candidate_markdown, note = _select_candidate_for_table(record, table_id)
 
         label_accuracy = "n/a (no --labels file supplied; TICKET-A1b writes it)"
         crop_coverage = "n/a (no --labels file supplied; TICKET-A1b writes it)"
@@ -323,6 +354,39 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
             else:
                 label_accuracy = "see TICKET-A1b autopsy log (not scored here)"
                 crop_coverage = "see TICKET-A1b autopsy log (not scored here)"
+
+        if candidate_markdown is None:
+            # Provenance could not identify a single candidate -- bind() is
+            # NEVER called for this row (see module docstring: candidate
+            # selection must not depend on a binding result).
+            rows.append(
+                ReplayRow(
+                    doc_slug=record.doc_slug,
+                    page_num=record.page_num,
+                    table_id=table_id,
+                    recorded_status=str(recorded.get("status", "")),
+                    recorded_item_count=len(recorded_items),
+                    fresh_item_count=0,
+                    multiset_match=False,
+                    added=(),
+                    removed=(),
+                    final_disposition=_final_disposition(str(recorded.get("status", ""))),
+                    label_accuracy=label_accuracy,
+                    crop_coverage=crop_coverage,
+                    unreplayable=True,
+                    note=note,
+                )
+            )
+            continue
+
+        fresh_items, bind_note = replay_table(
+            record.pdf_path, record.page_num, candidate_markdown, table_id
+        )
+        note = " | ".join(part for part in (note, bind_note) if part)
+        fresh_counter = Counter(_item_key(item) for item in fresh_items)
+
+        added = tuple(sorted((fresh_counter - recorded_counter).elements()))
+        removed = tuple(sorted((recorded_counter - fresh_counter).elements()))
 
         rows.append(
             ReplayRow(
@@ -355,16 +419,17 @@ def format_report(rows: list[ReplayRow]) -> str:
     lines = []
     header = (
         f"{'doc':6} {'page':4} {'table_id':9} {'recorded':9} {'rec#':4} "
-        f"{'fresh#':6} {'match':5}  disposition"
+        f"{'fresh#':6} {'match':12}  disposition"
     )
     lines.append(header)
     lines.append("-" * len(header))
     for row in rows:
+        match_col = "UNREPLAYABLE" if row.unreplayable else ("YES" if row.multiset_match else "NO")
+        fresh_col = "-" if row.unreplayable else str(row.fresh_item_count)
         lines.append(
             f"{row.doc_slug:6} {row.page_num:<4} {row.table_id:9} "
             f"{row.recorded_status:9} {row.recorded_item_count:<4} "
-            f"{row.fresh_item_count:<6} {'YES' if row.multiset_match else 'NO':5}  "
-            f"{row.final_disposition}"
+            f"{fresh_col:<6} {match_col:12}  {row.final_disposition}"
         )
         if row.note:
             lines.append(f"       note: {row.note}")
