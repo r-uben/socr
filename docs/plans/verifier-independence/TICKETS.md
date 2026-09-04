@@ -169,8 +169,10 @@ B1 in tree — not an explanation of the confounded 8.0.
 **Do:** Before running: record the intended source digest from the checkout
 (`_socr_source_digest()` on the B1 tree) and verify the resolved package path
 (`~/venvs/socr/bin/python -c "import socr; print(socr.__file__)"`) points at that
-checkout — a consistently wrong editable install passes a sidecars-agree check. Re-run
-`run.sh` from the frozen corpus; **assert all 20 sidecars are present and each
+checkout — a consistently wrong editable install passes a sidecars-agree check. Run from
+a **dedicated checkout pinned to the intended B1 commit, kept unchanged throughout
+measurement**; set `PYTHONPATH=<that checkout>/src` explicitly for every process
+`run.sh` launches (the shared venv's editable pointer has been repointed mid-run twice); **assert all 20 sidecars are present and each
 `socr_source_digest` equals the intended digest** before tabulating (else the run is
 discarded, not reported); tabulate `timings_s` per stage per page, log the breakdown. No code change; no
 claim about run 2's minutes.
@@ -242,7 +244,9 @@ ACCEPTED quota. Full suite green; ruff format clean.
 **Problem:** "The free lane witnesses the model" needs a number on the same 20 pages —
 but a live OCR re-run is nondeterministic and stricter abstention can *lower* accepts
 legitimately, so the live count is a **report**, not the gate.
-**Do:** Re-run `run.sh` on the frozen corpus at the C2b tree. Tabulate ACCEPTED /
+**Do:** Re-run `run.sh` on the frozen corpus at the C2b tree under **B2's run discipline**
+(pinned dedicated checkout, explicit `PYTHONPATH`, resolved-path check, all 20 sidecars on
+the intended digest). Tabulate ACCEPTED /
 WITHHELD / UNVERIFIED; lifted / held / abstained; cloud cost; per-stage minutes (B1).
 Compare to run 2 line by line. Every held table carries a cause from the full taxonomy:
 `absent_text`, `abstained`, `presentation` (#585), `lane_mismatch`, `infrastructure`,
