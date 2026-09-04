@@ -107,14 +107,18 @@ def _latched_rung_kinds(state: "DocumentState", page_nums) -> list[str]:
 class _PageStageClock:
     """Exclusive wall-clock accumulator for one agentic page (VI-B1).
 
-    Nested ``span`` children are subtracted from the parent so the exclusive
-    keys sum to ``total``. ``ladder`` / ``adjudication`` nest under ``tables``;
-    ``extract`` nests under ``route`` when ``run_provider`` runs inside
-    ``route_page``.
+    ``total`` is the independent page wall from construction to ``finalize``,
+    not the sum of stage keys. Nested ``span`` children are subtracted from
+    the parent so the exclusive keys can be compared to that wall (the 1 ms
+    Done-when). A derived sum cannot show unattributed time, which is what
+    "the 8 min has an owner" requires. ``ladder`` / ``adjudication`` nest
+    under ``tables``; ``extract`` nests under ``route`` when ``run_provider``
+    runs inside ``route_page``.
     """
 
     def __init__(self, now=time.perf_counter) -> None:
         self._now = now
+        self._t0 = now()
         self.exclusive: dict[str, float] = dict.fromkeys(PAGE_TIMING_EXCLUSIVE_KEYS, 0.0)
         self._stack: list[tuple[str, float, list[float]]] = []
 
@@ -137,7 +141,7 @@ class _PageStageClock:
 
     def finalize(self) -> dict[str, float]:
         out = {key: float(self.exclusive.get(key, 0.0)) for key in PAGE_TIMING_EXCLUSIVE_KEYS}
-        out["total"] = sum(out[key] for key in PAGE_TIMING_EXCLUSIVE_KEYS)
+        out["total"] = max(0.0, self._now() - self._t0)
         return out
 
 
@@ -6720,17 +6724,10 @@ class UnifiedPipeline:
                 if bo.status == PageStatus.SUCCESS:
                     bo.status = PageStatus.WARNING
 
-            # Write-through blob cache (replay-cache continuity).
-            _flush_t0 = time.perf_counter()
-            if _page_blob_store is not None:
-                try:
-                    _page_blob_store.put_page(bo)
-                except Exception as exc:
-                    logger.debug("write-through blob write failed for p%d: %s", page_num, exc)
-
-            # Provisional fragment + sidecar flush (PP-2 A1: salvage-only).
-            # ``terminal=False`` marks these as provisional; the authoritative
-            # bytes are written by _rewrite_all_fragments at assemble time.
+            # Write-through blob cache (replay-cache continuity) + provisional
+            # fragment. Timed as flush. Sidecar write is AFTER finalize so
+            # ``timings_s.total`` is the independent page wall, not a value
+            # that includes writing itself.
             try:
                 from ocr_output_contract import PAGE_MARKER_RE
 
@@ -6739,32 +6736,40 @@ class UnifiedPipeline:
                     finalized_page_record,
                 )
 
-                # GH-550: select and finalise ONCE, then hand the same record to
-                # both writers.
-                #
-                # GH-539 made the two agree by calling `finalized_page_record`
-                # for the fragment while `_flush_page_sidecar` called it again.
-                # Same function and same inputs, so they agreed -- but that is a
-                # coincidence maintained by hand, and #549 spent three rounds on
-                # exactly this class: same function, one argument apart; same
-                # guard, different output. A second call is a second chance to
-                # diverge.
-                #
-                # The `structure_class_floor_text` special case goes too: the
-                # floor disposition already lives inside the record, so deriving
-                # it separately was a third path to the same bytes.
-                _record = finalized_page_record(state, page_num, _whole_doc_page_texts(state))
+                with clock.span("flush"):
+                    if _page_blob_store is not None:
+                        try:
+                            _page_blob_store.put_page(bo)
+                        except Exception as exc:
+                            logger.debug(
+                                "write-through blob write failed for p%d: %s", page_num, exc
+                            )
 
-                # Strip any leading ## Page N marker so the provisional fragment
-                # body matches what assemble would produce (modulo
-                # post-strip/post-figure transforms, which run later).
-                _raw_body = _record.output.text or ""
-                _stripped = _raw_body.lstrip()
-                _m = PAGE_MARKER_RE.match(_stripped)
-                _body = _stripped[_m.end() :].lstrip("\n") if _m else _raw_body
+                    # GH-550: select and finalise ONCE, then hand the same record to
+                    # both writers.
+                    #
+                    # GH-539 made the two agree by calling `finalized_page_record`
+                    # for the fragment while `_flush_page_sidecar` called it again.
+                    # Same function and same inputs, so they agreed -- but that is a
+                    # coincidence maintained by hand, and #549 spent three rounds on
+                    # exactly this class: same function, one argument apart; same
+                    # guard, different output. A second call is a second chance to
+                    # diverge.
+                    #
+                    # The `structure_class_floor_text` special case goes too: the
+                    # floor disposition already lives inside the record, so deriving
+                    # it separately was a third path to the same bytes.
+                    _record = finalized_page_record(state, page_num, _whole_doc_page_texts(state))
 
-                self._flush_page_fragment(state, page_num, _body, output_dir)
-                clock.add_exclusive("flush", time.perf_counter() - _flush_t0)
+                    # Strip any leading ## Page N marker so the provisional fragment
+                    # body matches what assemble would produce (modulo
+                    # post-strip/post-figure transforms, which run later).
+                    _raw_body = _record.output.text or ""
+                    _stripped = _raw_body.lstrip()
+                    _m = PAGE_MARKER_RE.match(_stripped)
+                    _body = _stripped[_m.end() :].lstrip("\n") if _m else _raw_body
+
+                    self._flush_page_fragment(state, page_num, _body, output_dir)
                 ps.timings_s = clock.finalize()
                 self._flush_page_sidecar(
                     state, page_num, output_dir, terminal=False, record=_record
@@ -6776,7 +6781,6 @@ class UnifiedPipeline:
                     exc,
                 )
                 if not ps.timings_s:
-                    clock.add_exclusive("flush", time.perf_counter() - _flush_t0)
                     ps.timings_s = clock.finalize()
             self._page_clock = None
 

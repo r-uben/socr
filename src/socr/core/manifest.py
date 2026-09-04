@@ -69,8 +69,8 @@ NORMALIZER_VERSION = "3"
 ASSEMBLY_VERSION = "3"
 
 # VI-B1: exclusive per-page stage keys. Nested children (extract under route
-# for OCR; ladder / adjudication under tables) are subtracted from the parent
-# so these keys sum to ``timings_s.total``.
+# for OCR; ladder / adjudication under tables) are subtracted from the parent.
+# ``timings_s.total`` is the independent page wall, not this sum.
 PAGE_TIMING_EXCLUSIVE_KEYS: tuple[str, ...] = (
     "route",
     "extract",
@@ -98,7 +98,7 @@ def coerce_page_timings(raw) -> dict[str, float]:
 
 
 def exclusive_timings_sum(timings: dict[str, float] | None) -> float:
-    """Sum of exclusive stage keys; ``total`` itself is excluded."""
+    """Sum of exclusive stage keys. Does not read ``total`` (independent wall)."""
     if not timings:
         return 0.0
     return sum(float(timings.get(key, 0.0) or 0.0) for key in PAGE_TIMING_EXCLUSIVE_KEYS)

@@ -191,7 +191,8 @@ def test_nested_clock_subtracts_children_from_parent() -> None:
             ticks[0] += 0.40
             with clock.span("adjudication"):
                 ticks[0] += 0.25
-    clock.add_exclusive("flush", 0.02)
+    with clock.span("flush"):
+        ticks[0] += 0.02
     got = clock.finalize()
 
     assert got["extract"] == pytest.approx(1.20)
@@ -202,6 +203,30 @@ def test_nested_clock_subtracts_children_from_parent() -> None:
     assert got["flush"] == pytest.approx(0.02)
     _assert_exclusive_sum(got)
     assert got["total"] == pytest.approx(2.02)
+
+
+def test_total_is_independent_page_wall_not_the_stage_sum() -> None:
+    """A constructed total=sum(stages) cannot show unattributed time.
+
+    Advance the fake clock between spans: ``total`` must move with the wall,
+    not with the exclusive keys. That is the 8 min/page owner: a gap the
+    stages did not name.
+    """
+    ticks = [0.0]
+
+    def now() -> float:
+        return ticks[0]
+
+    clock = _PageStageClock(now=now)
+    with clock.span("extract"):
+        ticks[0] += 1.0
+    ticks[0] += 0.05  # unattributed
+    got = clock.finalize()
+
+    assert got["extract"] == pytest.approx(1.0)
+    assert got["total"] == pytest.approx(1.05)
+    assert exclusive_timings_sum(got) == pytest.approx(1.0)
+    assert abs(exclusive_timings_sum(got) - got["total"]) > 0.001
 
 
 def test_process_sidecar_exclusive_keys_sum_to_total(tmp_path: Path) -> None:
