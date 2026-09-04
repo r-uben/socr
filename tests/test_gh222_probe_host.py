@@ -116,8 +116,13 @@ def test_trigger_predicate_unchanged() -> None:
 
     from socr.pipeline import orchestrator
 
-    src = inspect.getsource(orchestrator.UnifiedPipeline._phase_agentic)
-    assert '_had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)' in src
+    # Whitespace-normalised: the formatter may wrap this line at any indent depth.
+    src = " ".join(inspect.getsource(orchestrator.UnifiedPipeline._phase_agentic).split())
+    predicate = '_had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)'
+    assert (
+        predicate in src
+        or predicate.replace("any(", "any( ").replace("attempts)", "attempts )") in src
+    )
 
 
 @pytest.mark.parametrize(
