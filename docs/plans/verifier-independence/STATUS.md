@@ -1,25 +1,30 @@
 # STATUS — verifier-independence
 
-Last updated: 2026-09-04
+Last updated: 2026-09-05
 
 ## Stage
 
 Plan drafted 2026-09-04 from a four-round Claude ↔ Codex conversation in the socr `brain`
 tab, then attacked by a three-seat panel (Codex: fidelity; agy: coverage/size; grok:
-gating/CI/resume) — 24 findings, all verified against the tree and folded in. Biggest
-corrections: A2 retargeted from `native_rows.py` to `binding.py` (the binder builds its own
-rows); `bands_from_rules` yields table boxes not row bands (C2a builds the helper); `lifted`
-replaced as A2's counter; C3's live quota replaced by A2's frozen-replay gate; `tests/` is
-flat. Nothing dispatched.
+gating/CI/resume) — 24 findings, all verified against the tree and folded in. A second
+revise panel (Codex / Claude / Cursor / Bugbot; Gemini silent) on 2026-09-05 folded
+additional findings (base SHA, A1 replay gate, A2 denominator, B2 baseline framing, C2b
+file split). Biggest corrections: A2 retargeted from `native_rows.py` to `binding.py` (the
+binder builds its own rows); `bands_from_rules` yields table boxes not row bands (C2a builds
+the helper); `lifted` replaced as A2's counter; C3's live quota replaced by A2's frozen-replay
+gate; `tests/` is flat. Nothing dispatched.
 
 ## Base state (clean before tickets)
 
-- `main` @ `b7323f7` (#587 merged). Plan branch `feat/verifier-independence-plan`.
+- `main` @ `92c1527` (#588 merged; docs-only digest-correction atop #587). Plan branch
+  `feat/verifier-independence-plan`.
 - Frozen evidence: `~/Data/socr/ladder-run2-2026-09-04/` (153 files, `SHA256SUMS`),
   copied from the run-2 scratchpad. Verify with `shasum -a 256 -c SHA256SUMS`.
 - Measured baseline (run 2, `main@f434019`): 18 tables to ladder → 7 ACCEPTED /
   11 UNVERIFIED; 7 adjudicated → 1 lifted / 6 held; 3 held by native row-label defects;
-  $0.0020 cloud; 8.0 min/page, no stage timings exist.
+  $0.0020 cloud; **8.0 min/page is confounded** — run-2 wall-clock spanned **three**
+  `socr_source_digest` values (venv repoint mid-run); no stage timings exist (B1/B2 establish
+  a fresh baseline under one digest).
 - Full suite last known green on `main`; ~1070 tests.
 
 ## Ticket board
@@ -48,6 +53,4 @@ flat. Nothing dispatched.
 
 ## Next action
 
-Commit the plan folder on `feat/verifier-independence-plan`, open the PR, then `/plan next`
-→ dispatch A1 and B1 on separate branches (`feat/vi-A1-replay-binding`,
-`feat/vi-B1-stage-timings`).
+Wave 1 dispatch: A1 on `feat/vi-A1-replay-binding` ∥ B1 on `feat/vi-B1-stage-timings`.

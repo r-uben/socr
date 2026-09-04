@@ -17,8 +17,10 @@ Measured on the 2026-09-04 ladder re-run (`docs/log/2026-09-04_ladder-corpus-rer
 `main@f434019`): 7 tables adjudicated, **1 lifted, 6 held**; **3 of the 6** (doc02 p3,
 doc02 p4, doc04 p3) are blocked by native row-label defects (#331 / #418 / #146); doc03
 is held by lane contradictions, doc05/doc07 retain sibling-LaTeX and lane items (#585,
-out of scope here). Cost is not the problem ($0.0020 / 20 pages). Latency is unmeasured
-(8.0 min/page; no stage timing exists anywhere in sidecar, manifest, or CLI).
+out of scope here). Cost is not the problem ($0.0020 / 20 pages). Latency is unmeasured — run-2's **8.0
+min/page is confounded** (wall-clock spanned three `socr_source_digest` values; venv repoint
+mid-run); no stage timing exists anywhere in sidecar, manifest, or CLI (B2 establishes a fresh
+baseline under one digest with B1 in tree).
 
 Three streams: **A** repair the native reference, **B** instrument latency, **C** make
 the verifier independent of both lanes. `orchestrator.py` decomposition (#155) is not a
@@ -47,12 +49,12 @@ prerequisite — every ticket touches a bounded seam.
   and discards the intermediate rules — **no row-band helper exists yet**. Ruled tables
   carry per-row rules; booktabs tables carry top/mid/bottom only.
 - **Resume gate:** skip checks (`orchestrator.py:8555-8571`) ignore extra JSON keys;
-  `_run_fingerprint` (`:1017-1251`) includes `socr_source_digest` (`:1251`), so **any
-  `.py` edit invalidates every existing ledger** — run-2 sidecars will never be skipped
-  by a tree that contains any ticket here. `_restore_terminal_page_state`
-  (`:8901-9112`) restores only named fields; a new sidecar field that is not restored is
-  dropped on the assemble re-flush.
-- **Byte-identity:** `_flush_page_sidecar` (`:8272-8453`) writes JSON;
+  `_run_fingerprint` (starts near `:976`; `socr_source_digest` at `:1251`) includes
+  `socr_source_digest`, so **any `.py` edit invalidates every existing ledger** — run-2
+  sidecars will never be skipped by a tree that contains any ticket here.
+  `_restore_terminal_page_state` (`:8901-9112`) restores only named fields; a new sidecar field
+  that is not restored is dropped on the assemble re-flush.
+- **Byte-identity:** `_flush_page_sidecar` (`:8147-8455`) writes JSON;
   `_rewrite_all_fragments` (`:9238-9276`) writes `.md` from assembled bodies. New fields
   stay out of fragment markdown, `audit_events.detail`, and `canonical_page_texts`.
 - **Hermeticity patches** (CI has no provider): `_available_engines_for_agentic` →
@@ -80,9 +82,13 @@ recorded `native_bbox` cover the printed label; rendered via `_render_adjudicati
 fixtures under `tests/fixtures/replay_binding/`, no corpus, no provider),
 **read-only import** of `orchestrator._render_adjudication_crop` — B1 owns that file.
 **Done when:** `~/venvs/socr/bin/socr-replay-binding ~/Data/socr/ladder-run2-2026-09-04`
-prints 7 rows and reproduces run-2's `1 lifted / 6 held` from the frozen sidecars on the
-unchanged tree; `~/venvs/socr/bin/pytest tests/test_replay_binding.py -q` exits 0 with
-`ollama` and `qwen-ocr` absent from `PATH`; `uvx ruff@0.16.0 format --check .` clean.
+prints 7 rows; on the **unchanged tree**, each row explicitly compares the **fresh** `bind()`
+result (contradiction item signatures, native labels, item set) against the frozen sidecar's
+recorded `binding_adjudication` — not merely echo of recorded `status` / lifted-held counts
+(reproducing `1 lifted / 6 held` from recorded statuses alone is vacuous); a hermetic fixture
+forces at least one bind delta (desk soft); `~/venvs/socr/bin/pytest tests/test_replay_binding.py -q`
+exits 0 with `ollama` and `qwen-ocr` absent from `PATH`; `uvx ruff@0.16.0 format --check .`
+clean.
 
 ### TICKET-A1b — failed-disproof autopsy · TODO · depends-on: A1 · wave 2 · agent: claude
 **Problem:** The 8 failed disproofs and the 3 native-label-blocked tables have never been
@@ -98,9 +104,10 @@ tables are `shredded_label` vs `bbox_truncated`, and answers the hypothesis in o
 with a count (`N of 8 crops truncated by native_bbox`).
 
 ### TICKET-A2 — binder row-label repair (#331 / #418 / #146) · TODO · depends-on: A1b · wave 3
-**Problem:** The binder's own rowizer truncates, runs-on, or shreds row labels (`1t 1t`,
-`Sample 1988:1–2019:12 1994:1–2019:12 …`), so the free reference contradicts a correct
-model token and the table is held.
+**Problem:** The binder's own rowizer truncates, runs-on, or shreds row labels on the 3 target
+tables (`Treasury inst. forward rate` missing `3Y`/`5Y`/`10Y` on doc02 p3/p4; shredded subscript
+`1t 1t` on doc04 p3), so the free reference contradicts a correct model token and the table is
+held.
 **Do:** Fix only the classes A1b found native-side (`shredded_label`, `bbox_truncated`) in
 `_native_rows` / `_assign_bands` / `_row_label_and_bbox`: stub-column retention (#331),
 snap-radius drop (#418), first-row-as-header (#146) — whichever are live on the 3 target
@@ -110,13 +117,13 @@ accepting more. Do **not** touch `native_rows.py`.
 **Files:** `src/socr/tables/binding.py`, `tests/test_binding.py`,
 `tests/test_tr1_rowizer.py`, `tests/test_gh331_stub_labels.py`,
 `tests/test_table_header_gh146.py`, `tests/fixtures/replay_binding/` (controls).
-**Done when:** on frozen replay, **3/3 target tables cleared of false native-label
-clamps**; **8/8 unresolved target labels reconstructed against the rendered source**
-(A1b's `labels.json`); **zero false accepts** on the row-swap and neighbouring-label
-controls; A1 output for the 4 non-target tables byte-identical before/after; genuinely
-absent text is reported in the log as its own line, never subtracted from the gate.
-`lifted` is **not** the counter — a correct native label produces no contradiction and so
-no adjudication at all. Full suite green; ruff format clean.
+**Done when:** on frozen replay, **3/3 target tables cleared of false native-label clamps**
+(that remain native-side-blocked after A1b); **N/N unresolved target labels reconstructed**
+against the rendered source, where **N = A1b's native-side subset only** (`shredded_label`,
+`bbox_truncated`) — `absent_text`, `neighbour_capture`, and `other` are logged on their own
+line and **out of that denominator**; **zero false accepts** on the row-swap and
+neighbouring-label controls; A1 output for the 4 non-target tables byte-identical before/after;
+full suite green; ruff format clean.
 
 ## Stream B — latency instrumentation
 
@@ -143,8 +150,9 @@ with timings on and off; existing golden/byte-identity tests unchanged. Patches:
 `_available_engines_for_agentic`, `_resolve_judge_model`.
 
 ### TICKET-B2 — latency breakdown on the frozen corpus · TODO · depends-on: B1 · wave 2 · agent: claude
-**Problem:** Nobody knows whether the 8 min is the ladder, the local VLM, or the
-adjudicator.
+**Problem:** Run-2's 8.0 min/page is confounded (three `socr_source_digest` values mid-run) and
+has no per-stage breakdown. B2 establishes a **fresh** timed baseline under **one digest** with
+B1 in tree — not an explanation of the confounded 8.0.
 **Do:** Re-run `run.sh` from the frozen corpus with B1 in the tree, tabulate `timings_s`
 per stage per page, log the breakdown. No code change.
 **Files:** `docs/plans/verifier-independence/logs/YYYY-MM-DD_B2-latency.md`.
@@ -185,13 +193,14 @@ the helper returns no per-row bands (abstain input), not a guess.
 
 ### TICKET-C2b — geometry-addressed disproof + abstain semantics · TODO · depends-on: C2a, A2, B1 · wave 5
 **Problem:** As C1. This is the architectural change the owner authorised.
-**Do:** `ContradictionItem` gains `cell_bbox` (geometry-derived, or `None`);
-`_disprove_one` transcribes `cell_bbox`, never `native_bbox`; `None` ⇒ `abstained`.
+**Do:** `ContradictedCell` / `RowLabelContradiction` in `binding.py` gain geometry-derived
+fields; `adjudication.py` converters copy into `ContradictionItem.cell_bbox` (geometry-derived,
+or `None`); `_disprove_one` transcribes `cell_bbox`, never `native_bbox`; `None` ⇒ `abstained`.
 `_adjudicate_clamped_table` populates it via C2a. `orchestrator.py:5245` / `:5292` learn
 the third outcome so clamp/audit wording is right; `_apply_binding_adjudication_meta`
 round-trips it. Keep the `_transcribe_cell_token` patch seam.
 **Files:** `src/socr/tables/adjudication.py`, `src/socr/tables/binding.py`
-(`ContradictionItem` population only), `src/socr/pipeline/orchestrator.py`
+(`ContradictedCell` / `RowLabelContradiction` geometry only), `src/socr/pipeline/orchestrator.py`
 (`:5200-5310` and `:5522-5637` only), `tests/test_binding_adjudication.py`,
 `tests/test_gh367_adjudication_lift.py`.
 **Done when:** two tests, same process, pinning the **difference**: (1) native bbox
@@ -199,9 +208,11 @@ truncated to half the label, geometry present → the transcriber receives the g
 cell and the item is disproved; (2) no per-row rules → `abstained`, not disproved, and the
 transcriber is **never called**. Any `process()` test patches
 `_available_engines_for_agentic`, `_resolve_judge_model`, `_transcribe_cell_token`.
-Resume skip identical with and without `cell_bbox` / `abstained`. On frozen replay every
-target table A2 cleared stays cleared; any newly required abstention is listed in the
-ticket log by table. Full suite green; ruff format clean.
+Resume skip identical with and without `cell_bbox` / `abstained`. **Deterministic
+frozen-replay gate** (A2's 3/3 clears targets before C2b; C3 is report-only): known
+geometry-addressable disputes on the frozen corpus must disprove via `cell_bbox`; known
+no-row-rule / booktabs cases must `abstain` (transcriber never called). Do not invent a
+live ACCEPTED quota. Full suite green; ruff format clean.
 
 ### TICKET-C3 — ladder corpus re-run and report · TODO · depends-on: C2b, B2 · wave 6 · agent: claude
 **Problem:** "The free lane witnesses the model" needs a number on the same 20 pages —
@@ -221,6 +232,9 @@ where it differs, names the class that moved it.
 
 ## Parked (deliberately)
 
+- **doc05 / doc07 class-(c) native row labels (out of wave).** Run-2 log still has native
+  row-label class-(c) items on doc05 (2) and doc07 (1), mixed with #585 / lane holds. A2's
+  8-label census does not cover them — leave as follow-up (#585 / #331), not invisible.
 - **#155 orchestrator decomposition.** Not a prerequisite; C2b touches two bounded hunks.
   Revisit only if C2b's reviewer finds the seam is not bounded.
 - **#585 sibling-LaTeX normalisation** (`\Delta`, `\log`, `\&`). Buys no demonstrated
