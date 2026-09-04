@@ -22,6 +22,11 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from socr.judge.table_verdict import (
+    CAUSE_DETAIL_PHRASES,
+    CAUSE_UNKNOWN,
+    TABLE_LADDER_UNVERIFIED_KIND,
+)
 from socr.tables.reconcile import PATCH_ELIGIBLE_NOTE
 
 # Audit kinds that mean "the digits in this page's table(s) may be wrong".
@@ -187,24 +192,43 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
 )
 
 
-# GH-353 TICKET-B2: fallback wording for the two ladder terminals when the
+# GH-353 TICKET-B2: fallback wording for the ladder terminals when the
 # emitting event carries no ``detail`` (the gate is free to pass one; this is
-# only a floor so a consumer never sees a bare kind token). The two sentences
-# echo the design doc's own distinction (content problem, not retryable vs.
-# infra problem, retryable) because that distinction is exactly what a
-# consumer deciding whether to re-run needs and the kind name alone doesn't
-# say it.
+# only a floor so a consumer never sees a bare kind token). REJECTED and
+# WITHHELD are content verdicts with a single fixed sentence each -- neither
+# ever carries a retry claim, so a static string is correct for both.
+#
+# GH-581 cold review round 7, finding 1: UNVERIFIED is NOT a single fixed
+# sentence -- "infra problem, retryable on resume" is exactly the false
+# promise this ticket exists to remove, and a bare kind-token floor must not
+# reintroduce it. ``table_ladder_unverified`` is therefore handled specially
+# below (``_unverified_fallback_detail``), reading the event's own typed
+# ``cause``/``latched`` instead of a fixed string, and is deliberately absent
+# from this dict.
 LADDER_TERMINAL_NOTES: dict[str, str] = {
     "table_ladder_rejected": ("judge ladder rejected this table: content problem, not retryable"),
-    "table_ladder_unverified": (
-        "judge ladder could not verify this table: infra problem, retryable on resume"
-    ),
     "table_ladder_withheld": (
         "judge ladder rejected this table and neither the native-geometry guard nor a "
         "blind cell transcription cleared it: the table's content was WITHHELD "
         "(marker plus page image), not shipped"
     ),
 }
+
+
+def _unverified_fallback_detail(data: dict) -> str:
+    """GH-581 cold review round 7, finding 1: the floor for a
+    ``table_ladder_unverified`` event with no ``detail`` of its own.
+
+    Reads the event's own typed ``data["cause"]`` (falling back to the
+    reserved ``CAUSE_UNKNOWN`` phrase for a legacy event that carries
+    neither) and appends the retry clause ONLY when ``data["latched"]`` is
+    literally ``True`` -- never a fixed "retryable on resume" floor, which
+    is exactly the false promise this ticket removes everywhere else.
+    """
+    cause = data.get("cause")
+    phrase = CAUSE_DETAIL_PHRASES.get(cause, CAUSE_DETAIL_PHRASES[CAUSE_UNKNOWN])
+    retry_clause = "; retryable on resume" if data.get("latched") is True else ""
+    return f"judge ladder could not verify this table ({phrase}{retry_clause})"
 
 
 @dataclass
@@ -342,7 +366,10 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
         page = trust.pages.setdefault(page_num, PageTrust(page_num=page_num))
         page.reasons.append(kind)
 
-        detail = getattr(event, "detail", "") or LADDER_TERMINAL_NOTES.get(kind, "")
+        if kind == TABLE_LADDER_UNVERIFIED_KIND:
+            detail = getattr(event, "detail", "") or _unverified_fallback_detail(data)
+        else:
+            detail = getattr(event, "detail", "") or LADDER_TERMINAL_NOTES.get(kind, "")
         if detail:
             page.details.append(f"{kind}: {detail}")
 

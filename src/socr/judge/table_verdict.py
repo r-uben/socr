@@ -666,9 +666,18 @@ def rung_result_from_output(rung: str, text: str, latency_sec: float) -> RungRes
 # ``TABLE_DISTRUST_KINDS`` / ``RESOLVING_KINDS``. Three kinds — one per
 # ladder outcome that a downstream consumer must be able to tell apart:
 # accepted (resolving), rejected (content problem, distrust), unverified
-# (infra problem, distrust). Intermediate per-rung steps (tiebreak,
+# (distrust: no accepted verdict). Intermediate per-rung steps (tiebreak,
 # substitute) are not separate event kinds; they are ``RungResult`` values
 # a caller can log, not terminal dispositions a consumer reads.
+#
+# GH-581: UNVERIFIED is NOT synonymous with "infra problem" -- it covers a
+# closed set of causes (``TABLE_LADDER_UNVERIFIED_CAUSES`` below), most of
+# which are not infrastructure at all: a mechanical binding contradiction, a
+# guard chain that never cleared the table, a witness that could never be
+# prepared, no rung ever configured, or a lone low-confidence PASS with no
+# corroborating witness. A consumer that needs the reason and the retry
+# semantics reads the ``table_ladder_unverified`` event's ``data["cause"]``
+# and ``data["latched"]`` -- never infers either from the kind name alone.
 
 TABLE_LADDER_ACCEPTED_KIND = "table_ladder_accepted"
 TABLE_LADDER_REJECTED_KIND = "table_ladder_rejected"
@@ -707,3 +716,92 @@ TABLE_LADDER_EVENT_KINDS: frozenset[str] = frozenset(
 #: READERS were overruled, which is a different fact and must be legible as one.
 REASON_VERIFIED_BY_GEOMETRY = "verified_by_geometry"
 REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION = "verified_by_blind_cell_transcription"
+
+#: GH-581: the closed set of causes a ``table_ladder_unverified`` event's
+#: ``data["cause"]`` may carry. Every UNVERIFIED terminal has exactly one --
+#: this is what a consumer reads instead of guessing from ``detail`` prose or
+#: an absent rung outage.
+CAUSE_NO_WITNESS = "no_witness"
+CAUSE_RUNG_UNAVAILABLE = "rung_unavailable"
+CAUSE_RUNG_NOT_ACCEPTED = "rung_not_accepted"
+CAUSE_BINDING_CONTRADICTION = "binding_contradiction"
+CAUSE_GUARD_NOT_CLEARED = "guard_not_cleared"
+CAUSE_GUARD_ERROR = "guard_error"
+#: GH-581 cold review round 1, finding 2: a witness WAS located, but the
+#: configured/reachable rung list was empty -- a config fact (strict_local,
+#: or no CLI found), never a transient outage. Distinct from
+#: ``CAUSE_NO_WITNESS`` (no witness at all) and from ``CAUSE_RUNG_UNAVAILABLE``
+#: (a configured rung that could not be reached THIS run).
+CAUSE_NO_RUNGS_CONFIGURED = "no_rungs_configured"
+#: A lone low-confidence PASS at the last rung, with no second real-PASS
+#: witness to corroborate it (ruling 1 in ``table_ladder.py``). Distinct
+#: from ``CAUSE_GUARD_NOT_CLEARED``: the P1 guard chain never runs for this
+#: table (it is neither ``TWO_LOW_PASS`` pending nor REJECTED).
+CAUSE_INSUFFICIENT_CORROBORATION = "insufficient_corroboration"
+#: The witness/crop machinery itself raised outside the per-table loop
+#: (B0's documented-never-to-raise contract broken). Not a rung or guard
+#: fact at all -- nothing here is retryable, because the defect is in this
+#: process's own code, not an external service.
+CAUSE_WITNESS_PREPARATION_ERROR = "witness_preparation_error"
+#: GH-581 cold review round 2, finding 1: a markdown table block reached
+#: assemble's completeness sweep with no ladder terminal event at all -- the
+#: per-page gate never ran the ladder for it (resume skipped the gate, a
+#: chart-asset route skipped it, or the ``if self.config.table_judge_ladder``
+#: branch never ran). Not a rung fact and not the P1 latch's concern; the
+#: page's own ``table_ladder_incomplete`` flag is the durable record that
+#: drives its OWN resume exception, separate from ``table_judge_retry_pending``.
+CAUSE_MISSING_TABLE_TERMINAL = "missing_table_terminal"
+CAUSE_UNKNOWN = "unknown"
+
+TABLE_LADDER_UNVERIFIED_CAUSES: frozenset[str] = frozenset(
+    {
+        CAUSE_NO_WITNESS,
+        CAUSE_RUNG_UNAVAILABLE,
+        CAUSE_RUNG_NOT_ACCEPTED,
+        CAUSE_BINDING_CONTRADICTION,
+        CAUSE_GUARD_NOT_CLEARED,
+        CAUSE_GUARD_ERROR,
+        CAUSE_NO_RUNGS_CONFIGURED,
+        CAUSE_INSUFFICIENT_CORROBORATION,
+        CAUSE_WITNESS_PREPARATION_ERROR,
+        CAUSE_MISSING_TABLE_TERMINAL,
+        CAUSE_UNKNOWN,
+    }
+)
+
+#: GH-581 cold review round 4, finding 1: the FIXED phrase for each cause,
+#: used to build an UNVERIFIED event's ``detail``. Never interpolate raw
+#: provider/exception/guard text into ``detail`` -- an untrusted diagnostic
+#: can itself contain the reserved substring "retryable" and trip the
+#: literal acceptance invariant (``("retryable" in detail) == latched``) on
+#: an unlatched event. Raw diagnostics belong ONLY in structured data
+#: (``rung_trail[].error``, ``guard_detail``, ``witness_error``), which a
+#: consumer reads deliberately rather than a substring check stumbling into.
+#: Not used for ``CAUSE_BINDING_CONTRADICTION`` -- that branch already has
+#: its own two fixed (held / not-held) phrases, built with no untrusted
+#: text at all.
+CAUSE_DETAIL_PHRASES: dict[str, str] = {
+    CAUSE_NO_WITNESS: (
+        "no table witness could be prepared, so no rung ran (will not be retried "
+        "-- a re-run reaches the same empty witness)"
+    ),
+    CAUSE_RUNG_UNAVAILABLE: "a configured rung was unavailable",
+    CAUSE_RUNG_NOT_ACCEPTED: "a rung answered but its verdict was not accepted",
+    # The guard chain's OWN binding check (GuardDisposition.CONTRADICTED),
+    # reached through the P1 two-low/rejected paths -- distinct from the
+    # table-level ``forced_by_binding`` clamp, which has its own two fixed
+    # (held / not-held) phrases built with no untrusted text either.
+    CAUSE_BINDING_CONTRADICTION: "native geometry contradicts the emitted table",
+    CAUSE_GUARD_NOT_CLEARED: "the guard chain did not clear this table",
+    CAUSE_GUARD_ERROR: "the guard chain encountered an internal error",
+    CAUSE_NO_RUNGS_CONFIGURED: ("no table-judge rung was configured or reachable for this table"),
+    CAUSE_INSUFFICIENT_CORROBORATION: ("a single low-confidence PASS had no corroborating witness"),
+    CAUSE_WITNESS_PREPARATION_ERROR: (
+        "table witness preparation failed; see the recorded diagnostic"
+    ),
+    CAUSE_MISSING_TABLE_TERMINAL: (
+        "no table-judge terminal was recorded for this table; the page will be "
+        "reprocessed because its terminal is incomplete"
+    ),
+    CAUSE_UNKNOWN: "no rung produced an accepted verdict",
+}

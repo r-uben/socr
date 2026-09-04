@@ -463,8 +463,12 @@ def test_a_not_scorable_page_surfaces_with_no_escalation_provider(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def _ladder_event(page: int, kind: str, table_id: str, detail: str = "") -> AuditEvent:
-    return AuditEvent(page_num=page, kind=kind, detail=detail, data={"table_id": table_id})
+def _ladder_event(
+    page: int, kind: str, table_id: str, detail: str = "", **extra_data
+) -> AuditEvent:
+    return AuditEvent(
+        page_num=page, kind=kind, detail=detail, data={"table_id": table_id, **extra_data}
+    )
 
 
 def test_one_pass_and_one_fail_the_fail_survives_the_pass():
@@ -560,7 +564,7 @@ def test_all_three_ladder_terminals_are_registered():
 
 def test_terminal_wording_falls_back_when_the_event_carries_no_detail():
     """A gate that forgets to pass ``detail`` still gets readable prose, not a
-    bare kind token."""
+    bare kind token. REJECTED has one fixed, never-retryable sentence."""
     events = [_ladder_event(3, "table_ladder_rejected", table_id="0", detail="")]
 
     trust = build_tables_trust("doc.pdf", events)
@@ -568,10 +572,46 @@ def test_terminal_wording_falls_back_when_the_event_carries_no_detail():
     detail_text = " ".join(trust.pages[3].details)
     assert "not retryable" in detail_text
 
-    events_unverified = [_ladder_event(4, "table_ladder_unverified", table_id="0", detail="")]
-    trust_unverified = build_tables_trust("doc.pdf", events_unverified)
-    detail_text_unverified = " ".join(trust_unverified.pages[4].details)
-    assert "retryable on resume" in detail_text_unverified
+
+def test_unverified_fallback_reads_the_events_own_latch_not_a_fixed_string():
+    """GH-581 cold review round 7, finding 1. UNVERIFIED has no single fixed
+    sentence -- "infra problem, retryable on resume" is exactly the false
+    promise this ticket removes everywhere else, and the empty-detail floor
+    must not reintroduce it. Paired difference: two otherwise-identical
+    empty-detail events, differing only in ``data["latched"]``."""
+    events_latched = [
+        _ladder_event(
+            4,
+            "table_ladder_unverified",
+            table_id="0",
+            detail="",
+            cause="rung_unavailable",
+            latched=True,
+        )
+    ]
+    trust_latched = build_tables_trust("doc.pdf", events_latched)
+    detail_latched = " ".join(trust_latched.pages[4].details)
+    assert "retryable on resume" in detail_latched
+
+    events_unlatched = [
+        _ladder_event(
+            5,
+            "table_ladder_unverified",
+            table_id="0",
+            detail="",
+            cause="rung_not_accepted",
+            latched=False,
+        )
+    ]
+    trust_unlatched = build_tables_trust("doc.pdf", events_unlatched)
+    detail_unlatched = " ".join(trust_unlatched.pages[5].details)
+    assert "retryable" not in detail_unlatched
+
+    # A legacy event with NEITHER field at all: neutral wording, no retry claim.
+    events_legacy = [_ladder_event(6, "table_ladder_unverified", table_id="0", detail="")]
+    trust_legacy = build_tables_trust("doc.pdf", events_legacy)
+    detail_legacy = " ".join(trust_legacy.pages[6].details)
+    assert "retryable" not in detail_legacy
 
 
 def test_ladder_kinds_match_judge_table_verdict():

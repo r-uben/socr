@@ -13,16 +13,27 @@ genuine rung outage -- because the two are only worth separating if they still
 read differently.
 
 One correction to the ticket's own pin. It says "empty ``rung_trail`` => that
-wording". An empty trail is not sufficient: a witness that WAS located and then
-found no reachable rung has an empty trail too, and that one genuinely is
-retryable. The witness is what separates them, so the condition is the empty
-trail AND ``witness_scope == "none"``. ``test_a_located_witness_with_no_rung_
-keeps_the_retryable_wording`` is that case, and it fails if the condition is
-loosened to the trail alone.
+wording". An empty trail is not sufficient: the witness located/none split is
+what actually tells apart a table nobody could send (never retryable) from
+one that was sent to an empty rung list.
 
 Latch semantics are untouched, as the ticket requires, and so are the assemble
 buckets and the page disposition -- this is wording, and a ``retryable: False``
 marker so consumers need not re-derive it.
+
+GH-581 correction: a witness that WAS located but handed an empty ``rungs``
+list (``test_a_located_witness_with_no_rung_...``, below) produces no
+``RungResult`` at all, so the P1 latch structurally cannot fire for it either
+-- an empty ``rungs`` list is a configuration fact (strict_local, or no CLI
+found), not a transient outage the next identical call would resolve. #560's
+original docstring called this case "a genuine rung outage" and asserted it
+keeps the retryable wording; #581 found that assumption was the SAME empty
+promise #560 itself was filed against, just for a different non-latching
+cause (GH-581's default-branch fix makes "retryable on resume" conditional
+on the page's own latch, and this case never sets it). The test below is
+renamed and re-pinned to the corrected behaviour: "not retryable", not
+silently dropped from the note either -- see the ``not_retryable`` bucket in
+``_unverified_wording_split``.
 """
 
 from __future__ import annotations
@@ -126,27 +137,33 @@ def test_a_witness_with_no_crop_is_not_called_retryable(tmp_path: Path) -> None:
     assert event.data.get("retryable") is False
 
 
-def test_a_located_witness_with_no_rung_keeps_the_retryable_wording(tmp_path: Path) -> None:
-    """The difference control, and the correction to #560's stated pin.
+def test_a_located_witness_with_no_rungs_is_not_retryable(tmp_path: Path) -> None:
+    """The difference control, and the GH-581 correction to #560's stated pin.
 
-    An empty ``rung_trail`` alone does NOT mean unretryable. Here the witness is
-    located and gets a crop, and the ladder is handed no rungs -- an outage, and
-    a rung coming back genuinely repairs it. If the condition were loosened to
-    the empty trail alone, this page would be mislabelled as permanently
-    unjudgeable.
+    An empty ``rung_trail`` alone does NOT mean unwitnessed -- the witness IS
+    located and gets a crop here, unlike the borderless case above. But handing
+    the ladder an empty ``rungs`` list produces no ``RungResult`` at all, so the
+    P1 latch structurally cannot fire for it: this is a configuration fact
+    (strict_local, or no CLI found), not a transient outage a later run
+    resolves on its own. #560's original pin called this "a genuine rung
+    outage" and kept the retryable wording; GH-581 found that was the same
+    empty promise #560 itself was filed against.
     """
     state = _run(_ruled_pdf(tmp_path / "r"), [])
 
     event = _unverified_event(state)
-    assert event.data["rung_trail"] == [], "a rung ran; this is not the outage case"
+    assert event.data["rung_trail"] == [], "no rung ran; this is the empty-ladder case"
     assert event.data["witness_scope"] != "none", (
         "the witness was not located, so this test is measuring the no-witness "
-        "case again rather than the outage it claims to"
+        "case again rather than the empty-ladder case it claims to"
     )
-    assert "retryable on resume" in event.detail, (
-        f"a genuine rung outage lost its retryable wording: {event.detail}"
+    assert event.data["latched"] is False, "an empty rungs list must never latch"
+    assert "retryable on resume" not in event.detail, (
+        f"an unlatched terminal still promises a retry: {event.detail}"
     )
-    assert "retryable" not in event.data, "an outage must not be marked unretryable"
+    assert event.data.get("retryable") is not False, (
+        "this is the witnessed case, not the unwitnessed one"
+    )
 
 
 def test_the_document_note_separates_the_two(tmp_path: Path) -> None:
@@ -160,11 +177,16 @@ def test_the_document_note_separates_the_two(tmp_path: Path) -> None:
     assert "no table witness could be prepared" in note
     assert "retryable on resume" not in note, f"the note still promises a retry: {note}"
 
-    outage = _run(_ruled_pdf(tmp_path / "nr"), [])
-    outage_note = pipeline._table_judge_ladder_note(outage)
-    assert outage_note is not None
-    assert "retryable on resume" in outage_note, (
-        f"a genuine outage lost the retryable wording in the note: {outage_note}"
+    # GH-581: an empty-ladder witnessed terminal never latches either, so the
+    # note must name it "not retryable" -- and still name it, not drop it.
+    unlatched = _run(_ruled_pdf(tmp_path / "nr"), [])
+    unlatched_note = pipeline._table_judge_ladder_note(unlatched)
+    assert unlatched_note is not None
+    assert "retryable on resume" not in unlatched_note, (
+        f"an unlatched terminal kept the retryable wording in the note: {unlatched_note}"
+    )
+    assert "not retryable" in unlatched_note, (
+        f"the unlatched terminal vanished from the note instead of being named: {unlatched_note}"
     )
 
 
