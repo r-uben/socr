@@ -229,6 +229,42 @@ def test_total_is_independent_page_wall_not_the_stage_sum() -> None:
     assert abs(exclusive_timings_sum(got) - got["total"]) > 0.001
 
 
+def test_exception_in_stage_finalizes_partial_timings_and_clears_clock(
+    tmp_path: Path,
+) -> None:
+    """A raise inside a later stage must still finalize completed stages
+    onto PageState and clear the pipeline clock. Otherwise a reused
+    pipeline attributes the next page's adjudication to a stale clock.
+    """
+    pdf_path = _real_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    pipeline = _make_pipeline()
+    pipeline.bd_detector = MagicMock()
+    pipeline.bd_detector.detect.return_value = _bd_assessment(pdf_path, 1, born_digital={1})
+
+    captured: dict = {}
+
+    def _boom(state, *args, **kwargs):
+        captured["state"] = state
+        raise RuntimeError("stage boom")
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+        patch.object(pipeline, "_guard_agentic_page_table_repetition", side_effect=_boom),
+    ):
+        with pytest.raises(RuntimeError, match="stage boom"):
+            pipeline.process(pdf_path, out_dir)
+
+    assert pipeline._page_clock is None
+    state = captured["state"]
+    timings = state.pages[1].timings_s
+    assert timings, "partial timings must be finalized onto the failing page"
+    assert timings["extract"] > 0.0
+    assert timings["flush"] == 0.0
+    assert timings["total"] >= timings["extract"]
+
+
 def test_process_sidecar_exclusive_keys_sum_to_total(tmp_path: Path) -> None:
     pdf_path = _real_pdf(tmp_path)
     out_dir = tmp_path / "out"
