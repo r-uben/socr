@@ -7,6 +7,20 @@ before the binder and adjudicator compare cells (GH-582)`). Same manifest, same 
 same 20 pages, same `socr process <pdf> --write-manifest --verbose` invocation, sequential.
 Content-free: identifiers, counts and dispositions only.
 
+## Correction (2026-09-04, evening): run 2 did not run on one source tree
+
+The sidecars' `socr_source_digest` shows run 2 used three different source trees:
+doc00–doc04 on one digest, doc05 and doc07 on a second, doc08 on a third. Run 1 used one
+digest throughout. Cause: while run 2 was in progress, a builder working in a separate
+worktree on GH-581 repointed the shared venv's editable install at that worktree, so the
+later documents imported the #581 work-in-progress code instead of `f434019`. GH-581 is
+surfacing-only (its tests pin behavioural equivalence with `origin/main` for outcomes,
+terminals and the latch), so the ACCEPTED/UNVERIFIED counts and the contradiction classes
+below are not expected to be affected; but the wall-clock, cost and page-level ending
+differences between runs are confounded by code as well as by OCR variance, and the
+"same invocation, same code" claim above holds only for doc00–doc04. Recorded in the
+session memory as the second occurrence of the venv-pointer trap.
+
 ## Headline
 
 | | run 1 (before #582) | run 2 (after #582) |
