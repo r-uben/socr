@@ -150,6 +150,17 @@ def _seed_ladder_page(state: DocumentState, disposition: FailureMode, engine: st
                     },
                     {"rung": "gemini", "ok": True, "executing": "agy"},
                 ],
+                # GH-581: mirror the current-contract keys a real
+                # ``table_ladder_unverified`` event carries, so this fixture
+                # is not a legacy shape the round-6 restore normalizer
+                # rewrites out from under it. REJECTED-kind events don't
+                # carry these -- deliberately absent, not just unused, for
+                # that disposition.
+                **(
+                    {"guard_detail": None, "latched": False, "cause": "rung_not_accepted"}
+                    if disposition is FailureMode.TABLE_UNVERIFIED
+                    else {}
+                ),
             },
         )
     )
@@ -301,6 +312,71 @@ class TestSidecarRestore:
             {"rung": "gemini", "ok": True, "executing": "agy"},
         ]
         assert sidecar is not None
+
+    def test_flush_and_restore_preserve_the_new_rung_trail_fields_verbatim(
+        self, tmp_path: Path
+    ) -> None:
+        """GH-581 cold review round 7, finding 3: ``_seed_ladder_page``'s
+        rows all predate this ticket's ``error``/``unavailable``/``refusal``
+        keys, so the exact-row assertions above only prove the LEGACY row
+        shape round-trips. Seed a genuinely current-shape row -- non-default
+        values for all three added fields -- and assert the exact row
+        survives both flush (to the sidecar JSON) and restore (back into
+        ``state.events``)."""
+        pdf_path = _pdf(tmp_path / "doc")
+        pipeline = _make_pipeline()
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        ps.best_output = _bo()
+        ps.attempts = [ps.best_output]
+        ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+        current_row = {
+            "rung": "ollama:glm-5.3-flash:cloud",
+            "ok": False,
+            "executing": "glm-5.3-flash:cloud",
+            "error": "httpx.ConnectError: connection refused",
+            "unavailable": True,
+            "refusal": False,
+        }
+        state.events.append(
+            AuditEvent(
+                page_num=1,
+                kind=TABLE_LADDER_UNVERIFIED_KIND,
+                engine="qwen",
+                detail=(
+                    "table p1-t1 unverified by the judge ladder "
+                    "(a configured rung was unavailable; retryable on resume)"
+                ),
+                data={
+                    "table_id": "p1-t1",
+                    "rung_trail": [current_row],
+                    "witness_scope": "located",
+                    "guard_detail": None,
+                    "latched": True,
+                    "cause": "rung_unavailable",
+                },
+            )
+        )
+        out_dir = tmp_path / "out"
+        pipeline._flush_page_sidecar(state, 1, out_dir)
+
+        meta = json.loads(_sidecar_path(pipeline, state, out_dir).read_text())
+        flushed = next(
+            ev
+            for ev in meta.get("audit_events", [])
+            if ev.get("kind") == TABLE_LADDER_UNVERIFIED_KIND
+        )
+        assert flushed["data"]["rung_trail"] == [current_row]
+        assert flushed["data"]["latched"] is True
+        assert flushed["data"]["cause"] == "rung_unavailable"
+
+        resumed_pipeline = _make_pipeline()
+        resumed_state = _make_state(pdf_path)
+        resumed_pipeline._restore_terminal_page_state(resumed_state, 1, _bo(), out_dir)
+        restored = next(e for e in resumed_state.events if e.kind == TABLE_LADDER_UNVERIFIED_KIND)
+        assert restored.data["rung_trail"] == [current_row]
+        assert restored.data["latched"] is True
+        assert restored.data["cause"] == "rung_unavailable"
 
     def test_restore_reproduces_tables_trust_and_note(self, tmp_path: Path) -> None:
         pipeline, original_state, out_dir = self._flush_original(

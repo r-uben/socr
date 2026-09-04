@@ -208,7 +208,14 @@ class TestNoNativeWordsStaysNeutral:
         events = _events_of_kind(state, TABLE_LADDER_ACCEPTED_KIND)
         assert len(events) == 1
         assert events[0].data["rung_trail"] == [
-            {"rung": "fake1", "ok": True, "executing": pipeline.config.table_judge_rung1_model}
+            {
+                "rung": "fake1",
+                "ok": True,
+                "executing": pipeline.config.table_judge_rung1_model,
+                "error": "",
+                "unavailable": False,
+                "refusal": False,
+            }
         ]
 
 

@@ -313,11 +313,17 @@ class TestWitnessFailOpen:
         # which promised a retry nothing performs -- the P1 latch correctly
         # does not fire for a no-witness terminal, so the document is skipped
         # on the next run.
+        # GH-581: the unverified event's cause/latched/guard_detail keys.
+        # This page never latched (nothing was unavailable -- it was simply
+        # unwitnessed), and its cause names that.
         assert events[0].data == {
             "table_id": "p1-t0",
             "rung_trail": [],
             "witness_scope": "none",
             "retryable": False,
+            "guard_detail": None,
+            "latched": False,
+            "cause": "no_witness",
         }
         assert "no table witness could be prepared" in events[0].detail
         assert "retryable on resume" not in events[0].detail
@@ -371,7 +377,23 @@ class TestWitnessFailOpen:
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         events = _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
         assert len(events) == 1
-        assert "boom" in events[0].detail
+        # GH-581 cold review round 4, finding 1: the raw exception text must
+        # never reach ``detail`` (an untrusted diagnostic could itself
+        # contain "retryable") -- it lives only in ``data["witness_error"]``.
+        assert "boom" not in events[0].detail
+        assert "retryable" not in events[0].detail
+        # GH-581 cold review round 1, finding 3: this terminal never reaches
+        # the per-table message loop, so it must carry the additive contract
+        # by hand -- an empty data dict here would silently drop cause/
+        # latched/guard_detail/rung_trail from a legitimate UNVERIFIED event.
+        assert events[0].data == {
+            "rung_trail": [],
+            "witness_scope": "none",
+            "guard_detail": None,
+            "latched": False,
+            "cause": "witness_preparation_error",
+            "witness_error": "RuntimeError: boom",
+        }
 
     def test_no_rungs_available_is_unverified_no_call(self, tmp_path: Path) -> None:
         """strict_local + ladder (or ladder off): rungs=[] fails open, no call made."""
@@ -386,11 +408,18 @@ class TestWitnessFailOpen:
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         events = _events_of_kind(state, TABLE_LADDER_UNVERIFIED_KIND)
         assert len(events) == 1
-        # rungs=[] -- fail-open before any rung is ever called.
+        # rungs=[] -- fail-open before any rung is ever called. GH-581 cold
+        # review round 1, finding 2: no RungResult exists to be unavailable,
+        # so this never latches, and the cause names the specific known
+        # config fact (an empty rung list) rather than the generic unknown
+        # fallback.
         assert events[0].data == {
             "table_id": "p1-t0",
             "rung_trail": [],
             "witness_scope": "located",
+            "guard_detail": None,
+            "latched": False,
+            "cause": "no_rungs_configured",
         }
 
 
@@ -423,12 +452,25 @@ class TestRungFailOpen:
         assert len(events) == 1
         # The rung DID run (¬S1 -- an answer that failed to parse/transport,
         # not "never called"), so it names the configured rung-1 identity.
+        # GH-581: the trail entry carries the ¬S1 reason, and the cause names
+        # it as an unaccepted answer, not an outage -- ``unavailable`` was
+        # never set, so this does not latch either.
         assert events[0].data == {
             "table_id": "p1-t0",
             "rung_trail": [
-                {"rung": "fake1", "ok": False, "executing": pipeline.config.table_judge_rung1_model}
+                {
+                    "rung": "fake1",
+                    "ok": False,
+                    "executing": pipeline.config.table_judge_rung1_model,
+                    "error": reason,
+                    "unavailable": False,
+                    "refusal": False,
+                }
             ],
             "witness_scope": "located",
+            "guard_detail": None,
+            "latched": False,
+            "cause": "rung_not_accepted",
         }
 
     def test_run_table_ladder_exception_is_unverified_not_raised(self, tmp_path: Path) -> None:
@@ -471,7 +513,14 @@ class TestLadderOutcomes:
         assert events[0].data == {
             "table_id": "p1-t0",
             "rung_trail": [
-                {"rung": "fake1", "ok": True, "executing": pipeline.config.table_judge_rung1_model}
+                {
+                    "rung": "fake1",
+                    "ok": True,
+                    "executing": pipeline.config.table_judge_rung1_model,
+                    "error": "",
+                    "unavailable": False,
+                    "refusal": False,
+                }
             ],
             "witness_scope": "located",
         }
@@ -500,7 +549,14 @@ class TestLadderOutcomes:
         assert events[0].data == {
             "table_id": "p1-t0",
             "rung_trail": [
-                {"rung": "fake1", "ok": True, "executing": pipeline.config.table_judge_rung1_model}
+                {
+                    "rung": "fake1",
+                    "ok": True,
+                    "executing": pipeline.config.table_judge_rung1_model,
+                    "error": "",
+                    "unavailable": False,
+                    "refusal": False,
+                }
             ],
             "witness_scope": "located",
         }

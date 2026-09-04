@@ -3531,8 +3531,10 @@ class UnifiedPipeline:
         return "; ".join(parts)
 
     @staticmethod
-    def _unverified_wording_split(state, pages: list[int]) -> tuple[list[int], list[int]]:
-        """Split TABLE_UNVERIFIED pages into (retryable, unwitnessed).
+    def _unverified_wording_split(
+        state, pages: list[int]
+    ) -> tuple[list[int], list[int], list[int], list[int]]:
+        """Split TABLE_UNVERIFIED pages into (retryable, not_retryable, unwitnessed, incomplete).
 
         GH-563: derived from the page's own ``table_ladder_unverified`` events,
         never from in-run PageState flags. #562 used flags, and they did not
@@ -3551,8 +3553,47 @@ class UnifiedPipeline:
         A page with no unverified event at all -- a disposition reached through
         ``best_output.failure_mode`` with no terminal of its own -- keeps the
         retryable wording, which is what it said before any of this.
+
+        GH-581: a page whose only WITNESSED unverified event(s) never latched
+        (a binding contradiction, or a rung that answered but was not
+        accepted) must not join the retryable sentence either -- that was the
+        same empty promise #560 fixed for the no-witness case, told again for
+        a different cause. Such a page goes to the new ``not_retryable``
+        bucket instead of being silently dropped from the note. Read from the
+        event's own ``data["latched"]`` when present (the gate always sets it
+        on a ``table_ladder_unverified`` event now) rather than re-deriving
+        it, so this can never disagree with the per-table wording that
+        emitted it. A pre-GH-581 sidecar has no ``latched`` key at all;
+        ``_restore_terminal_page_state`` normalizes such an event to the
+        current contract on replay (GH-581 cold review round 6, finding 1),
+        so this split never actually sees one in production. The `not
+        latch_bits` branch below is kept only as a defensive fallback for a
+        terminal emitted by a path genuinely outside both that normalizer
+        and the live gate -- it is not a documented, intended behaviour.
+
+        GH-581 cold review round 2, finding 1 / round 3, finding 2: the
+        assemble-time completeness backfill (a markdown table block that
+        reached assemble with no ladder terminal at all) has its OWN
+        semantics -- ``PageState.table_ladder_incomplete`` withholds that
+        page's D1b resume skip regardless of ``table_judge_retry_pending``.
+        But the backfill event's own ``latched`` now tracks the page's REAL
+        latch (round 3, finding 2 fixed the hard-coded ``False``), so a page
+        that is both latched (a sibling table's rung was unavailable) AND
+        incomplete must not be told about the SAME underlying fact twice --
+        once as "retryable" and once as "incomplete". These three buckets
+        --``retryable``, ``incomplete``, ``not_retryable`` -- are therefore
+        MUTUALLY EXCLUSIVE per page, in that fixed precedence: a genuinely
+        latched page is always "retryable" first, whether or not it is also
+        incomplete; only an UNLATCHED incomplete page falls to "incomplete";
+        only a page that is neither goes to "not_retryable". ``unwitnessed``
+        is a separate, orthogonal fact about ONE table that can never be
+        retried regardless of the page's own latch, and can still co-occur
+        with any of the three (cubic P2 on #562).
         """
-        from socr.judge.table_verdict import TABLE_LADDER_UNVERIFIED_KIND
+        from socr.judge.table_verdict import (
+            CAUSE_MISSING_TABLE_TERMINAL,
+            TABLE_LADDER_UNVERIFIED_KIND,
+        )
 
         by_page: dict[int, list] = {}
         for ev in state.events:
@@ -3560,17 +3601,51 @@ class UnifiedPipeline:
                 by_page.setdefault(getattr(ev, "page_num", 0), []).append(ev)
 
         retryable: list[int] = []
+        not_retryable: list[int] = []
         unwitnessed: list[int] = []
+        incomplete: list[int] = []
         for page_num in pages:
+            page_incomplete = bool(
+                getattr(state.pages.get(page_num), "table_ladder_incomplete", False)
+            )
             events = by_page.get(page_num) or []
             marked = [(getattr(ev, "data", None) or {}).get("retryable") is False for ev in events]
             if any(marked):
                 unwitnessed.append(page_num)
-            # A page can hold BOTH kinds, and then both sentences are true of
-            # it (cubic P2 on #562). No event at all falls here too.
-            if not marked or not all(marked):
+            if not events:
+                # No unverified event at all: unchanged fallback, subject to
+                # the same precedence as every other page.
+                if page_incomplete:
+                    incomplete.append(page_num)
+                else:
+                    retryable.append(page_num)
+                continue
+            witnessed = [
+                ev
+                for ev, unw in zip(events, marked)
+                if not unw
+                and (getattr(ev, "data", None) or {}).get("cause") != CAUSE_MISSING_TABLE_TERMINAL
+            ]
+            is_retryable = False
+            if witnessed:
+                latch_bits = [
+                    (getattr(ev, "data", None) or {}).get("latched")
+                    for ev in witnessed
+                    if "latched" in (getattr(ev, "data", None) or {})
+                ]
+                is_retryable = not latch_bits or any(latch_bits)
+            if is_retryable:
                 retryable.append(page_num)
-        return retryable, unwitnessed
+            elif page_incomplete:
+                incomplete.append(page_num)
+            elif witnessed:
+                not_retryable.append(page_num)
+            # else: every event on this page was the unwitnessed kind and/or
+            # the completeness-backfill kind with an unlatched page and an
+            # unset incomplete flag (should not happen -- the backfill always
+            # sets the flag alongside its event -- but fails closed to no
+            # bucket rather than a wrong one).
+        return retryable, not_retryable, unwitnessed, incomplete
 
     @staticmethod
     def _table_judge_ladder_note(state) -> str | None:
@@ -3646,18 +3721,40 @@ class UnifiedPipeline:
         # re-run reaches the same empty witness. Split so neither group carries
         # the other's claim. The BUCKET is untouched: this is wording only, and
         # the page is still TABLE_UNVERIFIED for document status.
-        retryable, unwitnessed = UnifiedPipeline._unverified_wording_split(state, unverified)
+        retryable, not_retryable, unwitnessed, incomplete = (
+            UnifiedPipeline._unverified_wording_split(state, unverified)
+        )
         if retryable:
             parts.append(
                 f"page(s) {', '.join(str(n) for n in retryable)}: "
                 f"{FailureMode.TABLE_UNVERIFIED.value} (table judge ladder exhausted "
                 "without an answer; retryable on resume)"
             )
+        if not_retryable:
+            # GH-581: a binding contradiction or an unaccepted rung answer,
+            # neither of which the P1 latch fires for -- named separately so
+            # this sentence never claims a retry that resume will not perform.
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in not_retryable)}: "
+                f"{FailureMode.TABLE_UNVERIFIED.value} (table judge ladder found no "
+                "accepted verdict; not retryable)"
+            )
         if unwitnessed:
             parts.append(
                 f"page(s) {', '.join(str(n) for n in unwitnessed)}: "
                 f"{FailureMode.TABLE_UNVERIFIED.value} (no table witness could be "
                 "prepared, so no rung ran; not retryable)"
+            )
+        if incomplete:
+            # GH-581 cold review round 2, finding 1: a completeness miss, not
+            # a rung outage -- named separately from both the latch-retryable
+            # and not-retryable sentences above, because it IS reprocessed,
+            # just by a different mechanism (``table_ladder_incomplete``).
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in incomplete)}: "
+                f"{FailureMode.TABLE_UNVERIFIED.value} (a table reached assemble with no "
+                "table-judge terminal; will be reprocessed because its terminal is "
+                "incomplete)"
             )
         return "; ".join(parts)
 
@@ -4627,6 +4724,8 @@ class UnifiedPipeline:
         guard_detail_by_table: dict,
         guard_cleared_ids: set,
         guard_unavailable_kinds: set,
+        guard_cause_by_table: dict,
+        guard_decision_by_table: dict,
     ):
         """P1: finish the two ruled terminals the ladder cannot settle alone.
 
@@ -4657,8 +4756,12 @@ class UnifiedPipeline:
         """
         from socr.judge.table_ladder import TableLadderOutcome, TableLadderPending
         from socr.judge.table_verdict import (
+            CAUSE_BINDING_CONTRADICTION,
+            CAUSE_GUARD_ERROR,
+            CAUSE_GUARD_NOT_CLEARED,
             REASON_VERIFIED_BY_BLIND_CELL_TRANSCRIPTION,
             REASON_VERIFIED_BY_GEOMETRY,
+            is_availability_exception,
             resolve_cell_refs,
         )
 
@@ -4666,12 +4769,6 @@ class UnifiedPipeline:
         rejected = result.outcome is TableLadderOutcome.REJECTED
         if not (two_low or rejected):
             return result
-
-        refs = self._doubted_cell_refs(result)
-        resolved = resolve_cell_refs(witness.markdown, refs) if refs else {}
-        extraction_tokens = (
-            {str(ref): token for ref, token in resolved.items()} if resolved is not None else {}
-        )
 
         def _unverified():
             """The shared fail-closed terminal: labelled, bytes kept."""
@@ -4699,6 +4796,21 @@ class UnifiedPipeline:
             live_adjudicator = None
 
         try:
+            # GH-581 cold review round 4, finding 2: ref extraction and
+            # resolution are PART of the guard chain's own fail-closed
+            # contract, not a precondition outside it -- a raise here used
+            # to escape to the OUTER per-witness ``except`` in
+            # ``_run_table_judge_gate``, which fabricates a synthetic
+            # ``unknown`` rung result and DISCARDS the real reader trail
+            # that already ran. Moved inside so the same handler below
+            # converts any failure here to ``CAUSE_GUARD_ERROR`` while
+            # preserving ``result`` (and its real ``rung_results``)
+            # untouched.
+            refs = self._doubted_cell_refs(result)
+            resolved = resolve_cell_refs(witness.markdown, refs) if refs else {}
+            extraction_tokens = (
+                {str(ref): token for ref, token in resolved.items()} if resolved is not None else {}
+            )
             decision = evaluate_cell_guard(
                 state=state,
                 page_num=page_num,
@@ -4720,10 +4832,48 @@ class UnifiedPipeline:
                 exc_info=True,
             )
             guard_detail_by_table[witness.table_id] = f"guard chain error: {type(exc).__name__}"
+            guard_cause_by_table[witness.table_id] = CAUSE_GUARD_ERROR
+            # GH-581 cold review round 5, finding 1: ref extraction/
+            # resolution moved INSIDE this try in round 4 (finding 2) so a
+            # failure there keeps the real reader trail instead of being
+            # discarded by the outer per-witness handler -- but before that
+            # move, such a failure escaped THIS method entirely and was
+            # caught by that outer handler, which classifies
+            # ``is_availability_exception`` and, when true, synthesizes a
+            # single ``RungResult(rung="unknown", unavailable=True, ...)``
+            # that DOES feed the P1 latch (as kind ``"unknown"`` --
+            # ``rung_kind`` on an id with no ``":"`` returns it verbatim).
+            # Moving the call must not silently change that outcome: an
+            # availability failure here (a transport error resolving refs,
+            # not a defect in this code) is exactly as retry-worthy as one
+            # the outer handler used to catch, so the SAME kind is fed into
+            # the SAME ``guard_unavailable_kinds`` set the adjudicator's own
+            # outage uses -- never into ``rung_trail`` (the real rungs' own
+            # entries stay exactly as they ran; this is not a rung result).
+            # A deterministic defect (KeyError, TypeError, ...) still does
+            # not latch (GH-575).
+            if is_availability_exception(exc):
+                guard_unavailable_kinds.add("unknown")
             # An internal error is not evidence against the table (GH-575).
             return _unverified()
 
         guard_detail_by_table[witness.table_id] = decision.detail
+        # GH-581 cold review round 2, finding 3: the issue asked for the
+        # TYPED decision, not just its free-text ``.detail`` -- a cause of
+        # ``guard_not_cleared`` alone cannot establish (for THIS table,
+        # never a sibling's) whether the adjudicator ran at all, or was
+        # merely never configured, or was suppressed by an earlier refusal
+        # this run. ``refs``/``suppressed`` are local to this call and are
+        # not on ``CellGuardDecision`` itself, so they are recorded here.
+        guard_decision_by_table[witness.table_id] = {
+            "guard_disposition": decision.disposition.value,
+            "geometry_evidence": decision.geometry_evidence.value,
+            "adjudicator_ran": decision.adjudicator_ran,
+            "guard_unavailable": decision.unavailable,
+            "guard_refusal": decision.refusal,
+            "adjudicator_suppressed": suppressed,
+            "requested_refs": list(refs),
+        }
         if decision.unavailable:
             guard_unavailable_kinds.add(RUNG_KIND_CELL_ADJUDICATOR)
         if decision.refusal and RUNG_KIND_CELL_ADJUDICATOR not in (
@@ -4745,6 +4895,11 @@ class UnifiedPipeline:
             # different token out of the crop.
             return replace(result, outcome=TableLadderOutcome.WITHHELD, final_verdict=None)
         else:
+            guard_cause_by_table[witness.table_id] = (
+                CAUSE_BINDING_CONTRADICTION
+                if decision.disposition is GuardDisposition.CONTRADICTED
+                else CAUSE_GUARD_NOT_CLEARED
+            )
             return _unverified()
 
         guard_cleared_ids.add(witness.table_id)
@@ -4806,6 +4961,16 @@ class UnifiedPipeline:
         )
         from socr.judge.table_prompt import table_judge_prompt_scope
         from socr.judge.table_verdict import (
+            CAUSE_BINDING_CONTRADICTION,
+            CAUSE_DETAIL_PHRASES,
+            CAUSE_GUARD_NOT_CLEARED,
+            CAUSE_INSUFFICIENT_CORROBORATION,
+            CAUSE_NO_RUNGS_CONFIGURED,
+            CAUSE_NO_WITNESS,
+            CAUSE_RUNG_NOT_ACCEPTED,
+            CAUSE_RUNG_UNAVAILABLE,
+            CAUSE_UNKNOWN,
+            CAUSE_WITNESS_PREPARATION_ERROR,
             TABLE_BINDING_ADJUDICATED_KIND,
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
@@ -4830,6 +4995,17 @@ class UnifiedPipeline:
         #: Rung kinds the guard chain found unavailable, merged into the P1
         #: latch alongside the reader kinds.
         guard_unavailable_kinds: set[str] = set()
+        #: GH-581: the guard chain's own cause for a table it did not clear --
+        #: distinct from ``guard_detail_by_table``'s free text, this is the
+        #: closed-set value the ``table_ladder_unverified`` event's
+        #: ``data["cause"]`` reads.
+        guard_cause_by_table: dict[str, str] = {}
+        #: GH-581 cold review round 2, finding 3: the guard chain's TYPED
+        #: decision per table (disposition, geometry evidence, whether the
+        #: adjudicator ran, its own unavailable/refusal bits, suppression
+        #: state, and the requested cell refs) -- additive surfacing for the
+        #: UNVERIFIED event's data, never consulted for outcome or latch.
+        guard_decision_by_table: dict[str, dict] = {}
         adjudicator = self._build_table_cell_adjudicator()
         markdown_by_table: dict[str, str] = {}
         scope_by_table: dict[str, str] = {}
@@ -4914,6 +5090,8 @@ class UnifiedPipeline:
                             guard_detail_by_table,
                             guard_cleared_ids,
                             guard_unavailable_kinds,
+                            guard_cause_by_table,
+                            guard_decision_by_table,
                         )
                         table_results.append(ladder_result)
                     except Exception as exc:
@@ -4961,7 +5139,29 @@ class UnifiedPipeline:
                     page_num=page_num,
                     kind=TABLE_LADDER_UNVERIFIED_KIND,
                     engine=bo.engine or "",
-                    detail=f"table witness preparation failed: {type(exc).__name__}: {exc}",
+                    # GH-581 cold review round 4, finding 1: the exception's
+                    # own text is untrusted and must never reach ``detail``
+                    # (it could itself contain "retryable") -- it lives ONLY
+                    # in ``data["witness_error"]`` below.
+                    detail=(
+                        f"table witness preparation failed "
+                        f"({CAUSE_DETAIL_PHRASES[CAUSE_WITNESS_PREPARATION_ERROR]})"
+                    ),
+                    # GH-581 cold review round 1, finding 3: this terminal
+                    # never reaches the per-table message loop below, so it
+                    # must carry the SAME additive contract by hand -- no
+                    # rung ever ran, no guard chain ever ran, and nothing
+                    # here is a transient condition a later run resolves
+                    # (the failure is in the witness machinery itself, not
+                    # an external service).
+                    data={
+                        "rung_trail": [],
+                        "witness_scope": WitnessScope.NONE.value,
+                        "guard_detail": None,
+                        "latched": False,
+                        "cause": CAUSE_WITNESS_PREPARATION_ERROR,
+                        "witness_error": f"{type(exc).__name__}: {exc}",
+                    },
                 )
             )
             ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
@@ -5057,8 +5257,15 @@ class UnifiedPipeline:
             clamped_results.append(result)
         table_results = clamped_results
 
+        # GH-581: whether the page's own retry latch actually fired. Derived
+        # from the SAME set that set ``ps.table_judge_retry_pending`` above --
+        # never re-derived independently, so the wording below and the latch
+        # can never disagree about what is retryable.
+        latched = bool(unavailable_kinds)
+
         for result in table_results:
             unwitnessed = False
+            cause: str | None = None
             if result.outcome is TableLadderOutcome.ACCEPTED:
                 kind = TABLE_LADDER_ACCEPTED_KIND
                 reason = guard_reason_by_table.get(result.table_id, "")
@@ -5081,17 +5288,22 @@ class UnifiedPipeline:
                 detail = f"table {result.table_id} rejected by the judge ladder (content problem, not retryable)"
             elif forced_by_binding.get(result.table_id) is not None:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
+                cause = CAUSE_BINDING_CONTRADICTION
                 held = (ps.binding_adjudication.get(result.table_id) or {}).get("status") == "held"
+                # GH-581: a deterministic binding contradiction never latches
+                # (GH-575) -- "retryable on resume" is true only if some OTHER
+                # rung on this page was genuinely unavailable.
+                retry_clause = "; retryable on resume" if latched else ""
                 if held:
                     detail = (
                         f"table {result.table_id} unverified: mechanical binding check found a "
                         "contradiction that adjudication did not disprove "
-                        "(acceptance withheld; retryable on resume)"
+                        f"(acceptance withheld{retry_clause})"
                     )
                 else:
                     detail = (
                         f"table {result.table_id} unverified: mechanical binding check found a "
-                        "contradiction (acceptance withheld; retryable on resume)"
+                        f"contradiction (acceptance withheld{retry_clause})"
                     )
             elif (
                 not result.rung_results
@@ -5105,23 +5317,115 @@ class UnifiedPipeline:
                 # document is skipped on the next run and the label is a lie.
                 #
                 # The empty rung trail is NOT sufficient on its own. A witness
-                # that was located and then found no reachable rung has an empty
-                # trail too, and that one genuinely IS retryable -- the rung can
-                # come back. #560 named the empty trail as the pin; the witness
-                # is what actually separates the two.
+                # that was located and then handed an empty configured ``rungs``
+                # list has an empty trail too, but is a DIFFERENT cause
+                # (``CAUSE_NO_RUNGS_CONFIGURED``, GH-581 cold review round 3,
+                # finding 3's correction to this file's own earlier claim) --
+                # a config fact (strict_local, or no CLI found), not a
+                # transient outage, so it does not latch either. #560 named
+                # the empty trail as the pin; the witness is what actually
+                # separates the unwitnessed case from every other empty-trail
+                # cause.
                 #
                 # Latch semantics are deliberately unchanged; only the wording
                 # is, because the wording is what was wrong.
                 kind = TABLE_LADDER_UNVERIFIED_KIND
                 unwitnessed = True
+                cause = CAUSE_NO_WITNESS
+                # GH-581 cold review round 3, finding 3 / round 4, finding 1:
+                # the fixed phrase in ``CAUSE_DETAIL_PHRASES`` already avoids
+                # the reserved "retryable" substring (a NEGATIVE claim must
+                # avoid it entirely, not merely negate it), and is the SAME
+                # single source of truth every other UNVERIFIED branch reads.
                 detail = (
-                    f"table {result.table_id} not judged: no table witness could be "
-                    "prepared, so no rung ran (not retryable -- a re-run reaches the "
-                    "same empty witness)"
+                    f"table {result.table_id} not judged: {CAUSE_DETAIL_PHRASES[CAUSE_NO_WITNESS]}"
                 )
+                # GH-581 cold review round 1, finding 1: ``latched`` is
+                # PAGE-scoped (any table's rung was unavailable) while this
+                # table's own "not retryable" claim is TABLE-scoped (its own
+                # witness will never exist). The two can both be true at
+                # once on a mixed page -- this table itself will never be
+                # retried, but the PAGE still is, because a SIBLING table's
+                # rung was unavailable. Say so explicitly rather than let
+                # the table-scoped negative and the page-scoped ``latched``
+                # flag read as a contradiction.
+                if latched:
+                    detail += (
+                        " -- the page itself is retryable on resume: another "
+                        "table on this page had an unavailable rung"
+                    )
             else:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
-                detail = f"table {result.table_id} unverified by the judge ladder (infra problem, retryable on resume)"
+                # GH-581: name the real cause instead of a fixed "infra
+                # problem" guess.
+                #
+                # GH-581 cold review round 4, finding 1: ``detail`` must
+                # NEVER interpolate raw provider/exception/guard text -- an
+                # untrusted diagnostic can itself contain the reserved
+                # substring "retryable" and trip the literal invariant on an
+                # unlatched event. So ``detail`` is built ONLY from the
+                # fixed per-cause phrase in ``CAUSE_DETAIL_PHRASES`` plus the
+                # controlled retry clause; the raw text (a guard decision's
+                # free-text detail, or a rung's ¬S1 error) lives ONLY in
+                # structured data (``guard_detail``, ``rung_trail[].error``),
+                # which a consumer reads deliberately rather than a substring
+                # check stumbling into it.
+                #
+                # GH-581 cold review round 3, finding 1: select by TABLE
+                # MEMBERSHIP, never by truthiness of the detail string --
+                # ``BlindCellResult.error`` (and so ``CellGuardDecision.
+                # detail``) defaults to `""`, so a real guard-chain answer
+                # (``guard_unavailable=True``, disposition ``not_cleared``)
+                # with an empty detail was silently discarded to the generic
+                # ``unknown`` fallback below. ``guard_detail_by_table`` is
+                # populated in the SAME two places as ``guard_cause_by_table``
+                # (the exception path and the fail-closed ``else``), so
+                # membership in one implies membership in the other; checking
+                # it directly is what actually answers "did the guard chain
+                # run for THIS table", not whether it happened to say
+                # anything.
+                if result.table_id in guard_detail_by_table:
+                    cause = guard_cause_by_table.get(result.table_id, CAUSE_GUARD_NOT_CLEARED)
+                else:
+                    # GH-581 cold review round 2, finding 2: classify from
+                    # the TYPED facts (``ok``/``unavailable``/``refusal``),
+                    # never from whether ``error`` happens to be non-empty --
+                    # a real ¬S1 outage can carry an empty ``error`` string,
+                    # and that must still read as an outage, not fall through
+                    # to the generic unknown cause.
+                    not_ok = [rr for rr in result.rung_results if not rr.ok]
+                    if not_ok:
+                        cause = (
+                            CAUSE_RUNG_UNAVAILABLE
+                            if any(rr.unavailable or rr.refusal for rr in not_ok)
+                            else CAUSE_RUNG_NOT_ACCEPTED
+                        )
+                    elif not result.rung_results:
+                        # GH-581 cold review round 1, finding 2: a witnessed
+                        # table handed no rung at all (an empty configured
+                        # ``rungs`` list -- strict_local, or no CLI found).
+                        # A config fact, not an outage: the next identical
+                        # call reaches the same empty list.
+                        cause = CAUSE_NO_RUNGS_CONFIGURED
+                    elif any(
+                        getattr(rr.verdict, "verdict", None) == "PASS"
+                        and getattr(rr.verdict, "confidence", None) == "low"
+                        for rr in result.rung_results
+                    ):
+                        # A lone low-confidence PASS at the last rung, with
+                        # no second real-PASS witness to corroborate it
+                        # (table_ladder.py ruling 1). Ordinary S1, not a
+                        # rung failure and not the guard chain's concern --
+                        # ``pending`` is None here, so the P1 chain never
+                        # ran for this table either.
+                        cause = CAUSE_INSUFFICIENT_CORROBORATION
+                    else:
+                        cause = CAUSE_UNKNOWN
+                retry_clause = "; retryable on resume" if latched else ""
+                detail = (
+                    f"table {result.table_id} unverified by the judge ladder "
+                    f"({CAUSE_DETAIL_PHRASES[cause]}{retry_clause})"
+                )
             # GH-353 review fix (post-A3 "agy" amendment): ``RungResult.rung``
             # names the judge model FAMILY ("gemini"), not the literal binary
             # that ran it (``agy``, per config) -- and rung 1's model is
@@ -5147,6 +5451,13 @@ class UnifiedPipeline:
                     "executing": self._executing_identity(
                         rr, executed_rungs_by_table.get(result.table_id) or [], idx
                     ),
+                    # GH-581: the ¬S1 reason and availability bits, so a
+                    # consumer no longer has to guess why a rung's ``ok`` was
+                    # False -- an outage, a refusal, or an unaccepted answer
+                    # each need a different response.
+                    "error": rr.error,
+                    "unavailable": rr.unavailable,
+                    "refusal": rr.refusal,
                 }
                 for idx, rr in enumerate(result.rung_results)
             ]
@@ -5170,6 +5481,32 @@ class UnifiedPipeline:
                         # GH-560: stated, not left to be inferred from an empty
                         # rung_trail by every consumer separately.
                         **({"retryable": False} if unwitnessed else {}),
+                        # GH-581: only the UNVERIFIED terminal carries a cause
+                        # -- ACCEPTED/WITHHELD/REJECTED have their own
+                        # ``reason``/``detail`` and no "is this retryable"
+                        # question to answer.
+                        **(
+                            {
+                                "guard_detail": guard_detail_by_table.get(result.table_id),
+                                "latched": latched,
+                                "cause": cause or CAUSE_UNKNOWN,
+                                # GH-581 cold review round 2, finding 3: the
+                                # TYPED guard decision for THIS table, when
+                                # the guard chain ran for it -- additive only,
+                                # never consulted for outcome or latch. Keys
+                                # are absent (not null) when the chain never
+                                # reached this table, so a consumer can tell
+                                # "no guard chain ran" from "it ran and found
+                                # nothing" without a sentinel value.
+                                **(
+                                    guard_decision_by_table[result.table_id]
+                                    if result.table_id in guard_decision_by_table
+                                    else {}
+                                ),
+                            }
+                            if kind is TABLE_LADDER_UNVERIFIED_KIND
+                            else {}
+                        ),
                     },
                 )
             )
@@ -8774,6 +9111,7 @@ class UnifiedPipeline:
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
             self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
+            from socr.judge.table_verdict import TABLE_LADDER_UNVERIFIED_KIND
 
             # P4-R joins the allowlist for the same reason D1a wrote it: the
             # lane's dispositions -- above all a presence-guard REJECTION --
@@ -8784,17 +9122,118 @@ class UnifiedPipeline:
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
+                ev_kind = str(ev.get("kind", ""))
+                ev_detail = str(ev.get("detail", "") or "")
+                ev_data = dict(ev.get("data") or {})
+                if ev_kind == TABLE_LADDER_UNVERIFIED_KIND and "latched" not in ev_data:
+                    # GH-581 cold review round 6, finding 1: a sidecar written
+                    # by a pre-GH-581 build has NO ``latched``/``cause``/
+                    # ``guard_detail`` at all, and its ``detail`` may still
+                    # say "retryable on resume" unconditionally -- the EXACT
+                    # false promise this ticket exists to fix, now replayed
+                    # verbatim on every resume of that corpus. Normalize it
+                    # to the current contract using ONLY the page's already-
+                    # restored real latch (``ps.table_judge_retry_pending``,
+                    # set above) and what the legacy event's OWN typed fields
+                    # can prove -- never a shape guess. Never changes which
+                    # pages the resume gate admits (that reads
+                    # ``table_judge_retry_pending``/``table_ladder_incomplete``
+                    # directly, both restored before this loop runs, not this
+                    # event's `data`).
+                    ev_detail, ev_data = self._normalize_legacy_unverified_event(
+                        ev_detail, ev_data, ps.table_judge_retry_pending
+                    )
                 state.events.append(
                     AuditEvent(
                         page_num=page_num,
-                        kind=str(ev.get("kind", "")),
+                        kind=ev_kind,
                         engine=str(ev.get("engine", "") or ""),
-                        detail=str(ev.get("detail", "") or ""),
-                        data=dict(ev.get("data") or {}),
+                        detail=ev_detail,
+                        data=ev_data,
                     )
                 )
         except Exception as exc:
             logger.debug("PP-5 flag restore failed for p%d (%s); body text kept", page_num, exc)
+
+    @staticmethod
+    def _normalize_legacy_unverified_event(
+        detail: str, data: dict, latched: bool
+    ) -> tuple[str, dict]:
+        """GH-581 cold review round 6, finding 1: bring a pre-GH-581
+        ``table_ladder_unverified`` sidecar event up to the current contract
+        on restore.
+
+        A sidecar written before this ticket has no ``latched``/``cause``/
+        ``guard_detail`` key at all, and its ``detail`` may still say
+        "retryable on resume" unconditionally regardless of the page's real
+        latch -- replaying it verbatim would repeat, on every resume of that
+        corpus, the exact false promise this ticket fixes for fresh runs.
+
+        ``latched`` is NEVER re-derived here -- it is the caller's already-
+        restored ``ps.table_judge_retry_pending``, the one durable fact this
+        event cannot disagree with. ``cause`` is selected ONLY where the
+        legacy event's OWN typed fields prove it, never from the shape of
+        what is absent:
+
+        * the pre-existing GH-560 ``retryable: False`` marker (an explicit,
+          deliberately-written typed fact, not a shape guess) proves
+          ``CAUSE_NO_WITNESS``;
+        * a ``rung_trail`` row with ``unavailable: true`` or ``refusal: true``
+          proves ``CAUSE_RUNG_UNAVAILABLE`` (cold review round 7, finding 2:
+          ``refusal`` is exactly as retry-latching as ``unavailable`` --
+          same rule the fresh-emission classifier in ``_run_table_judge_gate``
+          uses);
+        * a row where BOTH bits are explicitly present and both ``False``
+          proves the rung answered but was not accepted --
+          ``CAUSE_RUNG_NOT_ACCEPTED`` (round 7, finding 2: a truly pre-581
+          row never carries these keys at all, so their explicit presence,
+          even when false, is itself the typed fact that separates "proven
+          not-an-outage" from "unknown because untyped").
+
+        Anything else -- including an empty trail with no witness-scope key
+        at all, or a row missing the typed bits entirely, which merely LOOKS
+        like one of the above -- falls to ``CAUSE_UNKNOWN``, the reserved
+        fallback for a genuinely unclassified legacy state. Never touches
+        ``table_judge_retry_pending``/``table_ladder_incomplete`` (the resume
+        gate's own admission facts) or the page's disposition -- wording
+        only, exactly like every other GH-581 fix.
+        """
+        from socr.judge.table_verdict import (
+            CAUSE_DETAIL_PHRASES,
+            CAUSE_NO_WITNESS,
+            CAUSE_RUNG_NOT_ACCEPTED,
+            CAUSE_RUNG_UNAVAILABLE,
+            CAUSE_UNKNOWN,
+        )
+
+        rung_trail = data.get("rung_trail") if isinstance(data.get("rung_trail"), list) else []
+        table_id = data.get("table_id", "this table")
+        typed_rows = [row for row in rung_trail if isinstance(row, dict)]
+
+        if data.get("retryable") is False:
+            cause = CAUSE_NO_WITNESS
+        elif any(
+            row.get("unavailable") is True or row.get("refusal") is True for row in typed_rows
+        ):
+            cause = CAUSE_RUNG_UNAVAILABLE
+        elif any(
+            row.get("unavailable") is False and row.get("refusal") is False for row in typed_rows
+        ):
+            cause = CAUSE_RUNG_NOT_ACCEPTED
+        else:
+            cause = CAUSE_UNKNOWN
+
+        retry_clause = "; retryable on resume" if latched else ""
+        phrase = CAUSE_DETAIL_PHRASES[cause]
+        new_detail = f"table {table_id} unverified by the judge ladder ({phrase}{retry_clause})"
+
+        new_data = dict(data)
+        new_data.setdefault("rung_trail", rung_trail)
+        new_data.setdefault("witness_scope", "none")
+        new_data["guard_detail"] = data.get("guard_detail")
+        new_data["latched"] = latched
+        new_data["cause"] = cause
+        return new_detail, new_data
 
     def _rewrite_all_fragments(
         self,
@@ -8947,6 +9386,8 @@ class UnifiedPipeline:
         from socr.core.audit_log import AuditEvent
         from socr.core.manifest import is_page_failed_marker
         from socr.judge.table_verdict import (
+            CAUSE_DETAIL_PHRASES,
+            CAUSE_MISSING_TABLE_TERMINAL,
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
             TABLE_LADDER_UNVERIFIED_KIND,
@@ -9008,16 +9449,39 @@ class UnifiedPipeline:
                     FailureMode.TABLE_WITHHELD,
                 ):
                     page_state.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+                # GH-581 cold review round 3, finding 2: this event fires
+                # AFTER the per-page gate has already run for every OTHER
+                # table on this page, so ``table_judge_retry_pending`` is
+                # already settled -- a mixed page where a sibling table's
+                # rung was unavailable is genuinely page-latched, and saying
+                # otherwise contradicts that already-fired latch. Read it
+                # rather than hard-coding False; this completeness terminal
+                # still never sets the latch itself (nothing here ever
+                # reached a rung to BE unavailable).
+                backfill_latched = bool(getattr(page_state, "table_judge_retry_pending", False))
+                backfill_detail = (
+                    f"table {table_id} reached assemble with no table-judge terminal "
+                    f"({CAUSE_DETAIL_PHRASES[CAUSE_MISSING_TABLE_TERMINAL]})"
+                )
+                if backfill_latched:
+                    backfill_detail += (
+                        " -- the page itself is retryable on resume: another "
+                        "table on this page had an unavailable rung"
+                    )
                 state.events.append(
                     AuditEvent(
                         page_num=page_num,
                         kind=TABLE_LADDER_UNVERIFIED_KIND,
                         engine=(page_state.best_output.engine if page_state.best_output else ""),
-                        detail=(
-                            f"table {table_id} reached assemble with no table-judge "
-                            "terminal (infra problem, retryable on resume)"
-                        ),
-                        data={"table_id": table_id, "rung_trail": []},
+                        detail=backfill_detail,
+                        data={
+                            "table_id": table_id,
+                            "rung_trail": [],
+                            "witness_scope": "none",
+                            "guard_detail": None,
+                            "latched": backfill_latched,
+                            "cause": CAUSE_MISSING_TABLE_TERMINAL,
+                        },
                     )
                 )
 
@@ -9326,8 +9790,11 @@ class UnifiedPipeline:
         # as SUCCESS/audit_passed=False (GH-161, ``:4347``), and neither the
         # disposition guard nor a direct failure_mode stamp ever rewrites
         # ``.status`` to match. TABLE_REJECTED (content problem, not
-        # retryable) and TABLE_UNVERIFIED (infra problem, retryable on
-        # resume) are kept as separate, mutually exclusive buckets -- same
+        # retryable) and TABLE_UNVERIFIED (no accepted verdict; cause- and
+        # latch-dependent whether a resume retries it -- see
+        # ``data["cause"]``/``data["latched"]`` on its ``table_ladder_
+        # unverified`` event, GH-581) are kept as separate, mutually
+        # exclusive buckets -- same
         # reasoning as every other pairing above: one bucket per disposition,
         # because they need distinct audit kinds, CLI wording and (D1b,
         # later) distinct resume policy.
@@ -9677,20 +10144,40 @@ class UnifiedPipeline:
                     # GH-560: same split as the document note -- an operator
                     # told "retryable on resume" will re-run, and for a
                     # no-witness terminal that run changes nothing.
-                    _retryable, _unwitnessed = self._unverified_wording_split(
-                        state, table_unverified_pages
-                    )
+                    (
+                        _retryable,
+                        _not_retryable,
+                        _unwitnessed,
+                        _incomplete,
+                    ) = self._unverified_wording_split(state, table_unverified_pages)
                     if _retryable:
                         console.print(
                             f"  [yellow]{len(_retryable)} table page(s) could not be "
                             f"judged — TABLE_UNVERIFIED (ladder exhausted without an answer; "
                             f"retryable on resume): {_retryable}[/yellow]"
                         )
+                    if _not_retryable:
+                        # GH-581: a binding contradiction or an unaccepted
+                        # rung answer -- neither latches, so this must not
+                        # say "retryable" either.
+                        console.print(
+                            f"  [yellow]{len(_not_retryable)} table page(s) could not be "
+                            f"judged — TABLE_UNVERIFIED (ladder found no accepted verdict; "
+                            f"not retryable): {_not_retryable}[/yellow]"
+                        )
                     if _unwitnessed:
                         console.print(
                             f"  [yellow]{len(_unwitnessed)} table page(s) were not judged — "
                             f"TABLE_UNVERIFIED (no table witness could be prepared, so no rung "
                             f"ran; not retryable): {_unwitnessed}[/yellow]"
+                        )
+                    if _incomplete:
+                        # GH-581 cold review round 2, finding 1: a completeness
+                        # miss, distinct from both buckets above.
+                        console.print(
+                            f"  [yellow]{len(_incomplete)} table page(s) reached assemble with "
+                            f"no table-judge terminal — TABLE_UNVERIFIED (will be reprocessed "
+                            f"because the terminal is incomplete): {_incomplete}[/yellow]"
                         )
 
         # MAJOR 6(a) on #269: only the SIDECAR flush belongs here, after the
