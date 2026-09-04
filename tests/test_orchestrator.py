@@ -1332,6 +1332,22 @@ class TestAgenticIntegration:
         doc.close()
         return path
 
+    @staticmethod
+    def _corrupt_math_pdf(tmp_path):
+        """One page with clean prose plus a real font-mapped corrupt equation
+        line, geometrically detectable by ``recover_math_regions`` for real
+        (no fixture ``CorruptMathRegion`` faked in) -- same construction as
+        ``tests/test_math_recover.py``'s own ``_page`` helper."""
+        fitz = pytest.importorskip("fitz")
+        path = tmp_path / "paper.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 100), "Native prose survives.", fontsize=10)
+        page.insert_text((72, 140), "PðA or BÞ ¼ PðAÞ þ PðBÞ", fontsize=10)
+        doc.save(str(path))
+        doc.close()
+        return path
+
     def test_agentic_records_cost_and_writes_manifest(self, tmp_path):
         pdf = self._real_pdf(tmp_path, 1)
         config = _make_config(
@@ -1776,6 +1792,140 @@ class TestAgenticIntegration:
         assert native in result.markdown
         assert "corrupt equation unresolved" in result.markdown
         assert result.error == "corrupt equation candidate unverified on page(s) 1"
+
+    def test_agentic_corrupt_math_default_flip_no_provider_is_additive_only(self, tmp_path):
+        """Owner ruling 2026-09-04 default flip: pin the TRUE no-provider contract.
+
+        The paired runs differ only in ``recover_corrupt_math`` -- True (the
+        new default) vs. False (the old one) -- against a REAL, geometrically
+        detected corrupt-math region (a page with an actual font-mapped
+        corrupt equation line, read through the unmocked
+        ``recover_math_regions``/``splice_math`` seam) and a REAL unreachable
+        endpoint (``ollama_host="http://127.0.0.1:1"``, connection refused --
+        the CI no-ollama trap without faking any network layer). No part of
+        ``socr.math.recover`` is patched; the OCR call is made for real,
+        fails for real, and is retried once for real (its documented
+        empty-response retry).
+
+        Two rounds of correction went into this exact shape:
+
+        1. The first version used a blank fixture PDF, so the geometry pass
+           found no region at all and ``recover_math_regions`` returned
+           before reaching the splice step -- it only exercised the OTHER
+           branch ("the page-level detector claims corrupt math but no
+           region is geometrically present"), not a real detected-but-
+           unresolved region.
+        2. The second version fixed the region-detection gap but fabricated
+           the ``CorruptMathRegion`` return value directly and, in doing so,
+           exposed and pinned a REAL BUG in ``splice_math``: an aligned
+           region with a retained crop was REPLACING its native slice even
+           when unresolved, contradicting the GH-271 design record
+           (docs/log/2026-08-22_corrupt-equation-region-guardrail.md:
+           "Failure at any boundary keeps the native source text and appends
+           explicit evidence instead of silently deleting content"). That bug
+           is now fixed in ``splice_math`` (only a RESOLVED region replaces
+           its slice; an aligned-but-unresolved region keeps the native slice
+           and inserts the crop + marker immediately after it), and this test
+           is rebuilt end-to-end, unmocked, to prove the fix rather than
+           re-pin a fabricated fixture.
+
+        What is asserted is a DIFFERENCE, not an absolute status (CLAUDE.md:
+        "pin a difference, not a value" -- document status is provider-
+        dependent machinery and must not be pinned as a bare value): the two
+        runs must reach the SAME page status, the SAME native slice (corrupt
+        glyphs included) must ship in BOTH, and the flag's only effect with
+        no provider is to ADD a crop reference + unresolved marker immediately
+        after that unchanged slice, plus set ``result.error``.
+        """
+        import json
+
+        pdf = self._corrupt_math_pdf(tmp_path)
+        corrupt_slice = "PðA or BÞ ¼ PðAÞ þ PðBÞ"
+        native = f"Native prose survives.\n{corrupt_slice}\n \t\n"
+
+        def _assessment():
+            return DocumentAssessment(
+                path=pdf,
+                pages=[
+                    PageAssessment(
+                        page_num=1,
+                        is_born_digital=True,
+                        native_text=native,
+                        confidence=0.9,
+                        needs_ocr_enhancement=True,
+                        has_equations=True,
+                        has_corrupt_math=True,
+                        word_count=100,
+                    )
+                ],
+            )
+
+        results = {}
+        sidecars = {}
+        fragments = {}
+        for enabled in (False, True):
+            run_dir = tmp_path / str(enabled)
+            config = _make_config(
+                agentic=True,
+                native_first=True,
+                recover_corrupt_math=enabled,
+                judge_backend="heuristic",
+                enabled_engines=[],
+                # Real, unreachable endpoint -- connection refused, not mocked.
+                ollama_host="http://127.0.0.1:1",
+            )
+            pipeline = UnifiedPipeline(config)
+            pipeline.bd_detector = MagicMock()
+            pipeline.bd_detector.detect.return_value = _assessment()
+            pipeline._available_engines_for_agentic = MagicMock(return_value=[])
+            whole_page = _mock_engine_named("qwen", "must not run")
+            with (
+                patch("socr.pipeline.orchestrator.get_engine", return_value=whole_page),
+                patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            ):
+                results[enabled] = pipeline.process(pdf, run_dir)
+            doc_dir = run_dir / pdf.stem
+            sidecars[enabled] = json.loads((doc_dir / "pages" / "00001.json").read_text())
+            fragments[enabled] = (doc_dir / "pages" / "00001.md").read_text()
+
+        # Same document AND page-level status either way -- the flip does
+        # not change the disposition with no provider, only its diagnostics.
+        assert results[False].status == results[True].status
+        assert sidecars[False]["status"] == sidecars[True]["status"]
+
+        # The native slice -- corrupt glyphs included -- ships in BOTH, and
+        # the winning-output engine reflects which lane actually ran (this is
+        # a deterministic function of the flag, not of provider presence, so
+        # pinning the literal engine name is safe).
+        assert "Native prose survives." in fragments[False]
+        assert corrupt_slice in fragments[False]
+        assert sidecars[False]["winning_output"]["engine"] == "native"
+        assert "Native prose survives." in fragments[True]
+        assert corrupt_slice in fragments[True]
+        assert sidecars[True]["winning_output"]["engine"] == "native+math"
+
+        # Flag off: no crop, no marker, no error -- nothing added.
+        assert results[False].error is None
+        assert "corrupt equation unresolved" not in fragments[False]
+        assert "Corrupt equation crop" not in fragments[False]
+
+        # Flag on: additive only -- crop + unresolved marker appended right
+        # after the still-present native slice, plus a surfaced error.
+        assert results[True].error == "corrupt equation candidate unverified on page(s) 1"
+        assert "corrupt equation unresolved" in fragments[True]
+        assert "Corrupt equation crop" in fragments[True]
+        assert fragments[True].index(corrupt_slice) < fragments[True].index("Corrupt equation crop")
+
+        # BYTE-EXACT additivity: strip precisely the crop+unresolved
+        # diagnostic block splice_math inserted, and what remains must equal
+        # the flag-off fragment byte-for-byte -- proving the flag adds
+        # exactly one block and changes nothing else.
+        diagnostic_block = (
+            "\n![Corrupt equation crop](equations/corrupt_math_p00001_r001.png)\n"
+            "[corrupt equation unresolved: empty or whitespace-only LaTeX; "
+            "see retained crop]"
+        )
+        assert fragments[True] == fragments[False] + diagnostic_block
 
     @pytest.mark.parametrize(
         ("config_overrides", "has_tables", "whole_page_runs"),

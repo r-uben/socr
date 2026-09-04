@@ -378,30 +378,58 @@ def _region_replacement(region: CorruptMathRegion) -> str:
 def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str:
     """Patch exact corrupt substrings in ``native_text`` and preserve all other bytes.
 
-    The function updates each record's ``source_aligned`` field.  An aligned
-    region with a retained crop replaces its native slice even when LaTeX is
-    unresolved; that replacement contains the crop plus an explicit unresolved
-    marker rather than silently leaving corrupt glyphs in place.
+    The function updates each record's ``source_aligned`` field.  Only a
+    RESOLVED region -- crop retained, LaTeX present, structurally valid, and
+    source-aligned -- replaces its native slice.  An aligned region with a
+    retained crop that is NOT resolved keeps the native slice exactly as-is
+    and inserts the crop reference plus an explicit unresolved marker
+    immediately after it, so the evidence sits next to the (still corrupt)
+    glyphs rather than replacing them.  Per the GH-271 design record
+    (docs/log/2026-08-22_corrupt-equation-region-guardrail.md): "Failure at
+    any boundary keeps the native source text and appends explicit evidence
+    instead of silently deleting content."
 
     If the PDF extractor's region text cannot be found verbatim in the native
     snapshot, the snapshot is left untouched and the evidence plus an explicit
     unresolved marker is appended.  The function never rebuilds prose from page
     geometry and never silently drops a damaged equation.
+
+    Regions are consumed with a forward-only CURSOR through ``text``: each
+    region's source is searched for starting at the position immediately
+    after wherever the PREVIOUS region was spliced in, never from the start
+    of the string.  Without this, two regions sharing identical source text
+    (a duplicate corrupt equation appearing twice on a page) would both match
+    ``str.replace(..., 1)``'s first occurrence -- the unresolved-insertion
+    branch re-embeds ``source`` as the prefix of its own replacement, so a
+    from-the-start search finds that same freshly-inserted text again and
+    the SECOND real occurrence never gets its own evidence at all. Regions
+    are expected in page/geometry order (as ``_recovery_groups`` returns
+    them), so a forward-only cursor also matches reading order.
     """
     del page  # retained in the public signature for existing callers
     if not regions:
         return native_text
 
     text = native_text
+    cursor = 0
     unmatched: list[str] = []
     for region in regions:
         source = region.source_text
         source_in_native = bool(source and source in native_text)
-        source_available = bool(source and source in text)
+        idx = text.find(source, cursor) if source else -1
+        source_available = idx != -1
         region.source_aligned = source_in_native and source_available
         replacement = _region_replacement(region)
-        if region.source_aligned and (region.resolved or region.crop_path):
-            text = text.replace(source, replacement, 1)
+        if region.source_aligned and region.resolved:
+            text = text[:idx] + replacement + text[idx + len(source) :]
+            cursor = idx + len(replacement)
+        elif region.source_aligned and region.crop_path:
+            # Aligned but unresolved: keep the native slice untouched and
+            # attach the evidence adjacent to it, rather than deleting the
+            # (still corrupt) glyphs the reader may need to see or grep for.
+            insertion = f"{source}\n{replacement}"
+            text = text[:idx] + insertion + text[idx + len(source) :]
+            cursor = idx + len(insertion)
         else:
             if source_in_native and not source_available:
                 retention_reason = "source overlapped an earlier recovery"

@@ -191,11 +191,22 @@ class PipelineConfig:
     # CLI warns and ``--no-native-first`` wins (everything goes to OCR).
     native_only: bool = False
 
-    # --- Math recovery (font-corrupted equations) ---
+    # --- Math recovery (font-corrupted equations, default ON) ---
     # When a born-digital page's prose is clean but its math is font-map corrupted
     # ('=' -> '¼', '(' -> 'ð'), keep the native prose and image-OCR only the
-    # equation regions to LaTeX. Opt-in: needs a local vision model (Ollama).
-    recover_corrupt_math: bool = False
+    # equation regions to LaTeX. Needs a local/cloud vision model (Ollama) to
+    # RESOLVE a region into replacement LaTeX; a detected but UNRESOLVED region
+    # (no provider, or a rejected candidate) keeps the native slice untouched
+    # and only ADDS a retained crop plus an explicit unresolved marker next to
+    # it (see splice_math, GH-271) -- it never deletes the corrupted glyphs.
+    # Only a RESOLVED region replaces its native slice.
+    #
+    # Owner ruling 2026-09-04, recorded in
+    # docs/log/2026-09-04_corrupt-math-lane-default-on.md (measurement:
+    # docs/log/2026-09-03_p6-native-fallback-by-trigger.md): the
+    # region-recovery lane ships by default. Kill switch:
+    # ``--no-recover-corrupt-math``.
+    recover_corrupt_math: bool = True
     # qwen3.5:cloud (Ollama Cloud) is the practical winner: reliable on dense
     # equation regions where local qwen3-vl:30b-a3b-instruct times out, no extra
     # key.  Override with --math-model qwen3-vl:30b-a3b-instruct for offline runs.

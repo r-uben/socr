@@ -15,6 +15,8 @@ mask a missing knob by changing for an unrelated reason.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from socr.core.config import EngineType, PipelineConfig
@@ -38,6 +40,35 @@ def _fingerprint(**overrides: object) -> str:
     return orch.UnifiedPipeline(config)._run_fingerprint()
 
 
+def _fingerprint_extra(**overrides: object) -> dict[str, object]:
+    """The raw ``extra`` dict ``_run_fingerprint`` hands to ``run_fingerprint``.
+
+    ``_run_fingerprint`` returns an opaque hash, so a test that compares two
+    hashes cannot tell WHICH key moved. ``recover_corrupt_math`` and
+    ``math_model`` move TOGETHER by design (``math_model`` is recorded as
+    ``None`` whenever the lane is off), so a hash-only test comparing
+    ``recover_corrupt_math=False`` against ``recover_corrupt_math=True``
+    would keep passing even if the ``"recover_corrupt_math"`` key were
+    deleted from the fingerprint outright -- the ``"math_model"`` key alone
+    would still move. Capturing the dict lets a test assert the SPECIFIC key
+    it claims to cover, structurally, independent of any other key riding
+    along with it.
+    """
+    config = PipelineConfig()
+    for key, value in overrides.items():
+        assert hasattr(config, key), f"PipelineConfig has no field {key!r}"
+        setattr(config, key, value)
+    captured: dict[str, object] = {}
+
+    def _capture(*_args, extra=None, **_kwargs):
+        captured.update(extra or {})
+        return "unused"
+
+    with patch("ocr_output_contract.run_fingerprint", side_effect=_capture):
+        orch.UnifiedPipeline(config)._run_fingerprint()
+    return captured
+
+
 def test_auto_patch_tables_invalidates() -> None:
     """#229: table patching rewrites cells, so the two states are different runs.
 
@@ -59,6 +90,24 @@ def test_auto_patch_tables_is_ignored_without_dual_pass() -> None:
 def test_recover_corrupt_math_invalidates() -> None:
     """#233: the corrupt-font math lane replaces page text."""
     assert _fingerprint(recover_corrupt_math=False) != _fingerprint(recover_corrupt_math=True)
+
+
+def test_recover_corrupt_math_key_itself_moves() -> None:
+    """Structural isolation of the ``"recover_corrupt_math"`` key.
+
+    ``recover_corrupt_math`` and ``math_model`` move together by design (see
+    ``_fingerprint_extra``'s docstring), so the hash-only assertion above
+    would keep passing even if the ``"recover_corrupt_math"`` key were
+    deleted outright. This asserts the SPECIFIC key exists and differs,
+    independent of ``math_model``'s coupled value.
+    """
+    off = _fingerprint_extra(recover_corrupt_math=False)
+    on = _fingerprint_extra(recover_corrupt_math=True)
+    assert "recover_corrupt_math" in off
+    assert "recover_corrupt_math" in on
+    assert off["recover_corrupt_math"] != on["recover_corrupt_math"]
+    assert off["recover_corrupt_math"] is False
+    assert on["recover_corrupt_math"] is True
 
 
 def test_math_model_invalidates_while_the_lane_is_on() -> None:
