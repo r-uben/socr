@@ -94,12 +94,17 @@ def common_options(f):
         ),
     )(f)
     f = click.option(
-        "--recover-corrupt-math",
-        is_flag=True,
+        "--recover-corrupt-math/--no-recover-corrupt-math",
+        default=None,
         help=(
             "Keep native prose and re-read only positively detected corrupt-font equation "
             "crops with the --math-model endpoint. Retains each crop as ground truth and "
-            "marks syntax-valid LaTeX as non-authoritative; the page remains WARNING."
+            "marks syntax-valid LaTeX as non-authoritative; the page remains WARNING. "
+            "Default: on (owner ruling 2026-09-04, recorded in "
+            "docs/log/2026-09-04_corrupt-math-lane-default-on.md). "
+            "--no-recover-corrupt-math restores ordinary whole-page routing for "
+            "this page (native fallback only if no engine actually runs), with "
+            "the corrupt math left as-is."
         ),
     )(f)
     f = click.option(
@@ -314,7 +319,7 @@ def build_config(
     auto_patch_tables: bool = False,
     no_native_first: bool = False,
     native_only: bool = False,
-    recover_corrupt_math: bool = False,
+    recover_corrupt_math: bool | None = None,
     detect_equations: bool = False,
     recover_clean_equations: bool = False,
     no_equation_region_lane: bool = False,
@@ -480,8 +485,8 @@ def build_config(
         )
     elif native_only:
         config.native_only = True
-    if recover_corrupt_math:
-        config.recover_corrupt_math = True
+    if recover_corrupt_math is not None and _explicitly_given("recover_corrupt_math"):
+        config.recover_corrupt_math = recover_corrupt_math
     if detect_equations:
         config.detect_equations = True
     if recover_clean_equations:

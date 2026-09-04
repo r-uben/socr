@@ -2091,7 +2091,8 @@ class UnifiedPipeline:
         return ""
 
     def _is_corrupt_math_recovery_page(self, page_num: int, ps: PageState) -> bool:
-        """Whether the opt-in region lane owns this page instead of whole-page OCR."""
+        """Whether the corrupt-math region lane (default on) owns this page
+        instead of whole-page OCR."""
         return bool(
             self.config.native_first
             and not self.config.native_only
@@ -5391,7 +5392,8 @@ class UnifiedPipeline:
         """PP-2 fused page-major loop: one pass over ALL pages (native + OCR).
 
         Born-digital prose takes free native text; every OCR page is routed
-        through the cost ladder, except an opt-in corrupt-equation page: that page
+        through the cost ladder, except a corrupt-equation page (region lane
+        default on, kill switch ``--no-recover-corrupt-math``): that page
         takes the crop-backed ``native+math`` region lane before whole-page routing.
         After each page is final, a PROVISIONAL fragment + sidecar
         (``terminal=False``) is flushed for crash recovery.

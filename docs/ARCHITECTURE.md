@@ -105,7 +105,10 @@ document budget cannot cover it.
 - `cli.py`: Click commands — `process` (default, PDF-path shorthand), `batch`,
   `engines`, `replay`, `judge-benchmark`. Agentic routing controls:
   `--strict-local`, `--judge-backend`, `--judge-model`, `--max-cost-per-page`,
-  `--cost-budget`, `--write-manifest`, `--dual-pass-tables/--no-dual-pass-tables`.
+  `--cost-budget`, `--write-manifest`, `--dual-pass-tables/--no-dual-pass-tables`,
+  `--recover-corrupt-math/--no-recover-corrupt-math` (default on since owner
+  ruling 2026-09-04, recorded in `docs/log/2026-09-04_corrupt-math-lane-default-on.md`
+  — corrupt math is the dominant NATIVE_FALLBACK trigger).
 - `core/`:
   - `config.py`: `PipelineConfig` (single flat config), `EngineType`,
     `ENGINE_PRIORITY`, agentic flags.

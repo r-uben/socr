@@ -506,13 +506,23 @@ def test_splice_uses_exact_source_equation_label_once(candidate: str):
 
 
 def test_splice_empty_latex_keeps_visible_failure_and_crop():
+    """GH-271 design record: 'Failure at any boundary keeps the native source
+    text and appends explicit evidence instead of silently deleting content.'
+    An aligned, crop-retained but UNRESOLVED region must keep the corrupt
+    native glyphs in place (not delete them) and attach the crop + unresolved
+    marker immediately after them as additive evidence.
+    """
     native = "Prose.\n" + _EQ
     out = splice_math(None, native, [_region(_EQ, "")])
 
     assert "Prose." in out
+    # The (still corrupt) native glyphs are KEPT, not replaced.
+    assert _EQ in out
+    assert out.startswith(native)
     assert "![Corrupt equation crop](equations/crop.png)" in out
     assert "corrupt equation unresolved" in out
-    assert "¼" not in out and "ð" not in out
+    # The crop + marker follow the native glyphs, evidence adjacent to them.
+    assert out.index(_EQ) < out.index("![Corrupt equation crop]")
 
 
 def test_splice_no_crop_retains_native_source_bytes():
@@ -562,6 +572,40 @@ def test_identical_source_occurrences_align_and_replace_independently():
     assert "![Corrupt equation crop](equations/first.png)" in out
     assert "![Corrupt equation crop](equations/second.png)" in out
     assert _EQ not in out
+    # Round 3 regression: each duplicate source consumes its OWN occurrence,
+    # in page order -- not both matching str.replace's first occurrence.
+    assert (
+        out.index("equations/first.png")
+        < out.index("intervening prose")
+        < out.index("equations/second.png")
+    )
+
+
+def test_identical_unresolved_source_occurrences_each_get_own_adjacent_evidence():
+    """Round 3 bug: the unresolved-insertion branch re-embeds ``source`` as
+    the prefix of its own replacement, so a from-the-start
+    ``str.replace(..., 1)`` search re-matched that same freshly-inserted text
+    for a SECOND region sharing identical source -- both crops piled up next
+    to the FIRST occurrence and the second occurrence got no evidence at all.
+    A forward-only cursor through ``text`` fixes this: each region consumes
+    its own occurrence, evidence lands immediately after it, in order."""
+    native = f"{_EQ}\nintervening prose\n{_EQ}"
+    first = _region(_EQ, "", crop="equations/first.png")
+    second = _region(_EQ, "", crop="equations/second.png")
+
+    out = splice_math(None, native, [first, second])
+
+    assert first.source_aligned is True
+    assert second.source_aligned is True
+    assert out.count(_EQ) == 2, "both occurrences of the corrupt glyphs are kept"
+    # Each crop follows its OWN occurrence, in reading order.
+    assert (
+        out.index(_EQ)
+        < out.index("equations/first.png")
+        < out.index("intervening prose")
+        < out.index(_EQ, out.index("intervening prose"))
+        < out.index("equations/second.png")
+    )
 
 
 def test_overlapping_later_source_becomes_visible_unresolved_evidence():

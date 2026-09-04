@@ -52,9 +52,9 @@ class PageState:
     has_unrecovered_symbol_glyphs: bool = False
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
-    #: GH-271: the opt-in corrupt-equation lane produced a region hybrid that
-    #: must ship even though it remains WARNING/audit_passed=False (syntax is
-    #: not a mathematical-fidelity oracle). Read only by final winner selection.
+    #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
+    #: that must ship even though it remains WARNING/audit_passed=False (syntax
+    #: is not a mathematical-fidelity oracle). Read only by final winner selection.
     corrupt_math_hybrid: PageOutput | None = None
     judge_rejected: bool = False  # VLM judge rejected the best output
     #: GH-225: how many image references on this page had no provenance in
