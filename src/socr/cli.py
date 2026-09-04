@@ -16,6 +16,24 @@ from socr.review import html as review_html
 
 console = Console()
 
+
+def format_timings_summary_line(timings_s: dict | None) -> str:
+    """CLI summary fragment for VI-B1 exclusive stage wall-clock.
+
+    Empty when no page recorded timings. Prefixed with `` | `` so it appends
+    to the existing ``Success | engine | Ns`` line.
+    """
+    from socr.core.manifest import PAGE_TIMING_EXCLUSIVE_KEYS
+
+    if not timings_s:
+        return ""
+    parts = [
+        f"{key}={float(timings_s.get(key, 0.0) or 0.0):.1f}s" for key in PAGE_TIMING_EXCLUSIVE_KEYS
+    ]
+    total = float(timings_s.get("total", 0.0) or 0.0)
+    return " | " + " ".join(parts) + f" total={total:.1f}s"
+
+
 ENGINE_CHOICES = [
     e.value for e in EngineType if e not in (EngineType.DEEPSEEK_VLLM, EngineType.VLLM)
 ]

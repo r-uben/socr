@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -32,9 +32,12 @@ from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.manifest import (
     FinalizedPageRecord,
+    PAGE_TIMING_EXCLUSIVE_KEYS,
     PageDisposition,
     PageEnding,
     PagePrimaryReason,
+    coerce_page_timings,
+    rollup_page_timings,
 )
 from socr.core.normalizer import (
     MAX_CONSECUTIVE_IDENTICAL_TABLE_ROWS,
@@ -99,6 +102,43 @@ def _latched_rung_kinds(state: "DocumentState", page_nums) -> list[str]:
             continue
         kinds.update(k for k in (getattr(ps, "table_judge_retry_rungs", []) or []) if k)
     return sorted(kinds)
+
+
+class _PageStageClock:
+    """Exclusive wall-clock accumulator for one agentic page (VI-B1).
+
+    Nested ``span`` children are subtracted from the parent so the exclusive
+    keys sum to ``total``. ``ladder`` / ``adjudication`` nest under ``tables``;
+    ``extract`` nests under ``route`` when ``run_provider`` runs inside
+    ``route_page``.
+    """
+
+    def __init__(self, now=time.perf_counter) -> None:
+        self._now = now
+        self.exclusive: dict[str, float] = dict.fromkeys(PAGE_TIMING_EXCLUSIVE_KEYS, 0.0)
+        self._stack: list[tuple[str, float, list[float]]] = []
+
+    @contextmanager
+    def span(self, key: str):
+        child_walls: list[float] = []
+        t0 = self._now()
+        self._stack.append((key, t0, child_walls))
+        try:
+            yield
+        finally:
+            wall = self._now() - t0
+            self.exclusive[key] = self.exclusive.get(key, 0.0) + max(0.0, wall - sum(child_walls))
+            self._stack.pop()
+            if self._stack:
+                self._stack[-1][2].append(wall)
+
+    def add_exclusive(self, key: str, seconds: float) -> None:
+        self.exclusive[key] = self.exclusive.get(key, 0.0) + max(0.0, seconds)
+
+    def finalize(self) -> dict[str, float]:
+        out = {key: float(self.exclusive.get(key, 0.0)) for key in PAGE_TIMING_EXCLUSIVE_KEYS}
+        out["total"] = sum(out[key] for key in PAGE_TIMING_EXCLUSIVE_KEYS)
+        return out
 
 
 #: Exact PageDisposition contract pairs for the three migrated buckets (P6 stage C).
@@ -767,6 +807,10 @@ class UnifiedPipeline:
         #: batch counts as ONE reachability epoch rather than one per file.
         self._in_batch_run = False
         self._final_records = None
+        #: VI-B1: exclusive stage clock for the page currently in the agentic
+        #: loop. ``None`` outside that loop so helpers called from tests do
+        #: not record timings.
+        self._page_clock: _PageStageClock | None = None
         # Set by process_batch: the contract RunOutcome that drives the exit code.
         from ocr_output_contract import RunOutcome
 
@@ -5220,14 +5264,20 @@ class UnifiedPipeline:
                 # ... else the adjudicator"), and would re-pay the GH-367
                 # adjudication for evidence already gathered.
                 continue
-            record = self._adjudicate_clamped_table(
-                state,
-                page_num,
-                table_id,
-                markdown_by_table.get(table_id, ""),
-                binding,
-                ps,
+            _adj_cm = (
+                self._page_clock.span("adjudication")
+                if self._page_clock is not None
+                else nullcontext()
             )
+            with _adj_cm:
+                record = self._adjudicate_clamped_table(
+                    state,
+                    page_num,
+                    table_id,
+                    markdown_by_table.get(table_id, ""),
+                    binding,
+                    ps,
+                )
             ps.binding_adjudication[table_id] = record.to_dict()
             state.events.append(
                 AuditEvent(
@@ -6079,6 +6129,15 @@ class UnifiedPipeline:
             )
             return outs[0]
 
+        def _timed_route_provider(profile: ProviderProfile, page_num: int) -> PageOutput:
+            # Extract is a child of route only for the OCR ladder. Escalation
+            # reuses ``run_provider`` untimed so that spend stays under tables.
+            clock = self._page_clock
+            if clock is None:
+                return run_provider(profile, page_num)
+            with clock.span("extract"):
+                return run_provider(profile, page_num)
+
         # -- Lazy doc-scoped table extractor (P5) -------------------------------
         # Crop rereads are an escalation tool, so resolving a model or probing a
         # reader at document setup would make an otherwise clean document pay for
@@ -6229,12 +6288,16 @@ class UnifiedPipeline:
                     console.print(f"  p{page_num}: [dim]resumed (terminal ledger hit)[/dim]")
                 continue
 
+            clock = _PageStageClock()
+            self._page_clock = clock
+
             # GH-271: region-only corrupt-equation lane. It owns the page before
             # whole-page OCR and keeps surrounding native prose untouched.
             if page_num in math_recovery_pages:
-                self._agentic_math_recovery_page(
-                    state, page_num, ps, output_dir, chart_winner_pages, _chart_figures_dir
-                )
+                with clock.span("equations"):
+                    self._agentic_math_recovery_page(
+                        state, page_num, ps, output_dir, chart_winner_pages, _chart_figures_dir
+                    )
             # PP-7: Chart-asset lane — intercept before the native-bypass branch.
             # A born-digital native page that carries vector chart marks (or an
             # embedded raster image) routes here instead of shipping as raw word-
@@ -6242,7 +6305,8 @@ class UnifiedPipeline:
             # ref embedded + explicit audit flag.  Force PNG even when --save-
             # figures is off (chart PNGs are mandatory preservation artifacts).
             elif page_num in chart_winner_pages:
-                self._agentic_chart_asset_page(state, page_num, ps, _chart_figures_dir)
+                with clock.span("figures"):
+                    self._agentic_chart_asset_page(state, page_num, ps, _chart_figures_dir)
             # P4-R: region-scoped equation lane. It sits AFTER the corrupt-math
             # and chart lanes and BEFORE plain native, so a page those two own
             # keeps its existing route. The lane's floor is the plain-native
@@ -6250,220 +6314,230 @@ class UnifiedPipeline:
             # provider, no region, or a refused reading it ships exactly what
             # the `elif is_native` branch below would have shipped.
             elif page_num in equation_lane_pages:
-                self._agentic_equation_region_page(state, page_num, ps, output_dir, available)
+                with clock.span("equations"):
+                    self._agentic_equation_region_page(state, page_num, ps, output_dir, available)
                 equation_lane_handled.add(page_num)
             elif page_num in no_ocr_provider_pages:
-                self._agentic_no_provider_page(page_num, ps)
+                with clock.span("route"):
+                    self._agentic_no_provider_page(page_num, ps)
             elif is_native:
-                self._agentic_native_page(state, page_num, ps)
+                with clock.span("extract"):
+                    self._agentic_native_page(state, page_num, ps)
             else:
-                # Route OCR page through the cost ladder.
-                remaining = None
-                if self.config.cost_budget > 0:
-                    total_cost = state.total_cost
-                    # An unmetered earlier call makes remaining paid budget
-                    # unknowable. Fail closed by admitting only free rungs; an
-                    # unknown subtotal must never be treated as zero spend.
-                    remaining = (
-                        0.0
-                        if total_cost is None
-                        else max(self.config.cost_budget - total_cost, 0.0)
+                _route_span = clock.span("route")
+                _route_span.__enter__()
+                try:
+                    # Route OCR page through the cost ladder.
+                    remaining = None
+                    if self.config.cost_budget > 0:
+                        total_cost = state.total_cost
+                        # An unmetered earlier call makes remaining paid budget
+                        # unknowable. Fail closed by admitting only free rungs; an
+                        # unknown subtotal must never be treated as zero spend.
+                        remaining = (
+                            0.0
+                            if total_cost is None
+                            else max(self.config.cost_budget - total_cost, 0.0)
+                        )
+                    decision = route_page(
+                        page_num,
+                        ladder,
+                        _timed_route_provider,
+                        judge,
+                        remaining_budget=remaining,
+                        provider_timeout=provider_timeout,
                     )
-                decision = route_page(
-                    page_num,
-                    ladder,
-                    run_provider,
-                    judge,
-                    remaining_budget=remaining,
-                    provider_timeout=provider_timeout,
-                )
-                _route_table_signal = self._route_page_table_escalation_signal(decision, ladder)
-                # The profile whose reading won. Needed to re-judge a candidate
-                # produced after routing (crop reread) through the same judge
-                # with the same provider context.
-                for _att in decision.attempts:
-                    if _att.output is decision.final_output:
-                        _winning_profile = profile_by_id(_att.provider_id) or _winning_profile
-                        break
+                    _route_table_signal = self._route_page_table_escalation_signal(decision, ladder)
+                    # The profile whose reading won. Needed to re-judge a candidate
+                    # produced after routing (crop reread) through the same judge
+                    # with the same provider context.
+                    for _att in decision.attempts:
+                        if _att.output is decision.final_output:
+                            _winning_profile = profile_by_id(_att.provider_id) or _winning_profile
+                            break
 
-                for att in decision.attempts:
-                    att.output.cost_usd = att.cost_usd
-                    att.output.audit_passed = att.accepted
-                    att.output.provider_id = att.provider_id  # B3: agentic provenance
-                    # GH-370: ``att.model``/``att.backend`` carry the rung's
-                    # REGISTRY identity. The manifest's provenance fields must
-                    # carry what executed -- for a vLLM run those differ, and
-                    # recording the registry label named a backend that was not
-                    # installed on the host.
-                    att_profile = profile_by_id(att.provider_id)
-                    if att_profile is not None:
-                        att.output.provider_backend, att.output.provider_model = (
-                            resolved_provenance(att_profile, self.config)
-                        )
-                    else:
-                        att.output.provider_model = att.model
-                        att.output.provider_backend = att.backend
-                    att.output.skip_reason = (
-                        att.reason if not att.accepted and not att.output.text else ""
-                    )  # B3
-                    # GH-169: keep the judge's verdict for EVERY attempt, not
-                    # only the ones whose output was empty. A provider whose
-                    # reading the judge refused journaled reason "none", so the
-                    # one question the manifest exists to answer -- why did the
-                    # ladder escalate past this rung -- had no answer.
-                    att.output.judge_reason = att.reason or ""
+                    for att in decision.attempts:
+                        att.output.cost_usd = att.cost_usd
+                        att.output.audit_passed = att.accepted
+                        att.output.provider_id = att.provider_id  # B3: agentic provenance
+                        # GH-370: ``att.model``/``att.backend`` carry the rung's
+                        # REGISTRY identity. The manifest's provenance fields must
+                        # carry what executed -- for a vLLM run those differ, and
+                        # recording the registry label named a backend that was not
+                        # installed on the host.
+                        att_profile = profile_by_id(att.provider_id)
+                        if att_profile is not None:
+                            att.output.provider_backend, att.output.provider_model = (
+                                resolved_provenance(att_profile, self.config)
+                            )
+                        else:
+                            att.output.provider_model = att.model
+                            att.output.provider_backend = att.backend
+                        att.output.skip_reason = (
+                            att.reason if not att.accepted and not att.output.text else ""
+                        )  # B3
+                        # GH-169: keep the judge's verdict for EVERY attempt, not
+                        # only the ones whose output was empty. A provider whose
+                        # reading the judge refused journaled reason "none", so the
+                        # one question the manifest exists to answer -- why did the
+                        # ladder escalate past this rung -- had no answer.
+                        att.output.judge_reason = att.reason or ""
 
-                    ps.attempts.append(att.output)
-                ps.best_output = decision.final_output
+                        ps.attempts.append(att.output)
+                    ps.best_output = decision.final_output
 
-                # GH-90: scanned-table source-evidence fail-closed floor.
-                _source_ev_rejected = any(
-                    "source_evidence_table" in (att.reason or "") for att in decision.attempts
-                )
-                if _source_ev_rejected and not ps.is_born_digital:
-                    self._apply_scanned_table_floor(
-                        ps, state.handle.path, page_num, _chart_figures_dir
+                    # GH-90: scanned-table source-evidence fail-closed floor.
+                    _source_ev_rejected = any(
+                        "source_evidence_table" in (att.reason or "") for att in decision.attempts
                     )
-
-                # #263: rotated-shredded floor PNG. The page's native layer is
-                # confetti and the OCR ladder accepted nothing, so the marker
-                # that ships in its place carries the page image -- otherwise a
-                # human has no way to read a caption socr just refused. Render
-                # only when nothing was accepted: an accepted model output wins
-                # in _winning_page_output and the floor never applies.
-                if getattr(ps, "native_rotated_text_shredded", False) and not decision.accepted:
-                    if _chart_figures_dir is not None:
-                        ps.rotated_shred_png_ref = self._render_d3_floor_png(
-                            state.handle.path,
-                            page_num,
-                            _chart_figures_dir,
-                            stem="shredded_rotated_page",
-                            label="Shredded rotated page",
+                    if _source_ev_rejected and not ps.is_born_digital:
+                        self._apply_scanned_table_floor(
+                            ps, state.handle.path, page_num, _chart_figures_dir
                         )
 
-                # Provenance guard: when the judge rejected ALL ladder rungs for a
-                # born-digital table page or a page where table structure failed,
-                # mark the page so _assemble_result treats any native-text fallback as
-                # audit-failed.
-                if not decision.accepted and (
-                    self._page_has_tables(page_num, ps)
-                    or any(
-                        getattr(e, "kind", None) == "table_structure_failed"
-                        for e in state.events
-                        if getattr(e, "page_num", None) == page_num
-                    )
-                ):
-                    ps.native_table_structure_failed = True
-                    # TR-2: render chart region PNG crops and update placeholder
-                    # paths in ps.native_text so strip_phantom_images (called in
-                    # _phase_assemble with output_dir=doc_dir) finds the files.
-                    # If ps.native_text contains no chart region placeholders this
-                    # is a no-op; on render failure it returns native_text unchanged
-                    # (fail-open: placeholder is stripped as before).
-                    if ps.native_text and _chart_figures_dir is not None:
-                        ps.native_text = self._render_chart_region_pngs(
-                            state.handle.path,
-                            page_num,
-                            ps.native_text,
-                            _chart_figures_dir,
-                        )
-                    # TR-3 / GH-200: D3 fail-closed floor PNG.  When the per-region
-                    # verifier also hard-failed (native_table_unverifiable=True) OR
-                    # header attribution found a destroyed header band
-                    # (native_table_header_unattributed=True -- TR-3 is blind to
-                    # header loss by construction, see header_attribution.py),
-                    # render a full-page PNG so the human can still SEE the table.
-                    # The image ref is stored on ps.d3_floor_png_ref and picked up
-                    # by _winning_page_output (manifest.py) when assembling the
-                    # final failed-table marker text. Without this widening the
-                    # D3 floor would ship a bare marker with no image on a
-                    # header-only defect -- still fail-closed, but a human
-                    # cannot see the table (see manifest.py:_winning_page_output).
-                    if (
-                        getattr(ps, "native_table_unverifiable", False)
-                        or getattr(ps, "native_table_header_unattributed", False)
-                    ) and _chart_figures_dir is not None:
-                        ps.d3_floor_png_ref = self._render_d3_floor_png(
-                            state.handle.path,
-                            page_num,
-                            _chart_figures_dir,
-                        )
+                    # #263: rotated-shredded floor PNG. The page's native layer is
+                    # confetti and the OCR ladder accepted nothing, so the marker
+                    # that ships in its place carries the page image -- otherwise a
+                    # human has no way to read a caption socr just refused. Render
+                    # only when nothing was accepted: an accepted model output wins
+                    # in _winning_page_output and the floor never applies.
+                    if getattr(ps, "native_rotated_text_shredded", False) and not decision.accepted:
+                        if _chart_figures_dir is not None:
+                            ps.rotated_shred_png_ref = self._render_d3_floor_png(
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                                stem="shredded_rotated_page",
+                                label="Shredded rotated page",
+                            )
 
-                    # P2 / GH-317: structure-class fail-closed floor PNG. When
-                    # no attempt authored a usable grid on a born-digital table
-                    # page, render a full-page PNG so the fail-closed floor can
-                    # reference the image instead of shipping the unverified native grid.
-                    from socr.core.manifest import structure_class_floor_applies
-
-                    if (
-                        structure_class_floor_applies(ps)
-                        and _chart_figures_dir is not None
-                        and not getattr(ps, "d3_floor_png_ref", "")
+                    # Provenance guard: when the judge rejected ALL ladder rungs for a
+                    # born-digital table page or a page where table structure failed,
+                    # mark the page so _assemble_result treats any native-text fallback as
+                    # audit-failed.
+                    if not decision.accepted and (
+                        self._page_has_tables(page_num, ps)
+                        or any(
+                            getattr(e, "kind", None) == "table_structure_failed"
+                            for e in state.events
+                            if getattr(e, "page_num", None) == page_num
+                        )
                     ):
-                        ps.d3_floor_png_ref = self._render_d3_floor_png(
-                            state.handle.path,
-                            page_num,
-                            _chart_figures_dir,
-                            stem="failed_table",
-                            label="Failed table page",
-                        )
+                        ps.native_table_structure_failed = True
+                        # TR-2: render chart region PNG crops and update placeholder
+                        # paths in ps.native_text so strip_phantom_images (called in
+                        # _phase_assemble with output_dir=doc_dir) finds the files.
+                        # If ps.native_text contains no chart region placeholders this
+                        # is a no-op; on render failure it returns native_text unchanged
+                        # (fail-open: placeholder is stripped as before).
+                        if ps.native_text and _chart_figures_dir is not None:
+                            ps.native_text = self._render_chart_region_pngs(
+                                state.handle.path,
+                                page_num,
+                                ps.native_text,
+                                _chart_figures_dir,
+                            )
+                        # TR-3 / GH-200: D3 fail-closed floor PNG.  When the per-region
+                        # verifier also hard-failed (native_table_unverifiable=True) OR
+                        # header attribution found a destroyed header band
+                        # (native_table_header_unattributed=True -- TR-3 is blind to
+                        # header loss by construction, see header_attribution.py),
+                        # render a full-page PNG so the human can still SEE the table.
+                        # The image ref is stored on ps.d3_floor_png_ref and picked up
+                        # by _winning_page_output (manifest.py) when assembling the
+                        # final failed-table marker text. Without this widening the
+                        # D3 floor would ship a bare marker with no image on a
+                        # header-only defect -- still fail-closed, but a human
+                        # cannot see the table (see manifest.py:_winning_page_output).
+                        if (
+                            getattr(ps, "native_table_unverifiable", False)
+                            or getattr(ps, "native_table_header_unattributed", False)
+                        ) and _chart_figures_dir is not None:
+                            ps.d3_floor_png_ref = self._render_d3_floor_png(
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                            )
 
-                # Record cost so DocumentState.total_cost reflects spend, and
-                # against the PAGE so it survives the sidecar and resume (round 5).
-                state.record_engine_run(
-                    EngineResult(
-                        document_path=state.handle.path,
-                        engine=decision.winning_engine,
-                        status=DocumentStatus.SUCCESS
-                        if decision.accepted
-                        else DocumentStatus.AUDIT_FAILED,
-                        cost=decision.total_cost_usd,
-                        processing_time=0.0,
-                    ),
-                    page_nums=[page_num],
-                )
+                        # P2 / GH-317: structure-class fail-closed floor PNG. When
+                        # no attempt authored a usable grid on a born-digital table
+                        # page, render a full-page PNG so the fail-closed floor can
+                        # reference the image instead of shipping the unverified native grid.
+                        from socr.core.manifest import structure_class_floor_applies
 
-                if not self.config.quiet:
-                    tag = "accepted" if decision.accepted else "best-effort"
-                    console.print(
-                        f"  p{page_num}: {decision.winning_engine} "
-                        f"[{tag}, {len(decision.attempts)} tr, ${decision.total_cost_usd:.4f}]"
+                        if (
+                            structure_class_floor_applies(ps)
+                            and _chart_figures_dir is not None
+                            and not getattr(ps, "d3_floor_png_ref", "")
+                        ):
+                            ps.d3_floor_png_ref = self._render_d3_floor_png(
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                                stem="failed_table",
+                                label="Failed table page",
+                            )
+
+                    # Record cost so DocumentState.total_cost reflects spend, and
+                    # against the PAGE so it survives the sidecar and resume (round 5).
+                    state.record_engine_run(
+                        EngineResult(
+                            document_path=state.handle.path,
+                            engine=decision.winning_engine,
+                            status=DocumentStatus.SUCCESS
+                            if decision.accepted
+                            else DocumentStatus.AUDIT_FAILED,
+                            cost=decision.total_cost_usd,
+                            processing_time=0.0,
+                        ),
+                        page_nums=[page_num],
                     )
 
-                # Cascade-halt check: did any attempt time out, and is the
-                # backend now unresponsive?  Use PP-0's probe_ollama_idle.
-                # A judge timeout is encoded as reason="judge timeout" on the
-                # last attempt; a provider timeout is encoded similarly.
-                _had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)
-                if _had_timeout and not self._probe_backend_idle():
-                    backend_degraded = True
-                    halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
-                    from socr.core.audit_log import AuditEvent
-
-                    state.events.append(
-                        AuditEvent(
-                            page_num=page_num,
-                            kind="partial_save_vlm_timeout",
-                            engine="",
-                            detail=(
-                                f"backend unresponsive after timeout on p{page_num}; "
-                                "halting — pages processed so far are saved"
-                            ),
-                        )
-                    )
                     if not self.config.quiet:
+                        tag = "accepted" if decision.accepted else "best-effort"
                         console.print(
-                            f"  [red]p{page_num}: VLM backend unresponsive after timeout; "
-                            "halting document (PARTIAL_SAVE_VLM_TIMEOUT)[/red]"
+                            f"  p{page_num}: {decision.winning_engine} "
+                            f"[{tag}, {len(decision.attempts)} tr, ${decision.total_cost_usd:.4f}]"
                         )
-                    # Fall through to flush this page's output, then break at
-                    # the top of the next iteration.
 
+                    # Cascade-halt check: did any attempt time out, and is the
+                    # backend now unresponsive?  Use PP-0's probe_ollama_idle.
+                    # A judge timeout is encoded as reason="judge timeout" on the
+                    # last attempt; a provider timeout is encoded similarly.
+                    _had_timeout = any("timeout" in (att.reason or "") for att in decision.attempts)
+                    if _had_timeout and not self._probe_backend_idle():
+                        backend_degraded = True
+                        halt_reason = "PARTIAL_SAVE_VLM_TIMEOUT"
+                        from socr.core.audit_log import AuditEvent
+
+                        state.events.append(
+                            AuditEvent(
+                                page_num=page_num,
+                                kind="partial_save_vlm_timeout",
+                                engine="",
+                                detail=(
+                                    f"backend unresponsive after timeout on p{page_num}; "
+                                    "halting — pages processed so far are saved"
+                                ),
+                            )
+                        )
+                        if not self.config.quiet:
+                            console.print(
+                                f"  [red]p{page_num}: VLM backend unresponsive after timeout; "
+                                "halting document (PARTIAL_SAVE_VLM_TIMEOUT)[/red]"
+                            )
+                        # Fall through to flush this page's output, then break at
+                        # the top of the next iteration.
+
+                finally:
+                    _route_span.__exit__(None, None, None)
             # ----------------------------------------------------------------
             # Per-page lifecycle (runs for EVERY page that has best_output).
             # ----------------------------------------------------------------
             bo = ps.best_output
             if bo is None:
+                ps.timings_s = clock.finalize()
+                self._page_clock = None
                 continue
 
             # #123 TICKET-C2 scoring is NOT gated on the P5 signal: it must reach
@@ -6475,10 +6549,12 @@ class UnifiedPipeline:
             # chart-asset table pages included.
             _lane_live = _escalation_profile is not None and not _escalation_degraded
             _score_table_signal = False
-            if bo.text and (
-                self._page_has_tables(page_num, ps) or (_lane_live and bo.engine != "chart_asset")
-            ):
-                _score_table_signal = bool(self._surface_table_scoring(state, page_num, ps, bo))
+            with clock.span("tables"):
+                if bo.text and (
+                    self._page_has_tables(page_num, ps)
+                    or (_lane_live and bo.engine != "chart_asset")
+                ):
+                    _score_table_signal = bool(self._surface_table_scoring(state, page_num, ps, bo))
 
             # P5: the crop reread is an escalation tool fired by a signal, never a
             # trunk pass over every accepted table page.  Route evidence (a native
@@ -6487,72 +6563,75 @@ class UnifiedPipeline:
             # worth a bounded second look, but it is not evidence that a paid
             # provider re-read could be kept, which is what GH-96 below needs.
             _crop_changed_text = False
-            if (
-                _dual_pass_tables_enabled
-                and (_score_table_signal or _route_table_signal)
-                and not is_native
-                and bo.text
-                and bo.engine != "chart_asset"
-                and self._page_has_tables(page_num, ps)
-            ):
-                # A failed/missing extractor is fail-open and memoized by the
-                # document-scoped getter above.
-                _table_extractor = _get_table_extractor()
-                if _table_extractor is not None:
-                    _accepted_text = bo.text
-                    try:
-                        from socr.core.pdf import open_pdf
-                        from socr.tables import locate_tables
+            with clock.span("tables"):
+                if (
+                    _dual_pass_tables_enabled
+                    and (_score_table_signal or _route_table_signal)
+                    and not is_native
+                    and bo.text
+                    and bo.engine != "chart_asset"
+                    and self._page_has_tables(page_num, ps)
+                ):
+                    # A failed/missing extractor is fail-open and memoized by the
+                    # document-scoped getter above.
+                    _table_extractor = _get_table_extractor()
+                    if _table_extractor is not None:
+                        _accepted_text = bo.text
+                        try:
+                            from socr.core.pdf import open_pdf
+                            from socr.tables import locate_tables
 
-                        with open_pdf(state.handle.path) as _doc:
-                            _boxes = locate_tables(_doc[page_num - 1])
-                        if _boxes:
-                            _raw_crops = _table_extractor.extract(
-                                state.handle.path,
+                            with open_pdf(state.handle.path) as _doc:
+                                _boxes = locate_tables(_doc[page_num - 1])
+                            if _boxes:
+                                _raw_crops = _table_extractor.extract(
+                                    state.handle.path,
+                                    page_num,
+                                    _boxes,
+                                    cascade_probe=True,
+                                )
+                                self._reread_page_tables(
+                                    state, page_num, _raw_crops, _table_extractor
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "agentic signal table re-read errored on p%d (%s); keeping text",
                                 page_num,
-                                _boxes,
-                                cascade_probe=True,
+                                exc,
                             )
-                            self._reread_page_tables(state, page_num, _raw_crops, _table_extractor)
-                    except Exception as exc:
-                        logger.warning(
-                            "agentic signal table re-read errored on p%d (%s); keeping text",
-                            page_num,
-                            exc,
+                        bo = ps.best_output or bo
+                        # P3 / ruling step 4: the reread's patched text is a NEW
+                        # CANDIDATE, not shipped bytes. Run it back through the same
+                        # judge before it can replace what the judge already accepted.
+                        # Outside the try/except above on purpose: _reread_page_tables
+                        # patches bo.text outside its own guard, so a raise there must
+                        # still not leave unjudged bytes on the page.
+                        bo = self._rejudge_crop_patched_page(
+                            state, page_num, ps, bo, _accepted_text, judge, _winning_profile
                         )
-                    bo = ps.best_output or bo
-                    # P3 / ruling step 4: the reread's patched text is a NEW
-                    # CANDIDATE, not shipped bytes. Run it back through the same
-                    # judge before it can replace what the judge already accepted.
-                    # Outside the try/except above on purpose: _reread_page_tables
-                    # patches bo.text outside its own guard, so a raise there must
-                    # still not leave unjudged bytes on the page.
-                    bo = self._rejudge_crop_patched_page(
-                        state, page_num, ps, bo, _accepted_text, judge, _winning_profile
-                    )
-                    _crop_changed_text = (bo.text or "") != _accepted_text
+                        _crop_changed_text = (bo.text or "") != _accepted_text
 
-            # GH-96: escalate a table page whose output disagrees with its own
-            # native text layer, keeping the candidate only if exactness measurably
-            # improves. Driven by the SCORE, not by route evidence: an earlier rung
-            # being rejected says nothing about whether `decide_escalation` could
-            # keep a new candidate, and when the incumbent already scores 100% it
-            # provably cannot. Passing the score prevents a second scoring pass and
-            # its duplicate table_not_scorable / table_unexplained_lanes events --
-            # except when the crop reread changed the shipped bytes, where the
-            # stale score describes text that no longer ships and the page is
-            # re-scored on what does.
-            if _lane_live and bo.text and bo.engine != "chart_asset":
-                _escalation_degraded, bo = self._escalate_table_page(
-                    state,
-                    page_num,
-                    ps,
-                    bo,
-                    _escalation_profile,
-                    run_provider,
-                    state.handle.path,
-                    needs_escalation=None if _crop_changed_text else _score_table_signal,
-                )
+                # GH-96: escalate a table page whose output disagrees with its own
+                # native text layer, keeping the candidate only if exactness measurably
+                # improves. Driven by the SCORE, not by route evidence: an earlier rung
+                # being rejected says nothing about whether `decide_escalation` could
+                # keep a new candidate, and when the incumbent already scores 100% it
+                # provably cannot. Passing the score prevents a second scoring pass and
+                # its duplicate table_not_scorable / table_unexplained_lanes events --
+                # except when the crop reread changed the shipped bytes, where the
+                # stale score describes text that no longer ships and the page is
+                # re-scored on what does.
+                if _lane_live and bo.text and bo.engine != "chart_asset":
+                    _escalation_degraded, bo = self._escalate_table_page(
+                        state,
+                        page_num,
+                        ps,
+                        bo,
+                        _escalation_profile,
+                        run_provider,
+                        state.handle.path,
+                        needs_escalation=None if _crop_changed_text else _score_table_signal,
+                    )
 
             # GH-36a/36b: per-page equation detect + crop + optional LaTeX
             # sidecar.  Runs ONLY when the flags are on (default-off).  With
@@ -6563,62 +6642,66 @@ class UnifiedPipeline:
             # would detect and crop the same regions again and append a SECOND
             # sidecar at page end, so it is skipped here.
             if _detect_eq and bo.text and page_num not in equation_lane_handled:
-                # Determine whether this page has clean equations.
-                _eq_pages_set: set[int] = set()
-                if self._last_assessment:
-                    _eq_pages_set = {
-                        pa.page_num
-                        for pa in self._last_assessment.pages
-                        if pa.has_equations and not pa.has_corrupt_math and pa.is_born_digital
-                    }
-                if page_num in _eq_pages_set:
-                    # GH-36a: detect + crop (model-free, no text change).
-                    self._detect_and_crop_equations(state, [page_num], output_dir)
-                    # GH-36b: LaTeX sidecar (behind recover_clean_equations flag).
-                    if _recover_eq:
-                        self._attach_equation_latex_sidecars(state, [bo])
+                with clock.span("equations"):
+                    # Determine whether this page has clean equations.
+                    _eq_pages_set: set[int] = set()
+                    if self._last_assessment:
+                        _eq_pages_set = {
+                            pa.page_num
+                            for pa in self._last_assessment.pages
+                            if pa.has_equations and not pa.has_corrupt_math and pa.is_born_digital
+                        }
+                    if page_num in _eq_pages_set:
+                        # GH-36a: detect + crop (model-free, no text change).
+                        self._detect_and_crop_equations(state, [page_num], output_dir)
+                        # GH-36b: LaTeX sidecar (behind recover_clean_equations flag).
+                        if _recover_eq:
+                            self._attach_equation_latex_sidecars(state, [bo])
 
             # GH-86: strip VLM sentinel image refs before provisional flush.
             if _agentic_doc_dir is not None:
-                self._sanitize_agentic_page_image_refs(
-                    state,
-                    page_num,
-                    bo,
-                    _agentic_doc_dir,
-                )
-
-            # GH-97: truncate degenerate repeated table rows. Runs after table
-            # assembly (unlike OutputNormalizer) and before the flush, so the
-            # fragment, the sidecar and the stitched body all see one text.
-            self._guard_agentic_page_table_repetition(state, page_num, bo, is_native)
-
-            # GH-359 ruling 6: THIS `if` produces content terminals. Assemble
-            # does not re-judge; it only backfills a missing terminal as
-            # UNVERIFIED (completeness). Placed AFTER the repetition guard so
-            # the judged table is the exact text that ships. Runs on native
-            # AND OCR pages alike; the helper itself skips chart_asset pages
-            # (assemble catches residual markdown tables those pages still emit).
-            if self.config.table_judge_ladder:
-                self._run_table_judge_gate(state, page_num, ps, bo, _table_judge_rungs)
-                # P1 (owner ruling Q2): a withheld page ships a failure marker
-                # in place of the table, so the human's ONLY route back to the
-                # numbers is the page image. Rendered here, right after the
-                # gate, because every other floor's PNG decision is made
-                # earlier in this loop and none of them can see a disposition
-                # the gate has not produced yet. Only when no ref exists: an
-                # earlier floor may already have rendered one for this page.
-                if (
-                    ps.table_ladder_disposition is FailureMode.TABLE_WITHHELD
-                    and not getattr(ps, "d3_floor_png_ref", "")
-                    and _chart_figures_dir is not None
-                ):
-                    ps.d3_floor_png_ref = self._render_d3_floor_png(
-                        state.handle.path,
+                with clock.span("figures"):
+                    self._sanitize_agentic_page_image_refs(
+                        state,
                         page_num,
-                        _chart_figures_dir,
-                        stem="failed_table",
-                        label="Failed table page",
+                        bo,
+                        _agentic_doc_dir,
                     )
+
+            with clock.span("tables"):
+                # GH-97: truncate degenerate repeated table rows. Runs after table
+                # assembly (unlike OutputNormalizer) and before the flush, so the
+                # fragment, the sidecar and the stitched body all see one text.
+                self._guard_agentic_page_table_repetition(state, page_num, bo, is_native)
+
+                # GH-359 ruling 6: THIS `if` produces content terminals. Assemble
+                # does not re-judge; it only backfills a missing terminal as
+                # UNVERIFIED (completeness). Placed AFTER the repetition guard so
+                # the judged table is the exact text that ships. Runs on native
+                # AND OCR pages alike; the helper itself skips chart_asset pages
+                # (assemble catches residual markdown tables those pages still emit).
+                if self.config.table_judge_ladder:
+                    with clock.span("ladder"):
+                        self._run_table_judge_gate(state, page_num, ps, bo, _table_judge_rungs)
+                    # P1 (owner ruling Q2): a withheld page ships a failure marker
+                    # in place of the table, so the human's ONLY route back to the
+                    # numbers is the page image. Rendered here, right after the
+                    # gate, because every other floor's PNG decision is made
+                    # earlier in this loop and none of them can see a disposition
+                    # the gate has not produced yet. Only when no ref exists: an
+                    # earlier floor may already have rendered one for this page.
+                    if (
+                        ps.table_ladder_disposition is FailureMode.TABLE_WITHHELD
+                        and not getattr(ps, "d3_floor_png_ref", "")
+                        and _chart_figures_dir is not None
+                    ):
+                        ps.d3_floor_png_ref = self._render_d3_floor_png(
+                            state.handle.path,
+                            page_num,
+                            _chart_figures_dir,
+                            stem="failed_table",
+                            label="Failed table page",
+                        )
 
             # GH-318: this page's chart-vs-table routing was never decided --
             # the eligibility detector raised and the page fell through to the
@@ -6638,6 +6721,7 @@ class UnifiedPipeline:
                     bo.status = PageStatus.WARNING
 
             # Write-through blob cache (replay-cache continuity).
+            _flush_t0 = time.perf_counter()
             if _page_blob_store is not None:
                 try:
                     _page_blob_store.put_page(bo)
@@ -6680,6 +6764,8 @@ class UnifiedPipeline:
                 _body = _stripped[_m.end() :].lstrip("\n") if _m else _raw_body
 
                 self._flush_page_fragment(state, page_num, _body, output_dir)
+                clock.add_exclusive("flush", time.perf_counter() - _flush_t0)
+                ps.timings_s = clock.finalize()
                 self._flush_page_sidecar(
                     state, page_num, output_dir, terminal=False, record=_record
                 )
@@ -6689,6 +6775,10 @@ class UnifiedPipeline:
                     page_num,
                     exc,
                 )
+                if not ps.timings_s:
+                    clock.add_exclusive("flush", time.perf_counter() - _flush_t0)
+                    ps.timings_s = clock.finalize()
+            self._page_clock = None
 
         # -- Post-loop summary ---------------------------------------------------
         if not self.config.quiet:
@@ -8448,6 +8538,12 @@ class UnifiedPipeline:
             if rungs:
                 payload["table_judge_retry_rungs"] = rungs
 
+        # VI-B1: exclusive stage timings. Sparse: omitted when the page was
+        # never timed, so pre-B1 sidecar tests stay byte-identical.
+        _timings = coerce_page_timings(getattr(ps, "timings_s", None) or {})
+        if _timings:
+            payload["timings_s"] = _timings
+
         tmp_path = sidecar_path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.rename(sidecar_path)
@@ -9109,6 +9205,7 @@ class UnifiedPipeline:
             disposition_raw = meta.get("table_ladder_disposition")
             ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
+            ps.timings_s = coerce_page_timings(meta.get("timings_s"))
             self._apply_binding_adjudication_meta(state, page_num, meta)
             from socr.core.audit_log import AuditEvent
             from socr.judge.table_verdict import TABLE_LADDER_UNVERIFIED_KIND
@@ -11610,7 +11707,10 @@ class UnifiedPipeline:
         else:
             status_str = f"[red]{result.status.value}[/red]"
 
-        console.print(f"\n{status_str} | {result.engine} | {result.processing_time:.1f}s")
+        from socr.cli import format_timings_summary_line
+
+        extra = format_timings_summary_line(rollup_page_timings(state))
+        console.print(f"\n{status_str} | {result.engine} | {result.processing_time:.1f}s{extra}")
         if state.pages_needing_repair:
             console.print(
                 f"[yellow]{len(state.pages_needing_repair)} page(s) still failing[/yellow]"
