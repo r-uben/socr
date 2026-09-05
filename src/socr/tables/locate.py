@@ -340,7 +340,13 @@ def row_bands(page, region: tuple[float, float, float, float]) -> list[RowBand]:
     if len(rule_bands) == len(line_bands) and all(
         rb.y0 <= lb.y0 and rb.y1 >= lb.y1 for rb, lb in zip(rule_bands, line_bands)
     ):
-        return rule_bands
+        # Equal counts and containment do not resolve a line band's
+        # ambiguity: a rule interval can contain two heuristically merged
+        # rows (Codex seat). Each rule band inherits its counterpart's flag.
+        return [
+            RowBand(y0=rb.y0, y1=rb.y1, source=rb.source, ambiguity=lb.ambiguity)
+            for rb, lb in zip(rule_bands, line_bands)
+        ]
     return line_bands
 
 

@@ -320,6 +320,29 @@ def test_row_bands_footnote_marker_on_a_row_baseline_does_not_unfold_subscripts(
     assert row3.y0 <= ys[2] <= row3.y1 and row3.ambiguity
 
 
+def test_row_bands_rule_bands_inherit_line_band_ambiguity():
+    """Per-row rules whose count and containment match the line bands are
+    preferred — but a rule interval can contain two heuristically merged
+    rows, so each rule band carries its line counterpart's ambiguity flag
+    (Codex seat). Control: 4 ruled rows, a stray 0.3 pt same-line fragment
+    on row 2 → 4 rule bands, exactly band 1 flagged.
+    """
+    _, page = _new_page()
+    ys = (140.0, 160.0, 180.0, 200.0)
+    for i, y in enumerate(ys):
+        page.insert_text((_LABEL_X, y), f"R{i}", fontsize=10)
+        page.insert_text((_COL1_X, y), f"{i}.0", fontsize=10)
+    page.insert_text((_COL1_X + 30.0, ys[1] + 0.3), "b", fontsize=10)
+    for y in (128.0, 148.0, 168.0, 188.0, 208.0):  # per-row rules
+        page.draw_line((_REGION_X0, y), (_REGION_X1, y), width=0.5)
+    region = (_REGION_X0, 120.0, _REGION_X1, 220.0)
+
+    bands = row_bands(page, region)
+    assert len(bands) == 4
+    assert all(b.source == "rule" for b in bands)
+    assert [i for i, b in enumerate(bands) if b.ambiguity] == [1]
+
+
 def _box_line(baseline: float, y0: float, y1: float) -> dict:
     """A synthetic PDF line with an exact ``[y0, y1]`` box."""
     return {
