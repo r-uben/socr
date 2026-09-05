@@ -43,6 +43,12 @@ Lays out a MINIATURE version of a frozen corpus directory
   table block (``find_table_blocks``) but fails ``parse_grid`` (one-hyphen
   separator): bind() returns the default BindingResult, so the row is
   UNCHECKED, not a binder clear.
+- ``pages/00009.json`` — two native rows; recorded contradiction is on
+  the second; replay markdown keeps only the first (checked) row so the
+  disputed label is unbound → UNCHECKED, not a clear.
+- ``pages/00010.json`` — two recorded contradictions; replay keeps the
+  first (still contradicts) and drops the second (unbound) → overall NO
+  with the dropped item UNCHECKED, not frozen-only.
 """
 
 from __future__ import annotations
@@ -137,6 +143,23 @@ P8_ROWS = [
 ]
 P8_CANDIDATE_LABELS = {"Discount rate": "1Y Discount rate", "Prime rate": "Prime rate"}
 
+#: page 9: unrelated row checked, disputed row omitted from the candidate.
+P9_ROWS = [
+    {"label": "Checked yield", "Value": "0.48"},
+    {"label": "Dropped yield", "Value": "0.12"},
+]
+P9_RECORDED_LABELS = {"Checked yield": "Checked yield", "Dropped yield": "2Y Dropped yield"}
+P9_REPLAY_LABELS = {"Checked yield": "Checked yield"}
+
+#: page 10: one recorded item remains as a fresh contradiction; the other
+#: is omitted from the candidate (unbound) so it must not count as cleared.
+P10_ROWS = [
+    {"label": "Kept yield", "Value": "1.01"},
+    {"label": "Gone yield", "Value": "0.22"},
+]
+P10_RECORDED_LABELS = {"Kept yield": "2Y Kept yield", "Gone yield": "2Y Gone yield"}
+P10_REPLAY_LABELS = {"Kept yield": "2Y Kept yield"}
+
 
 def _draw_ruled_table(page, rows: list[dict], top: float, label_col: str = "label") -> None:
     import fitz  # noqa: F401  (imported for side effect parity with table_ladder fixture)
@@ -195,6 +218,10 @@ def generate_pdf(out_path: Path) -> None:
     _draw_ruled_grid_lines_only(page7, n_data_rows=len(P7_ROWS), top=TOP)
     page8 = doc.new_page()
     _draw_ruled_table(page8, P8_ROWS, TOP)
+    page9 = doc.new_page()
+    _draw_ruled_table(page9, P9_ROWS, TOP)
+    page10 = doc.new_page()
+    _draw_ruled_table(page10, P10_ROWS, TOP)
     doc.save(str(out_path))
     doc.close()
 
@@ -261,6 +288,10 @@ def main() -> None:
     md7 = _markdown_for(P7_ROWS, P7_CANDIDATE_LABELS)
     md8 = _markdown_for(P8_ROWS, P8_CANDIDATE_LABELS)
     md8_broken = md8.replace("| :--- | :--- |", "| - | - |")
+    md9_recorded = _markdown_for(P9_ROWS, P9_RECORDED_LABELS)
+    md9_replay = _markdown_for(P9_ROWS[:1], P9_REPLAY_LABELS)
+    md10_recorded = _markdown_for(P10_ROWS, P10_RECORDED_LABELS)
+    md10_replay = _markdown_for(P10_ROWS[:1], P10_REPLAY_LABELS)
 
     ba1, table_id1 = _binding_adjudication_for(pdf_path, 1, md1)
     ba2, table_id2 = _binding_adjudication_for(pdf_path, 2, md2)
@@ -268,8 +299,12 @@ def main() -> None:
     ba4, table_id4 = _binding_adjudication_for(pdf_path, 4, md4)
     ba5, table_id5 = _binding_adjudication_for(pdf_path, 5, md5)
     ba8, table_id8 = _binding_adjudication_for(pdf_path, 8, md8)
+    ba9, table_id9 = _binding_adjudication_for(pdf_path, 9, md9_recorded)
+    ba10, table_id10 = _binding_adjudication_for(pdf_path, 10, md10_recorded)
     assert table_id5 == "p5-t0", table_id5
     assert table_id8 == "p8-t0", table_id8
+    assert table_id9 == "p9-t0", table_id9
+    assert table_id10 == "p10-t0", table_id10
 
     _assert_replay_table_note(
         pdf_path, 5, md5, P5_ABSENT_TABLE_ID, "not found among this tree's witnesses"
@@ -411,6 +446,22 @@ def main() -> None:
     }
     (pages_dir / "00008.json").write_text(json.dumps(sidecar8, indent=2, sort_keys=True) + "\n")
 
+    sidecar9 = {
+        "page_num": 9,
+        "winning_output": {"text": md9_replay},
+        "binding_adjudication": {table_id9: ba9},
+        "audit_events": [],
+    }
+    (pages_dir / "00009.json").write_text(json.dumps(sidecar9, indent=2, sort_keys=True) + "\n")
+
+    sidecar10 = {
+        "page_num": 10,
+        "winning_output": {"text": md10_replay},
+        "binding_adjudication": {table_id10: ba10},
+        "audit_events": [],
+    }
+    (pages_dir / "00010.json").write_text(json.dumps(sidecar10, indent=2, sort_keys=True) + "\n")
+
     print(f"Generated: {pdf_path}")
     print(f"Generated: {pages_dir / '00001.json'} (table_id={table_id1})")
     print(f"Generated: {pages_dir / '00002.json'} (table_id={table_id2}, fail-closed marker)")
@@ -431,6 +482,14 @@ def main() -> None:
     print(
         f"Generated: {pages_dir / '00008.json'} "
         f"(table_id={table_id8}, located witness, parse_grid failure)"
+    )
+    print(
+        f"Generated: {pages_dir / '00009.json'} "
+        f"(table_id={table_id9}, disputed row unbound, sibling checked)"
+    )
+    print(
+        f"Generated: {pages_dir / '00010.json'} "
+        f"(table_id={table_id10}, mixed unchecked-removed + remaining contradiction)"
     )
 
 

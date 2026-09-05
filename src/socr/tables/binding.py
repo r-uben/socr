@@ -1067,6 +1067,11 @@ class BindingResult:
     candidate_valueless_unbound: int = 0
     native_valueless_unbound: int = 0
     row_labels_checked: int = 0
+    #: Native rows and candidate→native map this call computed. Empty when
+    #: parse_grid failed. Replay requires per-disputed-row evidence from these.
+    native_rows: list = field(default_factory=list)
+    row_binding: dict = field(default_factory=dict)
+    row_label_unverifiable_paths: tuple[tuple[str, ...], ...] = ()
 
     @property
     def fully_checked(self) -> bool:
@@ -1364,6 +1369,8 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     # every row-level drop/invention signal whenever column geometry was
     # ALSO unverifiable — this is exactly what HIGH 1 and HIGH 2 reported.
     row_binding = _bind_rows(native_rows, candidate_grid.rows)
+    result.native_rows = list(native_rows)
+    result.row_binding = dict(row_binding)
     bound_candidate_idxs = set(row_binding)
     bound_native_idxs = set(row_binding.values())
     result.candidate_valueless_unbound = sum(
@@ -1391,6 +1398,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     # Keep raw presence load-bearing alongside ``normalize_label``: that
     # normalizer deliberately erases presentation and punctuation, so a
     # punctuation-only non-empty label must not collapse into an empty stub.
+    unverifiable_paths: list[tuple[str, ...]] = []
     for cand_idx, native_idx in row_binding.items():
         result.row_labels_checked += 1
         candidate_label = candidate_grid.rows[cand_idx][0].strip()
@@ -1407,6 +1415,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
             # therefore not evidence of a mismatch. Fail closed as
             # unverifiable rather than falsely convicting or silently passing.
             result.row_label_unverifiable = True
+            unverifiable_paths.append(tuple(native_row.row_path))
         elif not same_presence or candidate_key != native_key:
             result.row_label_contradictions.append(
                 RowLabelContradiction(
@@ -1415,6 +1424,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
                     native_bbox=native_row.label_bbox,
                 )
             )
+    result.row_label_unverifiable_paths = tuple(unverifiable_paths)
 
     # BLOCKING 1: a native NUMERIC row that no candidate row ever bound to is not
     # merely "unverifiable" in the abstract — it is C4's dropped-digit signal

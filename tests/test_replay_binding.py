@@ -52,14 +52,16 @@ def test_discover_pages_finds_all_fixture_pages():
         ("doc00", 6),
         ("doc00", 7),
         ("doc00", 8),
+        ("doc00", 9),
+        ("doc00", 10),
     }
 
 
 def test_replay_corpus_row_shape_matches_recorded_table_count():
     """Same contract the real corpus proves at 7 rows (one row per recorded
-    table): here, 8 recorded tables -> 8 rows, exactly."""
+    table): here, 10 recorded tables -> 10 rows, exactly."""
     rows = replay_corpus(FIXTURE_CORPUS)
-    assert len(rows) == 8
+    assert len(rows) == 10
     assert all(isinstance(r, ReplayRow) for r in rows)
 
 
@@ -219,6 +221,8 @@ def test_report_formats_without_raising():
     assert "p6-t0" in report
     assert "p7-t0" in report
     assert "p8-t0" in report
+    assert "p9-t0" in report
+    assert "p10-t0" in report
     assert "UNREPLAYABLE" in report
     assert "UNCHECKED" in report
 
@@ -237,6 +241,8 @@ def test_main_cli_exits_zero_and_prints_rows(capsys):
     assert "p6-t0" in out
     assert "p7-t0" in out
     assert "p8-t0" in out
+    assert "p9-t0" in out
+    assert "p10-t0" in out
 
 
 @pytest.mark.parametrize(
@@ -322,6 +328,53 @@ def test_cli_prints_unchecked_for_parse_grid_failure(capsys):
     assert "UNREPLAYABLE" not in line
     words = line.split()
     assert "NO" not in words
+
+
+def test_unrelated_row_checked_disputed_unbound_is_unchecked():
+    """A sibling row is bound and compared; the disputed label is omitted
+    from the candidate, so it is UNCHECKED, not a frozen-only clear."""
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 9)
+    rows = replay_page(record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.unreplayable is False
+    assert row.unchecked is True
+    assert row.removed == ()
+    assert row.fresh_item_count == 0
+    assert row.recorded_item_count >= 1
+    assert "not bound" in row.note
+    assert row.row_labels_checked is not None and row.row_labels_checked >= 1
+    assert row.unchecked_removed
+
+
+def test_mixed_unchecked_removed_is_no_not_a_silent_clear():
+    """One recorded item remains as a fresh contradiction; another vanished
+    without per-row evidence. The vanished item is UNCHECKED; the row is NO."""
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 10)
+    rows = replay_page(record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.unreplayable is False
+    assert row.unchecked is False
+    assert row.multiset_match is False
+    assert row.fresh_item_count >= 1
+    assert row.unchecked_removed
+    for key in row.unchecked_removed:
+        assert key not in row.removed
+    assert "Gone yield" in str(row.unchecked_removed)
+
+
+def test_cli_mixed_row_is_no_with_unchecked_item(capsys):
+    from socr.benchmark.replay_binding import format_report
+
+    rows = replay_corpus(FIXTURE_CORPUS)
+    report = format_report(rows)
+    p9_line = next(ln for ln in report.splitlines() if "p9-t0" in ln)
+    assert "UNCHECKED" in p9_line, p9_line
+    p10_line = next(ln for ln in report.splitlines() if "p10-t0" in ln)
+    assert "NO" in p10_line.split(), p10_line
+    assert "UNCHECKED" not in p10_line.split()
+    assert "UNCHECKED:" in report
 
 
 def test_successful_bind_carries_coverage_and_is_not_unchecked():

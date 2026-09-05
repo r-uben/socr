@@ -160,6 +160,10 @@ class ReplayRow:
     #: Distinct from unreplayable (bind never ran) and from NO (a real
     #: delta, including a genuine clear).
     unchecked: bool = False
+    #: Recorded items that vanished without per-row evidence they were
+    #: bound and compared. Never folded into ``removed`` (that would look
+    #: like a clear). Whole-row UNCHECKED when this is the only delta.
+    unchecked_removed: tuple[ReplayItemKey, ...] = ()
     note: str = ""
     #: Coverage from the fresh BindingResult; None when unreplayable.
     fully_checked: bool | None = None
@@ -392,46 +396,133 @@ def _coverage_fields(result: BindingResult | None) -> dict:
     }
 
 
-def _unchecked_reason(recorded_items: list, result: BindingResult) -> str | None:
-    """Reason an empty fresh side is not a clear, or None if it is.
+def _recorded_row_path(rec: dict) -> tuple[str, ...]:
+    row_path = tuple(rec.get("row_path") or ())
+    if not row_path and rec.get("native_token"):
+        row_path = (str(rec.get("native_token")),)
+    return row_path
 
-    Vanished recorded items are a clear only when those rows/cells were
-    bound and compared. Whole-table fully_checked is not required: a
-    label repair may leave other columns unverifiable.
+
+def _native_label(native_row) -> str:
+    return native_row.row_path[-1] if native_row.row_path else ""
+
+
+def _native_parent(native_row) -> tuple[str, ...]:
+    return tuple(native_row.row_path[:-1]) if native_row.row_path else ()
+
+
+def _native_idx_for_recorded(rec: dict, result: BindingResult) -> int | None:
+    """Locate the native row a frozen item refers to.
+
+    Exact ``row_path`` first. After a label repair the frozen path is the
+    old native token, so also accept a *bound* row whose label equals the
+    frozen model token, or a unique row whose label contains the frozen
+    native token (same parent when the frozen path had one). Searching
+    unbound rows too lets a dropped value-less/omitted row be named as
+    not bound, rather than "not among native rows".
     """
-    if not recorded_items:
+    row_path = _recorded_row_path(rec)
+    native_token = str(rec.get("native_token") or "")
+    model_token = str(rec.get("model_token") or "")
+    for idx, native_row in enumerate(result.native_rows):
+        if tuple(native_row.row_path) == row_path:
+            return idx
+
+    bound = set(result.row_binding.values())
+    frozen_last = row_path[-1] if row_path else native_token
+    frozen_parent = row_path[:-1] if len(row_path) > 1 else None
+
+    def search(predicate, bound_only: bool) -> list[int]:
+        hits = []
+        for idx, native_row in enumerate(result.native_rows):
+            if bound_only and idx not in bound:
+                continue
+            if predicate(native_row):
+                hits.append(idx)
+        return hits
+
+    def locate(bound_only: bool) -> int | None:
+        if model_token:
+            hits = search(lambda nr: _native_label(nr) == model_token, bound_only)
+            if len(hits) == 1:
+                return hits[0]
+        if native_token:
+            hits = search(lambda nr: _native_label(nr) == native_token, bound_only)
+            if len(hits) == 1:
+                return hits[0]
+        if frozen_last:
+
+            def contained(nr) -> bool:
+                lab = _native_label(nr)
+                if not lab:
+                    return False
+                if frozen_last not in lab and lab not in frozen_last:
+                    return False
+                if frozen_parent is not None and _native_parent(nr) != frozen_parent:
+                    return False
+                return True
+
+            hits = search(contained, bound_only)
+            if len(hits) == 1:
+                return hits[0]
+            if model_token and len(hits) > 1:
+                narrowed = [
+                    idx
+                    for idx in hits
+                    if model_token == _native_label(result.native_rows[idx])
+                    or model_token in _native_label(result.native_rows[idx])
+                ]
+                if len(narrowed) == 1:
+                    return narrowed[0]
         return None
-    compared_cells = {(c.row_path, c.col_path) for c in result.matched_cells} | {
-        (c.row_path, c.col_path) for c in result.contradicted_cells
-    }
-    if (
-        result.row_labels_checked == 0
-        and not compared_cells
-        and not result.row_label_contradictions
-    ):
+
+    found = locate(bound_only=True)
+    if found is not None:
+        return found
+    return locate(bound_only=False)
+
+
+def _item_unchecked_reason(rec: dict, result: BindingResult) -> str | None:
+    """Why this recorded item was not bound-and-compared, or None if it was.
+
+    Positive per-row evidence: the row_path is in native_rows, that native
+    index is in row_binding, and the label/cell was compared (not
+    unverifiable). Absence from native_unbound is not evidence.
+    """
+    if not result.native_rows and not result.row_binding:
         return (
             "candidate grid produced no checks "
             f"(row_labels_checked=0, column_binding_unverifiable="
             f"{result.column_binding_unverifiable})"
         )
-    unbound_row_paths = {cell.row_path for cell in result.native_unbound}
-    for rec in recorded_items:
-        kind = rec.get("kind", "")
-        row_path = tuple(rec.get("row_path") or ())
-        col_path = tuple(rec.get("col_path") or ())
-        if not row_path and rec.get("native_token"):
-            row_path = (str(rec.get("native_token")),)
-        if kind == "row_label":
-            if result.row_labels_checked == 0:
-                return "disputed row labels were not bound or compared"
-            if row_path in unbound_row_paths:
-                return f"disputed row {row_path!r} was unbound, not compared"
-        elif kind == "cell":
-            if (row_path, col_path) not in compared_cells:
-                return (
-                    f"disputed cell {row_path!r}/{col_path!r} was not compared "
-                    f"(column_binding_unverifiable={result.column_binding_unverifiable})"
-                )
+    kind = rec.get("kind", "")
+    row_path = _recorded_row_path(rec)
+    col_path = tuple(rec.get("col_path") or ())
+    native_idx = _native_idx_for_recorded(rec, result)
+    if native_idx is None:
+        return f"disputed row {row_path!r} not among native rows"
+    if native_idx not in set(result.row_binding.values()):
+        native_row = result.native_rows[native_idx]
+        extra = " (value-less)" if not native_row.multiset else ""
+        return f"disputed row {row_path!r} was not bound{extra}"
+    if kind == "row_label":
+        native_path = tuple(result.native_rows[native_idx].row_path)
+        if (
+            row_path in result.row_label_unverifiable_paths
+            or native_path in result.row_label_unverifiable_paths
+        ):
+            return f"disputed row {row_path!r} label was unverifiable"
+        return None
+    if kind == "cell":
+        compared_cells = {(c.row_path, c.col_path) for c in result.matched_cells} | {
+            (c.row_path, c.col_path) for c in result.contradicted_cells
+        }
+        if (row_path, col_path) not in compared_cells:
+            return (
+                f"disputed cell {row_path!r}/{col_path!r} was not compared "
+                f"(column_binding_unverifiable={result.column_binding_unverifiable})"
+            )
+        return None
     return None
 
 
@@ -517,33 +608,29 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
             continue
         assert bind_result is not None
         coverage = _coverage_fields(bind_result)
-        if not fresh_items:
-            reason = _unchecked_reason(recorded_items, bind_result)
-            if reason:
-                rows.append(
-                    ReplayRow(
-                        doc_slug=record.doc_slug,
-                        page_num=record.page_num,
-                        table_id=table_id,
-                        recorded_status=str(recorded.get("status", "")),
-                        recorded_item_count=len(recorded_items),
-                        fresh_item_count=0,
-                        multiset_match=False,
-                        added=(),
-                        removed=(),
-                        final_disposition=_final_disposition(str(recorded.get("status", ""))),
-                        label_accuracy=label_accuracy,
-                        crop_coverage=crop_coverage,
-                        unchecked=True,
-                        note=" | ".join(part for part in (note, reason) if part),
-                        **coverage,
-                    )
-                )
-                continue
         fresh_counter = Counter(_item_key(item) for item in fresh_items)
-
         added = tuple(sorted((fresh_counter - recorded_counter).elements()))
-        removed = tuple(sorted((recorded_counter - fresh_counter).elements()))
+        fresh_left = Counter(fresh_counter)
+        cleared_removed: list[ReplayItemKey] = []
+        unchecked_removed: list[ReplayItemKey] = []
+        reasons: list[str] = []
+        for rec in recorded_items:
+            key = _recorded_item_key(rec)
+            if fresh_left[key] > 0:
+                fresh_left[key] -= 1
+                continue
+            reason = _item_unchecked_reason(rec, bind_result)
+            if reason:
+                unchecked_removed.append(key)
+                reasons.append(reason)
+            else:
+                cleared_removed.append(key)
+        removed = tuple(sorted(cleared_removed))
+        unchecked_removed_t = tuple(sorted(unchecked_removed))
+        whole_unchecked = (
+            bool(unchecked_removed_t) and not added and not removed and not fresh_items
+        )
+        note = " | ".join(part for part in (note, *dict.fromkeys(reasons)) if part)
 
         rows.append(
             ReplayRow(
@@ -553,12 +640,14 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
                 recorded_status=str(recorded.get("status", "")),
                 recorded_item_count=len(recorded_items),
                 fresh_item_count=len(fresh_items),
-                multiset_match=not added and not removed,
+                multiset_match=not added and not removed and not unchecked_removed_t,
                 added=added,
                 removed=removed,
                 final_disposition=_final_disposition(str(recorded.get("status", ""))),
                 label_accuracy=label_accuracy,
                 crop_coverage=crop_coverage,
+                unchecked=whole_unchecked,
+                unchecked_removed=unchecked_removed_t,
                 note=note,
                 **coverage,
             )
@@ -602,6 +691,8 @@ def format_report(rows: list[ReplayRow]) -> str:
             lines.append(f"       + fresh-only: {list(row.added)}")
         if row.removed:
             lines.append(f"       - frozen-only: {list(row.removed)}")
+        if row.unchecked_removed:
+            lines.append(f"       UNCHECKED: {list(row.unchecked_removed)}")
     return "\n".join(lines)
 
 
