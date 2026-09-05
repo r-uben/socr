@@ -111,6 +111,15 @@ class TestTokensAgree:
         same printed glyph."""
         assert not tokens_agree(r"$\epsilon$ x", r"$\varepsilon$ x", kind="row_label")
 
+    def test_unsupported_word_command_does_not_earn_an_agreement(self) -> None:
+        """GH-585 review round 3: retaining the backslash at the helper is
+        not yet evidence that it survives the actual compare — ``\\logx``
+        is not a real LaTeX macro and must not agree with either ``log`` or
+        ``logx`` through ``tokens_agree``."""
+        assert not tokens_agree(r"\logx y", "log y", kind="row_label")
+        assert not tokens_agree(r"\logx y", "logx y", kind="row_label")
+        assert tokens_agree(r"\log y", "log y", kind="row_label")
+
 
 class TestAdjudicate:
     def test_all_abstained_is_held_and_never_transcribes_native_bbox(self) -> None:

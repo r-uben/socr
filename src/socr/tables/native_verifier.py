@@ -623,7 +623,7 @@ _GREEK_COMMAND_RE = re.compile(
 def _greek_command_sub(m: re.Match) -> str:
     name = m.group(1)
     if name in _GREEK_VARIANT_NAMES:
-        return f" {name} "
+        return f" greek{name} "
     return _GREEK_BASE_COMMANDS[name]
 
 
@@ -657,6 +657,19 @@ _MATH_OPERATOR_NAMES = (
 )
 _MATH_WORD_COMMAND_RE = re.compile(r"\\(" + "|".join(_MATH_OPERATOR_NAMES) + r")\b")
 
+# GH-585 review round 3: keeping the backslash on an unrecognized command
+# (``\logx``) is not, by itself, evidence that it stays distinct from the
+# plain word ``logx`` -- ``normalize_label``'s ASCII-only filter
+# (``native_rows._NON_ALNUM_RE``) strips ANY leftover backslash from EVERY
+# label unconditionally, recognized or not, so ``\logx`` and ``logx`` would
+# still fold to the identical key downstream regardless of what this helper
+# does with the backslash. An unsupported/unverified command must be given
+# a marker ``normalize_label`` cannot erase, so it never silently earns an
+# agreement with the bare word or with a real operator of a similar
+# spelling -- catch anything left after the Greek and operator maps have
+# run and fold it to an ``unmapped``-prefixed, alphanumeric-only token.
+_MATH_UNMAPPED_COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
+
 # GH-585 review round 2: the Greek COMMAND map above turns ``\Delta`` into
 # the Unicode letter the native layer prints, but the native layer's own
 # ``∆`` (and a raw Greek letter typed directly, e.g. ``α``) then hits
@@ -664,24 +677,46 @@ _MATH_WORD_COMMAND_RE = re.compile(r"\\(" + "|".join(_MATH_OPERATOR_NAMES) + r")
 # on BOTH sides and vanishes -- so ``α Coefficient`` and ``$\beta$
 # Coefficient`` folded to the same key ("coefficient") and falsely agreed,
 # regardless of which Greek letter either side actually named. Every real
-# Greek letter must survive the compare as a distinct ASCII word, so
-# different letters keep disagreeing and the same letter keeps agreeing --
-# this is a second, orthogonal step from the command map: it transliterates
-# a UNICODE letter (from either side, however it got there) to its ASCII
-# name, rather than a LaTeX command spelling to a letter.
+# Greek letter must survive the compare as a distinct token, so different
+# letters keep disagreeing and the same letter keeps agreeing -- this is a
+# second, orthogonal step from the command map: it transliterates a
+# UNICODE letter (from either side, however it got there) to a token,
+# rather than a LaTeX command spelling to a letter.
+#
+# GH-585 review round 3: a PLAIN word (``delta``) is not safe -- a label
+# that literally spells the English/prose word "Delta" would then falsely
+# agree with a native ``∆``, and ``normalize_label`` lowercases before its
+# ASCII filter, so a plain-word scheme also loses the distinction between
+# ``Δ`` (capital) and ``δ`` (lowercase) -- two different letters. Every
+# entry is therefore a ``greek``-prefixed, case-preserving TOKEN no real
+# prose word can collide with: capitals get a ``greekcap`` prefix
+# (``greekcapdelta``), lowercase letters get a bare ``greek`` prefix
+# (``greekdelta``), so case is part of the token's identity, not folded
+# away by ``normalize_label``'s later lowercasing. The table covers every
+# letter of the Greek alphabet in both cases -- built from the real
+# Unicode uppercase/lowercase codepoint pairing (offset ``0x20`` across the
+# whole block), not just the 11 letters LaTeX gives a distinct ``\Upper``
+# command to -- so a raw Greek capital the native layer emits without any
+# LaTeX command involved (e.g. bare ``Α``) still gets a token instead of
+# silently vanishing.
 #
 # ``∆`` (U+2206 INCREMENT, what LaTeX ``\Delta`` typically renders as in
 # extracted PDF text) and ``Δ`` (U+0394, the actual GREEK CAPITAL LETTER
 # DELTA codepoint some producers use instead) render identically and both
-# transliterate to "Delta". Final-form lowercase sigma (``ς``, U+03C2, used
-# only in word-final position) transliterates to "sigma", the same as
-# medial/initial ``σ`` -- same letter, positional glyph variant only.
-_GREEK_UNICODE_NAME: dict[str, str] = {
-    char: name for name, char in {**_GREEK_UPPER, **_GREEK_LOWER}.items()
+# alias to the same "greekcapdelta" token. Final-form lowercase sigma
+# (``ς``, U+03C2, used only in word-final position) aliases to the same
+# "greeksigma" token as medial/initial ``σ`` -- same letter, positional
+# glyph variant only.
+_GREEK_UPPER_ALL: dict[str, str] = {
+    name.capitalize(): chr(ord(char) - 0x20) for name, char in _GREEK_LOWER.items()
 }
-_GREEK_UNICODE_NAME["Δ"] = "Delta"  # U+0394, alias of the U+2206 "Delta" entry.
-_GREEK_UNICODE_NAME["ς"] = "sigma"  # U+03C2, alias of the U+03C3 "sigma" entry.
-_GREEK_UNICODE_RE = re.compile("[" + "".join(re.escape(c) for c in _GREEK_UNICODE_NAME) + "]")
+_GREEK_UNICODE_TOKEN: dict[str, str] = {char: f"greek{name}" for name, char in _GREEK_LOWER.items()}
+_GREEK_UNICODE_TOKEN.update(
+    {char: f"greekcap{name.lower()}" for name, char in _GREEK_UPPER_ALL.items()}
+)
+_GREEK_UNICODE_TOKEN["∆"] = _GREEK_UNICODE_TOKEN["Δ"]  # U+2206 aliases U+0394's token.
+_GREEK_UNICODE_TOKEN["ς"] = _GREEK_UNICODE_TOKEN["σ"]  # U+03C2 aliases U+03C3's token.
+_GREEK_UNICODE_RE = re.compile("[" + "".join(re.escape(c) for c in _GREEK_UNICODE_TOKEN) + "]")
 
 
 def strip_math_presentation(tok: str, *, label: bool = False) -> str:
@@ -705,15 +740,21 @@ def strip_math_presentation(tok: str, *, label: bool = False) -> str:
     ``label=True`` additionally unwraps ``\text{}``/``\mathrm{}``/
     ``\textbf{}``, maps Greek-letter commands to the Unicode letters the
     native layer prints, transliterates every Greek Unicode letter
-    (however it got there) to its ASCII name so distinct letters keep
-    comparing as distinct words, drops the backslash of every other
-    alphabetic word command (``\log`` -> ``log``), and flattens ``^``/``_``
-    script markers anywhere in the string, then drops the delimiters: see
-    the two mode comments above the regexes for why the two paths differ,
-    and the GH-585 comments above the Greek tables for why the command and
-    transliteration classes run in that order and what a bare symbolic
-    label (the WHOLE label is one Greek letter, no other content) is
-    deliberately exempted from transliteration -- see below.
+    (however it got there) to a case-preserving, ``greek``-prefixed token
+    no real prose word can collide with (so distinct letters, and distinct
+    cases of the same letter, keep comparing as distinct), drops the
+    backslash of every other supported alphabetic word command (``\log``
+    -> ``log``; an unsupported command is folded to an ``unmapped``-prefixed
+    token that cannot silently equal the bare word or a real operator, since
+    ``normalize_label`` strips a leftover backslash unconditionally and
+    would otherwise erase the distinction the backslash was meant to keep),
+    and flattens
+    ``^``/``_`` script markers anywhere in the string, then drops the
+    delimiters: see the two mode comments above the regexes for why the
+    two paths differ, and the GH-585 comments above the Greek tables for
+    why the command and transliteration classes run in that order and what
+    a bare symbolic label (the WHOLE label is one Greek letter, no other
+    content) is deliberately exempted from transliteration -- see below.
     """
     text = tok.strip()
     if not label:
@@ -737,11 +778,12 @@ def strip_math_presentation(tok: str, *, label: bool = False) -> str:
     # in a longer label (``∆Slope (3m)``) is not this case and still
     # transliterates normally.
     bare_symbol = _MATH_DOLLAR_RE.sub("", text).strip()
-    if bare_symbol not in _GREEK_UNICODE_NAME:
-        text = _GREEK_UNICODE_RE.sub(lambda m: f" {_GREEK_UNICODE_NAME[m.group(0)]} ", text)
+    if bare_symbol not in _GREEK_UNICODE_TOKEN:
+        text = _GREEK_UNICODE_RE.sub(lambda m: f" {_GREEK_UNICODE_TOKEN[m.group(0)]} ", text)
         text = re.sub(r"\s+", " ", text)
     text = _MATH_ESCAPED_PUNCT_RE.sub(r"\1", text)
     text = _MATH_WORD_COMMAND_RE.sub(r"\1", text)
+    text = _MATH_UNMAPPED_COMMAND_RE.sub(lambda m: f"unmapped{m.group(1)}", text)
     text = _MATH_SCRIPT_BRACE_RE.sub(r"\1", text)
     text = _MATH_SCRIPT_BARE_RE.sub(r"\1", text)
     text = _MATH_DOLLAR_RE.sub("", text)

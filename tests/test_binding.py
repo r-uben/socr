@@ -431,6 +431,38 @@ def test_gh585_sibling_latex_greek_and_word_command_labels_are_not_contradiction
     assert result.structural_agreement is True
 
 
+def test_gh585_unsupported_word_command_does_not_falsely_agree_through_bind():
+    """GH-585 review round 3: retaining the backslash at the
+    ``strip_math_presentation`` helper is not, by itself, evidence that
+    ``\\logx`` stays distinct through the actual binder compare --
+    ``normalize_label`` strips any leftover backslash from every label
+    unconditionally, so a naive fix could still let ``\\logx`` silently
+    agree with the bare word ``logx`` (or, worse, with the real operator
+    ``\\log`` on the shorter label). Neither must agree: the native row is
+    a genuine contradiction in both cases."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "logx y"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    against_bare_word = r"""
+|            | OLS  |
+|------------|------|
+| $\logx y$  | 0.95 |
+"""
+    against_real_operator = r"""
+|           | OLS  |
+|-----------|------|
+| $\log y$  | 0.95 |
+"""
+
+    for candidate in (against_bare_word, against_real_operator):
+        result = bind(words, candidate)
+        assert len(result.row_label_contradictions) == 1
+        assert result.row_label_unverifiable is False
+        assert result.structural_agreement is False
+
+
 # ---------------------------------------------------------------------------
 # GH-582: inline-math wrapping is presentation, not a value/label change
 # ---------------------------------------------------------------------------

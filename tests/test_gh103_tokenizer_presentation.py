@@ -250,13 +250,13 @@ def test_gh585_greek_command_table_maps_to_unicode(command, expected):
     assert strip_math_presentation(command, label=True) == expected
 
 
-def test_gh585_variant_greek_command_transliterates_to_its_own_distinct_name():
-    """GH-585 review round 2: ``\\varepsilon`` is a DIFFERENT glyph from
+def test_gh585_variant_greek_command_transliterates_to_its_own_distinct_token():
+    """GH-585 review round 2/3: ``\\varepsilon`` is a DIFFERENT glyph from
     ``\\epsilon`` (not established to be the same symbol in this corpus,
     unlike the U+0394/U+2206 Delta pair) — it must fold to its own
-    ``varepsilon`` name, never to the base letter's ``epsilon``."""
-    assert strip_math_presentation(r"\varepsilon", label=True) == "varepsilon"
-    assert strip_math_presentation(r"\epsilon", label=True) == "ε"
+    ``greekvarepsilon`` token, never to the base letter's token."""
+    assert strip_math_presentation(r"$\varepsilon$ x", label=True) == "greekvarepsilon  x"
+    assert strip_math_presentation(r"$\epsilon$ x", label=True) == "greekepsilon  x"
 
 
 @pytest.mark.parametrize(
@@ -279,11 +279,15 @@ def test_gh585_alphabetic_word_commands_drop_only_the_backslash(command):
 
 
 def test_gh585_unsupported_word_command_keeps_its_backslash():
-    """GH-585 review round 2: only the standard LaTeX math-operator names
+    """GH-585 review round 2/3: only the standard LaTeX math-operator names
     lose their backslash. An unverified/unsupported command (``\\logx`` --
     not a real LaTeX macro, but shaped like one) must not gain an agreement
-    it never earned by having its backslash silently stripped too."""
-    assert strip_math_presentation(r"\logx", label=True) == r"\logx"
+    it never earned. Round 3: keeping the literal backslash is not by
+    itself sufficient, since ``normalize_label`` strips ANY leftover
+    backslash unconditionally -- so ``\\logx`` is folded to an
+    ``unmapped``-prefixed token that survives that downstream strip
+    distinctly from both ``log`` and ``logx``."""
+    assert strip_math_presentation(r"\logx", label=True) == "unmappedlogx"
     assert strip_math_presentation(r"\log", label=True) == "log"
 
 
@@ -326,6 +330,28 @@ def test_gh585_real_greek_capital_delta_codepoint_aliases_the_increment_glyph():
     assert strip_math_presentation("ΔSlope", label=True) == strip_math_presentation(
         "∆Slope", label=True
     )
+
+
+def test_gh585_typed_greek_token_does_not_collide_with_the_spelled_out_prose_word():
+    """GH-585 review round 3: a plain-ASCII-word transliteration (``∆`` ->
+    ``"Delta"``) is itself a widening -- a label that literally types the
+    English word "Delta" would then falsely agree with the native symbol.
+    The ``greek``/``greekcap``-prefixed token can never collide with prose,
+    so ``∆Slope (3m)`` must NOT agree with a label that spells the word
+    out."""
+    native_key = normalize_label(strip_math_presentation("∆Slope (3m)", label=True))
+    prose_key = normalize_label(strip_math_presentation("Delta Slope (3m)", label=True))
+    assert native_key != prose_key
+
+
+def test_gh585_typed_greek_token_preserves_case_distinction():
+    """GH-585 review round 3: ``normalize_label`` lowercases, so a plain
+    lower-case name for both ``Δ`` (capital) and ``δ`` (lower-case, a
+    DIFFERENT letter) would fold together. The ``greekcap``-prefixed token
+    keeps case distinct through the compare."""
+    upper_key = normalize_label(strip_math_presentation("Δ x", label=True))
+    lower_key = normalize_label(strip_math_presentation("δ x", label=True))
+    assert upper_key != lower_key
 
 
 def test_gh585_escape_unmap_also_applies_to_the_numeric_cell_path():
