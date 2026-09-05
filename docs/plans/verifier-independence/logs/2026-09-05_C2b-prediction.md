@@ -6,6 +6,9 @@
 the frozen corpus `~/Data/socr/ladder-run2-2026-09-04` (checksums verified). Fresh `bind()`
 on each frozen page with its provenance-selected candidate (A1/A1c). This is the artifact
 C2b's frozen-replay gate asserts against item-for-item; it is committed before C2b starts.
+**Reproduced identically on the merged `maindf3d4`** (post-#616/#617; `binding.py` there
+carries A1c's superset of the `BindingResult` fields): 14 items, 3 addressed, 11 abstained,
+same verdicts and reasons.
 
 Rule applied per item, in order (first failure is the reason): origin exists; column edge
 `R` exists; the disputed native row is unique by `row_path`; **native chain** — native rows

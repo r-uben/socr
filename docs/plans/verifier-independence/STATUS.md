@@ -1,6 +1,6 @@
 # STATUS — verifier-independence
 
-Last updated: 2026-09-05 (wave 4 closed)
+Last updated: 2026-09-05 (wave 5 dispatched)
 
 ## Stage
 
@@ -39,7 +39,7 @@ gate; `tests/` is flat. Nothing dispatched.
 | C1  | verifier | DONE | A1b | 3 |
 | C2a | verifier | DONE | C1 | 4 (#616, 13 review rounds) |
 | A1c | native reference | DONE | — | 4 (#612, #595 closed) |
-| C2b | verifier | TODO | C2a, A2, B1 | 5 |
+| C2b | verifier | WIP | C2a, A2, B1 | 5 (curia codex vs grok) |
 | C3  | verifier | TODO | C2b, B2 | 6 (claude) |
 
 ## Dispatch waves
@@ -100,6 +100,7 @@ gate; `tests/` is flat. Nothing dispatched.
 
 ## Next action
 
-**C2b prediction artifact** (`logs/2026-09-05_C2b-prediction.md`): re-derive C1 §(d) on the
-post-A2/C2a tree for the 14 remaining items, applying the ordinal chain, the column test and
-the prefix rule with the shipped helpers; commit it and cite its SHA. Then wave 5: C2b.
+C2b in flight (curia, worktrees off `maindf3d4`). Prediction artifact:
+`logs/2026-09-05_C2b-prediction.md` at `35df3d4` — 3 addressed / 11 abstained of 14. On accept:
+PR, CI on the exact head, merge, then wave 6: C3 corpus re-run under B2's discipline against the
+pinned `~/repos/.worktrees/socr-vi-B2` replaced by a fresh pin at the C2b merge.
