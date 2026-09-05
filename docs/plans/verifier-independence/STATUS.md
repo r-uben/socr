@@ -37,7 +37,8 @@ gate; `tests/` is flat. Nothing dispatched.
 | B2  | latency | DONE | B1 | 2 (claude) |
 | A2  | native reference | DONE | A1b | 3 (curia, 2/3 — doc04 → #603) |
 | C1  | verifier | DONE | A1b | 3 |
-| C2a | verifier | TODO | C1 | 4 |
+| C2a | verifier | WIP | C1 | 4 (grok, revision after reviewer) |
+| A1c | native reference | WIP | — | 4 (#595) |
 | C2b | verifier | TODO | C2a, A2, B1 | 5 |
 | C3  | verifier | TODO | C2b, B2 | 6 (claude) |
 
