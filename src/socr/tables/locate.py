@@ -271,7 +271,14 @@ class RowBand:
 
     y0: float
     y1: float
-    source: str  # "rule" | "line"
+    source: str  # "rule" | "line" | "line-ambiguous"
+    #: Why this region's line pitch could not be certified (a tie, no gap value
+    #: repeating, or the two most frequent gaps closer than the smallest line
+    #: height). ``None`` when the pitch was certified. When set, every band in
+    #: the region is one unique baseline and NO merge was decided: the band
+    #: list is an over-split, safe only as an abstain input — a caller must not
+    #: treat these bands as printed rows (C2b abstains on any band carrying it).
+    ambiguity: str | None = None
 
 
 def row_bands_from_rules(
@@ -303,12 +310,13 @@ def row_bands_from_lines(page, region: tuple[float, float, float, float]) -> lis
     lines = _text_lines_in_region(page, region)
     if not lines:
         return []
-    groups = _group_lines_by_baseline(lines)
+    groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
     return [
         RowBand(
             y0=min(ln["bbox"][1] for ln in group),
             y1=max(ln["bbox"][3] for ln in group),
-            source="line",
+            source="line" if ambiguity is None else "line-ambiguous",
+            ambiguity=ambiguity,
         )
         for group in groups
     ]
@@ -452,7 +460,19 @@ def _text_lines_in_region(page, region: tuple[float, float, float, float]) -> li
 
 
 def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
+    """``_group_lines_by_baseline_with_reason`` without the reason — kept for
+    callers that only need the grouping (``label_column_edge``, tests)."""
+    return _group_lines_by_baseline_with_reason(lines)[0]
+
+
+def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[dict]], str | None]:
     """Group text-line dicts into printed rows by vertical-extent overlap.
+
+    Returns ``(groups, ambiguity)``. ``ambiguity`` is ``None`` when the
+    region's line pitch was certified and the grouping is a real row
+    segmentation; otherwise it names why no merge could be certified, and
+    ``groups`` is one group per unique baseline — an over-split that callers
+    must surface (``RowBand.ambiguity``), never silently consume as rows.
 
     Two lines belong to one band only if their boxes overlap in y by more
     than the overlap any two *adjacent printed rows* share. Adjacent rows
@@ -466,20 +486,20 @@ def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
     guess).
     """
     if len(lines) < 3:
-        return []
+        return [], None
     ordered = sorted(lines, key=lambda ln: ln["baseline"])
     by_base: dict[float, list[dict]] = {}
     for ln in ordered:
         by_base.setdefault(ln["baseline"], []).append(ln)
     baselines = sorted(by_base)
     if len(baselines) == 1:
-        return [ordered]
+        return [ordered], None
     gaps = [b - a for a, b in zip(baselines, baselines[1:])]
     min_height = min(ln["bbox"][3] - ln["bbox"][1] for ln in ordered)
     reason = _pitch_ambiguity(gaps, min_height)
     if reason is not None:
         logger.debug("line pitch ambiguous (%s): one band per unique baseline", reason)
-        return [list(by_base[b]) for b in baselines]
+        return [list(by_base[b]) for b in baselines], reason
 
     pitch = _modal_value(gaps)
 
@@ -508,7 +528,7 @@ def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
             groups[-1].append(cur)
         else:
             groups.append([cur])
-    return groups
+    return groups, None
 
 
 def _modal_value(values: list[float]) -> float:

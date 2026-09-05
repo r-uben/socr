@@ -25,6 +25,7 @@ import pytest
 from socr.tables.locate import (
     RowBand,
     _group_lines_by_baseline,
+    _group_lines_by_baseline_with_reason,
     band_index_for,
     label_column_edge,
     ordinal_origin,
@@ -258,9 +259,12 @@ def test_row_bands_nonuniform_pitch_does_not_merge():
         _box_line(9.5, 9.5, 19.5),
         _box_line(19.1, 19.1, 29.1),
     ]
-    groups = _group_lines_by_baseline(lines)
+    groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
     assert len(groups) == 3
     assert [ln["baseline"] for g in groups for ln in g] == [0.0, 9.5, 19.1]
+    # The over-split is SURFACED, not silent: a caller sees why no merge was
+    # certified and abstains on the region (C2b).
+    assert ambiguity is not None
 
 
 def test_row_bands_tied_modal_pitch_does_not_merge():
@@ -276,8 +280,34 @@ def test_row_bands_tied_modal_pitch_does_not_merge():
         _box_line(28.6, 28.6, 38.6),
         _box_line(38.2, 38.2, 48.2),
     ]
-    groups = _group_lines_by_baseline(lines)
+    groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
     assert len(groups) == 5
+    assert ambiguity is not None
+
+
+def test_row_bands_from_lines_marks_ambiguous_pitch_on_every_band(tmp_path):
+    """The ambiguity reaches the returned geometry: every band from an
+    uncertifiable pitch carries ``source == "line-ambiguous"`` and a reason,
+    while a certified pitch yields plain ``"line"`` bands with ``ambiguity``
+    None. Pinned as a difference between the two fixtures."""
+    import fitz
+
+    def _page(baselines):
+        doc = fitz.open()
+        page = doc.new_page(width=300, height=300)
+        for i, y in enumerate(baselines):
+            page.insert_text((20, 40 + y), f"row{i}", fontsize=10)
+        return doc, page
+
+    certified, page = _page([0, 12, 24, 36, 48, 60])
+    bands = row_bands_from_lines(page, (0, 0, 300, 300))
+    assert bands and all(b.source == "line" and b.ambiguity is None for b in bands)
+    certified.close()
+
+    ambiguous, page = _page([0, 9.5, 19.1, 28.6, 38.2])
+    bands = row_bands_from_lines(page, (0, 0, 300, 300))
+    assert bands and all(b.source == "line-ambiguous" and b.ambiguity for b in bands)
+    ambiguous.close()
 
 
 def test_ordinal_origin_three_rule_plain_table_origin_is_midrule():
