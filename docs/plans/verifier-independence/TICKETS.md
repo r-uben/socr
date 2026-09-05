@@ -70,7 +70,7 @@ prerequisite — every ticket touches a bounded seam.
 
 ## Stream A — native reference repair
 
-### TICKET-A1 — replay-binding harness · TODO · depends-on: none · wave 1
+### TICKET-A1 — replay-binding harness · DONE · depends-on: none · wave 1
 **Problem:** There is no way to re-bind a *frozen* model candidate against a *fresh*
 native extraction, so a binder change can only be measured through a live OCR run.
 **Do:** Add `socr.benchmark.replay_binding`: for each frozen page sidecar, take the model

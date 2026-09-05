@@ -1,0 +1,44 @@
+{
+  "audit_events": [
+    {
+      "data": {
+        "table_id": "p2-t0"
+      },
+      "engine": "qwen",
+      "kind": "table_binding_adjudicated"
+    }
+  ],
+  "binding_adjudication": {
+    "p2-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "5Y Inflation swap",
+          "native_token": "Inflation swap",
+          "row_path": [
+            "Inflation swap"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Inflation swap"
+          ],
+          [],
+          "Inflation swap",
+          "5Y Inflation swap"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 2,
+  "winning_output": {
+    "text": "[page 2 failed: unverifiable table \u2014 see image]\n\n![Failed table page 2](figures/x.png)"
+  }
+}

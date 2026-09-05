@@ -1,0 +1,5 @@
+{
+  "engine": "qwen",
+  "page_num": 3,
+  "text": "| Label | Value |\n| :--- | :--- |\n| 10Y Credit spread | 0.61 |\n| Term spread | 0.27 |\n"
+}

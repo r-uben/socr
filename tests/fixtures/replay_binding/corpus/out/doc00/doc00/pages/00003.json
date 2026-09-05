@@ -1,0 +1,44 @@
+{
+  "audit_events": [
+    {
+      "data": {
+        "table_id": "p3-t0"
+      },
+      "engine": "qwen",
+      "kind": "table_binding_adjudicated"
+    }
+  ],
+  "binding_adjudication": {
+    "p3-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "3Y Credit spread",
+          "native_token": "Credit spread",
+          "row_path": [
+            "Credit spread"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Credit spread"
+          ],
+          [],
+          "Credit spread",
+          "3Y Credit spread"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 3,
+  "winning_output": {
+    "text": "[page 3 failed: unverifiable table \u2014 see image]\n\n![Failed table page 3](figures/x.png)"
+  }
+}

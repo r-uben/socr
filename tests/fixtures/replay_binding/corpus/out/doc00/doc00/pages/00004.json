@@ -1,0 +1,51 @@
+{
+  "audit_events": [
+    {
+      "data": {
+        "table_id": "p4-t0"
+      },
+      "engine": "qwen",
+      "kind": "table_binding_adjudicated"
+    },
+    {
+      "data": {
+        "table_id": "p4-t0"
+      },
+      "engine": "gemini",
+      "kind": "table_binding_adjudicated"
+    }
+  ],
+  "binding_adjudication": {
+    "p4-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "5Y Breakeven inflation",
+          "native_token": "Breakeven inflation",
+          "row_path": [
+            "Breakeven inflation"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Breakeven inflation"
+          ],
+          [],
+          "Breakeven inflation",
+          "5Y Breakeven inflation"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 4,
+  "winning_output": {
+    "text": "[page 4 failed: unverifiable table \u2014 see image]\n\n![Failed table page 4](figures/x.png)"
+  }
+}
