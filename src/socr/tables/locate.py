@@ -501,7 +501,8 @@ def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[d
         logger.debug("line pitch ambiguous (%s): one band per unique baseline", reason)
         return [list(by_base[b]) for b in baselines], reason
 
-    pitch = _modal_value(gaps)
+    cluster = _pitch_clusters(gaps, min_height)[0]
+    pitch_lo, pitch_hi = cluster[0], cluster[-1]
 
     def _union_box(key: float) -> tuple[float, float, float, float]:
         group = by_base[key]
@@ -514,7 +515,7 @@ def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[d
 
     adjacent_overlap = 0.0
     for a, b, gap in zip(baselines, baselines[1:], gaps):
-        if gap == pitch:
+        if pitch_lo <= gap <= pitch_hi:
             adjacent_overlap = max(adjacent_overlap, _y_overlap(_union_box(a), _union_box(b)))
     groups: list[list[dict]] = [[ordered[0]]]
     for cur in ordered[1:]:
@@ -540,34 +541,49 @@ def _modal_value(values: list[float]) -> float:
     return max(v for v, n in counts.items() if n == best)
 
 
+def _pitch_clusters(gaps: list[float], min_line_height: float) -> list[list[float]]:
+    """Cluster unique-baseline gaps into candidate pitches, largest cluster first.
+
+    Two gaps belong to one pitch when they differ by less than the smallest
+    gap in the region: distinct row pitches differ by at least one row step
+    (a one-line row step vs a two-line row step differ by a whole step),
+    while rendering jitter is a fraction of a point. Sorted gaps are walked
+    once and split at any step of at least ``min(gaps)``. No literal — the
+    bound is the region's own row spacing. (``min_line_height`` is kept for
+    the signature's stability; the split bound is the smallest gap.)
+    """
+    if not gaps:
+        return []
+    ordered = sorted(gaps)
+    bound = ordered[0]
+    clusters: list[list[float]] = [[ordered[0]]]
+    for g in ordered[1:]:
+        if g - clusters[-1][-1] < bound:
+            clusters[-1].append(g)
+        else:
+            clusters.append([g])
+    return sorted(clusters, key=lambda c: (-len(c), c[0]))
+
+
 def _pitch_ambiguity(gaps: list[float], min_line_height: float) -> str | None:
     """Reason the unique-baseline gaps do not certify a line pitch, or None.
 
-    A pitch is ambiguous when (1) two gap values share the top frequency
-    (a tie), (2) no gap value occurs more than once, or (3) the two most
-    frequent gaps differ by less than the smallest line height *and* by
-    less than the smallest observed gap — they are jitter of one pitch,
-    not a row step vs a section step. Over-split rather than guess.
+    Ambiguous when (1) there are no gaps, (2) the largest pitch cluster has
+    a single member (every gap is its own pitch — nothing repeats), or
+    (3) two clusters tie for the largest membership (two row pitches are
+    equally supported, e.g. alternating 10 / 20 pt). Jitter of one pitch
+    (gaps within a line height of each other) is one cluster and is NOT
+    ambiguous — the pitch is certified at the cluster's *minimum*, the
+    conservative choice (largest adjacent-row overlap ⇒ fewest merges).
+    Over-split rather than guess when ambiguous.
     """
-    if not gaps:
+    clusters = _pitch_clusters(gaps, min_line_height)
+    if not clusters:
         return "no gaps"
-    counts: dict[float, int] = {}
-    for g in gaps:
-        counts[g] = counts.get(g, 0) + 1
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], -kv[0]))
-    _top_g, top_n = ranked[0]
-    if top_n == 1:
-        return "no gap value occurs more than once"
-    tied = [g for g, n in ranked if n == top_n]
-    if len(tied) > 1:
-        return "tied modal gap"
-    if len(ranked) >= 2:
-        g1, _n1 = ranked[0]
-        g2, _n2 = ranked[1]
-        delta = abs(g1 - g2)
-        smallest_gap = min(gaps)
-        if delta < min_line_height and delta < smallest_gap:
-            return "top two gaps differ by less than smallest line height"
+    if len(clusters[0]) == 1:
+        return "no gap value repeats within a line height"
+    if len(clusters) > 1 and len(clusters[1]) == len(clusters[0]):
+        return "tied pitch clusters"
     return None
 
 
