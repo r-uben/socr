@@ -353,18 +353,14 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
     synthetic or stale metadata on distant prose. No distance tolerance is
     used as row evidence.
 
-    A second numeric-free group (a math-font subscript sitting under the
-    small-caps line it annotates) has no numeric destination and different
-    ``(block_no, line_no)``. Fold it into the unique numeric-free group
-    *above* it whose boxes vertically overlap, each folding word sitting
-    under a destination *word* (not merely under the line's union x-span)
-    — still exact geometry, never a proximity radius. The resolved
-    destination (``y_to_group_key[other]``) must itself be numeric-free:
-    a marker already remapped onto a numeric row by the metadata fold
-    above is not a text destination, so a later hop cannot land an
-    annotation inside a data row. A small running annotation under a
-    label ("see note a") is not contained in any one parent word and
-    stays a separate group.
+    Numeric-free groups are never folded into other numeric-free groups.
+    On the measured fixture (doc04 p3 ``1t`` under ``ROTATED PCs``) the
+    subscript is a different ``(block_no, line_no)`` from its parent, its
+    box top sits inside the parent height (also true of a short overlapping
+    annotation such as ``(a)``), and the page's shorter-glyph height class
+    mixes the ``1t`` with an on-line ``∗``, so no page-derived test
+    separates a subscript from an annotation. The fold abstains rather
+    than guess.
     """
     rows_by_y: dict[int, list] = {}
     for word in words:
@@ -411,53 +407,6 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
                     destinations.add(destination)
         if len(destinations) == 1:
             y_to_group_key[y_key] = destinations.pop()
-
-    text_y_keys = [y_key for y_key in sorted(rows_by_y) if y_key not in numeric_y_keys]
-
-    def _median_height(y_key: int) -> float:
-        heights = sorted(word[3] - word[1] for word in rows_by_y[y_key])
-        return heights[len(heights) // 2]
-
-    for y_key in text_y_keys:
-        if y_to_group_key[y_key] != y_key:
-            continue
-        destinations = []
-        fold_height = _median_height(y_key)
-        for other in text_y_keys:
-            if other >= y_key:
-                continue
-            # Check the resolved destination, not the candidate key: ``other``
-            # may already have been remapped onto a numeric-bearing group by
-            # the metadata fold above. Hopping through it would land this
-            # annotation inside a data row.
-            resolved = y_to_group_key[other]
-            if resolved in numeric_y_keys:
-                continue
-            dest_words = rows_by_y[other]
-            # Subscript sits UNDER a glyph: strictly shorter type, every
-            # folding word's x-span contained in some destination word,
-            # boxes overlap in y. A running annotation under the line's
-            # union span ("see note a") is not contained in any one parent
-            # word and is left separate — geometry cannot prove it is a
-            # subscript, so the fold abstains on that group.
-            if (
-                fold_height < _median_height(other)
-                and all(
-                    any(
-                        dest_word[0] <= word[0] and word[2] <= dest_word[2]
-                        for dest_word in dest_words
-                    )
-                    for word in rows_by_y[y_key]
-                )
-                and any(
-                    _boxes_vertically_overlap(word, other_word)
-                    for word in rows_by_y[y_key]
-                    for other_word in dest_words
-                )
-            ):
-                destinations.append(other)
-        if len(destinations) == 1:
-            y_to_group_key[y_key] = y_to_group_key[destinations[0]]
 
     group_keys = sorted(set(y_to_group_key.values()))
     group_to_band = {group_key: idx for idx, group_key in enumerate(group_keys)}

@@ -1492,10 +1492,13 @@ def test_region_edge_stub_is_kept_whether_or_not_x0_sits_just_outside():
     assert _label(just_out) == "3Y Treasury"
 
 
-def test_math_font_subscript_band_folds_into_the_line_above():
-    """VI-A2 shape 4. ``1t`` sits under ``Rotated PCs`` (shorter, x-contained,
-    boxes overlap in y). Folding it in vs parking it 20 pt below is the
-    difference: only the overlapping geometry joins the printed line."""
+def test_numeric_free_text_groups_are_not_folded_together():
+    """Abstain: overlapping ``1t`` under ``Rotated PCs`` stays its own group.
+
+    On the measured fixture no page-derived test separates a subscript from
+    a short annotation, so overlapping vs parked-below must keep the same
+    number of bands — the parent label is unchanged either way.
+    """
     from socr.tables.binding import _assign_bands, _native_rows
 
     header = [
@@ -1520,21 +1523,14 @@ def test_math_font_subscript_band_folds_into_the_line_above():
 
     n_overlap, _ = _assign_bands(header + rotated + subscript_overlap + data)
     n_below, _ = _assign_bands(header + rotated + subscript_below + data)
-    assert len(n_overlap) == len(n_below) - 1
+    assert len(n_overlap) == len(n_below)
 
-    md = """
-|          | 3-M  | 2-YR |
-|----------|------|------|
-| Rotated  |      |      |
-| Action   | 1.48 | 1.00 |
-"""
     overlap_rows, _, _ = _native_rows(header + rotated + subscript_overlap + data)
-    below_rows, _, _ = _native_rows(header + rotated + subscript_below + data)
-    overlap_labels = [row.row_path[-1] for row in overlap_rows]
-    below_labels = [row.row_path[-1] for row in below_rows]
-    assert overlap_labels != below_labels
-    assert any("Rotated" in label and "1t" in label for label in overlap_labels)
-    assert any(label.strip() == "1t" for label in below_labels)
+    without_rows, _, _ = _native_rows(header + rotated + data)
+    overlap_rotated = [row.row_path[-1] for row in overlap_rows if "Rotated" in row.row_path[-1]]
+    without_rotated = [row.row_path[-1] for row in without_rows if "Rotated" in row.row_path[-1]]
+    assert overlap_rotated == without_rotated
+    assert any(row.row_path[-1].strip() == "1t" for row in overlap_rows)
 
 
 def test_text_fold_does_not_hop_into_a_numeric_row():
@@ -1558,9 +1554,8 @@ def test_text_fold_does_not_hop_into_a_numeric_row():
 
 
 def test_annotation_under_label_is_not_folded():
-    """Negative control: 'see note a' under a label satisfies union-span
-    overlap but is not a subscript (no annotation word sits inside one
-    parent word). Native label with vs without the annotation is identical."""
+    """Negative control: 'see note a' under a label. Native label with vs
+    without the annotation is identical."""
     from socr.tables.binding import _native_rows, _words_in_region
 
     payload = _a2_load("annotation_under_label.json")
@@ -1579,6 +1574,37 @@ def test_annotation_under_label_is_not_folded():
     assert _label(words) == "Large T"
     assert "see" not in _label(words)
     assert "note" not in _label(words)
+
+
+def test_short_annotation_under_numeric_free_parent_is_not_folded():
+    """Negative control that actually reaches the text-band path: a pure
+    label row (no numeric tokens) with a shorter ``(a)`` wholly contained
+    under one parent word, y-boxes overlapping. Required: the annotation
+    stays separate — parent label identical with vs without ``(a)``."""
+    from socr.tables.binding import _assign_bands, _native_rows, _words_in_region
+    from socr.tables.native_verifier import is_numeric_token
+
+    payload = _a2_load("short_annotation_under_text_parent.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    parent_y = round(100.0)
+    assert not any(is_numeric_token(word[4]) for word in words if round(word[1]) == parent_y), (
+        "fixture parent row must be numeric-free or this control never hits the fold"
+    )
+
+    without = [word for word in words if word[4] != "(a)"]
+    _centers, y_to_band = _assign_bands(_words_in_region(words, region))
+    assert y_to_band[round(107.0)] != y_to_band[parent_y]
+
+    def _rotated_label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        for row in rows:
+            if row.row_path and "Rotated" in row.row_path[-1]:
+                return row.row_path[-1]
+        raise AssertionError(f"no Rotated row in {[row.row_path for row in rows]}")
+
+    assert _rotated_label(words) == _rotated_label(without) == "Rotated"
+    assert "(a)" not in _rotated_label(words)
 
 
 def test_shape2_numeric_inside_label_is_not_swallowed_by_widening():

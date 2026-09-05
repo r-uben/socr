@@ -221,14 +221,13 @@ def test_header_repair_survives_demotion_end_to_end():
     ]
 
 
-def test_binder_does_not_make_a_math_font_subscript_the_first_data_row():
-    """VI-A2 / GH-146 on the binder: a shorter ``1t`` band sitting under
-    ``Rotated PCs`` is the same printed line, not a shredded first data row.
-
-    Difference: overlapping subscript geometry joins the parent label;
-    the same ``1t`` parked below the line stays a separate row.
+def test_binder_abstains_on_a_math_font_subscript_band():
+    """VI-A2 / GH-146: ``1t`` under ``Rotated PCs`` is not folded. Geometry
+    cannot tell a subscript from a short annotation, so both groups stay
+    separate. Difference: overlapping vs parked-below keep a standalone
+    ``1t`` row — the parent label is unchanged.
     """
-    from socr.tables.binding import _native_rows, bind
+    from socr.tables.binding import _native_rows
 
     def _w(x0, y0, x1, y1, text, block=0, line=0):
         return (x0, y0, x1, y1, text, block, line, 0)
@@ -247,22 +246,12 @@ def test_binder_does_not_make_a_math_font_subscript_the_first_data_row():
 
     overlap_rows, _, _ = _native_rows(shared + overlap)
     below_rows, _, _ = _native_rows(shared + below)
+    without_rows, _, _ = _native_rows(shared)
     overlap_labels = [row.row_path[-1] for row in overlap_rows]
     below_labels = [row.row_path[-1] for row in below_rows]
+    without_rotated = [row.row_path[-1] for row in without_rows if "Rotated" in row.row_path[-1]]
+    overlap_rotated = [label for label in overlap_labels if "Rotated" in label]
 
-    assert overlap_labels != below_labels
-    assert not any(label.strip() == "1t" for label in overlap_labels)
-    assert any("1t" in label for label in below_labels)
-
-    md = """
-|                  | 3-M  | 2-YR |
-|------------------|------|------|
-| Rotated PCs 1t   |      |      |
-| Action           | 1.48 | 1.00 |
-"""
-    overlap_bind = bind(shared + overlap, md)
-    below_bind = bind(shared + below, md)
-    overlap_natives = {c.row_path[-1] for c in overlap_bind.row_label_contradictions}
-    below_natives = {c.row_path[-1] for c in below_bind.row_label_contradictions}
-    assert "1t" not in overlap_natives
-    assert overlap_natives != below_natives or below_bind.row_label_contradictions != []
+    assert any(label.strip() == "1t" for label in overlap_labels)
+    assert any(label.strip() == "1t" for label in below_labels)
+    assert overlap_rotated == without_rotated
