@@ -12,19 +12,20 @@ Base: `origin/main@cc1c632` (rebased off `a601728`). Branch `feat/vi-C2a-line-ba
   `region` into bands.
 - `row_bands_from_lines(page, region)` — groups PDF text lines inside `region` into bands.
   Two lines join only when their boxes overlap in y by more than the overlap any two
-  adjacent printed rows share. Adjacent rows are consecutive unique-baseline groups at
-  the region's line pitch (the modal unique-baseline gap). Fewer than three lines
-  cannot establish a pitch → `[]` (abstain).
+  adjacent printed rows share, and only when the line pitch is certified (unique modal
+  unique-baseline gap). A tie, no gap occurring more than once, or two leading gaps
+  closer than a line height, refuses every merge (one band per unique baseline). Fewer
+  than three lines cannot establish a pitch → `[]` (abstain).
 - `row_bands(page, region)` — the C1 §(f) decision-1 dispatcher (rules-else-lines): trusts
   `row_bands_from_rules`'s output only when it corresponds 1:1 with `row_bands_from_lines`'s
   (same count, each rule band contains its line-band counterpart); otherwise returns the
   line bands. No text layer ⇒ `[]` (abstain input, never a guess).
 - `ordinal_origin(page, region)` — the y of the **second** horizontal-rule group in
-  `region`. Two consecutive rules are one drawn border iff (a) no text-line baseline in
-  the region lies between them **and** (b) their gap is smaller than the smallest
-  text-line height in the region (a gap no printed line could fit in). No text lines
-  → `None` (cannot certify an origin). `None` also when fewer than two rules or two
-  groups exist.
+  `region`. Two consecutive rules merge when no text-line baseline lies between them
+  and the gap is smaller than the smallest text-line height — the same geometry as a
+  doubled hairline *or* an empty narrow row; a caller can rule out two content-separated
+  rules, not which of those two readings it is. No text lines → `None`. `None` also
+  when fewer than two rules or two groups exist.
 - `label_column_edge(page, region)` — `R = min x0` over every non-leftmost text line of
   any printed row, shrunk to a whitespace edge (iterate while some line straddles `R`).
   `None` on a one-column region, when no such `R > region.x0` exists, or when `R`
@@ -48,19 +49,24 @@ rules on 24 pt type). A ratio jump on the sorted gaps needs a distribution: with
 two gaps it always declares a class break, so a plain 3-rule 15/45 table merges top+mid
 and returns the bottomrule as origin.
 
-The criterion that does not need a distribution: two consecutive rules are one drawn
-border iff (a) no text-line baseline in the region lies between them **and** (b) their
-gap is smaller than the smallest text-line height in the region — a gap no printed line
-could fit in. Otherwise they are distinct. If neither condition can be evaluated (no
-text lines) `ordinal_origin` returns `None` (abstain), never a guess. Doubled booktabs
-pairs on the frozen corpus have no baseline between them and a 2.4–2.5 pt gap below
-every line height on the page; every other consecutive pair has a baseline between them
-and/or a gap larger than a line. C1's measured origins are unchanged.
+The criterion that does not need a distribution: two consecutive rules merge when no
+text-line baseline lies between them and the gap is smaller than the smallest text-line
+height. That is **not** iff "doubled hairline": an intentionally empty narrow row has
+the same geometry. A caller can conclude the pair is not two content-separated rules;
+it cannot tell doubled hairline from empty narrow row. `ordinal_origin` still merges
+on True because both readings share a second-group origin below the pair. No text
+lines → `None`. Doubled booktabs pairs on the frozen corpus have no baseline between
+them and a 2.4–2.5 pt gap below every line height; every other consecutive pair has a
+baseline between them and/or a gap larger than a line. C1's measured origins are
+unchanged.
 
-Row bands use the same page-derived discipline: two lines share a band only when their
-boxes overlap in y by more than the overlap adjacent printed rows share, adjacent being
-consecutive unique-baseline groups at the modal unique-baseline gap. A uniform 9.5 pt
-pitch on 10 pt type is six printed rows, six bands — not three.
+Row bands: two lines share a band only when their boxes overlap in y by more than the
+overlap adjacent printed rows share, and only when the unique-baseline gap has a
+certified unique mode. A tie, every gap unique, or two leading gaps closer than a line
+height (and closer than the smallest observed gap — jitter of one pitch, not a row
+step vs a section step) certifies no merge: over-split, the ordinal chain abstains.
+A uniform 9.5 pt pitch on 10 pt type is six bands. Baselines 0 / 9.5 / 19.1 with 10 pt
+boxes are three bands, not two.
 
 ## Verification
 

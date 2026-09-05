@@ -340,15 +340,15 @@ def ordinal_origin(page, region: tuple[float, float, float, float]) -> float | N
     """The y of the second horizontal-rule group inside ``region`` — the
     header rule ordinals are counted from (C1 §(a)).
 
-    Two consecutive rules are one drawn border (booktabs' doubled
-    ``\\toprule``) iff no text-line baseline in the region lies between
-    them *and* their gap is smaller than the smallest text-line height in
-    the region — a gap no printed line could fit in. Otherwise they are
-    distinct. Both conditions are page-derived; neither needs a gap
-    distribution. No text lines in the region means the conditions cannot
-    be evaluated, so this returns ``None`` (no certified origin → abstain),
-    never a guess. ``None`` also when fewer than two rules, or fewer than
-    two groups, exist.
+    Two consecutive rules merge as one group when no text-line baseline
+    lies between them *and* the gap is smaller than the smallest
+    text-line height in the region. That is not iff "doubled hairline":
+    an empty narrow row has the same geometry. A caller can conclude the
+    pair is not two content-separated rules; it cannot tell doubled
+    hairline from empty narrow row. No text lines means the conditions
+    cannot be evaluated, so this returns ``None`` (abstain), never a
+    guess. ``None`` also when fewer than two rules, or fewer than two
+    groups, exist.
     """
     x0, y0, x1, y1 = region
     rules = sorted(
@@ -457,10 +457,13 @@ def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
     Two lines belong to one band only if their boxes overlap in y by more
     than the overlap any two *adjacent printed rows* share. Adjacent rows
     are consecutive unique-baseline groups whose baseline gap equals the
-    region's line pitch — the modal unique-baseline-to-baseline distance
-    (on a tie, the larger gap: the row step, not a wrap/subscript). Fewer
-    than three lines cannot establish a pitch: return no groups (abstain
-    input, never a guess).
+    region's certified line pitch (the unique modal unique-baseline gap).
+    When that pitch is ambiguous — a tie, no gap value occurring more than
+    once, or the two most frequent gaps differing by less than the smallest
+    line height — no merge is certified: each unique baseline is its own
+    band (over-split; the ordinal chain abstains). Fewer than three lines
+    cannot establish a pitch: return no groups (abstain input, never a
+    guess).
     """
     if len(lines) < 3:
         return []
@@ -472,6 +475,12 @@ def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
     if len(baselines) == 1:
         return [ordered]
     gaps = [b - a for a, b in zip(baselines, baselines[1:])]
+    min_height = min(ln["bbox"][3] - ln["bbox"][1] for ln in ordered)
+    reason = _pitch_ambiguity(gaps, min_height)
+    if reason is not None:
+        logger.debug("line pitch ambiguous (%s): one band per unique baseline", reason)
+        return [list(by_base[b]) for b in baselines]
+
     pitch = _modal_value(gaps)
 
     def _union_box(key: float) -> tuple[float, float, float, float]:
@@ -511,17 +520,55 @@ def _modal_value(values: list[float]) -> float:
     return max(v for v, n in counts.items() if n == best)
 
 
+def _pitch_ambiguity(gaps: list[float], min_line_height: float) -> str | None:
+    """Reason the unique-baseline gaps do not certify a line pitch, or None.
+
+    A pitch is ambiguous when (1) two gap values share the top frequency
+    (a tie), (2) no gap value occurs more than once, or (3) the two most
+    frequent gaps differ by less than the smallest line height *and* by
+    less than the smallest observed gap — they are jitter of one pitch,
+    not a row step vs a section step. Over-split rather than guess.
+    """
+    if not gaps:
+        return "no gaps"
+    counts: dict[float, int] = {}
+    for g in gaps:
+        counts[g] = counts.get(g, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], -kv[0]))
+    _top_g, top_n = ranked[0]
+    if top_n == 1:
+        return "no gap value occurs more than once"
+    tied = [g for g, n in ranked if n == top_n]
+    if len(tied) > 1:
+        return "tied modal gap"
+    if len(ranked) >= 2:
+        g1, _n1 = ranked[0]
+        g2, _n2 = ranked[1]
+        delta = abs(g1 - g2)
+        smallest_gap = min(gaps)
+        if delta < min_line_height and delta < smallest_gap:
+            return "top two gaps differ by less than smallest line height"
+    return None
+
+
 def _y_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
     """Shared vertical span of two ``(x0, y0, x1, y1)`` boxes, or 0."""
     return max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
 
 
 def _rules_are_one_border(y_a: float, y_b: float, lines: list[dict]) -> bool:
-    """True iff *y_a*..*y_b* is one drawn border, not two distinct rules.
+    """Whether *y_a*..*y_b* should merge as one rule group for the origin.
 
-    No text-line baseline between them, and the gap is smaller than the
-    smallest text-line height in the region (a gap no printed line could
-    fit in). *lines* must be non-empty — the caller abstains otherwise.
+    True when no text-line baseline lies between the two y's and the gap
+    is smaller than the smallest text-line height in the region. That is
+    not an iff for "doubled hairline border": the same geometry is an
+    intentionally empty narrow row (no text, gap below line height). A
+    caller **can** conclude the pair is not two content-separated rules
+    (no line fits, no baseline between). A caller **cannot** conclude
+    doubled hairline rather than an empty narrow row; ``ordinal_origin``
+    still merges on True because both readings share a second-group
+    origin below the pair. *lines* must be non-empty — the caller
+    abstains otherwise.
     """
     min_height = min(ln["bbox"][3] - ln["bbox"][1] for ln in lines)
     if min_height <= 0:

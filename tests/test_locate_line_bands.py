@@ -24,6 +24,7 @@ import pytest
 
 from socr.tables.locate import (
     RowBand,
+    _group_lines_by_baseline,
     band_index_for,
     label_column_edge,
     ordinal_origin,
@@ -213,20 +214,70 @@ def test_row_bands_uniform_pitch_one_band_per_printed_row():
 
 
 def test_row_bands_subscript_joins_its_label():
-    """A subscript under a label is the same printed row (doc04 shape)."""
+    """A subscript under a label is the same printed row (doc04 shape).
+
+    Four printed rows so the row pitch occurs more than once and is
+    certified; a two-row fixture has unique gaps and would over-split.
+    """
     _, page = _new_page()
     page.insert_text((_LABEL_X, 140.0), "GDP", fontsize=10)
     page.insert_text((_LABEL_X + 12.0, 144.0), "t", fontsize=7)
     page.insert_text((_COL1_X, 140.0), "1.0", fontsize=10)
-    page.insert_text((_LABEL_X, 160.0), "CPI", fontsize=10)
-    page.insert_text((_COL1_X, 160.0), "2.0", fontsize=10)
-    region = (_REGION_X0, 120.0, _REGION_X1, 180.0)
+    for i, y in enumerate((160.0, 180.0, 200.0)):
+        page.insert_text((_LABEL_X, y), f"R{i}", fontsize=10)
+        page.insert_text((_COL1_X, y), f"{i}.0", fontsize=10)
+    region = (_REGION_X0, 120.0, _REGION_X1, 220.0)
 
     bands = row_bands_from_lines(page, region)
-    assert len(bands) == 2
+    assert len(bands) == 4
     first = bands[0]
     assert first.y0 <= 140.0 <= first.y1
     assert first.y0 <= 144.0 <= first.y1
+
+
+def _box_line(baseline: float, y0: float, y1: float) -> dict:
+    """A synthetic PDF line with an exact ``[y0, y1]`` box."""
+    return {
+        "baseline": baseline,
+        "size": y1 - y0,
+        "bbox": (40.0, y0, 80.0, y1),
+        "x0": 40.0,
+        "x1": 80.0,
+    }
+
+
+def test_row_bands_nonuniform_pitch_does_not_merge():
+    """Baselines 0 / 9.5 / 19.1, 10 pt-high boxes → 3 bands.
+
+    Picking the larger gap (9.6) as pitch sets the overlap threshold to
+    0.4 and merges the first two rows (overlap 0.5). No gap value occurs
+    more than once, so no merge is certified.
+    """
+    lines = [
+        _box_line(0.0, 0.0, 10.0),
+        _box_line(9.5, 9.5, 19.5),
+        _box_line(19.1, 19.1, 29.1),
+    ]
+    groups = _group_lines_by_baseline(lines)
+    assert len(groups) == 3
+    assert [ln["baseline"] for g in groups for ln in g] == [0.0, 9.5, 19.1]
+
+
+def test_row_bands_tied_modal_pitch_does_not_merge():
+    """Tied modal gaps 9.5 / 9.6 (two each), 10 pt-high boxes → 5 bands.
+
+    Picking 9.6 sets the overlap threshold to 0.4 and merges every 9.5 pt
+    pair (overlap 0.5). A tie does not certify a pitch.
+    """
+    lines = [
+        _box_line(0.0, 0.0, 10.0),
+        _box_line(9.5, 9.5, 19.5),
+        _box_line(19.1, 19.1, 29.1),
+        _box_line(28.6, 28.6, 38.6),
+        _box_line(38.2, 38.2, 48.2),
+    ]
+    groups = _group_lines_by_baseline(lines)
+    assert len(groups) == 5
 
 
 def test_ordinal_origin_three_rule_plain_table_origin_is_midrule():
@@ -297,7 +348,13 @@ def test_label_column_edge_none_when_wrapped_label_collapses_r():
     page.insert_text((_LABEL_X, 170.0), "Other row", fontsize=9)
     page.insert_text((_COL1_X, 170.0), "4.0", fontsize=9)
     page.insert_text((_COL2_X, 170.0), "5.0", fontsize=9)
-    region = (_REGION_X0, 120.0, _REGION_X1, 190.0)
+    page.insert_text((_LABEL_X, 200.0), "Third", fontsize=9)
+    page.insert_text((_COL1_X, 200.0), "6.0", fontsize=9)
+    page.insert_text((_COL2_X, 200.0), "7.0", fontsize=9)
+    page.insert_text((_LABEL_X, 230.0), "Fourth", fontsize=9)
+    page.insert_text((_COL1_X, 230.0), "8.0", fontsize=9)
+    page.insert_text((_COL2_X, 230.0), "9.0", fontsize=9)
+    region = (_REGION_X0, 120.0, _REGION_X1, 250.0)
 
     assert label_column_edge(page, region) is None
 
