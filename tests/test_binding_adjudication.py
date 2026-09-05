@@ -156,6 +156,31 @@ class TestTokensAgree:
         trailing footnote digit keeps agreeing exactly as before the fix."""
         assert tokens_agree("Coefficient1", "Coefficient", kind="row_label")
 
+    def test_internal_chunk_before_a_greek_token_keeps_its_footnote_marker_digit(
+        self,
+    ) -> None:
+        """GH-585 review round 6: round 5 fixed the bare-digit suffix rule
+        but the end-anchored footnote-MARKER regex (``<sup>1</sup>``, ``$^1$``,
+        unicode superscripts) also ran on internal chunks, so
+        ``Model<sup>1</sup> α``/``Model<sup>2</sup> α`` still collapsed."""
+        assert not tokens_agree(
+            r"Model<sup>1</sup> $\alpha$", r"Model<sup>2</sup> $\alpha$", kind="row_label"
+        )
+
+    def test_trailing_footnote_marker_on_the_labels_own_end_still_folds(self) -> None:
+        """GH-585 review round 6: a genuine footnote marker on the label's
+        own end (the final chunk) still folds away exactly as before."""
+        assert tokens_agree("Coefficient<sup>1</sup>", "Coefficient", kind="row_label")
+
+    def test_bare_greek_symbol_with_a_trailing_digit_is_not_treated_as_a_footnote(
+        self,
+    ) -> None:
+        """GH-585 review round 6: the seat explicitly wants ``α1`` and ``α``
+        to stay distinct rather than have the trailing digit read as a
+        footnote on a bare symbol -- ``α1`` is not a lone Greek token, so it
+        is not bare-symbolic either; it simply must not agree with ``α``."""
+        assert not tokens_agree("α1", "α", kind="row_label")
+
 
 class TestAdjudicate:
     def test_all_abstained_is_held_and_never_transcribes_native_bbox(self) -> None:

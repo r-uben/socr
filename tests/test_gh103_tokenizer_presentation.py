@@ -420,6 +420,35 @@ def test_gh585_trailing_footnote_digit_on_the_labels_own_end_still_folds():
     assert label_key(r"$\alpha$ Coefficient1") == label_key(r"$\alpha$ Coefficient")
 
 
+def test_gh585_internal_chunk_keeps_its_footnote_marker_digit():
+    """GH-585 review round 6: round 5 withheld the bare-digit suffix rule
+    from internal chunks but ``normalize_label_chunk`` still ran the
+    end-anchored footnote-MARKER regex (``<sup>1</sup>``, ``$^1$``, unicode
+    superscripts), so ``"Model<sup>1</sup> α"``/``"Model<sup>2</sup> α"``
+    still collapsed to the same key. Both end-of-label footnote rules must
+    stay out of internal chunks."""
+    left = label_key(r"Model<sup>1</sup> $\alpha$")
+    right = label_key(r"Model<sup>2</sup> $\alpha$")
+    assert left != right
+    assert left == (("lit", "modelsup1sup"), ("greek", "alpha"))
+    assert right == (("lit", "modelsup2sup"), ("greek", "alpha"))
+
+
+def test_gh585_trailing_footnote_marker_on_the_labels_own_end_still_folds():
+    """GH-585 review round 6: a genuine footnote MARKER (not a bare digit)
+    on the label's own end -- the final chunk -- must still fold away
+    exactly as ``normalize_label`` always did."""
+    assert label_key("Coefficient<sup>1</sup>") == label_key("Coefficient")
+
+
+def test_gh585_bare_greek_symbol_with_a_trailing_digit_stays_distinct():
+    """GH-585 review round 6: the seat explicitly wants a trailing digit
+    right after a bare Greek symbol NOT to be read as a footnote -- ``α1``
+    has a literal ``"1"`` chunk of its own and must not key the same as the
+    bare symbol ``α``."""
+    assert label_key("α1") != label_key("α")
+
+
 def test_content_labels_were_never_the_bug():
     """Documented for the record: the content tokenizer scans, so bold was fine.
 

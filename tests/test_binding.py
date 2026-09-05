@@ -559,7 +559,53 @@ def test_gh585_trailing_footnote_digit_on_the_labels_own_end_still_folds():
     assert result.structural_agreement is True
 
 
-# ---------------------------------------------------------------------------
+def test_gh585_internal_chunk_before_a_greek_token_keeps_its_footnote_marker_digit():
+    """GH-585 review round 6: round 5 fixed the bare-digit suffix rule but
+    ``normalize_label_chunk`` still ran the end-anchored footnote-MARKER
+    regex (``<sup>1</sup>``, ``$^1$``, unicode superscripts) on internal
+    chunks, so ``Model<sup>1</sup> α``/``Model<sup>2</sup> α`` still
+    collapsed to the same key. Both end-of-label footnote rules must stay
+    out of internal chunks, not just the suffix rule."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Model<sup>1</sup> α"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                              | OLS  |
+|------------------------------|------|
+| Model<sup>2</sup> $\alpha$   | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert len(result.row_label_contradictions) == 1
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is False
+
+
+def test_gh585_trailing_footnote_marker_on_the_labels_own_end_still_folds():
+    """GH-585 review round 6: a genuine footnote MARKER (not a bare digit)
+    on the label's own end -- the final chunk -- must still fold away
+    exactly as ``normalize_label`` always did."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Coefficient<sup>1</sup>"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|              | OLS  |
+|--------------|------|
+| Coefficient  | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is True
+
+
 # GH-582: inline-math wrapping is presentation, not a value/label change
 # ---------------------------------------------------------------------------
 

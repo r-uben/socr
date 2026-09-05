@@ -63,11 +63,16 @@ _FOOTNOTE_MARKER_RE = re.compile(
 # "Panel 1" and "Panel 2" stay distinct while "Income tax1" folds.
 
 
-def _fold_emphasis_and_markers(label: str) -> str:
-    """Strip emphasis and footnote markers, common to every normalizer below."""
+def _fold_emphasis(label: str) -> str:
+    """Strip emphasis and case-fold, common to every normalizer below.
+
+    Contains none of the end-of-label footnote handling
+    (``_FOOTNOTE_MARKER_RE`` / ``_FOOTNOTE_SUFFIX_RE``) -- those are
+    whole-label rules and belong only in ``normalize_label`` (GH-585 review
+    round 6).
+    """
     text = label.replace("**", "").replace("*", "").replace("__", "").strip()
-    text = text.lower()
-    return _FOOTNOTE_MARKER_RE.sub("", text).strip()
+    return text.lower()
 
 
 def normalize_label(label: str) -> str:
@@ -85,26 +90,31 @@ def normalize_label(label: str) -> str:
     escalation accept rule runs on this metric, so an engine was being penalised for
     its footnote syntax.
     """
-    text = _fold_emphasis_and_markers(label)
+    text = _fold_emphasis(label)
+    text = _FOOTNOTE_MARKER_RE.sub("", text).strip()
     text = _FOOTNOTE_SUFFIX_RE.sub("", text)
     return _NON_ALNUM_RE.sub("", text)
 
 
 def normalize_label_chunk(label: str) -> str:
-    """Fold one INTERNAL chunk of a structured label key (GH-585 review round 5).
+    """Fold one INTERNAL chunk of a structured label key (GH-585 review rounds 5-6).
 
-    Same emphasis/marker/punctuation folding as ``normalize_label``, but
-    withholds the trailing bare-digit footnote-suffix rule
-    (``_FOOTNOTE_SUFFIX_RE``). That rule is a whole-label rule: it only means
-    "footnote" when the digit sits at the true end of the label. Applied to
-    an internal chunk of ``label_key``'s tokenized label -- e.g. ``"Model1 "``
-    in ``"Model1 $\\alpha$"``, where the digit is followed by a Greek token,
-    not the label's end -- it discards real content and collapses distinct
-    labels (``"Model1 α"`` and ``"Model2 α"``) into the same key. Callers
-    apply ``normalize_label`` (with the suffix rule) only to the final chunk,
-    the one that actually reaches the label's end.
+    Same emphasis/case/punctuation folding as ``normalize_label``, but
+    withholds BOTH end-of-label footnote rules: the marker regex
+    (``_FOOTNOTE_MARKER_RE`` -- ``<sup>1</sup>``, ``$^1$``, unicode
+    superscripts) and the bare-digit suffix rule (``_FOOTNOTE_SUFFIX_RE``).
+    Both are whole-label rules: they only mean "footnote" when the marker or
+    digit sits at the label's own end. Applied to an internal chunk of
+    ``label_key``'s tokenized label -- e.g. ``"Model1 "`` or
+    ``"Model<sup>1</sup> "`` in ``"Model1 $\\alpha$"`` /
+    ``"Model<sup>1</sup> $\\alpha$"``, where the marker/digit is followed by
+    a Greek token, not the label's end -- either rule discards real content
+    and collapses distinct labels (``"Model1 α"``/``"Model2 α"``,
+    ``"Model<sup>1</sup> α"``/``"Model<sup>2</sup> α"``) into the same key.
+    Callers apply ``normalize_label`` (with both rules) only to the final
+    chunk, the one that actually reaches the label's end.
     """
-    text = _fold_emphasis_and_markers(label)
+    text = _fold_emphasis(label)
     return _NON_ALNUM_RE.sub("", text)
 
 

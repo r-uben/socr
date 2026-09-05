@@ -160,6 +160,57 @@ unchanged from before this fix. Every earlier-round control still holds.
 - Full suite: see commit message / team-lead report for the run captured at
   commit time.
 
+## Round 6 (this commit)
+
+Codex seat reviewed `d655b1f` (round 5) and returned NO: same class of bug, one
+regex further. Round 5's `_fold_emphasis_and_markers` (the shared helper both
+`normalize_label` and `normalize_label_chunk` called) still ran the
+end-anchored footnote-MARKER regex (`_FOOTNOTE_MARKER_RE` --
+`<sup>1</sup>`/`$^1$`/unicode superscripts) unconditionally, including on
+`normalize_label_chunk`'s internal chunks. `"Model<sup>1</sup> α"` and
+`"Model<sup>2</sup> α"` still collapsed to the same key, for the identical
+reason round 5 fixed for the bare-digit suffix rule: the marker only means
+"footnote" when it sits at the label's own end, not when a Greek/command
+token follows.
+
+Fix: renamed the shared helper to `_fold_emphasis` (emphasis strip + case
+fold only, no footnote handling of any kind). Both `_FOOTNOTE_MARKER_RE` and
+`_FOOTNOTE_SUFFIX_RE` now live exclusively in `normalize_label`, applied only
+to the label's own end via `label_key`'s existing `final` chunk. `normalize_label_chunk`
+calls only `_fold_emphasis` + the punctuation strip -- no footnote handling
+at all, marker or suffix.
+
+Explicit requirement preserved: a bare Greek symbol immediately followed by
+a trailing digit (`α1` vs `α`) is NOT treated as a footnote -- `α1`'s digit
+becomes its own literal chunk (`(("greek","alpha"),("lit","1"))`), which is
+neither empty nor bare-symbolic, so it correctly fails to agree with the bare
+`α` key (`(("greek","alpha"),)`) without any special-casing.
+
+## Files changed (round 6)
+
+- `src/socr/tables/native_rows.py` — `_fold_emphasis_and_markers` renamed to
+  `_fold_emphasis` and stripped of both footnote regexes; both regexes moved
+  entirely into `normalize_label`; `normalize_label_chunk` calls only the
+  emphasis fold + punctuation strip.
+- `tests/test_gh103_tokenizer_presentation.py` — footnote-marker
+  internal/final-chunk unit tests on `label_key`; bare-symbol-plus-digit
+  distinctness unit test.
+- `tests/test_binding_adjudication.py` — same controls via `tokens_agree`.
+- `tests/test_binding.py` — same controls end-to-end via `bind()`.
+
+## Verification (round 6)
+
+- Targeted (`test_gh103_tokenizer_presentation.py` + `test_binding.py` +
+  `test_binding_adjudication.py`): 188 passed, 1 xfailed.
+- Broader native/table-metric suite (same 9 files as round 5): 196 passed.
+- Frozen-corpus harness: doc05 recorded 6 → fresh 4, doc07 recorded 5 → fresh
+  3, unchanged from rounds 3–5; C2b frozen prediction PASS against the
+  `73818b0` artifact.
+- `uvx ruff@0.16.0 format --check .` clean (580 files, after a
+  `ruff format` pass on `tests/test_binding.py`'s spacing).
+- Full suite: see commit message / team-lead report for the run captured at
+  commit time.
+
 ## Files changed (round 4)
 
 - `src/socr/tables/native_verifier.py` — `label_key`, `label_key_is_bare_symbolic`,
