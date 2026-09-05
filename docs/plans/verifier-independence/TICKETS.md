@@ -215,7 +215,7 @@ over {ruled, booktabs} × {row found, not} × {column found, not}, (c) the `bind
 `adjudication.py` / `orchestrator.py:5200-5310` fields and branches that change, (d) ≤ 3
 named decisions for the owner.
 
-### TICKET-C2a — line-band / column-edge / origin helpers + `BindingResult` surface · WIP · depends-on: C1 · wave 4
+### TICKET-C2a — line-band / column-edge / origin helpers + `BindingResult` surface · DONE (#616) · depends-on: C1 · wave 4
 **Problem:** C1 (rev 4, `logs/2026-09-05_C1-design.md` §(a)) measured that **no table on the
 corpus has per-row or vertical rules**, so the address must come from PDF text-line geometry
 inside the witness region, counted from an origin neither lane supplies. None of those helpers
@@ -336,7 +336,7 @@ agy wanted C3 as a strict `ACCEPTED ≥ 10/18` gate; Codex argued a live-run quo
 acceptance volume over justified acceptance and that the frozen replay is the only
 deterministic gate. Plan follows Codex; agy's number is kept as the *expectation*.
 
-### TICKET-A1c — replay harness: witness/locate failure is not a binder delta (#595) · TODO · depends-on: none · wave 4
+### TICKET-A1c — replay harness: witness/locate failure is not a binder delta (#595) · DONE (#612) · depends-on: none · wave 4
 **Problem:** `replay_table` returns `((), note)` when the current tree cannot produce a fresh
 bind (table_id missing among witnesses, witness not `LOCATED`, no native words), and
 `replay_page` still emits a normal comparison row with empty fresh items — so every recorded
