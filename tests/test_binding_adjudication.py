@@ -96,6 +96,21 @@ class TestTokensAgree:
         # tokens_agree's empty-key refusal (not a false match) still applies.
         assert not tokens_agree("β", r"$\beta$", kind="row_label")
 
+    def test_distinct_greek_letters_do_not_falsely_agree(self) -> None:
+        """GH-585 review round 2: before the Unicode transliteration step,
+        every Greek letter erased identically under ``normalize_label``'s
+        ASCII-only filter, so two DIFFERENT Greek-letter labels with the
+        same trailing text falsely agreed."""
+        assert not tokens_agree("α Coefficient", r"$\beta$ Coefficient", kind="row_label")
+        assert tokens_agree("α Coefficient", r"$\alpha$ Coefficient", kind="row_label")
+
+    def test_greek_variant_command_does_not_agree_with_its_base_letter(self) -> None:
+        """GH-585 review round 2: ``\\varepsilon`` is not established to be
+        the same symbol as ``\\epsilon`` in this corpus — they must stay
+        distinct, unlike the U+0394/U+2206 Delta pair which really is the
+        same printed glyph."""
+        assert not tokens_agree(r"$\epsilon$ x", r"$\varepsilon$ x", kind="row_label")
+
 
 class TestAdjudicate:
     def test_all_abstained_is_held_and_never_transcribes_native_bbox(self) -> None:

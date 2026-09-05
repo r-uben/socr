@@ -244,11 +244,19 @@ def test_gh585_a_real_text_difference_still_disagrees_after_the_map():
         (r"\Delta", "∆"),
         (r"\beta", "β"),
         (r"\Sigma", "Σ"),
-        (r"\varepsilon", "ε"),
     ],
 )
 def test_gh585_greek_command_table_maps_to_unicode(command, expected):
     assert strip_math_presentation(command, label=True) == expected
+
+
+def test_gh585_variant_greek_command_transliterates_to_its_own_distinct_name():
+    """GH-585 review round 2: ``\\varepsilon`` is a DIFFERENT glyph from
+    ``\\epsilon`` (not established to be the same symbol in this corpus,
+    unlike the U+0394/U+2206 Delta pair) — it must fold to its own
+    ``varepsilon`` name, never to the base letter's ``epsilon``."""
+    assert strip_math_presentation(r"\varepsilon", label=True) == "varepsilon"
+    assert strip_math_presentation(r"\epsilon", label=True) == "ε"
 
 
 @pytest.mark.parametrize(
@@ -268,6 +276,68 @@ def test_gh585_escaped_punctuation_unescapes(escaped, expected):
 @pytest.mark.parametrize("command", [r"\log", r"\ln", r"\exp"])
 def test_gh585_alphabetic_word_commands_drop_only_the_backslash(command):
     assert strip_math_presentation(command, label=True) == command[1:]
+
+
+def test_gh585_unsupported_word_command_keeps_its_backslash():
+    """GH-585 review round 2: only the standard LaTeX math-operator names
+    lose their backslash. An unverified/unsupported command (``\\logx`` --
+    not a real LaTeX macro, but shaped like one) must not gain an agreement
+    it never earned by having its backslash silently stripped too."""
+    assert strip_math_presentation(r"\logx", label=True) == r"\logx"
+    assert strip_math_presentation(r"\log", label=True) == "log"
+
+
+# ---------------------------------------------------------------------------
+# GH-585 review round 2: Greek-letter identity must survive the compare, and
+# the escape-unmap class also belongs on the numeric (``label=False``) path.
+# ---------------------------------------------------------------------------
+
+
+def test_gh585_different_greek_letters_with_identical_trailing_text_disagree():
+    """Before this fix, ``normalize_label``'s ASCII-only filter erased EVERY
+    Greek letter identically (both to ""), so ``α Coefficient`` and
+    ``$\\beta$ Coefficient`` folded to the same key and falsely agreed
+    regardless of which letter either side named. Transliterating each
+    Greek Unicode letter to its own ASCII name must make two different
+    letters keep disagreeing."""
+    alpha_key = normalize_label(strip_math_presentation("α Coefficient", label=True))
+    beta_key = normalize_label(strip_math_presentation(r"$\beta$ Coefficient", label=True))
+    assert alpha_key != beta_key
+    # And the same letter on both sides must still agree.
+    same_key = normalize_label(strip_math_presentation(r"$\alpha$ Coefficient", label=True))
+    assert alpha_key == same_key
+
+
+def test_gh585_bare_greek_symbol_label_is_not_turned_into_a_matchable_word():
+    """The transliteration must not defeat binding.py's bare-symbol-label
+    fail-closed rule: a label that IS a Greek letter and nothing else
+    (native ``β``, model ``$\\beta$``) must still normalize to an empty
+    key on both sides — same as before this fix — because a Greek letter
+    embedded inside a longer label is a different case (previous test)."""
+    native_key = normalize_label(strip_math_presentation("β", label=True))
+    model_key = normalize_label(strip_math_presentation(r"$\beta$", label=True))
+    assert native_key == "" and model_key == ""
+
+
+def test_gh585_real_greek_capital_delta_codepoint_aliases_the_increment_glyph():
+    """U+0394 (the actual GREEK CAPITAL LETTER DELTA) and U+2206 (INCREMENT,
+    what the corpus's native layer emits for ``\\Delta``) render identically
+    and must transliterate to the same name."""
+    assert strip_math_presentation("ΔSlope", label=True) == strip_math_presentation(
+        "∆Slope", label=True
+    )
+
+
+def test_gh585_escape_unmap_also_applies_to_the_numeric_cell_path():
+    """GH-585 review: a cell path escape (``12\\%``) must not be silently
+    invisible to the numeric tokenizer just because it was never wrapped in
+    ``$...$`` — ``label=False`` did not unescape at all before this fix."""
+    assert strip_math_presentation(r"12\%", label=False) == "12%"
+    assert is_numeric_token(r"12\%")
+    assert _normalize_numeric_token(r"12\%") == _normalize_numeric_token("12%")
+    # A plain, already-unescaped value is unaffected.
+    assert strip_math_presentation("12%", label=False) == "12%"
+    assert is_numeric_token("12%")
 
 
 def test_content_labels_were_never_the_bug():
