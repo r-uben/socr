@@ -285,6 +285,13 @@ disproved; (2) *wrong pointer* — the printed row above the disputed item has n
 one row inserted above the disputed item, native unchanged → `abstained`, call count 0.
 Any `process()` test patches `_available_engines_for_agentic`, `_resolve_judge_model`,
 `_transcribe_cell_token`. Resume skip identical with and without the new fields.
+**Prefix rule (added 2026-09-05 from the C2a panel, Codex seat):** C2a bands carry
+`ambiguity` where a sub-size boundary was merged heuristically or left unresolved. An
+uncertain merge makes the row COUNT uncertain, so every ordinal derived through it is
+uncertain: C2b must **abstain on any item whose prefix of bands from the header origin
+crosses an ambiguous band**, even when native and model indices agree. Fourth control:
+an ambiguous merge ABOVE an otherwise clean target → `abstained`, transcriber call count
+0, both lane indices agreeing.
 **Frozen-replay gate:** `socr-replay-binding` asserts the implementation matches the committed
 prediction item-for-item (address vs abstain, and the abstain reason class) on the 14 remaining
 items; every table A2 cleared stays cleared. **Feasibility checkpoint:** if fewer than one
