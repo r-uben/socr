@@ -48,14 +48,17 @@ def test_discover_pages_finds_all_fixture_pages():
         ("doc00", 2),
         ("doc00", 3),
         ("doc00", 4),
+        ("doc00", 5),
+        ("doc00", 6),
+        ("doc00", 7),
     }
 
 
 def test_replay_corpus_row_shape_matches_recorded_table_count():
     """Same contract the real corpus proves at 7 rows (one row per recorded
-    table): here, 4 recorded tables -> 4 rows, exactly."""
+    table): here, 7 recorded tables -> 7 rows, exactly."""
     rows = replay_corpus(FIXTURE_CORPUS)
-    assert len(rows) == 4
+    assert len(rows) == 7
     assert all(isinstance(r, ReplayRow) for r in rows)
 
 
@@ -211,6 +214,9 @@ def test_report_formats_without_raising():
     assert "p2-t0" in report
     assert "p3-t0" in report
     assert "p4-t0" in report
+    assert "p5-t99" in report
+    assert "p6-t0" in report
+    assert "p7-t0" in report
     assert "UNREPLAYABLE" in report
 
 
@@ -224,6 +230,59 @@ def test_main_cli_exits_zero_and_prints_rows(capsys):
     assert "p2-t0" in out
     assert "p3-t0" in out
     assert "p4-t0" in out
+    assert "p5-t99" in out
+    assert "p6-t0" in out
+    assert "p7-t0" in out
+
+
+@pytest.mark.parametrize(
+    ("page_num", "table_id", "note_fragment"),
+    [
+        (5, "p5-t99", "not found among this tree's witnesses"),
+        (6, "p6-t0", "no located box this tree"),
+        (7, "p7-t0", "no native words on this page"),
+    ],
+)
+def test_replay_table_failure_is_unreplayable_not_a_binder_delta(
+    monkeypatch, page_num, table_id, note_fragment
+):
+    """TICKET-A1c / GH-595: a non-empty replay_table note is UNREPLAYABLE,
+    never a comparison row with an empty fresh side."""
+    import socr.benchmark.replay_binding as replay_binding_module
+
+    def _bind_must_not_be_called(*args, **kwargs):
+        raise AssertionError("bind() was called for an unreplayable row")
+
+    monkeypatch.setattr(replay_binding_module, "bind", _bind_must_not_be_called)
+
+    sidecar_path = FIXTURE_CORPUS / "out" / "doc00" / "doc00" / "pages" / f"{page_num:05d}.json"
+    before = sidecar_path.read_bytes()
+
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == page_num)
+    rows = replay_page(record, labels=None)
+    row = next(r for r in rows if r.table_id == table_id)
+
+    assert row.unreplayable is True
+    assert row.added == ()
+    assert row.removed == ()
+    assert note_fragment in row.note
+
+    after = sidecar_path.read_bytes()
+    assert before == after
+
+
+def test_cli_prints_unreplayable_for_a1c_failures(capsys):
+    from socr.benchmark.replay_binding import main
+
+    exit_code = main([str(FIXTURE_CORPUS)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    for table_id in ("p5-t99", "p6-t0", "p7-t0"):
+        line = next(ln for ln in out.splitlines() if table_id in ln)
+        assert "UNREPLAYABLE" in line, line
+    assert "not found among this tree's witnesses" in out
+    assert "no located box this tree" in out
+    assert "no native words on this page" in out
 
 
 def test_labels_file_reported_when_absent_from_table(tmp_path):

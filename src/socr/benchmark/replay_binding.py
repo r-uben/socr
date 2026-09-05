@@ -69,6 +69,13 @@ ambiguous), or zero/more-than-one distinct cache candidate for the single
 agreed engine -> the row is `unreplayable` (`ReplayRow.unreplayable`) and
 `bind()` is never called for it.
 
+A non-empty note from `replay_table` (table_id missing among this
+tree's witnesses, witness not LOCATED, or the page has no native words)
+is the same outcome: `replay_page` marks the row `unreplayable` with
+that note, the same path provenance ambiguity already uses. An empty
+fresh side is NEVER compared against the frozen record as a binder
+delta — that would report every recorded item as cleared.
+
 **The persisted `binding_adjudication[<table_id]].items[]` records do NOT
 carry `native_bbox`** (`adjudication.ContradictionItem.to_record` omits
 it) -- so replay can only compare `(kind, native_token, model_token)` as a
@@ -142,9 +149,11 @@ class ReplayRow:
     final_disposition: str
     label_accuracy: str
     crop_coverage: str
-    #: True iff no single candidate markdown could be identified BY
-    #: PROVENANCE (see module docstring) — ``bind()`` was never called for
-    #: this row and every fresh_* field is a placeholder, not a result.
+    #: True iff ``bind()`` did not produce a comparable fresh side —
+    #: provenance could not identify a single candidate, or ``replay_table``
+    #: returned a non-empty note (table_id missing among witnesses, witness
+    #: not LOCATED, no native words). Every fresh_* field is a placeholder,
+    #: not a result; added/removed stay empty (never a binder delta).
     unreplayable: bool = False
     note: str = ""
 
@@ -331,6 +340,8 @@ def replay_table(
     Returns ``(items, note)``. ``note`` is empty on a clean replay and
     otherwise names why nothing could be bound (no such table_id, table not
     LOCATED this tree, or the page has no native words) — never raises.
+    Callers MUST treat a non-empty note as unreplayable: never compare
+    the empty ``items`` against the frozen record as a binder delta.
     """
     with open_pdf(pdf_path) as doc:
         words = doc[page_num - 1].get_text("words")
@@ -351,6 +362,33 @@ def _final_disposition(status: str) -> str:
     if status == "lifted":
         return "ACCEPTED (binding lifted — GH-359 ruling 5 clamp released)"
     return "UNVERIFIED (binding held — GH-359 ruling 5 clamp applies)"
+
+
+def _unreplayable_row(
+    record: PageRecord,
+    table_id: str,
+    recorded: dict,
+    recorded_item_count: int,
+    note: str,
+    label_accuracy: str,
+    crop_coverage: str,
+) -> ReplayRow:
+    return ReplayRow(
+        doc_slug=record.doc_slug,
+        page_num=record.page_num,
+        table_id=table_id,
+        recorded_status=str(recorded.get("status", "")),
+        recorded_item_count=recorded_item_count,
+        fresh_item_count=0,
+        multiset_match=False,
+        added=(),
+        removed=(),
+        final_disposition=_final_disposition(str(recorded.get("status", ""))),
+        label_accuracy=label_accuracy,
+        crop_coverage=crop_coverage,
+        unreplayable=True,
+        note=note,
+    )
 
 
 def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
@@ -377,21 +415,14 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
             # NEVER called for this row (see module docstring: candidate
             # selection must not depend on a binding result).
             rows.append(
-                ReplayRow(
-                    doc_slug=record.doc_slug,
-                    page_num=record.page_num,
-                    table_id=table_id,
-                    recorded_status=str(recorded.get("status", "")),
-                    recorded_item_count=len(recorded_items),
-                    fresh_item_count=0,
-                    multiset_match=False,
-                    added=(),
-                    removed=(),
-                    final_disposition=_final_disposition(str(recorded.get("status", ""))),
-                    label_accuracy=label_accuracy,
-                    crop_coverage=crop_coverage,
-                    unreplayable=True,
-                    note=note,
+                _unreplayable_row(
+                    record,
+                    table_id,
+                    recorded,
+                    len(recorded_items),
+                    note,
+                    label_accuracy,
+                    crop_coverage,
                 )
             )
             continue
@@ -400,6 +431,19 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
             record.pdf_path, record.page_num, candidate_markdown, table_id
         )
         note = " | ".join(part for part in (note, bind_note) if part)
+        if bind_note:
+            rows.append(
+                _unreplayable_row(
+                    record,
+                    table_id,
+                    recorded,
+                    len(recorded_items),
+                    note,
+                    label_accuracy,
+                    crop_coverage,
+                )
+            )
+            continue
         fresh_counter = Counter(_item_key(item) for item in fresh_items)
 
         added = tuple(sorted((fresh_counter - recorded_counter).elements()))

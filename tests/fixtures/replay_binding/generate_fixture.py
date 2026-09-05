@@ -33,6 +33,12 @@ Lays out a MINIATURE version of a frozen corpus directory
   DIFFERENT engines. Each engine has exactly one matching cache candidate
   (so the cache side ALONE would look unambiguous) — provenance itself is
   what is ambiguous here, one level up from the cache-collision case.
+- ``pages/00005.json`` — TICKET-A1c: real located table, sidecar keyed by a
+  table_id (``p5-t99``) that is not among this tree's witnesses.
+- ``pages/00006.json`` — TICKET-A1c: markdown table block present, page is
+  prose only, so the witness exists but is not LOCATED.
+- ``pages/00007.json`` — TICKET-A1c: ruled grid with no ``insert_text``,
+  so locate can still produce a box and the native word layer is empty.
 """
 
 from __future__ import annotations
@@ -93,6 +99,32 @@ P4_GEMINI_CANDIDATE_LABELS = {
     "Real yield": "Real yield",
 }
 
+#: page 5: TICKET-A1c — table_id absent among witnesses. Real located table
+#: (p5-t0 WOULD replay); sidecar records it under a table_id witnesses never emit.
+P5_ROWS = [
+    {"label": "Policy rate", "Value": "2.10"},
+    {"label": "Output gap", "Value": "0.04"},
+]
+P5_CANDIDATE_LABELS = {"Policy rate": "1Y Policy rate", "Output gap": "Output gap"}
+P5_ABSENT_TABLE_ID = "p5-t99"
+
+#: page 6: TICKET-A1c — witness present but not LOCATED. Markdown has a table
+#: block (p6-t0 is among witnesses); the page is prose, so locate finds no box.
+P6_ROWS = [
+    {"label": "Shadow rate", "Value": "1.02"},
+    {"label": "Natural rate", "Value": "0.55"},
+]
+P6_CANDIDATE_LABELS = {"Shadow rate": "2Y Shadow rate", "Natural rate": "Natural rate"}
+P6_PROSE = "This page is prose. It has no table geometry."
+
+#: page 7: TICKET-A1c — no native words. Same ruled geometry as the other
+#: pages, but no insert_text, so locate can still box the grid.
+P7_ROWS = [
+    {"label": "Forward rate", "Value": "0.91"},
+    {"label": "Spot rate", "Value": "0.44"},
+]
+P7_CANDIDATE_LABELS = {"Forward rate": "3Y Forward rate", "Spot rate": "Spot rate"}
+
 
 def _draw_ruled_table(page, rows: list[dict], top: float, label_col: str = "label") -> None:
     import fitz  # noqa: F401  (imported for side effect parity with table_ladder fixture)
@@ -108,6 +140,16 @@ def _draw_ruled_table(page, rows: list[dict], top: float, label_col: str = "labe
         page.insert_text((col_xs[0] + 4, y + 15), row[label_col], fontsize=9)
         page.insert_text((col_xs[1] + 4, y + 15), row["Value"], fontsize=9)
 
+    for yy in row_ys:
+        page.draw_line((col_xs[0], yy), (col_xs[-1], yy))
+    for xx in col_xs:
+        page.draw_line((xx, row_ys[0]), (xx, row_ys[-1]))
+
+
+def _draw_ruled_grid_lines_only(page, n_data_rows: int, top: float) -> None:
+    """Same geometry as ``_draw_ruled_table`` but no text."""
+    col_xs = [LEFT, LEFT + COL_W, LEFT + 2 * COL_W]
+    row_ys = [top + i * ROW_H for i in range(n_data_rows + 2)]
     for yy in row_ys:
         page.draw_line((col_xs[0], yy), (col_xs[-1], yy))
     for xx in col_xs:
@@ -133,6 +175,12 @@ def generate_pdf(out_path: Path) -> None:
     _draw_ruled_table(page3, P3_ROWS, TOP)
     page4 = doc.new_page()
     _draw_ruled_table(page4, P4_ROWS, TOP)
+    page5 = doc.new_page()
+    _draw_ruled_table(page5, P5_ROWS, TOP)
+    page6 = doc.new_page()
+    page6.insert_text((72, 72), P6_PROSE, fontsize=11)
+    page7 = doc.new_page()
+    _draw_ruled_grid_lines_only(page7, n_data_rows=len(P7_ROWS), top=TOP)
     doc.save(str(out_path))
     doc.close()
 
@@ -168,6 +216,19 @@ def _binding_adjudication_for(pdf_path: Path, page_num: int, markdown: str) -> d
 D3_MARKER = "[page {page_num} failed: unverifiable table — see image]"
 
 
+def _assert_replay_table_note(
+    pdf_path: Path, page_num: int, markdown: str, table_id: str, fragment: str
+) -> None:
+    import sys
+
+    sys.path.insert(0, str(HERE.parents[2] / "src"))
+    from socr.benchmark.replay_binding import replay_table
+
+    items, note = replay_table(pdf_path, page_num, markdown, table_id)
+    assert items == (), items
+    assert fragment in note, (note, fragment)
+
+
 def main() -> None:
     corpus_dir = HERE / "corpus"
     pdf_dir = corpus_dir / "in"
@@ -181,11 +242,22 @@ def main() -> None:
     md3_alt = _markdown_for(P3_ROWS, P3_ALT_CANDIDATE_LABELS)
     md4 = _markdown_for(P4_ROWS, P4_CANDIDATE_LABELS)
     md4_gemini = _markdown_for(P4_ROWS, P4_GEMINI_CANDIDATE_LABELS)
+    md5 = _markdown_for(P5_ROWS, P5_CANDIDATE_LABELS)
+    md6 = _markdown_for(P6_ROWS, P6_CANDIDATE_LABELS)
+    md7 = _markdown_for(P7_ROWS, P7_CANDIDATE_LABELS)
 
     ba1, table_id1 = _binding_adjudication_for(pdf_path, 1, md1)
     ba2, table_id2 = _binding_adjudication_for(pdf_path, 2, md2)
     ba3, table_id3 = _binding_adjudication_for(pdf_path, 3, md3)
     ba4, table_id4 = _binding_adjudication_for(pdf_path, 4, md4)
+    ba5, table_id5 = _binding_adjudication_for(pdf_path, 5, md5)
+    assert table_id5 == "p5-t0", table_id5
+
+    _assert_replay_table_note(
+        pdf_path, 5, md5, P5_ABSENT_TABLE_ID, "not found among this tree's witnesses"
+    )
+    _assert_replay_table_note(pdf_path, 6, md6, "p6-t0", "no located box this tree")
+    _assert_replay_table_note(pdf_path, 7, md7, "p7-t0", "no native words on this page")
 
     pages_dir = corpus_dir / "out" / "doc00" / "doc00" / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -280,6 +352,30 @@ def main() -> None:
         json.dumps(cache_entry4_gemini, indent=2, sort_keys=True) + "\n"
     )
 
+    sidecar5 = {
+        "page_num": 5,
+        "winning_output": {"text": md5},
+        "binding_adjudication": {P5_ABSENT_TABLE_ID: ba5},
+        "audit_events": [],
+    }
+    (pages_dir / "00005.json").write_text(json.dumps(sidecar5, indent=2, sort_keys=True) + "\n")
+
+    sidecar6 = {
+        "page_num": 6,
+        "winning_output": {"text": md6},
+        "binding_adjudication": {"p6-t0": ba5},
+        "audit_events": [],
+    }
+    (pages_dir / "00006.json").write_text(json.dumps(sidecar6, indent=2, sort_keys=True) + "\n")
+
+    sidecar7 = {
+        "page_num": 7,
+        "winning_output": {"text": md7},
+        "binding_adjudication": {"p7-t0": ba5},
+        "audit_events": [],
+    }
+    (pages_dir / "00007.json").write_text(json.dumps(sidecar7, indent=2, sort_keys=True) + "\n")
+
     print(f"Generated: {pdf_path}")
     print(f"Generated: {pages_dir / '00001.json'} (table_id={table_id1})")
     print(f"Generated: {pages_dir / '00002.json'} (table_id={table_id2}, fail-closed marker)")
@@ -291,6 +387,12 @@ def main() -> None:
         f"Generated: {pages_dir / '00004.json'} "
         f"(table_id={table_id4}, fail-closed marker, conflicting provenance engines)"
     )
+    print(
+        f"Generated: {pages_dir / '00005.json'} "
+        f"(table_id={P5_ABSENT_TABLE_ID}, table_id absent among witnesses)"
+    )
+    print(f"Generated: {pages_dir / '00006.json'} (table_id=p6-t0, witness not LOCATED)")
+    print(f"Generated: {pages_dir / '00007.json'} (table_id=p7-t0, no native words)")
 
 
 if __name__ == "__main__":
