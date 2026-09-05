@@ -220,6 +220,16 @@ class PageState:
     #: sidecar written before this field existed -- and the gate then falls
     #: back to asking about any rung.
     table_judge_retry_rungs: list[str] = field(default_factory=list)
+    #: VI-B1: wall-clock seconds for this page's agentic loop.
+    #: Exclusive keys: route, extract, tables, ladder, adjudication, figures,
+    #: equations, flush. ``total`` is the independent page wall, not the sum
+    #: of those keys — unattributed time is ``total - sum(exclusive)``. Nested
+    #: children (extract under route for OCR; ladder and adjudication under
+    #: tables) are subtracted from the parent. Measurement only: never
+    #: consulted by resume, fingerprint, or winner selection. Empty when the
+    #: page was never timed (old sidecar, or a flush that did not run the
+    #: page loop).
+    timings_s: dict[str, float] = field(default_factory=dict)
 
     def is_structure_class(self) -> bool:
         """C2: pages whose native branch may never author a GRID.

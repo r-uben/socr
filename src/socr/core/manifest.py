@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
@@ -66,6 +67,56 @@ logger = logging.getLogger(__name__)
 MANIFEST_SCHEMA_VERSION = "1"
 NORMALIZER_VERSION = "3"
 ASSEMBLY_VERSION = "3"
+
+# VI-B1: exclusive per-page stage keys. Nested children (extract under route
+# for OCR; ladder / adjudication under tables) are subtracted from the parent.
+# ``timings_s.total`` is the independent page wall, not this sum.
+PAGE_TIMING_EXCLUSIVE_KEYS: tuple[str, ...] = (
+    "route",
+    "extract",
+    "tables",
+    "ladder",
+    "adjudication",
+    "figures",
+    "equations",
+    "flush",
+)
+
+
+def coerce_page_timings(raw) -> dict[str, float]:
+    """Keep only finite non-negative numeric exclusive keys (and ``total``)."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key in (*PAGE_TIMING_EXCLUSIVE_KEYS, "total"):
+        value = raw.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+            out[key] = float(value)
+    return out
+
+
+def exclusive_timings_sum(timings: dict[str, float] | None) -> float:
+    """Sum of exclusive stage keys. Does not read ``total`` (independent wall)."""
+    if not timings:
+        return 0.0
+    return sum(float(timings.get(key, 0.0) or 0.0) for key in PAGE_TIMING_EXCLUSIVE_KEYS)
+
+
+def rollup_page_timings(state: DocumentState) -> dict[str, float]:
+    """Sum per-page ``timings_s`` into one document dict."""
+    acc = {key: 0.0 for key in PAGE_TIMING_EXCLUSIVE_KEYS}
+    acc["total"] = 0.0
+    for ps in state.pages.values():
+        timings = coerce_page_timings(getattr(ps, "timings_s", None) or {})
+        if not timings:
+            continue
+        for key in PAGE_TIMING_EXCLUSIVE_KEYS:
+            acc[key] += float(timings.get(key, 0.0) or 0.0)
+        acc["total"] += float(timings.get("total", 0.0) or 0.0)
+    return acc
+
 
 # Legacy page separator. socr now assembles bodies and replays with the
 # contract's ``assemble_pages`` (``## Page N`` headers); this constant is kept
@@ -238,6 +289,9 @@ class Manifest:
     agentic_ladder: list[dict] | None = None
     # Judge model used for agentic routing (B3) — "" when heuristic judge was used.
     agentic_judge_model: str = ""
+    # VI-B1: document rollup of per-page exclusive stage timings. None when no
+    # page recorded ``timings_s`` (pre-B1 sidecar / non-agentic run).
+    timings_s: dict[str, float] | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -252,10 +306,14 @@ class Manifest:
             d["agentic_ladder"] = self.agentic_ladder
         if self.agentic_judge_model:
             d["agentic_judge_model"] = self.agentic_judge_model
+        if self.timings_s:
+            d["timings_s"] = self.timings_s
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> Manifest:
+        raw_timings = d.get("timings_s")
+        timings_s = coerce_page_timings(raw_timings) or None if raw_timings is not None else None
         return cls(
             pdf_filename=d["pdf_filename"],
             pdf_file_hash=d["pdf_file_hash"],
@@ -265,6 +323,7 @@ class Manifest:
             entries={int(k): ManifestEntry.from_dict(v) for k, v in d.get("entries", {}).items()},
             agentic_ladder=d.get("agentic_ladder"),
             agentic_judge_model=d.get("agentic_judge_model", ""),
+            timings_s=timings_s,
         )
 
     def save(self, path: Path | str) -> None:
@@ -2109,6 +2168,7 @@ def build_manifest(
                 len(saved_pages),
                 handle.page_count,
             )
+    has_page_timings = any(getattr(ps, "timings_s", None) for ps in state.pages.values())
     manifest = Manifest(
         pdf_filename=handle.filename,
         pdf_file_hash=handle.file_hash,
@@ -2116,6 +2176,7 @@ def build_manifest(
         render_dpi=dpi,
         agentic_ladder=state.agentic_ladder if state.agentic_ladder else None,
         agentic_judge_model=getattr(state, "agentic_judge_model", ""),
+        timings_s=rollup_page_timings(state) if has_page_timings else None,
     )
     # Recover/finalize every exact page body once so the manifest, cache and
     # replay cannot diverge from the saved Markdown or its failure status. The
