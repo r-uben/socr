@@ -1,0 +1,15 @@
+{
+  "_comment": "VI-A2 control, autopsy shape 3: a row whose cells are non-numeric (Sample + date ranges) is absorbed into the native label. The shape-1 repair must not start treating those cells as values.",
+  "region": [40, 60, 520, 200],
+  "markdown": "| | A | B |\n| --- | --- | --- |\n| slope | 1.10 | 1.11 |\n| Sample |  |  |\n",
+  "words": [
+    [140, 70, 170, 80, "A", 0, 0, 0],
+    [280, 70, 310, 80, "B", 0, 0, 1],
+    [50, 100, 90, 110, "slope", 0, 1, 0],
+    [150, 100, 180, 110, "1.10", 0, 1, 1],
+    [290, 100, 320, 110, "1.11", 0, 1, 2],
+    [50, 130, 100, 140, "Sample", 0, 2, 0],
+    [160, 130, 250, 140, "1988:1-2019:12", 0, 2, 1],
+    [300, 130, 390, 140, "1994:1-2019:12", 0, 2, 2]
+  ]
+}

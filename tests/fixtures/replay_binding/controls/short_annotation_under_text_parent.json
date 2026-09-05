@@ -1,0 +1,14 @@
+{
+  "_comment": "VI-A2 negative control: NUMERIC-FREE parent row (pure label, no data tokens) with a shorter '(a)' wholly contained under one parent word, y-boxes overlapping. Required: annotation is NOT folded — native parent label identical with vs without '(a)'.",
+  "region": [40, 60, 400, 220],
+  "markdown": "| | OLS | IV |\n| --- | --- | --- |\n| Rotated PCs | | |\n| Action | 1.48 | 1.00 |\n",
+  "words": [
+    [200, 70, 230, 80, "OLS", 0, 0, 0],
+    [300, 70, 330, 80, "IV", 0, 0, 1],
+    [50, 100, 140, 111, "Rotated", 0, 1, 0],
+    [70, 107, 85, 114, "(a)", 0, 2, 0],
+    [50, 160, 90, 170, "Action", 0, 3, 0],
+    [200, 160, 230, 170, "1.48", 0, 3, 1],
+    [300, 160, 330, 170, "1.00", 0, 3, 2]
+  ]
+}

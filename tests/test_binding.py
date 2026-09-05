@@ -13,7 +13,9 @@ that the module is absent.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -1442,6 +1444,297 @@ def test_genuine_invented_value_in_cell_still_convicted():
     result = bind(words, md)
     unbound_tokens = {u.token for u in result.model_unbound}
     assert unbound_tokens == {"99.9", "88.8"}
+
+
+# ---------------------------------------------------------------------------
+# VI-A2: binder row-label repair (GH-331 / #418 / #146)
+# ---------------------------------------------------------------------------
+
+_A2_CONTROLS = Path(__file__).parent / "fixtures" / "replay_binding" / "controls"
+
+
+def _a2_words(payload: dict) -> list:
+    return [tuple(word) for word in payload["words"]]
+
+
+def _a2_load(name: str) -> dict:
+    return json.loads((_A2_CONTROLS / name).read_text())
+
+
+def test_region_edge_stub_is_kept_whether_or_not_x0_sits_just_outside():
+    """VI-A2 shape 1. Measured drop is 8e-4–2e-3 pt of top-left overflow, not a
+    missing stub column. Two word lists that differ only in whether ``3Y``'s
+    x0 is on the region edge or 0.002 pt left of it must produce the SAME
+    native label — the difference that used to exist is the bug."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    region = (100.0, 50.0, 400.0, 200.0)
+    header = [
+        w(200, 70, 230, 80, "OLS"),
+        w(300, 70, 330, 80, "IV"),
+    ]
+    rest = [
+        w(120, 100, 180, 110, "Treasury"),
+        w(200, 100, 230, 110, "0.50"),
+        w(300, 100, 330, 110, "0.51"),
+    ]
+    on_edge = header + [w(100.0, 100, 112, 110, "3Y")] + rest
+    just_out = header + [w(99.998, 100, 111.998, 110, "3Y")] + rest
+
+    def _label(words):
+        scoped = _words_in_region(words, region)
+        rows, _, _ = _native_rows(scoped)
+        data = [row for row in rows if not row.is_parent]
+        assert data, "fixture produced no data row"
+        return data[0].row_path[-1]
+
+    assert _label(on_edge) == _label(just_out)
+    assert _label(just_out) == "3Y Treasury"
+
+
+def test_numeric_free_text_groups_are_not_folded_together():
+    """Abstain: overlapping ``1t`` under ``Rotated PCs`` stays its own group.
+
+    On the measured fixture no page-derived test separates a subscript from
+    a short annotation, so overlapping vs parked-below must keep the same
+    number of bands — the parent label is unchanged either way.
+    """
+    from socr.tables.binding import _assign_bands, _native_rows
+
+    header = [
+        w(200, 70, 230, 80, "3-M"),
+        w(300, 70, 330, 80, "2-YR"),
+    ]
+    rotated = [
+        (50, 100, 110, 111, "Rotated", 0, 0, 0),
+        (115, 100, 145, 111, "PCs", 0, 0, 1),
+    ]
+    subscript_overlap = [
+        (80, 107, 95, 115, "1t", 1, 0, 0),
+    ]
+    subscript_below = [
+        (80, 130, 95, 138, "1t", 1, 0, 0),
+    ]
+    data = [
+        w(50, 160, 90, 170, "Action"),
+        w(200, 160, 230, 170, "1.48"),
+        w(300, 160, 330, 170, "1.00"),
+    ]
+
+    n_overlap, _ = _assign_bands(header + rotated + subscript_overlap + data)
+    n_below, _ = _assign_bands(header + rotated + subscript_below + data)
+    assert len(n_overlap) == len(n_below)
+
+    overlap_rows, _, _ = _native_rows(header + rotated + subscript_overlap + data)
+    without_rows, _, _ = _native_rows(header + rotated + data)
+    overlap_rotated = [row.row_path[-1] for row in overlap_rows if "Rotated" in row.row_path[-1]]
+    without_rotated = [row.row_path[-1] for row in without_rows if "Rotated" in row.row_path[-1]]
+    assert overlap_rotated == without_rotated
+    assert any(row.row_path[-1].strip() == "1t" for row in overlap_rows)
+
+
+def test_text_fold_does_not_hop_into_a_numeric_row():
+    """A numeric-free marker already remapped onto a numeric row must not
+    become a hop for a later text group. ``*`` shares RowB's line and
+    folds into it; a shorter ``a`` under the star would follow that hop
+    unless the resolved destination is required to be numeric-free."""
+    from socr.tables.binding import _assign_bands
+
+    words = [
+        (50, 100, 90, 106, "RowA", 0, 0, 0),
+        (150, 100, 180, 106, "1.0", 0, 0, 1),
+        (50, 110, 90, 116, "RowB", 0, 1, 0),
+        (150, 110, 180, 116, "2.0", 0, 1, 1),
+        (185, 104, 190, 111, "*", 0, 1, 2),
+        (186, 107, 189, 110, "a", 0, 99, 0),
+    ]
+    _centers, y_to_band = _assign_bands(words)
+    assert y_to_band[round(104)] == y_to_band[round(110)]
+    assert y_to_band[round(107)] != y_to_band[round(110)]
+
+
+def test_annotation_under_label_is_not_folded():
+    """Negative control: 'see note a' under a label. Native label with vs
+    without the annotation is identical."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    payload = _a2_load("annotation_under_label.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    annotation = {"see", "note", "a"}
+    without = [word for word in words if word[4] not in annotation]
+
+    def _label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        data = [row for row in rows if not row.is_parent]
+        assert data
+        return data[0].row_path[-1]
+
+    assert _label(words) == _label(without)
+    assert _label(words) == "Large T"
+    assert "see" not in _label(words)
+    assert "note" not in _label(words)
+
+
+def test_short_annotation_under_numeric_free_parent_is_not_folded():
+    """Negative control that actually reaches the text-band path: a pure
+    label row (no numeric tokens) with a shorter ``(a)`` wholly contained
+    under one parent word, y-boxes overlapping. Required: the annotation
+    stays separate — parent label identical with vs without ``(a)``."""
+    from socr.tables.binding import _assign_bands, _native_rows, _words_in_region
+    from socr.tables.native_verifier import is_numeric_token
+
+    payload = _a2_load("short_annotation_under_text_parent.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    parent_y = round(100.0)
+    assert not any(is_numeric_token(word[4]) for word in words if round(word[1]) == parent_y), (
+        "fixture parent row must be numeric-free or this control never hits the fold"
+    )
+
+    without = [word for word in words if word[4] != "(a)"]
+    _centers, y_to_band = _assign_bands(_words_in_region(words, region))
+    assert y_to_band[round(107.0)] != y_to_band[parent_y]
+
+    def _rotated_label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        for row in rows:
+            if row.row_path and "Rotated" in row.row_path[-1]:
+                return row.row_path[-1]
+        raise AssertionError(f"no Rotated row in {[row.row_path for row in rows]}")
+
+    assert _rotated_label(words) == _rotated_label(without) == "Rotated"
+    assert "(a)" not in _rotated_label(words)
+
+
+def test_shape2_numeric_inside_label_is_not_swallowed_by_widening():
+    """Autopsy shape 2 control: ``500`` at a data-lane x must stay a value.
+    Pin the difference between a candidate that matches the cut native label
+    and one that claims the printed ``500`` — the latter still contradicts."""
+    payload = _a2_load("shape2_numeric_in_label.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    cut = """
+|            | OLS  | IV   |
+|------------|------|------|
+| slope      | 1.10 | 1.11 |
+| dlog S&P   | 0.50 | 0.51 |
+| other      | 0.20 | 0.21 |
+"""
+    printed = """
+|                   | OLS  | IV   |
+|-------------------|------|------|
+| slope             | 1.10 | 1.11 |
+| dlog S&P 500 (3m) | 0.50 | 0.51 |
+| other             | 0.20 | 0.21 |
+"""
+    cut_result = bind(words, cut, region=region)
+    printed_result = bind(words, printed, region=region)
+    cut_labels = [c.candidate_label for c in cut_result.row_label_contradictions]
+    printed_labels = [c.candidate_label for c in printed_result.row_label_contradictions]
+    assert cut_labels != printed_labels
+    assert not any("500" in label for label in cut_labels)
+    assert any("500" in label for label in printed_labels)
+
+
+def test_shape3_nonnumeric_cells_stay_in_the_native_label():
+    """Autopsy shape 3 control: date-range cells are not values. The native
+    label with the date ranges present must differ from the same geometry
+    with those cells deleted — they were absorbed, and A2 must not start
+    treating them as a value lane."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    payload = _a2_load("shape3_nonnumeric_values.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    without_dates = [word for word in words if ":" not in word[4]]
+
+    def _sample_label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        for row in rows:
+            if row.row_path and "Sample" in row.row_path[-1]:
+                return row.row_path[-1]
+        raise AssertionError(f"no Sample row in {[row.row_path for row in rows]}")
+
+    with_dates = _sample_label(words)
+    stripped = _sample_label(without_dates)
+    assert with_dates != stripped
+    assert "1988:1-2019:12" in with_dates
+    assert stripped == "Sample"
+
+
+def test_row_swap_control_still_contradicts():
+    """VI-A2 must not pass by accepting swapped stubs. Correct vs swapped
+    markdown on the same words: one agrees, the other contradicts."""
+    payload = _a2_load("row_swap.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    correct = bind(words, payload["markdown_correct"], region=region)
+    swapped = bind(words, payload["markdown_swapped"], region=region)
+    assert correct.row_label_contradictions == []
+    assert swapped.row_label_contradictions != []
+    assert {c.candidate_label for c in swapped.row_label_contradictions} == {"Small", "Large"}
+
+
+def test_neighbouring_label_outside_the_region_is_not_captured():
+    """A neighbour stub whose centroid is outside the region must not
+    enter the label. Same table with vs without that word: labels identical."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    payload = _a2_load("neighbouring_label.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    without = [word for word in words if word[4] != "Neighbour"]
+
+    def _label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        data = [row for row in rows if not row.is_parent]
+        assert data
+        return data[0].row_path[-1]
+
+    assert _label(words) == _label(without)
+    assert _label(words) == "Treasury"
+    assert "Neighbour" not in _label(words)
+
+
+def test_grazing_caption_and_footnote_are_excluded_as_on_main():
+    """A caption box that dips a sub-point into the region from ABOVE and a
+    footnote box from BELOW must stay out. Top-left containment (main)
+    excludes the caption graze; centroid excludes both. Pin: with vs
+    without those two words, the native label is identical — the
+    difference is zero."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    payload = _a2_load("grazing_caption_footnote.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    grazers = {"Caption", "Footnote"}
+    without = [word for word in words if word[4] not in grazers]
+    grazer_words = [word for word in words if word[4] in grazers]
+    scoped = _words_in_region(words, region)
+    scoped_texts = {word[4] for word in scoped}
+    assert grazers.isdisjoint(scoped_texts)
+
+    def _top_left(word: tuple) -> bool:
+        rx0, ry0, rx1, ry1 = region
+        return rx0 <= word[0] <= rx1 and ry0 <= word[1] <= ry1
+
+    def _intersects(word: tuple) -> bool:
+        rx0, ry0, rx1, ry1 = region
+        return min(word[2], rx1) > max(word[0], rx0) and min(word[3], ry1) > max(word[1], ry0)
+
+    caption = next(word for word in words if word[4] == "Caption")
+    assert _top_left(caption) is False
+    assert all(_intersects(word) for word in grazer_words)
+
+    def _label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        data = [row for row in rows if not row.is_parent]
+        assert data
+        return data[0].row_path[-1]
+
+    assert _label(words) == _label(without)
+    assert _label(words) == "Treasury"
 
 
 if __name__ == "__main__":

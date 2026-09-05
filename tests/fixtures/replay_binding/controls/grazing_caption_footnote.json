@@ -1,0 +1,14 @@
+{
+  "_comment": "VI-A2 control: a caption box dips a sub-point margin into the region from ABOVE and a footnote box from BELOW. Centroids stay outside, so both must be excluded — the same verdict top-left containment gave on main. Box intersection admitted them (GH-330 prose pollution). Region matches the reviewer reproduction (100,60,400,200).",
+  "region": [100, 60, 400, 200],
+  "markdown": "| | OLS | IV |\n| --- | --- | --- |\n| Treasury | 0.50 | 0.51 |\n",
+  "words": [
+    [140, 70, 170, 80, "OLS", 0, 0, 0],
+    [240, 70, 270, 80, "IV", 0, 0, 1],
+    [150, 59.4, 220, 60.2, "Caption", 1, 0, 0],
+    [115, 100, 180, 110, "Treasury", 0, 1, 0],
+    [200, 100, 230, 110, "0.50", 0, 1, 1],
+    [300, 100, 330, 110, "0.51", 0, 1, 2],
+    [150, 199.8, 220, 200.6, "Footnote", 2, 0, 0]
+  ]
+}

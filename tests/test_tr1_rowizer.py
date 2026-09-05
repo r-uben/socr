@@ -765,3 +765,36 @@ class TestIsLaneStackedRealPDFIntegration:
             "extract_structured passed through raw stacked text 'Alpha Fund\\nBeta Research'. "
             "The _is_lane_stacked branch must route to the rowizer, not _table_to_markdown."
         )
+
+
+def test_a2_binder_repair_does_not_change_rowizer_output(monkeypatch):
+    """VI-A2 owns ``binding.py``. The TR-1 rowizer must not consult it.
+
+    Difference: ``rowize_from_word_list`` on the same words with
+    ``binding._native_rows`` replaced by a bomb vs left intact — output
+    identical. If A2 leaked into reconstruct, the bomb would fire.
+    """
+    from socr.tables import binding as binding_module
+    from socr.tables.reconstruct import rowize_from_word_list
+
+    words = [
+        (50.0, 100.0, 90.0, 108.0, "Ashford", 0, 0, 0),
+        (150.0, 100.0, 180.0, 108.0, "2.1", 0, 0, 1),
+        (220.0, 100.0, 250.0, 108.0, "1.9", 0, 0, 2),
+        (50.0, 116.0, 90.0, 124.0, "Clearview", 0, 1, 0),
+        (150.0, 116.0, 180.0, 124.0, "1.8", 0, 1, 1),
+        (220.0, 116.0, 250.0, 124.0, "2.0", 0, 1, 2),
+        (50.0, 132.0, 90.0, 140.0, "Dunmore", 0, 2, 0),
+        (150.0, 132.0, 180.0, 140.0, "2.3", 0, 2, 1),
+        (220.0, 132.0, 250.0, 140.0, "2.6", 0, 2, 2),
+    ]
+    intact = rowize_from_word_list(words)
+
+    def _bomb(*_a, **_k):
+        raise AssertionError("rowizer called binding._native_rows")
+
+    monkeypatch.setattr(binding_module, "_native_rows", _bomb)
+    monkeypatch.setattr(binding_module, "_assign_bands", _bomb)
+    monkeypatch.setattr(binding_module, "_words_in_region", _bomb)
+    patched = rowize_from_word_list(words)
+    assert patched == intact

@@ -219,3 +219,39 @@ def test_header_repair_survives_demotion_end_to_end():
         ["Euro1", "1", "2", "16", "49", "23", "8", "1"],
         ["Yen1", "0", "3", "15", "40", "29", "9", "4"],
     ]
+
+
+def test_binder_abstains_on_a_math_font_subscript_band():
+    """VI-A2 / GH-146: ``1t`` under ``Rotated PCs`` is not folded. Geometry
+    cannot tell a subscript from a short annotation, so both groups stay
+    separate. Difference: overlapping vs parked-below keep a standalone
+    ``1t`` row — the parent label is unchanged.
+    """
+    from socr.tables.binding import _native_rows
+
+    def _w(x0, y0, x1, y1, text, block=0, line=0):
+        return (x0, y0, x1, y1, text, block, line, 0)
+
+    shared = [
+        _w(250, 70, 280, 80, "3-M"),
+        _w(330, 70, 360, 80, "2-YR"),
+        _w(50, 100, 120, 111, "Rotated"),
+        _w(125, 100, 155, 111, "PCs"),
+        _w(50, 160, 90, 170, "Action"),
+        _w(250, 160, 280, 170, "1.48"),
+        _w(330, 160, 360, 170, "1.00"),
+    ]
+    overlap = [_w(80, 107, 95, 115, "1t", block=1)]
+    below = [_w(80, 130, 95, 138, "1t", block=1)]
+
+    overlap_rows, _, _ = _native_rows(shared + overlap)
+    below_rows, _, _ = _native_rows(shared + below)
+    without_rows, _, _ = _native_rows(shared)
+    overlap_labels = [row.row_path[-1] for row in overlap_rows]
+    below_labels = [row.row_path[-1] for row in below_rows]
+    without_rotated = [row.row_path[-1] for row in without_rows if "Rotated" in row.row_path[-1]]
+    overlap_rotated = [label for label in overlap_labels if "Rotated" in label]
+
+    assert any(label.strip() == "1t" for label in overlap_labels)
+    assert any(label.strip() == "1t" for label in below_labels)
+    assert overlap_rotated == without_rotated

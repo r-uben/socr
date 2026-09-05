@@ -329,6 +329,16 @@ def _row_label_and_bbox(
     return label, _union_word_bbox(label_words)
 
 
+def _boxes_vertically_overlap(left: tuple, right: tuple) -> bool:
+    """True when two ``(x0, y0, x1, y1, ...)`` word boxes overlap in y.
+
+    Strict: boxes that merely touch are not overlapping. Same predicate the
+    numeric-marker fold below already uses on extracted boxes; no distance
+    tolerance is introduced.
+    """
+    return min(left[3], right[3]) > max(left[1], right[1])
+
+
 def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
     """Assign rowizer-compatible y groups without chaining adjacent rows.
 
@@ -342,6 +352,15 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
     y-group; exact bbox intersection is only a corroborating guard against
     synthetic or stale metadata on distant prose. No distance tolerance is
     used as row evidence.
+
+    Numeric-free groups are never folded into other numeric-free groups.
+    On the measured fixture (doc04 p3 ``1t`` under ``ROTATED PCs``) the
+    subscript is a different ``(block_no, line_no)`` from its parent, its
+    box top sits inside the parent height (also true of a short overlapping
+    annotation such as ``(a)``), and the page's shorter-glyph height class
+    mixes the ``1t`` with an on-line ``∗``, so no page-derived test
+    separates a subscript from an annotation. The fold abstains rather
+    than guess.
     """
     rows_by_y: dict[int, list] = {}
     for word in words:
@@ -382,7 +401,7 @@ def _assign_bands(words: list) -> tuple[list[float], dict[float, int]]:
                 # distant headers and panel rows from being treated as line
                 # evidence; no proximity radius is introduced.
                 if any(
-                    word[1] < numeric_word[3] and numeric_word[1] < word[3]
+                    _boxes_vertically_overlap(word, numeric_word)
                     for numeric_word in numeric_words_by_y[destination]
                 ):
                     destinations.add(destination)
@@ -1246,8 +1265,27 @@ def _record_inventions_on_parent_row(
         )
 
 
+def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
+    """True when the centroid of *word*'s box falls inside *region*.
+
+    A symmetric point test on the word's own box — ``((x0+x1)/2, (y0+y1)/2)``
+    against the closed region. No distance or pt threshold.
+
+    Leading stubs whose ``x0`` sits a fraction of a point outside the
+    region's min-x stay in: a ~10 pt glyph has its centroid trivially
+    inside (GH-331 / VI-A2). A caption or footnote whose box merely grazes
+    the region from above or below stays out: its centroid is still
+    outside. Box intersection admitted those grazers and re-opened the
+    prose-pollution GH-330 was written to stop.
+    """
+    rx0, ry0, rx1, ry1 = region
+    cx = (word[0] + word[2]) / 2.0
+    cy = (word[1] + word[3]) / 2.0
+    return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
+
+
 def _words_in_region(words: list, region: tuple | None) -> list:
-    """Filter *words* to those whose top-left corner lies inside *region*.
+    """Filter *words* to those whose box-centroid falls inside *region*.
 
     GH-330. ``bind`` was only ever called with a whole page's words, so on a page
     with prose above the table and notes below it, lane clustering ran over text
@@ -1256,9 +1294,11 @@ def _words_in_region(words: list, region: tuple | None) -> list:
     ``(rect, markdown)`` pair, so the rect was available all along and simply never
     passed in.
 
-    Top-left containment (not intersection) matches how ``extract_structured``
-    assigns a word to a region, so the two agree on which words belong to a table.
-    Kept here rather than imported so ``binding`` stays free of ``fitz``.
+    Centroid, not top-left and not box intersection: a stub whose ``x0`` is
+    10⁻³ pt left of the region's min-x is still a table word (GH-331 /
+    VI-A2); a caption whose box dips a fraction of a point in from above
+    is not. Kept here rather than imported so ``binding`` stays free of
+    ``fitz``.
 
     ``region=None`` returns *words* unchanged — byte-for-byte the old behaviour.
     """
@@ -1270,7 +1310,8 @@ def _words_in_region(words: list, region: tuple | None) -> list:
         return words  # a malformed region is an absence of scoping, not a conviction
     if not (x0 <= x1 and y0 <= y1):
         return words
-    return [w for w in words if x0 <= w[0] <= x1 and y0 <= w[1] <= y1]
+    box = (x0, y0, x1, y1)
+    return [w for w in words if _word_centroid_in_region(w, box)]
 
 
 def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingResult:
