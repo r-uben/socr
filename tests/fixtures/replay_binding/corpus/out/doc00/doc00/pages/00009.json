@@ -1,0 +1,36 @@
+{
+  "audit_events": [],
+  "binding_adjudication": {
+    "p9-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "2Y Dropped yield",
+          "native_token": "Dropped yield",
+          "row_path": [
+            "Dropped yield"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Dropped yield"
+          ],
+          [],
+          "Dropped yield",
+          "2Y Dropped yield"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 9,
+  "winning_output": {
+    "text": "| Label | Value |\n| :--- | :--- |\n| 2Y Dropped yield extra | 0.48 |\n"
+  }
+}

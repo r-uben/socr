@@ -1,0 +1,36 @@
+{
+  "audit_events": [],
+  "binding_adjudication": {
+    "p6-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "1Y Policy rate",
+          "native_token": "Policy rate",
+          "row_path": [
+            "Policy rate"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Policy rate"
+          ],
+          [],
+          "Policy rate",
+          "1Y Policy rate"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 6,
+  "winning_output": {
+    "text": "| Label | Value |\n| :--- | :--- |\n| 2Y Shadow rate | 1.02 |\n| Natural rate | 0.55 |\n"
+  }
+}

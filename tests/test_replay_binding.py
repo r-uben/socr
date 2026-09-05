@@ -48,14 +48,21 @@ def test_discover_pages_finds_all_fixture_pages():
         ("doc00", 2),
         ("doc00", 3),
         ("doc00", 4),
+        ("doc00", 5),
+        ("doc00", 6),
+        ("doc00", 7),
+        ("doc00", 8),
+        ("doc00", 9),
+        ("doc00", 10),
+        ("doc00", 11),
     }
 
 
 def test_replay_corpus_row_shape_matches_recorded_table_count():
     """Same contract the real corpus proves at 7 rows (one row per recorded
-    table): here, 4 recorded tables -> 4 rows, exactly."""
+    table): here, 11 recorded tables -> 11 rows, exactly."""
     rows = replay_corpus(FIXTURE_CORPUS)
-    assert len(rows) == 4
+    assert len(rows) == 11
     assert all(isinstance(r, ReplayRow) for r in rows)
 
 
@@ -191,7 +198,10 @@ def test_perturbed_recorded_items_report_exact_delta():
     row = rows[0]
     assert row.multiset_match is False
     assert row.added == (real_item,)
-    assert row.removed == (("row_label", "Term premium", "10Y Term premium"),)
+    bogus_key = ("row_label", "Term premium", "10Y Term premium")
+    assert bogus_key not in row.removed
+    assert bogus_key in row.unchecked_removed
+    assert "no candidate row" in row.note
 
 
 def test_sidecar_bytes_unchanged_by_replay():
@@ -211,7 +221,15 @@ def test_report_formats_without_raising():
     assert "p2-t0" in report
     assert "p3-t0" in report
     assert "p4-t0" in report
+    assert "p5-t99" in report
+    assert "p6-t0" in report
+    assert "p7-t0" in report
+    assert "p8-t0" in report
+    assert "p9-t0" in report
+    assert "p10-t0" in report
+    assert "p11-t0" in report
     assert "UNREPLAYABLE" in report
+    assert "UNCHECKED" in report
 
 
 def test_main_cli_exits_zero_and_prints_rows(capsys):
@@ -224,6 +242,170 @@ def test_main_cli_exits_zero_and_prints_rows(capsys):
     assert "p2-t0" in out
     assert "p3-t0" in out
     assert "p4-t0" in out
+    assert "p5-t99" in out
+    assert "p6-t0" in out
+    assert "p7-t0" in out
+    assert "p8-t0" in out
+    assert "p9-t0" in out
+    assert "p10-t0" in out
+    assert "p11-t0" in out
+
+
+@pytest.mark.parametrize(
+    ("page_num", "table_id", "note_fragment"),
+    [
+        (5, "p5-t99", "not found among this tree's witnesses"),
+        (6, "p6-t0", "no located box this tree"),
+        (7, "p7-t0", "no native words on this page"),
+    ],
+)
+def test_replay_table_failure_is_unreplayable_not_a_binder_delta(
+    monkeypatch, page_num, table_id, note_fragment
+):
+    """TICKET-A1c / GH-595: a non-empty replay_table note is UNREPLAYABLE,
+    never a comparison row with an empty fresh side."""
+    import socr.benchmark.replay_binding as replay_binding_module
+
+    def _bind_must_not_be_called(*args, **kwargs):
+        raise AssertionError("bind() was called for an unreplayable row")
+
+    monkeypatch.setattr(replay_binding_module, "bind", _bind_must_not_be_called)
+
+    sidecar_path = FIXTURE_CORPUS / "out" / "doc00" / "doc00" / "pages" / f"{page_num:05d}.json"
+    before = sidecar_path.read_bytes()
+
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == page_num)
+    rows = replay_page(record, labels=None)
+    row = next(r for r in rows if r.table_id == table_id)
+
+    assert row.unreplayable is True
+    assert row.added == ()
+    assert row.removed == ()
+    assert note_fragment in row.note
+
+    after = sidecar_path.read_bytes()
+    assert before == after
+
+
+def test_cli_prints_unreplayable_for_a1c_failures(capsys):
+    from socr.benchmark.replay_binding import main
+
+    exit_code = main([str(FIXTURE_CORPUS)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    for table_id in ("p5-t99", "p6-t0", "p7-t0"):
+        line = next(ln for ln in out.splitlines() if table_id in ln)
+        assert "UNREPLAYABLE" in line, line
+    assert "not found among this tree's witnesses" in out
+    assert "no located box this tree" in out
+    assert "no native words on this page" in out
+
+
+def test_parse_grid_failure_is_unchecked_not_a_binder_clear():
+    """Located witness whose candidate grid fails parse_grid: empty fresh
+    items are UNCHECKED, never NO with the recorded items as frozen-only."""
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 8)
+    sidecar_path = record.sidecar_path
+    before = sidecar_path.read_bytes()
+    rows = replay_page(record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.table_id == "p8-t0"
+    assert row.unreplayable is False
+    assert row.unchecked is True
+    assert row.added == ()
+    assert row.removed == ()
+    assert row.fresh_item_count == 0
+    assert row.recorded_item_count >= 1
+    assert "no checks" in row.note
+    assert row.row_labels_checked == 0
+    assert row.fully_checked is False
+    assert sidecar_path.read_bytes() == before
+
+
+def test_cli_prints_unchecked_for_parse_grid_failure(capsys):
+    from socr.benchmark.replay_binding import main
+
+    exit_code = main([str(FIXTURE_CORPUS)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if "p8-t0" in ln)
+    assert "UNCHECKED" in line, line
+    assert "UNREPLAYABLE" not in line
+    words = line.split()
+    assert "NO" not in words
+
+
+def test_unrelated_row_checked_disputed_unbound_is_unchecked():
+    """A sibling row is bound and compared; the disputed label is omitted
+    from the candidate, so it is UNCHECKED, not a frozen-only clear."""
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 9)
+    rows = replay_page(record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.unreplayable is False
+    assert row.unchecked is True
+    assert row.removed == ()
+    assert row.fresh_item_count == 0
+    assert row.recorded_item_count >= 1
+    assert "no candidate row" in row.note
+    assert row.row_labels_checked is not None and row.row_labels_checked >= 1
+    assert row.unchecked_removed
+
+
+def test_mixed_unchecked_removed_is_no_not_a_silent_clear():
+    """One recorded item remains as a fresh contradiction; another vanished
+    without per-row evidence. The vanished item is UNCHECKED; the row is NO."""
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 10)
+    rows = replay_page(record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.unreplayable is False
+    assert row.unchecked is False
+    assert row.multiset_match is False
+    assert row.fresh_item_count >= 1
+    assert row.unchecked_removed
+    for key in row.unchecked_removed:
+        assert key not in row.removed
+    assert "Gone yield" in str(row.unchecked_removed)
+
+
+def test_cli_mixed_row_is_no_with_unchecked_item(capsys):
+    from socr.benchmark.replay_binding import format_report
+
+    rows = replay_corpus(FIXTURE_CORPUS)
+    report = format_report(rows)
+    p9_line = next(ln for ln in report.splitlines() if "p9-t0" in ln)
+    assert "UNCHECKED" in p9_line, p9_line
+    p10_line = next(ln for ln in report.splitlines() if "p10-t0" in ln)
+    assert "NO" in p10_line.split(), p10_line
+    assert "UNCHECKED" not in p10_line.split()
+    assert "UNCHECKED:" in report
+
+
+def test_duplicate_candidate_labels_are_unchecked():
+    """Two candidate rows share a stub; the disputed frozen model_token
+    matches both, so the row is UNCHECKED even if a sibling is bound."""
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 11)
+    rows = replay_page(record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.unreplayable is False
+    assert row.unchecked_removed
+    assert "matches" in row.note and "rows" in row.note
+    for key in row.unchecked_removed:
+        assert key not in row.removed
+
+
+def test_successful_bind_carries_coverage_and_is_not_unchecked():
+    rows = replay_corpus(FIXTURE_CORPUS)
+    p1 = next(r for r in rows if r.table_id == "p1-t0")
+    assert p1.unchecked is False
+    assert p1.unreplayable is False
+    assert p1.row_labels_checked is not None and p1.row_labels_checked >= 1
+    assert p1.fully_checked is not None
+    assert p1.column_binding_unverifiable is not None
+    assert p1.native_unbound_count is not None
 
 
 def test_labels_file_reported_when_absent_from_table(tmp_path):

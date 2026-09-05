@@ -1,0 +1,36 @@
+{
+  "audit_events": [],
+  "binding_adjudication": {
+    "p8-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "1Y Discount rate",
+          "native_token": "Discount rate",
+          "row_path": [
+            "Discount rate"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Discount rate"
+          ],
+          [],
+          "Discount rate",
+          "1Y Discount rate"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 8,
+  "winning_output": {
+    "text": "| Label | Value |\n| - | - |\n| 1Y Discount rate | 3.25 |\n| Prime rate | 1.11 |\n"
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "audit_events": [],
+  "binding_adjudication": {
+    "p10-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "2Y Kept yield",
+          "native_token": "Kept yield",
+          "row_path": [
+            "Kept yield"
+          ]
+        },
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "2Y Gone yield",
+          "native_token": "Gone yield",
+          "row_path": [
+            "Gone yield"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Kept yield"
+          ],
+          [],
+          "Kept yield",
+          "2Y Kept yield"
+        ],
+        [
+          "row_label",
+          [
+            "Gone yield"
+          ],
+          [],
+          "Gone yield",
+          "2Y Gone yield"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 10,
+  "winning_output": {
+    "text": "| Label | Value |\n| :--- | :--- |\n| 2Y Kept yield | 1.01 |\n"
+  }
+}
