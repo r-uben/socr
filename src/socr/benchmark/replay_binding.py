@@ -695,6 +695,35 @@ def assert_prediction(rows: list[ReplayRow], prediction: dict) -> None:
             raise AssertionError(f"A2 cleared table regressed: {key!r}")
 
 
+def _prediction_verdicts(artifact_text: str) -> list[list]:
+    """Read the artifact's row-label predictions, preserving order and token spaces."""
+    section = artifact_text.split("## Per item\n", 1)[1].split("\n## ", 1)[0]
+    verdicts = []
+    for line in section.splitlines():
+        if not line.startswith("| doc"):
+            continue
+        # Remove exactly the table padding: a token prefix can itself end in
+        # a space. Escaped token pipes are not column separators.
+        columns = line.removeprefix("| ").removesuffix(" |").split(" | ")
+        if columns[1] == "p":
+            continue
+        doc, page, table, tokens, verdict, reason = columns
+        verdicts.append(
+            [
+                doc,
+                int(page),
+                table,
+                "row_label",
+                tokens.replace("\\|", "|"),
+                verdict.removeprefix("**").removesuffix("**"),
+                reason,
+            ]
+        )
+    if not verdicts:
+        raise AssertionError("C2b prediction artifact has no per-item verdicts")
+    return verdicts
+
+
 def _frozen_prediction(corpus_dir: Path) -> dict | None:
     """Load the frozen gate in a source checkout; other corpora remain general replay."""
     root = Path(__file__).resolve().parents[3]
@@ -707,6 +736,8 @@ def _frozen_prediction(corpus_dir: Path) -> dict | None:
     artifact = root / prediction["artifact"]
     if hashlib.sha256(artifact.read_bytes()).hexdigest() != prediction["artifact_sha256"]:
         raise AssertionError("C2b prediction artifact differs from the fixture's source")
+    if prediction["verdicts"] != _prediction_verdicts(artifact.read_text()):
+        raise AssertionError("C2b prediction JSON verdicts differ from the markdown artifact")
     manifest = corpus_dir / "SHA256SUMS"
     if hashlib.sha256(manifest.read_bytes()).hexdigest() != prediction["manifest_sha256"]:
         raise AssertionError("Frozen corpus checksum manifest differs from the prediction input")

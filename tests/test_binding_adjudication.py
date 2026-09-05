@@ -140,6 +140,47 @@ class TestAdjudicate:
         assert second.items[0].outcome == "abstained"
         transcribe.assert_not_called()
 
+    def test_prior_requires_matching_geometry_and_method(self) -> None:
+        import copy
+        from unittest.mock import Mock
+
+        item = _label(
+            row_path=("RowA",),
+            native_token="RowA",
+            model_token="RowB",
+            cell_bbox=(0, 0, 10, 10),
+            address_source="ordinal geometry",
+        )
+        matching = adjudicate((item,), markdown="md", transcribe=lambda _: "RowB").to_dict()
+        legacy = copy.deepcopy(matching)
+        legacy["signatures"] = [list(item.signature())]
+        moved = copy.deepcopy(matching)
+        moved["signatures"][0][-1] = moved["signatures"][0][-1].replace("10, 10", "20, 20")
+        old_method = copy.deepcopy(matching)
+        old_method["signatures"][0][-1] = old_method["signatures"][0][-1].replace(
+            "geometry_cell_transcription", "native_crop_transcription"
+        )
+        changed_source = copy.deepcopy(matching)
+        changed_source["signatures"][0][-1] = changed_source["signatures"][0][-1].replace(
+            "ordinal geometry", "native pointer"
+        )
+        for prior, calls in (
+            (legacy, 1),
+            (moved, 1),
+            (old_method, 1),
+            (changed_source, 1),
+            (matching, 0),
+        ):
+            transcribe = Mock(return_value="RowB")
+            result = adjudicate((item,), markdown="md", prior=prior, transcribe=transcribe)
+            assert result.status == "lifted"
+            assert transcribe.call_count == calls
+            if calls:
+                transcribe.assert_called_once_with(item.cell_bbox)
+            else:
+                # Reusing evidence must not erase its original method.
+                assert prior_lift_applies(result.to_dict(), "md", (item,))
+
     def test_encoding_garbage_disproves_without_transcriber(self) -> None:
         items = (
             _label(

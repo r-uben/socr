@@ -38,6 +38,7 @@ markdown checksum and the contradiction signature set both match.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, replace
 from typing import Callable, Literal
 
@@ -83,6 +84,24 @@ class ContradictionItem:
     def signature(self) -> tuple[str, tuple[str, ...], tuple[str, ...], str, str]:
         return (self.kind, self.row_path, self.col_path, self.native_token, self.model_token)
 
+    def lift_signature(self) -> tuple:
+        """Bind reusable evidence to its address and verification method.
+
+        A reused lift retains the original method, rather than replacing it
+        with ``prior_lift``. Legacy native-crop signatures cannot match.
+        """
+        provenance = json.dumps(
+            {
+                "address_source": self.address_source,
+                "cell_bbox": self.cell_bbox,
+                "method": "encoding_garbage"
+                if token_is_encoding_garbage(self.native_token)
+                else "geometry_cell_transcription",
+            },
+            sort_keys=True,
+        )
+        return (*self.signature(), provenance)
+
     def to_record(self, disproof: DisproofKind | None) -> dict:
         return {
             "kind": self.kind,
@@ -123,7 +142,7 @@ class AdjudicationRecord:
         return {
             "status": self.status,
             "markdown_sha256": self.markdown_sha256,
-            "signatures": [list(outcome.item.signature()) for outcome in self.items],
+            "signatures": [list(outcome.item.lift_signature()) for outcome in self.items],
             "items": [outcome.item.to_record(outcome.disproof) for outcome in self.items],
         }
 
@@ -228,14 +247,16 @@ def prior_lift_applies(prior: object, markdown: str, items: tuple[ContradictionI
         prior_sigs = sorted(tuple(_coerce_signature(sig)) for sig in raw_sigs)
     except (TypeError, ValueError):
         return False
-    current_sigs = sorted(item.signature() for item in items)
+    current_sigs = sorted(item.lift_signature() for item in items)
     return prior_sigs == current_sigs
 
 
-def _coerce_signature(raw: object) -> tuple[str, tuple[str, ...], tuple[str, ...], str, str]:
-    if not isinstance(raw, (list, tuple)) or len(raw) != 5:
+def _coerce_signature(raw: object) -> tuple:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 6:
         raise ValueError("bad signature")
-    kind, row_path, col_path, native, model = raw
+    kind, row_path, col_path, native, model, provenance = raw
+    if not isinstance(provenance, str):
+        raise ValueError("bad address provenance")
     if kind not in ("cell", "row_label"):
         raise ValueError("bad kind")
     if not isinstance(row_path, (list, tuple)) or not isinstance(col_path, (list, tuple)):
@@ -246,6 +267,7 @@ def _coerce_signature(raw: object) -> tuple[str, tuple[str, ...], tuple[str, ...
         tuple(str(p) for p in col_path),
         str(native),
         str(model),
+        provenance,
     )
 
 

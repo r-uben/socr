@@ -5659,6 +5659,8 @@ class UnifiedPipeline:
             return band_index_for(bands, midpoint)
 
         def address(item):
+            if item.kind != "row_label":
+                return None, f"no column correspondence for {item.kind}"
             if origin is None:
                 return None, "no origin (no second rule group)"
             if edge is None or edge <= region[0]:

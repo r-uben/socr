@@ -446,7 +446,7 @@ class TestProcessDifference:
 
 def test_geometry_address_four_controls_in_one_process(tmp_path: Path) -> None:
     """Hold the printed page fixed while independently breaking each prefix."""
-    from socr.tables.binding import RowLabelContradiction, bind
+    from socr.tables.binding import ContradictedCell, RowLabelContradiction, bind
     from socr.tables.locate import label_column_edge, ordinal_origin, row_bands
     from socr.tables.witness import prepare_table_witnesses
 
@@ -554,6 +554,29 @@ def test_geometry_address_four_controls_in_one_process(tmp_path: Path) -> None:
             (bands[1].y1 + bands[2].y0) / 2,
         )
     )
+
+    # A clean row chain establishes the label column only. A numeric dispute
+    # on this very same printed row must not borrow the label's address.
+    numeric = replace(
+        binding,
+        row_label_contradictions=[],
+        contradicted_cells=[ContradictedCell(("Target",), ("OLS",), "200", "201")],
+    )
+    for current, expected_calls in ((numeric, 0), (binding, 1)):
+        with patch.object(
+            pipeline, "_transcribe_cell_token", return_value="Target complete"
+        ) as transcribe:
+            record = pipeline._adjudicate_clamped_table(
+                state, 1, table_id, markdown, current, state.pages[1], region=region
+            )
+        assert transcribe.call_count == expected_calls
+        if not expected_calls:
+            assert record.status == "held"
+            assert record.items[0].outcome == "abstained"
+            assert record.items[0].item.abstain_reason == "no column correspondence for cell"
+            assert record.items[0].item.cell_bbox is None
+        else:
+            assert record.items[0].item.cell_bbox is not None
 
 
 def test_address_metadata_preserves_resume_and_final_markdown(tmp_path: Path) -> None:
