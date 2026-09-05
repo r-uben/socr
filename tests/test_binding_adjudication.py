@@ -76,6 +76,26 @@ class TestTokensAgree:
         assert tokens_agree("Adjusted $\\text{R}^2$", "Adjusted R2", kind="row_label")
         assert not tokens_agree("Adjusted $\\text{R}^2$", "Constant", kind="row_label")
 
+    def test_sibling_latex_presentation_labels_agree(self) -> None:
+        """GH-585: Greek-letter commands and alphabetic word commands are
+        sibling presentation classes to the GH-582 wrap, and must agree the
+        same way once mapped."""
+        assert tokens_agree("∆Slope (3m)", r"$\Delta \text{ Slope (3m)}$", kind="row_label")
+        assert tokens_agree(
+            "∆log Comm. price (3m)",
+            r"$\Delta \log \text{ Comm. price (3m)}$",
+            kind="row_label",
+        )
+        # A genuine text difference (missing "500 (3m)") still disagrees.
+        assert not tokens_agree(
+            "∆log S&P",
+            r"$\Delta \log \text{ S\&P 500 (3m)}$",
+            kind="row_label",
+        )
+        # A bare symbolic label still folds to an empty key on both sides —
+        # tokens_agree's empty-key refusal (not a false match) still applies.
+        assert not tokens_agree("β", r"$\beta$", kind="row_label")
+
 
 class TestAdjudicate:
     def test_all_abstained_is_held_and_never_transcribes_native_bbox(self) -> None:

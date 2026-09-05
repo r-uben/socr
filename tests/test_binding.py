@@ -406,6 +406,31 @@ def test_symbolic_row_labels_fail_closed_as_unverifiable():
     assert result.structural_agreement is False
 
 
+def test_gh585_sibling_latex_greek_and_word_command_labels_are_not_contradictions():
+    """GH-585: a Greek-letter command (``\\Delta``) and a plain alphabetic
+    word command (``\\log``) are sibling presentation classes to the GH-582
+    ``\\text{}``/``^`` wrap — the ladder-corpus doc05 held pair. On ``main``
+    (GH-582 fix only) this label is convicted as a shifted/invented label
+    because ``\\Delta`` survives the shared normalizer as the spelled-out
+    ASCII word ``delta``, which the native ``∆`` side never carries."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "∆log Comm. price (3m)"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                                          | OLS  |
+|------------------------------------------|------|
+| $\Delta \log \text{ Comm. price (3m)}$   | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is True
+
+
 # ---------------------------------------------------------------------------
 # GH-582: inline-math wrapping is presentation, not a value/label change
 # ---------------------------------------------------------------------------

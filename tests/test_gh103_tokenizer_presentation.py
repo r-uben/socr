@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import pytest
 
+from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import (
     _normalize_numeric_token,
     _numeric_multiset_from_tokens,
     is_numeric_token,
+    strip_math_presentation,
     strip_presentation,
 )
 from socr.tables.source_evidence import collect_table_tokens
@@ -197,6 +199,75 @@ def test_gh582_numeric_path_unwraps_a_balanced_whole_token_wrap():
     assert _normalize_numeric_token(r"\(0.5\)") == "0.5"
     assert is_numeric_token("$43$")
     assert _normalize_numeric_token("$43$") == "43"
+
+
+# ---------------------------------------------------------------------------
+# GH-585: sibling LaTeX presentation classes the GH-582 wrap fix left open.
+# Doc05/doc07 ladder-corpus held pairs (`` `/consilium` `` A1 replay).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("native", "model"),
+    [
+        ("∆Slope (3m)", r"$\Delta \text{ Slope (3m)}$"),
+        ("∆log Comm. price (3m)", r"$\Delta \log \text{ Comm. price (3m)}$"),
+    ],
+)
+def test_gh585_greek_command_and_word_command_labels_agree(native, model):
+    """GH-585: a Greek-letter command (``\\Delta``) must fold to the same
+    non-ASCII symbol ``normalize_label`` strips on both sides, and a plain
+    alphabetic word command (``\\log``) must lose only its backslash — on
+    ``main`` (GH-582 fix only) these two pairs still contradict because
+    ``\\Delta`` survives as the spelled-out ASCII word ``delta``, which
+    ``normalize_label`` does NOT discard the way it discards the native
+    ``∆`` symbol."""
+    native_key = normalize_label(strip_math_presentation(native, label=True))
+    model_key = normalize_label(strip_math_presentation(model, label=True))
+    assert native_key == model_key
+
+
+def test_gh585_a_real_text_difference_still_disagrees_after_the_map():
+    """GH-585: the map is exact, not a widening — `` S&P `` vs
+    `` S&P 500 (3m) `` is a genuine text difference (missing ``500 (3m)``)
+    and must still fail to match after the Greek/escape/word-command map."""
+    native = "∆log S&P"
+    model = r"$\Delta \log \text{ S\&P 500 (3m)}$"
+    native_key = normalize_label(strip_math_presentation(native, label=True))
+    model_key = normalize_label(strip_math_presentation(model, label=True))
+    assert native_key != model_key
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (r"\Delta", "∆"),
+        (r"\beta", "β"),
+        (r"\Sigma", "Σ"),
+        (r"\varepsilon", "ε"),
+    ],
+)
+def test_gh585_greek_command_table_maps_to_unicode(command, expected):
+    assert strip_math_presentation(command, label=True) == expected
+
+
+@pytest.mark.parametrize(
+    ("escaped", "expected"),
+    [
+        (r"\&", "&"),
+        (r"\%", "%"),
+        (r"\_", "_"),
+        (r"\$", ""),  # GH-582: bare `$` is a delimiter, dropped like any other.
+        (r"\#", "#"),
+    ],
+)
+def test_gh585_escaped_punctuation_unescapes(escaped, expected):
+    assert strip_math_presentation(escaped, label=True) == expected
+
+
+@pytest.mark.parametrize("command", [r"\log", r"\ln", r"\exp"])
+def test_gh585_alphabetic_word_commands_drop_only_the_backslash(command):
+    assert strip_math_presentation(command, label=True) == command[1:]
 
 
 def test_content_labels_were_never_the_bug():

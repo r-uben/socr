@@ -514,6 +514,101 @@ _MATH_TEXT_WRAP_RE = re.compile(r"\\(?:text|mathrm|textbf)\{([^{}]*)\}")
 _MATH_SCRIPT_BRACE_RE = re.compile(r"[\^_]\{([^{}]*)\}")
 _MATH_SCRIPT_BARE_RE = re.compile(r"[\^_](\S)")
 
+# GH-585: a VLM's ``label=True`` output is inline-math LaTeX, and the
+# native page's text layer is not -- the native layer carries the actual
+# Unicode symbol (``∆``) or the plain escaped-punctuation character
+# (``&``), never the LaTeX source that would render it. Three command
+# classes stand between the two sides even after the ``\text{}``/``$``
+# stripping above, and each is deterministic (a fixed spelling maps to a
+# fixed replacement -- never a threshold or a fuzzy match):
+#
+# 1. Greek-letter commands (``\Delta``, ``\beta``, ...) map to the Unicode
+#    Greek letter the native layer prints. This MUST run
+#    before class 3 below: both are "backslash + letters", and a Greek
+#    name run through the generic word-command rule would spell itself
+#    out in Latin letters (``\Delta`` -> ``Delta``) instead of folding to
+#    the single non-ASCII ``∆`` that ``normalize_label`` treats the same
+#    way it treats the native symbol (stripped as non-``[a-z0-9]``, so
+#    both sides lose it identically rather than one side keeping a
+#    spelled-out word the other never had).
+# 2. Escaped punctuation (``\&``, ``\%``, ``\_``, ``\$``, ``\#``) unescapes
+#    to the bare character. ``normalize_label`` discards this punctuation
+#    on both sides regardless (it is non-alphanumeric), so this class is a
+#    no-op in practice for that comparison, but the escape is stripped
+#    here anyway because this helper is generic presentation stripping,
+#    not solely a ``normalize_label`` pre-pass -- see ``strip_presentation``
+#    callers.
+# 3. Every OTHER alphabetic word command (``\log``, ``\ln``, ``\exp``, ...)
+#    loses its backslash, keeping the word: ``\log`` -> ``log``. The full
+#    Greek table (class 1) must be substituted first so it never falls
+#    through to this generic rule.
+#
+# The full standard LaTeX Greek alphabet. Lowercase commands exist for all
+# 24 letters; uppercase commands exist only for the 11 letters whose
+# capital glyph differs from the Latin lookalike (the rest -- ``\Alpha``,
+# ``\Beta``, ... -- are not standard LaTeX and are deliberately omitted so
+# this stays an exact map, not a guess). ``var``-prefixed alternate glyphs
+# map to the same base letter: the native layer does not distinguish glyph
+# variants, so folding them together is exact, not a widening of the match.
+_GREEK_LOWER = {
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "epsilon": "ε",
+    "zeta": "ζ",
+    "eta": "η",
+    "theta": "θ",
+    "iota": "ι",
+    "kappa": "κ",
+    "lambda": "λ",
+    "mu": "μ",
+    "nu": "ν",
+    "xi": "ξ",
+    "omicron": "ο",
+    "pi": "π",
+    "rho": "ρ",
+    "sigma": "σ",
+    "tau": "τ",
+    "upsilon": "υ",
+    "phi": "φ",
+    "chi": "χ",
+    "psi": "ψ",
+    "omega": "ω",
+}
+_GREEK_UPPER = {
+    "Gamma": "Γ",
+    "Delta": "∆",  # U+2206 INCREMENT -- the codepoint the native PDFs emit.
+    "Theta": "Θ",
+    "Lambda": "Λ",
+    "Xi": "Ξ",
+    "Pi": "Π",
+    "Sigma": "Σ",
+    "Upsilon": "Υ",
+    "Phi": "Φ",
+    "Psi": "Ψ",
+    "Omega": "Ω",
+}
+_GREEK_VARIANTS = {
+    "varepsilon": _GREEK_LOWER["epsilon"],
+    "vartheta": _GREEK_LOWER["theta"],
+    "varkappa": _GREEK_LOWER["kappa"],
+    "varpi": _GREEK_LOWER["pi"],
+    "varrho": _GREEK_LOWER["rho"],
+    "varsigma": _GREEK_LOWER["sigma"],
+    "varphi": _GREEK_LOWER["phi"],
+}
+_GREEK_COMMANDS: dict[str, str] = {**_GREEK_UPPER, **_GREEK_VARIANTS, **_GREEK_LOWER}
+# Longest names first so ``vartheta`` matches whole, not as ``var`` + a
+# dangling ``theta`` alternative fragment; within equal length, order does
+# not matter because no two Greek command names share a first letter class
+# that could partially overlap under this alternation.
+_GREEK_COMMAND_RE = re.compile(
+    r"\\(" + "|".join(sorted(_GREEK_COMMANDS, key=len, reverse=True)) + r")\b"
+)
+_MATH_ESCAPED_PUNCT_RE = re.compile(r"\\([&%_$#])")
+_MATH_WORD_COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
+
 
 def strip_math_presentation(tok: str, *, label: bool = False) -> str:
     r"""Strip inline-math wrapping so a LaTeX-decorated token compares equal
@@ -530,9 +625,14 @@ def strip_math_presentation(tok: str, *, label: bool = False) -> str:
     ``label=False`` unwraps one balanced ``$...$``/``\(...\)`` pair around
     the WHOLE token and leaves everything else -- including ``^``/``_`` --
     untouched. ``label=True`` additionally unwraps
-    ``\text{}``/``\mathrm{}``/``\textbf{}`` and flattens ``^``/``_``
-    script markers anywhere in the string, then drops the delimiters: see
-    the two mode comments above the regexes for why the two paths differ.
+    ``\text{}``/``\mathrm{}``/``\textbf{}``, maps Greek-letter commands to
+    the Unicode letters the native layer prints, unescapes ``\&``/``\%``/
+    ``\_``/``\$``/``\#``, drops the backslash of every other alphabetic
+    word command (``\log`` -> ``log``), and flattens ``^``/``_`` script
+    markers anywhere in the string, then drops the delimiters: see
+    the two mode comments above the regexes for why the two paths differ,
+    and the GH-585 comment above the Greek table for why the command
+    classes run in that order.
     """
     text = tok.strip()
     if not label:
@@ -542,6 +642,9 @@ def strip_math_presentation(tok: str, *, label: bool = False) -> str:
     while prev != text:
         prev = text
         text = _MATH_TEXT_WRAP_RE.sub(r"\1", text)
+    text = _GREEK_COMMAND_RE.sub(lambda m: _GREEK_COMMANDS[m.group(1)], text)
+    text = _MATH_ESCAPED_PUNCT_RE.sub(r"\1", text)
+    text = _MATH_WORD_COMMAND_RE.sub(r"\1", text)
     text = _MATH_SCRIPT_BRACE_RE.sub(r"\1", text)
     text = _MATH_SCRIPT_BARE_RE.sub(r"\1", text)
     text = _MATH_DOLLAR_RE.sub("", text)
