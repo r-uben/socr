@@ -533,6 +533,11 @@ def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
     * otherwise ``ambiguous``: tight leading between two real rows is
       geometrically indistinguishable from an annotation line, so the
       boundary is kept and surfaced, never guessed.
+
+    Deliberate non-goals (they resolve to ``ambiguous``, never to a wrong
+    merge): a superscript ABOVE its base (the smaller text comes first in
+    baseline order; C1's corpus scan found only subscripts below, doc04's
+    shape) and a subscript overhanging its parent's right edge. Both abstain.
     No literal: every bound is the two lines' own boxes and sizes.
     """
 
