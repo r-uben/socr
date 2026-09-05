@@ -43,12 +43,15 @@ Lays out a MINIATURE version of a frozen corpus directory
   table block (``find_table_blocks``) but fails ``parse_grid`` (one-hyphen
   separator): bind() returns the default BindingResult, so the row is
   UNCHECKED, not a binder clear.
-- ``pages/00009.json`` — two native rows; recorded contradiction is on
-  the second; replay markdown keeps only the first (checked) row so the
-  disputed label is unbound → UNCHECKED, not a clear.
+- ``pages/00009.json`` — disappeared disputed row whose frozen model
+  token is a substring of the remaining checked row's candidate label
+  → UNCHECKED (exact candidate-index lookup, no substring fallback).
 - ``pages/00010.json`` — two recorded contradictions; replay keeps the
-  first (still contradicts) and drops the second (unbound) → overall NO
-  with the dropped item UNCHECKED, not frozen-only.
+  first (still contradicts) and drops the second → overall NO with the
+  dropped item UNCHECKED, not frozen-only.
+- ``pages/00011.json`` — two candidate rows share a label; the disputed
+  row's frozen model_token matches both → UNCHECKED, even if the other
+  row is bound and compared.
 """
 
 from __future__ import annotations
@@ -145,11 +148,14 @@ P8_CANDIDATE_LABELS = {"Discount rate": "1Y Discount rate", "Prime rate": "Prime
 
 #: page 9: unrelated row checked, disputed row omitted from the candidate.
 P9_ROWS = [
-    {"label": "Checked yield", "Value": "0.48"},
+    {"label": "2Y Dropped yield extra", "Value": "0.48"},
     {"label": "Dropped yield", "Value": "0.12"},
 ]
-P9_RECORDED_LABELS = {"Checked yield": "Checked yield", "Dropped yield": "2Y Dropped yield"}
-P9_REPLAY_LABELS = {"Checked yield": "Checked yield"}
+P9_RECORDED_LABELS = {
+    "2Y Dropped yield extra": "2Y Dropped yield extra",
+    "Dropped yield": "2Y Dropped yield",
+}
+P9_REPLAY_LABELS = {"2Y Dropped yield extra": "2Y Dropped yield extra"}
 
 #: page 10: one recorded item remains as a fresh contradiction; the other
 #: is omitted from the candidate (unbound) so it must not count as cleared.
@@ -159,6 +165,19 @@ P10_ROWS = [
 ]
 P10_RECORDED_LABELS = {"Kept yield": "2Y Kept yield", "Gone yield": "2Y Gone yield"}
 P10_REPLAY_LABELS = {"Kept yield": "2Y Kept yield"}
+
+#: page 11: duplicate candidate stubs. Recorded items use model_token
+#: "Dup rate"; replay keeps two Dup-rate rows so the index is ambiguous.
+P11_ROWS = [
+    {"label": "Alpha rate", "Value": "0.77"},
+    {"label": "Beta rate", "Value": "0.88"},
+]
+P11_RECORDED_LABELS = {"Alpha rate": "Dup rate", "Beta rate": "Dup rate"}
+P11_REPLAY_ROWS = [
+    {"label": "Alpha rate", "Value": "0.88"},
+    {"label": "Beta rate", "Value": "0.99"},
+]
+P11_REPLAY_LABELS = {"Alpha rate": "Dup rate", "Beta rate": "Dup rate"}
 
 
 def _draw_ruled_table(page, rows: list[dict], top: float, label_col: str = "label") -> None:
@@ -222,6 +241,8 @@ def generate_pdf(out_path: Path) -> None:
     _draw_ruled_table(page9, P9_ROWS, TOP)
     page10 = doc.new_page()
     _draw_ruled_table(page10, P10_ROWS, TOP)
+    page11 = doc.new_page()
+    _draw_ruled_table(page11, P11_ROWS, TOP)
     doc.save(str(out_path))
     doc.close()
 
@@ -292,6 +313,8 @@ def main() -> None:
     md9_replay = _markdown_for(P9_ROWS[:1], P9_REPLAY_LABELS)
     md10_recorded = _markdown_for(P10_ROWS, P10_RECORDED_LABELS)
     md10_replay = _markdown_for(P10_ROWS[:1], P10_REPLAY_LABELS)
+    md11_recorded = _markdown_for(P11_ROWS, P11_RECORDED_LABELS)
+    md11_replay = _markdown_for(P11_REPLAY_ROWS, P11_REPLAY_LABELS)
 
     ba1, table_id1 = _binding_adjudication_for(pdf_path, 1, md1)
     ba2, table_id2 = _binding_adjudication_for(pdf_path, 2, md2)
@@ -301,10 +324,12 @@ def main() -> None:
     ba8, table_id8 = _binding_adjudication_for(pdf_path, 8, md8)
     ba9, table_id9 = _binding_adjudication_for(pdf_path, 9, md9_recorded)
     ba10, table_id10 = _binding_adjudication_for(pdf_path, 10, md10_recorded)
+    ba11, table_id11 = _binding_adjudication_for(pdf_path, 11, md11_recorded)
     assert table_id5 == "p5-t0", table_id5
     assert table_id8 == "p8-t0", table_id8
     assert table_id9 == "p9-t0", table_id9
     assert table_id10 == "p10-t0", table_id10
+    assert table_id11 == "p11-t0", table_id11
 
     _assert_replay_table_note(
         pdf_path, 5, md5, P5_ABSENT_TABLE_ID, "not found among this tree's witnesses"
@@ -462,6 +487,14 @@ def main() -> None:
     }
     (pages_dir / "00010.json").write_text(json.dumps(sidecar10, indent=2, sort_keys=True) + "\n")
 
+    sidecar11 = {
+        "page_num": 11,
+        "winning_output": {"text": md11_replay},
+        "binding_adjudication": {table_id11: ba11},
+        "audit_events": [],
+    }
+    (pages_dir / "00011.json").write_text(json.dumps(sidecar11, indent=2, sort_keys=True) + "\n")
+
     print(f"Generated: {pdf_path}")
     print(f"Generated: {pages_dir / '00001.json'} (table_id={table_id1})")
     print(f"Generated: {pages_dir / '00002.json'} (table_id={table_id2}, fail-closed marker)")
@@ -490,6 +523,9 @@ def main() -> None:
     print(
         f"Generated: {pages_dir / '00010.json'} "
         f"(table_id={table_id10}, mixed unchecked-removed + remaining contradiction)"
+    )
+    print(
+        f"Generated: {pages_dir / '00011.json'} (table_id={table_id11}, duplicate candidate labels)"
     )
 
 

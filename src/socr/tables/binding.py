@@ -1071,6 +1071,7 @@ class BindingResult:
     #: parse_grid failed. Replay requires per-disputed-row evidence from these.
     native_rows: list = field(default_factory=list)
     row_binding: dict = field(default_factory=dict)
+    candidate_row_labels: tuple[str, ...] = ()
     row_label_unverifiable_paths: tuple[tuple[str, ...], ...] = ()
 
     @property
@@ -1371,6 +1372,9 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     row_binding = _bind_rows(native_rows, candidate_grid.rows)
     result.native_rows = list(native_rows)
     result.row_binding = dict(row_binding)
+    result.candidate_row_labels = tuple(
+        (row[0].strip() if row else "") for row in candidate_grid.rows
+    )
     bound_candidate_idxs = set(row_binding)
     bound_native_idxs = set(row_binding.values())
     result.candidate_valueless_unbound = sum(

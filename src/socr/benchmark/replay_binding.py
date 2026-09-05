@@ -403,117 +403,47 @@ def _recorded_row_path(rec: dict) -> tuple[str, ...]:
     return row_path
 
 
-def _native_label(native_row) -> str:
-    return native_row.row_path[-1] if native_row.row_path else ""
-
-
-def _native_parent(native_row) -> tuple[str, ...]:
-    return tuple(native_row.row_path[:-1]) if native_row.row_path else ()
-
-
-def _native_idx_for_recorded(rec: dict, result: BindingResult) -> int | None:
-    """Locate the native row a frozen item refers to.
-
-    Exact ``row_path`` first. After a label repair the frozen path is the
-    old native token, so also accept a *bound* row whose label equals the
-    frozen model token, or a unique row whose label contains the frozen
-    native token (same parent when the frozen path had one). Searching
-    unbound rows too lets a dropped value-less/omitted row be named as
-    not bound, rather than "not among native rows".
-    """
-    row_path = _recorded_row_path(rec)
-    native_token = str(rec.get("native_token") or "")
+def _candidate_indices_for_item(rec: dict, result: BindingResult) -> list[int]:
+    """Exact stub matches in the fresh candidate grid. No substring."""
     model_token = str(rec.get("model_token") or "")
-    for idx, native_row in enumerate(result.native_rows):
-        if tuple(native_row.row_path) == row_path:
-            return idx
-
-    bound = set(result.row_binding.values())
-    frozen_last = row_path[-1] if row_path else native_token
-    frozen_parent = row_path[:-1] if len(row_path) > 1 else None
-
-    def search(predicate, bound_only: bool) -> list[int]:
-        hits = []
-        for idx, native_row in enumerate(result.native_rows):
-            if bound_only and idx not in bound:
-                continue
-            if predicate(native_row):
-                hits.append(idx)
-        return hits
-
-    def locate(bound_only: bool) -> int | None:
-        if model_token:
-            hits = search(lambda nr: _native_label(nr) == model_token, bound_only)
-            if len(hits) == 1:
-                return hits[0]
-        if native_token:
-            hits = search(lambda nr: _native_label(nr) == native_token, bound_only)
-            if len(hits) == 1:
-                return hits[0]
-        if frozen_last:
-
-            def contained(nr) -> bool:
-                lab = _native_label(nr)
-                if not lab:
-                    return False
-                if frozen_last not in lab and lab not in frozen_last:
-                    return False
-                if frozen_parent is not None and _native_parent(nr) != frozen_parent:
-                    return False
-                return True
-
-            hits = search(contained, bound_only)
-            if len(hits) == 1:
-                return hits[0]
-            if model_token and len(hits) > 1:
-                narrowed = [
-                    idx
-                    for idx in hits
-                    if model_token == _native_label(result.native_rows[idx])
-                    or model_token in _native_label(result.native_rows[idx])
-                ]
-                if len(narrowed) == 1:
-                    return narrowed[0]
-        return None
-
-    found = locate(bound_only=True)
-    if found is not None:
-        return found
-    return locate(bound_only=False)
+    return [i for i, lab in enumerate(result.candidate_row_labels) if lab == model_token]
 
 
 def _item_unchecked_reason(rec: dict, result: BindingResult) -> str | None:
     """Why this recorded item was not bound-and-compared, or None if it was.
 
-    Positive per-row evidence: the row_path is in native_rows, that native
-    index is in row_binding, and the label/cell was compared (not
-    unverifiable). Absence from native_unbound is not evidence.
+    Correspondence is the frozen candidate row: exact model_token in
+    candidate_row_labels, then row_binding[cand_idx]. Duplicate stubs,
+    a missing stub, or an unbound candidate index are UNCHECKED. Never
+    label-text similarity against native rows.
     """
-    if not result.native_rows and not result.row_binding:
+    if not result.candidate_row_labels and not result.row_binding:
         return (
             "candidate grid produced no checks "
             f"(row_labels_checked=0, column_binding_unverifiable="
             f"{result.column_binding_unverifiable})"
         )
     kind = rec.get("kind", "")
-    row_path = _recorded_row_path(rec)
-    col_path = tuple(rec.get("col_path") or ())
-    native_idx = _native_idx_for_recorded(rec, result)
-    if native_idx is None:
-        return f"disputed row {row_path!r} not among native rows"
-    if native_idx not in set(result.row_binding.values()):
-        native_row = result.native_rows[native_idx]
-        extra = " (value-less)" if not native_row.multiset else ""
-        return f"disputed row {row_path!r} was not bound{extra}"
-    if kind == "row_label":
-        native_path = tuple(result.native_rows[native_idx].row_path)
-        if (
-            row_path in result.row_label_unverifiable_paths
-            or native_path in result.row_label_unverifiable_paths
-        ):
-            return f"disputed row {row_path!r} label was unverifiable"
-        return None
+    model_token = str(rec.get("model_token") or "")
     if kind == "cell":
+        row_path = _recorded_row_path(rec)
+        col_path = tuple(rec.get("col_path") or ())
+        hits = [
+            idx
+            for idx, native_row in enumerate(result.native_rows)
+            if tuple(native_row.row_path) == row_path
+        ]
+        if len(hits) == 0:
+            return f"disputed row {row_path!r} not among native rows"
+        if len(hits) > 1:
+            return f"frozen row_path {row_path!r} matches {len(hits)} rows"
+        native_idx = hits[0]
+        cand_hits = [c for c, n in result.row_binding.items() if n == native_idx]
+        if len(cand_hits) != 1:
+            return (
+                f"candidate index unbound in fresh row_binding "
+                f"(native {row_path!r} has {len(cand_hits)} bindings)"
+            )
         compared_cells = {(c.row_path, c.col_path) for c in result.matched_cells} | {
             (c.row_path, c.col_path) for c in result.contradicted_cells
         }
@@ -523,6 +453,19 @@ def _item_unchecked_reason(rec: dict, result: BindingResult) -> str | None:
                 f"(column_binding_unverifiable={result.column_binding_unverifiable})"
             )
         return None
+
+    indices = _candidate_indices_for_item(rec, result)
+    if len(indices) == 0:
+        return f"no candidate row for frozen model_token {model_token!r}"
+    if len(indices) > 1:
+        return f"frozen candidate row {model_token!r} matches {len(indices)} rows"
+    (cand_idx,) = indices
+    if cand_idx not in result.row_binding:
+        return f"candidate index {cand_idx} unbound in fresh row_binding"
+    native_idx = result.row_binding[cand_idx]
+    native_path = tuple(result.native_rows[native_idx].row_path)
+    if native_path in result.row_label_unverifiable_paths:
+        return f"disputed row {native_path!r} label was unverifiable"
     return None
 
 

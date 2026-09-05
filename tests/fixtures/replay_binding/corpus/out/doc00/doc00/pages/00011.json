@@ -1,0 +1,55 @@
+{
+  "audit_events": [],
+  "binding_adjudication": {
+    "p11-t0": {
+      "items": [
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "Dup rate",
+          "native_token": "Alpha rate",
+          "row_path": [
+            "Alpha rate"
+          ]
+        },
+        {
+          "col_path": [],
+          "disproof": null,
+          "kind": "row_label",
+          "model_token": "Dup rate",
+          "native_token": "Beta rate",
+          "row_path": [
+            "Beta rate"
+          ]
+        }
+      ],
+      "markdown_sha256": "unused-in-fixture",
+      "signatures": [
+        [
+          "row_label",
+          [
+            "Alpha rate"
+          ],
+          [],
+          "Alpha rate",
+          "Dup rate"
+        ],
+        [
+          "row_label",
+          [
+            "Beta rate"
+          ],
+          [],
+          "Beta rate",
+          "Dup rate"
+        ]
+      ],
+      "status": "held"
+    }
+  },
+  "page_num": 11,
+  "winning_output": {
+    "text": "| Label | Value |\n| :--- | :--- |\n| Dup rate | 0.88 |\n| Dup rate | 0.99 |\n"
+  }
+}

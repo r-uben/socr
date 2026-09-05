@@ -54,14 +54,15 @@ def test_discover_pages_finds_all_fixture_pages():
         ("doc00", 8),
         ("doc00", 9),
         ("doc00", 10),
+        ("doc00", 11),
     }
 
 
 def test_replay_corpus_row_shape_matches_recorded_table_count():
     """Same contract the real corpus proves at 7 rows (one row per recorded
-    table): here, 10 recorded tables -> 10 rows, exactly."""
+    table): here, 11 recorded tables -> 11 rows, exactly."""
     rows = replay_corpus(FIXTURE_CORPUS)
-    assert len(rows) == 10
+    assert len(rows) == 11
     assert all(isinstance(r, ReplayRow) for r in rows)
 
 
@@ -197,7 +198,10 @@ def test_perturbed_recorded_items_report_exact_delta():
     row = rows[0]
     assert row.multiset_match is False
     assert row.added == (real_item,)
-    assert row.removed == (("row_label", "Term premium", "10Y Term premium"),)
+    bogus_key = ("row_label", "Term premium", "10Y Term premium")
+    assert bogus_key not in row.removed
+    assert bogus_key in row.unchecked_removed
+    assert "no candidate row" in row.note
 
 
 def test_sidecar_bytes_unchanged_by_replay():
@@ -223,6 +227,7 @@ def test_report_formats_without_raising():
     assert "p8-t0" in report
     assert "p9-t0" in report
     assert "p10-t0" in report
+    assert "p11-t0" in report
     assert "UNREPLAYABLE" in report
     assert "UNCHECKED" in report
 
@@ -243,6 +248,7 @@ def test_main_cli_exits_zero_and_prints_rows(capsys):
     assert "p8-t0" in out
     assert "p9-t0" in out
     assert "p10-t0" in out
+    assert "p11-t0" in out
 
 
 @pytest.mark.parametrize(
@@ -342,7 +348,7 @@ def test_unrelated_row_checked_disputed_unbound_is_unchecked():
     assert row.removed == ()
     assert row.fresh_item_count == 0
     assert row.recorded_item_count >= 1
-    assert "not bound" in row.note
+    assert "no candidate row" in row.note
     assert row.row_labels_checked is not None and row.row_labels_checked >= 1
     assert row.unchecked_removed
 
@@ -375,6 +381,20 @@ def test_cli_mixed_row_is_no_with_unchecked_item(capsys):
     assert "NO" in p10_line.split(), p10_line
     assert "UNCHECKED" not in p10_line.split()
     assert "UNCHECKED:" in report
+
+
+def test_duplicate_candidate_labels_are_unchecked():
+    """Two candidate rows share a stub; the disputed frozen model_token
+    matches both, so the row is UNCHECKED even if a sibling is bound."""
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 11)
+    rows = replay_page(record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.unreplayable is False
+    assert row.unchecked_removed
+    assert "matches" in row.note and "rows" in row.note
+    for key in row.unchecked_removed:
+        assert key not in row.removed
 
 
 def test_successful_bind_carries_coverage_and_is_not_unchecked():
