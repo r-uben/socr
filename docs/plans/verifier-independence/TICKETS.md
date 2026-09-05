@@ -156,7 +156,10 @@ no optimisation, no threshold, no new status.
 `src/socr/core/manifest.py`, `src/socr/cli.py` (summary line), `tests/test_timings.py`
 (new).
 **Done when:** `~/venvs/socr/bin/pytest tests/test_timings.py -q` exits 0 in a shell with
-`ollama` absent, and it proves (a) exclusive keys sum to `timings_s.total` within 1 ms,
+`ollama` absent, and it proves (a) `timings_s.total` is an independently measured page
+wall-clock and `total − Σ exclusive` is reported as unattributed time (**amended at merge**,
+PR #594: the original "exclusive keys sum to total within 1 ms" was tautological once total
+was defined as the sum),
 (b) the resume skip decision is identical with and without `timings_s` present (pattern:
 `tests/test_p6_disposition_persistence.py:191-228`), (c) the final `.md` is byte-identical
 with timings on and off; existing golden/byte-identity tests unchanged. Patches:

@@ -1,6 +1,6 @@
 # STATUS — verifier-independence
 
-Last updated: 2026-09-05
+Last updated: 2026-09-05 (wave 1 merged, wave 2 started)
 
 ## Stage
 
@@ -32,9 +32,9 @@ gate; `tests/` is flat. Nothing dispatched.
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
 | A1  | native reference | DONE | — | 1 |
-| B1  | latency | TODO | — | 1 |
-| A1b | native reference | TODO | A1 | 2 (claude) |
-| B2  | latency | TODO | B1 | 2 (claude) |
+| B1  | latency | DONE | — | 1 |
+| A1b | native reference | DONE | A1 | 2 (claude) |
+| B2  | latency | WIP | B1 | 2 (claude) |
 | A2  | native reference | TODO | A1b | 3 |
 | C1  | verifier | TODO | A1b | 3 |
 | C2a | verifier | TODO | C1 | 4 |
@@ -51,13 +51,26 @@ gate; `tests/` is flat. Nothing dispatched.
 - Wave 5: C2b (`adjudication.py`, `binding.py`, `orchestrator.py` two hunks).
 - Wave 6: C3 (corpus re-run, Claude inline).
 
+## Wave 1 closed (2026-09-05)
+
+- **A1** merged (#593, `a49e0b4`): replay harness. Candidate identity is provenance-only
+  (two Codex brain-seat rounds). Findings: persisted adjudication records carry **no
+  `native_bbox`**; one frozen page's `winning_output.text` is the D3 marker.
+- **B1** merged (#594, `4c1b284`): `/curia` codex vs grok + Sonnet seat; grok's build. **Recorded
+  decision:** `total` is the independent page wall-clock and `total − Σ exclusive` is reported as
+  unattributed — Done-when (a)'s literal "keys sum to total" is superseded (Astra: absorbing the
+  remainder into `route` would conceal missing instrumentation). Page lifecycle in `try/finally`.
+  Full suite 4108 passed.
+- **Second corpus fixture:** `~/Data/socr/fed-sample-2026-09-05/in/fed-1989-11-14-minutes.pdf`
+  (5 pages, $0.0002, 8 min). p3: table rejected at every rung for lack of native evidence, then
+  the fail-closed marker discarded the page's prose too (#591). p1: two-column attendee list
+  column-interleaved and shipped SUCCESS (#592). A1b includes p3; C1 must consider p1.
+- **A1b baseline protocol (Astra):** a fresh crop is not what the historical adjudicator saw.
+  A1b records source digest + rendered crops as the baseline artefact *before* A2, and labels
+  reconstructed-baseline geometry separately from current geometry.
+
 ## Next action
 
-Wave 1 dispatch: A1 on `feat/vi-A1-replay-binding` ∥ B1 on `feat/vi-B1-stage-timings`.
-
-A1 done 2026-09-05 on `feat/vi-A1-replay-binding`
-(`/Users/rubenffuertes/repos/.worktrees/socr-vi-A1`), see
-`docs/log/2026-09-05_vi-a1-replay-binding.md`. Corpus replay: 7/7 rows,
-exact multiset match on the unchanged tree (one row needed a D3
-fail-closed-marker cache fallback, folded into the harness). A1b can
-dispatch once this branch merges.
+Wave 2, both Claude inline: **B2** fresh timed baseline on the frozen 20 pages under B2's run
+discipline (pinned checkout `mainc1b284`, explicit `PYTHONPATH`, one digest) ∥ **A1b** autopsy
+of the 8 failed-disproof crops + census of all 12 class-(c) items + Fed p3.
