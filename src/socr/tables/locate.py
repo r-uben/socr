@@ -545,8 +545,12 @@ def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
         )
 
     ub, lb = _union(upper), _union(lower)
-    size_u = min(ln["size"] for ln in upper)
-    size_l = min(ln["size"] for ln in lower)
+    # A baseline group's type size is its DOMINANT (largest) span size: a
+    # 4 pt footnote marker sharing a 10 pt row's baseline does not make that
+    # row 4 pt type (reviewer construction — with min() the row's own
+    # subscript at a 4.5 pt gap read as a separate row, silently).
+    size_u = max(ln["size"] for ln in upper)
+    size_l = max(ln["size"] for ln in lower)
     gap = lower[0]["baseline"] - upper[0]["baseline"]
     if gap >= min(size_u, size_l):
         return "separate"

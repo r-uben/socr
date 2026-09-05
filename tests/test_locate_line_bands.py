@@ -286,6 +286,32 @@ def test_row_bands_one_stray_close_pair_does_not_poison_the_region():
     assert fifth.y0 <= ys[4] <= fifth.y1 and fifth.y0 <= ys[4] + 0.3 <= fifth.y1
 
 
+def test_row_bands_footnote_marker_on_a_row_baseline_does_not_unfold_subscripts():
+    """Reviewer construction: 8 rows at a 14 pt pitch, 10 pt type; a 4 pt
+    footnote marker far right sharing row 3's exact baseline; a legitimate
+    6 pt subscript under row 3 (gap 4.5) and an unrelated one under row 6.
+    With min() the marker dragged row 3's size to 4 pt, the 4.5 pt gap read
+    as row separation, and (region-wide) row 6's fold failed too, with no
+    ambiguity anywhere. Now: 8 bands, both subscripts folded, ambiguity None.
+    """
+    _, page = _new_page()
+    ys = [140.0 + 14.0 * i for i in range(8)]
+    for i, y in enumerate(ys):
+        page.insert_text((_LABEL_X, y), f"Row {i}", fontsize=10)
+        page.insert_text((_COL1_X, y), f"{i}.0", fontsize=10)
+    page.insert_text((250.0, ys[2]), "*", fontsize=4)  # footnote marker on row 3's baseline
+    page.insert_text((_LABEL_X + 8.0, ys[2] + 4.5), "t", fontsize=6)  # subscript under row 3
+    page.insert_text((_LABEL_X + 8.0, ys[5] + 4.5), "t", fontsize=6)  # subscript under row 6
+    region = (_REGION_X0, 120.0, 270.0, 260.0)
+
+    bands = row_bands_from_lines(page, region)
+    assert len(bands) == 8
+    assert all(b.ambiguity is None for b in bands)
+    for row, sub_y in ((2, ys[2] + 4.5), (5, ys[5] + 4.5)):
+        assert bands[row].y0 <= ys[row] <= bands[row].y1
+        assert bands[row].y0 <= sub_y <= bands[row].y1
+
+
 def _box_line(baseline: float, y0: float, y1: float) -> dict:
     """A synthetic PDF line with an exact ``[y0, y1]`` box."""
     return {
