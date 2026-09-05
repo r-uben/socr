@@ -172,11 +172,6 @@ def _horizontal_rules(page) -> list[tuple[float, float, float]]:
     Reads both explicit line items ("l") and thin filled/stroked rectangles
     ("re") that LaTeX/booktabs sometimes emit for rules.
     """
-    return [(y, x0, x1) for (y, x0, x1, _thickness) in _horizontal_rules_with_thickness(page)]
-
-
-def _horizontal_rules_with_thickness(page) -> list[tuple[float, float, float, float]]:
-    """Like ``_horizontal_rules`` but keeps each rule's drawn stroke thickness."""
     try:
         drawings = page.get_drawings()
     except Exception as exc:  # pragma: no cover - defensive
@@ -189,25 +184,24 @@ def _horizontal_rules_with_thickness(page) -> list[tuple[float, float, float, fl
     # page. Clamp x to the page so a rule bleeding into the margin still anchors
     # the band sanely.
     page_rect = page.rect
-    rules: list[tuple[float, float, float, float]] = []
+    rules: list[tuple[float, float, float]] = []
     for d in drawings:
-        stroke_width = d.get("width") or _RULE_FLATNESS_PT
         for item in d.get("items", []):
             kind = item[0]
             if kind == "l":  # line: ("l", p0, p1)
                 (px0, py0), (px1, py1) = item[1], item[2]
                 if abs(py0 - py1) <= _RULE_FLATNESS_PT and abs(px1 - px0) >= _RULE_MIN_WIDTH_PT:
-                    rules.append((min(py0, py1), min(px0, px1), max(px0, px1), float(stroke_width)))
+                    rules.append((min(py0, py1), min(px0, px1), max(px0, px1)))
             elif kind == "re":  # rectangle: ("re", Rect, ...)
                 rect = item[1]
                 w = abs(rect.x1 - rect.x0)
                 h = abs(rect.y1 - rect.y0)
                 if h <= _RULE_FLATNESS_PT and w >= _RULE_MIN_WIDTH_PT:
                     y = (rect.y0 + rect.y1) / 2.0
-                    rules.append((y, min(rect.x0, rect.x1), max(rect.x0, rect.x1), h))
+                    rules.append((y, min(rect.x0, rect.x1), max(rect.x0, rect.x1)))
     rules = [
-        (y, max(page_rect.x0, x0), min(page_rect.x1, x1), thickness)
-        for (y, x0, x1, thickness) in rules
+        (y, max(page_rect.x0, x0), min(page_rect.x1, x1))
+        for (y, x0, x1) in rules
         if page_rect.y0 <= y <= page_rect.y1
     ]
     rules.sort()
@@ -298,13 +292,13 @@ def row_bands_from_rules(
 def row_bands_from_lines(page, region: tuple[float, float, float, float]) -> list[RowBand]:
     """Group PDF text lines inside ``region`` into row bands.
 
-    One printed row = one band: a new line joins the current band when its
-    baseline is within the smaller of (the band's first/anchor font size,
-    its own) of that *anchor* baseline (C1 §(a)) — a bound drawn from the
-    page's own type size, never a tuned constant. Comparing to the previous
-    line instead is transitive and collapses a run of rows whose leading is
-    slightly under 1 em. No text layer (a scanned region) returns no bands:
-    that is an abstain input, not a guess.
+    One printed row = one band. Two lines join only when their boxes overlap
+    in y by more than the overlap any two adjacent printed rows share —
+    adjacent meaning consecutive unique-baseline groups at the region's
+    line pitch (the modal unique-baseline gap). Baseline-distance clustering
+    is transitive at a 9.5 pt pitch on 10 pt type and collapses six printed
+    rows into three (or one). No text layer, or too few lines to establish
+    a pitch, returns no bands: that is an abstain input, not a guess.
     """
     lines = _text_lines_in_region(page, region)
     if not lines:
@@ -346,17 +340,15 @@ def ordinal_origin(page, region: tuple[float, float, float, float]) -> float | N
     """The y of the second horizontal-rule group inside ``region`` — the
     header rule ordinals are counted from (C1 §(a)).
 
-    Two rules close together are one drawn border rather than two distinct
-    rules — booktabs' doubled top/bottom rule, drawn as two hairlines a
-    couple of points apart. The merge distance is derived from the
-    region's own rule geometry only: sort the consecutive inter-rule gaps
-    and split at the natural break (the largest ratio jump that actually
-    separates two gap classes). A single gap class — no doubled rules,
-    every consecutive ratio the same geometric progression — has no break
-    and nothing merges. No font-size input, no literal point threshold.
-    ``None`` when fewer than two rules, or fewer than two groups, exist —
-    a scanned page has no vector rules at all, so every item on it
-    abstains.
+    Two consecutive rules are one drawn border (booktabs' doubled
+    ``\\toprule``) iff no text-line baseline in the region lies between
+    them *and* their gap is smaller than the smallest text-line height in
+    the region — a gap no printed line could fit in. Otherwise they are
+    distinct. Both conditions are page-derived; neither needs a gap
+    distribution. No text lines in the region means the conditions cannot
+    be evaluated, so this returns ``None`` (no certified origin → abstain),
+    never a guess. ``None`` also when fewer than two rules, or fewer than
+    two groups, exist.
     """
     x0, y0, x1, y1 = region
     rules = sorted(
@@ -364,12 +356,13 @@ def ordinal_origin(page, region: tuple[float, float, float, float]) -> float | N
     )
     if len(rules) < 2:
         return None
-    ys = [r[0] for r in rules]
-    merge_gap = _inter_rule_merge_gap([b - a for a, b in zip(ys, ys[1:])])
+    lines = _text_lines_in_region(page, region)
+    if not lines:
+        return None
     groups: list[list[tuple[float, float, float]]] = [[rules[0]]]
     for rule in rules[1:]:
         prev = groups[-1][-1]
-        if rule[0] - prev[0] < merge_gap:
+        if _rules_are_one_border(prev[0], rule[0], lines):
             groups[-1].append(rule)
         else:
             groups.append([rule])
@@ -421,11 +414,13 @@ def label_column_edge(page, region: tuple[float, float, float, float]) -> float 
 
 
 def band_index_for(bands: list[RowBand], y_mid: float) -> int | None:
-    """Index of the band whose ``[y0, y1]`` contains ``y_mid``, else ``None``."""
-    for idx, band in enumerate(bands):
-        if band.y0 <= y_mid <= band.y1:
-            return idx
-    return None
+    """Index of the unique band whose ``[y0, y1]`` contains ``y_mid``.
+
+    ``None`` when no band contains the point, or when more than one does
+    (overlapping bands: abstain, do not pick the first).
+    """
+    hits = [idx for idx, band in enumerate(bands) if band.y0 <= y_mid <= band.y1]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _text_lines_in_region(page, region: tuple[float, float, float, float]) -> list[dict]:
@@ -457,80 +452,88 @@ def _text_lines_in_region(page, region: tuple[float, float, float, float]) -> li
 
 
 def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
-    """Group text-line dicts into printed rows by baseline proximity.
+    """Group text-line dicts into printed rows by vertical-extent overlap.
 
-    A new line joins the current band only when its baseline is within
-    the smaller of (the band's first/anchor line's font size, its own
-    font size) of that *anchor* baseline — not of the previous line.
-    Pairwise-adjacent clustering is transitive and collapses a run of
-    printed rows whose leading is slightly under 1 em into one band.
+    Two lines belong to one band only if their boxes overlap in y by more
+    than the overlap any two *adjacent printed rows* share. Adjacent rows
+    are consecutive unique-baseline groups whose baseline gap equals the
+    region's line pitch — the modal unique-baseline-to-baseline distance
+    (on a tie, the larger gap: the row step, not a wrap/subscript). Fewer
+    than three lines cannot establish a pitch: return no groups (abstain
+    input, never a guess).
     """
-    if not lines:
+    if len(lines) < 3:
         return []
     ordered = sorted(lines, key=lambda ln: ln["baseline"])
+    by_base: dict[float, list[dict]] = {}
+    for ln in ordered:
+        by_base.setdefault(ln["baseline"], []).append(ln)
+    baselines = sorted(by_base)
+    if len(baselines) == 1:
+        return [ordered]
+    gaps = [b - a for a, b in zip(baselines, baselines[1:])]
+    pitch = _modal_value(gaps)
+
+    def _union_box(key: float) -> tuple[float, float, float, float]:
+        group = by_base[key]
+        return (
+            min(ln["bbox"][0] for ln in group),
+            min(ln["bbox"][1] for ln in group),
+            max(ln["bbox"][2] for ln in group),
+            max(ln["bbox"][3] for ln in group),
+        )
+
+    adjacent_overlap = 0.0
+    for a, b, gap in zip(baselines, baselines[1:], gaps):
+        if gap == pitch:
+            adjacent_overlap = max(adjacent_overlap, _y_overlap(_union_box(a), _union_box(b)))
     groups: list[list[dict]] = [[ordered[0]]]
     for cur in ordered[1:]:
-        anchor = groups[-1][0]
-        if cur["baseline"] - anchor["baseline"] < min(anchor["size"], cur["size"]):
+        band_box = (
+            min(ln["bbox"][0] for ln in groups[-1]),
+            min(ln["bbox"][1] for ln in groups[-1]),
+            max(ln["bbox"][2] for ln in groups[-1]),
+            max(ln["bbox"][3] for ln in groups[-1]),
+        )
+        if _y_overlap(band_box, cur["bbox"]) > adjacent_overlap:
             groups[-1].append(cur)
         else:
             groups.append([cur])
     return groups
 
 
-def _inter_rule_merge_gap(gaps: list[float]) -> float:
-    """Merge threshold from the region's own consecutive inter-rule gaps.
+def _modal_value(values: list[float]) -> float:
+    """The most frequent value in *values*; on a tie, the larger one."""
+    counts: dict[float, int] = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    best = max(counts.values())
+    return max(v for v, n in counts.items() if n == best)
 
-    Sort the gaps and split at the natural break — the largest ratio
-    jump that actually separates two gap *classes*. Float-twin copies of
-    one magnitude (a doubled pair measured at both top and bottom) collapse
-    first: the leading consecutive ratio is a twin when it is closer to 1
-    than to the next ratio (``r0² < r1``). After that:
 
-    * one remaining magnitude → a single gap class, nothing merges
-      (threshold 0);
-    * one remaining ratio → that jump *is* the class break;
-    * several ratios → the largest jump is the candidate. It is a
-      small-end class break only when it dominates every later jump
-      (``r0 > max(later)²``: the small-end ratio is more of a class
-      change than the later jumps are relative to 1). When a later jump
-      is larger (a huge body span), recurse on the small side to find
-      the doubled-rule break there.
+def _y_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """Shared vertical span of two ``(x0, y0, x1, y1)`` boxes, or 0."""
+    return max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
 
-    Derived from the region's own rule geometry only — no font size, no
-    literal point threshold. The midpoint of the two magnitudes at the
-    break is the threshold (a gap equal to either magnitude then falls
-    cleanly on one side of a strict ``<``).
+
+def _rules_are_one_border(y_a: float, y_b: float, lines: list[dict]) -> bool:
+    """True iff *y_a*..*y_b* is one drawn border, not two distinct rules.
+
+    No text-line baseline between them, and the gap is smaller than the
+    smallest text-line height in the region (a gap no printed line could
+    fit in). *lines* must be non-empty — the caller abstains otherwise.
     """
-    vals = sorted(g for g in gaps if g > 0.0)
-    if len(vals) < 2:
-        return 0.0
-    while len(vals) >= 3:
-        r0 = vals[1] / vals[0]
-        r1 = vals[2] / vals[1]
-        if r0 * r0 < r1:
-            vals = [vals[0], *vals[2:]]
-        else:
-            break
-    ratios = [vals[i + 1] / vals[i] for i in range(len(vals) - 1)]
-    if not ratios:
-        return 0.0
-    if len(ratios) == 1:
-        return (vals[0] + vals[1]) / 2.0
-    best_i = max(range(len(ratios)), key=lambda i: ratios[i])
-    later_max = max(ratios[1:])
-    if best_i == 0 and ratios[0] > later_max * later_max:
-        return (vals[0] + vals[1]) / 2.0
-    if best_i > 0:
-        return _inter_rule_merge_gap(vals[: best_i + 1])
-    return 0.0
+    min_height = min(ln["bbox"][3] - ln["bbox"][1] for ln in lines)
+    if min_height <= 0:
+        return False
+    if any(y_a < ln["baseline"] < y_b for ln in lines):
+        return False
+    return (y_b - y_a) < min_height
 
 
 def _rule_overlaps_span(rule: tuple, x0: float, x1: float) -> bool:
     """True if ``rule``'s ``(x0, x1)`` shares >= ``_RULE_X_OVERLAP`` of its
-    width with the ``(x0, x1)`` span. Accepts both the 3-tuple
-    ``_horizontal_rules`` and the 4-tuple ``_horizontal_rules_with_thickness``
-    shapes — the span is always in positions 1 and 2.
+    width with the ``(x0, x1)`` span.
     """
     rx0, rx1 = rule[1], rule[2]
     inter = max(0.0, min(rx1, x1) - max(rx0, x0))

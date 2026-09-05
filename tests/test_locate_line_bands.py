@@ -140,6 +140,15 @@ def test_band_index_for():
     assert band_index_for(bands, 5.0) == 0
     assert band_index_for(bands, 25.0) == 2
     assert band_index_for(bands, 100.0) is None
+    # Shared edge is in two bands — abstain, do not pick the first.
+    assert band_index_for(bands, 10.0) is None
+
+
+def test_band_index_for_overlapping_bands_is_none():
+    bands = [RowBand(0.0, 15.0, "line"), RowBand(10.0, 25.0, "line")]
+    assert band_index_for(bands, 12.0) is None
+    assert band_index_for(bands, 5.0) == 0
+    assert band_index_for(bands, 20.0) == 1
 
 
 def test_ordinal_origin_merges_doubled_rule_on_small_type():
@@ -168,43 +177,109 @@ def test_ordinal_origin_merges_doubled_rule_on_small_type():
 def test_ordinal_origin_does_not_merge_distinct_rules_on_large_type():
     """24 pt table, two distinct rules 8 pt apart: they stay two groups.
 
-    Half the body font (12 pt) would merge them and drop the origin
-    (only one group). The region's own rule gaps are a single class, so
-    nothing merges and the origin is the second rule.
+    A baseline sits between them, so they are not one drawn border (the
+    gap-below-line-height test never fires). Origin is the second rule.
     """
     _, page = _new_page()
     _draw_rule(page, 80.0, width=1.0)
-    _draw_rule(page, 88.0, width=1.0)  # 8 pt — distinct, not a doubled pair
-    page.insert_text((_LABEL_X, 120.0), "Alpha", fontsize=24)
-    page.insert_text((_COL1_X, 120.0), "1.0", fontsize=24)
+    page.insert_text((_LABEL_X, 84.0), "Hdr", fontsize=24)
+    page.insert_text((_COL1_X, 84.0), "c", fontsize=24)
+    _draw_rule(page, 88.0, width=1.0)  # 8 pt, but a baseline lies between
     region = (_REGION_X0, 70.0, _REGION_X1, 160.0)
 
     origin = ordinal_origin(page, region)
     assert origin == pytest.approx(88.0, abs=0.01)
 
 
-def test_row_bands_anchor_not_pairwise_chain():
-    """6 rows at a 9.5 pt baseline step on 10 pt type stay six bands.
+def test_row_bands_uniform_pitch_one_band_per_printed_row():
+    """6 printed rows at a uniform 9.5 pt pitch on 10 pt type → 6 bands.
 
-    Each printed row has a continuation line 9.5 pt below its start
-    (10 pt type). Pairwise-adjacent clustering is transitive: 9.5 < 10
-    and the 2.5 pt gap from that continuation to the next row is also
-    < 10, so the whole run collapses into one band. Comparing each new
-    line to the band's first (anchor) baseline keeps the six rows.
+    Baseline-distance clustering (even vs the band's first line) still
+    admits the neighbour (9.5 < 10) and yields 3 bands. Vertical-extent
+    overlap vs the adjacent-row overlap on this page keeps one band per
+    printed row.
     """
     _, page = _new_page()
     fontsize = 10.0
-    row_step = 12.0
-    wrap = 9.5
+    step = 9.5
     for i in range(6):
-        y = 120.0 + i * row_step
+        y = 120.0 + i * step
         page.insert_text((_LABEL_X, y), f"Row{i}", fontsize=fontsize)
         page.insert_text((_COL1_X, y), f"{i}.0", fontsize=fontsize)
-        page.insert_text((_LABEL_X, y + wrap), "x", fontsize=fontsize)
-    region = (_REGION_X0, 100.0, _REGION_X1, 220.0)
+    region = (_REGION_X0, 100.0, _REGION_X1, 200.0)
 
     bands = row_bands_from_lines(page, region)
     assert len(bands) == 6
+
+
+def test_row_bands_subscript_joins_its_label():
+    """A subscript under a label is the same printed row (doc04 shape)."""
+    _, page = _new_page()
+    page.insert_text((_LABEL_X, 140.0), "GDP", fontsize=10)
+    page.insert_text((_LABEL_X + 12.0, 144.0), "t", fontsize=7)
+    page.insert_text((_COL1_X, 140.0), "1.0", fontsize=10)
+    page.insert_text((_LABEL_X, 160.0), "CPI", fontsize=10)
+    page.insert_text((_COL1_X, 160.0), "2.0", fontsize=10)
+    region = (_REGION_X0, 120.0, _REGION_X1, 180.0)
+
+    bands = row_bands_from_lines(page, region)
+    assert len(bands) == 2
+    first = bands[0]
+    assert first.y0 <= 140.0 <= first.y1
+    assert first.y0 <= 144.0 <= first.y1
+
+
+def test_ordinal_origin_three_rule_plain_table_origin_is_midrule():
+    """3-rule toprule/midrule/bottomrule, gaps 15/45: origin is the midrule.
+
+    A ratio heuristic on two gaps always declares a class break and would
+    merge top+mid (origin = bottomrule at 140). No text-between + gap <
+    line height does not: 15 pt holds a header line.
+    """
+    _, page = _new_page()
+    _draw_rule(page, 80.0)
+    page.insert_text((_LABEL_X, 90.0), "Hdr", fontsize=10)
+    page.insert_text((_COL1_X, 90.0), "c1", fontsize=10)
+    _draw_rule(page, 95.0)
+    page.insert_text((_LABEL_X, 110.0), "A", fontsize=10)
+    page.insert_text((_COL1_X, 110.0), "1", fontsize=10)
+    page.insert_text((_LABEL_X, 125.0), "B", fontsize=10)
+    page.insert_text((_COL1_X, 125.0), "2", fontsize=10)
+    _draw_rule(page, 140.0)
+    region = (_REGION_X0, 70.0, _REGION_X1, 155.0)
+
+    origin = ordinal_origin(page, region)
+    assert origin == pytest.approx(95.0, abs=0.01)
+
+
+def test_ordinal_origin_doubled_then_ordinary_second_group():
+    """Doubled 2.5 pt pair then an ordinary rule 20 pt below: origin is
+    the second group (the ordinary rule)."""
+    _, page = _new_page()
+    _draw_rule(page, 80.0, width=0.5)
+    _draw_rule(page, 82.5, width=0.5)
+    page.insert_text((_LABEL_X, 92.0), "Hdr", fontsize=10)
+    page.insert_text((_COL1_X, 92.0), "c1", fontsize=10)
+    _draw_rule(page, 102.5)
+    page.insert_text((_LABEL_X, 120.0), "A", fontsize=10)
+    page.insert_text((_COL1_X, 120.0), "1", fontsize=10)
+    region = (_REGION_X0, 70.0, _REGION_X1, 140.0)
+
+    origin = ordinal_origin(page, region)
+    assert origin == pytest.approx(102.5, abs=0.01)
+
+
+def test_ordinal_origin_two_doubled_borders_only_is_none():
+    """Gaps 2.5/3.0 only: two doubled borders, no ordinary rule → None."""
+    _, page = _new_page()
+    _draw_rule(page, 80.0, width=0.5)
+    _draw_rule(page, 82.5, width=0.5)
+    _draw_rule(page, 85.5, width=0.5)
+    page.insert_text((_LABEL_X, 120.0), "A", fontsize=10)
+    page.insert_text((_COL1_X, 120.0), "1", fontsize=10)
+    region = (_REGION_X0, 70.0, _REGION_X1, 140.0)
+
+    assert ordinal_origin(page, region) is None
 
 
 def test_label_column_edge_none_when_wrapped_label_collapses_r():
@@ -287,3 +362,7 @@ def test_corpus_origins_match_c1_measurement():
                 f"{slug} p{page_num} {table_id}: origin {origin} != C1's {expected}"
             )
         assert band_count > 0, f"{slug} p{page_num} {table_id}: no row bands addressed at all"
+        if slug == "doc04":
+            assert band_count == 12, f"doc04 p{page_num}: bands {band_count} != 12"
+        if slug == "doc05":
+            assert band_count == 17, f"doc05 p{page_num}: bands {band_count} != 17"
