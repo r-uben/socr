@@ -152,9 +152,9 @@ def test_binder_keeps_a_leading_stub_that_sits_just_outside_the_region():
     """VI-A2 / GH-331 on the binder (not the reconstruct rowizer).
 
     A ``3Y`` stub whose x0 is 0.002 pt left of the table region is the
-    measured doc02 drop. Top-left containment lost it; box intersection
-    keeps it. Pin the difference: the same row with the stub on the region
-    edge vs just outside must bind to the same native label.
+    measured doc02 drop. Top-left containment lost it; a centroid-in-region
+    test keeps it. Pin the difference: the same row with the stub on the
+    region edge vs just outside must bind to the same native label.
     """
     from socr.tables.binding import _native_rows, _words_in_region, bind
 

@@ -1607,7 +1607,7 @@ def test_row_swap_control_still_contradicts():
 
 
 def test_neighbouring_label_outside_the_region_is_not_captured():
-    """A neighbour stub whose box does not intersect the region must not
+    """A neighbour stub whose centroid is outside the region must not
     enter the label. Same table with vs without that word: labels identical."""
     from socr.tables.binding import _native_rows, _words_in_region
 
@@ -1625,6 +1625,46 @@ def test_neighbouring_label_outside_the_region_is_not_captured():
     assert _label(words) == _label(without)
     assert _label(words) == "Treasury"
     assert "Neighbour" not in _label(words)
+
+
+def test_grazing_caption_and_footnote_are_excluded_as_on_main():
+    """A caption box that dips a sub-point into the region from ABOVE and a
+    footnote box from BELOW must stay out. Top-left containment (main)
+    excludes the caption graze; centroid excludes both. Pin: with vs
+    without those two words, the native label is identical — the
+    difference is zero."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    payload = _a2_load("grazing_caption_footnote.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    grazers = {"Caption", "Footnote"}
+    without = [word for word in words if word[4] not in grazers]
+    grazer_words = [word for word in words if word[4] in grazers]
+    scoped = _words_in_region(words, region)
+    scoped_texts = {word[4] for word in scoped}
+    assert grazers.isdisjoint(scoped_texts)
+
+    def _top_left(word: tuple) -> bool:
+        rx0, ry0, rx1, ry1 = region
+        return rx0 <= word[0] <= rx1 and ry0 <= word[1] <= ry1
+
+    def _intersects(word: tuple) -> bool:
+        rx0, ry0, rx1, ry1 = region
+        return min(word[2], rx1) > max(word[0], rx0) and min(word[3], ry1) > max(word[1], ry0)
+
+    caption = next(word for word in words if word[4] == "Caption")
+    assert _top_left(caption) is False
+    assert all(_intersects(word) for word in grazer_words)
+
+    def _label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        data = [row for row in rows if not row.is_parent]
+        assert data
+        return data[0].row_path[-1]
+
+    assert _label(words) == _label(without)
+    assert _label(words) == "Treasury"
 
 
 if __name__ == "__main__":

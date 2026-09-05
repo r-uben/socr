@@ -1301,22 +1301,27 @@ def _record_inventions_on_parent_row(
         )
 
 
-def _word_intersects_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
-    """True when *word*'s box strictly overlaps *region*.
+def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
+    """True when the centroid of *word*'s box falls inside *region*.
 
-    Top-left containment dropped leading stub words whose PDF ``x0`` sat a
-    fraction of a point outside the region's min-x (itself taken from a
-    sibling stub on an earlier row). Intersection keeps those stubs — they
-    are almost entirely inside the box — and still excludes a neighbour
-    whose box only *touches* the region edge. No slack constant: the bound
-    is the word's own extracted box against the region's box.
+    A symmetric point test on the word's own box — ``((x0+x1)/2, (y0+y1)/2)``
+    against the closed region. No distance or pt threshold.
+
+    Leading stubs whose ``x0`` sits a fraction of a point outside the
+    region's min-x stay in: a ~10 pt glyph has its centroid trivially
+    inside (GH-331 / VI-A2). A caption or footnote whose box merely grazes
+    the region from above or below stays out: its centroid is still
+    outside. Box intersection admitted those grazers and re-opened the
+    prose-pollution GH-330 was written to stop.
     """
     rx0, ry0, rx1, ry1 = region
-    return min(word[2], rx1) > max(word[0], rx0) and min(word[3], ry1) > max(word[1], ry0)
+    cx = (word[0] + word[2]) / 2.0
+    cy = (word[1] + word[3]) / 2.0
+    return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
 
 
 def _words_in_region(words: list, region: tuple | None) -> list:
-    """Filter *words* to those whose box intersects *region*.
+    """Filter *words* to those whose box-centroid falls inside *region*.
 
     GH-330. ``bind`` was only ever called with a whole page's words, so on a page
     with prose above the table and notes below it, lane clustering ran over text
@@ -1325,10 +1330,11 @@ def _words_in_region(words: list, region: tuple | None) -> list:
     ``(rect, markdown)`` pair, so the rect was available all along and simply never
     passed in.
 
-    Intersection, not top-left containment: a stub whose ``x0`` is 10⁻³ pt
-    left of the region's min-x is still a table word (GH-331 / VI-A2). A
-    word wholly outside — ``x1`` at or left of ``region.x0`` — is not.
-    Kept here rather than imported so ``binding`` stays free of ``fitz``.
+    Centroid, not top-left and not box intersection: a stub whose ``x0`` is
+    10⁻³ pt left of the region's min-x is still a table word (GH-331 /
+    VI-A2); a caption whose box dips a fraction of a point in from above
+    is not. Kept here rather than imported so ``binding`` stays free of
+    ``fitz``.
 
     ``region=None`` returns *words* unchanged — byte-for-byte the old behaviour.
     """
@@ -1341,7 +1347,7 @@ def _words_in_region(words: list, region: tuple | None) -> list:
     if not (x0 <= x1 and y0 <= y1):
         return words
     box = (x0, y0, x1, y1)
-    return [w for w in words if _word_intersects_region(w, box)]
+    return [w for w in words if _word_centroid_in_region(w, box)]
 
 
 def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingResult:

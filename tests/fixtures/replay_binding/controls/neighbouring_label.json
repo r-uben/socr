@@ -1,5 +1,5 @@
 {
-  "_comment": "VI-A2 control: a neighbour table's stub sits wholly to the left of the region (boxes do not intersect). Intersection membership must not pull it into this table's row label.",
+  "_comment": "VI-A2 control: a neighbour table's stub sits wholly to the left of the region (centroid outside). Membership must not pull it into this table's row label.",
   "region": [100, 60, 400, 200],
   "markdown": "| | OLS | IV |\n| --- | --- | --- |\n| Treasury | 0.50 | 0.51 |\n",
   "words": [
