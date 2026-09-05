@@ -1,6 +1,6 @@
 # STATUS — verifier-independence
 
-Last updated: 2026-09-05 (waves 1–3 closed)
+Last updated: 2026-09-05 (wave 4 closed)
 
 ## Stage
 
@@ -37,8 +37,8 @@ gate; `tests/` is flat. Nothing dispatched.
 | B2  | latency | DONE | B1 | 2 (claude) |
 | A2  | native reference | DONE | A1b | 3 (curia, 2/3 — doc04 → #603) |
 | C1  | verifier | DONE | A1b | 3 |
-| C2a | verifier | WIP | C1 | 4 (grok, revision after reviewer) |
-| A1c | native reference | WIP | — | 4 (#595) |
+| C2a | verifier | DONE | C1 | 4 (#616, 13 review rounds) |
+| A1c | native reference | DONE | — | 4 (#612, #595 closed) |
 | C2b | verifier | TODO | C2a, A2, B1 | 5 |
 | C3  | verifier | TODO | C2b, B2 | 6 (claude) |
 
@@ -87,10 +87,19 @@ gate; `tests/` is flat. Nothing dispatched.
   subscript from a `(a)` note) → gate revised to 2/3, N=7, doc04 → #603. Codex's build projected
   the missing stub from a donor row (native inventing text) — disqualified.
 
+## Wave 4 closed (2026-09-05)
+
+- **A1c** (#612): replay rows are UNREPLAYABLE on witness failure and UNCHECKED without
+  per-row bind evidence (frozen candidate index → `row_binding`, no label similarity). Four
+  Codex rounds.
+- **C2a** (#616): `row_bands` / `label_column_edge` / `ordinal_origin` + `BindingResult`
+  surface. C1 §(a)'s rule-merge and band rules were both wrong on implementation; corrected
+  in the note. Every non-`separate` verdict is flagged; C2b abstains across flagged prefixes
+  (#614). Corpus: origins as measured; bands 13/23/23/12/13/17/33; ambiguity doc01 4,
+  doc04 2, others 0.
+
 ## Next action
 
-**Rewrite C2a before dispatch.** Its ticket text still says `row_bands_from_rules` over
-`_horizontal_rules`; C1 rev 4 replaced that with text-line bands + `label_column_edge` + the
-ordinal chain from the header rule (`bind()` must expose `native_rows` / `row_binding` on
-`BindingResult`). Then wave 4: C2a (`locate.py` + that `BindingResult` surface), gated on C1.
-C2b prediction artifact = C1 §(d) at 3/22.
+**C2b prediction artifact** (`logs/2026-09-05_C2b-prediction.md`): re-derive C1 §(d) on the
+post-A2/C2a tree for the 14 remaining items, applying the ordinal chain, the column test and
+the prefix rule with the shipped helpers; commit it and cite its SHA. Then wave 5: C2b.
