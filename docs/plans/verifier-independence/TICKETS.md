@@ -215,43 +215,79 @@ over {ruled, booktabs} × {row found, not} × {column found, not}, (c) the `bind
 `adjudication.py` / `orchestrator.py:5200-5310` fields and branches that change, (d) ≤ 3
 named decisions for the owner.
 
-### TICKET-C2a — row/column geometry helpers · TODO · depends-on: C1 · wave 4
-**Problem:** As C1 — the address must come from page geometry.
-**Do:** Implement `row_bands_from_rules` (and the column address C1 settled) in
-`locate.py`, pure functions over page geometry; no binder or candidate input.
-**Files:** `src/socr/tables/locate.py`, `tests/test_locate_row_bands.py` (new; synthetic
-fixtures). Nothing else.
-**Done when:** `~/venvs/socr/bin/pytest tests/test_locate_row_bands.py -q` exits 0 and
-proves: on a ruled fixture every printed row gets exactly one band; on a booktabs fixture
-the helper returns no per-row bands (abstain input), not a guess.
+### TICKET-C2a — line-band / column-edge / origin helpers + `BindingResult` surface · TODO · depends-on: C1 · wave 4
+**Problem:** C1 (rev 4, `logs/2026-09-05_C1-design.md` §(a)) measured that **no table on the
+corpus has per-row or vertical rules**, so the address must come from PDF text-line geometry
+inside the witness region, counted from an origin neither lane supplies. None of those helpers
+exist, and `bind()` does not expose the two lists the ordinal chain needs.
+**Do:** In `locate.py`, pure functions over `(page, region)` with no binder or candidate input:
+`row_bands(page, region)` — text lines (`page.get_text("dict")`) inside the region grouped into
+bands whose baselines differ by less than the smaller of their font sizes; where per-row rules
+exist, `row_bands_from_rules` supplies the edges instead; `label_column_edge(bands, region)` —
+`R₀ = min x0` over all non-leftmost lines, shrunk to a whitespace edge as C1 §(a) specifies
+(iterate to convergence — ≤ 2 passes was *observed* on this corpus, it is not a limit),
+returning `None` when no `R > region.x0` exists;
+`ordinal_origin(page, region)` — cluster the region's horizontal rules by y (rules closer than a
+rule thickness are one border), return the y of the **second** group, `None` when there is no
+second group (scanned pages). Every bound is derived from the page's own type sizes and rule
+thickness — no literal. In `binding.py`, `BindingResult` gains two **read-only** fields,
+`native_rows` and `row_binding` (the `_native_rows` output and the `_bind_rows` mapping already
+computed) — nothing else in `binding.py` changes and no geometry enters it.
+**Files:** `src/socr/tables/locate.py`, `src/socr/tables/binding.py` (`BindingResult` fields
+only), `tests/test_locate_line_bands.py` (new; synthetic fixtures + the frozen-corpus check
+below runs only when the corpus dir exists, else skips — CI has no corpus).
+**Done when:** `~/venvs/socr/bin/pytest tests/test_locate_line_bands.py -q` exits 0 and proves:
+(1) on a synthetic ruled fixture every printed row gets exactly one band and the bands equal
+`row_bands_from_rules`; (2) on a synthetic booktabs fixture one band per printed row from text
+lines, and `ordinal_origin` = the second rule group; (3) on a fixture with no rules
+`ordinal_origin` is `None` (abstain input), never a guess; (4) `label_column_edge` returns `None`
+on a one-column fixture. Corpus check (skipped in CI): on the frozen 7 tables the origins equal
+C1's measured values (doc01 116.3, doc02 123.9, doc03 241.5, doc05/07 121.0, doc04 `None`) and
+the band counts per table match C1 §(d)'s inputs. `BindingResult.native_rows` /
+`.row_binding` are populated on every `bind()` call and the A1 harness output is byte-identical
+before/after. Full suite green; ruff format clean.
 
 ### TICKET-C2b — geometry-addressed disproof + abstain semantics · TODO · depends-on: C2a, A2, B1 · wave 5
-**Problem:** As C1. This is the architectural change the owner authorised.
-**Do:** `ContradictedCell` / `RowLabelContradiction` in `binding.py` gain geometry-derived
-fields; `adjudication.py` converters copy into `ContradictionItem.cell_bbox` (geometry-derived,
-or `None`); `_disprove_one` transcribes `cell_bbox`, never `native_bbox`; `None` ⇒ `abstained`.
-`_adjudicate_clamped_table` populates it via C2a. `orchestrator.py:5245` / `:5292` learn
-the third outcome so clamp/audit wording is right; `_apply_binding_adjudication_meta`
-round-trips it. Keep the `_transcribe_cell_token` patch seam.
-**Files:** `src/socr/tables/adjudication.py`, `src/socr/tables/binding.py`
-(`ContradictedCell` / `RowLabelContradiction` geometry only), `src/socr/pipeline/orchestrator.py`
+**Problem:** As C1 — `_disprove_one` transcribes `item.native_bbox`, so the recovery crop is
+addressed by the lane it is checking. This is the architectural change the owner authorised.
+**Do:** Exactly C1 §(c). `adjudication.py`: `ContradictionItem` gains `cell_bbox`,
+`address_source`, `abstain_reason` (`native_bbox` stays, audit only, never transcribed);
+`_disprove_one` transcribes `cell_bbox` and returns the new `"abstained"` `DisproofKind` when
+it is `None` **without calling `transcribe`**; `adjudicate` treats `abstained` as not a
+disproof (a table with any abstained item cannot be `lifted`); `to_record` emits both new
+fields. `orchestrator.py:_adjudicate_clamped_table` builds the ordinal chain from
+`BindingResult.native_rows` + `.row_binding` + C2a's bands/origin/edge, per C1 §(a)
+conditions 1–4 (native chain **and** model chain from the same origin; `i = j = b`), attaches
+`cell_bbox = (region.x0, band.y0, R, band.y1)` or `None` with the reason, and renders with
+padding **clamped on both axes**: x within `[region.x0, R]`, y limited by the adjacent bands
+(C1: 6 pt of padding against a 0.2 pt column clearance re-opens over-capture). The test
+asserts the **rendered crop rectangle** respects both clamps — not merely that the
+transcriber received a bbox. `:5259-5310` counts abstentions separately and the UNVERIFIED cause
+gains `abstained`. `binding.py` gains **no** geometry fields. Keep the
+`_transcribe_cell_token` patch seam.
+**Prediction artifact (committed before C2b starts):** C1 §(d) at rev 4 — 3/22 addressed
+(doc05 p1 items with triples (4,4,4), (6,6,6), (8,8,8)), 19 abstained with reasons — is the
+artifact; reference its commit SHA in the ticket log. After A2 (merged, #602) the remaining set is
+**14 = 22 − 7 doc02 items − 1 doc01 item**; doc04's item remains and abstains (no origin).
+The prediction artifact must be **re-derived on the post-A2 tree** before C2b starts — C1
+§(d) was computed pre-A2 and its remaining-set membership is stale; commit the updated
+per-item table and cite that SHA.
+**Files:** `src/socr/tables/adjudication.py`, `src/socr/pipeline/orchestrator.py`
 (`:5200-5310` and `:5522-5637` only), `tests/test_binding_adjudication.py`,
-`tests/test_gh367_adjudication_lift.py`.
-**Done when:** two tests, same process, pinning the **difference**: (1) native bbox
-truncated to half the label, geometry present → the transcriber receives the geometry
-cell and the item is disproved; (2) no per-row rules → `abstained`, not disproved, and the
-transcriber is **never called**. Any `process()` test patches
-`_available_engines_for_agentic`, `_resolve_judge_model`, `_transcribe_cell_token`.
-Resume skip identical with and without `cell_bbox` / `abstained`. **Deterministic
-frozen-replay gate** (A2's 3/3 clears targets before C2b; C3 is report-only): for every
-item still contradicted on the frozen corpus after A2, C1's truth table applied to the
-frozen page predicts `geometry-addressed` or `abstained`; the prediction is a **separately
-committed, reviewed artifact** (`logs/YYYY-MM-DD_C2b-prediction.md`, referenced by commit
-SHA in the ticket log) landed **before C2b starts**, and `socr-replay-binding` asserts
-the implementation matches it item-for-item (no OCR). **Feasibility checkpoint:** if the
-prediction finds no frozen item geometry-addressable, C2b returns to the owner for scope
-revision — correct abstention must never force invented correspondence. Do not invent a live
-ACCEPTED quota. Full suite green; ruff format clean.
+`tests/test_gh367_adjudication_lift.py`, `tests/fixtures/replay_binding/controls/`.
+**Done when:** three hermetic controls in one process, pinning the **difference**, with
+`_transcribe_cell_token` call counts asserted: (1) *positive* — native bbox truncated to half
+the label, both chains intact → the transcriber receives the geometry cell and the item is
+disproved; (2) *wrong pointer* — the printed row above the disputed item has no native row →
+`abstained`, call count 0, table `held`; (3) *shifted but order-preserving* — model table has
+one row inserted above the disputed item, native unchanged → `abstained`, call count 0.
+Any `process()` test patches `_available_engines_for_agentic`, `_resolve_judge_model`,
+`_transcribe_cell_token`. Resume skip identical with and without the new fields.
+**Frozen-replay gate:** `socr-replay-binding` asserts the implementation matches the committed
+prediction item-for-item (address vs abstain, and the abstain reason class) on the 14 remaining
+items; every table A2 cleared stays cleared. **Feasibility checkpoint:** if fewer than one
+remaining item is geometry-addressed, C2b returns to the owner — correct abstention must never
+force invented correspondence. Full suite green; ruff format clean.
 
 ### TICKET-C3 — ladder corpus re-run and report · TODO · depends-on: C2b, B2 · wave 6 · agent: claude
 **Problem:** "The free lane witnesses the model" needs a number on the same 20 pages —
