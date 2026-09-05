@@ -238,7 +238,7 @@ def test_row_bands_subscript_under_label_is_an_ambiguous_boundary():
     assert all(b.ambiguity is None for b in bands[2:])
 
 
-def test_row_bands_jittered_pitch_keeps_subscript_fold():
+def test_row_bands_jittered_pitch_flags_only_the_subscript_boundary():
     """Reviewer construction: 8 printed rows at a 12 pt pitch with ±0.1 pt
     row-to-row jitter (no two gaps repeat bit-for-bit) plus a subscript under
     row 3. Exact-float gap equality once flagged the whole region ambiguous;
