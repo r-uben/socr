@@ -5281,6 +5281,10 @@ class UnifiedPipeline:
                     markdown_by_table.get(table_id, ""),
                     binding,
                     ps,
+                    region=next(
+                        (w.box.bbox for w in witnesses if w.table_id == table_id and w.box),
+                        None,
+                    ),
                 )
             ps.binding_adjudication[table_id] = record.to_dict()
             state.events.append(
@@ -5291,7 +5295,8 @@ class UnifiedPipeline:
                     detail=(
                         f"table {table_id} binding adjudication {record.status}: "
                         f"{sum(1 for o in record.items if o.disproof)}/"
-                        f"{len(record.items)} contradictions disproved"
+                        f"{len(record.items)} contradictions disproved; "
+                        f"{sum(o.outcome == 'abstained' for o in record.items)} abstained"
                     ),
                     data={"table_id": table_id, **record.to_dict()},
                 )
@@ -5343,6 +5348,13 @@ class UnifiedPipeline:
             elif forced_by_binding.get(result.table_id) is not None:
                 kind = TABLE_LADDER_UNVERIFIED_KIND
                 cause = CAUSE_BINDING_CONTRADICTION
+                if any(
+                    item.get("outcome") == "abstained"
+                    for item in (ps.binding_adjudication.get(result.table_id) or {}).get(
+                        "items", []
+                    )
+                ):
+                    cause = "abstained"
                 held = (ps.binding_adjudication.get(result.table_id) or {}).get("status") == "held"
                 # GH-581: a deterministic binding contradiction never latches
                 # (GH-575) -- "retryable on resume" is true only if some OTHER
@@ -5581,6 +5593,8 @@ class UnifiedPipeline:
         markdown: str,
         binding,
         ps: PageState,
+        *,
+        region: tuple[float, float, float, float] | None = None,
     ):
         """GH-367: try to disprove each bind() contradiction on one table.
 
@@ -5590,10 +5604,20 @@ class UnifiedPipeline:
         from socr.tables.adjudication import adjudicate, items_from_binding
 
         items = items_from_binding(binding)
+        limits = {}
+        if region is not None:
+            from socr.core.pdf import open_pdf
+
+            with open_pdf(state.handle.path) as doc:
+                items, limits = self._address_adjudication_items(doc[page_num - 1], region, binding)
+        else:
+            items = tuple(replace(item, abstain_reason="no table region") for item in items)
         prior = (ps.binding_adjudication or {}).get(table_id)
 
         def _transcribe(bbox: tuple[float, float, float, float]) -> str | None:
-            crop = self._render_adjudication_crop(state.handle.path, page_num, bbox)
+            crop = self._render_adjudication_crop(
+                state.handle.path, page_num, bbox, clip_limits=limits[bbox]
+            )
             if crop is None:
                 return None
             try:
@@ -5602,6 +5626,95 @@ class UnifiedPipeline:
                 crop.unlink(missing_ok=True)
 
         return adjudicate(items, markdown=markdown, prior=prior, transcribe=_transcribe)
+
+    @staticmethod
+    def _address_adjudication_items(page, region, binding):
+        """Prove both ordinal prefixes before attaching any recovery address.
+
+        Native contradiction boxes are audit evidence only. Each native row
+        instead occupies the band of its own word boxes, as in C1's reference
+        computation. Limits split the whitespace to adjacent bands in half.
+        """
+        from socr.tables.adjudication import adjudication_text_lines, items_from_binding
+        from socr.tables.locate import (
+            band_index_for,
+            label_column_edge,
+            ordinal_origin,
+            row_bands,
+        )
+
+        origin = ordinal_origin(page, region)
+        bands = [b for b in row_bands(page, region) if origin is not None and b.y0 >= origin]
+        edge = label_column_edge(page, region)
+        lines = adjudication_text_lines(page, region)
+        native = binding.native_rows
+        inverse = {v: k for k, v in binding.row_binding.items()}
+
+        def band_of(index):
+            row = native[index]
+            boxes = ([row.label_bbox] if row.label_bbox else []) + list(row.lane_bboxes.values())
+            if not boxes:
+                return None
+            midpoint = (min(box[1] for box in boxes) + max(box[3] for box in boxes)) / 2
+            return band_index_for(bands, midpoint)
+
+        def address(item):
+            if origin is None:
+                return None, "no origin (no second rule group)"
+            if edge is None or edge <= region[0]:
+                return None, "no column edge"
+            candidates = [k for k, row in enumerate(native) if tuple(row.row_path) == item.row_path]
+            if len(candidates) != 1:
+                return None, f"native row for row_path not unique ({len(candidates)})"
+            i = candidates[0]
+            for k in range(i + 1):
+                if band_of(k) != k:
+                    return None, f"native chain breaks at native row {k} (band {band_of(k)})"
+            if i not in inverse:
+                return None, "disputed native row not bound to a model row"
+            j = inverse[i]
+            if j != i:
+                return None, f"model index {j} != band {i}"
+            for k in range(j + 1):
+                if k not in binding.row_binding or band_of(binding.row_binding[k]) != k:
+                    return None, f"model chain breaks at model row {k}"
+            ambiguous = [k for k in range(i + 1) if bands[k].ambiguity]
+            if ambiguous:
+                return None, f"prefix crosses ambiguous band(s) {ambiguous}"
+            band = bands[i]
+            in_band = sorted(
+                (line for line in lines if band.y0 <= line["baseline"] <= band.y1),
+                key=lambda line: line["x0"],
+            )
+            if (
+                not in_band
+                or in_band[0]["x1"] > edge
+                or (len(in_band) > 1 and in_band[1]["x0"] < edge)
+            ):
+                return None, "column test: leftmost line crosses R or second line starts before R"
+            return i, None
+
+        items = []
+        limits = {}
+        for item in items_from_binding(binding):
+            index, reason = address(item)
+            if reason is not None:
+                items.append(replace(item, abstain_reason=reason))
+                continue
+            band = bands[index]
+            bbox = (region[0], band.y0, edge, band.y1)
+            limits[bbox] = (
+                region[0],
+                (bands[index - 1].y1 + band.y0) / 2 if index else origin,
+                edge,
+                (band.y1 + bands[index + 1].y0) / 2 if index + 1 < len(bands) else region[3],
+            )
+            source = (
+                f"(i,j,b)=({index},{index},{index}) "
+                f"cell=({region[0]:.1f},{band.y0:.1f},{edge:.1f},{band.y1:.1f})"
+            )
+            items.append(replace(item, cell_bbox=bbox, address_source=source))
+        return tuple(items), limits
 
     def _transcribe_cell_token(self, crop_path: Path) -> str | None:
         """Constrained transcriber seam. Returns a token or None. Never raises.
@@ -5633,6 +5746,8 @@ class UnifiedPipeline:
         pdf_path: Path,
         page_num: int,
         bbox: tuple[float, float, float, float],
+        *,
+        clip_limits: tuple[float, float, float, float] | None = None,
     ) -> Path | None:
         """Render *bbox* to a temp PNG using the same padding/DPI as table witnesses."""
         import os
@@ -5660,6 +5775,8 @@ class UnifiedPipeline:
                 min(page_rect.x1, x1 + CROP_PADDING_PT),
                 min(page_rect.y1, y1 + CROP_PADDING_PT),
             )
+            if clip_limits is not None:
+                clip &= fitz.Rect(clip_limits)
             if clip.is_empty or clip.is_infinite:
                 return None
             rotation = upright_rotation_for(page, clip=clip)

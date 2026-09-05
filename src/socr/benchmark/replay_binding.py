@@ -98,6 +98,7 @@ whole pipeline config.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import Counter
@@ -106,7 +107,7 @@ from pathlib import Path
 
 from socr.core.pdf import open_pdf
 from socr.judge.table_verdict import TABLE_BINDING_ADJUDICATED_KIND
-from socr.tables.adjudication import ContradictionItem, items_from_binding
+from socr.tables.adjudication import ContradictionItem
 from socr.tables.binding import BindingResult, bind
 from socr.tables.witness import TableWitness, WitnessStatus, prepare_table_witnesses
 
@@ -172,6 +173,8 @@ class ReplayRow:
     row_labels_checked: int | None = None
     native_unbound_count: int | None = None
     native_valueless_unbound: int | None = None
+    #: Geometry verdicts only; no transcriber or adjudication is run in replay.
+    address_items: tuple[ContradictionItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -374,7 +377,13 @@ def replay_table(
         if not words:
             return (), "no native words on this page", None
         binding_result = bind(words, witness.markdown, region=witness.box.bbox)
-    return items_from_binding(binding_result), "", binding_result
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    with open_pdf(pdf_path) as doc:
+        items, _limits = UnifiedPipeline._address_adjudication_items(
+            doc[page_num - 1], witness.box.bbox, binding_result
+        )
+    return tuple(items), "", binding_result
 
 
 def _final_disposition(status: str) -> str:
@@ -592,6 +601,7 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
                 unchecked=whole_unchecked,
                 unchecked_removed=unchecked_removed_t,
                 note=note,
+                address_items=tuple(fresh_items),
                 **coverage,
             )
         )
@@ -636,7 +646,80 @@ def format_report(rows: list[ReplayRow]) -> str:
             lines.append(f"       - frozen-only: {list(row.removed)}")
         if row.unchecked_removed:
             lines.append(f"       UNCHECKED: {list(row.unchecked_removed)}")
+        for item in row.address_items:
+            verdict, reason = _address_verdict(item)
+            lines.append(
+                f"       {item.kind} {item.native_token!r}|{item.model_token!r}: "
+                f"{verdict} — {reason}"
+            )
     return "\n".join(lines)
+
+
+def _address_verdict(item: ContradictionItem) -> tuple[str, str | None]:
+    if item.cell_bbox is not None:
+        return "addressed", item.address_source
+    return "abstained", item.abstain_reason
+
+
+def assert_prediction(rows: list[ReplayRow], prediction: dict) -> None:
+    """Compare the implementation with the independently committed C2b computation.
+
+    Keep order and duplicates, including the artifact's token-prefix presentation.
+    Unreplayable or unchecked tables cannot masquerade as A2 clears.
+    """
+    width = prediction["token_prefix_length"]
+    actual = [
+        [
+            row.doc_slug,
+            row.page_num,
+            row.table_id,
+            item.kind,
+            (item.native_token or "")[:width] + "|" + (item.model_token or "")[:width],
+            *_address_verdict(item),
+        ]
+        for row in rows
+        for item in row.address_items
+    ]
+    if actual != prediction["verdicts"]:
+        raise AssertionError(f"C2b prediction mismatch: {actual!r}")
+    by_table = {(row.doc_slug, row.page_num, row.table_id): row for row in rows}
+    for key in prediction["cleared_tables"]:
+        row = by_table.get(tuple(key))
+        if (
+            row is None
+            or row.unreplayable
+            or row.unchecked
+            or row.unchecked_removed
+            or row.fresh_item_count
+        ):
+            raise AssertionError(f"A2 cleared table regressed: {key!r}")
+
+
+def _frozen_prediction(corpus_dir: Path) -> dict | None:
+    """Load the frozen gate in a source checkout; other corpora remain general replay."""
+    root = Path(__file__).resolve().parents[3]
+    fixture = root / "tests/fixtures/replay_binding/controls/c2b_prediction.json"
+    if not fixture.is_file():
+        return None
+    prediction = json.loads(fixture.read_text())
+    if corpus_dir.name != prediction["corpus_name"]:
+        return None
+    artifact = root / prediction["artifact"]
+    if hashlib.sha256(artifact.read_bytes()).hexdigest() != prediction["artifact_sha256"]:
+        raise AssertionError("C2b prediction artifact differs from the fixture's source")
+    manifest = corpus_dir / "SHA256SUMS"
+    if hashlib.sha256(manifest.read_bytes()).hexdigest() != prediction["manifest_sha256"]:
+        raise AssertionError("Frozen corpus checksum manifest differs from the prediction input")
+    for line in manifest.read_text().splitlines():
+        digest, relative = line.split(maxsplit=1)
+        path = (corpus_dir / relative.lstrip("*")).resolve()
+        if not path.is_relative_to(corpus_dir.resolve()):
+            raise AssertionError(f"Checksum path outside corpus: {relative}")
+        with path.open("rb") as stream:
+            actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        if actual != digest:
+            raise AssertionError(f"Frozen corpus checksum mismatch: {relative}")
+    return prediction
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -663,8 +746,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.labels is not None:
         labels = json.loads(args.labels.read_text())
 
-    rows = replay_corpus(args.corpus_dir.expanduser(), labels)
+    corpus_dir = args.corpus_dir.expanduser().resolve()
+    prediction = _frozen_prediction(corpus_dir)
+    rows = replay_corpus(corpus_dir, labels)
     print(format_report(rows))
+    if prediction is not None:
+        assert_prediction(rows, prediction)
+        print("C2b frozen prediction: PASS (all item verdicts/reasons and A2 clears)")
     return 0
 
 

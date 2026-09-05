@@ -24,6 +24,9 @@ def _cell(**kwargs) -> ContradictionItem:
 
 
 def _label(**kwargs) -> ContradictionItem:
+    # Rule tests supply an independently established address; caller tests
+    # exercise the geometry that establishes it.
+    kwargs.setdefault("cell_bbox", kwargs.get("native_bbox"))
     return ContradictionItem(kind="row_label", col_path=(), **kwargs)
 
 
@@ -75,6 +78,68 @@ class TestTokensAgree:
 
 
 class TestAdjudicate:
+    def test_all_abstained_is_held_and_never_transcribes_native_bbox(self) -> None:
+        from unittest.mock import Mock
+
+        transcribe = Mock(return_value="RowB")
+        item = _label(
+            row_path=("RowA",),
+            native_token="RowA",
+            model_token="RowB",
+            native_bbox=(1, 2, 3, 4),
+            cell_bbox=None,
+            abstain_reason="no column edge",
+        )
+        record = adjudicate((item,), markdown="md", transcribe=transcribe)
+        assert record.status == "held"
+        assert record.items[0].outcome == "abstained"
+        assert record.items[0].disproof is None
+        transcribe.assert_not_called()
+        saved = record.to_dict()["items"][0]
+        assert saved["cell_bbox"] is None
+        assert saved["address_source"] is None
+        assert saved["abstain_reason"] == "no column edge"
+        assert tuple(saved["native_bbox"]) == (1, 2, 3, 4)
+
+    def test_geometry_address_is_used_instead_of_native_bbox(self) -> None:
+        from unittest.mock import Mock
+
+        cell_bbox = (0, 0, 10, 10)
+        transcribe = Mock(return_value="RowB")
+        item = _label(
+            row_path=("RowA",),
+            native_token="RowA",
+            model_token="RowB",
+            native_bbox=(0, 0, 5, 10),
+            cell_bbox=cell_bbox,
+            address_source="geometry",
+        )
+        record = adjudicate((item,), markdown="md", transcribe=transcribe)
+        assert record.status == "lifted"
+        transcribe.assert_called_once_with(cell_bbox)
+        assert record.to_dict()["items"][0]["address_source"] == "geometry"
+
+    def test_prior_lift_cannot_overrule_current_abstention(self) -> None:
+        from dataclasses import replace
+        from unittest.mock import Mock
+
+        item = _label(
+            row_path=("RowA",),
+            native_token="RowA",
+            model_token="RowB",
+            native_bbox=(0, 0, 1, 1),
+        )
+        first = adjudicate((item,), markdown="md", transcribe=lambda _: "RowB")
+        assert first.status == "lifted"
+        abstaining = replace(item, cell_bbox=None, abstain_reason="no column edge")
+        transcribe = Mock(return_value="RowB")
+        second = adjudicate(
+            (abstaining,), markdown="md", prior=first.to_dict(), transcribe=transcribe
+        )
+        assert second.status == "held"
+        assert second.items[0].outcome == "abstained"
+        transcribe.assert_not_called()
+
     def test_encoding_garbage_disproves_without_transcriber(self) -> None:
         items = (
             _label(
@@ -310,3 +375,69 @@ class TestPriorLiftKeepsMultiplicity:
         again = adjudicate(items, markdown="md", prior=both.to_dict(), transcribe=lambda _b: "RowA")
         assert again.status == "lifted"
         assert all(o.disproof == "prior_lift" for o in again.items)
+
+
+def test_frozen_prediction_gate_rejects_verdict_drift_and_unchecked_clears() -> None:
+    import ast
+    import json
+    from dataclasses import replace
+    from pathlib import Path
+
+    import pytest
+
+    from socr.benchmark.replay_binding import ReplayRow, assert_prediction
+
+    prediction = json.loads(
+        (Path(__file__).parent / "fixtures/replay_binding/controls/c2b_prediction.json").read_text()
+    )
+    grouped = {}
+    for doc, page, table, kind, tokens, verdict, reason in prediction["verdicts"]:
+        native, model = tokens.split("|", 1)
+        item = ContradictionItem(
+            kind=kind,
+            row_path=(),
+            col_path=(),
+            native_token=native,
+            model_token=model,
+            cell_bbox=ast.literal_eval(reason.split("cell=")[1])
+            if verdict == "addressed"
+            else None,
+            address_source=reason if verdict == "addressed" else None,
+            abstain_reason=reason if verdict == "abstained" else None,
+        )
+        grouped.setdefault((doc, page, table), []).append(item)
+    for key in prediction["cleared_tables"]:
+        grouped[tuple(key)] = []
+    rows = [
+        ReplayRow(
+            doc_slug=doc,
+            page_num=page,
+            table_id=table,
+            recorded_status="held",
+            recorded_item_count=len(items),
+            fresh_item_count=len(items),
+            multiset_match=True,
+            added=(),
+            removed=(),
+            final_disposition="held",
+            label_accuracy="unavailable",
+            crop_coverage="unavailable",
+            address_items=tuple(items),
+        )
+        for (doc, page, table), items in grouped.items()
+    ]
+    assert_prediction(rows, prediction)
+    first = rows[0]
+    wrong_reason = replace(first.address_items[0], abstain_reason="different failure")
+    with pytest.raises(AssertionError, match="prediction mismatch"):
+        assert_prediction(
+            [replace(first, address_items=(wrong_reason, *first.address_items[1:])), *rows[1:]],
+            prediction,
+        )
+    with pytest.raises(AssertionError, match="prediction mismatch"):
+        assert_prediction(
+            [replace(first, address_items=first.address_items[1:]), *rows[1:]], prediction
+        )
+    for changes in ({"unchecked": True}, {"unreplayable": True}, {"fresh_item_count": 1}):
+        with pytest.raises(AssertionError, match="cleared table regressed"):
+            assert_prediction([*rows[:-1], replace(rows[-1], **changes)], prediction)

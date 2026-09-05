@@ -22,10 +22,13 @@ _for_agentic`` and ``_resolve_judge_model`` are patched wherever
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import fitz
+import pytest
 
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
@@ -188,6 +191,44 @@ def _process(pipeline: UnifiedPipeline, pdf_path: Path, out_dir: Path, rungs, tr
 
 
 class TestGateLift:
+    def test_all_abstained_records_unverified_cause_without_transcribing(
+        self, tmp_path: Path
+    ) -> None:
+        from socr.judge.table_verdict import TABLE_LADDER_UNVERIFIED_KIND
+
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        outcomes = []
+        for missing_origin in (False, True):
+            state = _make_state(pdf_path)
+            with (
+                patch.object(
+                    pipeline,
+                    "_transcribe_cell_token",
+                    side_effect=_QueueTranscriber(["RowB", "RowA"]),
+                ) as transcribe,
+                patch("socr.tables.locate.ordinal_origin", return_value=None)
+                if missing_origin
+                else nullcontext(),
+            ):
+                pipeline._run_table_judge_gate(
+                    state, 1, state.pages[1], _bo(_SHIFTED_MD), [_accept_rung()]
+                )
+            outcomes.append(state.pages[1].table_ladder_disposition)
+            if missing_origin:
+                transcribe.assert_not_called()
+                events = [
+                    event for event in state.events if event.kind == TABLE_LADDER_UNVERIFIED_KIND
+                ]
+                assert len(events) == 1
+                assert events[0].data["cause"] == "abstained"
+                record = next(iter(state.pages[1].binding_adjudication.values()))
+                assert record["status"] == "held"
+                assert all(item["outcome"] == "abstained" for item in record["items"])
+            else:
+                assert transcribe.call_count == 2
+        assert outcomes[0] != outcomes[1]
+
     def test_transcriber_matching_markdown_lifts_clamp(self, tmp_path: Path) -> None:
         pipeline = _make_pipeline()
         pdf_path = _row_shift_pdf(tmp_path)
@@ -401,3 +442,180 @@ class TestProcessDifference:
 
         assert result_off.status != result_on.status
         assert "table_unverified" in (result_on.error or "")
+
+
+def test_geometry_address_four_controls_in_one_process(tmp_path: Path) -> None:
+    """Hold the printed page fixed while independently breaking each prefix."""
+    from socr.tables.binding import RowLabelContradiction, bind
+    from socr.tables.locate import label_column_edge, ordinal_origin, row_bands
+    from socr.tables.witness import prepare_table_witnesses
+
+    pdf_path = tmp_path / "geometry.pdf"
+    markdown = (
+        "| Label | OLS |\n| --- | --- |\n| First | 100 |\n"
+        "| Target complete | 200 |\n| Last | 300 |\n"
+    )
+    with fitz.open() as doc:
+        page = doc.new_page()
+        for baseline, label, value in (
+            (112, "Label", "OLS"),
+            (132, "First", "100"),
+            (146, "Target complete", "200"),
+            (160, "Last", "300"),
+        ):
+            page.insert_text((104, baseline), label, fontsize=9)
+            page.insert_text((254, baseline), value, fontsize=9)
+        for y in (100, 120, 168):
+            page.draw_line((100, y), (350, y))
+        doc.save(pdf_path)
+
+    with prepare_table_witnesses(pdf_path, 1, markdown) as witnesses:
+        witness = witnesses[0]
+        region, table_id = witness.box.bbox, witness.table_id
+    with fitz.open(pdf_path) as doc:
+        page = doc[0]
+        binding = bind(page.get_text("words"), markdown, region=region)
+        origin = ordinal_origin(page, region)
+        bands = [band for band in row_bands(page, region) if band.y0 >= origin]
+        edge = label_column_edge(page, region)
+    assert len(binding.native_rows) == len(bands) == 3
+    assert binding.row_binding == {0: 0, 1: 1, 2: 2}
+    target = binding.native_rows[1]
+    full = target.label_bbox
+    truncated = (full[0], full[1], (full[0] + full[2]) / 2, full[3])
+    # The native row's words anchor it. Its rounded y and the disputed bbox
+    # are deliberately unsuitable as independent addresses.
+    binding.native_rows = [replace(row, y=origin) for row in binding.native_rows]
+    binding.row_label_contradictions = [
+        RowLabelContradiction(target.row_path, "Target complete", truncated)
+    ]
+    binding.row_label_contradictions[0] = replace(
+        binding.row_label_contradictions[0], row_path=("Target",)
+    )
+    binding.native_rows[1] = replace(binding.native_rows[1], row_path=("Target",))
+
+    missing = replace(binding, native_rows=binding.native_rows[1:], row_binding={1: 0, 2: 1})
+    inserted = replace(binding, row_binding={0: 0, 2: 1, 3: 2})
+    shifted_markdown = markdown.replace("| Target complete", "| Inserted | |\n| Target complete")
+    ambiguous_bands = [replace(bands[0], ambiguity="merge-heuristic"), *bands[1:]]
+    pipeline = _make_pipeline()
+    state = _make_state(pdf_path)
+    rendered = []
+    real_pixmap = fitz.Page.get_pixmap
+
+    def capture_pixmap(page, *args, **kwargs):
+        rendered.append(tuple(kwargs["clip"]))
+        return real_pixmap(page, *args, **kwargs)
+
+    records = []
+    for current, candidate, geometry, expected_calls in (
+        (binding, markdown, bands, 1),
+        (missing, markdown, bands, 0),
+        (inserted, shifted_markdown, bands, 0),
+        (binding, markdown, ambiguous_bands, 0),
+    ):
+        with (
+            patch("socr.tables.locate.row_bands", return_value=geometry),
+            patch.object(fitz.Page, "get_pixmap", capture_pixmap),
+            patch.object(
+                pipeline, "_transcribe_cell_token", return_value="Target complete"
+            ) as transcribe,
+            patch.object(
+                pipeline, "_render_adjudication_crop", wraps=pipeline._render_adjudication_crop
+            ) as render,
+        ):
+            record = pipeline._adjudicate_clamped_table(
+                state, 1, table_id, candidate, current, state.pages[1], region=region
+            )
+        assert transcribe.call_count == expected_calls
+        if expected_calls:
+            cell = (region[0], bands[1].y0, edge, bands[1].y1)
+            assert record.items[0].item.cell_bbox == cell
+            assert render.call_args.args[2] == cell
+            assert cell != truncated
+            assert record.items[0].disproof == "raster_transcription"
+        else:
+            assert record.items[0].outcome == "abstained"
+            assert record.items[0].disproof is None
+        records.append(record)
+    assert [r.status for r in records] == ["lifted", "held", "held", "held"]
+    assert [r.items[0].item.abstain_reason for r in records[1:]] == [
+        "native chain breaks at native row 0 (band 1)",
+        "model index 2 != band 1",
+        "prefix crosses ambiguous band(s) [0]",
+    ]
+    # Assert the rectangle actually rendered, including both padding clamps.
+    assert len(rendered) == 1
+    assert rendered[0] == pytest.approx(
+        (
+            region[0],
+            (bands[0].y1 + bands[1].y0) / 2,
+            edge,
+            (bands[1].y1 + bands[2].y0) / 2,
+        )
+    )
+
+
+def test_address_metadata_preserves_resume_and_final_markdown(tmp_path: Path) -> None:
+    from socr.tables.adjudication import ContradictionItem
+
+    pdf_path = _row_shift_pdf(tmp_path)
+    pipeline = _make_pipeline()
+    full_dir, legacy_dir = tmp_path / "full", tmp_path / "legacy"
+    full_result = _process(
+        pipeline, pdf_path, full_dir, [_accept_rung()], _QueueTranscriber(["RowB", "RowA"])
+    )
+    new_fields = {"cell_bbox", "address_source", "abstain_reason", "outcome"}
+    original = ContradictionItem.to_record
+
+    def legacy_record(item, disproof):
+        return {
+            key: value for key, value in original(item, disproof).items() if key not in new_fields
+        }
+
+    with patch.object(ContradictionItem, "to_record", legacy_record):
+        legacy_result = _process(
+            _make_pipeline(),
+            pdf_path,
+            legacy_dir,
+            [_accept_rung()],
+            _QueueTranscriber(["RowB", "RowA"]),
+        )
+    assert full_result.status == legacy_result.status
+    full_md = list(full_dir.rglob("doc.md"))
+    legacy_md = list(legacy_dir.rglob("doc.md"))
+    assert len(full_md) == len(legacy_md) == 1
+    assert full_md[0].read_bytes() == legacy_md[0].read_bytes()
+    assert full_result.markdown == legacy_result.markdown
+
+    sidecar = next(full_dir.rglob("pages/00001.json"))
+    baseline = json.loads(sidecar.read_text())
+    legacy = json.loads(next(legacy_dir.rglob("pages/00001.json")).read_text())
+    baseline_items = next(iter(baseline["binding_adjudication"].values()))["items"]
+    legacy_items = next(iter(legacy["binding_adjudication"].values()))["items"]
+    assert all(new_fields <= item.keys() for item in baseline_items)
+    assert all(new_fields.isdisjoint(item) for item in legacy_items)
+
+    # Keep fingerprint and every other field fixed; strip only the new item
+    # metadata, then compare the real terminal ledger gate and restoration.
+    decisions = []
+    for include_fields in (True, False):
+        meta = json.loads(json.dumps(baseline))
+        if not include_fields:
+            for table in meta["binding_adjudication"].values():
+                for item in table["items"]:
+                    for key in new_fields:
+                        item.pop(key)
+        sidecar.write_text(json.dumps(meta))
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        decision = pipeline._load_terminal_page(state, 1, full_dir)
+        decisions.append(decision)
+        if decision is not None:
+            pipeline._restore_terminal_page_state(state, 1, decision, full_dir)
+            assert state.pages[1].binding_adjudication == meta["binding_adjudication"]
+    assert (decisions[0] is None) == (decisions[1] is None)
+    assert decisions[0] is not None, "the control must exercise a skippable terminal page"
+    if decisions[0] is not None:
+        assert decisions[0].text == decisions[1].text
+        assert decisions[0].status == decisions[1].status
+        assert decisions[0].audit_passed == decisions[1].audit_passed
