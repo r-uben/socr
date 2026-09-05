@@ -251,3 +251,381 @@ def _iou(a, b) -> float:
     area_b = (bx1 - bx0) * (by1 - by0)
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# VI-C2a: row-band / column-edge / ordinal-origin helpers.
+#
+# Pure functions over ``(page, region)`` — no binder state, no candidate
+# markdown. ``region`` is a witness table's own bbox, the same tuple
+# ``TableBox.bbox`` already carries. They give the verifier an address for a
+# disputed cell that neither the native binder nor the candidate's own
+# structure gets to nominate. Design:
+# docs/plans/verifier-independence/logs/2026-09-05_C1-design.md, §(a).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RowBand:
+    """One printed table row's vertical extent inside a witness region."""
+
+    y0: float
+    y1: float
+    source: str  # "rule" | "line" | "line-ambiguous"
+    #: Why this region's line pitch could not be certified (a tie, no gap value
+    #: repeating, or the two most frequent gaps closer than the smallest line
+    #: height). ``None`` when the pitch was certified. When set, every band in
+    #: the region is one unique baseline and NO merge was decided: the band
+    #: list is an over-split, safe only as an abstain input — a caller must not
+    #: treat these bands as printed rows (C2b abstains on any band carrying it).
+    ambiguity: str | None = None
+
+
+def row_bands_from_rules(
+    rules: list[tuple[float, float, float]], region: tuple[float, float, float, float]
+) -> list[RowBand]:
+    """Pair consecutive horizontal rules inside ``region`` into row bands.
+
+    Only trustworthy where a table draws a rule between every printed row.
+    A booktabs table's top/mid/bottom rules still pair into bands here, but
+    they span many printed rows each; :func:`row_bands` only accepts this
+    result where it corresponds 1:1 with the line-derived bands.
+    """
+    x0, y0, x1, y1 = region
+    ys = sorted({r[0] for r in rules if y0 <= r[0] <= y1 and _rule_overlaps_span(r, x0, x1)})
+    return [RowBand(y0=a, y1=b, source="rule") for a, b in zip(ys, ys[1:])]
+
+
+def row_bands_from_lines(page, region: tuple[float, float, float, float]) -> list[RowBand]:
+    """Group PDF text lines inside ``region`` into row bands.
+
+    One printed row = one band. Two lines join only when their boxes overlap
+    in y by more than the overlap any two adjacent printed rows share —
+    adjacent meaning consecutive unique-baseline groups at the region's
+    line pitch (the modal unique-baseline gap). Baseline-distance clustering
+    is transitive at a 9.5 pt pitch on 10 pt type and collapses six printed
+    rows into three (or one). No text layer, or too few lines to establish
+    a pitch, returns no bands: that is an abstain input, not a guess.
+    """
+    lines = _text_lines_in_region(page, region)
+    if not lines:
+        return []
+    groups, reason, flagged = _group_lines_by_baseline_with_reason(lines)
+    return [
+        RowBand(
+            y0=min(ln["bbox"][1] for ln in group),
+            y1=max(ln["bbox"][3] for ln in group),
+            source="line-ambiguous" if i in flagged else "line",
+            ambiguity=reason if i in flagged else None,
+        )
+        for i, group in enumerate(groups)
+    ]
+
+
+def row_bands(page, region: tuple[float, float, float, float]) -> list[RowBand]:
+    """Row bands for ``region``: rules where they address one printed row
+    each, lines otherwise (C1 §(f) decision 1 — rules-else-lines).
+
+    A booktabs table's top/mid/bottom rules pair into a handful of bands
+    that each span many printed rows — not "per-row rules". The
+    distinguishing test is page-derived correspondence, not a rule-count
+    threshold: rule-derived bands are trusted only when there are exactly as
+    many of them as line-derived bands, and each one contains its
+    line-derived counterpart.
+    """
+    line_bands = row_bands_from_lines(page, region)
+    if not line_bands:
+        return []  # no text layer: abstain input, never a guess
+    rule_bands = row_bands_from_rules(_horizontal_rules(page), region)
+    if len(rule_bands) == len(line_bands) and all(
+        rb.y0 <= lb.y0 and rb.y1 >= lb.y1 for rb, lb in zip(rule_bands, line_bands)
+    ):
+        # Equal counts and containment do not resolve a line band's
+        # ambiguity: a rule interval can contain two heuristically merged
+        # rows (Codex seat). Each rule band inherits its counterpart's flag.
+        return [
+            RowBand(y0=rb.y0, y1=rb.y1, source=rb.source, ambiguity=lb.ambiguity)
+            for rb, lb in zip(rule_bands, line_bands)
+        ]
+    return line_bands
+
+
+def ordinal_origin(page, region: tuple[float, float, float, float]) -> float | None:
+    """The y of the second horizontal-rule group inside ``region`` — the
+    header rule ordinals are counted from (C1 §(a)).
+
+    Two consecutive rules merge as one group when no text-line baseline
+    lies between them *and* the gap is smaller than the smallest
+    text-line height in the region. That is not iff "doubled hairline":
+    an empty narrow row has the same geometry. A caller can conclude the
+    pair is not two content-separated rules; it cannot tell doubled
+    hairline from empty narrow row. No text lines means the conditions
+    cannot be evaluated, so this returns ``None`` (abstain), never a
+    guess. ``None`` also when fewer than two rules, or fewer than two
+    groups, exist.
+    """
+    x0, y0, x1, y1 = region
+    rules = sorted(
+        r for r in _horizontal_rules(page) if y0 <= r[0] <= y1 and _rule_overlaps_span(r, x0, x1)
+    )
+    if len(rules) < 2:
+        return None
+    lines = _text_lines_in_region(page, region)
+    if not lines:
+        return None
+    groups: list[list[tuple[float, float, float]]] = [[rules[0]]]
+    for rule in rules[1:]:
+        prev = groups[-1][-1]
+        if _rules_are_one_border(prev[0], rule[0], lines):
+            groups[-1].append(rule)
+        else:
+            groups.append([rule])
+    if len(groups) < 2:
+        return None
+    second_group = groups[1]
+    return sum(r[0] for r in second_group) / len(second_group)
+
+
+def label_column_edge(page, region: tuple[float, float, float, float]) -> float | None:
+    """The label column's right edge ``R`` inside ``region`` (C1 §(a)).
+
+    ``R`` starts at the leftmost ``x0`` among every non-leftmost line of any
+    printed row, then shrinks to a whitespace edge: while some line
+    straddles it, ``R`` moves left to that line's own ``x0``. Fixed point
+    observed in <=2 passes on the corpus this was measured against — an
+    observation, not a limit. ``None`` on a one-column region (every row has
+    exactly one line), when no candidate lies right of the region's own
+    left edge, or when ``R`` collapses onto the leftmost text (a wrapped
+    label's own ``x0`` is not a column edge).
+    """
+    lines = _text_lines_in_region(page, region)
+    if not lines:
+        return None
+    candidates: list[float] = []
+    for group in _group_lines_by_baseline(lines):
+        ordered = sorted(group, key=lambda ln: ln["x0"])
+        candidates.extend(ln["x0"] for ln in ordered[1:])
+    if not candidates:
+        return None
+    edge = min(candidates)
+    while True:
+        straddling = [ln for ln in lines if ln["x0"] < edge < ln["x1"]]
+        if not straddling:
+            break
+        narrower = min(ln["x0"] for ln in straddling)
+        if narrower >= edge:
+            break
+        edge = narrower
+    # R is a column edge only if it sits strictly right of the region's
+    # left bound *and* of the leftmost text — a wrapped label's own x0
+    # is not a column edge (it is the label column collapsing onto the
+    # region's left content edge, the same outcome as R == region.x0
+    # when the label is flush with the box).
+    content_x0 = min(ln["x0"] for ln in lines)
+    if edge <= region[0] or edge <= content_x0:
+        return None
+    return edge
+
+
+def band_index_for(bands: list[RowBand], y_mid: float) -> int | None:
+    """Index of the unique band whose ``[y0, y1]`` contains ``y_mid``.
+
+    ``None`` when no band contains the point, or when more than one does
+    (overlapping bands: abstain, do not pick the first).
+    """
+    hits = [idx for idx, band in enumerate(bands) if band.y0 <= y_mid <= band.y1]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _text_lines_in_region(page, region: tuple[float, float, float, float]) -> list[dict]:
+    """PDF text lines inside ``region``, each as a dict with ``baseline``
+    (first span's ``origin`` y), ``size`` (dominant span size), and ``bbox``.
+    """
+    try:
+        text_dict = page.get_text("dict", clip=tuple(region))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("get_text(dict) failed: %s", exc)
+        return []
+    lines: list[dict] = []
+    for block in text_dict.get("blocks", []):
+        for line in block.get("lines", []):
+            spans = [s for s in line.get("spans", []) if s.get("text", "").strip()]
+            if not spans:
+                continue
+            bbox = line["bbox"]
+            lines.append(
+                {
+                    "baseline": spans[0]["origin"][1],
+                    "size": max(s["size"] for s in spans),
+                    "bbox": bbox,
+                    "x0": bbox[0],
+                    "x1": bbox[2],
+                }
+            )
+    return lines
+
+
+def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
+    """``_group_lines_by_baseline_with_reason`` without the reason — kept for
+    callers that only need the grouping (``label_column_edge``, tests)."""
+    return _group_lines_by_baseline_with_reason(lines)[0]
+
+
+def _group_lines_by_baseline_with_reason(
+    lines: list[dict],
+) -> tuple[list[list[dict]], str | None, set[int]]:
+    """Group text-line dicts into printed rows by vertical-extent overlap.
+
+    Returns ``(groups, ambiguity)``. ``ambiguity`` is ``None`` when the
+    region's line pitch was certified and the grouping is a real row
+    segmentation; otherwise it names why no merge could be certified, and
+    ``groups`` is one group per unique baseline — an over-split that callers
+    must surface (``RowBand.ambiguity``), never silently consume as rows.
+
+    Two lines belong to one band only if their boxes overlap in y by more
+    than the overlap any two *adjacent printed rows* share. Adjacent rows
+    are consecutive unique-baseline groups whose baseline gap equals the
+    region's certified line pitch (the unique modal unique-baseline gap).
+    When that pitch is ambiguous — a tie, no gap value occurring more than
+    once, or the two most frequent gaps differing by less than the smallest
+    line height — no merge is certified: each unique baseline is its own
+    band (over-split; the ordinal chain abstains). Fewer than three lines
+    cannot establish a pitch: return no groups (abstain input, never a
+    guess).
+    """
+    if len(lines) < 3:
+        return [], None, set()
+    ordered = sorted(lines, key=lambda ln: ln["baseline"])
+    by_base: dict[float, list[dict]] = {}
+    for ln in ordered:
+        by_base.setdefault(ln["baseline"], []).append(ln)
+    baselines = sorted(by_base)
+    if len(baselines) == 1:
+        return [ordered], None, set()
+    groups: list[list[dict]] = [list(by_base[baselines[0]])]
+    flagged: set[int] = set()
+    for key in baselines[1:]:
+        verdict = _boundary_verdict(groups[-1], by_base[key])
+        if verdict == "merge-heuristic":
+            # Same printed line by mutual baseline-in-box. That keeps the band
+            # count equal to the printed-row count (the ordinal chain needs
+            # it), but a font box is not glyph ink (Codex seat: metrics 2.2×
+            # the type size make two readable 9 pt-leading rows satisfy it),
+            # so the merged band is flagged — C2b abstains on THIS row only.
+            groups[-1].extend(by_base[key])
+            flagged.add(len(groups) - 1)
+            continue
+        if verdict == "ambiguous":
+            flagged.add(len(groups) - 1)
+            flagged.add(len(groups))
+        groups.append(list(by_base[key]))
+    reason = (
+        None
+        if not flagged
+        else f"{len(flagged)} band(s) rest on a sub-size boundary (heuristic merge or no evidence)"
+    )
+    return groups, reason, flagged
+
+
+def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
+    """Decide ONE consecutive-baseline boundary from the two lines' own geometry.
+
+    Returns ``"separate"``, ``"merge-heuristic"`` or ``"ambiguous"``. Per boundary — a
+    wide gap elsewhere in the region is no evidence about this one (Codex
+    seat: uncertain boundaries retain their ambiguity independently).
+
+    * gap ≥ the smaller font size ⇒ ``separate``: a subscript never sits a
+      full em below its base.
+    * below that, ``merge-heuristic`` when each baseline lies inside the
+      other line's box (a split same-line span, cells at a fraction-of-a-
+      point baseline offset, an inline marker): the lines are merged so the
+      band count stays equal to the printed-row count, but the band is
+      FLAGGED — a font box is not glyph ink, and metrics far larger than the
+      type size can make two readable tight-leading rows satisfy it. C2b
+      abstains on that row. x-ranges are not consulted: a band is a printed
+      line, not a glyph run. Smaller type inside the upper line's
+      x-span (a subscript under its base, doc04's shape) is NOT merged: an
+      annotation such as ``(a)`` has the same geometry (VI-A2 withdrew its
+      fold on this point), so that boundary is ambiguous.
+    * otherwise ``ambiguous``: tight leading between two real rows is
+      geometrically indistinguishable from an annotation line, so the
+      boundary is kept and surfaced, never guessed.
+
+    Deliberate non-goals (they resolve to ``ambiguous``, never to a wrong
+    merge): any sub/superscript or annotation line — below or above its
+    base, contained or overhanging. All abstain; doc04's math-font header
+    therefore over-splits and its item abstains in C (it has no origin anyway).
+    No literal: every bound is the two lines' own boxes and sizes.
+    """
+
+    def _union(group: list[dict]) -> tuple[float, float, float, float]:
+        return (
+            min(ln["bbox"][0] for ln in group),
+            min(ln["bbox"][1] for ln in group),
+            max(ln["bbox"][2] for ln in group),
+            max(ln["bbox"][3] for ln in group),
+        )
+
+    ub, lb = _union(upper), _union(lower)
+    # A baseline group's type size is its DOMINANT (largest) span size: a
+    # 4 pt footnote marker sharing a 10 pt row's baseline does not make that
+    # row 4 pt type (reviewer construction — with min() the row's own
+    # subscript at a 4.5 pt gap read as a separate row, silently).
+    size_u = max(ln["size"] for ln in upper)
+    size_l = max(ln["size"] for ln in lower)
+    gap = lower[0]["baseline"] - upper[0]["baseline"]
+    if gap >= min(size_u, size_l):
+        return "separate"
+    # Same physical line: each baseline lies inside the other's box. A split
+    # same-line span or jitter satisfies this; a following row never does —
+    # its baseline sits below the upper box's descender, and the upper
+    # baseline sits above the lower box's top.
+    inside_vertically = (ub[1] <= lower[0]["baseline"] < ub[3]) and (
+        lb[1] <= upper[0]["baseline"] < lb[3]
+    )
+    # A band is one PRINTED LINE. Two spans whose baselines each fall inside
+    # the other's box are on the same printed line whatever their x-ranges —
+    # a following row's baseline sits a full line below, outside the box. An
+    # annotation to the right at baseline+2 pt is on that line; merging it
+    # keeps the band count equal to the printed-row count, while splitting
+    # it would add a phantom row and break the ordinal chain. (Measured: an
+    # x-overlap requirement split four real rows on doc01, 13 → 17 bands.)
+    if inside_vertically:
+        return "merge-heuristic"
+    # Smaller type inside the upper line's x-span is what a subscript looks
+    # like — and also what a "(a)" / "see note" annotation looks like (the
+    # VI-A2 fold was withdrawn on exactly that point). No page geometry
+    # separates them, so the boundary is ambiguous, never a merge.
+    return "ambiguous"
+
+
+def _rules_are_one_border(y_a: float, y_b: float, lines: list[dict]) -> bool:
+    """Whether *y_a*..*y_b* should merge as one rule group for the origin.
+
+    True when no text-line baseline lies between the two y's and the gap
+    is smaller than the smallest text-line height in the region. That is
+    not an iff for "doubled hairline border": the same geometry is an
+    intentionally empty narrow row (no text, gap below line height). A
+    caller **can** conclude the pair is not two content-separated rules
+    (no line fits, no baseline between). A caller **cannot** conclude
+    doubled hairline rather than an empty narrow row; ``ordinal_origin``
+    still merges on True because both readings share a second-group
+    origin below the pair. *lines* must be non-empty — the caller
+    abstains otherwise.
+    """
+    min_height = min(ln["bbox"][3] - ln["bbox"][1] for ln in lines)
+    if min_height <= 0:
+        return False
+    if any(y_a < ln["baseline"] < y_b for ln in lines):
+        return False
+    return (y_b - y_a) < min_height
+
+
+def _rule_overlaps_span(rule: tuple, x0: float, x1: float) -> bool:
+    """True if ``rule``'s ``(x0, x1)`` shares >= ``_RULE_X_OVERLAP`` of its
+    width with the ``(x0, x1)`` span.
+    """
+    rx0, rx1 = rule[1], rule[2]
+    inter = max(0.0, min(rx1, x1) - max(rx0, x0))
+    width = min(rx1 - rx0, x1 - x0)
+    return width > 0 and inter / width >= _RULE_X_OVERLAP
