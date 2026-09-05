@@ -214,8 +214,9 @@ def test_row_bands_uniform_pitch_one_band_per_printed_row():
     assert len(bands) == 6
 
 
-def test_row_bands_subscript_joins_its_label():
-    """A subscript under a label is the same printed row (doc04 shape).
+def test_row_bands_subscript_under_label_is_an_ambiguous_boundary():
+    """A subscript under a label (doc04 shape) is not folded: the same
+    geometry is a ``(a)`` annotation, so the boundary abstains.
 
     Four printed rows so the row pitch occurs more than once and is
     certified; a two-row fixture has unique gaps and would over-split.
@@ -230,19 +231,19 @@ def test_row_bands_subscript_joins_its_label():
     region = (_REGION_X0, 120.0, _REGION_X1, 220.0)
 
     bands = row_bands_from_lines(page, region)
-    assert len(bands) == 4
-    first = bands[0]
-    assert first.y0 <= 140.0 <= first.y1
-    assert first.y0 <= 144.0 <= first.y1
+    # A subscript is geometrically an annotation: NOT folded, its boundary is
+    # ambiguous and both adjacent bands say so (VI-A2 precedent).
+    assert len(bands) == 5
+    assert bands[0].ambiguity and bands[1].ambiguity
+    assert all(b.ambiguity is None for b in bands[2:])
 
 
 def test_row_bands_jittered_pitch_keeps_subscript_fold():
     """Reviewer construction: 8 printed rows at a 12 pt pitch with ±0.1 pt
     row-to-row jitter (no two gaps repeat bit-for-bit) plus a subscript under
-    row 3 (doc04 shape). Exact-float gap equality called this "no gap repeats"
-    and over-split to 9 bands, losing the fold. Clustering by the region's
-    smallest gap certifies the pitch: 8 bands, subscript inside row 3's band,
-    ambiguity None. Pinned as a difference from the over-split.
+    row 3. Exact-float gap equality once flagged the whole region ambiguous;
+    per-boundary verdicts flag only the subscript's boundary and certify
+    every jittered row boundary.
     """
     _, page = _new_page()
     jitter = (0.0, 0.1, -0.1, 0.05, -0.05, 0.1, -0.1, 0.0)
@@ -254,11 +255,11 @@ def test_row_bands_jittered_pitch_keeps_subscript_fold():
     region = (_REGION_X0, 120.0, _REGION_X1, 250.0)
 
     bands = row_bands_from_lines(page, region)
-    assert len(bands) == 8
-    assert all(b.ambiguity is None and b.source == "line" for b in bands)
-    third = bands[2]
-    assert third.y0 <= ys[2] <= third.y1
-    assert third.y0 <= ys[2] + 4.0 <= third.y1
+    # 8 rows + the subscript as its own band; only the two bands adjoining the
+    # sub-size boundary are flagged — jitter never makes a boundary ambiguous.
+    assert len(bands) == 9
+    assert sum(1 for b in bands if b.ambiguity) == 2
+    assert bands[2].ambiguity and bands[3].ambiguity
 
 
 def test_row_bands_one_stray_close_pair_does_not_poison_the_region():
@@ -290,9 +291,10 @@ def test_row_bands_footnote_marker_on_a_row_baseline_does_not_unfold_subscripts(
     """Reviewer construction: 8 rows at a 14 pt pitch, 10 pt type; a 4 pt
     footnote marker far right sharing row 3's exact baseline; a legitimate
     6 pt subscript under row 3 (gap 4.5) and an unrelated one under row 6.
-    With min() the marker dragged row 3's size to 4 pt, the 4.5 pt gap read
-    as row separation, and (region-wide) row 6's fold failed too, with no
-    ambiguity anywhere. Now: 8 bands, both subscripts folded, ambiguity None.
+    With min() the marker dragged row 3's size to 4 pt and the 4.5 pt gap
+    read as a certified row separation with no ambiguity. Now the group's
+    size is its dominant span, the gap is sub-size, and the boundary is
+    ambiguous — surfaced, never a confident "separate".
     """
     _, page = _new_page()
     ys = [140.0 + 14.0 * i for i in range(8)]
@@ -305,11 +307,13 @@ def test_row_bands_footnote_marker_on_a_row_baseline_does_not_unfold_subscripts(
     region = (_REGION_X0, 120.0, 270.0, 260.0)
 
     bands = row_bands_from_lines(page, region)
-    assert len(bands) == 8
-    assert all(b.ambiguity is None for b in bands)
-    for row, sub_y in ((2, ys[2] + 4.5), (5, ys[5] + 4.5)):
-        assert bands[row].y0 <= ys[row] <= bands[row].y1
-        assert bands[row].y0 <= sub_y <= bands[row].y1
+    # 8 rows + 2 subscript bands. The marker shares row 3's baseline and is in
+    # row 3's band (exact-baseline group); the subscript boundaries under rows
+    # 3 and 6 are ambiguous (4 bands flagged), every other boundary certified.
+    assert len(bands) == 10
+    assert sum(1 for b in bands if b.ambiguity) == 4
+    row3 = bands[2]
+    assert row3.y0 <= ys[2] <= row3.y1 and row3.ambiguity
 
 
 def _box_line(baseline: float, y0: float, y1: float) -> dict:
@@ -484,14 +488,16 @@ def test_label_column_edge_equal_size_wrap_is_an_ambiguous_band_and_r_is_the_dat
 def test_label_column_edge_none_when_wrapped_label_collapses_r():
     """A wrapped-label row must not report the label's own x0 as R.
 
-    The wrap (smaller type, inside the label's x-span) merges into the first
-    label line's band, so its x0 is a non-leftmost candidate and R collapses
-    onto the label column — the same degeneracy as R == region.x0. Return None.
+    A split same-line span at the label's own x0 merges into the label line's
+    band, so its x0 is a non-leftmost candidate and R collapses onto the label
+    column — the same degeneracy as R == region.x0. Return None.
     """
     _, page = _new_page()
     page.insert_text((_LABEL_X, 140.0), "Central government net", fontsize=9)
-    # smaller-type wrap inside the label span, alone on its baseline: merges
-    page.insert_text((_LABEL_X, 146.0), "debt", fontsize=7)
+    # a split same-line span: same type, baseline 0.3 pt off, starting at the
+    # label's own x0 — each baseline lies inside the other's box, so it merges
+    # into the label line, and its x0 becomes a non-leftmost candidate.
+    page.insert_text((_LABEL_X, 140.3), "net", fontsize=9)
     page.insert_text((_COL1_X, 140.0), "1.0", fontsize=9)
     page.insert_text((_COL2_X, 140.0), "2.0", fontsize=9)
     page.insert_text((_LABEL_X, 170.0), "Other row", fontsize=9)
@@ -569,6 +575,10 @@ def test_corpus_origins_match_c1_measurement():
             )
         assert band_count > 0, f"{slug} p{page_num} {table_id}: no row bands addressed at all"
         if slug == "doc04":
-            assert band_count == 12, f"doc04 p{page_num}: bands {band_count} != 12"
+            # C1 measured 12 with the math-font subscript folded; the fold was
+            # withdrawn (an annotation has the same geometry), so the subscript
+            # is its own flagged band: 13, two of them ambiguous. doc04 has no
+            # origin and abstains in C regardless.
+            assert band_count == 13, f"doc04 p{page_num}: bands {band_count} != 13"
         if slug == "doc05":
             assert band_count == 17, f"doc05 p{page_num}: bands {band_count} != 17"

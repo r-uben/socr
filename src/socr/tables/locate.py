@@ -525,19 +525,20 @@ def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
     * gap ≥ the smaller font size ⇒ ``separate``: a subscript never sits a
       full em below its base.
     * below that, ``merge`` only with positive evidence that the lower text
-      belongs to the upper row: each baseline lies inside the other line's
-      box (a split same-line span, or jitter — a following row's baseline
-      sits below the upper box's descender), or the lower text is
-      smaller type whose x-span lies inside the upper line's x-span (a
-      subscript under its base — doc04's shape).
+      is the SAME physical line: each baseline lies inside the other line's
+      box (a split same-line span, or jitter) — two printed rows cannot do
+      that without overprinting. Smaller type inside the upper line's
+      x-span (a subscript under its base, doc04's shape) is NOT merged: an
+      annotation such as ``(a)`` has the same geometry (VI-A2 withdrew its
+      fold on this point), so that boundary is ambiguous.
     * otherwise ``ambiguous``: tight leading between two real rows is
       geometrically indistinguishable from an annotation line, so the
       boundary is kept and surfaced, never guessed.
 
     Deliberate non-goals (they resolve to ``ambiguous``, never to a wrong
-    merge): a superscript ABOVE its base (the smaller text comes first in
-    baseline order; C1's corpus scan found only subscripts below, doc04's
-    shape) and a subscript overhanging its parent's right edge. Both abstain.
+    merge): any sub/superscript or annotation line — below or above its
+    base, contained or overhanging. All abstain; doc04's math-font header
+    therefore over-splits and its item abstains in C (it has no origin anyway).
     No literal: every bound is the two lines' own boxes and sizes.
     """
 
@@ -566,9 +567,12 @@ def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
     inside_vertically = (ub[1] <= lower[0]["baseline"] < ub[3]) and (
         lb[1] <= upper[0]["baseline"] < lb[3]
     )
-    subscript_shape = size_l < size_u and lb[0] >= ub[0] and lb[2] <= ub[2]
-    if inside_vertically or subscript_shape:
+    if inside_vertically:
         return "merge"
+    # Smaller type inside the upper line's x-span is what a subscript looks
+    # like — and also what a "(a)" / "see note" annotation looks like (the
+    # VI-A2 fold was withdrawn on exactly that point). No page geometry
+    # separates them, so the boundary is ambiguous, never a merge.
     return "ambiguous"
 
 
