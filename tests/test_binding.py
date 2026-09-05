@@ -406,7 +406,206 @@ def test_symbolic_row_labels_fail_closed_as_unverifiable():
     assert result.structural_agreement is False
 
 
-# ---------------------------------------------------------------------------
+def test_gh585_sibling_latex_greek_and_word_command_labels_are_not_contradictions():
+    """GH-585: a Greek-letter command (``\\Delta``) and a plain alphabetic
+    word command (``\\log``) are sibling presentation classes to the GH-582
+    ``\\text{}``/``^`` wrap — the ladder-corpus doc05 held pair. On ``main``
+    (GH-582 fix only) this label is convicted as a shifted/invented label
+    because ``\\Delta`` survives the shared normalizer as the spelled-out
+    ASCII word ``delta``, which the native ``∆`` side never carries."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "∆log Comm. price (3m)"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                                          | OLS  |
+|------------------------------------------|------|
+| $\Delta \log \text{ Comm. price (3m)}$   | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is True
+
+
+def test_gh585_unsupported_word_command_does_not_falsely_agree_through_bind():
+    """GH-585 review round 3: retaining the backslash at the
+    ``strip_math_presentation`` helper is not, by itself, evidence that
+    ``\\logx`` stays distinct through the actual binder compare --
+    ``normalize_label`` strips any leftover backslash from every label
+    unconditionally, so a naive fix could still let ``\\logx`` silently
+    agree with the bare word ``logx`` (or, worse, with the real operator
+    ``\\log`` on the shorter label). Neither must agree: the native row is
+    a genuine contradiction in both cases."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "logx y"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    against_bare_word = r"""
+|            | OLS  |
+|------------|------|
+| $\logx y$  | 0.95 |
+"""
+    against_real_operator = r"""
+|           | OLS  |
+|-----------|------|
+| $\log y$  | 0.95 |
+"""
+
+    for candidate in (against_bare_word, against_real_operator):
+        result = bind(words, candidate)
+        assert len(result.row_label_contradictions) == 1
+        assert result.row_label_unverifiable is False
+        assert result.structural_agreement is False
+
+
+def test_gh585_sentinel_string_from_an_earlier_round_does_not_falsely_agree_through_bind():
+    """GH-585 review round 4: rounds 2/3 represented a Greek letter as an
+    ordinary STRING folded into ``normalize_label``'s flat key
+    (``"greekalpha"``), so a label that happens to spell that sentinel
+    text out in prose would falsely agree with the real Greek letter.
+    ``label_key``'s structured tuple can never collide with prose this
+    way; the native row is a genuine contradiction against the typed
+    sentinel word."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "α Coefficient"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                          | OLS  |
+|--------------------------|------|
+| greekalpha Coefficient   | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert len(result.row_label_contradictions) == 1
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is False
+
+
+def test_gh585_variant_unicode_glyph_agrees_with_its_variant_command_through_bind():
+    """GH-585 review round 4: a native PDF's text layer can emit the
+    variant-glyph codepoint directly (``ϑ`` U+03D1) instead of the base
+    letter; it must agree with its ``\\vartheta`` command counterpart
+    through the full binder path, not be convicted as a shifted label."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "ϑ Coefficient"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                              | OLS  |
+|------------------------------|------|
+| $\vartheta$ Coefficient      | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is True
+
+
+def test_gh585_internal_chunk_before_a_greek_token_keeps_its_trailing_digit():
+    """GH-585 review round 5: ``label_key`` normalizes each internal literal
+    chunk without the whole-label trailing-footnote-suffix rule, so a real
+    digit that is part of an internal word (``Model1`` before the Greek
+    token, not the label's own end) survives and ``Model1 α``/``Model2 α``
+    stay distinct rows -- the suffix rule applying INSIDE the label was a
+    false agreement, not a footnote."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Model1 α"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                    | OLS  |
+|--------------------|------|
+| Model2 $\alpha$    | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert len(result.row_label_contradictions) == 1
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is False
+
+
+def test_gh585_trailing_footnote_digit_on_the_labels_own_end_still_folds():
+    """GH-585 review round 5: the suffix rule must still apply to the FINAL
+    chunk -- the one that reaches the label's true end -- so a genuine
+    trailing footnote digit is unaffected by the round-5 fix."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Coefficient1"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|              | OLS  |
+|--------------|------|
+| Coefficient  | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is True
+
+
+def test_gh585_internal_chunk_before_a_greek_token_keeps_its_footnote_marker_digit():
+    """GH-585 review round 6: round 5 fixed the bare-digit suffix rule but
+    ``normalize_label_chunk`` still ran the end-anchored footnote-MARKER
+    regex (``<sup>1</sup>``, ``$^1$``, unicode superscripts) on internal
+    chunks, so ``Model<sup>1</sup> α``/``Model<sup>2</sup> α`` still
+    collapsed to the same key. Both end-of-label footnote rules must stay
+    out of internal chunks, not just the suffix rule."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Model<sup>1</sup> α"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                              | OLS  |
+|------------------------------|------|
+| Model<sup>2</sup> $\alpha$   | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert len(result.row_label_contradictions) == 1
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is False
+
+
+def test_gh585_trailing_footnote_marker_on_the_labels_own_end_still_folds():
+    """GH-585 review round 6: a genuine footnote MARKER (not a bare digit)
+    on the label's own end -- the final chunk -- must still fold away
+    exactly as ``normalize_label`` always did."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Coefficient<sup>1</sup>"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|              | OLS  |
+|--------------|------|
+| Coefficient  | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is True
+
+
 # GH-582: inline-math wrapping is presentation, not a value/label change
 # ---------------------------------------------------------------------------
 

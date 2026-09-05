@@ -76,6 +76,111 @@ class TestTokensAgree:
         assert tokens_agree("Adjusted $\\text{R}^2$", "Adjusted R2", kind="row_label")
         assert not tokens_agree("Adjusted $\\text{R}^2$", "Constant", kind="row_label")
 
+    def test_sibling_latex_presentation_labels_agree(self) -> None:
+        """GH-585: Greek-letter commands and alphabetic word commands are
+        sibling presentation classes to the GH-582 wrap, and must agree the
+        same way once mapped."""
+        assert tokens_agree("∆Slope (3m)", r"$\Delta \text{ Slope (3m)}$", kind="row_label")
+        assert tokens_agree(
+            "∆log Comm. price (3m)",
+            r"$\Delta \log \text{ Comm. price (3m)}$",
+            kind="row_label",
+        )
+        # A genuine text difference (missing "500 (3m)") still disagrees.
+        assert not tokens_agree(
+            "∆log S&P",
+            r"$\Delta \log \text{ S\&P 500 (3m)}$",
+            kind="row_label",
+        )
+        # A bare symbolic label still folds to an empty key on both sides —
+        # tokens_agree's empty-key refusal (not a false match) still applies.
+        assert not tokens_agree("β", r"$\beta$", kind="row_label")
+
+    def test_distinct_greek_letters_do_not_falsely_agree(self) -> None:
+        """GH-585 review round 2: before the Unicode transliteration step,
+        every Greek letter erased identically under ``normalize_label``'s
+        ASCII-only filter, so two DIFFERENT Greek-letter labels with the
+        same trailing text falsely agreed."""
+        assert not tokens_agree("α Coefficient", r"$\beta$ Coefficient", kind="row_label")
+        assert tokens_agree("α Coefficient", r"$\alpha$ Coefficient", kind="row_label")
+
+    def test_greek_variant_command_does_not_agree_with_its_base_letter(self) -> None:
+        """GH-585 review round 2: ``\\varepsilon`` is not established to be
+        the same symbol as ``\\epsilon`` in this corpus — they must stay
+        distinct, unlike the U+0394/U+2206 Delta pair which really is the
+        same printed glyph."""
+        assert not tokens_agree(r"$\epsilon$ x", r"$\varepsilon$ x", kind="row_label")
+
+    def test_unsupported_word_command_does_not_earn_an_agreement(self) -> None:
+        """GH-585 review round 3: retaining the backslash at the helper is
+        not yet evidence that it survives the actual compare — ``\\logx``
+        is not a real LaTeX macro and must not agree with either ``log`` or
+        ``logx`` through ``tokens_agree``."""
+        assert not tokens_agree(r"\logx y", "log y", kind="row_label")
+        assert not tokens_agree(r"\logx y", "logx y", kind="row_label")
+        assert tokens_agree(r"\log y", "log y", kind="row_label")
+
+    def test_sentinel_strings_from_earlier_rounds_do_not_collide_with_literal_prose(
+        self,
+    ) -> None:
+        """GH-585 review round 4: rounds 2/3 represented a Greek letter or an
+        unsupported command as an ordinary STRING folded into
+        ``normalize_label``'s flat key, so a label that happened to spell
+        that sentinel text out in prose falsely agreed with the real Greek
+        letter/unsupported command. ``label_key``'s structured tuple can
+        never collide with prose this way — a ``("greek", ...)``/``("cmd",
+        ...)`` tag is a different tuple shape from ``("lit", ...)``
+        regardless of what the literal text says."""
+        assert not tokens_agree("α Coefficient", "greekalpha Coefficient", kind="row_label")
+        assert not tokens_agree(r"\logx y", "unmappedlogx y", kind="row_label")
+
+    def test_variant_unicode_glyph_agrees_with_its_variant_command(self) -> None:
+        """GH-585 review round 4: a native PDF's text layer can emit the
+        variant-glyph codepoint directly (``ϑ`` U+03D1) instead of the base
+        letter; it must agree with its ``\\vartheta`` command counterpart,
+        not the base ``\\theta``/``θ`` letter."""
+        assert tokens_agree("ϑ Coefficient", r"$\vartheta$ Coefficient", kind="row_label")
+        assert not tokens_agree("ϑ Coefficient", r"$\theta$ Coefficient", kind="row_label")
+
+    def test_internal_chunk_before_a_greek_token_keeps_its_trailing_digit(self) -> None:
+        """GH-585 review round 5: ``normalize_label``'s trailing-footnote-
+        suffix rule is a whole-label rule. Applied to an INTERNAL literal
+        chunk of ``label_key`` -- one that ends where a Greek token follows,
+        not where the label itself ends -- it discarded a real digit and
+        collapsed ``"Model1 α"``/``"Model2 α"`` into the same key."""
+        assert not tokens_agree(r"Model1 $\alpha$", r"Model2 $\alpha$", kind="row_label")
+
+    def test_trailing_footnote_digit_on_the_labels_own_end_still_folds(self) -> None:
+        """GH-585 review round 5: the suffix rule must still apply to the
+        FINAL chunk, the one reaching the label's true end, so a genuine
+        trailing footnote digit keeps agreeing exactly as before the fix."""
+        assert tokens_agree("Coefficient1", "Coefficient", kind="row_label")
+
+    def test_internal_chunk_before_a_greek_token_keeps_its_footnote_marker_digit(
+        self,
+    ) -> None:
+        """GH-585 review round 6: round 5 fixed the bare-digit suffix rule
+        but the end-anchored footnote-MARKER regex (``<sup>1</sup>``, ``$^1$``,
+        unicode superscripts) also ran on internal chunks, so
+        ``Model<sup>1</sup> α``/``Model<sup>2</sup> α`` still collapsed."""
+        assert not tokens_agree(
+            r"Model<sup>1</sup> $\alpha$", r"Model<sup>2</sup> $\alpha$", kind="row_label"
+        )
+
+    def test_trailing_footnote_marker_on_the_labels_own_end_still_folds(self) -> None:
+        """GH-585 review round 6: a genuine footnote marker on the label's
+        own end (the final chunk) still folds away exactly as before."""
+        assert tokens_agree("Coefficient<sup>1</sup>", "Coefficient", kind="row_label")
+
+    def test_bare_greek_symbol_with_a_trailing_digit_is_not_treated_as_a_footnote(
+        self,
+    ) -> None:
+        """GH-585 review round 6: the seat explicitly wants ``α1`` and ``α``
+        to stay distinct rather than have the trailing digit read as a
+        footnote on a bare symbol -- ``α1`` is not a lone Greek token, so it
+        is not bare-symbolic either; it simply must not agree with ``α``."""
+        assert not tokens_agree("α1", "α", kind="row_label")
+
 
 class TestAdjudicate:
     def test_all_abstained_is_held_and_never_transcribes_native_bbox(self) -> None:

@@ -43,11 +43,11 @@ from dataclasses import dataclass, replace
 from typing import Callable, Literal
 
 from socr.tables.binding import BindingResult, ContradictedCell, RowLabelContradiction
-from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import (
     _normalize_numeric_token,
     is_numeric_token,
-    strip_math_presentation,
+    label_key,
+    label_key_is_bare_symbolic,
 )
 
 DisproofKind = Literal["encoding_garbage", "raster_transcription", "prior_lift"]
@@ -174,9 +174,11 @@ def token_is_encoding_garbage(token: str) -> bool:
 def tokens_agree(left: str, right: str, *, kind: ContradictionKind) -> bool:
     """Same equality bind() used to convict, including empty-key refusal."""
     if kind == "row_label":
-        left_key = normalize_label(strip_math_presentation(left, label=True))
-        right_key = normalize_label(strip_math_presentation(right, label=True))
-        return bool(left_key) and left_key == right_key
+        left_key = label_key(left)
+        right_key = label_key(right)
+        if not left_key or label_key_is_bare_symbolic(left_key):
+            return False
+        return left_key == right_key
     if is_numeric_token(left) and is_numeric_token(right):
         return _normalize_numeric_token(left) == _normalize_numeric_token(right)
     return left.strip() == right.strip()
