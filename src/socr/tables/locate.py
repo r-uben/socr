@@ -172,6 +172,17 @@ def _horizontal_rules(page) -> list[tuple[float, float, float]]:
     Reads both explicit line items ("l") and thin filled/stroked rectangles
     ("re") that LaTeX/booktabs sometimes emit for rules.
     """
+    return [(y, x0, x1) for (y, x0, x1, _thickness) in _horizontal_rules_with_thickness(page)]
+
+
+def _horizontal_rules_with_thickness(page) -> list[tuple[float, float, float, float]]:
+    """Like ``_horizontal_rules`` but keeps each rule's drawn stroke thickness.
+
+    ``ordinal_origin`` needs the thickness to decide whether two close rules
+    are one drawn border (e.g. booktabs' doubled ``\\toprule``) or two
+    distinct rules — the same page-derived quantity a reader would use, never
+    a tuned constant.
+    """
     try:
         drawings = page.get_drawings()
     except Exception as exc:  # pragma: no cover - defensive
@@ -184,24 +195,25 @@ def _horizontal_rules(page) -> list[tuple[float, float, float]]:
     # page. Clamp x to the page so a rule bleeding into the margin still anchors
     # the band sanely.
     page_rect = page.rect
-    rules: list[tuple[float, float, float]] = []
+    rules: list[tuple[float, float, float, float]] = []
     for d in drawings:
+        stroke_width = d.get("width") or _RULE_FLATNESS_PT
         for item in d.get("items", []):
             kind = item[0]
             if kind == "l":  # line: ("l", p0, p1)
                 (px0, py0), (px1, py1) = item[1], item[2]
                 if abs(py0 - py1) <= _RULE_FLATNESS_PT and abs(px1 - px0) >= _RULE_MIN_WIDTH_PT:
-                    rules.append((min(py0, py1), min(px0, px1), max(px0, px1)))
+                    rules.append((min(py0, py1), min(px0, px1), max(px0, px1), float(stroke_width)))
             elif kind == "re":  # rectangle: ("re", Rect, ...)
                 rect = item[1]
                 w = abs(rect.x1 - rect.x0)
                 h = abs(rect.y1 - rect.y0)
                 if h <= _RULE_FLATNESS_PT and w >= _RULE_MIN_WIDTH_PT:
                     y = (rect.y0 + rect.y1) / 2.0
-                    rules.append((y, min(rect.x0, rect.x1), max(rect.x0, rect.x1)))
+                    rules.append((y, min(rect.x0, rect.x1), max(rect.x0, rect.x1), h))
     rules = [
-        (y, max(page_rect.x0, x0), min(page_rect.x1, x1))
-        for (y, x0, x1) in rules
+        (y, max(page_rect.x0, x0), min(page_rect.x1, x1), thickness)
+        for (y, x0, x1, thickness) in rules
         if page_rect.y0 <= y <= page_rect.y1
     ]
     rules.sort()
@@ -251,3 +263,224 @@ def _iou(a, b) -> float:
     area_b = (bx1 - bx0) * (by1 - by0)
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# VI-C2a: row-band / column-edge / ordinal-origin helpers.
+#
+# Pure functions over ``(page, region)`` — no binder state, no candidate
+# markdown. ``region`` is a witness table's own bbox, the same tuple
+# ``TableBox.bbox`` already carries. They give the verifier an address for a
+# disputed cell that neither the native binder nor the candidate's own
+# structure gets to nominate. Design:
+# docs/plans/verifier-independence/logs/2026-09-05_C1-design.md, §(a).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RowBand:
+    """One printed table row's vertical extent inside a witness region."""
+
+    y0: float
+    y1: float
+    source: str  # "rule" | "line"
+
+
+def row_bands_from_rules(
+    rules: list[tuple[float, float, float]], region: tuple[float, float, float, float]
+) -> list[RowBand]:
+    """Pair consecutive horizontal rules inside ``region`` into row bands.
+
+    Only trustworthy where a table draws a rule between every printed row.
+    A booktabs table's top/mid/bottom rules still pair into bands here, but
+    they span many printed rows each; :func:`row_bands` only accepts this
+    result where it corresponds 1:1 with the line-derived bands.
+    """
+    x0, y0, x1, y1 = region
+    ys = sorted({r[0] for r in rules if y0 <= r[0] <= y1 and _rule_overlaps_span(r, x0, x1)})
+    return [RowBand(y0=a, y1=b, source="rule") for a, b in zip(ys, ys[1:])]
+
+
+def row_bands_from_lines(page, region: tuple[float, float, float, float]) -> list[RowBand]:
+    """Group PDF text lines inside ``region`` into row bands.
+
+    One printed row = one band: consecutive lines merge into the same band
+    when their baselines differ by less than the *smaller* of their two font
+    sizes (C1 §(a)) — a bound drawn from the page's own type size, never a
+    tuned constant. No text layer (a scanned region) returns no bands: that
+    is an abstain input, not a guess.
+    """
+    lines = _text_lines_in_region(page, region)
+    if not lines:
+        return []
+    groups = _group_lines_by_baseline(lines)
+    return [
+        RowBand(
+            y0=min(ln["bbox"][1] for ln in group),
+            y1=max(ln["bbox"][3] for ln in group),
+            source="line",
+        )
+        for group in groups
+    ]
+
+
+def row_bands(page, region: tuple[float, float, float, float]) -> list[RowBand]:
+    """Row bands for ``region``: rules where they address one printed row
+    each, lines otherwise (C1 §(f) decision 1 — rules-else-lines).
+
+    A booktabs table's top/mid/bottom rules pair into a handful of bands
+    that each span many printed rows — not "per-row rules". The
+    distinguishing test is page-derived correspondence, not a rule-count
+    threshold: rule-derived bands are trusted only when there are exactly as
+    many of them as line-derived bands, and each one contains its
+    line-derived counterpart.
+    """
+    line_bands = row_bands_from_lines(page, region)
+    if not line_bands:
+        return []  # no text layer: abstain input, never a guess
+    rule_bands = row_bands_from_rules(_horizontal_rules(page), region)
+    if len(rule_bands) == len(line_bands) and all(
+        rb.y0 <= lb.y0 and rb.y1 >= lb.y1 for rb, lb in zip(rule_bands, line_bands)
+    ):
+        return rule_bands
+    return line_bands
+
+
+def ordinal_origin(page, region: tuple[float, float, float, float]) -> float | None:
+    """The y of the second horizontal-rule group inside ``region`` — the
+    header rule ordinals are counted from (C1 §(a)).
+
+    Two rules close together are one drawn border rather than two distinct
+    rules — booktabs' doubled top/bottom rule, drawn as two hairlines a
+    couple of points apart, well under any real inter-rule spacing on the
+    page. A single line's own drawn stroke width is not itself that
+    distance (it stays a hairline regardless of how far apart the two
+    rules of a doubled border sit), so the merge distance is instead
+    derived from the region's own type size: half the smallest font size
+    of any text line in the region — small enough to never bridge a
+    genuine rule-to-content gap, and measured on the corpus (doc01, doc02,
+    doc03) to sit right between the doubled-border gap (~2.4pt) and the
+    next-smallest genuine rule gap (~17pt+). A region with rules but no
+    text at all falls back to the widest rule's own thickness. ``None``
+    when fewer than two rules, or fewer than two groups, exist — a scanned
+    page has no vector rules at all, so every item on it abstains.
+    """
+    x0, y0, x1, y1 = region
+    rules = sorted(
+        r
+        for r in _horizontal_rules_with_thickness(page)
+        if y0 <= r[0] <= y1 and _rule_overlaps_span(r, x0, x1)
+    )
+    if len(rules) < 2:
+        return None
+    lines = _text_lines_in_region(page, region)
+    merge_gap = min(ln["size"] for ln in lines) / 2.0 if lines else max(r[3] for r in rules)
+    groups: list[list[tuple[float, float, float, float]]] = [[rules[0]]]
+    for rule in rules[1:]:
+        prev = groups[-1][-1]
+        if rule[0] - prev[0] < merge_gap:
+            groups[-1].append(rule)
+        else:
+            groups.append([rule])
+    if len(groups) < 2:
+        return None
+    second_group = groups[1]
+    return sum(r[0] for r in second_group) / len(second_group)
+
+
+def label_column_edge(page, region: tuple[float, float, float, float]) -> float | None:
+    """The label column's right edge ``R`` inside ``region`` (C1 §(a)).
+
+    ``R`` starts at the leftmost ``x0`` among every non-leftmost line of any
+    printed row, then shrinks to a whitespace edge: while some line
+    straddles it, ``R`` moves left to that line's own ``x0``. Fixed point
+    observed in <=2 passes on the corpus this was measured against — an
+    observation, not a limit. ``None`` on a one-column region (every row has
+    exactly one line) or when no candidate lies right of the region's own
+    left edge.
+    """
+    lines = _text_lines_in_region(page, region)
+    if not lines:
+        return None
+    candidates: list[float] = []
+    for group in _group_lines_by_baseline(lines):
+        ordered = sorted(group, key=lambda ln: ln["x0"])
+        candidates.extend(ln["x0"] for ln in ordered[1:])
+    if not candidates:
+        return None
+    edge = min(candidates)
+    while True:
+        straddling = [ln for ln in lines if ln["x0"] < edge < ln["x1"]]
+        if not straddling:
+            break
+        narrower = min(ln["x0"] for ln in straddling)
+        if narrower >= edge:
+            break
+        edge = narrower
+    region_x0 = region[0]
+    return edge if edge > region_x0 else None
+
+
+def band_index_for(bands: list[RowBand], y_mid: float) -> int | None:
+    """Index of the band whose ``[y0, y1]`` contains ``y_mid``, else ``None``."""
+    for idx, band in enumerate(bands):
+        if band.y0 <= y_mid <= band.y1:
+            return idx
+    return None
+
+
+def _text_lines_in_region(page, region: tuple[float, float, float, float]) -> list[dict]:
+    """PDF text lines inside ``region``, each as a dict with ``baseline``
+    (first span's ``origin`` y), ``size`` (dominant span size), and ``bbox``.
+    """
+    try:
+        text_dict = page.get_text("dict", clip=tuple(region))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("get_text(dict) failed: %s", exc)
+        return []
+    lines: list[dict] = []
+    for block in text_dict.get("blocks", []):
+        for line in block.get("lines", []):
+            spans = [s for s in line.get("spans", []) if s.get("text", "").strip()]
+            if not spans:
+                continue
+            bbox = line["bbox"]
+            lines.append(
+                {
+                    "baseline": spans[0]["origin"][1],
+                    "size": max(s["size"] for s in spans),
+                    "bbox": bbox,
+                    "x0": bbox[0],
+                    "x1": bbox[2],
+                }
+            )
+    return lines
+
+
+def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
+    """Group text-line dicts into printed rows by baseline proximity.
+
+    Consecutive lines merge when their baselines differ by less than the
+    smaller of their two font sizes — the page's own type size, not a tuned
+    constant.
+    """
+    ordered = sorted(lines, key=lambda ln: ln["baseline"])
+    groups: list[list[dict]] = [[ordered[0]]]
+    for prev, cur in zip(ordered, ordered[1:]):
+        if cur["baseline"] - prev["baseline"] < min(prev["size"], cur["size"]):
+            groups[-1].append(cur)
+        else:
+            groups.append([cur])
+    return groups
+
+
+def _rule_overlaps_span(rule: tuple, x0: float, x1: float) -> bool:
+    """True if ``rule``'s ``(x0, x1)`` shares >= ``_RULE_X_OVERLAP`` of its
+    width with the ``(x0, x1)`` span. Accepts both the 3-tuple
+    ``_horizontal_rules`` and the 4-tuple ``_horizontal_rules_with_thickness``
+    shapes — the span is always in positions 1 and 2.
+    """
+    rx0, rx1 = rule[1], rule[2]
+    inter = max(0.0, min(rx1, x1) - max(rx0, x0))
+    width = min(rx1 - rx0, x1 - x0)
+    return width > 0 and inter / width >= _RULE_X_OVERLAP
