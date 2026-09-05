@@ -298,7 +298,7 @@ items; every table A2 cleared stays cleared. **Feasibility checkpoint:** if fewe
 remaining item is geometry-addressed, C2b returns to the owner — correct abstention must never
 force invented correspondence. Full suite green; ruff format clean.
 
-### TICKET-C3 — ladder corpus re-run and report · WIP · depends-on: C2b, B2 · wave 6 · agent: claude
+### TICKET-C3 — ladder corpus re-run and report · DONE · depends-on: C2b, B2 · wave 6 · agent: claude
 **Problem:** "The free lane witnesses the model" needs a number on the same 20 pages —
 but a live OCR re-run is nondeterministic and stricter abstention can *lower* accepts
 legitimately, so the live count is a **report**, not the gate.

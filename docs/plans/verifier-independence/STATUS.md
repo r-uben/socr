@@ -1,6 +1,6 @@
 # STATUS — verifier-independence
 
-Last updated: 2026-09-05 (C2b merged, C3 running)
+Last updated: 2026-09-05 (plan closed)
 
 ## Stage
 
@@ -40,7 +40,7 @@ gate; `tests/` is flat. Nothing dispatched.
 | C2a | verifier | DONE | C1 | 4 (#616, 13 review rounds) |
 | A1c | native reference | DONE | — | 4 (#612, #595 closed) |
 | C2b | verifier | DONE | C2a, A2, B1 | 5 (#621; single seat — grok 402) |
-| C3  | verifier | WIP | C2b, B2 | 6 (claude; running) |
+| C3  | verifier | DONE | C2b, B2 | 6 (run 3, `docs/log/2026-09-05_ladder-corpus-run-3.md`) |
 
 ## Dispatch waves
 
@@ -109,11 +109,15 @@ gate; `tests/` is flat. Nothing dispatched.
   APPROVE-FOR-PR after two holes past the first ACCEPT (numeric cells addressed; legacy lifts
   bypassing geometry).
 
+## Plan closed (2026-09-05)
+
+Run 3 (`docs/log/2026-09-05_ladder-corpus-run-3.md`, one digest, 20/20): 8 ACCEPTED · 1 WITHHELD ·
+9 UNVERIFIED (run 2: 7 · 0 · 11); doc02 p3/p4 UNVERIFIED → ACCEPTED via A2; all 14 remaining items
+matched the C2b prediction live; the 3 addressed doc05 items were transcribed on their geometry
+cells and not disproved because `\Delta` ≠ `∆` in the comparison layer (#585). 6.8 min/page.
+
 ## Next action
 
-**C3 running** since 16:51 on `~/repos/.worktrees/socr-vi-C3` pinned at `d82a0f2`, intended
-`socr_source_digest` `720a5822…`, outputs `~/Data/socr/vi-C3-2026-09-05/`. On completion: verify all
-20 sidecars carry the intended digest; tabulate ACCEPTED / WITHHELD / UNVERIFIED, lifted / held /
-abstained, cost, per-stage minutes; compare to run 2 line by line with the full cause taxonomy;
-`docs/log/2026-09-05_ladder-corpus-run-3.md`. The hard gate was A2's frozen replay; this is the
-report.
+None in this plan. Follow-ups by issue: #585 (sibling-LaTeX normalisation — the next lift),
+#600 (`round(y0)` row split — unblocks doc03/doc05 chains), #601 (model spacer row), #603 (math-font
+header), #591/#592 (Fed minutes), #608/#609 (centroid follow-ups), C1 §(f) per-band label edge (doc07).
