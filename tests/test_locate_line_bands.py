@@ -236,6 +236,31 @@ def test_row_bands_subscript_joins_its_label():
     assert first.y0 <= 144.0 <= first.y1
 
 
+def test_row_bands_jittered_pitch_keeps_subscript_fold():
+    """Reviewer construction: 8 printed rows at a 12 pt pitch with ±0.1 pt
+    row-to-row jitter (no two gaps repeat bit-for-bit) plus a subscript under
+    row 3 (doc04 shape). Exact-float gap equality called this "no gap repeats"
+    and over-split to 9 bands, losing the fold. Clustering by the region's
+    smallest gap certifies the pitch: 8 bands, subscript inside row 3's band,
+    ambiguity None. Pinned as a difference from the over-split.
+    """
+    _, page = _new_page()
+    jitter = (0.0, 0.1, -0.1, 0.05, -0.05, 0.1, -0.1, 0.0)
+    ys = [140.0 + 12.0 * i + jitter[i] for i in range(8)]
+    for i, y in enumerate(ys):
+        page.insert_text((_LABEL_X, y), f"R{i}", fontsize=10)
+        page.insert_text((_COL1_X, y), f"{i}.0", fontsize=10)
+    page.insert_text((_LABEL_X + 14.0, ys[2] + 4.0), "t", fontsize=7)  # subscript under row 3
+    region = (_REGION_X0, 120.0, _REGION_X1, 250.0)
+
+    bands = row_bands_from_lines(page, region)
+    assert len(bands) == 8
+    assert all(b.ambiguity is None and b.source == "line" for b in bands)
+    third = bands[2]
+    assert third.y0 <= ys[2] <= third.y1
+    assert third.y0 <= ys[2] + 4.0 <= third.y1
+
+
 def _box_line(baseline: float, y0: float, y1: float) -> dict:
     """A synthetic PDF line with an exact ``[y0, y1]`` box."""
     return {
