@@ -267,9 +267,9 @@ def test_row_bands_one_stray_close_pair_does_not_poison_the_region():
     ONE stray pair of line entries 0.3 pt apart on the same visual row (a split
     same-line span, or a tight subscript). Under gap clustering the stray gap
     set the bound for the whole region and every row over-split ("tied pitch
-    clusters"). Under row-capable pairs the stray pair is sub-size and folds
-    into its row; the eleven 12 pt pairs are row-capable and certify the
-    rows: 8 bands, ambiguity None.
+    clusters"). Under per-boundary verdicts the stray pair's boundary is
+    judged on its own geometry and the other seven row boundaries are
+    certified independently — one stray pair cannot poison the region.
     """
     _, page = _new_page()
     jitter = (0.0, 0.2, -0.2, 0.1, -0.1, 0.2, -0.2, 0.0)
@@ -281,6 +281,9 @@ def test_row_bands_one_stray_close_pair_does_not_poison_the_region():
     region = (_REGION_X0, 120.0, _REGION_X1, 250.0)
 
     bands = row_bands_from_lines(page, region)
+    # The stray fragment's baseline lies inside row 5's box and vice versa:
+    # it is on row 5's printed line (x-ranges are not consulted — a band is a
+    # printed line), so it folds in; every row boundary is certified.
     assert len(bands) == 8
     assert all(b.ambiguity is None for b in bands)
     fifth = bands[4]

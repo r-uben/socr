@@ -525,9 +525,11 @@ def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
     * gap ≥ the smaller font size ⇒ ``separate``: a subscript never sits a
       full em below its base.
     * below that, ``merge`` only with positive evidence that the lower text
-      is the SAME physical line: each baseline lies inside the other line's
-      box (a split same-line span, or jitter) — two printed rows cannot do
-      that without overprinting. Smaller type inside the upper line's
+      is the SAME printed line: each baseline lies inside the other line's
+      box (a split same-line span, cells at a fraction-of-a-point baseline
+      offset, an inline marker) — a following printed row's baseline sits
+      a full line below, outside the box. x-ranges are not consulted: a
+      band is a printed line, not a glyph run. Smaller type inside the upper line's
       x-span (a subscript under its base, doc04's shape) is NOT merged: an
       annotation such as ``(a)`` has the same geometry (VI-A2 withdrew its
       fold on this point), so that boundary is ambiguous.
@@ -567,6 +569,13 @@ def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
     inside_vertically = (ub[1] <= lower[0]["baseline"] < ub[3]) and (
         lb[1] <= upper[0]["baseline"] < lb[3]
     )
+    # A band is one PRINTED LINE. Two spans whose baselines each fall inside
+    # the other's box are on the same printed line whatever their x-ranges —
+    # a following row's baseline sits a full line below, outside the box. An
+    # annotation to the right at baseline+2 pt is on that line; merging it
+    # keeps the band count equal to the printed-row count, while splitting
+    # it would add a phantom row and break the ordinal chain. (Measured: an
+    # x-overlap requirement split four real rows on doc01, 13 → 17 bands.)
     if inside_vertically:
         return "merge"
     # Smaller type inside the upper line's x-span is what a subscript looks
