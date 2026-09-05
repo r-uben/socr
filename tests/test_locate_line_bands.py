@@ -261,6 +261,31 @@ def test_row_bands_jittered_pitch_keeps_subscript_fold():
     assert third.y0 <= ys[2] + 4.0 <= third.y1
 
 
+def test_row_bands_one_stray_close_pair_does_not_poison_the_region():
+    """Reviewer construction: 8 rows at a 12 pt pitch with ±0.2 pt jitter plus
+    ONE stray pair of line entries 0.3 pt apart on the same visual row (a split
+    same-line span, or a tight subscript). Under gap clustering the stray gap
+    set the bound for the whole region and every row over-split ("tied pitch
+    clusters"). Under row-capable pairs the stray pair is sub-size and folds
+    into its row; the eleven 12 pt pairs are row-capable and certify the
+    rows: 8 bands, ambiguity None.
+    """
+    _, page = _new_page()
+    jitter = (0.0, 0.2, -0.2, 0.1, -0.1, 0.2, -0.2, 0.0)
+    ys = [140.0 + 12.0 * i + jitter[i] for i in range(8)]
+    for i, y in enumerate(ys):
+        page.insert_text((_LABEL_X, y), f"R{i}", fontsize=10)
+        page.insert_text((_COL1_X, y), f"{i}.0", fontsize=10)
+    page.insert_text((_COL1_X + 30.0, ys[4] + 0.3), "b", fontsize=10)  # stray 0.3 pt pair
+    region = (_REGION_X0, 120.0, _REGION_X1, 250.0)
+
+    bands = row_bands_from_lines(page, region)
+    assert len(bands) == 8
+    assert all(b.ambiguity is None for b in bands)
+    fifth = bands[4]
+    assert fifth.y0 <= ys[4] <= fifth.y1 and fifth.y0 <= ys[4] + 0.3 <= fifth.y1
+
+
 def _box_line(baseline: float, y0: float, y1: float) -> dict:
     """A synthetic PDF line with an exact ``[y0, y1]`` box."""
     return {
