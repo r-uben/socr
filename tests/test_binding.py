@@ -13,7 +13,9 @@ that the module is absent.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -1442,6 +1444,187 @@ def test_genuine_invented_value_in_cell_still_convicted():
     result = bind(words, md)
     unbound_tokens = {u.token for u in result.model_unbound}
     assert unbound_tokens == {"99.9", "88.8"}
+
+
+# ---------------------------------------------------------------------------
+# VI-A2: binder row-label repair (GH-331 / #418 / #146)
+# ---------------------------------------------------------------------------
+
+_A2_CONTROLS = Path(__file__).parent / "fixtures" / "replay_binding" / "controls"
+
+
+def _a2_words(payload: dict) -> list:
+    return [tuple(word) for word in payload["words"]]
+
+
+def _a2_load(name: str) -> dict:
+    return json.loads((_A2_CONTROLS / name).read_text())
+
+
+def test_region_edge_stub_is_kept_whether_or_not_x0_sits_just_outside():
+    """VI-A2 shape 1. Measured drop is 8e-4–2e-3 pt of top-left overflow, not a
+    missing stub column. Two word lists that differ only in whether ``3Y``'s
+    x0 is on the region edge or 0.002 pt left of it must produce the SAME
+    native label — the difference that used to exist is the bug."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    region = (100.0, 50.0, 400.0, 200.0)
+    header = [
+        w(200, 70, 230, 80, "OLS"),
+        w(300, 70, 330, 80, "IV"),
+    ]
+    rest = [
+        w(120, 100, 180, 110, "Treasury"),
+        w(200, 100, 230, 110, "0.50"),
+        w(300, 100, 330, 110, "0.51"),
+    ]
+    on_edge = header + [w(100.0, 100, 112, 110, "3Y")] + rest
+    just_out = header + [w(99.998, 100, 111.998, 110, "3Y")] + rest
+
+    def _label(words):
+        scoped = _words_in_region(words, region)
+        rows, _, _ = _native_rows(scoped)
+        data = [row for row in rows if not row.is_parent]
+        assert data, "fixture produced no data row"
+        return data[0].row_path[-1]
+
+    assert _label(on_edge) == _label(just_out)
+    assert _label(just_out) == "3Y Treasury"
+
+
+def test_math_font_subscript_band_folds_into_the_line_above():
+    """VI-A2 shape 4. ``1t`` sits under ``Rotated PCs`` (shorter, x-contained,
+    boxes overlap in y). Folding it in vs parking it 20 pt below is the
+    difference: only the overlapping geometry joins the printed line."""
+    from socr.tables.binding import _assign_bands, _native_rows
+
+    header = [
+        w(200, 70, 230, 80, "3-M"),
+        w(300, 70, 330, 80, "2-YR"),
+    ]
+    rotated = [
+        (50, 100, 110, 111, "Rotated", 0, 0, 0),
+        (115, 100, 145, 111, "PCs", 0, 0, 1),
+    ]
+    subscript_overlap = [
+        (80, 107, 95, 115, "1t", 1, 0, 0),
+    ]
+    subscript_below = [
+        (80, 130, 95, 138, "1t", 1, 0, 0),
+    ]
+    data = [
+        w(50, 160, 90, 170, "Action"),
+        w(200, 160, 230, 170, "1.48"),
+        w(300, 160, 330, 170, "1.00"),
+    ]
+
+    n_overlap, _ = _assign_bands(header + rotated + subscript_overlap + data)
+    n_below, _ = _assign_bands(header + rotated + subscript_below + data)
+    assert len(n_overlap) == len(n_below) - 1
+
+    md = """
+|          | 3-M  | 2-YR |
+|----------|------|------|
+| Rotated  |      |      |
+| Action   | 1.48 | 1.00 |
+"""
+    overlap_rows, _, _ = _native_rows(header + rotated + subscript_overlap + data)
+    below_rows, _, _ = _native_rows(header + rotated + subscript_below + data)
+    overlap_labels = [row.row_path[-1] for row in overlap_rows]
+    below_labels = [row.row_path[-1] for row in below_rows]
+    assert overlap_labels != below_labels
+    assert any("Rotated" in label and "1t" in label for label in overlap_labels)
+    assert any(label.strip() == "1t" for label in below_labels)
+
+
+def test_shape2_numeric_inside_label_is_not_swallowed_by_widening():
+    """Autopsy shape 2 control: ``500`` at a data-lane x must stay a value.
+    Pin the difference between a candidate that matches the cut native label
+    and one that claims the printed ``500`` — the latter still contradicts."""
+    payload = _a2_load("shape2_numeric_in_label.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    cut = """
+|            | OLS  | IV   |
+|------------|------|------|
+| slope      | 1.10 | 1.11 |
+| dlog S&P   | 0.50 | 0.51 |
+| other      | 0.20 | 0.21 |
+"""
+    printed = """
+|                   | OLS  | IV   |
+|-------------------|------|------|
+| slope             | 1.10 | 1.11 |
+| dlog S&P 500 (3m) | 0.50 | 0.51 |
+| other             | 0.20 | 0.21 |
+"""
+    cut_result = bind(words, cut, region=region)
+    printed_result = bind(words, printed, region=region)
+    cut_labels = [c.candidate_label for c in cut_result.row_label_contradictions]
+    printed_labels = [c.candidate_label for c in printed_result.row_label_contradictions]
+    assert cut_labels != printed_labels
+    assert not any("500" in label for label in cut_labels)
+    assert any("500" in label for label in printed_labels)
+
+
+def test_shape3_nonnumeric_cells_stay_in_the_native_label():
+    """Autopsy shape 3 control: date-range cells are not values. The native
+    label with the date ranges present must differ from the same geometry
+    with those cells deleted — they were absorbed, and A2 must not start
+    treating them as a value lane."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    payload = _a2_load("shape3_nonnumeric_values.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    without_dates = [word for word in words if ":" not in word[4]]
+
+    def _sample_label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        for row in rows:
+            if row.row_path and "Sample" in row.row_path[-1]:
+                return row.row_path[-1]
+        raise AssertionError(f"no Sample row in {[row.row_path for row in rows]}")
+
+    with_dates = _sample_label(words)
+    stripped = _sample_label(without_dates)
+    assert with_dates != stripped
+    assert "1988:1-2019:12" in with_dates
+    assert stripped == "Sample"
+
+
+def test_row_swap_control_still_contradicts():
+    """VI-A2 must not pass by accepting swapped stubs. Correct vs swapped
+    markdown on the same words: one agrees, the other contradicts."""
+    payload = _a2_load("row_swap.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    correct = bind(words, payload["markdown_correct"], region=region)
+    swapped = bind(words, payload["markdown_swapped"], region=region)
+    assert correct.row_label_contradictions == []
+    assert swapped.row_label_contradictions != []
+    assert {c.candidate_label for c in swapped.row_label_contradictions} == {"Small", "Large"}
+
+
+def test_neighbouring_label_outside_the_region_is_not_captured():
+    """A neighbour stub whose box does not intersect the region must not
+    enter the label. Same table with vs without that word: labels identical."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    payload = _a2_load("neighbouring_label.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    without = [word for word in words if word[4] != "Neighbour"]
+
+    def _label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        data = [row for row in rows if not row.is_parent]
+        assert data
+        return data[0].row_path[-1]
+
+    assert _label(words) == _label(without)
+    assert _label(words) == "Treasury"
+    assert "Neighbour" not in _label(words)
 
 
 if __name__ == "__main__":

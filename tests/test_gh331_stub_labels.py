@@ -148,6 +148,45 @@ def test_a_table_with_no_intervening_labels_is_untouched():
         assert val in flat
 
 
+def test_binder_keeps_a_leading_stub_that_sits_just_outside_the_region():
+    """VI-A2 / GH-331 on the binder (not the reconstruct rowizer).
+
+    A ``3Y`` stub whose x0 is 0.002 pt left of the table region is the
+    measured doc02 drop. Top-left containment lost it; box intersection
+    keeps it. Pin the difference: the same row with the stub on the region
+    edge vs just outside must bind to the same native label.
+    """
+    from socr.tables.binding import _native_rows, _words_in_region, bind
+
+    region = (80.0, 60.0, 360.0, 180.0)
+
+    def _row(stub_x0: float) -> list:
+        return [
+            (200.0, 70, 230.0, 80, "OLS", 0, 0, 0),
+            (300.0, 70, 330.0, 80, "IV", 0, 0, 1),
+            (stub_x0, 100, stub_x0 + 12.0, 110, "3Y", 0, 1, 0),
+            (100.0, 100, 170.0, 110, "Treasury", 0, 1, 1),
+            (200.0, 100, 230.0, 110, "0.29", 0, 1, 2),
+            (300.0, 100, 330.0, 110, "0.30", 0, 1, 3),
+        ]
+
+    def _native_label(words):
+        rows, _, _ = _native_rows(_words_in_region(words, region))
+        return rows[0].row_path[-1]
+
+    on_edge = _row(80.0)
+    just_out = _row(79.998)
+    assert _native_label(on_edge) == _native_label(just_out) == "3Y Treasury"
+
+    md = """
+|              | OLS  | IV   |
+|--------------|------|------|
+| 3Y Treasury  | 0.29 | 0.30 |
+"""
+    assert bind(just_out, md, region=region).row_label_contradictions == []
+    assert bind(on_edge, md, region=region).row_label_contradictions == []
+
+
 def test_a_single_stray_word_does_not_promote_a_data_column():
     """Recurrence, not one sighting.
 

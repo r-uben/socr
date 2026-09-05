@@ -1,0 +1,16 @@
+{
+  "_comment": "VI-A2 control: candidate swaps two row labels. Numeric anchors still bind the rows; the swapped stubs must remain contradictions. The stub-retention repair must not pass by accepting more labels.",
+  "region": [40, 60, 400, 200],
+  "markdown_correct": "| | OLS | IV |\n| --- | --- | --- |\n| Large | 0.05 | 0.06 |\n| Small | 0.07 | 0.08 |\n",
+  "markdown_swapped": "| | OLS | IV |\n| --- | --- | --- |\n| Small | 0.05 | 0.06 |\n| Large | 0.07 | 0.08 |\n",
+  "words": [
+    [140, 70, 170, 80, "OLS", 0, 0, 0],
+    [240, 70, 270, 80, "IV", 0, 0, 1],
+    [50, 100, 100, 110, "Large", 0, 1, 0],
+    [150, 100, 180, 110, "0.05", 0, 1, 1],
+    [250, 100, 280, 110, "0.06", 0, 1, 2],
+    [50, 130, 100, 140, "Small", 0, 2, 0],
+    [150, 130, 180, 140, "0.07", 0, 2, 1],
+    [250, 130, 280, 140, "0.08", 0, 2, 2]
+  ]
+}

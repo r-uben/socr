@@ -1,0 +1,13 @@
+{
+  "_comment": "VI-A2 control: a neighbour table's stub sits wholly to the left of the region (boxes do not intersect). Intersection membership must not pull it into this table's row label.",
+  "region": [100, 60, 400, 200],
+  "markdown": "| | OLS | IV |\n| --- | --- | --- |\n| Treasury | 0.50 | 0.51 |\n",
+  "words": [
+    [140, 70, 170, 80, "OLS", 0, 0, 0],
+    [240, 70, 270, 80, "IV", 0, 0, 1],
+    [40, 100, 90, 110, "Neighbour", 1, 0, 0],
+    [115, 100, 180, 110, "Treasury", 0, 1, 0],
+    [200, 100, 230, 110, "0.50", 0, 1, 1],
+    [300, 100, 330, 110, "0.51", 0, 1, 2]
+  ]
+}

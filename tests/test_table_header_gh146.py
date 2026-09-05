@@ -219,3 +219,50 @@ def test_header_repair_survives_demotion_end_to_end():
         ["Euro1", "1", "2", "16", "49", "23", "8", "1"],
         ["Yen1", "0", "3", "15", "40", "29", "9", "4"],
     ]
+
+
+def test_binder_does_not_make_a_math_font_subscript_the_first_data_row():
+    """VI-A2 / GH-146 on the binder: a shorter ``1t`` band sitting under
+    ``Rotated PCs`` is the same printed line, not a shredded first data row.
+
+    Difference: overlapping subscript geometry joins the parent label;
+    the same ``1t`` parked below the line stays a separate row.
+    """
+    from socr.tables.binding import _native_rows, bind
+
+    def _w(x0, y0, x1, y1, text, block=0, line=0):
+        return (x0, y0, x1, y1, text, block, line, 0)
+
+    shared = [
+        _w(250, 70, 280, 80, "3-M"),
+        _w(330, 70, 360, 80, "2-YR"),
+        _w(50, 100, 120, 111, "Rotated"),
+        _w(125, 100, 155, 111, "PCs"),
+        _w(50, 160, 90, 170, "Action"),
+        _w(250, 160, 280, 170, "1.48"),
+        _w(330, 160, 360, 170, "1.00"),
+    ]
+    overlap = [_w(80, 107, 95, 115, "1t", block=1)]
+    below = [_w(80, 130, 95, 138, "1t", block=1)]
+
+    overlap_rows, _, _ = _native_rows(shared + overlap)
+    below_rows, _, _ = _native_rows(shared + below)
+    overlap_labels = [row.row_path[-1] for row in overlap_rows]
+    below_labels = [row.row_path[-1] for row in below_rows]
+
+    assert overlap_labels != below_labels
+    assert not any(label.strip() == "1t" for label in overlap_labels)
+    assert any("1t" in label for label in below_labels)
+
+    md = """
+|                  | 3-M  | 2-YR |
+|------------------|------|------|
+| Rotated PCs 1t   |      |      |
+| Action           | 1.48 | 1.00 |
+"""
+    overlap_bind = bind(shared + overlap, md)
+    below_bind = bind(shared + below, md)
+    overlap_natives = {c.row_path[-1] for c in overlap_bind.row_label_contradictions}
+    below_natives = {c.row_path[-1] for c in below_bind.row_label_contradictions}
+    assert "1t" not in overlap_natives
+    assert overlap_natives != below_natives or below_bind.row_label_contradictions != []
