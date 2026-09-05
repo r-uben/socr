@@ -51,14 +51,15 @@ def test_discover_pages_finds_all_fixture_pages():
         ("doc00", 5),
         ("doc00", 6),
         ("doc00", 7),
+        ("doc00", 8),
     }
 
 
 def test_replay_corpus_row_shape_matches_recorded_table_count():
     """Same contract the real corpus proves at 7 rows (one row per recorded
-    table): here, 7 recorded tables -> 7 rows, exactly."""
+    table): here, 8 recorded tables -> 8 rows, exactly."""
     rows = replay_corpus(FIXTURE_CORPUS)
-    assert len(rows) == 7
+    assert len(rows) == 8
     assert all(isinstance(r, ReplayRow) for r in rows)
 
 
@@ -217,7 +218,9 @@ def test_report_formats_without_raising():
     assert "p5-t99" in report
     assert "p6-t0" in report
     assert "p7-t0" in report
+    assert "p8-t0" in report
     assert "UNREPLAYABLE" in report
+    assert "UNCHECKED" in report
 
 
 def test_main_cli_exits_zero_and_prints_rows(capsys):
@@ -233,6 +236,7 @@ def test_main_cli_exits_zero_and_prints_rows(capsys):
     assert "p5-t99" in out
     assert "p6-t0" in out
     assert "p7-t0" in out
+    assert "p8-t0" in out
 
 
 @pytest.mark.parametrize(
@@ -283,6 +287,52 @@ def test_cli_prints_unreplayable_for_a1c_failures(capsys):
     assert "not found among this tree's witnesses" in out
     assert "no located box this tree" in out
     assert "no native words on this page" in out
+
+
+def test_parse_grid_failure_is_unchecked_not_a_binder_clear():
+    """Located witness whose candidate grid fails parse_grid: empty fresh
+    items are UNCHECKED, never NO with the recorded items as frozen-only."""
+    record = next(r for r in discover_pages(FIXTURE_CORPUS) if r.page_num == 8)
+    sidecar_path = record.sidecar_path
+    before = sidecar_path.read_bytes()
+    rows = replay_page(record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.table_id == "p8-t0"
+    assert row.unreplayable is False
+    assert row.unchecked is True
+    assert row.added == ()
+    assert row.removed == ()
+    assert row.fresh_item_count == 0
+    assert row.recorded_item_count >= 1
+    assert "no checks" in row.note
+    assert row.row_labels_checked == 0
+    assert row.fully_checked is False
+    assert sidecar_path.read_bytes() == before
+
+
+def test_cli_prints_unchecked_for_parse_grid_failure(capsys):
+    from socr.benchmark.replay_binding import main
+
+    exit_code = main([str(FIXTURE_CORPUS)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if "p8-t0" in ln)
+    assert "UNCHECKED" in line, line
+    assert "UNREPLAYABLE" not in line
+    words = line.split()
+    assert "NO" not in words
+
+
+def test_successful_bind_carries_coverage_and_is_not_unchecked():
+    rows = replay_corpus(FIXTURE_CORPUS)
+    p1 = next(r for r in rows if r.table_id == "p1-t0")
+    assert p1.unchecked is False
+    assert p1.unreplayable is False
+    assert p1.row_labels_checked is not None and p1.row_labels_checked >= 1
+    assert p1.fully_checked is not None
+    assert p1.column_binding_unverifiable is not None
+    assert p1.native_unbound_count is not None
 
 
 def test_labels_file_reported_when_absent_from_table(tmp_path):

@@ -107,7 +107,7 @@ from pathlib import Path
 from socr.core.pdf import open_pdf
 from socr.judge.table_verdict import TABLE_BINDING_ADJUDICATED_KIND
 from socr.tables.adjudication import ContradictionItem, items_from_binding
-from socr.tables.binding import bind
+from socr.tables.binding import BindingResult, bind
 from socr.tables.witness import TableWitness, WitnessStatus, prepare_table_witnesses
 
 #: (kind, native_token, model_token) — the only fields the persisted sidecar
@@ -155,7 +155,19 @@ class ReplayRow:
     #: not LOCATED, no native words). Every fresh_* field is a placeholder,
     #: not a result; added/removed stay empty (never a binder delta).
     unreplayable: bool = False
+    #: True iff bind() ran but the empty fresh side is not a clear: the
+    #: previously disputed rows/cells were not bound and compared.
+    #: Distinct from unreplayable (bind never ran) and from NO (a real
+    #: delta, including a genuine clear).
+    unchecked: bool = False
     note: str = ""
+    #: Coverage from the fresh BindingResult; None when unreplayable.
+    fully_checked: bool | None = None
+    column_binding_unverifiable: bool | None = None
+    row_binding_unverifiable: bool | None = None
+    row_labels_checked: int | None = None
+    native_unbound_count: int | None = None
+    native_valueless_unbound: int | None = None
 
 
 @dataclass(frozen=True)
@@ -332,16 +344,19 @@ def replay_table(
     page_num: int,
     model_markdown: str,
     table_id: str,
-) -> tuple[tuple[ContradictionItem, ...], str]:
+) -> tuple[tuple[ContradictionItem, ...], str, BindingResult | None]:
     """Re-derive the table's witness (block markdown + located box) from
     *model_markdown* with the CURRENT tree, then re-run ``bind()`` against
     the native words on *page_num* of *pdf_path*.
 
-    Returns ``(items, note)``. ``note`` is empty on a clean replay and
-    otherwise names why nothing could be bound (no such table_id, table not
-    LOCATED this tree, or the page has no native words) — never raises.
-    Callers MUST treat a non-empty note as unreplayable: never compare
-    the empty ``items`` against the frozen record as a binder delta.
+    Returns ``(items, note, result)``. ``note`` is empty on a clean replay
+    and otherwise names why nothing could be bound (no such table_id,
+    table not LOCATED this tree, or the page has no native words) — never
+    raises. ``result`` is the fresh BindingResult, or None when note is
+    set. Callers MUST treat a non-empty note as unreplayable. An empty
+    items tuple with a BindingResult is not automatically a clear —
+    callers must check whether the disputed rows/cells were actually
+    compared (see ``_unchecked_reason``).
     """
     with open_pdf(pdf_path) as doc:
         words = doc[page_num - 1].get_text("words")
@@ -349,19 +364,75 @@ def replay_table(
     with prepare_table_witnesses(pdf_path, page_num, model_markdown) as witnesses:
         witness = _witness_for_table(witnesses, table_id)
         if witness is None:
-            return (), f"table_id {table_id!r} not found among this tree's witnesses"
+            return (), f"table_id {table_id!r} not found among this tree's witnesses", None
         if witness.status is not WitnessStatus.LOCATED or witness.box is None:
-            return (), f"witness status {witness.status.value} (no located box this tree)"
+            return (), f"witness status {witness.status.value} (no located box this tree)", None
         if not words:
-            return (), "no native words on this page"
+            return (), "no native words on this page", None
         binding_result = bind(words, witness.markdown, region=witness.box.bbox)
-    return items_from_binding(binding_result), ""
+    return items_from_binding(binding_result), "", binding_result
 
 
 def _final_disposition(status: str) -> str:
     if status == "lifted":
         return "ACCEPTED (binding lifted — GH-359 ruling 5 clamp released)"
     return "UNVERIFIED (binding held — GH-359 ruling 5 clamp applies)"
+
+
+def _coverage_fields(result: BindingResult | None) -> dict:
+    if result is None:
+        return {}
+    return {
+        "fully_checked": result.fully_checked,
+        "column_binding_unverifiable": result.column_binding_unverifiable,
+        "row_binding_unverifiable": result.row_binding_unverifiable,
+        "row_labels_checked": result.row_labels_checked,
+        "native_unbound_count": len(result.native_unbound),
+        "native_valueless_unbound": result.native_valueless_unbound,
+    }
+
+
+def _unchecked_reason(recorded_items: list, result: BindingResult) -> str | None:
+    """Reason an empty fresh side is not a clear, or None if it is.
+
+    Vanished recorded items are a clear only when those rows/cells were
+    bound and compared. Whole-table fully_checked is not required: a
+    label repair may leave other columns unverifiable.
+    """
+    if not recorded_items:
+        return None
+    compared_cells = {(c.row_path, c.col_path) for c in result.matched_cells} | {
+        (c.row_path, c.col_path) for c in result.contradicted_cells
+    }
+    if (
+        result.row_labels_checked == 0
+        and not compared_cells
+        and not result.row_label_contradictions
+    ):
+        return (
+            "candidate grid produced no checks "
+            f"(row_labels_checked=0, column_binding_unverifiable="
+            f"{result.column_binding_unverifiable})"
+        )
+    unbound_row_paths = {cell.row_path for cell in result.native_unbound}
+    for rec in recorded_items:
+        kind = rec.get("kind", "")
+        row_path = tuple(rec.get("row_path") or ())
+        col_path = tuple(rec.get("col_path") or ())
+        if not row_path and rec.get("native_token"):
+            row_path = (str(rec.get("native_token")),)
+        if kind == "row_label":
+            if result.row_labels_checked == 0:
+                return "disputed row labels were not bound or compared"
+            if row_path in unbound_row_paths:
+                return f"disputed row {row_path!r} was unbound, not compared"
+        elif kind == "cell":
+            if (row_path, col_path) not in compared_cells:
+                return (
+                    f"disputed cell {row_path!r}/{col_path!r} was not compared "
+                    f"(column_binding_unverifiable={result.column_binding_unverifiable})"
+                )
+    return None
 
 
 def _unreplayable_row(
@@ -427,7 +498,7 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
             )
             continue
 
-        fresh_items, bind_note = replay_table(
+        fresh_items, bind_note, bind_result = replay_table(
             record.pdf_path, record.page_num, candidate_markdown, table_id
         )
         note = " | ".join(part for part in (note, bind_note) if part)
@@ -444,6 +515,31 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
                 )
             )
             continue
+        assert bind_result is not None
+        coverage = _coverage_fields(bind_result)
+        if not fresh_items:
+            reason = _unchecked_reason(recorded_items, bind_result)
+            if reason:
+                rows.append(
+                    ReplayRow(
+                        doc_slug=record.doc_slug,
+                        page_num=record.page_num,
+                        table_id=table_id,
+                        recorded_status=str(recorded.get("status", "")),
+                        recorded_item_count=len(recorded_items),
+                        fresh_item_count=0,
+                        multiset_match=False,
+                        added=(),
+                        removed=(),
+                        final_disposition=_final_disposition(str(recorded.get("status", ""))),
+                        label_accuracy=label_accuracy,
+                        crop_coverage=crop_coverage,
+                        unchecked=True,
+                        note=" | ".join(part for part in (note, reason) if part),
+                        **coverage,
+                    )
+                )
+                continue
         fresh_counter = Counter(_item_key(item) for item in fresh_items)
 
         added = tuple(sorted((fresh_counter - recorded_counter).elements()))
@@ -464,6 +560,7 @@ def replay_page(record: PageRecord, labels: dict | None) -> list[ReplayRow]:
                 label_accuracy=label_accuracy,
                 crop_coverage=crop_coverage,
                 note=note,
+                **coverage,
             )
         )
     return rows
@@ -485,8 +582,15 @@ def format_report(rows: list[ReplayRow]) -> str:
     lines.append(header)
     lines.append("-" * len(header))
     for row in rows:
-        match_col = "UNREPLAYABLE" if row.unreplayable else ("YES" if row.multiset_match else "NO")
-        fresh_col = "-" if row.unreplayable else str(row.fresh_item_count)
+        if row.unreplayable:
+            match_col = "UNREPLAYABLE"
+            fresh_col = "-"
+        elif row.unchecked:
+            match_col = "UNCHECKED"
+            fresh_col = str(row.fresh_item_count)
+        else:
+            match_col = "YES" if row.multiset_match else "NO"
+            fresh_col = str(row.fresh_item_count)
         lines.append(
             f"{row.doc_slug:6} {row.page_num:<4} {row.table_id:9} "
             f"{row.recorded_status:9} {row.recorded_item_count:<4} "

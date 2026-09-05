@@ -39,6 +39,10 @@ Lays out a MINIATURE version of a frozen corpus directory
   prose only, so the witness exists but is not LOCATED.
 - ``pages/00007.json`` — TICKET-A1c: ruled grid with no ``insert_text``,
   so locate can still produce a box and the native word layer is empty.
+- ``pages/00008.json`` — located witness whose candidate markdown is a
+  table block (``find_table_blocks``) but fails ``parse_grid`` (one-hyphen
+  separator): bind() returns the default BindingResult, so the row is
+  UNCHECKED, not a binder clear.
 """
 
 from __future__ import annotations
@@ -125,6 +129,14 @@ P7_ROWS = [
 ]
 P7_CANDIDATE_LABELS = {"Forward rate": "3Y Forward rate", "Spot rate": "Spot rate"}
 
+#: page 8: located table + candidate markdown that find_table_blocks sees
+#: but parse_grid rejects (one-hyphen separator).
+P8_ROWS = [
+    {"label": "Discount rate", "Value": "3.25"},
+    {"label": "Prime rate", "Value": "1.11"},
+]
+P8_CANDIDATE_LABELS = {"Discount rate": "1Y Discount rate", "Prime rate": "Prime rate"}
+
 
 def _draw_ruled_table(page, rows: list[dict], top: float, label_col: str = "label") -> None:
     import fitz  # noqa: F401  (imported for side effect parity with table_ladder fixture)
@@ -181,6 +193,8 @@ def generate_pdf(out_path: Path) -> None:
     page6.insert_text((72, 72), P6_PROSE, fontsize=11)
     page7 = doc.new_page()
     _draw_ruled_grid_lines_only(page7, n_data_rows=len(P7_ROWS), top=TOP)
+    page8 = doc.new_page()
+    _draw_ruled_table(page8, P8_ROWS, TOP)
     doc.save(str(out_path))
     doc.close()
 
@@ -224,7 +238,7 @@ def _assert_replay_table_note(
     sys.path.insert(0, str(HERE.parents[2] / "src"))
     from socr.benchmark.replay_binding import replay_table
 
-    items, note = replay_table(pdf_path, page_num, markdown, table_id)
+    items, note, _result = replay_table(pdf_path, page_num, markdown, table_id)
     assert items == (), items
     assert fragment in note, (note, fragment)
 
@@ -245,19 +259,32 @@ def main() -> None:
     md5 = _markdown_for(P5_ROWS, P5_CANDIDATE_LABELS)
     md6 = _markdown_for(P6_ROWS, P6_CANDIDATE_LABELS)
     md7 = _markdown_for(P7_ROWS, P7_CANDIDATE_LABELS)
+    md8 = _markdown_for(P8_ROWS, P8_CANDIDATE_LABELS)
+    md8_broken = md8.replace("| :--- | :--- |", "| - | - |")
 
     ba1, table_id1 = _binding_adjudication_for(pdf_path, 1, md1)
     ba2, table_id2 = _binding_adjudication_for(pdf_path, 2, md2)
     ba3, table_id3 = _binding_adjudication_for(pdf_path, 3, md3)
     ba4, table_id4 = _binding_adjudication_for(pdf_path, 4, md4)
     ba5, table_id5 = _binding_adjudication_for(pdf_path, 5, md5)
+    ba8, table_id8 = _binding_adjudication_for(pdf_path, 8, md8)
     assert table_id5 == "p5-t0", table_id5
+    assert table_id8 == "p8-t0", table_id8
 
     _assert_replay_table_note(
         pdf_path, 5, md5, P5_ABSENT_TABLE_ID, "not found among this tree's witnesses"
     )
     _assert_replay_table_note(pdf_path, 6, md6, "p6-t0", "no located box this tree")
     _assert_replay_table_note(pdf_path, 7, md7, "p7-t0", "no native words on this page")
+    from socr.tables.binding import parse_grid
+    from socr.tables.reconcile import find_table_blocks
+    from socr.tables.witness import WitnessStatus, prepare_table_witnesses
+
+    assert parse_grid(md8_broken) is None, md8_broken
+    assert find_table_blocks(md8_broken), md8_broken
+    with prepare_table_witnesses(pdf_path, 8, md8_broken) as witnesses:
+        assert len(witnesses) == 1, witnesses
+        assert witnesses[0].status is WitnessStatus.LOCATED, witnesses[0]
 
     pages_dir = corpus_dir / "out" / "doc00" / "doc00" / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -376,6 +403,14 @@ def main() -> None:
     }
     (pages_dir / "00007.json").write_text(json.dumps(sidecar7, indent=2, sort_keys=True) + "\n")
 
+    sidecar8 = {
+        "page_num": 8,
+        "winning_output": {"text": md8_broken},
+        "binding_adjudication": {table_id8: ba8},
+        "audit_events": [],
+    }
+    (pages_dir / "00008.json").write_text(json.dumps(sidecar8, indent=2, sort_keys=True) + "\n")
+
     print(f"Generated: {pdf_path}")
     print(f"Generated: {pages_dir / '00001.json'} (table_id={table_id1})")
     print(f"Generated: {pages_dir / '00002.json'} (table_id={table_id2}, fail-closed marker)")
@@ -393,6 +428,10 @@ def main() -> None:
     )
     print(f"Generated: {pages_dir / '00006.json'} (table_id=p6-t0, witness not LOCATED)")
     print(f"Generated: {pages_dir / '00007.json'} (table_id=p7-t0, no native words)")
+    print(
+        f"Generated: {pages_dir / '00008.json'} "
+        f"(table_id={table_id8}, located witness, parse_grid failure)"
+    )
 
 
 if __name__ == "__main__":
