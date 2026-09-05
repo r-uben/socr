@@ -258,14 +258,19 @@ fields. `orchestrator.py:_adjudicate_clamped_table` builds the ordinal chain fro
 `BindingResult.native_rows` + `.row_binding` + C2a's bands/origin/edge, per C1 §(a)
 conditions 1–4 (native chain **and** model chain from the same origin; `i = j = b`), attaches
 `cell_bbox = (region.x0, band.y0, R, band.y1)` or `None` with the reason, and renders with
-padding **clamped to the band** (C1: 6 pt of padding against a 0.2 pt column clearance
-re-opens over-capture). `:5259-5310` counts abstentions separately and the UNVERIFIED cause
+padding **clamped on both axes**: x within `[region.x0, R]`, y limited by the adjacent bands
+(C1: 6 pt of padding against a 0.2 pt column clearance re-opens over-capture). The test
+asserts the **rendered crop rectangle** respects both clamps — not merely that the
+transcriber received a bbox. `:5259-5310` counts abstentions separately and the UNVERIFIED cause
 gains `abstained`. `binding.py` gains **no** geometry fields. Keep the
 `_transcribe_cell_token` patch seam.
 **Prediction artifact (committed before C2b starts):** C1 §(d) at rev 4 — 3/22 addressed
 (doc05 p1 items with triples (4,4,4), (6,6,6), (8,8,8)), 19 abstained with reasons — is the
-artifact; reference its commit SHA in the ticket log. After A2 the remaining set is 14
-(22 − 8 cleared, of which doc04's 1 stays contradicted and abstains: no origin).
+artifact; reference its commit SHA in the ticket log. After A2 (merged, #602) the remaining set is
+**14 = 22 − 7 doc02 items − 1 doc01 item**; doc04's item remains and abstains (no origin).
+The prediction artifact must be **re-derived on the post-A2 tree** before C2b starts — C1
+§(d) was computed pre-A2 and its remaining-set membership is stale; commit the updated
+per-item table and cite that SHA.
 **Files:** `src/socr/tables/adjudication.py`, `src/socr/pipeline/orchestrator.py`
 (`:5200-5310` and `:5522-5637` only), `tests/test_binding_adjudication.py`,
 `tests/test_gh367_adjudication_lift.py`, `tests/fixtures/replay_binding/controls/`.
