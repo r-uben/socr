@@ -127,7 +127,12 @@ accepting more. Do **not** touch `native_rows.py`.
 **Files:** `src/socr/tables/binding.py`, `tests/test_binding.py`,
 `tests/test_tr1_rowizer.py`, `tests/test_gh331_stub_labels.py`,
 `tests/test_table_header_gh146.py`, `tests/fixtures/replay_binding/` (controls).
-**Done when:** on frozen replay, **3/3 target tables cleared of false native-label clamps**;
+**Done when:** on frozen replay, **3/3 target tables cleared of false native-label clamps**
+(**revised 2026-09-05 before merge, PR pending: 2/3 — doc04 p3 is withdrawn from A2's
+denominator.** A1b classed it as the math-font shape, not the rowizer shape; the curia build
+found no page-derived geometry that separates a math subscript from a short annotation under
+a label, and abstained rather than merge — a fold that admits `(a)` into a label is worse than
+no fold. doc04 moves to a new ticket in the math-font lane, #219/#140 family. N becomes 7);
 **N/N unresolved target labels reconstructed** against the rendered source, where **N =
 A1b's native-side subset only** (`shredded_label`, `bbox_truncated`), with A1b's
 classifications **frozen before repair starts** (A2 may not reclassify); all three target
