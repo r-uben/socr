@@ -786,18 +786,30 @@ def label_key(text: str) -> tuple[tuple[str, str], ...]:
     ``(("greek", "beta"),)`` -- callers must treat a lone ``"greek"`` token
     as unprovable (binding.py's row-label fail-closed rule), not as a
     value to match on, exactly as a bare symbolic label always was.
+
+    ``normalize_label``'s trailing-footnote-suffix rule (a bare digit right
+    at the end of the label) is a WHOLE-LABEL rule (GH-585 review round 5):
+    applied to an internal literal chunk -- one that ends where a Greek or
+    command token follows, not where the label itself ends -- it would
+    discard a real trailing digit that is part of the chunk's own content
+    (``"Model1 α"`` and ``"Model2 α"`` must stay distinct). Only the final
+    literal chunk, the one reaching the label's true end, uses
+    ``normalize_label``; every other chunk uses ``normalize_label_chunk``,
+    which folds the same emphasis/marker/punctuation but withholds that
+    suffix rule.
     """
-    from socr.tables.native_rows import normalize_label
+    from socr.tables.native_rows import normalize_label, normalize_label_chunk
 
     text = strip_math_presentation(text, label=True)
     tokens: list[tuple[str, str]] = []
     literal_parts: list[str] = []
 
-    def flush_literal() -> None:
+    def flush_literal(*, final: bool) -> None:
         if not literal_parts:
             return
-        normalized = normalize_label("".join(literal_parts))
+        joined = "".join(literal_parts)
         literal_parts.clear()
+        normalized = normalize_label(joined) if final else normalize_label_chunk(joined)
         if normalized:
             tokens.append(("lit", normalized))
 
@@ -805,21 +817,21 @@ def label_key(text: str) -> tuple[tuple[str, str], ...]:
     for m in _LABEL_TOKEN_RE.finditer(text):
         literal_parts.append(text[pos : m.start()])
         if m.group("greek"):
-            flush_literal()
+            flush_literal(final=False)
             tokens.append(("greek", _GREEK_COMMAND_TAG[m.group("greek")[1:]]))
         elif m.group("op"):
             literal_parts.append(m.group("op")[1:])
         elif m.group("esc"):
             literal_parts.append(m.group("esc")[1:])
         elif m.group("cmd"):
-            flush_literal()
+            flush_literal(final=False)
             tokens.append(("cmd", m.group("cmd")[1:]))
         elif m.group("greekchar"):
-            flush_literal()
+            flush_literal(final=False)
             tokens.append(("greek", _GREEK_UNICODE_TAG[m.group("greekchar")]))
         pos = m.end()
     literal_parts.append(text[pos:])
-    flush_literal()
+    flush_literal(final=True)
     return tuple(tokens)
 
 

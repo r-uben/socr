@@ -142,6 +142,20 @@ class TestTokensAgree:
         assert tokens_agree("ϑ Coefficient", r"$\vartheta$ Coefficient", kind="row_label")
         assert not tokens_agree("ϑ Coefficient", r"$\theta$ Coefficient", kind="row_label")
 
+    def test_internal_chunk_before_a_greek_token_keeps_its_trailing_digit(self) -> None:
+        """GH-585 review round 5: ``normalize_label``'s trailing-footnote-
+        suffix rule is a whole-label rule. Applied to an INTERNAL literal
+        chunk of ``label_key`` -- one that ends where a Greek token follows,
+        not where the label itself ends -- it discarded a real digit and
+        collapsed ``"Model1 α"``/``"Model2 α"`` into the same key."""
+        assert not tokens_agree(r"Model1 $\alpha$", r"Model2 $\alpha$", kind="row_label")
+
+    def test_trailing_footnote_digit_on_the_labels_own_end_still_folds(self) -> None:
+        """GH-585 review round 5: the suffix rule must still apply to the
+        FINAL chunk, the one reaching the label's true end, so a genuine
+        trailing footnote digit keeps agreeing exactly as before the fix."""
+        assert tokens_agree("Coefficient1", "Coefficient", kind="row_label")
+
 
 class TestAdjudicate:
     def test_all_abstained_is_held_and_never_transcribes_native_bbox(self) -> None:

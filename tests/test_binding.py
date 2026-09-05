@@ -512,6 +512,53 @@ def test_gh585_variant_unicode_glyph_agrees_with_its_variant_command_through_bin
     assert result.structural_agreement is True
 
 
+def test_gh585_internal_chunk_before_a_greek_token_keeps_its_trailing_digit():
+    """GH-585 review round 5: ``label_key`` normalizes each internal literal
+    chunk without the whole-label trailing-footnote-suffix rule, so a real
+    digit that is part of an internal word (``Model1`` before the Greek
+    token, not the label's own end) survives and ``Model1 α``/``Model2 α``
+    stay distinct rows -- the suffix rule applying INSIDE the label was a
+    false agreement, not a footnote."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Model1 α"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                    | OLS  |
+|--------------------|------|
+| Model2 $\alpha$    | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert len(result.row_label_contradictions) == 1
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is False
+
+
+def test_gh585_trailing_footnote_digit_on_the_labels_own_end_still_folds():
+    """GH-585 review round 5: the suffix rule must still apply to the FINAL
+    chunk -- the one that reaches the label's true end -- so a genuine
+    trailing footnote digit is unaffected by the round-5 fix."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "Coefficient1"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|              | OLS  |
+|--------------|------|
+| Coefficient  | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is True
+
+
 # ---------------------------------------------------------------------------
 # GH-582: inline-math wrapping is presentation, not a value/label change
 # ---------------------------------------------------------------------------

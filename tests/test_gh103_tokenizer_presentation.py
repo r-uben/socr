@@ -398,6 +398,28 @@ def test_gh585_escape_unmap_also_applies_to_the_numeric_cell_path():
     assert is_numeric_token("12%")
 
 
+def test_gh585_internal_literal_chunk_keeps_its_trailing_digit():
+    """GH-585 review round 5: ``normalize_label``'s trailing-footnote-suffix
+    rule is a WHOLE-LABEL rule. ``label_key`` folded every literal chunk
+    through it, including internal ones that end where a Greek/command
+    token follows rather than where the label itself ends -- discarding a
+    real digit and collapsing ``"Model1 α"``/``"Model2 α"`` into the same
+    key. Only the final chunk (the one reaching the label's true end)
+    applies the suffix rule."""
+    assert label_key(r"Model1 $\alpha$") != label_key(r"Model2 $\alpha$")
+    assert label_key(r"Model1 $\alpha$") == (("lit", "model1"), ("greek", "alpha"))
+    assert label_key(r"Model2 $\alpha$") == (("lit", "model2"), ("greek", "alpha"))
+
+
+def test_gh585_trailing_footnote_digit_on_the_labels_own_end_still_folds():
+    """GH-585 review round 5: a genuine trailing footnote digit -- one that
+    sits on the FINAL literal chunk, the label's own end -- still folds
+    away exactly as ``normalize_label`` always did; the round-5 fix only
+    withholds the rule from internal chunks, not the label's end."""
+    assert label_key("Coefficient1") == label_key("Coefficient")
+    assert label_key(r"$\alpha$ Coefficient1") == label_key(r"$\alpha$ Coefficient")
+
+
 def test_content_labels_were_never_the_bug():
     """Documented for the record: the content tokenizer scans, so bold was fine.
 

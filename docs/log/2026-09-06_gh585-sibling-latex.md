@@ -101,6 +101,65 @@ reasoning it was a positional glyph variant. Round 4's review named `ς` as one 
 six codepoints requiring its own `varsigma` tag, distinct from base sigma; this log
 adopts that correction.
 
+## Round 5 (this commit)
+
+Codex seat reviewed `8603981` (round 4) and returned NO: `label_key`'s
+`flush_literal()` ran `normalize_label` on every literal chunk it emitted,
+including INTERNAL chunks — ones that end because a Greek/command token
+follows, not because the label itself ends. `normalize_label`'s trailing-
+footnote-suffix rule (a bare digit right after a letter/bracket at the end of
+the string it is given) is a WHOLE-LABEL rule; applied to an internal chunk it
+discards a real digit that is part of the chunk's own content. `"Model1 α"`
+and `"Model2 α"` both keyed to `(("lit", "model"), ("greek", "alpha"))` — a
+false agreement the digit should have prevented.
+
+Fix: split `normalize_label` (`native_rows.py`) into a shared
+`_fold_emphasis_and_markers` helper plus two public entry points —
+`normalize_label` (unchanged behavior: emphasis/marker fold, suffix rule,
+punctuation strip) and new `normalize_label_chunk` (same fold and punctuation
+strip, no suffix rule). `label_key`'s `flush_literal` now takes a `final: bool`
+flag: every call triggered mid-scan by an upcoming Greek/cmd/greekchar token
+uses `normalize_label_chunk` (internal chunk, suffix rule withheld); only the
+final flush after the token scan — the chunk that actually reaches the
+label's end — uses `normalize_label` (suffix rule applies). No caller outside
+`label_key` was touched; `normalize_label`'s existing behavior for every other
+caller (GH-96 exactness, the escalation canary, `_fallback_pair_allowed`'s use
+via `label_key`) is unchanged.
+
+Negative control: `Model1 α` vs `Model2 α` no longer agree (through
+`tokens_agree` and `bind()`). Positive control: a genuine trailing footnote
+digit on the label's own end (`Coefficient1` vs `Coefficient`) still agrees,
+unchanged from before this fix. Every earlier-round control still holds.
+
+## Files changed (round 5)
+
+- `src/socr/tables/native_rows.py` — `_fold_emphasis_and_markers` extracted;
+  new `normalize_label_chunk` (no suffix rule); `normalize_label` unchanged
+  in behavior, refactored to reuse the shared fold.
+- `src/socr/tables/native_verifier.py` — `label_key`'s `flush_literal` takes
+  `final: bool`; internal chunks use `normalize_label_chunk`, only the final
+  chunk uses `normalize_label`.
+- `tests/test_gh103_tokenizer_presentation.py` — internal-chunk-keeps-digit
+  and final-chunk-still-folds unit tests on `label_key`.
+- `tests/test_binding_adjudication.py` — same two controls via `tokens_agree`.
+- `tests/test_binding.py` — same two controls end-to-end via `bind()`.
+
+## Verification (round 5)
+
+- Targeted (`test_gh103_tokenizer_presentation.py` + `test_binding.py` +
+  `test_binding_adjudication.py`): 180 passed, 1 xfailed (pre-existing).
+- Broader native/table-metric suite (`test_corpus_rescore_gate.py`,
+  `test_gh331_stub_labels.py`, `test_gh367_adjudication_lift.py`,
+  `test_metric_corruption_battery.py`, `test_native_table_verifier.py`,
+  `test_package_layering.py`, `test_source_evidence_table_judge.py`,
+  `test_table_header_gh146.py`, `test_tr1_rowizer.py`): 196 passed.
+- Frozen-corpus harness: doc05 recorded 6 → fresh 4, doc07 recorded 5 → fresh
+  3, unchanged from rounds 3–4; C2b frozen prediction PASS against the
+  `73818b0` artifact.
+- `uvx ruff@0.16.0 format --check .` clean (580 files).
+- Full suite: see commit message / team-lead report for the run captured at
+  commit time.
+
 ## Files changed (round 4)
 
 - `src/socr/tables/native_verifier.py` — `label_key`, `label_key_is_bare_symbolic`,

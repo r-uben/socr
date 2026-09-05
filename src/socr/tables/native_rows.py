@@ -63,6 +63,13 @@ _FOOTNOTE_MARKER_RE = re.compile(
 # "Panel 1" and "Panel 2" stay distinct while "Income tax1" folds.
 
 
+def _fold_emphasis_and_markers(label: str) -> str:
+    """Strip emphasis and footnote markers, common to every normalizer below."""
+    text = label.replace("**", "").replace("*", "").replace("__", "").strip()
+    text = text.lower()
+    return _FOOTNOTE_MARKER_RE.sub("", text).strip()
+
+
 def normalize_label(label: str) -> str:
     """Fold a row label to a comparison key.
 
@@ -78,10 +85,26 @@ def normalize_label(label: str) -> str:
     escalation accept rule runs on this metric, so an engine was being penalised for
     its footnote syntax.
     """
-    text = label.replace("**", "").replace("*", "").replace("__", "").strip()
-    text = text.lower()
-    text = _FOOTNOTE_MARKER_RE.sub("", text).strip()
+    text = _fold_emphasis_and_markers(label)
     text = _FOOTNOTE_SUFFIX_RE.sub("", text)
+    return _NON_ALNUM_RE.sub("", text)
+
+
+def normalize_label_chunk(label: str) -> str:
+    """Fold one INTERNAL chunk of a structured label key (GH-585 review round 5).
+
+    Same emphasis/marker/punctuation folding as ``normalize_label``, but
+    withholds the trailing bare-digit footnote-suffix rule
+    (``_FOOTNOTE_SUFFIX_RE``). That rule is a whole-label rule: it only means
+    "footnote" when the digit sits at the true end of the label. Applied to
+    an internal chunk of ``label_key``'s tokenized label -- e.g. ``"Model1 "``
+    in ``"Model1 $\\alpha$"``, where the digit is followed by a Greek token,
+    not the label's end -- it discards real content and collapses distinct
+    labels (``"Model1 α"`` and ``"Model2 α"``) into the same key. Callers
+    apply ``normalize_label`` (with the suffix rule) only to the final chunk,
+    the one that actually reaches the label's end.
+    """
+    text = _fold_emphasis_and_markers(label)
     return _NON_ALNUM_RE.sub("", text)
 
 
