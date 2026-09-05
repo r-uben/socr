@@ -247,7 +247,7 @@ the band counts per table match C1 §(d)'s inputs. `BindingResult.native_rows` /
 `.row_binding` are populated on every `bind()` call and the A1 harness output is byte-identical
 before/after. Full suite green; ruff format clean.
 
-### TICKET-C2b — geometry-addressed disproof + abstain semantics · TODO · depends-on: C2a, A2, B1 · wave 5
+### TICKET-C2b — geometry-addressed disproof + abstain semantics · DONE (#621) · depends-on: C2a, A2, B1 · wave 5
 **Problem:** As C1 — `_disprove_one` transcribes `item.native_bbox`, so the recovery crop is
 addressed by the lane it is checking. This is the architectural change the owner authorised.
 **Do:** Exactly C1 §(c). `adjudication.py`: `ContradictionItem` gains `cell_bbox`,
@@ -298,7 +298,7 @@ items; every table A2 cleared stays cleared. **Feasibility checkpoint:** if fewe
 remaining item is geometry-addressed, C2b returns to the owner — correct abstention must never
 force invented correspondence. Full suite green; ruff format clean.
 
-### TICKET-C3 — ladder corpus re-run and report · TODO · depends-on: C2b, B2 · wave 6 · agent: claude
+### TICKET-C3 — ladder corpus re-run and report · WIP · depends-on: C2b, B2 · wave 6 · agent: claude
 **Problem:** "The free lane witnesses the model" needs a number on the same 20 pages —
 but a live OCR re-run is nondeterministic and stricter abstention can *lower* accepts
 legitimately, so the live count is a **report**, not the gate.

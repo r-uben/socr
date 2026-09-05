@@ -1,6 +1,6 @@
 # STATUS — verifier-independence
 
-Last updated: 2026-09-05 (wave 5 dispatched)
+Last updated: 2026-09-05 (C2b merged, C3 running)
 
 ## Stage
 
@@ -39,8 +39,8 @@ gate; `tests/` is flat. Nothing dispatched.
 | C1  | verifier | DONE | A1b | 3 |
 | C2a | verifier | DONE | C1 | 4 (#616, 13 review rounds) |
 | A1c | native reference | DONE | — | 4 (#612, #595 closed) |
-| C2b | verifier | WIP | C2a, A2, B1 | 5 (curia codex vs grok) |
-| C3  | verifier | TODO | C2b, B2 | 6 (claude) |
+| C2b | verifier | DONE | C2a, A2, B1 | 5 (#621; single seat — grok 402) |
+| C3  | verifier | WIP | C2b, B2 | 6 (claude; running) |
 
 ## Dispatch waves
 
@@ -98,9 +98,22 @@ gate; `tests/` is flat. Nothing dispatched.
   (#614). Corpus: origins as measured; bands 13/23/23/12/13/17/33; ambiguity doc01 4,
   doc04 2, others 0.
 
+## Wave 5 closed (2026-09-05)
+
+- **C2b** merged (#621, `d82a0f2`): the recovery crop is addressed by page geometry through the
+  ordinal chain (native and model chains from the header origin, i = j = b), the #614 prefix rule,
+  and the column test; row-label items only; abstain is a separate outcome that never lifts;
+  lift signatures carry address + method provenance. Frozen gate PASS: 14 remaining items, 3
+  addressed (doc05 (4,4,4) (6,6,6) (8,8,8)), 11 abstained, A2 clears preserved. Curia degraded to
+  one seat (grok: 402 Grok Build balance exhausted); Sonnet ACCEPT ×2, Codex brain seat
+  APPROVE-FOR-PR after two holes past the first ACCEPT (numeric cells addressed; legacy lifts
+  bypassing geometry).
+
 ## Next action
 
-C2b in flight (curia, worktrees off `maindf3d4`). Prediction artifact:
-`logs/2026-09-05_C2b-prediction.md` at `35df3d4` — 3 addressed / 11 abstained of 14. On accept:
-PR, CI on the exact head, merge, then wave 6: C3 corpus re-run under B2's discipline against the
-pinned `~/repos/.worktrees/socr-vi-B2` replaced by a fresh pin at the C2b merge.
+**C3 running** since 16:51 on `~/repos/.worktrees/socr-vi-C3` pinned at `d82a0f2`, intended
+`socr_source_digest` `720a5822…`, outputs `~/Data/socr/vi-C3-2026-09-05/`. On completion: verify all
+20 sidecars carry the intended digest; tabulate ACCEPTED / WITHHELD / UNVERIFIED, lifted / held /
+abstained, cost, per-stage minutes; compare to run 2 line by line with the full cause taxonomy;
+`docs/log/2026-09-05_ladder-corpus-run-3.md`. The hard gate was A2's frozen replay; this is the
+report.
