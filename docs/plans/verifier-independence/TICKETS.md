@@ -135,7 +135,12 @@ tables appear in the report regardless; `absent_text`, `neighbour_capture`, and 
 are logged on their own line, **out of that denominator**, and keep their justified
 dispositions. If A1b's findings invalidate 3/3, the gate is **revised explicitly in
 TICKETS.md before implementation** — never shrunk silently; **zero false accepts** on the row-swap and
-neighbouring-label controls; A1 output for the 4 non-target tables byte-identical before/after;
+neighbouring-label controls; A1 output for the 4 non-target tables **not worse** before/after — every
+recorded item persists identically or disappears because the SAME root cause A2 fixed also
+produced it (**amended 2026-09-05 before merge**: "byte-identical" became unachievable once A1b
+classed doc01 p2's dropped `2` as the same 0.001 pt region-edge clip as doc02's stubs;
+`_words_in_region` is one shared function and may not special-case pages; doc01 p2 goes 1 → 0
+items and is recorded in the ticket log as a same-cause clear, not a regression);
 full suite green; ruff format clean.
 
 ## Stream B — latency instrumentation
