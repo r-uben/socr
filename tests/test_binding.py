@@ -1537,6 +1537,50 @@ def test_math_font_subscript_band_folds_into_the_line_above():
     assert any(label.strip() == "1t" for label in below_labels)
 
 
+def test_text_fold_does_not_hop_into_a_numeric_row():
+    """A numeric-free marker already remapped onto a numeric row must not
+    become a hop for a later text group. ``*`` shares RowB's line and
+    folds into it; a shorter ``a`` under the star would follow that hop
+    unless the resolved destination is required to be numeric-free."""
+    from socr.tables.binding import _assign_bands
+
+    words = [
+        (50, 100, 90, 106, "RowA", 0, 0, 0),
+        (150, 100, 180, 106, "1.0", 0, 0, 1),
+        (50, 110, 90, 116, "RowB", 0, 1, 0),
+        (150, 110, 180, 116, "2.0", 0, 1, 1),
+        (185, 104, 190, 111, "*", 0, 1, 2),
+        (186, 107, 189, 110, "a", 0, 99, 0),
+    ]
+    _centers, y_to_band = _assign_bands(words)
+    assert y_to_band[round(104)] == y_to_band[round(110)]
+    assert y_to_band[round(107)] != y_to_band[round(110)]
+
+
+def test_annotation_under_label_is_not_folded():
+    """Negative control: 'see note a' under a label satisfies union-span
+    overlap but is not a subscript (no annotation word sits inside one
+    parent word). Native label with vs without the annotation is identical."""
+    from socr.tables.binding import _native_rows, _words_in_region
+
+    payload = _a2_load("annotation_under_label.json")
+    words = _a2_words(payload)
+    region = tuple(payload["region"])
+    annotation = {"see", "note", "a"}
+    without = [word for word in words if word[4] not in annotation]
+
+    def _label(word_list):
+        rows, _, _ = _native_rows(_words_in_region(word_list, region))
+        data = [row for row in rows if not row.is_parent]
+        assert data
+        return data[0].row_path[-1]
+
+    assert _label(words) == _label(without)
+    assert _label(words) == "Large T"
+    assert "see" not in _label(words)
+    assert "note" not in _label(words)
+
+
 def test_shape2_numeric_inside_label_is_not_swallowed_by_widening():
     """Autopsy shape 2 control: ``500`` at a data-lane x must stay a value.
     Pin the difference between a candidate that matches the cut native label

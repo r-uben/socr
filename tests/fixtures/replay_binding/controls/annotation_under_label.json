@@ -1,0 +1,16 @@
+{
+  "_comment": "VI-A2 negative control: a smaller 'see note a' line sits under the row label, y-boxes overlap, union x-span contained. That is an annotation, not a math subscript — each annotation word is not contained in any one parent word. Required: native label unchanged with vs without the annotation (zero difference).",
+  "region": [40, 60, 400, 200],
+  "markdown": "| | OLS | IV |\n| --- | --- | --- |\n| Large T | 0.05 | 0.06 |\n",
+  "words": [
+    [140, 70, 170, 80, "OLS", 0, 0, 0],
+    [240, 70, 270, 80, "IV", 0, 0, 1],
+    [50, 100, 90, 111, "Large", 0, 1, 0],
+    [95, 100, 115, 111, "T", 0, 1, 1],
+    [52, 107, 68, 114, "see", 0, 2, 0],
+    [70, 107, 88, 114, "note", 0, 2, 1],
+    [90, 107, 102, 114, "a", 0, 2, 2],
+    [150, 100, 180, 110, "0.05", 0, 1, 2],
+    [250, 100, 280, 110, "0.06", 0, 1, 3]
+  ]
+}
