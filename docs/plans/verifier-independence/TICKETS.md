@@ -127,7 +127,12 @@ accepting more. Do **not** touch `native_rows.py`.
 **Files:** `src/socr/tables/binding.py`, `tests/test_binding.py`,
 `tests/test_tr1_rowizer.py`, `tests/test_gh331_stub_labels.py`,
 `tests/test_table_header_gh146.py`, `tests/fixtures/replay_binding/` (controls).
-**Done when:** on frozen replay, **3/3 target tables cleared of false native-label clamps**;
+**Done when:** on frozen replay, **3/3 target tables cleared of false native-label clamps**
+(**revised 2026-09-05 before merge, PR pending: 2/3 — doc04 p3 is withdrawn from A2's
+denominator.** A1b classed it as the math-font shape, not the rowizer shape; the curia build
+found no page-derived geometry that separates a math subscript from a short annotation under
+a label, and abstained rather than merge — a fold that admits `(a)` into a label is worse than
+no fold. doc04 moves to a new ticket in the math-font lane, #219/#140 family. N becomes 7);
 **N/N unresolved target labels reconstructed** against the rendered source, where **N =
 A1b's native-side subset only** (`shredded_label`, `bbox_truncated`), with A1b's
 classifications **frozen before repair starts** (A2 may not reclassify); all three target
@@ -135,7 +140,12 @@ tables appear in the report regardless; `absent_text`, `neighbour_capture`, and 
 are logged on their own line, **out of that denominator**, and keep their justified
 dispositions. If A1b's findings invalidate 3/3, the gate is **revised explicitly in
 TICKETS.md before implementation** — never shrunk silently; **zero false accepts** on the row-swap and
-neighbouring-label controls; A1 output for the 4 non-target tables byte-identical before/after;
+neighbouring-label controls; A1 output for the 4 non-target tables **not worse** before/after — every
+recorded item persists identically or disappears because the SAME root cause A2 fixed also
+produced it (**amended 2026-09-05 before merge**: "byte-identical" became unachievable once A1b
+classed doc01 p2's dropped `2` as the same 0.001 pt region-edge clip as doc02's stubs;
+`_words_in_region` is one shared function and may not special-case pages; doc01 p2 goes 1 → 0
+items and is recorded in the ticket log as a same-cause clear, not a regression);
 full suite green; ruff format clean.
 
 ## Stream B — latency instrumentation
