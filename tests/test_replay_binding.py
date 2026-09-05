@@ -8,6 +8,7 @@ for the whole module to prove nothing in this path shells out to either.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -426,3 +427,41 @@ def test_labels_absent_entirely_reported_as_unavailable():
     rows = replay_page(record, labels=None)
     assert "no --labels file" in rows[0].label_accuracy
     assert "no --labels file" in rows[0].crop_coverage
+
+
+@pytest.mark.parametrize("field", ["token", "verdict", "reason", "kind", "order", "missing"])
+def test_frozen_gate_rejects_prediction_copy_changed_without_artifact(monkeypatch, tmp_path, field):
+    """An authenticated markdown hash must not bless a different JSON oracle."""
+    import socr.benchmark.replay_binding as replay_binding_module
+
+    root = Path(__file__).resolve().parents[1]
+    fixture_relative = Path("tests/fixtures/replay_binding/controls/c2b_prediction.json")
+    prediction = json.loads((root / fixture_relative).read_text())
+    artifact = tmp_path / prediction["artifact"]
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes((root / prediction["artifact"]).read_bytes())
+    corpus = tmp_path / prediction["corpus_name"]
+    corpus.mkdir()
+    manifest = corpus / "SHA256SUMS"
+    manifest.write_bytes(b"")
+    prediction["manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    fixture = tmp_path / fixture_relative
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text(json.dumps(prediction))
+    monkeypatch.setattr(
+        replay_binding_module, "__file__", str(tmp_path / "src/socr/benchmark/replay_binding.py")
+    )
+
+    assert replay_binding_module._frozen_prediction(corpus) == prediction
+    if field == "order":
+        prediction["verdicts"].reverse()
+    elif field == "missing":
+        prediction["verdicts"].pop()
+    else:
+        index = {"kind": 3, "token": 4, "verdict": 5, "reason": 6}[field]
+        prediction["verdicts"][0][index] = "tampered"
+    fixture.write_text(json.dumps(prediction))
+
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest() == prediction["artifact_sha256"]
+    with pytest.raises(AssertionError, match="JSON verdicts differ from the markdown artifact"):
+        replay_binding_module._frozen_prediction(corpus)

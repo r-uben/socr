@@ -1,0 +1,152 @@
+{
+  "artifact": "docs/plans/verifier-independence/logs/2026-09-05_C2b-prediction.md",
+  "artifact_sha256": "dce5e33c825ce51656b0bc412e902aa5ca9d47af1cc06422b99b0d0120c52f79",
+  "corpus_name": "ladder-run2-2026-09-04",
+  "manifest_sha256": "95bbc235c4e4574663317c013ef5d86c2fa3e993876ec98656b632564584f3b5",
+  "verdicts": [
+    [
+      "doc03",
+      1,
+      "p1-t0",
+      "row_label",
+      "S&P|",
+      "abstained",
+      "column test: leftmost line crosses R or second line starts before R"
+    ],
+    [
+      "doc03",
+      1,
+      "p1-t0",
+      "row_label",
+      "|R$^{2}$",
+      "abstained",
+      "native chain breaks at native row 3 (band 2)"
+    ],
+    [
+      "doc04",
+      3,
+      "p3-t0",
+      "row_label",
+      "1t 1t|**ROTATED PCs** $\\math",
+      "abstained",
+      "no origin (no second rule group)"
+    ],
+    [
+      "doc05",
+      1,
+      "p1-t0",
+      "row_label",
+      "∆Slope (3m)|$\\Delta$ Slope (3m)",
+      "addressed",
+      "(i,j,b)=(6,6,6) cell=(72.0,235.4,203.3,247.3)"
+    ],
+    [
+      "doc05",
+      1,
+      "p1-t0",
+      "row_label",
+      "∆log Comm. price (3m)|$\\Delta \\log$ Comm. pr",
+      "addressed",
+      "(i,j,b)=(8,8,8) cell=(72.0,271.2,203.3,283.2)"
+    ],
+    [
+      "doc05",
+      1,
+      "p1-t0",
+      "row_label",
+      "|$R^2$",
+      "abstained",
+      "native chain breaks at native row 13 (band 12)"
+    ],
+    [
+      "doc05",
+      1,
+      "p1-t0",
+      "row_label",
+      "∆log S&P|$\\Delta \\log$ S&P 500 ",
+      "addressed",
+      "(i,j,b)=(4,4,4) cell=(72.0,199.5,203.3,211.5)"
+    ],
+    [
+      "doc05",
+      1,
+      "p1-t0",
+      "row_label",
+      "Sample 1988:1–2019:12 |Sample",
+      "abstained",
+      "native chain breaks at native row 13 (band 12)"
+    ],
+    [
+      "doc05",
+      1,
+      "p1-t0",
+      "row_label",
+      "Policy surprise mps mp|Policy surprise",
+      "abstained",
+      "native chain breaks at native row 13 (band 12)"
+    ],
+    [
+      "doc07",
+      1,
+      "p1-t0",
+      "row_label",
+      "∆Slope (3m)|$\\Delta \\text{ Slope (",
+      "abstained",
+      "no column edge"
+    ],
+    [
+      "doc07",
+      1,
+      "p1-t0",
+      "row_label",
+      "∆log Comm. price (3m)|$\\Delta \\log \\text{ Co",
+      "abstained",
+      "no column edge"
+    ],
+    [
+      "doc07",
+      1,
+      "p1-t0",
+      "row_label",
+      "|R$^2$",
+      "abstained",
+      "no column edge"
+    ],
+    [
+      "doc07",
+      1,
+      "p1-t0",
+      "row_label",
+      "∆log S&P|$\\Delta \\log \\text{ S\\",
+      "abstained",
+      "no column edge"
+    ],
+    [
+      "doc07",
+      1,
+      "p1-t0",
+      "row_label",
+      "Sample 1988:1–2019:12 |Sample",
+      "abstained",
+      "no column edge"
+    ]
+  ],
+  "cleared_tables": [
+    [
+      "doc01",
+      2,
+      "p2-t0"
+    ],
+    [
+      "doc02",
+      3,
+      "p3-t0"
+    ],
+    [
+      "doc02",
+      4,
+      "p4-t0"
+    ]
+  ],
+  "token_prefix_length": 22
+}

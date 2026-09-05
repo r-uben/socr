@@ -17,7 +17,7 @@ verdict. A contradiction is disproved when either:
    Bind() compared a codebook/error string to markdown, so the
    comparison is invalid, not a content disagreement.
 2. **Independent raster transcription (constrained model role).** A
-   transcriber is shown ONLY the native word's bbox crop. It never sees
+   transcriber is shown ONLY the geometry-addressed cell crop. It never sees
    the markdown, the native string, the contradiction, or a PASS/FAIL
    schema. It returns a token. Disproof is: that token agrees with the
    markdown token AND disagrees with the native token, using the same
@@ -38,7 +38,8 @@ markdown checksum and the contradiction signature set both match.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from typing import Callable, Literal
 
 from socr.tables.binding import BindingResult, ContradictedCell, RowLabelContradiction
@@ -76,9 +77,30 @@ class ContradictionItem:
     native_token: str
     model_token: str
     native_bbox: tuple[float, float, float, float] | None = None
+    cell_bbox: tuple[float, float, float, float] | None = None
+    address_source: str | None = None
+    abstain_reason: str | None = None
 
     def signature(self) -> tuple[str, tuple[str, ...], tuple[str, ...], str, str]:
         return (self.kind, self.row_path, self.col_path, self.native_token, self.model_token)
+
+    def lift_signature(self) -> tuple:
+        """Bind reusable evidence to its address and verification method.
+
+        A reused lift retains the original method, rather than replacing it
+        with ``prior_lift``. Legacy native-crop signatures cannot match.
+        """
+        provenance = json.dumps(
+            {
+                "address_source": self.address_source,
+                "cell_bbox": self.cell_bbox,
+                "method": "encoding_garbage"
+                if token_is_encoding_garbage(self.native_token)
+                else "geometry_cell_transcription",
+            },
+            sort_keys=True,
+        )
+        return (*self.signature(), provenance)
 
     def to_record(self, disproof: DisproofKind | None) -> dict:
         return {
@@ -88,6 +110,11 @@ class ContradictionItem:
             "native_token": self.native_token,
             "model_token": self.model_token,
             "disproof": disproof,
+            "native_bbox": self.native_bbox,
+            "cell_bbox": self.cell_bbox,
+            "address_source": self.address_source,
+            "abstain_reason": self.abstain_reason,
+            "outcome": ItemOutcome(self, disproof).outcome,
         }
 
 
@@ -95,6 +122,12 @@ class ContradictionItem:
 class ItemOutcome:
     item: ContradictionItem
     disproof: DisproofKind | None
+
+    @property
+    def outcome(self) -> Literal["disproved", "held", "abstained"]:
+        if self.disproof is not None:
+            return "disproved"
+        return "abstained" if self.item.cell_bbox is None else "held"
 
 
 @dataclass(frozen=True)
@@ -109,7 +142,7 @@ class AdjudicationRecord:
         return {
             "status": self.status,
             "markdown_sha256": self.markdown_sha256,
-            "signatures": [list(outcome.item.signature()) for outcome in self.items],
+            "signatures": [list(outcome.item.lift_signature()) for outcome in self.items],
             "items": [outcome.item.to_record(outcome.disproof) for outcome in self.items],
         }
 
@@ -158,6 +191,17 @@ def items_from_binding(result: BindingResult) -> tuple[ContradictionItem, ...]:
     return tuple(items)
 
 
+def adjudication_text_lines(page, region) -> list[dict]:
+    """Expose the geometry lane's lines for the adjudicator's column test.
+
+    Keep locate's private representation inside the tables package; the
+    orchestrator must use the same lines that established the row bands.
+    """
+    from socr.tables.locate import _text_lines_in_region
+
+    return _text_lines_in_region(page, region)
+
+
 def _item_from_cell(cell: ContradictedCell) -> ContradictionItem:
     return ContradictionItem(
         kind="cell",
@@ -203,14 +247,16 @@ def prior_lift_applies(prior: object, markdown: str, items: tuple[ContradictionI
         prior_sigs = sorted(tuple(_coerce_signature(sig)) for sig in raw_sigs)
     except (TypeError, ValueError):
         return False
-    current_sigs = sorted(item.signature() for item in items)
+    current_sigs = sorted(item.lift_signature() for item in items)
     return prior_sigs == current_sigs
 
 
-def _coerce_signature(raw: object) -> tuple[str, tuple[str, ...], tuple[str, ...], str, str]:
-    if not isinstance(raw, (list, tuple)) or len(raw) != 5:
+def _coerce_signature(raw: object) -> tuple:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 6:
         raise ValueError("bad signature")
-    kind, row_path, col_path, native, model = raw
+    kind, row_path, col_path, native, model, provenance = raw
+    if not isinstance(provenance, str):
+        raise ValueError("bad address provenance")
     if kind not in ("cell", "row_label"):
         raise ValueError("bad kind")
     if not isinstance(row_path, (list, tuple)) or not isinstance(col_path, (list, tuple)):
@@ -221,6 +267,7 @@ def _coerce_signature(raw: object) -> tuple[str, tuple[str, ...], tuple[str, ...
         tuple(str(p) for p in col_path),
         str(native),
         str(model),
+        provenance,
     )
 
 
@@ -233,7 +280,7 @@ def adjudicate(
 ) -> AdjudicationRecord:
     """Decide whether *every* contradiction is independently disproved.
 
-    ``transcribe`` is given a native bbox and returns a token or None.
+    ``transcribe`` is given a geometry cell bbox and returns a token or None.
     It is not called for encoding-garbage items or when a matching prior
     lift already covers the whole set. A missing transcriber (None) is
     absence of evidence, not a conviction of either side.
@@ -242,7 +289,15 @@ def adjudicate(
     if not items:
         return AdjudicationRecord(status="held", markdown_sha256=digest, items=())
 
-    if prior_lift_applies(prior, markdown, items):
+    items = tuple(
+        replace(item, abstain_reason=item.abstain_reason or "no geometry address")
+        if item.cell_bbox is None and not token_is_encoding_garbage(item.native_token)
+        else item
+        for item in items
+    )
+    if all(
+        item.cell_bbox is not None or token_is_encoding_garbage(item.native_token) for item in items
+    ) and prior_lift_applies(prior, markdown, items):
         outcomes = tuple(ItemOutcome(item=item, disproof="prior_lift") for item in items)
         return AdjudicationRecord(status="lifted", markdown_sha256=digest, items=outcomes)
 
@@ -263,9 +318,9 @@ def _disprove_one(
 ) -> DisproofKind | None:
     if token_is_encoding_garbage(item.native_token):
         return "encoding_garbage"
-    if transcribe is None or item.native_bbox is None:
+    if transcribe is None or item.cell_bbox is None:
         return None
-    token = transcribe(item.native_bbox)
+    token = transcribe(item.cell_bbox)
     if not token:
         return None
     if not tokens_agree(token, item.model_token, kind=item.kind):
