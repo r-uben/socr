@@ -310,15 +310,15 @@ def row_bands_from_lines(page, region: tuple[float, float, float, float]) -> lis
     lines = _text_lines_in_region(page, region)
     if not lines:
         return []
-    groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
+    groups, reason, flagged = _group_lines_by_baseline_with_reason(lines)
     return [
         RowBand(
             y0=min(ln["bbox"][1] for ln in group),
             y1=max(ln["bbox"][3] for ln in group),
-            source="line" if ambiguity is None else "line-ambiguous",
-            ambiguity=ambiguity,
+            source="line-ambiguous" if i in flagged else "line",
+            ambiguity=reason if i in flagged else None,
         )
-        for group in groups
+        for i, group in enumerate(groups)
     ]
 
 
@@ -465,7 +465,9 @@ def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
     return _group_lines_by_baseline_with_reason(lines)[0]
 
 
-def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[dict]], str | None]:
+def _group_lines_by_baseline_with_reason(
+    lines: list[dict],
+) -> tuple[list[list[dict]], str | None, set[int]]:
     """Group text-line dicts into printed rows by vertical-extent overlap.
 
     Returns ``(groups, ambiguity)``. ``ambiguity`` is ``None`` when the
@@ -486,18 +488,55 @@ def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[d
     guess).
     """
     if len(lines) < 3:
-        return [], None
+        return [], None, set()
     ordered = sorted(lines, key=lambda ln: ln["baseline"])
     by_base: dict[float, list[dict]] = {}
     for ln in ordered:
         by_base.setdefault(ln["baseline"], []).append(ln)
     baselines = sorted(by_base)
     if len(baselines) == 1:
-        return [ordered], None
-    gaps = [b - a for a, b in zip(baselines, baselines[1:])]
+        return [ordered], None, set()
+    groups: list[list[dict]] = [list(by_base[baselines[0]])]
+    flagged: set[int] = set()
+    for key in baselines[1:]:
+        verdict = _boundary_verdict(groups[-1], by_base[key])
+        if verdict == "merge":
+            groups[-1].extend(by_base[key])
+            continue
+        if verdict == "ambiguous":
+            flagged.add(len(groups) - 1)
+            flagged.add(len(groups))
+        groups.append(list(by_base[key]))
+    reason = (
+        None
+        if not flagged
+        else f"{len(flagged)} band(s) adjoin a sub-size boundary with no merge evidence"
+    )
+    return groups, reason, flagged
 
-    def _union_box(key: float) -> tuple[float, float, float, float]:
-        group = by_base[key]
+
+def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
+    """Decide ONE consecutive-baseline boundary from the two lines' own geometry.
+
+    Returns ``"separate"``, ``"merge"`` or ``"ambiguous"``. Per boundary — a
+    wide gap elsewhere in the region is no evidence about this one (Codex
+    seat: uncertain boundaries retain their ambiguity independently).
+
+    * gap ≥ the smaller font size ⇒ ``separate``: a subscript never sits a
+      full em below its base.
+    * below that, ``merge`` only with positive evidence that the lower text
+      belongs to the upper row: each baseline lies inside the other line's
+      box (a split same-line span, or jitter — a following row's baseline
+      sits below the upper box's descender), or the lower text is
+      smaller type whose x-span lies inside the upper line's x-span (a
+      subscript under its base — doc04's shape).
+    * otherwise ``ambiguous``: tight leading between two real rows is
+      geometrically indistinguishable from an annotation line, so the
+      boundary is kept and surfaced, never guessed.
+    No literal: every bound is the two lines' own boxes and sizes.
+    """
+
+    def _union(group: list[dict]) -> tuple[float, float, float, float]:
         return (
             min(ln["bbox"][0] for ln in group),
             min(ln["bbox"][1] for ln in group),
@@ -505,68 +544,23 @@ def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[d
             max(ln["bbox"][3] for ln in group),
         )
 
-    # Evidence against merging comes from EVERY observed row-capable pair, not
-    # from a majority pitch: a merge must exceed the overlap of any pair that
-    # could itself be two rows (Codex seat: majority support alone cannot
-    # license merging a real short row of a different gap class).
-    adjacent_overlap = 0.0
-    row_capable_pairs = 0
-
-    def _size(key: float) -> float:
-        return min(ln["size"] for ln in by_base[key])
-
-    for a, b, gap in zip(baselines, baselines[1:], gaps):
-        box_a, box_b = _union_box(a), _union_box(b)
-        if _row_capable(gap, _size(a), _size(b)):
-            row_capable_pairs += 1
-            adjacent_overlap = max(adjacent_overlap, _y_overlap(box_a, box_b))
-    reason = _pitch_ambiguity(row_capable_pairs)
-    if reason is not None:
-        logger.debug("row separation uncertifiable (%s): one band per unique baseline", reason)
-        return [list(by_base[b]) for b in baselines], reason
-    groups: list[list[dict]] = [[ordered[0]]]
-    for cur in ordered[1:]:
-        band_box = (
-            min(ln["bbox"][0] for ln in groups[-1]),
-            min(ln["bbox"][1] for ln in groups[-1]),
-            max(ln["bbox"][2] for ln in groups[-1]),
-            max(ln["bbox"][3] for ln in groups[-1]),
-        )
-        if _y_overlap(band_box, cur["bbox"]) > adjacent_overlap:
-            groups[-1].append(cur)
-        else:
-            groups.append([cur])
-    return groups, None
-
-
-def _row_capable(gap: float, size_a: float, size_b: float) -> bool:
-    """Whether two consecutive unique baselines *can* be separate printed rows.
-
-    Two rows of type cannot sit closer than the smaller of their font sizes —
-    at a baseline gap below that the glyphs collide — so such a gap is a
-    subscript, an annotation, or jitter, never a row step. The bound is the
-    lines' own ``size`` (not the bbox height, which carries ascender/descender
-    allowance and would call ordinary 1.2× leading sub-line). No literal.
-    """
-    return gap >= min(size_a, size_b)
-
-
-def _pitch_ambiguity(row_capable_pairs: int) -> str | None:
-    """Reason the region cannot certify any row separation, or None.
-
-    Row separation is established only by observed row-capable pairs
-    (``_row_capable``). With none, every gap is below its lines' heights and
-    nothing distinguishes a tight row step from an annotation: over-split and
-    say so, rather than guess.
-    """
-    if row_capable_pairs == 0:
-        return "no row-capable baseline gap (every gap below its lines' font size)"
-    return None
-
-
-def _y_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
-    """Shared vertical span of two ``(x0, y0, x1, y1)`` boxes, or 0."""
-    return max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    ub, lb = _union(upper), _union(lower)
+    size_u = min(ln["size"] for ln in upper)
+    size_l = min(ln["size"] for ln in lower)
+    gap = lower[0]["baseline"] - upper[0]["baseline"]
+    if gap >= min(size_u, size_l):
+        return "separate"
+    # Same physical line: each baseline lies inside the other's box. A split
+    # same-line span or jitter satisfies this; a following row never does —
+    # its baseline sits below the upper box's descender, and the upper
+    # baseline sits above the lower box's top.
+    inside_vertically = (ub[1] <= lower[0]["baseline"] < ub[3]) and (
+        lb[1] <= upper[0]["baseline"] < lb[3]
+    )
+    subscript_shape = size_l < size_u and lb[0] >= ub[0] and lb[2] <= ub[2]
+    if inside_vertically or subscript_shape:
+        return "merge"
+    return "ambiguous"
 
 
 def _rules_are_one_border(y_a: float, y_b: float, lines: list[dict]) -> bool:

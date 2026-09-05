@@ -309,7 +309,7 @@ def test_row_bands_nonuniform_pitch_does_not_merge():
         _box_line(9.5, 9.5, 19.5),
         _box_line(19.1, 19.1, 29.1),
     ]
-    groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
+    groups, ambiguity, _flagged = _group_lines_by_baseline_with_reason(lines)
     assert len(groups) == 3
     assert [ln["baseline"] for g in groups for ln in g] == [0.0, 9.5, 19.1]
     # Every gap (9.5, 9.6) is below the 10 pt type: no pair can be certified as
@@ -330,7 +330,7 @@ def test_row_bands_tied_modal_pitch_does_not_merge():
         _box_line(28.6, 28.6, 38.6),
         _box_line(38.2, 38.2, 48.2),
     ]
-    groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
+    groups, ambiguity, _flagged = _group_lines_by_baseline_with_reason(lines)
     assert len(groups) == 5
     assert ambiguity is not None  # 9.5/9.6 gaps under 10 pt type: uncertifiable
 
@@ -347,7 +347,7 @@ def test_row_bands_alternating_gaps_certified_by_row_capable_pairs():
         _box_line(40.0, 40.0, 50.0),
         _box_line(60.0, 60.0, 70.0),
     ]
-    groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
+    groups, ambiguity, _flagged = _group_lines_by_baseline_with_reason(lines)
     assert len(groups) == 5
     assert ambiguity is None
 
@@ -430,18 +430,44 @@ def test_ordinal_origin_two_doubled_borders_only_is_none():
     assert ordinal_origin(page, region) is None
 
 
-def test_label_column_edge_none_when_wrapped_label_collapses_r():
-    """A wrapped-label row must not report the label's own x0 as R.
-
-    The wrap sits in the same band as the first label line, so its x0
-    is a non-leftmost candidate and R collapses onto the label column
-    — the same degeneracy as R == region.x0. Return None.
+def test_label_column_edge_equal_size_wrap_is_an_ambiguous_band_and_r_is_the_data_column():
+    """An equal-size wrap 6 pt under a 9 pt label is geometrically a tight
+    row or a continuation — no evidence either way — so its boundary is
+    ambiguous: the wrap is its own band, flagged, and the column edge is the
+    real data column (150), not a collapse. C2b abstains on that row only.
     """
     _, page = _new_page()
     page.insert_text((_LABEL_X, 140.0), "Central government net", fontsize=9)
-    page.insert_text((_LABEL_X, 146.0), "debt", fontsize=9)  # 6 pt wrap
+    page.insert_text((_LABEL_X, 146.0), "debt", fontsize=9)
     page.insert_text((_COL1_X, 146.0), "1.0", fontsize=9)
     page.insert_text((_COL2_X, 146.0), "2.0", fontsize=9)
+    for y, a, b, lab in (
+        (170.0, "4.0", "5.0", "Other row"),
+        (200.0, "6.0", "7.0", "Third"),
+        (230.0, "8.0", "9.0", "Fourth"),
+    ):
+        page.insert_text((_LABEL_X, y), lab, fontsize=9)
+        page.insert_text((_COL1_X, y), a, fontsize=9)
+        page.insert_text((_COL2_X, y), b, fontsize=9)
+    region = (_REGION_X0, 120.0, _REGION_X1, 250.0)
+    bands = row_bands_from_lines(page, region)
+    assert sum(1 for b in bands if b.ambiguity) == 2  # both sides of the ambiguous boundary
+    assert label_column_edge(page, region) == _COL1_X
+
+
+def test_label_column_edge_none_when_wrapped_label_collapses_r():
+    """A wrapped-label row must not report the label's own x0 as R.
+
+    The wrap (smaller type, inside the label's x-span) merges into the first
+    label line's band, so its x0 is a non-leftmost candidate and R collapses
+    onto the label column — the same degeneracy as R == region.x0. Return None.
+    """
+    _, page = _new_page()
+    page.insert_text((_LABEL_X, 140.0), "Central government net", fontsize=9)
+    # smaller-type wrap inside the label span, alone on its baseline: merges
+    page.insert_text((_LABEL_X, 146.0), "debt", fontsize=7)
+    page.insert_text((_COL1_X, 140.0), "1.0", fontsize=9)
+    page.insert_text((_COL2_X, 140.0), "2.0", fontsize=9)
     page.insert_text((_LABEL_X, 170.0), "Other row", fontsize=9)
     page.insert_text((_COL1_X, 170.0), "4.0", fontsize=9)
     page.insert_text((_COL2_X, 170.0), "5.0", fontsize=9)
