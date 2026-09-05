@@ -1,6 +1,6 @@
 # STATUS — verifier-independence
 
-Last updated: 2026-09-05 (wave 1 merged, wave 2 started)
+Last updated: 2026-09-05 (waves 1–3 closed)
 
 ## Stage
 
@@ -35,7 +35,7 @@ gate; `tests/` is flat. Nothing dispatched.
 | B1  | latency | DONE | — | 1 |
 | A1b | native reference | DONE | A1 | 2 (claude) |
 | B2  | latency | DONE | B1 | 2 (claude) |
-| A2  | native reference | WIP | A1b | 3 (curia) |
+| A2  | native reference | DONE | A1b | 3 (curia, 2/3 — doc04 → #603) |
 | C1  | verifier | DONE | A1b | 3 |
 | C2a | verifier | TODO | C1 | 4 |
 | C2b | verifier | TODO | C2a, A2, B1 | 5 |
@@ -69,8 +69,27 @@ gate; `tests/` is flat. Nothing dispatched.
   A1b records source digest + rendered crops as the baseline artefact *before* A2, and labels
   reconstructed-baseline geometry separately from current geometry.
 
+## Waves 2–3 closed (2026-09-05)
+
+- **A1b** (autopsy): 8/8 target crops truncated by `native_bbox`; three native defect shapes; the
+  corpus's one lift was padding luck. `labels.json` + `a1b-crops/` frozen with the corpus.
+- **B2** (baseline): 7.0 min/page on one digest; `route` overhead 38 % = `extract` 38 %; ladder 13 %;
+  no stage > 50 %. `logs/2026-09-05_B2-latency.md`, `_B2-timings.tsv`.
+- **C1** (design, 4 Codex rounds): no table on the corpus has per-row or vertical rules — the
+  rules-only stream C addressed 0/22. Ruling: rules-else-text-line bands with the same
+  origin-relative ordinal chain on native, model and band; abstain otherwise. **3/22 addressable
+  today; 3 of 14 remaining after A2.** Two negative controls mandated for C2b. Surfaced #600
+  (`round(y0)` row split), #601 (model spacer row breaks the chain).
+- **A2** (#602, curia codex vs grok, 4 rounds): root cause was NOT the rowizer — seven stubs sit
+  0.001–0.002 pt outside the witness region and top-left containment dropped them. Fix: word
+  centroid in the closed region box. Subscript fold for doc04 abstained (no geometry separates a
+  subscript from a `(a)` note) → gate revised to 2/3, N=7, doc04 → #603. Codex's build projected
+  the missing stub from a donor row (native inventing text) — disqualified.
+
 ## Next action
 
-Wave 2, both Claude inline: **B2** fresh timed baseline on the frozen 20 pages under B2's run
-discipline (pinned checkout `mainc1b284`, explicit `PYTHONPATH`, one digest) ∥ **A1b** autopsy
-of the 8 failed-disproof crops + census of all 12 class-(c) items + Fed p3.
+**Rewrite C2a before dispatch.** Its ticket text still says `row_bands_from_rules` over
+`_horizontal_rules`; C1 rev 4 replaced that with text-line bands + `label_column_edge` + the
+ordinal chain from the header rule (`bind()` must expose `native_rows` / `row_binding` on
+`BindingResult`). Then wave 4: C2a (`locate.py` + that `BindingResult` surface), gated on C1.
+C2b prediction artifact = C1 §(d) at 3/22.
