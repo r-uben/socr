@@ -225,7 +225,8 @@ exist, and `bind()` does not expose the two lists the ordinal chain needs.
 bands whose baselines differ by less than the smaller of their font sizes; where per-row rules
 exist, `row_bands_from_rules` supplies the edges instead; `label_column_edge(bands, region)` —
 `R₀ = min x0` over all non-leftmost lines, shrunk to a whitespace edge as C1 §(a) specifies
-(fixed point in ≤ 2 passes), returning `None` when no `R > region.x0` exists;
+(iterate to convergence — ≤ 2 passes was *observed* on this corpus, it is not a limit),
+returning `None` when no `R > region.x0` exists;
 `ordinal_origin(page, region)` — cluster the region's horizontal rules by y (rules closer than a
 rule thickness are one border), return the y of the **second** group, `None` when there is no
 second group (scanned pages). Every bound is derived from the page's own type sizes and rule
