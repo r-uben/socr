@@ -96,7 +96,7 @@ unchanged; `~/venvs/socr/bin/pytest tests/test_replay_binding.py -q`
 exits 0 with `ollama` and `qwen-ocr` absent from `PATH`; `uvx ruff@0.16.0 format --check .`
 clean.
 
-### TICKET-A1b — failed-disproof autopsy · TODO · depends-on: A1 · wave 2 · agent: claude
+### TICKET-A1b — failed-disproof autopsy · DONE · depends-on: A1 · wave 2 · agent: claude
 **Problem:** The 8 failed disproofs and the 3 native-label-blocked tables have never been
 looked at cell by cell, and the "native bbox truncates the crop" claim is a hypothesis.
 **Do:** Run A1 on the frozen corpus. Census **all 12** class-(c) items the run-2 log counts
@@ -113,7 +113,7 @@ identifies which of the 3 blocked tables are `shredded_label` vs `bbox_truncated
 denominator), and answers the hypothesis in one line with a count (`M of 8 crops
 truncated by native_bbox`).
 
-### TICKET-A2 — binder row-label repair (#331 / #418 / #146) · TODO · depends-on: A1b · wave 3
+### TICKET-A2 — binder row-label repair (#331 / #418 / #146) · DONE (2/3, #602) · depends-on: A1b · wave 3
 **Problem:** The binder's own rowizer truncates, runs-on, or shreds row labels on the 3 target
 tables (`Treasury inst. forward rate` missing `3Y`/`5Y`/`10Y` on doc02 p3/p4; shredded subscript
 `1t 1t` on doc04 p3), so the free reference contradicts a correct model token and the table is
@@ -150,7 +150,7 @@ full suite green; ruff format clean.
 
 ## Stream B — latency instrumentation
 
-### TICKET-B1 — per-page, per-stage exclusive wall-clock · TODO · depends-on: none · wave 1
+### TICKET-B1 — per-page, per-stage exclusive wall-clock · DONE (#594) · depends-on: none · wave 1
 **Problem:** 8.0 min/page and nothing in the sidecar, manifest, or CLI says where it
 goes.
 **Do:** Time each stage of the page loop in `_phase_agentic` — `route`, `extract`,
@@ -175,7 +175,7 @@ was defined as the sum),
 with timings on and off; existing golden/byte-identity tests unchanged. Patches:
 `_available_engines_for_agentic`, `_resolve_judge_model`.
 
-### TICKET-B2 — latency breakdown on the frozen corpus · TODO · depends-on: B1 · wave 2 · agent: claude
+### TICKET-B2 — latency breakdown on the frozen corpus · DONE · depends-on: B1 · wave 2 · agent: claude
 **Problem:** Run-2's 8.0 min/page is confounded (three `socr_source_digest` values mid-run) and
 has no per-stage breakdown. B2 establishes a **fresh** timed baseline under **one digest** with
 B1 in tree — not an explanation of the confounded 8.0.
@@ -195,7 +195,7 @@ stage that owns > 50 % of wall-clock, or stating no stage does.
 
 ## Stream C — verifier independence
 
-### TICKET-C1 — design: geometry-addressed cell correspondence + abstain rule · TODO · depends-on: A1b · wave 3
+### TICKET-C1 — design: geometry-addressed cell correspondence + abstain rule · DONE (rev 4, #599) · depends-on: A1b · wave 3
 **Problem:** The disproof crop is addressed by the native bbox (self-witness); the
 model's structure would let the candidate choose where it is examined (mirror hole); a
 union crop is unsafe because `tokens_agree` checks text, not location.
@@ -215,7 +215,7 @@ over {ruled, booktabs} × {row found, not} × {column found, not}, (c) the `bind
 `adjudication.py` / `orchestrator.py:5200-5310` fields and branches that change, (d) ≤ 3
 named decisions for the owner.
 
-### TICKET-C2a — line-band / column-edge / origin helpers + `BindingResult` surface · TODO · depends-on: C1 · wave 4
+### TICKET-C2a — line-band / column-edge / origin helpers + `BindingResult` surface · WIP · depends-on: C1 · wave 4
 **Problem:** C1 (rev 4, `logs/2026-09-05_C1-design.md` §(a)) measured that **no table on the
 corpus has per-row or vertical rules**, so the address must come from PDF text-line geometry
 inside the witness region, counted from an origin neither lane supplies. None of those helpers
@@ -252,9 +252,11 @@ before/after. Full suite green; ruff format clean.
 addressed by the lane it is checking. This is the architectural change the owner authorised.
 **Do:** Exactly C1 §(c). `adjudication.py`: `ContradictionItem` gains `cell_bbox`,
 `address_source`, `abstain_reason` (`native_bbox` stays, audit only, never transcribed);
-`_disprove_one` transcribes `cell_bbox` and returns the new `"abstained"` `DisproofKind` when
-it is `None` **without calling `transcribe`**; `adjudicate` treats `abstained` as not a
-disproof (a table with any abstained item cannot be `lifted`); `to_record` emits both new
+`_disprove_one` transcribes `cell_bbox`; when it is `None` it returns **no disproof** and the
+item carries `abstain_reason` — `abstained` is a **separate outcome, never a `DisproofKind`**
+(#604: extending `DisproofKind` would let `all(o.disproof is not None)` count an abstention
+as a lift); `adjudicate` computes `lifted` only when every item has a *real* disproof kind,
+and any abstention ⇒ `held`, pinned by a test that an all-abstained table is not lifted; `to_record` emits both new
 fields. `orchestrator.py:_adjudicate_clamped_table` builds the ordinal chain from
 `BindingResult.native_rows` + `.row_binding` + C2a's bands/origin/edge, per C1 §(a)
 conditions 1–4 (native chain **and** model chain from the same origin; `i = j = b`), attaches
@@ -326,3 +328,19 @@ where it differs, names the class that moved it.
 agy wanted C3 as a strict `ACCEPTED ≥ 10/18` gate; Codex argued a live-run quota rewards
 acceptance volume over justified acceptance and that the frozen replay is the only
 deterministic gate. Plan follows Codex; agy's number is kept as the *expectation*.
+
+### TICKET-A1c — replay harness: witness/locate failure is not a binder delta (#595) · TODO · depends-on: none · wave 4
+**Problem:** `replay_table` returns `((), note)` when the current tree cannot produce a fresh
+bind (table_id missing among witnesses, witness not `LOCATED`, no native words), and
+`replay_page` still emits a normal comparison row with empty fresh items — so every recorded
+item shows as "frozen-only", i.e. as cleared. C2b's frozen-replay gate and A2-style oracles
+would pass on a broken witness. A false binder delta is worse than a missing row.
+**Do:** When `replay_table` returns a non-empty `note`, mark the row `unreplayable` with that
+note (the same path provenance ambiguity already uses), never `multiset_match=False` with an
+empty fresh side; the CLI prints `UNREPLAYABLE`. Add the three failure cases as hermetic
+fixtures.
+**Files:** `src/socr/benchmark/replay_binding.py`, `tests/test_replay_binding.py`,
+`tests/fixtures/replay_binding/`.
+**Done when:** the three fixtures each yield `unreplayable=True`, `added=removed=()`, and
+the note; the frozen-corpus output (7 rows) is byte-identical before/after; full suite green;
+ruff format clean.
