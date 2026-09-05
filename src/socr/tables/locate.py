@@ -495,14 +495,6 @@ def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[d
     if len(baselines) == 1:
         return [ordered], None
     gaps = [b - a for a, b in zip(baselines, baselines[1:])]
-    min_height = min(ln["bbox"][3] - ln["bbox"][1] for ln in ordered)
-    reason = _pitch_ambiguity(gaps, min_height)
-    if reason is not None:
-        logger.debug("line pitch ambiguous (%s): one band per unique baseline", reason)
-        return [list(by_base[b]) for b in baselines], reason
-
-    cluster = _pitch_clusters(gaps, min_height)[0]
-    pitch_lo, pitch_hi = cluster[0], cluster[-1]
 
     def _union_box(key: float) -> tuple[float, float, float, float]:
         group = by_base[key]
@@ -513,10 +505,25 @@ def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[d
             max(ln["bbox"][3] for ln in group),
         )
 
+    # Evidence against merging comes from EVERY observed row-capable pair, not
+    # from a majority pitch: a merge must exceed the overlap of any pair that
+    # could itself be two rows (Codex seat: majority support alone cannot
+    # license merging a real short row of a different gap class).
     adjacent_overlap = 0.0
+    row_capable_pairs = 0
+
+    def _size(key: float) -> float:
+        return min(ln["size"] for ln in by_base[key])
+
     for a, b, gap in zip(baselines, baselines[1:], gaps):
-        if pitch_lo <= gap <= pitch_hi:
-            adjacent_overlap = max(adjacent_overlap, _y_overlap(_union_box(a), _union_box(b)))
+        box_a, box_b = _union_box(a), _union_box(b)
+        if _row_capable(gap, _size(a), _size(b)):
+            row_capable_pairs += 1
+            adjacent_overlap = max(adjacent_overlap, _y_overlap(box_a, box_b))
+    reason = _pitch_ambiguity(row_capable_pairs)
+    if reason is not None:
+        logger.debug("row separation uncertifiable (%s): one band per unique baseline", reason)
+        return [list(by_base[b]) for b in baselines], reason
     groups: list[list[dict]] = [[ordered[0]]]
     for cur in ordered[1:]:
         band_box = (
@@ -532,58 +539,28 @@ def _group_lines_by_baseline_with_reason(lines: list[dict]) -> tuple[list[list[d
     return groups, None
 
 
-def _modal_value(values: list[float]) -> float:
-    """The most frequent value in *values*; on a tie, the larger one."""
-    counts: dict[float, int] = {}
-    for v in values:
-        counts[v] = counts.get(v, 0) + 1
-    best = max(counts.values())
-    return max(v for v, n in counts.items() if n == best)
+def _row_capable(gap: float, size_a: float, size_b: float) -> bool:
+    """Whether two consecutive unique baselines *can* be separate printed rows.
 
-
-def _pitch_clusters(gaps: list[float], min_line_height: float) -> list[list[float]]:
-    """Cluster unique-baseline gaps into candidate pitches, largest cluster first.
-
-    Two gaps belong to one pitch when they differ by less than the smallest
-    gap in the region: distinct row pitches differ by at least one row step
-    (a one-line row step vs a two-line row step differ by a whole step),
-    while rendering jitter is a fraction of a point. Sorted gaps are walked
-    once and split at any step of at least ``min(gaps)``. No literal — the
-    bound is the region's own row spacing. (``min_line_height`` is kept for
-    the signature's stability; the split bound is the smallest gap.)
+    Two rows of type cannot sit closer than the smaller of their font sizes —
+    at a baseline gap below that the glyphs collide — so such a gap is a
+    subscript, an annotation, or jitter, never a row step. The bound is the
+    lines' own ``size`` (not the bbox height, which carries ascender/descender
+    allowance and would call ordinary 1.2× leading sub-line). No literal.
     """
-    if not gaps:
-        return []
-    ordered = sorted(gaps)
-    bound = ordered[0]
-    clusters: list[list[float]] = [[ordered[0]]]
-    for g in ordered[1:]:
-        if g - clusters[-1][-1] < bound:
-            clusters[-1].append(g)
-        else:
-            clusters.append([g])
-    return sorted(clusters, key=lambda c: (-len(c), c[0]))
+    return gap >= min(size_a, size_b)
 
 
-def _pitch_ambiguity(gaps: list[float], min_line_height: float) -> str | None:
-    """Reason the unique-baseline gaps do not certify a line pitch, or None.
+def _pitch_ambiguity(row_capable_pairs: int) -> str | None:
+    """Reason the region cannot certify any row separation, or None.
 
-    Ambiguous when (1) there are no gaps, (2) the largest pitch cluster has
-    a single member (every gap is its own pitch — nothing repeats), or
-    (3) two clusters tie for the largest membership (two row pitches are
-    equally supported, e.g. alternating 10 / 20 pt). Jitter of one pitch
-    (gaps within a line height of each other) is one cluster and is NOT
-    ambiguous — the pitch is certified at the cluster's *minimum*, the
-    conservative choice (largest adjacent-row overlap ⇒ fewest merges).
-    Over-split rather than guess when ambiguous.
+    Row separation is established only by observed row-capable pairs
+    (``_row_capable``). With none, every gap is below its lines' heights and
+    nothing distinguishes a tight row step from an annotation: over-split and
+    say so, rather than guess.
     """
-    clusters = _pitch_clusters(gaps, min_line_height)
-    if not clusters:
-        return "no gaps"
-    if len(clusters[0]) == 1:
-        return "no gap value repeats within a line height"
-    if len(clusters) > 1 and len(clusters[1]) == len(clusters[0]):
-        return "tied pitch clusters"
+    if row_capable_pairs == 0:
+        return "no row-capable baseline gap (every gap below its lines' font size)"
     return None
 
 

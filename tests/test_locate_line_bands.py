@@ -287,9 +287,9 @@ def test_row_bands_nonuniform_pitch_does_not_merge():
     groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
     assert len(groups) == 3
     assert [ln["baseline"] for g in groups for ln in g] == [0.0, 9.5, 19.1]
-    # 9.5 / 9.6 is ONE pitch with jitter, certified at its minimum (9.5): the
-    # adjacent-row overlap is then 0.5, and the 0.5-overlap pair is not merged.
-    assert ambiguity is None
+    # Every gap (9.5, 9.6) is below the 10 pt type: no pair can be certified as
+    # two rows, so nothing merges and the region says so — over-split, surfaced.
+    assert ambiguity is not None
 
 
 def test_row_bands_tied_modal_pitch_does_not_merge():
@@ -307,13 +307,14 @@ def test_row_bands_tied_modal_pitch_does_not_merge():
     ]
     groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
     assert len(groups) == 5
-    assert ambiguity is None  # jitter, not a tie: certified conservatively
+    assert ambiguity is not None  # 9.5/9.6 gaps under 10 pt type: uncertifiable
 
 
-def test_row_bands_genuinely_tied_pitch_clusters_are_ambiguous():
-    """Alternating 10 / 20 pt gaps on 10 pt boxes: two pitch clusters with
-    equal membership. No pitch is certified, no merge is decided, and the
-    reason is surfaced — the difference from the jitter case above."""
+def test_row_bands_alternating_gaps_certified_by_row_capable_pairs():
+    """Alternating 10 / 20 pt gaps on 10 pt type: every pair is row-capable
+    (gap ≥ size), the pairs overlap by 0, so a merge would need overlap > 0
+    and none has it — 5 rows, certified, no ambiguity. A majority pitch is
+    not consulted; each observed row-capable pair is evidence."""
     lines = [
         _box_line(0.0, 0.0, 10.0),
         _box_line(10.0, 10.0, 20.0),
@@ -323,7 +324,7 @@ def test_row_bands_genuinely_tied_pitch_clusters_are_ambiguous():
     ]
     groups, ambiguity = _group_lines_by_baseline_with_reason(lines)
     assert len(groups) == 5
-    assert ambiguity == "tied pitch clusters"
+    assert ambiguity is None
 
 
 def test_row_bands_from_lines_marks_ambiguous_pitch_on_every_band(tmp_path):
@@ -345,7 +346,7 @@ def test_row_bands_from_lines_marks_ambiguous_pitch_on_every_band(tmp_path):
     assert bands and all(b.source == "line" and b.ambiguity is None for b in bands)
     certified.close()
 
-    ambiguous, page = _page([0, 10, 30, 40, 60])
+    ambiguous, page = _page([0, 8, 16, 24, 32])  # every gap below the 10 pt type
     bands = row_bands_from_lines(page, (0, 0, 300, 300))
     assert bands and all(b.source == "line-ambiguous" and b.ambiguity for b in bands)
     ambiguous.close()
