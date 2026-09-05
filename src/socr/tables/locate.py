@@ -176,13 +176,7 @@ def _horizontal_rules(page) -> list[tuple[float, float, float]]:
 
 
 def _horizontal_rules_with_thickness(page) -> list[tuple[float, float, float, float]]:
-    """Like ``_horizontal_rules`` but keeps each rule's drawn stroke thickness.
-
-    ``ordinal_origin`` needs the thickness to decide whether two close rules
-    are one drawn border (e.g. booktabs' doubled ``\\toprule``) or two
-    distinct rules — the same page-derived quantity a reader would use, never
-    a tuned constant.
-    """
+    """Like ``_horizontal_rules`` but keeps each rule's drawn stroke thickness."""
     try:
         drawings = page.get_drawings()
     except Exception as exc:  # pragma: no cover - defensive
@@ -304,11 +298,13 @@ def row_bands_from_rules(
 def row_bands_from_lines(page, region: tuple[float, float, float, float]) -> list[RowBand]:
     """Group PDF text lines inside ``region`` into row bands.
 
-    One printed row = one band: consecutive lines merge into the same band
-    when their baselines differ by less than the *smaller* of their two font
-    sizes (C1 §(a)) — a bound drawn from the page's own type size, never a
-    tuned constant. No text layer (a scanned region) returns no bands: that
-    is an abstain input, not a guess.
+    One printed row = one band: a new line joins the current band when its
+    baseline is within the smaller of (the band's first/anchor font size,
+    its own) of that *anchor* baseline (C1 §(a)) — a bound drawn from the
+    page's own type size, never a tuned constant. Comparing to the previous
+    line instead is transitive and collapses a run of rows whose leading is
+    slightly under 1 em. No text layer (a scanned region) returns no bands:
+    that is an abstain input, not a guess.
     """
     lines = _text_lines_in_region(page, region)
     if not lines:
@@ -352,30 +348,25 @@ def ordinal_origin(page, region: tuple[float, float, float, float]) -> float | N
 
     Two rules close together are one drawn border rather than two distinct
     rules — booktabs' doubled top/bottom rule, drawn as two hairlines a
-    couple of points apart, well under any real inter-rule spacing on the
-    page. A single line's own drawn stroke width is not itself that
-    distance (it stays a hairline regardless of how far apart the two
-    rules of a doubled border sit), so the merge distance is instead
-    derived from the region's own type size: half the smallest font size
-    of any text line in the region — small enough to never bridge a
-    genuine rule-to-content gap, and measured on the corpus (doc01, doc02,
-    doc03) to sit right between the doubled-border gap (~2.4pt) and the
-    next-smallest genuine rule gap (~17pt+). A region with rules but no
-    text at all falls back to the widest rule's own thickness. ``None``
-    when fewer than two rules, or fewer than two groups, exist — a scanned
-    page has no vector rules at all, so every item on it abstains.
+    couple of points apart. The merge distance is derived from the
+    region's own rule geometry only: sort the consecutive inter-rule gaps
+    and split at the natural break (the largest ratio jump that actually
+    separates two gap classes). A single gap class — no doubled rules,
+    every consecutive ratio the same geometric progression — has no break
+    and nothing merges. No font-size input, no literal point threshold.
+    ``None`` when fewer than two rules, or fewer than two groups, exist —
+    a scanned page has no vector rules at all, so every item on it
+    abstains.
     """
     x0, y0, x1, y1 = region
     rules = sorted(
-        r
-        for r in _horizontal_rules_with_thickness(page)
-        if y0 <= r[0] <= y1 and _rule_overlaps_span(r, x0, x1)
+        r for r in _horizontal_rules(page) if y0 <= r[0] <= y1 and _rule_overlaps_span(r, x0, x1)
     )
     if len(rules) < 2:
         return None
-    lines = _text_lines_in_region(page, region)
-    merge_gap = min(ln["size"] for ln in lines) / 2.0 if lines else max(r[3] for r in rules)
-    groups: list[list[tuple[float, float, float, float]]] = [[rules[0]]]
+    ys = [r[0] for r in rules]
+    merge_gap = _inter_rule_merge_gap([b - a for a, b in zip(ys, ys[1:])])
+    groups: list[list[tuple[float, float, float]]] = [[rules[0]]]
     for rule in rules[1:]:
         prev = groups[-1][-1]
         if rule[0] - prev[0] < merge_gap:
@@ -396,8 +387,9 @@ def label_column_edge(page, region: tuple[float, float, float, float]) -> float 
     straddles it, ``R`` moves left to that line's own ``x0``. Fixed point
     observed in <=2 passes on the corpus this was measured against — an
     observation, not a limit. ``None`` on a one-column region (every row has
-    exactly one line) or when no candidate lies right of the region's own
-    left edge.
+    exactly one line), when no candidate lies right of the region's own
+    left edge, or when ``R`` collapses onto the leftmost text (a wrapped
+    label's own ``x0`` is not a column edge).
     """
     lines = _text_lines_in_region(page, region)
     if not lines:
@@ -417,8 +409,15 @@ def label_column_edge(page, region: tuple[float, float, float, float]) -> float 
         if narrower >= edge:
             break
         edge = narrower
-    region_x0 = region[0]
-    return edge if edge > region_x0 else None
+    # R is a column edge only if it sits strictly right of the region's
+    # left bound *and* of the leftmost text — a wrapped label's own x0
+    # is not a column edge (it is the label column collapsing onto the
+    # region's left content edge, the same outcome as R == region.x0
+    # when the label is flush with the box).
+    content_x0 = min(ln["x0"] for ln in lines)
+    if edge <= region[0] or edge <= content_x0:
+        return None
+    return edge
 
 
 def band_index_for(bands: list[RowBand], y_mid: float) -> int | None:
@@ -460,18 +459,71 @@ def _text_lines_in_region(page, region: tuple[float, float, float, float]) -> li
 def _group_lines_by_baseline(lines: list[dict]) -> list[list[dict]]:
     """Group text-line dicts into printed rows by baseline proximity.
 
-    Consecutive lines merge when their baselines differ by less than the
-    smaller of their two font sizes — the page's own type size, not a tuned
-    constant.
+    A new line joins the current band only when its baseline is within
+    the smaller of (the band's first/anchor line's font size, its own
+    font size) of that *anchor* baseline — not of the previous line.
+    Pairwise-adjacent clustering is transitive and collapses a run of
+    printed rows whose leading is slightly under 1 em into one band.
     """
+    if not lines:
+        return []
     ordered = sorted(lines, key=lambda ln: ln["baseline"])
     groups: list[list[dict]] = [[ordered[0]]]
-    for prev, cur in zip(ordered, ordered[1:]):
-        if cur["baseline"] - prev["baseline"] < min(prev["size"], cur["size"]):
+    for cur in ordered[1:]:
+        anchor = groups[-1][0]
+        if cur["baseline"] - anchor["baseline"] < min(anchor["size"], cur["size"]):
             groups[-1].append(cur)
         else:
             groups.append([cur])
     return groups
+
+
+def _inter_rule_merge_gap(gaps: list[float]) -> float:
+    """Merge threshold from the region's own consecutive inter-rule gaps.
+
+    Sort the gaps and split at the natural break — the largest ratio
+    jump that actually separates two gap *classes*. Float-twin copies of
+    one magnitude (a doubled pair measured at both top and bottom) collapse
+    first: the leading consecutive ratio is a twin when it is closer to 1
+    than to the next ratio (``r0² < r1``). After that:
+
+    * one remaining magnitude → a single gap class, nothing merges
+      (threshold 0);
+    * one remaining ratio → that jump *is* the class break;
+    * several ratios → the largest jump is the candidate. It is a
+      small-end class break only when it dominates every later jump
+      (``r0 > max(later)²``: the small-end ratio is more of a class
+      change than the later jumps are relative to 1). When a later jump
+      is larger (a huge body span), recurse on the small side to find
+      the doubled-rule break there.
+
+    Derived from the region's own rule geometry only — no font size, no
+    literal point threshold. The midpoint of the two magnitudes at the
+    break is the threshold (a gap equal to either magnitude then falls
+    cleanly on one side of a strict ``<``).
+    """
+    vals = sorted(g for g in gaps if g > 0.0)
+    if len(vals) < 2:
+        return 0.0
+    while len(vals) >= 3:
+        r0 = vals[1] / vals[0]
+        r1 = vals[2] / vals[1]
+        if r0 * r0 < r1:
+            vals = [vals[0], *vals[2:]]
+        else:
+            break
+    ratios = [vals[i + 1] / vals[i] for i in range(len(vals) - 1)]
+    if not ratios:
+        return 0.0
+    if len(ratios) == 1:
+        return (vals[0] + vals[1]) / 2.0
+    best_i = max(range(len(ratios)), key=lambda i: ratios[i])
+    later_max = max(ratios[1:])
+    if best_i == 0 and ratios[0] > later_max * later_max:
+        return (vals[0] + vals[1]) / 2.0
+    if best_i > 0:
+        return _inter_rule_merge_gap(vals[: best_i + 1])
+    return 0.0
 
 
 def _rule_overlaps_span(rule: tuple, x0: float, x1: float) -> bool:

@@ -142,6 +142,91 @@ def test_band_index_for():
     assert band_index_for(bands, 100.0) is None
 
 
+def test_ordinal_origin_merges_doubled_rule_on_small_type():
+    """6 pt table, 4 pt doubled-rule gap: the pair is one border.
+
+    Half the body font (3 pt) would split them and land the origin on the
+    second hairline. The region's own rule-gap natural break merges the
+    pair, so the origin is the header rule.
+    """
+    _, page = _new_page()
+    _draw_rule(page, 80.0, width=0.5)
+    _draw_rule(page, 84.0, width=0.5)  # 4 pt doubled pair
+    page.insert_text((_LABEL_X, 95.0), "Hdr", fontsize=6)
+    page.insert_text((_COL1_X, 95.0), "c1", fontsize=6)
+    _draw_rule(page, 110.0, width=0.5)  # header / mid rule — the origin
+    page.insert_text((_LABEL_X, 125.0), "A", fontsize=6)
+    page.insert_text((_COL1_X, 125.0), "1", fontsize=6)
+    page.insert_text((_LABEL_X, 140.0), "B", fontsize=6)
+    page.insert_text((_COL1_X, 140.0), "2", fontsize=6)
+    region = (_REGION_X0, 70.0, _REGION_X1, 160.0)
+
+    origin = ordinal_origin(page, region)
+    assert origin == pytest.approx(110.0, abs=0.01)
+
+
+def test_ordinal_origin_does_not_merge_distinct_rules_on_large_type():
+    """24 pt table, two distinct rules 8 pt apart: they stay two groups.
+
+    Half the body font (12 pt) would merge them and drop the origin
+    (only one group). The region's own rule gaps are a single class, so
+    nothing merges and the origin is the second rule.
+    """
+    _, page = _new_page()
+    _draw_rule(page, 80.0, width=1.0)
+    _draw_rule(page, 88.0, width=1.0)  # 8 pt — distinct, not a doubled pair
+    page.insert_text((_LABEL_X, 120.0), "Alpha", fontsize=24)
+    page.insert_text((_COL1_X, 120.0), "1.0", fontsize=24)
+    region = (_REGION_X0, 70.0, _REGION_X1, 160.0)
+
+    origin = ordinal_origin(page, region)
+    assert origin == pytest.approx(88.0, abs=0.01)
+
+
+def test_row_bands_anchor_not_pairwise_chain():
+    """6 rows at a 9.5 pt baseline step on 10 pt type stay six bands.
+
+    Each printed row has a continuation line 9.5 pt below its start
+    (10 pt type). Pairwise-adjacent clustering is transitive: 9.5 < 10
+    and the 2.5 pt gap from that continuation to the next row is also
+    < 10, so the whole run collapses into one band. Comparing each new
+    line to the band's first (anchor) baseline keeps the six rows.
+    """
+    _, page = _new_page()
+    fontsize = 10.0
+    row_step = 12.0
+    wrap = 9.5
+    for i in range(6):
+        y = 120.0 + i * row_step
+        page.insert_text((_LABEL_X, y), f"Row{i}", fontsize=fontsize)
+        page.insert_text((_COL1_X, y), f"{i}.0", fontsize=fontsize)
+        page.insert_text((_LABEL_X, y + wrap), "x", fontsize=fontsize)
+    region = (_REGION_X0, 100.0, _REGION_X1, 220.0)
+
+    bands = row_bands_from_lines(page, region)
+    assert len(bands) == 6
+
+
+def test_label_column_edge_none_when_wrapped_label_collapses_r():
+    """A wrapped-label row must not report the label's own x0 as R.
+
+    The wrap sits in the same band as the first label line, so its x0
+    is a non-leftmost candidate and R collapses onto the label column
+    — the same degeneracy as R == region.x0. Return None.
+    """
+    _, page = _new_page()
+    page.insert_text((_LABEL_X, 140.0), "Central government net", fontsize=9)
+    page.insert_text((_LABEL_X, 146.0), "debt", fontsize=9)  # 6 pt wrap
+    page.insert_text((_COL1_X, 146.0), "1.0", fontsize=9)
+    page.insert_text((_COL2_X, 146.0), "2.0", fontsize=9)
+    page.insert_text((_LABEL_X, 170.0), "Other row", fontsize=9)
+    page.insert_text((_COL1_X, 170.0), "4.0", fontsize=9)
+    page.insert_text((_COL2_X, 170.0), "5.0", fontsize=9)
+    region = (_REGION_X0, 120.0, _REGION_X1, 190.0)
+
+    assert label_column_edge(page, region) is None
+
+
 # ---------------------------------------------------------------------------
 # Frozen-corpus check (C1's measured origins). Skipped in CI — no corpus.
 # ---------------------------------------------------------------------------
