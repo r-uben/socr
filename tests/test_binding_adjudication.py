@@ -120,6 +120,28 @@ class TestTokensAgree:
         assert not tokens_agree(r"\logx y", "logx y", kind="row_label")
         assert tokens_agree(r"\log y", "log y", kind="row_label")
 
+    def test_sentinel_strings_from_earlier_rounds_do_not_collide_with_literal_prose(
+        self,
+    ) -> None:
+        """GH-585 review round 4: rounds 2/3 represented a Greek letter or an
+        unsupported command as an ordinary STRING folded into
+        ``normalize_label``'s flat key, so a label that happened to spell
+        that sentinel text out in prose falsely agreed with the real Greek
+        letter/unsupported command. ``label_key``'s structured tuple can
+        never collide with prose this way — a ``("greek", ...)``/``("cmd",
+        ...)`` tag is a different tuple shape from ``("lit", ...)``
+        regardless of what the literal text says."""
+        assert not tokens_agree("α Coefficient", "greekalpha Coefficient", kind="row_label")
+        assert not tokens_agree(r"\logx y", "unmappedlogx y", kind="row_label")
+
+    def test_variant_unicode_glyph_agrees_with_its_variant_command(self) -> None:
+        """GH-585 review round 4: a native PDF's text layer can emit the
+        variant-glyph codepoint directly (``ϑ`` U+03D1) instead of the base
+        letter; it must agree with its ``\\vartheta`` command counterpart,
+        not the base ``\\theta``/``θ`` letter."""
+        assert tokens_agree("ϑ Coefficient", r"$\vartheta$ Coefficient", kind="row_label")
+        assert not tokens_agree("ϑ Coefficient", r"$\theta$ Coefficient", kind="row_label")
+
 
 class TestAdjudicate:
     def test_all_abstained_is_held_and_never_transcribes_native_bbox(self) -> None:

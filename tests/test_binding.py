@@ -463,6 +463,55 @@ def test_gh585_unsupported_word_command_does_not_falsely_agree_through_bind():
         assert result.structural_agreement is False
 
 
+def test_gh585_sentinel_string_from_an_earlier_round_does_not_falsely_agree_through_bind():
+    """GH-585 review round 4: rounds 2/3 represented a Greek letter as an
+    ordinary STRING folded into ``normalize_label``'s flat key
+    (``"greekalpha"``), so a label that happens to spell that sentinel
+    text out in prose would falsely agree with the real Greek letter.
+    ``label_key``'s structured tuple can never collide with prose this
+    way; the native row is a genuine contradiction against the typed
+    sentinel word."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "α Coefficient"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                          | OLS  |
+|--------------------------|------|
+| greekalpha Coefficient   | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert len(result.row_label_contradictions) == 1
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is False
+
+
+def test_gh585_variant_unicode_glyph_agrees_with_its_variant_command_through_bind():
+    """GH-585 review round 4: a native PDF's text layer can emit the
+    variant-glyph codepoint directly (``ϑ`` U+03D1) instead of the base
+    letter; it must agree with its ``\\vartheta`` command counterpart
+    through the full binder path, not be convicted as a shifted label."""
+    words = [
+        w(140, 70, 170, 80, "OLS"),
+        w(50, 100, 140, 110, "ϑ Coefficient"),
+        w(150, 100, 180, 110, "0.95"),
+    ]
+    candidate = r"""
+|                              | OLS  |
+|------------------------------|------|
+| $\vartheta$ Coefficient      | 0.95 |
+"""
+
+    result = bind(words, candidate)
+
+    assert result.row_label_contradictions == []
+    assert result.row_label_unverifiable is False
+    assert result.structural_agreement is True
+
+
 # ---------------------------------------------------------------------------
 # GH-582: inline-math wrapping is presentation, not a value/label change
 # ---------------------------------------------------------------------------

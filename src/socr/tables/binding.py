@@ -85,7 +85,6 @@ from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 
-from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import (
     _WELL_SEPARATED_GAP_PT,
     _cluster_x_positions,
@@ -93,7 +92,8 @@ from socr.tables.native_verifier import (
     _normalize_numeric_token,
     _well_separated_lanes_in_row,
     is_numeric_token,
-    strip_math_presentation,
+    label_key,
+    label_key_is_bare_symbolic,
     strip_presentation,
 )
 
@@ -979,9 +979,9 @@ def _bind_rows(
             native_row = native_rows[native_idx]
             candidate_label = grid_rows[cand_idx][0].strip()
             native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
-            labels_match = bool(candidate_label and native_label) and normalize_label(
-                strip_math_presentation(candidate_label, label=True)
-            ) == normalize_label(strip_math_presentation(native_label, label=True))
+            labels_match = bool(candidate_label and native_label) and label_key(
+                candidate_label
+            ) == label_key(native_label)
             if not labels_match:
                 return False
             if not candidate_multiset:
@@ -1409,15 +1409,19 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
         native_row = native_rows[native_idx]
         native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
         same_presence = bool(candidate_label) == bool(native_label)
-        candidate_key = normalize_label(strip_math_presentation(candidate_label, label=True))
-        native_key = normalize_label(strip_math_presentation(native_label, label=True))
-        if candidate_label and native_label and (not candidate_key or not native_key):
+        candidate_key = label_key(candidate_label)
+        native_key = label_key(native_label)
+        candidate_unprovable = not candidate_key or label_key_is_bare_symbolic(candidate_key)
+        native_unprovable = not native_key or label_key_is_bare_symbolic(native_key)
+        if candidate_label and native_label and (candidate_unprovable or native_unprovable):
             # The shared row-label normalizer intentionally handles prose
             # labels, presentation, and footnotes; it does not canonicalize
             # mathematical notation (for example native ``β`` versus model
-            # ``$\\beta$``). A non-empty label that normalizes to no key is
-            # therefore not evidence of a mismatch. Fail closed as
-            # unverifiable rather than falsely convicting or silently passing.
+            # ``$\\beta$`` -- a bare symbolic label, GH-585's
+            # ``label_key_is_bare_symbolic``). A non-empty label that keys
+            # to nothing provable is therefore not evidence of a mismatch.
+            # Fail closed as unverifiable rather than falsely convicting or
+            # silently passing.
             result.row_label_unverifiable = True
             unverifiable_paths.append(tuple(native_row.row_path))
         elif not same_presence or candidate_key != native_key:

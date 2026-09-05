@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import pytest
 
-from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import (
     _normalize_numeric_token,
     _numeric_multiset_from_tokens,
     is_numeric_token,
+    label_key,
+    label_key_is_bare_symbolic,
     strip_math_presentation,
     strip_presentation,
 )
@@ -215,16 +216,14 @@ def test_gh582_numeric_path_unwraps_a_balanced_whole_token_wrap():
     ],
 )
 def test_gh585_greek_command_and_word_command_labels_agree(native, model):
-    """GH-585: a Greek-letter command (``\\Delta``) must fold to the same
-    non-ASCII symbol ``normalize_label`` strips on both sides, and a plain
+    """GH-585: a Greek-letter command (``\\Delta``) must key to the same
+    ``("greek", ...)`` token as the native Unicode symbol, and a plain
     alphabetic word command (``\\log``) must lose only its backslash — on
     ``main`` (GH-582 fix only) these two pairs still contradict because
     ``\\Delta`` survives as the spelled-out ASCII word ``delta``, which
     ``normalize_label`` does NOT discard the way it discards the native
     ``∆`` symbol."""
-    native_key = normalize_label(strip_math_presentation(native, label=True))
-    model_key = normalize_label(strip_math_presentation(model, label=True))
-    assert native_key == model_key
+    assert label_key(native) == label_key(model)
 
 
 def test_gh585_a_real_text_difference_still_disagrees_after_the_map():
@@ -233,30 +232,34 @@ def test_gh585_a_real_text_difference_still_disagrees_after_the_map():
     and must still fail to match after the Greek/escape/word-command map."""
     native = "∆log S&P"
     model = r"$\Delta \log \text{ S\&P 500 (3m)}$"
-    native_key = normalize_label(strip_math_presentation(native, label=True))
-    model_key = normalize_label(strip_math_presentation(model, label=True))
-    assert native_key != model_key
+    assert label_key(native) != label_key(model)
 
 
 @pytest.mark.parametrize(
-    ("command", "expected"),
+    ("command", "tag"),
     [
-        (r"\Delta", "∆"),
-        (r"\beta", "β"),
-        (r"\Sigma", "Σ"),
+        (r"\Delta", "capdelta"),
+        (r"\beta", "beta"),
+        (r"\Sigma", "capsigma"),
     ],
 )
-def test_gh585_greek_command_table_maps_to_unicode(command, expected):
-    assert strip_math_presentation(command, label=True) == expected
+def test_gh585_greek_command_keys_to_its_tag(command, tag):
+    """GH-585 review round 4: the Greek command's identity now lives in
+    ``label_key()``'s structured tuple, not in a plain string
+    ``strip_math_presentation`` returns -- a bare command with no other
+    content is the "bare symbolic" shape (see the UNVERIFIABLE test
+    below), so this checks the tag directly rather than equality with
+    another label."""
+    assert label_key(command) == (("greek", tag),)
 
 
-def test_gh585_variant_greek_command_transliterates_to_its_own_distinct_token():
-    """GH-585 review round 2/3: ``\\varepsilon`` is a DIFFERENT glyph from
-    ``\\epsilon`` (not established to be the same symbol in this corpus,
-    unlike the U+0394/U+2206 Delta pair) — it must fold to its own
-    ``greekvarepsilon`` token, never to the base letter's token."""
-    assert strip_math_presentation(r"$\varepsilon$ x", label=True) == "greekvarepsilon  x"
-    assert strip_math_presentation(r"$\epsilon$ x", label=True) == "greekepsilon  x"
+def test_gh585_variant_greek_command_keys_to_its_own_distinct_tag():
+    """GH-585 review round 2/3/4: ``\\varepsilon`` is a DIFFERENT glyph
+    from ``\\epsilon`` (not established to be the same symbol in this
+    corpus, unlike the U+0394/U+2206 Delta pair) — it must key to its own
+    ``varepsilon`` tag, never to the base letter's tag."""
+    assert label_key(r"$\varepsilon$ x") == (("greek", "varepsilon"), ("lit", "x"))
+    assert label_key(r"$\epsilon$ x") == (("greek", "epsilon"), ("lit", "x"))
 
 
 @pytest.mark.parametrize(
@@ -265,30 +268,35 @@ def test_gh585_variant_greek_command_transliterates_to_its_own_distinct_token():
         (r"\&", "&"),
         (r"\%", "%"),
         (r"\_", "_"),
-        (r"\$", ""),  # GH-582: bare `$` is a delimiter, dropped like any other.
+        (r"\$", "$"),
         (r"\#", "#"),
     ],
 )
-def test_gh585_escaped_punctuation_unescapes(escaped, expected):
-    assert strip_math_presentation(escaped, label=True) == expected
+def test_gh585_escaped_punctuation_unescapes_in_the_cell_path(escaped, expected):
+    assert strip_math_presentation(escaped, label=False) == expected
 
 
 @pytest.mark.parametrize("command", [r"\log", r"\ln", r"\exp"])
-def test_gh585_alphabetic_word_commands_drop_only_the_backslash(command):
-    assert strip_math_presentation(command, label=True) == command[1:]
+def test_gh585_alphabetic_word_commands_key_as_the_bare_word(command):
+    """GH-585 review round 4: a real, verified LaTeX operator is a textual
+    equivalence, not a symbol -- it folds into the surrounding literal
+    text (a ``("lit", ...)`` token), not a ``("greek", ...)``/``("cmd",
+    ...)`` tag."""
+    assert label_key(command) == (("lit", command[1:]),)
 
 
-def test_gh585_unsupported_word_command_keeps_its_backslash():
-    """GH-585 review round 2/3: only the standard LaTeX math-operator names
-    lose their backslash. An unverified/unsupported command (``\\logx`` --
-    not a real LaTeX macro, but shaped like one) must not gain an agreement
-    it never earned. Round 3: keeping the literal backslash is not by
-    itself sufficient, since ``normalize_label`` strips ANY leftover
-    backslash unconditionally -- so ``\\logx`` is folded to an
-    ``unmapped``-prefixed token that survives that downstream strip
-    distinctly from both ``log`` and ``logx``."""
-    assert strip_math_presentation(r"\logx", label=True) == "unmappedlogx"
-    assert strip_math_presentation(r"\log", label=True) == "log"
+def test_gh585_unsupported_word_command_is_tagged_not_silently_dropped():
+    """GH-585 review round 2/3/4: only the standard LaTeX math-operator
+    names fold into their bare word. An unverified/unsupported command
+    (``\\logx`` -- not a real LaTeX macro, but shaped like one) must not
+    gain an agreement it never earned. Round 3 tried keeping the literal
+    backslash, but ``normalize_label`` strips ANY leftover backslash
+    unconditionally downstream, so that alone was not sufficient. Round 4:
+    ``label_key`` tags it ``("cmd", "logx")``, a different tuple shape
+    from both ``("lit", "log")`` and ``("lit", "logx")`` structurally, not
+    merely a string that happens to look different."""
+    assert label_key(r"\logx") == (("cmd", "logx"),)
+    assert label_key(r"\log") == (("lit", "log"),)
 
 
 # ---------------------------------------------------------------------------
@@ -301,57 +309,81 @@ def test_gh585_different_greek_letters_with_identical_trailing_text_disagree():
     """Before this fix, ``normalize_label``'s ASCII-only filter erased EVERY
     Greek letter identically (both to ""), so ``α Coefficient`` and
     ``$\\beta$ Coefficient`` folded to the same key and falsely agreed
-    regardless of which letter either side named. Transliterating each
-    Greek Unicode letter to its own ASCII name must make two different
-    letters keep disagreeing."""
-    alpha_key = normalize_label(strip_math_presentation("α Coefficient", label=True))
-    beta_key = normalize_label(strip_math_presentation(r"$\beta$ Coefficient", label=True))
+    regardless of which letter either side named. Tagging each Greek
+    letter with its own tag must make two different letters keep
+    disagreeing."""
+    alpha_key = label_key("α Coefficient")
+    beta_key = label_key(r"$\beta$ Coefficient")
     assert alpha_key != beta_key
     # And the same letter on both sides must still agree.
-    same_key = normalize_label(strip_math_presentation(r"$\alpha$ Coefficient", label=True))
+    same_key = label_key(r"$\alpha$ Coefficient")
     assert alpha_key == same_key
 
 
-def test_gh585_bare_greek_symbol_label_is_not_turned_into_a_matchable_word():
-    """The transliteration must not defeat binding.py's bare-symbol-label
+def test_gh585_bare_greek_symbol_label_is_unverifiable_not_a_match():
+    """The tagging must not defeat binding.py's bare-symbol-label
     fail-closed rule: a label that IS a Greek letter and nothing else
-    (native ``β``, model ``$\\beta$``) must still normalize to an empty
-    key on both sides — same as before this fix — because a Greek letter
+    (native ``β``, model ``$\\beta$``) keys to the single-element tuple
+    ``label_key_is_bare_symbolic`` flags as unprovable -- same policy as
+    before this fix, expressed structurally now -- because a Greek letter
     embedded inside a longer label is a different case (previous test)."""
-    native_key = normalize_label(strip_math_presentation("β", label=True))
-    model_key = normalize_label(strip_math_presentation(r"$\beta$", label=True))
-    assert native_key == "" and model_key == ""
+    native_key = label_key("β")
+    model_key = label_key(r"$\beta$")
+    assert native_key == model_key == (("greek", "beta"),)
+    assert label_key_is_bare_symbolic(native_key)
+    assert label_key_is_bare_symbolic(model_key)
 
 
 def test_gh585_real_greek_capital_delta_codepoint_aliases_the_increment_glyph():
     """U+0394 (the actual GREEK CAPITAL LETTER DELTA) and U+2206 (INCREMENT,
     what the corpus's native layer emits for ``\\Delta``) render identically
-    and must transliterate to the same name."""
-    assert strip_math_presentation("ΔSlope", label=True) == strip_math_presentation(
-        "∆Slope", label=True
-    )
+    and must key to the same tag."""
+    assert label_key("ΔSlope") == label_key("∆Slope")
 
 
 def test_gh585_typed_greek_token_does_not_collide_with_the_spelled_out_prose_word():
-    """GH-585 review round 3: a plain-ASCII-word transliteration (``∆`` ->
+    """GH-585 review round 3/4: a plain-ASCII-word transliteration (``∆`` ->
     ``"Delta"``) is itself a widening -- a label that literally types the
     English word "Delta" would then falsely agree with the native symbol.
-    The ``greek``/``greekcap``-prefixed token can never collide with prose,
-    so ``∆Slope (3m)`` must NOT agree with a label that spells the word
-    out."""
-    native_key = normalize_label(strip_math_presentation("∆Slope (3m)", label=True))
-    prose_key = normalize_label(strip_math_presentation("Delta Slope (3m)", label=True))
-    assert native_key != prose_key
+    A structured ``("greek", ...)`` tag can never equal a ``("lit", ...)``
+    literal-text token regardless of what the literal text says, so
+    ``∆Slope (3m)`` must NOT agree with a label that spells the word out
+    -- even the sentinel word a PREVIOUS round of this fix used
+    (``"greekcapdelta"``/``"greekalpha"``/``"unmappedlogx"``, round 3's
+    string tokens)."""
+    assert label_key("∆Slope (3m)") != label_key("Delta Slope (3m)")
+    assert label_key("α Coefficient") != label_key("greekalpha Coefficient")
+    assert label_key(r"\logx y") != label_key("unmappedlogx y")
 
 
 def test_gh585_typed_greek_token_preserves_case_distinction():
-    """GH-585 review round 3: ``normalize_label`` lowercases, so a plain
+    """GH-585 review round 3/4: ``normalize_label`` lowercases, so a plain
     lower-case name for both ``Δ`` (capital) and ``δ`` (lower-case, a
-    DIFFERENT letter) would fold together. The ``greekcap``-prefixed token
-    keeps case distinct through the compare."""
-    upper_key = normalize_label(strip_math_presentation("Δ x", label=True))
-    lower_key = normalize_label(strip_math_presentation("δ x", label=True))
-    assert upper_key != lower_key
+    DIFFERENT letter) would fold together. The ``cap``-prefixed tag keeps
+    case distinct through the compare."""
+    assert label_key("Δ x") != label_key("δ x")
+
+
+@pytest.mark.parametrize(
+    ("native", "model", "base_letter"),
+    [
+        ("ϑ Coefficient", r"$\vartheta$ Coefficient", "θ"),
+        ("ϕ Coefficient", r"$\varphi$ Coefficient", "φ"),
+        ("ϖ Coefficient", r"$\varpi$ Coefficient", "π"),
+        ("ϱ Coefficient", r"$\varrho$ Coefficient", "ρ"),
+        ("ς Coefficient", r"$\varsigma$ Coefficient", "σ"),
+        ("ϵ Coefficient", r"$\varepsilon$ Coefficient", "ε"),
+    ],
+)
+def test_gh585_variant_unicode_glyphs_agree_with_their_variant_command(native, model, base_letter):
+    """GH-585 review round 4: a native PDF's text layer can emit the
+    variant-glyph codepoint directly (``ϑ`` U+03D1, ``ϕ`` U+03D5 -- distinct
+    from base ``φ`` U+03C6, ``ϖ`` U+03D6, ``ϱ`` U+03F1, ``ς`` U+03C2, ``ϵ``
+    U+03F5) instead of the base letter; each must key to the same tag as
+    its ``\\var...`` command, not the base letter's tag."""
+    assert label_key(native) == label_key(model)
+    base_form = native[0]  # the variant glyph itself, first char of the parametrized text
+    assert label_key(native) != label_key(native.replace(base_form, base_letter))
 
 
 def test_gh585_escape_unmap_also_applies_to_the_numeric_cell_path():

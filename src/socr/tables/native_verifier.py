@@ -520,17 +520,14 @@ _MATH_SCRIPT_BARE_RE = re.compile(r"[\^_](\S)")
 # (``&``), never the LaTeX source that would render it. Three command
 # classes stand between the two sides even after the ``\text{}``/``$``
 # stripping above, and each is deterministic (a fixed spelling maps to a
-# fixed replacement -- never a threshold or a fuzzy match):
+# fixed comparison outcome -- never a threshold or a fuzzy match):
 #
-# 1. Greek-letter commands (``\Delta``, ``\beta``, ...) map to the Unicode
-#    Greek letter the native layer prints. This MUST run
-#    before class 3 below: both are "backslash + letters", and a Greek
-#    name run through the generic word-command rule would spell itself
-#    out in Latin letters (``\Delta`` -> ``Delta``) instead of folding to
-#    the single non-ASCII ``∆`` that ``normalize_label`` treats the same
-#    way it treats the native symbol (stripped as non-``[a-z0-9]``, so
-#    both sides lose it identically rather than one side keeping a
-#    spelled-out word the other never had).
+# 1. Greek-letter commands (``\Delta``, ``\beta``, ...) and the raw
+#    Unicode Greek letter the native layer prints (``∆``) both resolve to
+#    the SAME typed tag (GH-585 review round 4's ``label_key()``, below),
+#    so a command on one side and a Unicode glyph on the other compare
+#    equal without either side ever becoming a plain string another label
+#    could coincidentally spell out.
 # 2. Escaped punctuation (``\&``, ``\%``, ``\_``, ``\$``, ``\#``) unescapes
 #    to the bare character. ``normalize_label`` discards this punctuation
 #    on both sides regardless (it is non-alphanumeric), so this class is a
@@ -539,17 +536,18 @@ _MATH_SCRIPT_BARE_RE = re.compile(r"[\^_](\S)")
 #    not solely a ``normalize_label`` pre-pass -- see ``strip_presentation``
 #    callers.
 # 3. Every OTHER alphabetic word command (``\log``, ``\ln``, ``\exp``, ...)
-#    loses its backslash, keeping the word: ``\log`` -> ``log``. The full
-#    Greek table (class 1) must be substituted first so it never falls
-#    through to this generic rule.
+#    loses its backslash, keeping the word: ``\log`` -> ``log``, a real,
+#    verified textual equivalence. Any command NOT in this list and not a
+#    recognized Greek spelling is tagged ``("cmd", name)`` instead of
+#    losing its backslash, so an unsupported/unverified macro (``\logx``)
+#    never earns an agreement with the bare word or a real operator of
+#    similar spelling.
 #
 # The full standard LaTeX Greek alphabet. Lowercase commands exist for all
 # 24 letters; uppercase commands exist only for the 11 letters whose
 # capital glyph differs from the Latin lookalike (the rest -- ``\Alpha``,
 # ``\Beta``, ... -- are not standard LaTeX and are deliberately omitted so
-# this stays an exact map, not a guess). ``var``-prefixed alternate glyphs
-# map to the same base letter: the native layer does not distinguish glyph
-# variants, so folding them together is exact, not a widening of the match.
+# this stays an exact map, not a guess).
 _GREEK_LOWER = {
     "alpha": "α",
     "beta": "β",
@@ -594,10 +592,7 @@ _GREEK_UPPER = {
 # symbol as ``\epsilon`` in this corpus -- unlike the U+0394/U+2206 Delta
 # pair below, which really is the identical printed glyph under two
 # codepoints). Each variant therefore transliterates to its own distinct
-# name, never folded into the base letter's name: handled by substituting
-# the LITERAL name text directly (see ``_greek_command_sub``), bypassing
-# the Unicode round-trip the base commands use, so there is no shared
-# codepoint for the transliteration step to collapse.
+# tag, never folded into the base letter's tag.
 _GREEK_VARIANT_NAMES = (
     "varepsilon",
     "vartheta",
@@ -608,36 +603,82 @@ _GREEK_VARIANT_NAMES = (
     "varphi",
 )
 _GREEK_BASE_COMMANDS: dict[str, str] = {**_GREEK_UPPER, **_GREEK_LOWER}
-_GREEK_COMMANDS: dict[str, str] = _GREEK_BASE_COMMANDS  # kept for the reverse map below
+
+# GH-585 review round 4: the sibling-command widening (``\Delta`` ->
+# ``"Delta"``) and the round-3 fix for it (a case-preserving but still
+# ORDINARY-STRING token, ``"greekcapdelta"``) both shared one flaw: the
+# result was folded back into ``normalize_label``'s flat string key, so a
+# label that happens to spell the sentinel text out in prose
+# (``"greekalpha Coefficient"``, ``"unmappedlogx y"``) collided with the
+# real Greek/unsupported-command label. A string key can never be made
+# collision-proof against arbitrary future prose. The fix is structural:
+# ``label_key()`` below returns a TUPLE of typed tokens -- ``("lit", ...)``
+# for literal text (normalized the same way ``normalize_label`` always
+# has), ``("greek", tag)`` for a Greek letter (from either its LaTeX
+# command or its Unicode glyph, any case, any variant), ``("cmd", name)``
+# for an unsupported command -- so a literal chunk of prose can never
+# equal a typed token regardless of what the prose spells out: they are
+# different Python objects (a 2-tuple with a different first element), not
+# strings that merely look different. ``strip_math_presentation`` keeps
+# only its GH-582 wrap/escape/script duties; it no longer invents any
+# string standing in for a Greek letter or an unmapped command -- that
+# representation now exists solely as the structured tag ``label_key``
+# emits, so there is no string sentinel left for prose to collide with.
+#
+# Every recognized command name (base upper/lower and every variant) maps
+# to a canonical tag: lowercase base letters keep their bare name
+# (``"alpha"``), the 11 letters with a dedicated uppercase LaTeX command
+# get a ``cap`` prefix (``"capdelta"``), and each variant keeps its own
+# name (``"varepsilon"``) so it is never confused with the base letter.
+_GREEK_COMMAND_TAG: dict[str, str] = {name: name for name in _GREEK_LOWER}
+_GREEK_COMMAND_TAG.update({name: f"cap{name.lower()}" for name in _GREEK_UPPER})
+_GREEK_COMMAND_TAG.update({name: name for name in _GREEK_VARIANT_NAMES})
 # Longest names first so ``vartheta`` matches whole, not as ``var`` + a
-# dangling ``theta`` alternative fragment; within equal length, order does
-# not matter because no two Greek command names share a first letter class
-# that could partially overlap under this alternation.
-_GREEK_COMMAND_RE = re.compile(
-    r"\\("
-    + "|".join(sorted((*_GREEK_BASE_COMMANDS, *_GREEK_VARIANT_NAMES), key=len, reverse=True))
-    + r")\b"
+# dangling ``theta`` alternative fragment.
+_GREEK_COMMAND_ALT = "|".join(sorted(_GREEK_COMMAND_TAG, key=len, reverse=True))
+
+# The Unicode side of the same tag table: every base letter (both cases,
+# built from the real uppercase/lowercase codepoint pairing across the
+# whole Greek block -- offset ``0x20`` -- not just the 11 letters LaTeX
+# gives a distinct uppercase command to, so a raw Greek capital the native
+# layer emits without any command involved, e.g. bare ``Α``, still gets a
+# tag instead of silently vanishing under ``normalize_label``), plus the
+# six glyphs whose Unicode codepoint IS the variant form rather than the
+# base letter (a native PDF's text layer can emit either): ``ϑ`` U+03D1,
+# ``ϕ`` U+03D5 (GREEK PHI SYMBOL -- distinct from base ``φ`` U+03C6),
+# ``ϖ`` U+03D6, ``ϱ`` U+03F1, ``ς`` U+03C2 (GREEK SMALL LETTER FINAL SIGMA
+# -- despite the name, GH-585 review round 4 treats this as the ``\varsigma``
+# variant glyph, not an interchangeable form of base ``σ``), ``ϵ`` U+03F5.
+# ``∆`` (U+2206 INCREMENT, what LaTeX ``\Delta`` typically renders as in
+# extracted PDF text) and ``Δ`` (U+0394, the actual GREEK CAPITAL LETTER
+# DELTA codepoint some producers use instead) render identically and both
+# alias to the same ``"capdelta"`` tag -- the one deliberate exception,
+# because it really is the identical printed glyph under two codepoints.
+_GREEK_UPPER_ALL: dict[str, str] = {
+    name.capitalize(): chr(ord(char) - 0x20) for name, char in _GREEK_LOWER.items()
+}
+_GREEK_UNICODE_TAG: dict[str, str] = {char: name for name, char in _GREEK_LOWER.items()}
+_GREEK_UNICODE_TAG.update({char: f"cap{name.lower()}" for name, char in _GREEK_UPPER_ALL.items()})
+_GREEK_UNICODE_TAG["∆"] = _GREEK_UNICODE_TAG["Δ"]  # U+2206 aliases U+0394's tag.
+_GREEK_UNICODE_TAG.update(
+    {
+        "ϑ": "vartheta",  # U+03D1 GREEK THETA SYMBOL
+        "ϕ": "varphi",  # U+03D5 GREEK PHI SYMBOL (distinct from base phi, U+03C6)
+        "ϖ": "varpi",  # U+03D6 GREEK PI SYMBOL
+        "ϱ": "varrho",  # U+03F1 GREEK RHO SYMBOL
+        "ς": "varsigma",  # U+03C2 GREEK SMALL LETTER FINAL SIGMA
+        "ϵ": "varepsilon",  # U+03F5 GREEK LUNATE EPSILON SYMBOL
+    }
 )
-
-
-def _greek_command_sub(m: re.Match) -> str:
-    name = m.group(1)
-    if name in _GREEK_VARIANT_NAMES:
-        return f" greek{name} "
-    return _GREEK_BASE_COMMANDS[name]
-
 
 _MATH_ESCAPED_PUNCT_RE = re.compile(r"\\([&%_$#])")
 # GH-585 review round 2: an unbounded ``\\[A-Za-z]+`` rule stripped the
 # backslash of ANY alphabetic command, including one never verified to be
 # presentation-only -- an unsupported macro (``\logx``) would gain an
 # agreement it never earned. Restricted to the standard LaTeX math-operator
-# names (the ``\operatorname``-family macros LaTeX ships); anything else
-# keeps its backslash, so it still fails to match its plain counterpart the
-# same way it did before this fix -- fail closed, not agreement by
-# omission. The trailing ``\b`` also means ``\logx`` does not partially
-# match as ``\log`` + ``x``: the boundary check between ``g`` and ``x``
-# (both word characters) fails, so the whole token is left untouched.
+# names (the ``\operatorname``-family macros LaTeX ships); anything else is
+# tagged ``("cmd", name)`` by ``label_key`` instead, so it stays distinct
+# from both the bare word and a real operator of similar spelling.
 _MATH_OPERATOR_NAMES = (
     "log",
     "ln",
@@ -655,68 +696,23 @@ _MATH_OPERATOR_NAMES = (
     "arg",
     "Pr",
 )
-_MATH_WORD_COMMAND_RE = re.compile(r"\\(" + "|".join(_MATH_OPERATOR_NAMES) + r")\b")
 
-# GH-585 review round 3: keeping the backslash on an unrecognized command
-# (``\logx``) is not, by itself, evidence that it stays distinct from the
-# plain word ``logx`` -- ``normalize_label``'s ASCII-only filter
-# (``native_rows._NON_ALNUM_RE``) strips ANY leftover backslash from EVERY
-# label unconditionally, recognized or not, so ``\logx`` and ``logx`` would
-# still fold to the identical key downstream regardless of what this helper
-# does with the backslash. An unsupported/unverified command must be given
-# a marker ``normalize_label`` cannot erase, so it never silently earns an
-# agreement with the bare word or with a real operator of a similar
-# spelling -- catch anything left after the Greek and operator maps have
-# run and fold it to an ``unmapped``-prefixed, alphanumeric-only token.
-_MATH_UNMAPPED_COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
-
-# GH-585 review round 2: the Greek COMMAND map above turns ``\Delta`` into
-# the Unicode letter the native layer prints, but the native layer's own
-# ``∆`` (and a raw Greek letter typed directly, e.g. ``α``) then hits
-# ``normalize_label``'s ASCII-only filter (``native_rows._NON_ALNUM_RE``)
-# on BOTH sides and vanishes -- so ``α Coefficient`` and ``$\beta$
-# Coefficient`` folded to the same key ("coefficient") and falsely agreed,
-# regardless of which Greek letter either side actually named. Every real
-# Greek letter must survive the compare as a distinct token, so different
-# letters keep disagreeing and the same letter keeps agreeing -- this is a
-# second, orthogonal step from the command map: it transliterates a
-# UNICODE letter (from either side, however it got there) to a token,
-# rather than a LaTeX command spelling to a letter.
-#
-# GH-585 review round 3: a PLAIN word (``delta``) is not safe -- a label
-# that literally spells the English/prose word "Delta" would then falsely
-# agree with a native ``∆``, and ``normalize_label`` lowercases before its
-# ASCII filter, so a plain-word scheme also loses the distinction between
-# ``Δ`` (capital) and ``δ`` (lowercase) -- two different letters. Every
-# entry is therefore a ``greek``-prefixed, case-preserving TOKEN no real
-# prose word can collide with: capitals get a ``greekcap`` prefix
-# (``greekcapdelta``), lowercase letters get a bare ``greek`` prefix
-# (``greekdelta``), so case is part of the token's identity, not folded
-# away by ``normalize_label``'s later lowercasing. The table covers every
-# letter of the Greek alphabet in both cases -- built from the real
-# Unicode uppercase/lowercase codepoint pairing (offset ``0x20`` across the
-# whole block), not just the 11 letters LaTeX gives a distinct ``\Upper``
-# command to -- so a raw Greek capital the native layer emits without any
-# LaTeX command involved (e.g. bare ``Α``) still gets a token instead of
-# silently vanishing.
-#
-# ``∆`` (U+2206 INCREMENT, what LaTeX ``\Delta`` typically renders as in
-# extracted PDF text) and ``Δ`` (U+0394, the actual GREEK CAPITAL LETTER
-# DELTA codepoint some producers use instead) render identically and both
-# alias to the same "greekcapdelta" token. Final-form lowercase sigma
-# (``ς``, U+03C2, used only in word-final position) aliases to the same
-# "greeksigma" token as medial/initial ``σ`` -- same letter, positional
-# glyph variant only.
-_GREEK_UPPER_ALL: dict[str, str] = {
-    name.capitalize(): chr(ord(char) - 0x20) for name, char in _GREEK_LOWER.items()
-}
-_GREEK_UNICODE_TOKEN: dict[str, str] = {char: f"greek{name}" for name, char in _GREEK_LOWER.items()}
-_GREEK_UNICODE_TOKEN.update(
-    {char: f"greekcap{name.lower()}" for name, char in _GREEK_UPPER_ALL.items()}
+# One tokenizing pass over a label finds, in priority order: a recognized
+# Greek command, a recognized math-operator command (folded to its bare
+# word -- literal text, not a tag), an escaped punctuation mark (unescaped
+# -- literal text), any other backslash command (an unmapped/unsupported
+# macro -- tagged, never silently folded to its spelling), or a raw Greek
+# Unicode letter (tagged the same way its command form would be). Greek
+# commands are tried before the generic operator/unmapped-command
+# alternatives so ``\Delta`` is never mistaken for an unrecognized command
+# or partially consumed by the operator alternation.
+_LABEL_TOKEN_RE = re.compile(
+    r"(?P<greek>\\(?:" + _GREEK_COMMAND_ALT + r")\b)"
+    r"|(?P<op>\\(?:" + "|".join(_MATH_OPERATOR_NAMES) + r")\b)"
+    r"|(?P<esc>\\[&%_$#])"
+    r"|(?P<cmd>\\[A-Za-z]+)"
+    r"|(?P<greekchar>[" + "".join(re.escape(c) for c in _GREEK_UNICODE_TAG) + r"])"
 )
-_GREEK_UNICODE_TOKEN["∆"] = _GREEK_UNICODE_TOKEN["Δ"]  # U+2206 aliases U+0394's token.
-_GREEK_UNICODE_TOKEN["ς"] = _GREEK_UNICODE_TOKEN["σ"]  # U+03C2 aliases U+03C3's token.
-_GREEK_UNICODE_RE = re.compile("[" + "".join(re.escape(c) for c in _GREEK_UNICODE_TOKEN) + "]")
 
 
 def strip_math_presentation(tok: str, *, label: bool = False) -> str:
@@ -724,12 +720,13 @@ def strip_math_presentation(tok: str, *, label: bool = False) -> str:
     to the plain-text value/label it renders (GH-582).
 
     Shared by the binder's cell comparison (``label=False``, the default)
-    and its row-label comparison and by ``adjudication.tokens_agree``
-    (``label=True`` for the ``row_label`` kind), so a candidate cell or
-    label wrapped in inline math is compared on its content, not convicted
-    (cell) or held undisprovable (label) purely for its typesetting.
-    Column-header span confirmation (``binding._norm_header_text``) is a
-    separate, non-convicting path and does not use this helper.
+    and, for ``label=True``, by the wrap/escape/script cleanup both
+    ``binding.py``'s row-label compare and ``adjudication.tokens_agree``
+    apply before calling ``label_key()`` on the result (row-label EQUALITY
+    itself is decided by ``label_key()``'s structured tuple, not by this
+    function's return string -- see GH-585 review round 4). Column-header
+    span confirmation (``binding._norm_header_text``) is a separate,
+    non-convicting path and does not use this helper.
 
     ``label=False`` unwraps one balanced ``$...$``/``\(...\)`` pair around
     the WHOLE token and leaves everything else -- including ``^``/``_`` --
@@ -738,23 +735,13 @@ def strip_math_presentation(tok: str, *, label: bool = False) -> str:
     the numeric tokenizer; it does NOT map Greek commands or drop word
     commands (a cell is a value, not a name with math notation baked in).
     ``label=True`` additionally unwraps ``\text{}``/``\mathrm{}``/
-    ``\textbf{}``, maps Greek-letter commands to the Unicode letters the
-    native layer prints, transliterates every Greek Unicode letter
-    (however it got there) to a case-preserving, ``greek``-prefixed token
-    no real prose word can collide with (so distinct letters, and distinct
-    cases of the same letter, keep comparing as distinct), drops the
-    backslash of every other supported alphabetic word command (``\log``
-    -> ``log``; an unsupported command is folded to an ``unmapped``-prefixed
-    token that cannot silently equal the bare word or a real operator, since
-    ``normalize_label`` strips a leftover backslash unconditionally and
-    would otherwise erase the distinction the backslash was meant to keep),
-    and flattens
-    ``^``/``_`` script markers anywhere in the string, then drops the
-    delimiters: see the two mode comments above the regexes for why the
-    two paths differ, and the GH-585 comments above the Greek tables for
-    why the command and transliteration classes run in that order and what
-    a bare symbolic label (the WHOLE label is one Greek letter, no other
-    content) is deliberately exempted from transliteration -- see below.
+    ``\textbf{}`` and flattens ``^``/``_`` script markers anywhere in the
+    string (keeping their content), then drops the math delimiters. It
+    does NOT map Greek commands/glyphs or word commands itself any more --
+    that is ``label_key()``'s job, because a plain string return value
+    cannot be made collision-proof against arbitrary prose (GH-585 review
+    round 3/4); this function only does the presentation stripping that IS
+    safe to represent as a plain string.
     """
     text = tok.strip()
     if not label:
@@ -765,29 +752,86 @@ def strip_math_presentation(tok: str, *, label: bool = False) -> str:
     while prev != text:
         prev = text
         text = _MATH_TEXT_WRAP_RE.sub(r"\1", text)
-    text = _GREEK_COMMAND_RE.sub(_greek_command_sub, text)
-    text = re.sub(r"\s+", " ", text)
-    # A label that IS a bare Greek symbol and nothing else (native ``β``,
-    # model ``$\beta$``) must stay unprovable by this normalizer -- that is
-    # a deliberate fail-closed policy (binding.py's row-label guard), not a
-    # limitation this transliteration should quietly fix. Detect that case
-    # BEFORE transliterating: if stripping the math delimiters and
-    # surrounding whitespace leaves exactly one Greek letter, skip the
-    # transliteration so it still vanishes under ``normalize_label``'s
-    # ASCII-only filter, same as before this fix. A Greek letter embedded
-    # in a longer label (``∆Slope (3m)``) is not this case and still
-    # transliterates normally.
-    bare_symbol = _MATH_DOLLAR_RE.sub("", text).strip()
-    if bare_symbol not in _GREEK_UNICODE_TOKEN:
-        text = _GREEK_UNICODE_RE.sub(lambda m: f" {_GREEK_UNICODE_TOKEN[m.group(0)]} ", text)
-        text = re.sub(r"\s+", " ", text)
-    text = _MATH_ESCAPED_PUNCT_RE.sub(r"\1", text)
-    text = _MATH_WORD_COMMAND_RE.sub(r"\1", text)
-    text = _MATH_UNMAPPED_COMMAND_RE.sub(lambda m: f"unmapped{m.group(1)}", text)
     text = _MATH_SCRIPT_BRACE_RE.sub(r"\1", text)
     text = _MATH_SCRIPT_BARE_RE.sub(r"\1", text)
     text = _MATH_DOLLAR_RE.sub("", text)
     return text.strip()
+
+
+def label_key(text: str) -> tuple[tuple[str, str], ...]:
+    r"""Structured row-label comparison key (GH-585 review round 4).
+
+    Returns a tuple of typed tokens instead of a flat string, so a literal
+    text chunk can never collide with a Greek letter or an unsupported
+    command merely because it happens to spell the same characters out:
+    ``("lit", "greekalpha coefficient")`` (real prose) and ``("greek",
+    "alpha"), ("lit", "coefficient")`` (an actual Greek letter) are
+    different tuples regardless of what the literal string contains.
+
+    Each contiguous run of plain text is normalized exactly the way
+    ``normalize_label`` always has (case-folded, footnote markers and
+    punctuation dropped) and becomes one ``("lit", ...)`` entry -- dropped
+    entirely if it normalizes to nothing, same as an empty
+    ``normalize_label`` result always meant "no content here". A
+    recognized Greek letter (from its LaTeX command or its Unicode glyph,
+    either case, every variant glyph) becomes ``("greek", tag)``; the
+    LaTeX math-operator names (``\log`` and its siblings) fold into the
+    surrounding literal text as their bare word, since they are a real,
+    verified textual equivalence, not a symbol; any other backslash
+    command becomes ``("cmd", name)`` so it can never silently equal the
+    bare word of the same spelling or a real operator.
+
+    A label that IS a bare Greek symbol and nothing else (native ``β``,
+    model ``$\beta$``) still returns the single-element tuple
+    ``(("greek", "beta"),)`` -- callers must treat a lone ``"greek"`` token
+    as unprovable (binding.py's row-label fail-closed rule), not as a
+    value to match on, exactly as a bare symbolic label always was.
+    """
+    from socr.tables.native_rows import normalize_label
+
+    text = strip_math_presentation(text, label=True)
+    tokens: list[tuple[str, str]] = []
+    literal_parts: list[str] = []
+
+    def flush_literal() -> None:
+        if not literal_parts:
+            return
+        normalized = normalize_label("".join(literal_parts))
+        literal_parts.clear()
+        if normalized:
+            tokens.append(("lit", normalized))
+
+    pos = 0
+    for m in _LABEL_TOKEN_RE.finditer(text):
+        literal_parts.append(text[pos : m.start()])
+        if m.group("greek"):
+            flush_literal()
+            tokens.append(("greek", _GREEK_COMMAND_TAG[m.group("greek")[1:]]))
+        elif m.group("op"):
+            literal_parts.append(m.group("op")[1:])
+        elif m.group("esc"):
+            literal_parts.append(m.group("esc")[1:])
+        elif m.group("cmd"):
+            flush_literal()
+            tokens.append(("cmd", m.group("cmd")[1:]))
+        elif m.group("greekchar"):
+            flush_literal()
+            tokens.append(("greek", _GREEK_UNICODE_TAG[m.group("greekchar")]))
+        pos = m.end()
+    literal_parts.append(text[pos:])
+    flush_literal()
+    return tuple(tokens)
+
+
+def label_key_is_bare_symbolic(key: tuple[tuple[str, str], ...]) -> bool:
+    """True when *key* is a lone Greek token with no other content.
+
+    A bare symbolic label (native ``β``, model ``$\\beta$``) is not
+    provably equal to anything by this normalizer -- binding.py's
+    row-label guard must treat it as unverifiable, never as a match, even
+    against another label naming the identical letter.
+    """
+    return len(key) == 1 and key[0][0] == "greek"
 
 
 def strip_presentation(tok: str) -> str:
