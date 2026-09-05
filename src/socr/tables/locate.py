@@ -500,8 +500,14 @@ def _group_lines_by_baseline_with_reason(
     flagged: set[int] = set()
     for key in baselines[1:]:
         verdict = _boundary_verdict(groups[-1], by_base[key])
-        if verdict == "merge":
+        if verdict == "merge-heuristic":
+            # Same printed line by mutual baseline-in-box. That keeps the band
+            # count equal to the printed-row count (the ordinal chain needs
+            # it), but a font box is not glyph ink (Codex seat: metrics 2.2×
+            # the type size make two readable 9 pt-leading rows satisfy it),
+            # so the merged band is flagged — C2b abstains on THIS row only.
             groups[-1].extend(by_base[key])
+            flagged.add(len(groups) - 1)
             continue
         if verdict == "ambiguous":
             flagged.add(len(groups) - 1)
@@ -510,7 +516,7 @@ def _group_lines_by_baseline_with_reason(
     reason = (
         None
         if not flagged
-        else f"{len(flagged)} band(s) adjoin a sub-size boundary with no merge evidence"
+        else f"{len(flagged)} band(s) rest on a sub-size boundary (heuristic merge or no evidence)"
     )
     return groups, reason, flagged
 
@@ -518,18 +524,20 @@ def _group_lines_by_baseline_with_reason(
 def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
     """Decide ONE consecutive-baseline boundary from the two lines' own geometry.
 
-    Returns ``"separate"``, ``"merge"`` or ``"ambiguous"``. Per boundary — a
+    Returns ``"separate"``, ``"merge-heuristic"`` or ``"ambiguous"``. Per boundary — a
     wide gap elsewhere in the region is no evidence about this one (Codex
     seat: uncertain boundaries retain their ambiguity independently).
 
     * gap ≥ the smaller font size ⇒ ``separate``: a subscript never sits a
       full em below its base.
-    * below that, ``merge`` only with positive evidence that the lower text
-      is the SAME printed line: each baseline lies inside the other line's
-      box (a split same-line span, cells at a fraction-of-a-point baseline
-      offset, an inline marker) — a following printed row's baseline sits
-      a full line below, outside the box. x-ranges are not consulted: a
-      band is a printed line, not a glyph run. Smaller type inside the upper line's
+    * below that, ``merge-heuristic`` when each baseline lies inside the
+      other line's box (a split same-line span, cells at a fraction-of-a-
+      point baseline offset, an inline marker): the lines are merged so the
+      band count stays equal to the printed-row count, but the band is
+      FLAGGED — a font box is not glyph ink, and metrics far larger than the
+      type size can make two readable tight-leading rows satisfy it. C2b
+      abstains on that row. x-ranges are not consulted: a band is a printed
+      line, not a glyph run. Smaller type inside the upper line's
       x-span (a subscript under its base, doc04's shape) is NOT merged: an
       annotation such as ``(a)`` has the same geometry (VI-A2 withdrew its
       fold on this point), so that boundary is ambiguous.
@@ -577,7 +585,7 @@ def _boundary_verdict(upper: list[dict], lower: list[dict]) -> str:
     # it would add a phantom row and break the ordinal chain. (Measured: an
     # x-overlap requirement split four real rows on doc01, 13 → 17 bands.)
     if inside_vertically:
-        return "merge"
+        return "merge-heuristic"
     # Smaller type inside the upper line's x-span is what a subscript looks
     # like — and also what a "(a)" / "see note" annotation looks like (the
     # VI-A2 fold was withdrawn on exactly that point). No page geometry

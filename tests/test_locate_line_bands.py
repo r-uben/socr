@@ -282,10 +282,11 @@ def test_row_bands_one_stray_close_pair_does_not_poison_the_region():
 
     bands = row_bands_from_lines(page, region)
     # The stray fragment's baseline lies inside row 5's box and vice versa:
-    # it is on row 5's printed line (x-ranges are not consulted — a band is a
-    # printed line), so it folds in; every row boundary is certified.
+    # it is merged into row 5's printed line (the band count stays 8, so the
+    # ordinal chain holds for every other row) and ONLY that band is flagged —
+    # a box-containment merge is a heuristic, not a certificate.
     assert len(bands) == 8
-    assert all(b.ambiguity is None for b in bands)
+    assert [i for i, b in enumerate(bands) if b.ambiguity] == [4]
     fifth = bands[4]
     assert fifth.y0 <= ys[4] <= fifth.y1 and fifth.y0 <= ys[4] + 0.3 <= fifth.y1
 
