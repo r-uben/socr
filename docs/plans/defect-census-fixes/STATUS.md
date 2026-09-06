@@ -15,9 +15,9 @@ nothing dispatched.
 ## Ticket board
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
-| A1a | corroboration fn | TODO | — | 1 |
-| C1 | native geometry (#592) | TODO | — | 1 |
-| D1 | throughput | TODO | — | 1 |
+| A1a | corroboration fn | WIP (#627, socr-a1a) | — | 1 |
+| C1 | native geometry (#592) | WIP (socr-c1) | — | 1 |
+| D1 | throughput | WIP (#628, socr-d1) | — | 1 |
 | A1b | selection | TODO | A1a | 2 |
 | A1c | surfacing + resume | TODO | A1b | 3 |
 | A2 | truncation guard | TODO | A1c | 4 |
@@ -37,5 +37,5 @@ nothing dispatched.
 - Waves 7–9: E2, F1a, F1b, F2.
 
 ## Next action
-Owner approves or amends the plan (email 2026-09-06). Then `/plan next` wave 1: three
+Wave 1 dispatched 2026-09-06 (three Sonnet implementers in worktrees off main@eb14c82). Next: Sonnet reviewer + Astra on each as it lands; then wave 2 A1b.
 branches off main (`feat/NN-row-corroboration`, `fix/592-aligned-runs`, `fix/NN-nougat-ladder`).
