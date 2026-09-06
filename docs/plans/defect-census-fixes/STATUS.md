@@ -16,7 +16,7 @@ nothing dispatched.
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
 | A1a | corroboration fn | WIP (#627, socr-a1a) | — | 1 |
-| C1 | native geometry (#592) | WIP (socr-c1) | — | 1 |
+| C1 | native geometry (#592) | REVIEW (432f92b) | — | 1 |
 | D1 | throughput | WIP (#628, socr-d1) | — | 1 |
 | A1b | selection | TODO | A1a | 2 |
 | A1c | surfacing + resume | TODO | A1b | 3 |
