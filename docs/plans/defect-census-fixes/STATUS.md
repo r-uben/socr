@@ -15,7 +15,7 @@ nothing dispatched.
 ## Ticket board
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
-| A1a | corroboration fn | REWORK-3 (Astra: dropped row clears; skipped-band gate + strict monotonic + unbound_rows) | — | 1 |
+| A1a | corroboration fn | DONE-LOCAL (92133fa; reviewer + Astra; edge-row blind spot -> A1b; unpushed) | — | 1 |
 | C1 | native geometry (#592) | DONE-LOCAL (4ce7ecc; reviewer + 2 Astra rounds; residual pinned; unpushed) | — | 1 |
 | D1 | throughput | DONE-LOCAL (0fa11fc, reviewer ACCEPT, live on agentic path; Astra skipped: Codex quota <10%; unpushed) | — | 1 |
 | A1b | selection | TODO | A1a | 2 |
@@ -37,5 +37,5 @@ nothing dispatched.
 - Waves 7–9: E2, F1a, F1b, F2.
 
 ## Next action
-Wave 1 dispatched 2026-09-06 (three Sonnet implementers in worktrees off main@eb14c82). Next: Sonnet reviewer + Astra on each as it lands; then wave 2 A1b.
+Wave 1 complete locally 2026-09-06: A1a 92133fa (socr-a1a), C1 4ce7ecc (socr-c1), D1 0fa11fc (socr-d1); each reviewed, A1a/C1 Astra-checked, D1 Astra skipped (Codex quota). Unpushed. Next: owner says push -> open 3 PRs, wait CI green, merge; then wave 2 A1b (depends A1a merged) on a fresh branch off main.
 branches off main (`feat/NN-row-corroboration`, `fix/592-aligned-runs`, `fix/NN-nougat-ladder`).

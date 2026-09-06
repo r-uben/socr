@@ -80,8 +80,12 @@ with `unbound_rows` (candidate row indices that did not bind) so that a table cl
 share floor with one wrong row (a single altered digit still clears at 36/39 on a 39-row
 table — measured, A1a log) ships with THAT row named in the sidecar and marked in the
 markdown (a trailing `<!-- row unverified -->` comment on the row), never silently.
-No native numeric words in the region (scan, image-only
-table region) → unchanged fail-closed. A ladder-ACCEPTED candidate the floor still discards
+A1a's skipped-band gate is blind to a dropped FIRST or LAST row of a block (no straddling
+bound pair; measured on bulletin p1 with the whole page as region). A1b scopes the region to
+the detected table bbox and adds an edge check: native numeric bands inside the bbox before
+the first matched band or after the last one count as skipped unless they are the
+column-index line; measure on the six fixtures before setting anything. No native numeric
+words in the region (scan, image-only table region) → unchanged fail-closed. A ladder-ACCEPTED candidate the floor still discards
 emits `structure_floor_overrode_ladder` (closes #589 via option (c), generalised). Keep the
 candidate's header row as emitted; the flag carries the doubt (owner may rule for neutral
 `col N` stubs later — record the header text in the sidecar either way so the choice is
