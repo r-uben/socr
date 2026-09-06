@@ -16,7 +16,7 @@ nothing dispatched.
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
 | A1a | corroboration fn | REWORK (reviewer: row-value swap passes; anchor label + monotonic bands) | — | 1 |
-| C1 | native geometry (#592) | REWORK (Astra: two prose columns interleave; width discriminator) | — | 1 |
+| C1 | native geometry (#592) | ASTRA-2 (619666b, width ratio 0.65 added) | — | 1 |
 | D1 | throughput | DONE-LOCAL (0fa11fc, reviewer ACCEPT, live on agentic path; Astra skipped: Codex quota <10%; unpushed) | — | 1 |
 | A1b | selection | TODO | A1a | 2 |
 | A1c | surfacing + resume | TODO | A1b | 3 |
