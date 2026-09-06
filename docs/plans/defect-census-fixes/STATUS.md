@@ -16,7 +16,7 @@ nothing dispatched.
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
 | A1a | corroboration fn | ASTRA (8c833df; reviewer fixes applied; unbound_rows deferred to A1b) | — | 1 |
-| C1 | native geometry (#592) | REWORK-4 (Astra residual: marginal notes beside body; adding measure-fill guard) | — | 1 |
+| C1 | native geometry (#592) | DONE-LOCAL (4ce7ecc; reviewer + 2 Astra rounds; residual pinned; unpushed) | — | 1 |
 | D1 | throughput | DONE-LOCAL (0fa11fc, reviewer ACCEPT, live on agentic path; Astra skipped: Codex quota <10%; unpushed) | — | 1 |
 | A1b | selection | TODO | A1a | 2 |
 | A1c | surfacing + resume | TODO | A1b | 3 |
