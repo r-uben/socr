@@ -75,7 +75,12 @@ every cached grid candidate with `corroborate_rows` on that region; a candidate 
 both constants and whose numeric row count is not below the native effective row count by
 more than the existing wrapped-label allowance (name the symbol from
 `value_guard_row_count_warning`; this closes the A1→A2 window) becomes the winner. Tie-break
-by ladder verdict, then share. No native numeric words in the region (scan, image-only
+by ladder verdict, then share. A1a's `RowCorroboration` exposes only counts; A1b extends it
+with `unbound_rows` (candidate row indices that did not bind) so that a table clearing the
+share floor with one wrong row (a single altered digit still clears at 36/39 on a 39-row
+table — measured, A1a log) ships with THAT row named in the sidecar and marked in the
+markdown (a trailing `<!-- row unverified -->` comment on the row), never silently.
+No native numeric words in the region (scan, image-only
 table region) → unchanged fail-closed. A ladder-ACCEPTED candidate the floor still discards
 emits `structure_floor_overrode_ladder` (closes #589 via option (c), generalised). Keep the
 candidate's header row as emitted; the flag carries the doubt (owner may rule for neutral
