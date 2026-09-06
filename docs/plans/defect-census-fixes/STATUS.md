@@ -15,7 +15,7 @@ nothing dispatched.
 ## Ticket board
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
-| A1a | corroboration fn | WIP (#627, socr-a1a) | — | 1 |
+| A1a | corroboration fn | REVIEW (c7decbc) | — | 1 |
 | C1 | native geometry (#592) | REWORK (Astra: two prose columns interleave; width discriminator) | — | 1 |
 | D1 | throughput | REVIEW (0fa11fc) | — | 1 |
 | A1b | selection | TODO | A1a | 2 |
