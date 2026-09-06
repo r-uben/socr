@@ -17,7 +17,7 @@ nothing dispatched.
 |--------|--------|--------|------------|------|
 | A1a | corroboration fn | WIP (#627, socr-a1a) | — | 1 |
 | C1 | native geometry (#592) | REWORK (Astra: two prose columns interleave; width discriminator) | — | 1 |
-| D1 | throughput | WIP (#628, socr-d1) | — | 1 |
+| D1 | throughput | REVIEW (0fa11fc) | — | 1 |
 | A1b | selection | TODO | A1a | 2 |
 | A1c | surfacing + resume | TODO | A1b | 3 |
 | A2 | truncation guard | TODO | A1c | 4 |
