@@ -1622,6 +1622,35 @@ class UnifiedPipeline:
                     )
                 )
 
+        # TICKET-A1b (#634): cache native words for every page detection found
+        # at least one table on, so S1 selection can call
+        # ``row_corroboration.corroborate_rows`` before the structure-class
+        # floor discards a candidate. Scoped to ``detected_table_count > 0``
+        # (GH-520 detection, not reconstruction) -- a page with no detected
+        # table has nothing for the fallback to score against. Best-effort:
+        # any failure to open/read the PDF leaves ``native_words`` at its
+        # default empty list, which only ever makes the fallback abstain.
+        try:
+            from socr.core.pdf import open_pdf
+
+            pages_needing_words = [
+                pa.page_num for pa in assessment.pages if pa.detected_table_count > 0
+            ]
+            if pages_needing_words:
+                doc = open_pdf(state.handle.path)
+                try:
+                    for page_num in pages_needing_words:
+                        ps = state.pages.get(page_num)
+                        if ps is None or not (0 <= page_num - 1 < len(doc)):
+                            continue
+                        ps.native_words = doc[page_num - 1].get_text("words")
+                finally:
+                    doc.close()
+        except Exception:
+            logger.warning(
+                "TICKET-A1b: failed to cache native words for %s", state.handle.path, exc_info=True
+            )
+
         self._emit_native_table_structure_events(state, assessment)
 
         # GH-195: surface a rejected text-strategy grid. GH-144 A2 rejects a

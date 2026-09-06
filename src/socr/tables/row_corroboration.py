@@ -222,10 +222,10 @@ def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, flo
     return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
 
 
-def _words_in_region(words: list, region: tuple | None) -> list:
+def words_in_region(words: list, region: tuple | None) -> list:
     """Filter *words* to those whose box-centroid falls inside *region*.
 
-    Same centroid predicate as ``binding._words_in_region`` (GH-330 /
+    Same centroid predicate as ``binding.words_in_region`` (GH-330 /
     GH-331); duplicated locally rather than imported since that name is
     private to ``binding.py``. ``region=None`` returns *words* unchanged.
     """
@@ -257,7 +257,7 @@ def _is_genuine_numeric(text: str) -> tuple[bool, str]:
     return True, normalized
 
 
-def _baseline_bands(words: list) -> list[_NativeBand]:
+def baseline_bands(words: list) -> list[_NativeBand]:
     """Cluster *words* into ordered baseline bands (top to bottom).
 
     Clustering key is the word's y-centre, with a tolerance derived from
@@ -309,11 +309,11 @@ def _baseline_bands(words: list) -> list[_NativeBand]:
 _SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
 
 
-def _split_cells(line: str) -> list[str]:
+def split_cells(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
-def _is_separator_row(cells: list[str]) -> bool:
+def is_separator_row(cells: list[str]) -> bool:
     return (
         bool(cells)
         and all(_SEPARATOR_CELL_RE.match(c) for c in cells if c)
@@ -321,7 +321,7 @@ def _is_separator_row(cells: list[str]) -> bool:
     )
 
 
-def _table_blocks(markdown: str) -> list[list[list[str]]]:
+def table_blocks(markdown: str) -> list[list[list[str]]]:
     """Locate every markdown table block: runs of >= 2 consecutive pipe lines.
 
     Unlike ``binding.parse_grid`` (which requires every row in a block —
@@ -358,9 +358,9 @@ def _table_blocks(markdown: str) -> list[list[list[str]]]:
             j += 1
         run = pipe_idxs[i : j + 1]
         if len(run) >= 2:
-            run_cells = [_split_cells(lines[k]) for k in run]
+            run_cells = [split_cells(lines[k]) for k in run]
             separator_positions = {
-                pos for pos, cells in enumerate(run_cells) if _is_separator_row(cells)
+                pos for pos, cells in enumerate(run_cells) if is_separator_row(cells)
             }
             header_positions = {pos - 1 for pos in separator_positions if pos - 1 >= 0}
             rows = [
@@ -374,7 +374,7 @@ def _table_blocks(markdown: str) -> list[list[list[str]]]:
     return blocks
 
 
-def _is_column_index_row(tokens: tuple[str, ...]) -> bool:
+def is_column_index_row(tokens: tuple[str, ...]) -> bool:
     """True when *tokens* is exactly the consecutive integers 1..K, K = len(tokens).
 
     Real ECB statistical pages print a bold column-index legend row (a
@@ -400,7 +400,7 @@ def _is_column_index_row(tokens: tuple[str, ...]) -> bool:
     return values == list(range(1, len(values) + 1))
 
 
-def _numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
+def numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
     """Return each row's ordered genuine numeric tokens, anchored to a numeric label.
 
     Column 0 (the row's stub/label) is normally NOT numeric data (a code or
@@ -408,7 +408,7 @@ def _numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
     sequence. But when the stub cell IS itself a genuine numeric token — a
     bare year or ordinal row label, e.g. ``2018`` / ``2019`` — it is
     PREPENDED to the row's data tokens as an anchor. Native baseline bands
-    already include such a label as their own first token (``_baseline_bands``
+    already include such a label as their own first token (``baseline_bands``
     does not exclude any word by position), so anchoring a numeric label
     ties a row's match to ITS OWN printed line, not to a same-shaped value
     run copied from a different line. Without this, swapping two rows'
@@ -430,7 +430,7 @@ def _numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
     -- neither of which is a data row (measured on the A1a ECB fixtures).
     A row (anchored or not) whose full token sequence is exactly the
     consecutive integers 1..K is also excluded — see
-    ``_is_column_index_row``.
+    ``is_column_index_row``.
     """
     result: list[tuple[str, ...]] = []
     for row in rows:
@@ -449,7 +449,7 @@ def _numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
         if not data_tokens:
             continue
         full_tokens = (stub_normalized, *data_tokens) if is_numeric_stub else tuple(data_tokens)
-        if _is_column_index_row(full_tokens):
+        if is_column_index_row(full_tokens):
             continue
         result.append(full_tokens)
     return result
@@ -466,7 +466,7 @@ def _contiguous_run(needle: tuple[str, ...], haystack: tuple[str, ...]) -> bool:
     return False
 
 
-def _match_rows_monotonic(
+def match_rows_monotonic(
     rows: list[tuple[str, ...]], native_row_token_lists: list[tuple[str, ...]]
 ) -> list[int | None]:
     """Match *rows* (one table block, candidate order) against native bands.
@@ -521,8 +521,8 @@ def corroborate_rows(
     words, returns a ``RowCorroboration`` of all zeros (``clears`` is
     ``None`` — abstain, not a conviction).
     """
-    region_words = _words_in_region(words, region)
-    native_bands = _baseline_bands(region_words)
+    region_words = words_in_region(words, region)
+    native_bands = baseline_bands(region_words)
     native_row_token_lists = [band.tokens for band in native_bands if band.tokens]
     native_row_y_centers = [band.y_center for band in native_bands if band.tokens]
     native_numeric_rows = len(native_row_token_lists)
@@ -531,16 +531,16 @@ def corroborate_rows(
     for tokens in native_row_token_lists:
         native_counts.update(tokens)
 
-    blocks = _table_blocks(markdown)
+    blocks = table_blocks(markdown)
     candidate_rows: list[tuple[str, ...]] = []
     unbound_rows: list[tuple[int, ...]] = []
     all_gap_band_idxs: set[int] = set()
     skipped_native_rows = 0
     bound = 0
     for rows in blocks:
-        block_rows = _numeric_body_rows(rows)
+        block_rows = numeric_body_rows(rows)
         candidate_rows.extend(block_rows)
-        matches = _match_rows_monotonic(block_rows, native_row_token_lists)
+        matches = match_rows_monotonic(block_rows, native_row_token_lists)
         bound_pairs = [(pos, idx) for pos, idx in enumerate(matches) if idx is not None]
         bound += len(bound_pairs)
         unbound_rows.append(tuple(i for i, m in enumerate(matches) if m is None))

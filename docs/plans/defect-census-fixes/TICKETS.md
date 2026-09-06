@@ -69,8 +69,10 @@ page; the log records each page's share. `uvx ruff@0.16.0 format --check .` clea
 `PageState`, which carries no words (`core/state.py`); the S1 branch has nothing to score
 against. 9/9 ECB statistical pages floored over a candidate that reproduced the page.
 **Do:** Store the page's native words (and `detected_table_bboxes`) on `PageState` at
-extraction time. In `structure_class_grid_winner`, when the structure guard abstained
-(`header_unattributed`) and native numeric words exist inside a detected table bbox, score
+extraction time. In `structure_class_grid_winner`, whenever the strict grid-authored pool is empty (the
+floor would otherwise apply — gate re-ruled 2026-09-06: the native `header_unattributed`
+flag is False on all six census fixtures; the census's `header_unattributed` was a defect on
+the MODEL candidate) and native numeric words exist inside a detected table bbox, score
 every cached grid candidate with `corroborate_rows` on that region; a candidate clearing
 both constants and whose numeric row count is not below the native effective row count by
 more than the existing wrapped-label allowance (name the symbol from

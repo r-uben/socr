@@ -727,6 +727,82 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
 _NATIVE_TEXT_LANES = ("native", "chart_asset")
 
 
+def _grid_shaped_attempt(out: PageOutput | None) -> bool:
+    """Whether ``out`` is a non-native reading that authored a table grid,
+    with NO judge/rejection verdict applied either way.
+
+    TICKET-A1b (#634): split out of ``_grid_authored_attempt`` so the row-
+    corroboration fallback below can score every STRUCTURALLY plausible
+    candidate, including one the value guard hard-rejected on a stale
+    multiset check -- second-guessing exactly that guard is why the fallback
+    exists (a flattened/relabelled row is multiset-identical to a correct one
+    and can be hard-rejected today even though the row-level ORDERED check
+    below would clear it). ``_grid_authored_attempt`` keeps the judge gate for
+    S1 case (i)'s own pool; both pools call this same structural half so they
+    cannot drift apart on what "authored a grid" means in the first place.
+
+    A native-engine reading is never a candidate -- C1 forbids native from
+    authoring the GRID on a structure-class page, full stop; native's PROSE
+    ships separately, untouched, via the last-resort WARNING branch below.
+
+    GH-268 centralizes "authored a grid" in ``has_strict_table_grid``. S1
+    must use the same structural contract as the earlier D3 and #259 branches;
+    otherwise an output one branch rejects can be selected by this later one.
+    """
+    if out is None:
+        return False
+    if (out.engine or "").startswith("native"):
+        return False
+    text = (out.text or "").strip()
+    if not text or is_page_failed_marker(text):
+        return False
+    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+        return False
+
+    from socr.tables.reconcile import has_strict_table_grid
+
+    return has_strict_table_grid(text)
+
+
+def _grid_reading_attempt(out: PageOutput | None) -> bool:
+    """Whether ``out`` is a non-native reading that authored ANY table
+    reading, ragged body allowed -- the row-corroboration fallback's own
+    candidate pool.
+
+    TICKET-A1b (#634), measured against the real ECB fixture cache: a
+    statistical table's own printed layout routinely stacks more than one
+    spanning-header-shaped row above the numeric body (a units line, a
+    grouped-column label row, a bare column-index legend row -- see
+    ``row_corroboration.is_column_index_row``'s own docstring for the same
+    convention), so ``has_strict_table_grid``'s uniform-body-width
+    requirement rejects the ENTIRE block before row corroboration ever gets
+    to look at it -- measured 0/6 real qwen/gemini fixture candidates
+    passing ``has_strict_table_grid`` where the numeric body rows
+    underneath corroborate cleanly. ``has_authored_table_grid`` (#259's own
+    ragged-body-tolerant predicate) is used instead, matching
+    ``row_corroboration``'s own module contract: ``table_blocks`` is
+    deliberately not ``binding.parse_grid`` for the identical reason ("gives
+    up on the WHOLE block the first time a row does not [match column
+    counts]"). Deliberately a SEPARATE predicate from ``_grid_shaped_attempt``
+    rather than a parameter on it, so S1 case (i)'s own strict pool
+    (``_grid_authored_attempt``) and its existing floor-fixture tests are
+    untouched by this widening.
+    """
+    if out is None:
+        return False
+    if (out.engine or "").startswith("native"):
+        return False
+    text = (out.text or "").strip()
+    if not text or is_page_failed_marker(text):
+        return False
+    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+        return False
+
+    from socr.tables.reconcile import has_authored_table_grid
+
+    return has_authored_table_grid(text)
+
+
 def _grid_authored_attempt(out: PageOutput | None) -> bool:
     """Whether ``out`` is a model-authored reading that authored a table grid
     and was never POSITIVELY hard-rejected by the still-live value guard /
@@ -746,32 +822,12 @@ def _grid_authored_attempt(out: PageOutput | None) -> bool:
     stays "" -- so an empty ``rejection_class`` is indistinguishable from "no
     judge ever ran" and must default to distrust, not to "authored a grid,
     ship it."
-
-    A native-engine reading is never a candidate -- C1 forbids native from
-    authoring the GRID on a structure-class page, full stop; native's PROSE
-    ships separately, untouched, via the last-resort WARNING branch below.
-
-    GH-268 centralizes "authored a grid" in ``has_strict_table_grid``. S1
-    must use the same structural contract as the earlier D3 and #259 branches;
-    otherwise an output one branch rejects can be selected by this later one.
     """
-    if out is None:
+    if not _grid_shaped_attempt(out):
         return False
-    if (out.engine or "").startswith("native"):
-        return False
-    text = (out.text or "").strip()
-    if not text or is_page_failed_marker(text):
-        return False
-    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
-        return False
-    if not (
+    return bool(
         out.audit_passed or getattr(out, "rejection_class", "") == REJECTION_AMBIGUOUS_DEFERRED
-    ):
-        return False
-
-    from socr.tables.reconcile import has_strict_table_grid
-
-    return has_strict_table_grid(text)
+    )
 
 
 def _reaches_structure_class_branch(p) -> bool:
@@ -850,6 +906,434 @@ def _reaches_structure_class_branch(p) -> bool:
     return any(not (a.engine or "").startswith("native") for a in p.attempts)
 
 
+def _strict_grid_authored_pool(p) -> list[PageOutput]:
+    """S1 case (i)'s own candidate pool: every judge-cleared grid-authored
+    attempt, ``best_output`` first.
+
+    Factored out of ``structure_class_grid_winner`` (TICKET-A1b, #634) so it
+    and the corroboration fallback's own gate agree, byte-for-byte, on when
+    this pool is non-empty -- the fallback must never fire when case (i)
+    already has something to ship.
+    """
+    if _grid_authored_attempt(p.best_output):
+        return [p.best_output]
+    return [out for out in p.attempts if _grid_authored_attempt(out)]
+
+
+def _union_bbox(
+    bboxes: list[tuple[float, float, float, float]],
+) -> tuple[float, float, float, float] | None:
+    """Smallest box covering every bbox in *bboxes*, or ``None`` if empty.
+
+    TICKET-A1b (#634) disclosed simplification: a page can carry more than
+    one ``detected_table_bboxes`` entry, and ``corroborate_rows`` takes a
+    single region. Scoring against the union rather than splitting per-table
+    is deliberate: ``corroborate_rows`` already scores every markdown table
+    BLOCK it finds against one region, so a multi-table page is handled at
+    the block level already -- the union only widens the native-word filter,
+    it does not merge table blocks.
+    """
+    if not bboxes:
+        return None
+    return (
+        min(b[0] for b in bboxes),
+        min(b[1] for b in bboxes),
+        max(b[2] for b in bboxes),
+        max(b[3] for b in bboxes),
+    )
+
+
+#: TICKET-A1b (#634) round 2 (owner correction, 2026-09-06): the minimum
+#: share of a candidate's own numeric body rows (``RowCorroboration.total``)
+#: that the union of a page's ``detected_table_bboxes`` must expose as
+#: native numeric bands (``RowCorroboration.native_numeric_rows``) before
+#: that bbox-scoped region is trusted at all. Below this share the detector
+#: has under-covered the table (a partial box, or one block of a
+#: multi-block annex table), and scoring against it turns a genuinely
+#: corroborating candidate's own numbers into false "extras" -- the exact
+#: defect the owner's second ruling identified: all six census fixtures'
+#: bbox-union coverage measured 0.10-0.69 (16/39, 18/39, 5/39, 4/14, 25/36,
+#: 23/36) while the SAME six fixtures' whole-PAGE coverage measured 1.28-1.93
+#: (50/39, 51/39, 50/39, 27/14, 50/36, 46/36) -- see
+#: ``docs/log/2026-09-06_A1b-corroboration-selection.md``. 0.75 sits with
+#: margin below every measured full-page ratio and above every measured
+#: under-covering one; no finer anchor exists in the data than that gap.
+REGION_COVERAGE_MIN_SHARE: float = 0.75
+
+
+def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
+    """TICKET-A1b (#634) round 3 (owner redesign, 2026-09-06): closes the
+    A1->A2 truncation window with a SHAPE-based check, not a geometric one.
+
+    Rounds 1-2 anchored the row-count-allowance and edge-row checks to
+    ``detected_table_bboxes``, then (when that under-covered) to a
+    band-run extended by a distance tolerance. Both failed: measured
+    against all six census fixtures, the detector's own bboxes sit
+    entirely OUTSIDE the numeric body (bulletin p1's bbox ends at y=258;
+    its data rows run 275.8-635.2 -- see the filed detector issue), and a
+    pitch-based distance tolerance cannot separate "next block of the same
+    multi-block table" (report p3's own internal section-heading gap,
+    48.4pt, 6.31x its row pitch) from "table ended, footnote starts"
+    (bulletin p1's real boundary, 20.15pt, 2.62x its row pitch) -- the
+    former is LARGER than the latter, so no threshold, raw or
+    pitch-normalized, admits one while excluding the other.
+
+    This check instead asks whether native page has as many TABLE-SHAPED
+    rows as the candidate claims to have emitted, using the candidate's OWN
+    numeric body rows to define what "table-shaped" means -- no distance or
+    geometry involved:
+
+    - ``ROW_SHAPE_MIN`` is data-derived per candidate: the minimum numeric-
+      token count over the candidate's own ``numeric_body_rows``. A footnote
+      band (one bare number), a date/label-only band, and a value-less
+      section-heading band (zero numeric tokens) are all narrower than any
+      real data row and fall out on their own -- no named constant needed.
+    - ``native_table_rows`` counts every native baseline band on the WHOLE
+      PAGE (``region=None``, matching what ``corroborate_rows`` already
+      scores the ``clears`` gate against once under-coverage widens it --
+      see ``REGION_COVERAGE_MIN_SHARE`` above) whose own numeric-token count
+      is ``>= ROW_SHAPE_MIN`` and that is not the printed column-index
+      legend row (``is_column_index_row``, a table convention, not data).
+    - Reconciles with A1a's own ``ROW_CORROBORATION_MIN`` allowance: the
+      candidate's total must be at least that share of ``native_table_rows``,
+      or the candidate dropped whole rows and is not eligible, regardless of
+      how well the rows it DID emit corroborate.
+
+    Measured on all six fixtures (see the log): every real winning
+    candidate reconciles EXACTLY (ratio 1.000 -- 39/39, 39/39, 39/39, 14/14,
+    36/36, 36/36; no strays). The reviewer's last-10-rows-deleted repro
+    measures 29 vs a 39-row native floor (threshold 36, fails); a
+    first-5-rows-deleted variant measures 34 vs the same floor (also fails,
+    leading edge caught the same way -- no separate edge-row walk needed,
+    since every unmatched table-shaped native band counts wherever it sits,
+    not just at the bound range's boundary).
+
+    A page with two independent tables where the candidate covers only one
+    is REJECTED here by design: the page-level ``native_table_rows`` counts
+    both tables' rows, so a candidate missing an entire second table cannot
+    reconcile -- the second table's rows are lost content, same as any
+    other dropped rows.
+    """
+    from socr.tables.row_corroboration import (
+        ROW_CORROBORATION_MIN,
+        baseline_bands,
+        is_column_index_row,
+        numeric_body_rows,
+        table_blocks,
+    )
+
+    candidate_rows = [
+        row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
+    ]
+    if not candidate_rows:
+        return True
+
+    row_shape_min = min(len(row) for row in candidate_rows)
+    native_table_rows = sum(
+        1
+        for band in baseline_bands(words)
+        if band.tokens
+        and len(band.tokens) >= row_shape_min
+        and not is_column_index_row(band.tokens)
+    )
+    if native_table_rows <= 0:
+        return True
+
+    return len(candidate_rows) >= math.ceil(native_table_rows * ROW_CORROBORATION_MIN)
+
+
+def _row_corroborated_grid_winner(p):
+    """TICKET-A1b (#634): S1 case (i)-b -- a candidate the strict grid-authored
+    pool discarded, kept anyway because its rows measurably reproduce the
+    native page.
+
+    Returns ``(PageOutput, RowCorroboration)`` for the winning candidate, or
+    ``None`` if nothing corroborates (including plain abstention: no native
+    words cached, no detected bbox, or ``corroborate_rows`` itself abstains).
+
+    GATE (owner ruling, 2026-09-06 -- see the ticket's own motivating
+    evidence): this is called ONLY by ``structure_class_grid_winner`` /
+    ``structure_class_grid_corroboration`` once ``_strict_grid_authored_pool``
+    is already empty, i.e. the S1 floor would otherwise apply -- NOT gated on
+    ``native_table_header_unattributed``. The ticket's literal spec named
+    that flag, but all six ECB defect-census fixtures that motivate this
+    ticket measure it ``False`` (the header-loss signal in the census came
+    from a MODEL-side ``table_structure_failed: header_unattributed`` audit
+    event on the losing candidate, not this native page flag); gating on the
+    native flag would make the fallback a no-op on every one of its own
+    motivating pages. The owner ruling is about OUTCOME, not flag: whenever
+    the floor would ship the fail-closed marker, consult native row
+    corroboration first. C1's invariant is untouched by this -- native still
+    never authors the grid; what can now ship is a MODEL candidate the
+    native layer corroborates row-for-row, exactly the defect class A1a's
+    ``row_corroboration`` module was built to measure (a numerically
+    reproducing candidate the multiset-based value guard hard-rejected
+    anyway).
+
+    Scored against ``_grid_reading_attempt``'s pool, not
+    ``_grid_authored_attempt``'s -- deliberately wider than S1 case (i): a
+    candidate the value guard hard-rejected on a stale multiset comparison is
+    exactly what row corroboration exists to re-examine (a flattened row is
+    multiset-identical to a correct one; the ordered per-row check is not).
+    Wider still than ``_grid_shaped_attempt`` -- measured against the real
+    ECB fixture cache, 0/6 real qwen/gemini candidates pass
+    ``has_strict_table_grid``'s uniform-body-width requirement (a spanning
+    units/legend row above the numeric body is routine in real statistical
+    tables), so ``_grid_reading_attempt`` uses ``has_authored_table_grid``
+    (ragged body allowed) instead -- see its own docstring.
+
+    Tie-break (disclosed judgment call): among clearing candidates, prefer
+    one whose page-level ``table_ladder_disposition`` is NOT a recorded
+    negative verdict, then the higher corroboration share, then the existing
+    ``(audit_passed, confidence, word_count)`` ordering S1 case (i) uses.
+
+    TICKET-A1b (#634) round 2 (owner correction, 2026-09-06): the region
+    scored against is NOT unconditionally the bbox union. Measured against
+    all six census fixtures, ``detected_table_bboxes`` drastically
+    under-covers a real annex table (a partial box, or one block of a
+    multi-block stacked table) -- 16-18 native numeric words captured
+    against 410-606 on the whole page -- which turns a genuinely
+    corroborating candidate's own numbers into false "extras" and a false
+    ``clears=False``. Per candidate: score against the bbox union first; if
+    its own native-row coverage against THIS candidate's row count
+    (``native_numeric_rows / total``) is below ``REGION_COVERAGE_MIN_SHARE``,
+    the detector has under-covered and the ``clears`` gate is re-scored
+    against the whole page (``region=None`` -- ``words_in_region``'s own
+    no-op sentinel). Recorded, not silently substituted: each scored
+    candidate carries its ``corroboration_region`` ("bbox_union" or "page")
+    and the pre-widen coverage share, both surfaced through to the sidecar
+    by ``_apply_row_corroboration_disclosure``.
+
+    TICKET-A1b (#634) round 3 (owner redesign, 2026-09-06): the row-count
+    reconciliation below (``_row_shape_reconciliation_ok``) runs
+    UNCONDITIONALLY on every candidate, regardless of ``region_kind`` --
+    see its own docstring for why the region-anchored (round 1) and
+    band-run-distance-anchored (round 2 follow-up) designs both broke on
+    real fixtures, and why the shape-based replacement does not need a
+    region argument at all (it always reconciles against the whole page).
+    """
+    words = getattr(p, "native_words", None) or []
+    if not words:
+        return None
+    bbox_region = _union_bbox(list(getattr(p, "detected_table_bboxes", None) or []))
+    if bbox_region is None:
+        return None
+
+    from socr.tables.row_corroboration import corroborate_rows
+
+    seen_ids: set[int] = set()
+    candidates: list[PageOutput] = []
+    for out in [p.best_output, *p.attempts]:
+        if out is None or id(out) in seen_ids or not _grid_reading_attempt(out):
+            continue
+        seen_ids.add(id(out))
+        candidates.append(out)
+
+    scored = []
+    for out in candidates:
+        text = out.text or ""
+        rc_bbox = corroborate_rows(words, text, bbox_region)
+        region_kind = "bbox_union"
+        coverage_share = None
+        rc = rc_bbox
+        if rc_bbox.total > 0:
+            coverage_share = rc_bbox.native_numeric_rows / rc_bbox.total
+            if coverage_share < REGION_COVERAGE_MIN_SHARE:
+                region_kind = "page"
+                rc = corroborate_rows(words, text, None)
+        if rc.clears is not True:
+            continue
+        # TICKET-A1b round 3 (owner redesign, 2026-09-06): shape-based row
+        # reconciliation, always scored against the whole page regardless
+        # of ``region_kind`` -- see ``_row_shape_reconciliation_ok``'s own
+        # docstring for why neither the bbox nor a distance-bounded region
+        # around it can anchor this check on the real fixtures.
+        if not _row_shape_reconciliation_ok(words, text):
+            continue
+        scored.append((out, rc, region_kind, coverage_share))
+    if not scored:
+        return None
+
+    ladder_not_rejected = getattr(p, "table_ladder_disposition", None) is None
+
+    def _tie_break(pair):
+        out, rc, _region_kind, _coverage_share = pair
+        return (
+            ladder_not_rejected,
+            rc.share or 0.0,
+            out.audit_passed,
+            out.confidence,
+            out.word_count,
+        )
+
+    return max(scored, key=_tie_break)
+
+
+def structure_class_grid_corroboration(p):
+    """TICKET-A1b (#634): the ``(RowCorroboration, region_kind, coverage_share)``
+    detail behind ``structure_class_grid_winner``'s corroboration-fallback
+    winner, for the caller's per-row surfacing (markdown splice + audit
+    event). ``region_kind`` is ``"bbox_union"`` or ``"page"`` (round 2:
+    which region the winner was actually scored against, after the
+    coverage-based widening check); ``coverage_share`` is the bbox union's
+    own pre-widen ``native_numeric_rows / total`` ratio, or ``None`` if the
+    winning candidate had no numeric body rows to divide by.
+
+    ``None`` unless ``structure_class_grid_winner`` actually shipped a
+    fallback candidate -- mirrors its own gating (``_reaches_structure_class_branch``,
+    empty strict pool) so the two functions can never disagree about which
+    page this applies to.
+    """
+    if not _reaches_structure_class_branch(p):
+        return None
+    if _strict_grid_authored_pool(p):
+        return None
+    corroborated = _row_corroborated_grid_winner(p)
+    if corroborated is None:
+        return None
+    _out, rc, region_kind, coverage_share = corroborated
+    return rc, region_kind, coverage_share
+
+
+def _table_block_layout(markdown: str) -> list[dict]:
+    """TICKET-A1b (#634): per markdown table block, the header line(s)' raw
+    text and the ORIGINAL SOURCE LINE NUMBER of each numeric body row, in
+    the same order ``row_corroboration.numeric_body_rows`` returns them
+    for that block.
+
+    ``corroborate_rows``/``RowCorroboration.unbound_rows`` work entirely in
+    COUNTS -- a block-relative index into a candidate's numeric body rows --
+    because that is all selection needs to score a candidate. Turning an
+    unbound row's index back into an actual markdown LINE to annotate needs
+    line numbers that return type does not carry, so this mirrors
+    ``row_corroboration``'s own block/row detection (``table_blocks``,
+    ``numeric_body_rows``) rather than re-deriving the filtering rules --
+    every predicate call below is that module's own function, imported,
+    never duplicated logic. The one necessarily-duplicated piece is the
+    line-grouping loop itself (pipe-line runs, separator/header exclusion),
+    since ``table_blocks`` discards line numbers before returning; kept
+    line-for-line identical to that function on purpose.
+    """
+    from socr.tables.row_corroboration import is_separator_row, numeric_body_rows, split_cells
+
+    lines = markdown.splitlines()
+    pipe_idxs = [i for i, ln in enumerate(lines) if "|" in ln and ln.strip()]
+    layouts: list[dict] = []
+    i = 0
+    while i < len(pipe_idxs):
+        j = i
+        while j + 1 < len(pipe_idxs) and pipe_idxs[j + 1] == pipe_idxs[j] + 1:
+            j += 1
+        run = pipe_idxs[i : j + 1]
+        if len(run) >= 2:
+            run_cells = [split_cells(lines[k]) for k in run]
+            separator_positions = {
+                pos for pos, cells in enumerate(run_cells) if is_separator_row(cells)
+            }
+            header_positions = {pos - 1 for pos in separator_positions if pos - 1 >= 0}
+            kept = [
+                (run[pos], cells)
+                for pos, cells in enumerate(run_cells)
+                if pos not in separator_positions and pos not in header_positions
+            ]
+            if kept:
+                body_line_nums = [
+                    line_num for line_num, cells in kept if numeric_body_rows([cells])
+                ]
+                layouts.append(
+                    {
+                        "header_lines": [lines[run[pos]] for pos in sorted(header_positions)],
+                        "row_line_nums": body_line_nums,
+                    }
+                )
+        i = j + 1
+    return layouts
+
+
+def _splice_unverified_row_markers(markdown: str, unbound_rows: tuple[tuple[int, ...], ...]) -> str:
+    """TICKET-A1b (#634): append an inline ``<!-- row unverified -->`` marker
+    to every table row ``row_corroboration`` could not bind to a native
+    baseline band, so the doubt travels with the shipped markdown itself,
+    not only the sidecar/audit log (CLAUDE.md: no silent content loss -- a
+    table clearing the share floor with one wrong row must not read as the
+    whole table having cleared).
+
+    Fails safe: a block-count or row-index mismatch against
+    ``_table_block_layout``'s own reading of the SAME markdown (which
+    should not be possible, since both derive from the same text, but nothing
+    here is worth ever crashing assembly over) is silently skipped for that
+    row rather than raising or corrupting an unrelated line.
+    """
+    if not any(unbound_rows):
+        return markdown
+    layouts = _table_block_layout(markdown)
+    lines = markdown.splitlines()
+    for block_idx, row_idxs in enumerate(unbound_rows):
+        if not row_idxs or block_idx >= len(layouts):
+            continue
+        row_line_nums = layouts[block_idx]["row_line_nums"]
+        for row_idx in row_idxs:
+            if row_idx >= len(row_line_nums):
+                continue
+            line_num = row_line_nums[row_idx]
+            if line_num >= len(lines) or "row unverified" in lines[line_num]:
+                continue
+            lines[line_num] = f"{lines[line_num].rstrip()} <!-- row unverified -->"
+    return "\n".join(lines)
+
+
+def _apply_row_corroboration_disclosure(
+    state, page_num: int, grid_winner, corroboration, region_kind: str, coverage_share: float | None
+):
+    """TICKET-A1b (#634): the visible half of the row-corroboration fallback.
+
+    Splices per-row ``<!-- row unverified -->`` markers into the shipped
+    markdown (see ``_splice_unverified_row_markers``) and appends an
+    ``AuditEvent`` naming the header text AS EMITTED (the ticket's own
+    "owner may rule for neutral ``col N`` stubs later" -- recording the
+    header either way keeps that choice reversible) plus the corroboration
+    counts, so batch analysis and the sidecar can see this page shipped via
+    the fallback rather than S1 case (i)'s ordinary grid-authored pool.
+
+    ``region_kind`` / ``coverage_share`` (round 2, owner correction
+    2026-09-06): which region the winner was actually scored against
+    (``"bbox_union"`` or ``"page"``) and the bbox union's own pre-widen
+    coverage ratio, recorded so a partial detected bbox that forced a
+    page-wide fallback is visible in the sidecar, never silent.
+    """
+    from socr.core.audit_log import AuditEvent
+
+    text = grid_winner.text or ""
+    spliced = _splice_unverified_row_markers(text, corroboration.unbound_rows)
+    header_lines = [line for layout in _table_block_layout(text) for line in layout["header_lines"]]
+    share = corroboration.share
+    detail = (
+        f"row corroboration kept this candidate over the structure-class floor: "
+        f"{corroboration.bound}/{corroboration.total} rows bound"
+        + (f" (share {share:.3f})" if share is not None else "")
+        + f" [corroboration_region={region_kind}]"
+    )
+    state.events.append(
+        AuditEvent(
+            page_num=page_num,
+            kind="structure_class_row_corroborated",
+            engine=grid_winner.engine or "",
+            detail=detail,
+            data={
+                "bound": corroboration.bound,
+                "total": corroboration.total,
+                "unbound_rows": [list(idxs) for idxs in corroboration.unbound_rows],
+                "header_lines": header_lines,
+                "corroboration_region": region_kind,
+                "region_coverage_share": coverage_share,
+            },
+        )
+    )
+    if spliced == text:
+        return grid_winner
+    return replace(grid_winner, text=spliced)
+
+
 def structure_class_grid_winner(p) -> PageOutput | None:
     """S1 case (i): the grid-authoring model attempt a structure-class page ships.
 
@@ -871,15 +1355,23 @@ def structure_class_grid_winner(p) -> PageOutput | None:
     function mutates nothing either way: ``audit_passed`` is the
     winner-SELECTION flag, not a page-quality flag, and flipping it on the
     stored attempt discards the page (the #252 round-1 defect).
+
+    TICKET-A1b (#634) case (i)-b: when the strict pool above is empty, falls
+    back to ``_row_corroborated_grid_winner`` -- a candidate the strict pool
+    discarded but whose rows measurably reproduce the native page, per
+    A1a's row-corroboration check. Consult
+    ``structure_class_grid_corroboration(p)`` for the detail behind that
+    winner (share, unbound rows) when this returns one.
     """
     if not _reaches_structure_class_branch(p):
         return None
-    if _grid_authored_attempt(p.best_output):
-        return p.best_output
-    candidates = [out for out in p.attempts if _grid_authored_attempt(out)]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda out: (out.audit_passed, out.confidence, out.word_count))
+    strict_pool = _strict_grid_authored_pool(p)
+    if strict_pool:
+        if p.best_output in strict_pool:
+            return p.best_output
+        return max(strict_pool, key=lambda out: (out.audit_passed, out.confidence, out.word_count))
+    corroborated = _row_corroborated_grid_winner(p)
+    return corroborated[0] if corroborated is not None else None
 
 
 def structure_class_floor_applies(p) -> bool:
@@ -1562,6 +2054,19 @@ def _select_page_output_tagged(
         if _reaches_structure_class_branch(p):
             grid_winner = structure_class_grid_winner(p)
             if grid_winner is not None:
+                # TICKET-A1b (#634) case (i)-b: this winner came from the
+                # row-corroboration fallback (the strict grid-authored pool
+                # was empty), so the doubt this candidate still carries must
+                # be made visible before it ships -- per-row markers in the
+                # text itself and an audit event naming the header and the
+                # counts, not just a silent pass through the same two
+                # endings case (i) uses.
+                corroboration_detail = structure_class_grid_corroboration(p)
+                if corroboration_detail is not None:
+                    corroboration, region_kind, coverage_share = corroboration_detail
+                    grid_winner = _apply_row_corroboration_disclosure(
+                        state, page_num, grid_winner, corroboration, region_kind, coverage_share
+                    )
                 # (i) a grid-authoring model attempt from ``p.attempts``, body
                 # untouched, flagged only per its own status (S1 spec,
                 # verbatim) WHEN it is a clean pass. MAJOR 7(a) on #269: a

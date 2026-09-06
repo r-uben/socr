@@ -15,10 +15,10 @@ nothing dispatched.
 ## Ticket board
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
-| A1a | corroboration fn | DONE-LOCAL (92133fa; reviewer + Astra; edge-row blind spot -> A1b; unpushed) | — | 1 |
-| C1 | native geometry (#592) | DONE-LOCAL (4ce7ecc; reviewer + 2 Astra rounds; residual pinned; unpushed) | — | 1 |
-| D1 | throughput | DONE-LOCAL (0fa11fc, reviewer ACCEPT, live on agentic path; Astra skipped: Codex quota <10%; unpushed) | — | 1 |
-| A1b | selection | TODO | A1a | 2 |
+| A1a | corroboration fn | DONE (#630 merged 2026-09-06) | — | 1 |
+| C1 | native geometry (#592) | DONE (#631 merged 2026-09-06) | — | 1 |
+| D1 | throughput | DONE (#632 merged 2026-09-06) | — | 1 |
+| A1b | selection | DONE-LOCAL (#634, 016b084+02ca07b; reviewer ACCEPT x2; Astra pane gone, skipped; #639 filed for the detector) | A1a | 2 |
 | A1c | surfacing + resume | TODO | A1b | 3 |
 | A2 | truncation guard | TODO | A1c | 4 |
 | B1 | marker scope (#591) | TODO | A2 | 5 |
@@ -37,5 +37,4 @@ nothing dispatched.
 - Waves 7–9: E2, F1a, F1b, F2.
 
 ## Next action
-Wave 1 complete locally 2026-09-06: A1a 92133fa (socr-a1a), C1 4ce7ecc (socr-c1), D1 0fa11fc (socr-d1); each reviewed, A1a/C1 Astra-checked, D1 Astra skipped (Codex quota). Pushed 2026-09-06; PRs #629 (docs), #630 (A1a), #631 (C1), #632 (D1). Next: confirm a CI run exists per head, wait green, merge; then wave 2 A1b (depends A1a merged) on a fresh branch off main.
-branches off main (`feat/NN-row-corroboration`, `fix/592-aligned-runs`, `fix/NN-nougat-ladder`).
+A1b (#634) in review at 016b084; then Astra (quota permitting), push on owner's word, CI for the exact head, merge. Then A1c.
