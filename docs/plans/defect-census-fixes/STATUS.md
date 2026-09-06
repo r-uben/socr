@@ -37,5 +37,5 @@ nothing dispatched.
 - Waves 7–9: E2, F1a, F1b, F2.
 
 ## Next action
-Wave 1 complete locally 2026-09-06: A1a 92133fa (socr-a1a), C1 4ce7ecc (socr-c1), D1 0fa11fc (socr-d1); each reviewed, A1a/C1 Astra-checked, D1 Astra skipped (Codex quota). Unpushed. Next: owner says push -> open 3 PRs, wait CI green, merge; then wave 2 A1b (depends A1a merged) on a fresh branch off main.
+Wave 1 complete locally 2026-09-06: A1a 92133fa (socr-a1a), C1 4ce7ecc (socr-c1), D1 0fa11fc (socr-d1); each reviewed, A1a/C1 Astra-checked, D1 Astra skipped (Codex quota). Pushed 2026-09-06; PRs #629 (docs), #630 (A1a), #631 (C1), #632 (D1). Next: confirm a CI run exists per head, wait green, merge; then wave 2 A1b (depends A1a merged) on a fresh branch off main.
 branches off main (`feat/NN-row-corroboration`, `fix/592-aligned-runs`, `fix/NN-nougat-ladder`).
