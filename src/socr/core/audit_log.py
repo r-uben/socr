@@ -114,6 +114,7 @@ def build_run_audit(state) -> RunAudit:
     """
     events: list[AuditEvent] = list(getattr(state, "events", []))
     events.extend(_derive_escalations(state))
+    events.extend(_derive_structure_floor_overrides(state))
 
     # Stable order: by page, then a coarse phase rank so a page's story reads
     # top-to-bottom (engine escalation -> judge -> dual-pass -> TR-3 detection
@@ -162,6 +163,12 @@ def build_run_audit(state) -> RunAudit:
         # a fail-closed floor, either way the last word on its table content.
         "structure_class_model_table_kept": 6,
         "structure_class_ladder_exhausted_floor": 6,
+        # TICKET-A1b (#634): same phase/rank as the two lines above -- one
+        # more shape of "the structure-class winner-selection story for this
+        # page", either the row-corroborated candidate that shipped or the
+        # ladder-accepted candidate the floor overrode anyway.
+        "structure_class_row_corroborated": 6,
+        "structure_floor_overrode_ladder": 6,
         "page_failed": 7,
     }
     events.sort(key=lambda e: (e.page_num, rank.get(e.kind, 9)))
@@ -203,4 +210,53 @@ def _derive_escalations(state) -> list[AuditEvent]:
                     data={"failure_mode": a.failure_mode.value, "recovered_by": took_over},
                 )
             )
+    return out
+
+
+def _derive_structure_floor_overrides(state) -> list[AuditEvent]:
+    """TICKET-A1b (#634): generalises #589 (option c).
+
+    A per-table judge-ladder ACCEPT (``TABLE_LADDER_ACCEPTED_KIND``, appended
+    at the source in ``state.events`` from ``_phase_agentic``) is a verdict
+    about that table's own content, entirely independent of S1's
+    grid-authorship/corroboration selection. A page can therefore end up
+    with an accepted table AND still have its structure-class floor apply
+    (``manifest.structure_class_floor_applies`` -- true only when
+    ``structure_class_grid_winner`` itself, corroboration fallback included,
+    found nothing to ship): the accepted table was never in the grid-shaped
+    candidate pool at all (an OCR rung the ladder scored on its OWN text
+    reconstruction, not on the grid-authored markdown attempts S1 chooses
+    between), or corroboration's stricter ordered-row check still rejected
+    it. Derived here (not appended at the selection site in ``manifest.py``)
+    for the same reason ``_derive_escalations`` is derived rather than
+    threaded through every phase: the two facts it compares -- "ladder
+    accepted a table here" and "the floor still applies here" -- are each
+    already unambiguous and available on ``state`` without a new mutation
+    point, so recomputing them here cannot drift from either source of
+    truth.
+    """
+    from socr.core.manifest import structure_class_floor_applies
+    from socr.judge.table_verdict import TABLE_LADDER_ACCEPTED_KIND
+
+    accepted_pages: set[int] = {
+        e.page_num
+        for e in getattr(state, "events", []) or []
+        if getattr(e, "kind", "") == TABLE_LADDER_ACCEPTED_KIND
+    }
+    out: list[AuditEvent] = []
+    for page_num in sorted(accepted_pages):
+        p = state.pages.get(page_num)
+        if p is None or not structure_class_floor_applies(p):
+            continue
+        out.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="structure_floor_overrode_ladder",
+                detail=(
+                    "judge ladder accepted a table on this page, but the "
+                    "structure-class floor still discarded every candidate "
+                    "and shipped the fail-closed marker instead"
+                ),
+            )
+        )
     return out

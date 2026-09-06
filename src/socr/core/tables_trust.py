@@ -188,6 +188,19 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # applied to the S1 winner-selection branch.
         "structure_class_model_table_kept",
         "structure_class_ladder_exhausted_floor",
+        # TICKET-A1b (#634): S1 case (i)-b -- a candidate the strict grid pool
+        # discarded, kept anyway because A1a's ``row_corroboration`` measured
+        # its rows against native. Distrust-worthy for the same reason
+        # ``structure_class_model_table_kept`` is: no MEASURED native table
+        # exists to fully adjudicate the numbers, only an ordered-row
+        # reproduction check; a consumer must still be told.
+        "structure_class_row_corroborated",
+        # TICKET-A1b (#634): generalises #589 (option c) -- the judge ladder
+        # ACCEPTED some table on this page, but S1's structure-class floor
+        # still discarded every candidate and shipped the fail-closed marker
+        # instead. A consumer must be able to see that an accepted table
+        # existed and was overridden, not just that the floor fired.
+        "structure_floor_overrode_ladder",
     }
 )
 

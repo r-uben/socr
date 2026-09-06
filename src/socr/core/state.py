@@ -114,6 +114,15 @@ class PageState:
     #: page reaches the same verdict as the run that measured it.
     detected_table_count: int = 0
     detected_table_bboxes: list[tuple[float, float, float, float]] = field(default_factory=list)
+    #: TICKET-A1b (#634): raw ``page.get_text("words")`` tuples, populated once
+    #: at extraction time alongside ``detected_table_bboxes`` above so S1
+    #: selection can call ``row_corroboration.corroborate_rows`` before the
+    #: structure-class floor discards a candidate sight-unseen. Deliberately
+    #: RUNTIME-ONLY: the sidecar/manifest payload is built field-by-field (not
+    #: ``asdict``), so this is never persisted and never restored on resume --
+    #: a resumed page's fallback simply has no native-words evidence to
+    #: consult, which only ever makes the fallback abstain, never mis-fire.
+    native_words: list[tuple] = field(default_factory=list)
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     #: What this page has actually SPENT, as a recorded fact rather than a
     #: derivation (cold review rounds 4-5). Every site that journals an
