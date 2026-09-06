@@ -74,6 +74,7 @@ class CoverageRecord:
     native_valueless_unbound: int
     native_unbound_count: int
     model_unbound_count: int
+    model_unbound_nonempty: bool
     cell_contradiction_count: int = 0
     row_label_contradiction_count: int = 0
     contradiction_count: int = 0
@@ -335,6 +336,7 @@ def _record(
         contradiction_count=len(result.contradicted_cells) + len(result.row_label_contradictions),
         native_unbound_count=len(result.native_unbound),
         model_unbound_count=len(result.model_unbound),
+        model_unbound_nonempty=bool(result.model_unbound),
         cell_contradiction_count=len(result.contradicted_cells),
         row_label_contradiction_count=len(result.row_label_contradictions),
     )
@@ -365,7 +367,7 @@ def _aggregate(records: tuple[CoverageRecord, ...], denominator: int) -> dict[st
         ),
         "contradiction_nonempty": sum(record.contradiction_count > 0 for record in records),
         "native_unbound_nonempty": sum(record.native_unbound_count > 0 for record in records),
-        "model_unbound_nonempty": sum(record.model_unbound_count > 0 for record in records),
+        "model_unbound_nonempty": sum(record.model_unbound_nonempty for record in records),
     }
 
 
@@ -509,5 +511,6 @@ def summary_text(report: CoverageReport) -> str:
         "Selected whole-page results:",
         f"  fully checked: {whole['fully_checked']}/{whole['denominator']}",
         f"  structural agreement: {whole['structural_agreement']}/{whole['denominator']}",
+        f"  model unbound non-empty: {whole['model_unbound_nonempty']}/{whole['denominator']}",
     ]
     return "\n".join(lines) + "\n"
