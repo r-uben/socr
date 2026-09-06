@@ -18,7 +18,7 @@ nothing dispatched.
 | A1a | corroboration fn | DONE (#630 merged 2026-09-06) | — | 1 |
 | C1 | native geometry (#592) | DONE (#631 merged 2026-09-06) | — | 1 |
 | D1 | throughput | DONE (#632 merged 2026-09-06) | — | 1 |
-| A1b | selection | RE-REVIEW (#634, 016b084 + 02ca07b row-shape reconciliation) | A1a | 2 |
+| A1b | selection | DONE-LOCAL (#634, 016b084+02ca07b; reviewer ACCEPT x2; Astra pane gone, skipped; #639 filed for the detector) | A1a | 2 |
 | A1c | surfacing + resume | TODO | A1b | 3 |
 | A2 | truncation guard | TODO | A1c | 4 |
 | B1 | marker scope (#591) | TODO | A2 | 5 |
