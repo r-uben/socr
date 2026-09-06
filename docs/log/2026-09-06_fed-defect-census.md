@@ -170,3 +170,13 @@ candidate is cached.
 6. **`table_not_scorable` on pages with no table** — false trust flag; noise.
 7. #625 → #624 — one Fed table; last.
 Hyphenation: owner remit decision pending; not a ticket until ruled.
+
+## #591 / #592 re-verification on main (14:34–14:38, `census-591-recheck`)
+
+`fed-1989-11-14-minutes.pdf` (5 pp, scanned with text layer) on `main@eb14c82`, same pinned
+tree. p1, p2, p4, p5: `chart_asset`, SUCCESS, words 1.00, numbers 100%. **p1 ships the
+column-wise attendee list (`Mr.` ×11 then names) — #592 reproduced, SUCCESS, no flag.**
+**p3: `error / nougat / hallucination`, marker alone, words 0.00 of 145, numbers 0 of 65 —
+#591 reproduced on main via the `page_failed` ending** (same ending as ECB survey-2013 p1).
+Both endings therefore exist on main; B1 covers both. Note the winning engine on p3 is
+nougat (D1).
