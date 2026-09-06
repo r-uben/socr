@@ -15,7 +15,7 @@ nothing dispatched.
 ## Ticket board
 | Ticket | Stream | Status | depends-on | Wave |
 |--------|--------|--------|------------|------|
-| A1a | corroboration fn | ASTRA (8c833df; reviewer fixes applied; unbound_rows deferred to A1b) | — | 1 |
+| A1a | corroboration fn | REWORK-3 (Astra: dropped row clears; skipped-band gate + strict monotonic + unbound_rows) | — | 1 |
 | C1 | native geometry (#592) | DONE-LOCAL (4ce7ecc; reviewer + 2 Astra rounds; residual pinned; unpushed) | — | 1 |
 | D1 | throughput | DONE-LOCAL (0fa11fc, reviewer ACCEPT, live on agentic path; Astra skipped: Codex quota <10%; unpushed) | — | 1 |
 | A1b | selection | TODO | A1a | 2 |
