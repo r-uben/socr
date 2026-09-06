@@ -961,77 +961,85 @@ def _union_bbox(
 REGION_COVERAGE_MIN_SHARE: float = 0.75
 
 
-def _row_count_allowance_ok(rc) -> bool:
-    """TICKET-A1b (#634): closes the A1->A2 truncation window.
+def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
+    """TICKET-A1b (#634) round 3 (owner redesign, 2026-09-06): closes the
+    A1->A2 truncation window with a SHAPE-based check, not a geometric one.
 
-    ``RowCorroboration.clears`` gates ``bound / total`` -- a candidate
-    missing rows ENTIRELY (never emitted at all, not merely garbled) can
-    still have ``bound == total`` and clear, because ``total`` is the
-    candidate's OWN row count, not the native page's. This checks the
-    candidate's row count against ``native_numeric_rows`` instead, so a
-    candidate that dropped whole rows (off the end or anywhere) cannot win
-    regardless of how well the rows it DID emit corroborate.
+    Rounds 1-2 anchored the row-count-allowance and edge-row checks to
+    ``detected_table_bboxes``, then (when that under-covered) to a
+    band-run extended by a distance tolerance. Both failed: measured
+    against all six census fixtures, the detector's own bboxes sit
+    entirely OUTSIDE the numeric body (bulletin p1's bbox ends at y=258;
+    its data rows run 275.8-635.2 -- see the filed detector issue), and a
+    pitch-based distance tolerance cannot separate "next block of the same
+    multi-block table" (report p3's own internal section-heading gap,
+    48.4pt, 6.31x its row pitch) from "table ended, footnote starts"
+    (bulletin p1's real boundary, 20.15pt, 2.62x its row pitch) -- the
+    former is LARGER than the latter, so no threshold, raw or
+    pitch-normalized, admits one while excluding the other.
 
-    Reuses A1a's own ``ROW_CORROBORATION_MIN`` as the allowance share.
-    Disclosed judgment call: no row-count tolerance constant exists on the
-    value-guard side to reuse instead -- ``native_verifier._value_guard`` is
-    an exact-equality row-count check with no slack constant -- and A1a's
-    log ties this exact share to the wrapped-label defect's measured 3-row
-    shortfall, the same failure this allowance exists to tolerate.
-    """
-    if rc.native_numeric_rows <= 0:
-        return True
+    This check instead asks whether native page has as many TABLE-SHAPED
+    rows as the candidate claims to have emitted, using the candidate's OWN
+    numeric body rows to define what "table-shaped" means -- no distance or
+    geometry involved:
 
-    from socr.tables.row_corroboration import ROW_CORROBORATION_MIN
+    - ``ROW_SHAPE_MIN`` is data-derived per candidate: the minimum numeric-
+      token count over the candidate's own ``numeric_body_rows``. A footnote
+      band (one bare number), a date/label-only band, and a value-less
+      section-heading band (zero numeric tokens) are all narrower than any
+      real data row and fall out on their own -- no named constant needed.
+    - ``native_table_rows`` counts every native baseline band on the WHOLE
+      PAGE (``region=None``, matching what ``corroborate_rows`` already
+      scores the ``clears`` gate against once under-coverage widens it --
+      see ``REGION_COVERAGE_MIN_SHARE`` above) whose own numeric-token count
+      is ``>= ROW_SHAPE_MIN`` and that is not the printed column-index
+      legend row (``is_column_index_row``, a table convention, not data).
+    - Reconciles with A1a's own ``ROW_CORROBORATION_MIN`` allowance: the
+      candidate's total must be at least that share of ``native_table_rows``,
+      or the candidate dropped whole rows and is not eligible, regardless of
+      how well the rows it DID emit corroborate.
 
-    return rc.total >= math.ceil(rc.native_numeric_rows * ROW_CORROBORATION_MIN)
+    Measured on all six fixtures (see the log): every real winning
+    candidate reconciles EXACTLY (ratio 1.000 -- 39/39, 39/39, 39/39, 14/14,
+    36/36, 36/36; no strays). The reviewer's last-10-rows-deleted repro
+    measures 29 vs a 39-row native floor (threshold 36, fails); a
+    first-5-rows-deleted variant measures 34 vs the same floor (also fails,
+    leading edge caught the same way -- no separate edge-row walk needed,
+    since every unmatched table-shaped native band counts wherever it sits,
+    not just at the bound range's boundary).
 
-
-def _edge_row_skip_count(words: list, markdown: str, region) -> int:
-    """TICKET-A1b (#634): native numeric bands, within *region*, that sit
-    BEFORE the candidate's first bound row or AFTER its last one -- a class
-    ``RowCorroboration.skipped_native_rows`` is blind to, since that gate
-    only counts gaps STRICTLY BETWEEN two bound rows (a dropped first or
-    last row of a block has no straddling bound pair to expose the gap;
-    measured on bulletin p1 with the whole page as region -- A1a log). A
-    band that is exactly the printed column-index legend line does not
-    count -- it is a table convention, not a dropped data row, the same
-    exclusion ``is_column_index_row`` already applies to candidate rows.
-
-    Deliberately reuses row_corroboration's own private helpers rather than
-    re-deriving the block/band walk, so this can never disagree with what
-    ``corroborate_rows`` itself would call "bound" for the same inputs.
+    A page with two independent tables where the candidate covers only one
+    is REJECTED here by design: the page-level ``native_table_rows`` counts
+    both tables' rows, so a candidate missing an entire second table cannot
+    reconcile -- the second table's rows are lost content, same as any
+    other dropped rows.
     """
     from socr.tables.row_corroboration import (
+        ROW_CORROBORATION_MIN,
         baseline_bands,
         is_column_index_row,
-        match_rows_monotonic,
         numeric_body_rows,
         table_blocks,
-        words_in_region,
     )
 
-    region_words = words_in_region(words, region)
-    native_bands = [band for band in baseline_bands(region_words) if band.tokens]
-    if not native_bands:
-        return 0
-    native_row_token_lists = [band.tokens for band in native_bands]
+    candidate_rows = [
+        row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
+    ]
+    if not candidate_rows:
+        return True
 
-    skipped = 0
-    for rows in table_blocks(markdown):
-        block_rows = numeric_body_rows(rows)
-        matches = match_rows_monotonic(block_rows, native_row_token_lists)
-        bound_idxs = [idx for idx in matches if idx is not None]
-        if not bound_idxs:
-            continue
-        first_idx, last_idx = min(bound_idxs), max(bound_idxs)
-        for idx, tokens in enumerate(native_row_token_lists):
-            if first_idx <= idx <= last_idx:
-                continue
-            if is_column_index_row(tokens):
-                continue
-            skipped += 1
-    return skipped
+    row_shape_min = min(len(row) for row in candidate_rows)
+    native_table_rows = sum(
+        1
+        for band in baseline_bands(words)
+        if band.tokens
+        and len(band.tokens) >= row_shape_min
+        and not is_column_index_row(band.tokens)
+    )
+    if native_table_rows <= 0:
+        return True
+
+    return len(candidate_rows) >= math.ceil(native_table_rows * ROW_CORROBORATION_MIN)
 
 
 def _row_corroborated_grid_winner(p):
@@ -1089,15 +1097,20 @@ def _row_corroborated_grid_winner(p):
     ``clears=False``. Per candidate: score against the bbox union first; if
     its own native-row coverage against THIS candidate's row count
     (``native_numeric_rows / total``) is below ``REGION_COVERAGE_MIN_SHARE``,
-    the detector has under-covered and ONLY the ``clears`` gate is
-    re-scored against the whole page (``region=None`` --
-    ``words_in_region``'s own no-op sentinel); the row-count-allowance and
-    edge-row checks stay anchored to the original (under-covering) bbox --
-    see their own call sites below for why widening THEM would convict a
-    complete candidate on unrelated page content. Recorded, not silently
-    substituted: each scored candidate carries its ``corroboration_region``
-    ("bbox_union" or "page") and the pre-widen coverage share, both
-    surfaced through to the sidecar by ``_apply_row_corroboration_disclosure``.
+    the detector has under-covered and the ``clears`` gate is re-scored
+    against the whole page (``region=None`` -- ``words_in_region``'s own
+    no-op sentinel). Recorded, not silently substituted: each scored
+    candidate carries its ``corroboration_region`` ("bbox_union" or "page")
+    and the pre-widen coverage share, both surfaced through to the sidecar
+    by ``_apply_row_corroboration_disclosure``.
+
+    TICKET-A1b (#634) round 3 (owner redesign, 2026-09-06): the row-count
+    reconciliation below (``_row_shape_reconciliation_ok``) runs
+    UNCONDITIONALLY on every candidate, regardless of ``region_kind`` --
+    see its own docstring for why the region-anchored (round 1) and
+    band-run-distance-anchored (round 2 follow-up) designs both broke on
+    real fixtures, and why the shape-based replacement does not need a
+    region argument at all (it always reconciles against the whole page).
     """
     words = getattr(p, "native_words", None) or []
     if not words:
@@ -1106,7 +1119,7 @@ def _row_corroborated_grid_winner(p):
     if bbox_region is None:
         return None
 
-    from socr.tables.row_corroboration import SKIPPED_ROWS_MAX, corroborate_rows
+    from socr.tables.row_corroboration import corroborate_rows
 
     seen_ids: set[int] = set()
     candidates: list[PageOutput] = []
@@ -1130,34 +1143,13 @@ def _row_corroborated_grid_winner(p):
                 rc = corroborate_rows(words, text, None)
         if rc.clears is not True:
             continue
-        # TICKET-A1b round 2 (owner correction, 2026-09-06): the row-count
-        # allowance and edge-row checks are ANCHORED-TO-BBOX safety nets on
-        # top of A1a's own ``clears`` gate, and both stop being trustworthy
-        # once the bbox itself has been judged unreliable (the branch above
-        # already fired because the bbox under-covers). A near-empty bbox
-        # (measured cov ~0.10-0.29 on the four single-block fixtures) makes
-        # them fall through near-vacuously anyway (no bound pairs to
-        # bracket; a tiny denominator trivially met) -- harmless. But a
-        # bbox that captures roughly HALF a real multi-block table (cov
-        # ~0.64-0.69, measured on both two-block report fixtures) makes the
-        # edge check ACTIVELY WRONG: rows that sit in the SECOND block,
-        # entirely outside this narrow bbox, are miscounted as dropped edge
-        # rows relative to the first block's own bound range, convicting a
-        # candidate whose page-scoped match above is a full 36/36. Once the
-        # region has been judged unreliable, these two checks are skipped
-        # rather than scored against either extreme (the bbox, wrong in a
-        # different way at each end of that range; or the page, whose
-        # native_numeric_rows counts unrelated content elsewhere on the
-        # page -- see the docstring above). A1a's own gate already covers
-        # INTERIOR gaps (``skipped_native_rows``, part of ``clears``) at
-        # the region actually scored; only the OUTSIDE-the-bound-range case
-        # goes unchecked in the widened branch, a disclosed narrowing of
-        # this ticket's own edge-row addition, not of A1a's contract.
-        if region_kind == "bbox_union":
-            if not _row_count_allowance_ok(rc_bbox):
-                continue
-            if _edge_row_skip_count(words, text, bbox_region) > SKIPPED_ROWS_MAX:
-                continue
+        # TICKET-A1b round 3 (owner redesign, 2026-09-06): shape-based row
+        # reconciliation, always scored against the whole page regardless
+        # of ``region_kind`` -- see ``_row_shape_reconciliation_ok``'s own
+        # docstring for why neither the bbox nor a distance-bounded region
+        # around it can anchor this check on the real fixtures.
+        if not _row_shape_reconciliation_ok(words, text):
+            continue
         scored.append((out, rc, region_kind, coverage_share))
     if not scored:
         return None

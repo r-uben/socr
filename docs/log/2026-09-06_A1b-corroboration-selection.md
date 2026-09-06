@@ -178,8 +178,112 @@ A1c (a separate, later-wave ticket per `docs/plans/defect-census-fixes/TICKETS.m
 `structure_class_row_corroborated` audit event (with its `corroboration_region` /
 `region_coverage_share` fields) is the intended attachment point for A1c's own marker work.
 
+## Round 3: row-shape reconciliation replaces both distance-anchored checks
+
+A reviewer repro on the row-count-allowance/edge-row checks above (round 2's own additions,
+scored against the bbox-union region) found a real gap: deleting a single complete data row
+from the real bulletin p1 qwen candidate (e.g. the `2018` row) still let `corroborate_rows`
+report `clears=True` — `bound/total = 38/38 = 1.0 ≥ 36/39`, because the gate's denominator is
+the candidate's OWN row count, so a dropped row lowers numerator and denominator together and
+the allowance never fires. The round-1/2 checks that were meant to catch exactly this (the
+row-count-allowance, the edge-row walk) were anchored to `detected_table_bboxes`, which round
+2's own investigation had already shown does not cover the numeric body on any fixture — so
+in practice those checks fired on almost nothing.
+
+### Round 2 follow-up: band-run (distance-anchored) — measured, rejected
+
+Before dropping distance entirely, a "band-run" alternative was measured: extend the checked
+region from the bbox union by up to `N` row-pitches in either direction, to reach real data
+rows without reaching unrelated content. Requested measurement — internal row pitch, the
+largest within-table gap (multi-block tables), and the smallest table-to-non-table gap, both
+raw and pitch-normalized:
+
+| fixture | pitch | max within-table gap | int/pitch | gap→footnote | after/pitch | gap→boundary | before/pitch |
+|---|---|---|---|---|---|---|---|
+| bulletin p1 | 7.68 | 23.62 | 3.08 | 20.15 | 2.62 | 21.60 | 2.81 |
+| bulletin p2 | 7.68 | 23.16 | 3.02 | 20.17 | 2.63 | 21.60 | 2.81 |
+| bulletin p3 | 7.68 | 23.64 | 3.08 | 20.17 | 2.63 | 21.60 | 2.81 |
+| report p1 | 7.92 | 11.76 | 1.48 | 28.45 | 3.59 | 11.50 | 1.45 |
+| report p2 | 7.92 | 35.06 | 4.43 | 28.22 | 3.56 | 11.50 | 1.45 |
+| report p3 | 7.68 | 48.43 | 6.31 | 42.10 | 5.48 | 11.50 | 1.50 |
+
+Max within-table gap across the set: **6.31×** pitch (report p3's own internal two-block
+break). Min table-to-non-table gap across the set: **1.45×** pitch (report p1/p2/p3's
+boundary gap). The former is larger than the latter — no single raw or pitch-normalized
+threshold admits every real multi-block continuation while excluding every real boundary.
+Per the owner's own stop condition ("if they overlap on any fixture, report the numbers and
+stop"), this was reported and the band-run design was dropped without being implemented.
+
+### Design: row shape, no distance or geometry
+
+Replaces `_row_count_allowance_ok` and `_edge_row_skip_count` (both removed) with a single
+`_row_shape_reconciliation_ok(words, markdown)`:
+
+- `ROW_SHAPE_MIN` — data-derived per candidate: the minimum numeric-token count over the
+  candidate's own `numeric_body_rows`. No named constant; footnote bands (one bare number),
+  date/label-only bands, and value-less section headings are narrower than any real data row
+  and fall out on their own.
+- `native_table_rows` — count of whole-page (`region=None`, matching what `corroborate_rows`
+  already scores the `clears` gate against once under-coverage widens it) native baseline
+  bands whose own numeric-token count is `>= ROW_SHAPE_MIN` and that are not the printed
+  column-index legend row (`is_column_index_row`).
+- Reconciliation: `candidate_total >= ceil(native_table_rows * ROW_CORROBORATION_MIN)` (A1a's
+  own 36/39 allowance), run unconditionally, regardless of `region_kind`. A page with two
+  independent tables where the candidate covers only one is rejected by design — the
+  page-level `native_table_rows` counts both tables, so a candidate missing an entire second
+  table cannot reconcile.
+
+### Measurement (required before implementing, per owner instruction)
+
+Real winning candidate vs whole-page `native_table_rows`, all six fixtures:
+
+| fixture | engine | ROW_SHAPE_MIN | candidate_total | native_table_rows | ratio |
+|---|---|---|---|---|---|
+| bulletin p1 | qwen | 12 | 39 | 39 | 1.000 |
+| bulletin p2 | qwen | 10 | 39 | 39 | 1.000 |
+| bulletin p3 | gemini | 8 | 39 | 39 | 1.000 |
+| report p1 | gemini | 12 | 14 | 14 | 1.000 |
+| report p2 | gemini | 10 | 36 | 36 | 1.000 |
+| report p3 | gemini | 15 | 36 | 36 | 1.000 |
+
+Every real winner reconciles exactly (no strays, no under-count) — all complete candidates
+pass, per the owner's own stop condition (only a failing complete candidate would have
+blocked implementation).
+
+Reviewer's repro, run directly against `_row_corroborated_grid_winner` with rows
+programmatically deleted from the real bulletin p1 qwen candidate (39 real rows, threshold
+`ceil(39 * 36/39) = 36`):
+
+| variant | candidate_total | vs threshold (36) | outcome |
+|---|---|---|---|
+| complete | 39 | 39 ≥ 36 | WINNER, bound=39/39 |
+| minus last 10 rows | 29 | 29 < 36 | NO WINNER (correctly rejected) |
+| minus first 5 rows | 34 | 34 < 36 | NO WINNER (correctly rejected) |
+
+Both trailing and leading truncation are caught the same way — every unmatched table-shaped
+native band counts toward `native_table_rows` wherever it sits on the page, not just past a
+bound range's edge, so no separate edge-row walk is needed.
+
+### Detector defect filed separately (not this ticket's fix)
+
+The bbox/data-row mismatch behind rounds 1-2's failed geometric designs is a `detected_table_bboxes`
+defect, filed as **#639** and referenced here rather than fixed in this ticket:
+
+| fixture | bbox y-range(s) | representative data-row y-range (rows with ≥3 numeric tokens) |
+|---|---|---|
+| bulletin p1 | (166.0, 258.0) | (254.2, 816.0) |
+| bulletin p2 | (166.0, 242.6) | (185.3, 816.0) |
+| bulletin p3 | (166.0, 265.6) | (261.9, 816.0) |
+| report p1 | (171.5, 241.1) | (238.3, 356.5) |
+| report p2 | (184.0, 260.6), (451.1, 513.8) | (257.7, 720.0) |
+| report p3 | (183.8, 256.5), (457.1, 523.1) | (253.9, 682.0) |
+
+On every fixture the detector's bbox ends at or before where the real numeric body starts (or
+covers only its first rows before a multi-block continuation) — consistent with capturing a
+caption/units box rather than the table body.
+
 ## Tests
 
-- `PYTHONPATH=<worktree>/src ~/venvs/socr/bin/pytest tests/test_s1_structure_class_winner_corroboration.py tests/test_gh317_structure_class_floor.py tests/test_s1_structure_class_winner_gh_reachability.py tests/test_package_layering.py tests/tables/test_row_corroboration.py -q` — 139 passed.
-- Full suite (`pytest tests/ -q`) — 4267 passed, 4 xfailed, 0 failed.
-- `uvx ruff@0.16.0 format --check .` — 590 files already formatted (clean).
+- `PYTHONPATH=<worktree>/src ~/venvs/socr/bin/pytest tests/test_s1_structure_class_winner_corroboration.py tests/test_gh317_structure_class_floor.py tests/test_s1_structure_class_winner_gh_reachability.py tests/test_package_layering.py tests/tables/test_row_corroboration.py -q` — round 2: 139 passed; round 3: 142 passed (8 tests in the corroboration file, up from 5).
+- Full suite (`pytest tests/ -q`) — round 3: 4270 passed, 4 xfailed, 0 failed (194.70s).
+- `uvx ruff@0.16.0 format --check .` — round 3: 591 files already formatted (clean).

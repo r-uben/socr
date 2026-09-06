@@ -215,3 +215,133 @@ def test_row_unverified_marker_spliced_for_unbound_row() -> None:
 class _FakeState:
     def __init__(self) -> None:
         self.events: list = []
+
+
+# TICKET-A1b (#634) round 3 (owner redesign, 2026-09-06): a bigger synthetic
+# table -- 20 rows, not 3 -- so dropping rows crosses A1a's own
+# ROW_CORROBORATION_MIN (36/39 ~= 0.9231) allowance the same way the
+# reviewer's real repro did (bulletin p1 qwen candidate, 39 real rows, minus
+# its last 10 -- see the review this round answers, and
+# docs/log/2026-09-06_A1b-corroboration-selection.md's round-3 section for
+# why a bbox- or distance-anchored region could not catch this and the
+# shape-based reconciliation replaces both the row-count-allowance and the
+# edge-row check). ceil(20 * 36/39) == 19, so dropping even one row from
+# either end must fail to reconcile; the complete table must still win.
+_LARGE_ROWS = [(2000 + i, float(100 + i), float(200 + i)) for i in range(20)]
+
+
+def _large_md(rows: list[tuple[int, float, float]]) -> str:
+    lines = ["| Year | A | B |", "|---|---|---|"]
+    lines += [f"| {year} | {a} | {b} |" for year, a, b in rows]
+    return "\n".join(lines) + "\n"
+
+
+_LARGE_NATIVE_WORDS: list[tuple] = []
+for _i, (_year, _a, _b) in enumerate(_LARGE_ROWS):
+    _LARGE_NATIVE_WORDS += _row_words(10.0 + _i * 20.0, [str(_year), str(_a), str(_b)])
+
+_LARGE_REGION = (0.0, 0.0, 200.0, 10.0 + len(_LARGE_ROWS) * 20.0)
+
+
+def _large_page(attempts: list[PageOutput]) -> PageState:
+    p = PageState(page_num=1)
+    p.is_born_digital = True
+    p.native_text = NATIVE_PROSE
+    p.has_tables = True
+    p.attempts = attempts
+    p.best_output = attempts[-1] if attempts else None
+    p.native_words = _LARGE_NATIVE_WORDS
+    p.detected_table_bboxes = [_LARGE_REGION]
+    return p
+
+
+def test_candidate_missing_trailing_rows_does_not_win() -> None:
+    """The reviewer's repro (round 3): a candidate whose LAST rows are
+    silently dropped, but whose remaining rows all still bind cleanly, must
+    NOT win the corroboration fallback -- the complete candidate must.
+
+    ``ceil(20 * 36/39) == 19``: dropping ONE row (19/20) would still clear
+    the allowance -- this drops TWO (18/20) to sit cleanly below it.
+    """
+    complete = _grid_reading_output("qwen", _large_md(_LARGE_ROWS))
+    truncated = _grid_reading_output("qwen", _large_md(_LARGE_ROWS[:-2]))
+
+    p_complete = _large_page([complete])
+    p_truncated = _large_page([truncated])
+
+    assert _strict_grid_authored_pool(p_complete) == []
+    assert _strict_grid_authored_pool(p_truncated) == []
+
+    winner = structure_class_grid_winner(p_complete)
+    assert winner is not None
+    assert winner.engine == "qwen"
+
+    assert _row_corroborated_grid_winner(p_truncated) is None
+    assert structure_class_grid_winner(p_truncated) is None
+    assert structure_class_floor_applies(p_truncated) is True
+
+
+def test_candidate_missing_leading_rows_does_not_win() -> None:
+    """The same defect at the OTHER edge: dropping the FIRST two rows
+    instead of the last must also fail to reconcile -- the shape-based
+    check counts every unmatched table-shaped native band wherever it sits,
+    not just past the bound range's trailing edge (unlike the round-2
+    edge-row walk it replaces, which was scored anchored to a region and
+    could not be trusted on real fixtures at all -- see the log).
+    """
+    truncated = _grid_reading_output("qwen", _large_md(_LARGE_ROWS[2:]))
+    p_truncated = _large_page([truncated])
+
+    assert _strict_grid_authored_pool(p_truncated) == []
+    assert _row_corroborated_grid_winner(p_truncated) is None
+    assert structure_class_grid_winner(p_truncated) is None
+    assert structure_class_floor_applies(p_truncated) is True
+
+
+def test_strict_pool_winner_ships_even_with_a_corroborating_candidate_present() -> None:
+    """When S1 case (i)'s own strict grid-authored pool is NOT empty, the
+    corroboration fallback must never fire, let alone override it -- even
+    when a separate, ragged candidate on the SAME page would otherwise
+    corroborate and win the fallback outright.
+
+    ``p.best_output`` is deliberately the (not-yet-audit_passed)
+    ``corroborating`` attempt, not ``strict`` directly: ``_reaches_
+    structure_class_branch`` treats an already-``audit_passed`` non-native
+    ``best_output`` as proof some EARLIER branch already shipped it (a
+    precondition this test must not trip, since it is testing what S1
+    itself picks from ``p.attempts``, mirroring how S1 selection actually
+    assigns ``best_output`` only after choosing a winner).
+    """
+    strict_md = (
+        "| Year | A | B |\n"
+        "|---|---|---|\n"
+        "| 2018 | 100.0 | 200.0 |\n"
+        "| 2019 | 110.0 | 210.0 |\n"
+        "| 2020 | 120.0 | 220.0 |\n"
+    )
+    strict = PageOutput(
+        page_num=1,
+        text=strict_md,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+        confidence=0.9,
+        failure_mode=FailureMode.NONE,
+    )
+    corroborating = _grid_reading_output("gemini", GOOD_MD)
+
+    # attempts=[strict, corroborating]: ``_floored_structure_class_page`` sets
+    # ``best_output = attempts[-1]``, so ``corroborating`` (audit_passed=False)
+    # ships as best_output -- keeping ``_reaches_structure_class_branch``'s
+    # early-return guard (which fires whenever a non-native best_output is
+    # already audit_passed) from short-circuiting before S1 even runs.
+    # ``strict`` stays reachable to ``_strict_grid_authored_pool`` via
+    # ``p.attempts`` regardless of position.
+    p = _floored_structure_class_page(with_native_words=True, attempts=[strict, corroborating])
+
+    assert _strict_grid_authored_pool(p) == [strict]
+
+    winner = structure_class_grid_winner(p)
+    assert winner is not None
+    assert winner is strict
+    assert winner.engine == "qwen"
