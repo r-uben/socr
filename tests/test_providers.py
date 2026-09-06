@@ -6,6 +6,7 @@ from socr.core.config import EngineType
 from socr.core.providers import (
     DEFAULT_PROVIDERS,
     PROFILE_GEMINI,
+    PROFILE_NOUGAT,
     PROFILE_QWEN_CLOUD,
     PROFILE_QWEN_LOCAL,
     ProviderProfile,
@@ -172,3 +173,44 @@ def test_cost_of_deepseek_still_works():
 def test_cost_of_mistral_still_works():
     """Mistral remains in DEFAULT_PROVIDERS so cost_of works for replay."""
     assert cost_of(EngineType.MISTRAL, 5) == 0.001 * 5
+
+
+# --- GH-628 (D1): nougat leaves the automatic ladder ---
+# 2026-09-06 ECB defect census: nougat took 6+ CPU minutes per rejected table
+# page on a Mac and produced nothing, and its one "win" (fed-1989-11-14 p3) was
+# a hallucination. Pin the DIFFERENCE (default excludes it, include_ineligible
+# brings it back, --primary still resolves it directly) rather than any one
+# ladder snapshot -- see CLAUDE.md's no-provider-trap note.
+
+
+def test_nougat_not_auto_eligible():
+    assert PROFILE_NOUGAT.auto_eligible is False
+
+
+def test_default_ladder_excludes_nougat():
+    """Default ladder (include_ineligible=False, all providers) must omit nougat,
+    same as DeepSeek/Mistral."""
+    ladder = provider_ladder(None)
+    engines = {p.engine for p in ladder}
+    assert EngineType.NOUGAT not in engines
+
+
+def test_include_ineligible_includes_nougat():
+    """include_ineligible=True must bring nougat back into the all-providers ladder."""
+    ladder = provider_ladder(None, include_ineligible=True)
+    engines = {p.engine for p in ladder}
+    assert EngineType.NOUGAT in engines
+
+
+def test_cost_of_nougat_still_works():
+    """Nougat remains in DEFAULT_PROVIDERS so cost_of works for replay."""
+    assert cost_of(EngineType.NOUGAT, 5) == 0.0
+
+
+def test_primary_nougat_still_resolves():
+    """--primary nougat must still resolve to EngineType.NOUGAT directly,
+    bypassing the auto ladder entirely -- same mechanism as --primary deepseek."""
+    from socr.cli import build_config
+
+    config = build_config(primary="nougat")
+    assert config.primary_engine == EngineType.NOUGAT
