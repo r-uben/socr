@@ -108,12 +108,19 @@ PROFILE_GLM = ProviderProfile(
 )
 
 PROFILE_NOUGAT = ProviderProfile(
+    # GH-628: nougat is an academic-paper OCR model, not a general table
+    # engine. On the 2026-09-06 ECB defect census (Mac, 6+ CPU minutes per
+    # rejected table page) it produced nothing for any table page and only
+    # "won" fed-1989-11-14 p3 with a hallucinated result. auto_eligible=False
+    # keeps it out of the automatic ladder while it stays reachable via
+    # ``--primary nougat``, same as DeepSeek/Mistral.
     engine=EngineType.NOUGAT,
     tier=TIER_LOCAL,
     cost_per_page_usd=0.0,
     id="nougat",
     backend="nougat",
     model="nougat",
+    auto_eligible=False,
 )
 
 PROFILE_MISTRAL = ProviderProfile(
@@ -220,8 +227,9 @@ def provider_ladder(
         per_page_only: keep only providers that can OCR individual pages.
         max_cost_per_page: if > 0, drop providers above this price cap.
         include_ineligible: if True, include providers with auto_eligible=False
-            (DeepSeek, Mistral). Default False — they are excluded from the
-            automatic routing ladder and only reachable via explicit --primary.
+            (DeepSeek, Mistral, Nougat). Default False — they are excluded from
+            the automatic routing ladder and only reachable via explicit
+            --primary.
     """
     if available is not None and available and isinstance(next(iter(available)), ProviderProfile):
         profiles: list[ProviderProfile] = list(available)  # type: ignore[arg-type]
