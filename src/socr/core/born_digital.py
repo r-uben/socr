@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import statistics
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -383,6 +384,423 @@ _WORD_TOKEN_RE = re.compile(r"[^\W\d_]+|\d+(?:\.\d+)?")
 #: behaviour was effectively a threshold of zero, which deleted a paragraph over
 #: a single point of contact (#145).
 _REGION_COVERAGE_DROP = 0.5
+
+#: GH-592 (C1): a tab-aligned two-column list (e.g. a "PRESENT:" attendee
+#: roster where the honorific and the name were typeset as two separate
+#: columns) native-extracts as one column's lines in full, then the other's --
+#: 11 bare "Mr."/"Ms." lines, then 11 names, on the Fed 1989-11-14 minutes p1
+#: fixture. The seam is a horizontal gap comparable to a single word space
+#: between the two columns, unlike a genuine multi-column prose layout (a
+#: journal page), whose gutter is many word spaces wide.
+#:
+#: Measured (see docs/log/2026-09-06_C1-aligned-runs.md): on the Fed fixture,
+#: the 11 honorific->name gaps range 0.92-1.76 word spaces (median word space
+#: 6.42pt at this page's font size); on three real two-column papers' body
+#: text (Fama-French 1997, Morris-Shin 1998, Grossman-Stiglitz 1980), the
+#: narrowest column gap measured is 2.30 word spaces. The margin here is
+#: real but not wide (~15% on each side) -- see ``LABEL_COLUMN_WIDTH_SHARE``
+#: below for the discriminator that actually protects genuine two-column
+#: prose from a false merge; the gap threshold alone is not sufficient (see
+#: the Astra false-merge finding in the log).
+ALIGNED_RUN_GAP_MAX_WORD_SPACES = 2.0
+
+#: A gap-and-bijection match is not enough: two independent, unrelated prose
+#: sentences placed in adjacent narrow columns can satisfy both (see the
+#: Astra false-merge finding in docs/log/2026-09-06_C1-aligned-runs.md --
+#: "We stopped the trial." / "We approved the drug." merged into one
+#: semantically destroyed line). A genuine label column ("Mr."/"Ms.") is
+#: always much NARROWER than the value column it labels; two independent
+#: prose columns are not -- each is close to full column width. Require the
+#: left block's median line width to be at most this share of the right
+#: block's median line width.
+#:
+#: Measured (see the log) restricted to the actual candidate block range
+#: `_try_aligned_run` evaluates -- not a whole-page approximation, which
+#: gives a spuriously extreme number: Fed fixture ratio 0.51 (label column
+#: median width 18.0pt vs. name column median width 35.28pt); Astra's
+#: synthetic false-merge repro 1.0; the same three real papers' column-width
+#: ratios (whole-page approximation, since no candidate run ever forms
+#: there) all 0.97-1.03. Set with ~27% margin above the Fed ceiling (0.51)
+#: and ~33% margin below the real-paper floor (0.97), erring toward the
+#: lower (more conservative -- rejects more borderline cases) side of that
+#: range per the "fail toward not merging" directive.
+LABEL_COLUMN_WIDTH_SHARE = 0.65
+
+#: Width asymmetry alone identifies "the left block is narrow", not "the
+#: left block is a label column" (GH-592 Astra RESIDUAL finding, see the
+#: log): four short "Note" labels beside four independent short sentences of
+#: very different lengths can be narrow-left/wide-right AND pass the
+#: bijection AND the gap check, yet still be unrelated content. What a
+#: genuine label's VALUE column looks like structurally is a plain list of
+#: short, independent entries -- never a WRAPPED PARAGRAPH, because a
+#: wrapped paragraph's lines (all but the last) each run up against the
+#: column's own measure (the greedy line-wrap fills every line until the
+#: next word would overflow). A list of independent values does not do this
+#: -- each entry ends wherever its own content ends, unrelated to the
+#: column's width. If a majority of the right block's lines land within
+#: ``RIGHT_BLOCK_FILL_TOLERANCE_WORD_WIDTHS`` median word-widths of the
+#: block's own widest line, treat it as wrapped body prose and do not merge.
+#:
+#: Two word-widths is deliberately generous: a wrapped line falls short of
+#: the measure by at most the width of the one word that didn't fit (plus a
+#: trailing space); a tighter tolerance would UNDER-count fill and let more
+#: wrapped-paragraph cases slip past this guard, which is the wrong
+#: direction per "fail toward not merging".
+RIGHT_BLOCK_FILL_TOLERANCE_WORD_WIDTHS = 2.0
+
+#: See ``RIGHT_BLOCK_FILL_TOLERANCE_WORD_WIDTHS`` above for the mechanics.
+#: Measured (see the log), at that tolerance, over the actual candidate
+#: right block: Fed fixture's name column fills at 0.182 (only its own
+#: widest line and one long "Corrigan, Vice Chairman" outlier are anywhere
+#: near the measure -- the other 9 bare names are not); a real Fed-minutes
+#: paragraph wrapped to 4 lines fills at 0.75; Astra's exact residual repro
+#: (four short, very unequal independent sentences) fills at exactly 0.50 --
+#: at the boundary, and NOT caught by this guard with a strict ">"
+#: comparison (see "Deviations"/residual note in the log: this is
+#: acknowledged and accepted, not silently loosened to catch it). 0.5 reads
+#: as "a majority" (strictly more than half) and sits with a wide margin
+#: above the Fed positive (0.182) and exactly at, not above, Astra's
+#: residual -- catching the real-body-prose case (0.75) without disturbing
+#: the Fed merge.
+MEASURE_FILL_SHARE_MAX = 0.5
+
+#: A "run" must have at least this many paired rows before two x-disjoint
+#: line groups are treated as an aligned run rather than a coincidental
+#: single pair. Not a measured threshold -- it is the minimum evidence for
+#: calling something a repeating pattern rather than one accident.
+_ALIGNED_RUN_MIN_ROWS = 2
+
+#: How many consecutive failed extensions to tolerate while growing a
+#: candidate run before giving up on it. The Fed fixture's run only reaches
+#: bijection (11 honorific lines vs. 11 name lines) once all five dict blocks
+#: making up the two columns are included -- an odd running total (block 6
+#: alone, then +block 7, then +block 8, then +block 9) cannot split evenly
+#: and fails three extensions in a row before the fourth (+block 10) succeeds.
+#: Not a measured value; a bound on search cost, set with margin over that
+#: one observed case.
+_ALIGNED_RUN_FAIL_STREAK_LIMIT = 4
+
+
+def _median_word_space_width(words: list) -> float | None:
+    """Median horizontal gap between adjacent words sharing the same line.
+
+    Used as the yardstick for ``ALIGNED_RUN_GAP_MAX_WORD_SPACES``: "comparable
+    to a word space" is meaningless without measuring what a word space on
+    THIS page actually is. Returns ``None`` when there is not enough evidence
+    (fewer than one measurable gap) -- callers must then skip aligned-run
+    detection entirely rather than guess a default.
+    """
+    by_line: dict[tuple[int, int], list] = {}
+    for w in words:
+        key = (w[5], w[6])
+        by_line.setdefault(key, []).append(w)
+
+    gaps: list[float] = []
+    for line_words in by_line.values():
+        ordered = sorted(line_words, key=lambda w: w[0])
+        for a, b in zip(ordered, ordered[1:]):
+            gap = b[0] - a[2]
+            if gap > 0:
+                gaps.append(gap)
+
+    if not gaps:
+        return None
+    gaps.sort()
+    mid = len(gaps) // 2
+    if len(gaps) % 2:
+        return gaps[mid]
+    return (gaps[mid - 1] + gaps[mid]) / 2.0
+
+
+def _median_word_width(words: list) -> float | None:
+    """Median glyph width (x1 - x0) of individual words on the page.
+
+    A different yardstick from ``_median_word_space_width`` (the gap
+    BETWEEN words) -- this measures the SIZE of a typical word, used by
+    ``RIGHT_BLOCK_FILL_TOLERANCE_WORD_WIDTHS`` to decide how close to a
+    block's own widest line a line must land to count as "filling the
+    measure" (see the GH-592 Astra residual finding in
+    docs/log/2026-09-06_C1-aligned-runs.md). Returns ``None`` when there are
+    no words to measure.
+    """
+    widths = [w[2] - w[0] for w in words if w[2] > w[0]]
+    if not widths:
+        return None
+    widths.sort()
+    mid = len(widths) // 2
+    if len(widths) % 2:
+        return widths[mid]
+    return (widths[mid - 1] + widths[mid]) / 2.0
+
+
+def _line_word_extents(words: list) -> dict[tuple[int, int], tuple[float, float]]:
+    """Per-(block_no, line_no) trimmed (x0, x1) from WORD boxes, not line bbox.
+
+    A dict-walk line's own bbox includes trailing-space glyphs baked into the
+    span text (e.g. "Mr.  " with two trailing spaces renders a bbox wider than
+    the visible "Mr."), which inflates the apparent right edge of a column
+    label enough to make it overlap the next column's left edge. Word boxes
+    strip that trailing whitespace, so the gap this module measures is the
+    true visual gap between glyphs.
+    """
+    extents: dict[tuple[int, int], tuple[float, float]] = {}
+    for w in words:
+        x0, _y0, x1, _y1 = w[0], w[1], w[2], w[3]
+        key = (w[5], w[6])
+        if key in extents:
+            prev_x0, prev_x1 = extents[key]
+            extents[key] = (min(prev_x0, x0), max(prev_x1, x1))
+        else:
+            extents[key] = (x0, x1)
+    return extents
+
+
+#: Consecutive x0 values within this many points are treated as the same
+#: column seed when clustering (see ``_cluster_two_bands``). Not a measured
+#: threshold -- font/rendering jitter of a shared column start is well under
+#: a point in the fixtures examined; this is a generous multiple of that.
+_COLUMN_SEED_TOLERANCE = 3.0
+
+
+def _cluster_two_bands(values: list[float]) -> tuple[float, float] | None:
+    """Split ``values`` into two column bands, robust to a minority outlier.
+
+    Splitting on the largest gap in sorted values (tried first, see
+    docs/log/2026-09-06_C1-aligned-runs.md) breaks two ways here: a leading
+    label glued onto one row widens that row's own edge into its own
+    almost-cluster, and a long right-hand entry (a name plus a title) can
+    open a wider gap than the true column boundary. Both failures are about
+    outliers and variance, not the column boundary itself.
+
+    Instead: group consecutive sorted values within ``_COLUMN_SEED_TOLERANCE``
+    of each other, take the two LARGEST resulting groups as the two column
+    seeds (their means), and classify every value -- including anything left
+    over, i.e. the very outliers that broke the gap split -- by which seed
+    it is numerically nearest to. A column's seed is defined by where most of
+    its rows sit, so one odd row does not move it.
+    """
+    if len(values) < 2:
+        return None
+    ordered = sorted(values)
+    groups: list[list[float]] = [[ordered[0]]]
+    for v in ordered[1:]:
+        if v - groups[-1][-1] <= _COLUMN_SEED_TOLERANCE:
+            groups[-1].append(v)
+        else:
+            groups.append([v])
+    if len(groups) < 2:
+        return None
+    groups.sort(key=len, reverse=True)
+    seed_a = sum(groups[0]) / len(groups[0])
+    seed_b = sum(groups[1]) / len(groups[1])
+    if seed_a == seed_b:
+        return None
+    return (seed_a, seed_b) if seed_a < seed_b else (seed_b, seed_a)
+
+
+def _try_aligned_run(
+    items: list[dict],
+    word_space_width: float,
+    gap_max_word_spaces: float,
+    word_width: float,
+) -> list[str] | None:
+    """Test whether ``items`` (all lines in a candidate block range) form one
+    aligned two-column run, returning the merged row texts if so, else None.
+
+    Clusters lines by their trimmed LEFT edge (``x0``), not right edge: a
+    column's start position is stable across its own rows regardless of how
+    long each row's content is (a name plus a title vs. a bare name), where
+    the row's right edge is not. See ``_cluster_two_bands`` for how a
+    mixed-content leading row (this ticket's "PRESENT: Mr." row, whose own
+    left edge is nowhere near its column's other rows) still ends up
+    correctly classified.
+
+    A narrow gap plus a perfect bijection is NOT sufficient evidence of a
+    label/value pair (GH-592 Astra finding): two independent, unrelated
+    prose sentences placed in adjacent narrow columns can satisfy both, and
+    merging them silently swaps their second halves -- every word is
+    preserved, the meaning is destroyed. See ``LABEL_COLUMN_WIDTH_SHARE``'s
+    derivation for the additional width-ratio check this requires.
+
+    A narrow-left/wide-right width asymmetry is not sufficient either (GH-592
+    Astra RESIDUAL finding): a short label repeated down the left plus a
+    ragged list of unrelated, unequal-length sentences on the right can pass
+    both prior checks too. See ``RIGHT_BLOCK_FILL_TOLERANCE_WORD_WIDTHS`` /
+    ``MEASURE_FILL_SHARE_MAX`` for the wrapped-body-prose discriminator this
+    requires, and the log for the specific contrived case this does not
+    catch (documented as an accepted residual, not silently loosened).
+    """
+    if len(items) < _ALIGNED_RUN_MIN_ROWS * 2:
+        return None
+
+    seeds = _cluster_two_bands([it["x0"] for it in items])
+    if seeds is None:
+        return None
+    seed_left, seed_right = seeds
+
+    left = [it for it in items if abs(it["x0"] - seed_left) <= abs(it["x0"] - seed_right)]
+    right = [it for it in items if abs(it["x0"] - seed_left) > abs(it["x0"] - seed_right)]
+    if len(left) < _ALIGNED_RUN_MIN_ROWS or len(left) != len(right):
+        return None
+
+    # GH-592 Astra finding: a narrow gap plus a perfect bijection is not
+    # enough evidence -- two independent, unrelated prose columns (each
+    # close to full column width) can satisfy both, and merging them
+    # destroys meaning even though every word is preserved. A genuine label
+    # column is always much narrower than the value column it labels; two
+    # prose columns are not. See LABEL_COLUMN_WIDTH_SHARE's derivation.
+    left_width = statistics.median([it["x1"] - it["x0"] for it in left])
+    right_width = statistics.median([it["x1"] - it["x0"] for it in right])
+    if right_width <= 0 or left_width > LABEL_COLUMN_WIDTH_SHARE * right_width:
+        return None
+
+    # GH-592 Astra RESIDUAL finding: width asymmetry alone identifies "the
+    # left block is narrow", not "the left block is a label column" -- a
+    # majority of the right block's own lines running up against its own
+    # widest line is the signature of a WRAPPED PARAGRAPH (the greedy
+    # line-wrap fills every line but the last), not a list of independent
+    # short values. See RIGHT_BLOCK_FILL_TOLERANCE_WORD_WIDTHS /
+    # MEASURE_FILL_SHARE_MAX's derivation.
+    if word_width > 0:
+        right_widths = [it["x1"] - it["x0"] for it in right]
+        max_right_width = max(right_widths)
+        tol = RIGHT_BLOCK_FILL_TOLERANCE_WORD_WIDTHS * word_width
+        fill_share = sum(1 for w in right_widths if (max_right_width - w) <= tol) / len(
+            right_widths
+        )
+        if fill_share > MEASURE_FILL_SHARE_MAX:
+            return None
+
+    left.sort(key=lambda it: it["y0"])
+    right.sort(key=lambda it: it["y0"])
+
+    merged: list[str] = []
+    for l, r in zip(left, right):
+        # Same row: the two lines' vertical extents must actually overlap, not
+        # merely land at the same sorted rank.
+        if l["y1"] <= r["y0"] or r["y1"] <= l["y0"]:
+            return None
+        # Left must genuinely sit to the left of right (x-disjoint), by a gap
+        # comparable to -- not many times -- a word space. A justified
+        # multi-column prose gutter fails this by an order of magnitude.
+        gap = r["x0"] - l["x1"]
+        if gap <= 0 or gap > gap_max_word_spaces * word_space_width:
+            return None
+        merged.append(f"{l['text'].rstrip()} {r['text'].rstrip()}".rstrip())
+
+    return merged
+
+
+def _find_aligned_runs(
+    block_lines: list[list[dict]],
+    word_space_width: float,
+    word_width: float,
+) -> list[tuple[int, int, list[str]]]:
+    """Find maximal contiguous block ranges that are aligned two-column runs.
+
+    ``block_lines[i]`` is the list of line records (``{"text", "y0", "y1",
+    "x0", "x1"}``, already restricted to lines with at least one word) for the
+    i-th text block, in the page's own block order. Returns
+    ``(start, end, merged_row_texts)`` triples, ``end`` inclusive, positions
+    into ``block_lines``; ranges never overlap.
+    """
+    n = len(block_lines)
+    runs: list[tuple[int, int, list[str]]] = []
+    pos = 0
+    while pos < n:
+        items = list(block_lines[pos])
+        best: tuple[int, list[str]] | None = None
+        fail_streak = 0
+        end = pos
+        while end + 1 < n and fail_streak < _ALIGNED_RUN_FAIL_STREAK_LIMIT:
+            end += 1
+            items = items + block_lines[end]
+            candidate = _try_aligned_run(
+                items, word_space_width, ALIGNED_RUN_GAP_MAX_WORD_SPACES, word_width
+            )
+            if candidate is not None:
+                best = (end, candidate)
+                fail_streak = 0
+            else:
+                fail_streak += 1
+        if best is not None:
+            end_pos, merged_lines = best
+            runs.append((pos, end_pos, merged_lines))
+            pos = end_pos + 1
+        else:
+            pos += 1
+    return runs
+
+
+def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
+    """Reconstruct the no-table-regions prose text, merging aligned runs.
+
+    Returns ``None`` when no aligned run is found (or there isn't enough
+    evidence to look for one) -- the caller must then fall back to the
+    existing ``page.get_text("text")`` path UNCHANGED, so every page without
+    this specific defect is byte-for-byte identical to before this ticket.
+    """
+    try:
+        words = page.get_text("words") or []
+    except Exception:
+        return None
+    word_space_width = _median_word_space_width(words)
+    if not word_space_width:
+        return None
+    word_width = _median_word_width(words) or 0.0
+
+    try:
+        page_dict = page.get_text("dict")
+    except Exception:
+        return None
+
+    extents = _line_word_extents(words)
+    blocks = [b for b in page_dict.get("blocks", []) if b.get("type", 0) == 0]
+
+    block_lines: list[list[dict]] = []
+    block_line_texts: list[list[str]] = []
+    for bi, block in enumerate(blocks):
+        lines = block.get("lines", []) or []
+        items = []
+        texts = []
+        for li, line in enumerate(lines):
+            text = "".join(s.get("text", "") for s in line.get("spans", []) or [])
+            texts.append(text)
+            ext = extents.get((bi, li))
+            if ext is None:
+                continue
+            bbox = line.get("bbox")
+            if not bbox:
+                continue
+            items.append(
+                {
+                    "y0": bbox[1],
+                    "y1": bbox[3],
+                    "x0": ext[0],
+                    "x1": ext[1],
+                    "text": text,
+                }
+            )
+        block_lines.append(items)
+        block_line_texts.append(texts)
+
+    runs = _find_aligned_runs(block_lines, word_space_width, word_width)
+    if not runs:
+        return None
+
+    run_by_start = {start: (end, merged) for start, end, merged in runs}
+    consumed_until = -1
+    out_lines: list[str] = []
+    for bi in range(len(blocks)):
+        if bi <= consumed_until:
+            continue
+        if bi in run_by_start:
+            end, merged = run_by_start[bi]
+            out_lines.extend(merged)
+            consumed_until = end
+        else:
+            out_lines.extend(block_line_texts[bi])
+    return "\n".join(out_lines).strip()
 
 
 def _region_token_index(regions) -> Counter:
@@ -2195,6 +2613,20 @@ class BornDigitalDetector:
                 _flat_words = page.get_text("words") or []
             except Exception:
                 _flat_words = []
+            # GH-592 (C1): an aligned two-column run (an attendee roster
+            # split into a "Mr." column and a name column) reads as one
+            # column's lines in full, then the other's, under plain
+            # get_text("text"). Try the aligned-run assembler first; it
+            # returns None (falling through to the untouched flat-text path,
+            # byte-identical to before this ticket) unless it finds a run
+            # whose geometry proves it is one, per
+            # ALIGNED_RUN_GAP_MAX_WORD_SPACES.
+            try:
+                assembled = _assemble_prose_with_aligned_runs(page)
+            except Exception:
+                assembled = None
+            if assembled is not None:
+                return _apply_links_to_flat_text(assembled, _links, _flat_words)
             return _apply_links_to_flat_text(page.get_text("text").strip(), _links, _flat_words)
 
         # Sort regions top-to-bottom by their y0 coordinate (reading order).
