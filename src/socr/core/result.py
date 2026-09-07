@@ -118,6 +118,19 @@ class FailureMode(str, Enum):
     #: regional splice. Conflating them would make every historical rejected
     #: page look, on replay, like one whose content was withheld.
     TABLE_WITHHELD = "table_withheld"
+    #: TICKET-A1c (#641): the shipped table came from A1b's row-corroboration
+    #: fallback (``structure_class_grid_corroboration`` / a
+    #: ``structure_class_row_corroborated`` audit event on the same page) --
+    #: the strict grid-authored pool was empty, and the winning candidate was
+    #: kept only because its ROWS measurably reproduce native, never because
+    #: its HEADER binding was verified (that check does not exist; A1b's own
+    #: docstring is explicit that native never arbitrates the grid). Distinct
+    #: from ``MODEL_OUTPUT_FLAGGED``: that mode means "no rung accepted, and a
+    #: native distrust flag fired"; this one fires regardless of the winning
+    #: candidate's own ``audit_passed`` -- a clean-passing corroboration
+    #: winner is EXACTLY the case this mode exists to stop from shipping
+    #: silently as an undemoted SUCCESS.
+    HEADER_BINDING_UNVERIFIED = "header_binding_unverified"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The
@@ -249,6 +262,15 @@ class PageOutput:
     #: #259: how this output was refused, when socr can say. Empty means
     #: unknown -- see ``REJECTION_AMBIGUOUS_DEFERRED``, the only value written.
     rejection_class: str = ""
+    #: TICKET-A1c (#641): the row-corroboration record behind a
+    #: ``HEADER_BINDING_UNVERIFIED`` winner, so a consumer of the sidecar
+    #: (``pages/NNN.json``'s ``winning_output``) can see the doubt without
+    #: re-deriving it from ``audit_events``.  ``None`` on every other page.
+    #: Shape: ``{engine, bound, total, share, extra_numbers,
+    #: skipped_native_rows, unbound_rows, corroboration_region,
+    #: coverage_share, header_text}`` -- see
+    #: ``manifest._apply_row_corroboration_disclosure`` for how it is built.
+    table_corroboration: dict | None = None
 
     @property
     def word_count(self) -> int:
@@ -260,8 +282,20 @@ class PageOutput:
         return not self.audit_passed
 
     def to_dict(self) -> dict:
-        """Serialize to a JSON-safe dict. Used for content-addressed caching."""
-        return {
+        """Serialize to a JSON-safe dict. Used for content-addressed caching.
+
+        TICKET-A1c (#641): ``table_corroboration`` is omitted entirely (not
+        emitted as ``None``) when unset, unlike every other field here. The
+        content-addressed hash (``blob_ref`` / ``page_fingerprint``, see
+        ``core.cache``) is computed over this exact dict, and this field did
+        not exist before this ticket -- emitting it unconditionally would
+        change the hash of every already-terminal page in every corpus,
+        forcing a spurious reprocess-on-resume for pages that never touch
+        row-corroboration. Omitting it when ``None`` keeps non-corroborated
+        pages byte-identical to pre-#641 serialization; only a page that
+        actually ships a corroboration record changes shape.
+        """
+        d = {
             "page_num": self.page_num,
             "text": self.text,
             "status": self.status.value,
@@ -282,6 +316,9 @@ class PageOutput:
             "judge_reason": self.judge_reason,
             "rejection_class": self.rejection_class,
         }
+        if self.table_corroboration is not None:
+            d["table_corroboration"] = self.table_corroboration
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "PageOutput":
@@ -305,6 +342,7 @@ class PageOutput:
             skip_reason=d.get("skip_reason", ""),
             judge_reason=d.get("judge_reason", ""),
             rejection_class=d.get("rejection_class", ""),
+            table_corroboration=d.get("table_corroboration"),
         )
 
 

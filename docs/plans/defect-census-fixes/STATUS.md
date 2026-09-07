@@ -18,8 +18,8 @@ nothing dispatched.
 | A1a | corroboration fn | DONE (#630 merged 2026-09-06) | — | 1 |
 | C1 | native geometry (#592) | DONE (#631 merged 2026-09-06) | — | 1 |
 | D1 | throughput | DONE (#632 merged 2026-09-06) | — | 1 |
-| A1b | selection | DONE-LOCAL (#634, 016b084+02ca07b; reviewer ACCEPT x2; Astra pane gone, skipped; #639 filed for the detector) | A1a | 2 |
-| A1c | surfacing + resume | TODO | A1b | 3 |
+| A1b | selection | DONE (#640 merged 2026-09-07; #639 filed) | A1a | 2 |
+| A1c | surfacing + resume | REVIEW (#641, eac26d4, socr-a1c) | A1b | 3 |
 | A2 | truncation guard | TODO | A1c | 4 |
 | B1 | marker scope (#591) | TODO | A2 | 5 |
 | D3 | Fed re-measure | TODO | A2 | 5 |
@@ -37,4 +37,4 @@ nothing dispatched.
 - Waves 7–9: E2, F1a, F1b, F2.
 
 ## Next action
-A1b (#634) in review at 016b084; then Astra (quota permitting), push on owner's word, CI for the exact head, merge. Then A1c.
+A1c (#641) in review at eac26d4 + two live ECB runs pending; push on owner's word, CI for the exact head, merge. Then A2. Follow-ups filed: #639 (detector bbox), #643 (narrow-table false reject).

@@ -9839,6 +9839,21 @@ class UnifiedPipeline:
         structure_class_model_pages = sorted(disposition_buckets["structure_class_model_pages"])
         structure_class_floor_pages = sorted(disposition_buckets["structure_class_floor_pages"])
         corrupt_math_hybrid_pages = sorted(disposition_buckets["corrupt_math_hybrid_pages"])
+        # TICKET-A1c (#641): pages whose shipped winner is A1b's row-
+        # corroboration fallback (``FailureMode.HEADER_BINDING_UNVERIFIED``,
+        # stamped unconditionally in ``manifest._select_page_output_tagged``
+        # regardless of the candidate's own ``audit_passed``). Read directly
+        # off the finalized ``PageOutput.failure_mode`` rather than added to
+        # the disposition-bucket machinery above: every corroborated winner
+        # already shares the ``structure_class_model_pages`` disposition
+        # (MODEL_OUTPUT / STRUCTURE_CLASS), so a *disposition*-keyed bucket
+        # cannot distinguish it from an ordinary S1 case (i) winner -- this
+        # is a narrower, failure-mode-keyed subset for its own CLI line.
+        header_binding_unverified_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.output.failure_mode is FailureMode.HEADER_BINDING_UNVERIFIED
+        )
 
         # The six orthogonal bucket groups (native-only distrust, value drift,
         # fabrication, text-grid rejection, chart-detection failure, and
@@ -10328,6 +10343,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(structure_class_model_pages)} structure-class page(s) "
                         f"shipped the model's grid reading over native (native may not author "
                         f"a grid): {structure_class_model_pages}[/yellow]"
+                    )
+                if header_binding_unverified_pages:
+                    console.print(
+                        f"  [yellow]{len(header_binding_unverified_pages)} page(s) shipped a "
+                        f"corroborated table with header binding unverified: "
+                        f"{header_binding_unverified_pages}[/yellow]"
                     )
                 if structure_class_floor_pages:
                     console.print(
