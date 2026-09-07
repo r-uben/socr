@@ -4155,6 +4155,25 @@ class UnifiedPipeline:
         from socr.core.audit_log import AuditEvent
         from socr.tables.escalation_decision import decide_escalation
 
+        def _record_attempt_cost() -> None:
+            # GH-160 round 2: `run_provider` was actually invoked on every path
+            # below this point -- timeout, wrong-engine, empty/non-success, and
+            # accepted/rejected alike -- so all of them are billable. Recording
+            # only on the last (accepted/rejected) path under-reported spend on
+            # the earlier three, which also fed a wrong number into the
+            # remaining-budget gate above on a document's NEXT escalation call.
+            state.record_engine_run(
+                EngineResult(
+                    document_path=pdf_path,
+                    engine=profile.engine.value,
+                    status=DocumentStatus.SUCCESS,
+                    pages=[],
+                    pages_processed=1,
+                    cost=profile.cost_per_page_usd,
+                ),
+                page_nums=[page_num],
+            )
+
         try:
             from socr.core.pdf import open_pdf
 
@@ -4221,6 +4240,7 @@ class UnifiedPipeline:
                             ),
                         )
                     )
+                    _record_attempt_cost()
                     return True, bo
 
                 # `_run_engine_on_pages` converts a failed engine call into a
@@ -4240,6 +4260,7 @@ class UnifiedPipeline:
                             ),
                         )
                     )
+                    _record_attempt_cost()
                     return False, bo
                 if out.status is not PageStatus.SUCCESS or not (out.text or "").strip():
                     state.events.append(
@@ -4250,6 +4271,7 @@ class UnifiedPipeline:
                             detail=f"candidate status={out.status}, no usable text",
                         )
                     )
+                    _record_attempt_cost()
                     return False, bo
 
                 decision = decide_escalation(page, incumbent_text, out.text)
@@ -4259,18 +4281,10 @@ class UnifiedPipeline:
             # under-reports what it spent. Recorded against the PAGE here, ABOVE
             # the accept/reject branch: a refused candidate is never appended to
             # ``ps.attempts``, so this is the only place its real spend is seen
-            # (round 5).
-            state.record_engine_run(
-                EngineResult(
-                    document_path=pdf_path,
-                    engine=profile.engine.value,
-                    status=DocumentStatus.SUCCESS,
-                    pages=[],
-                    pages_processed=1,
-                    cost=profile.cost_per_page_usd,
-                ),
-                page_nums=[page_num],
-            )
+            # (round 5). GH-160 round 2: the timeout/wrong-engine/empty-status
+            # early returns above record their own attempt via
+            # ``_record_attempt_cost`` since they exit before this line.
+            _record_attempt_cost()
 
             if not decision.accepted:
                 if not self.config.quiet:

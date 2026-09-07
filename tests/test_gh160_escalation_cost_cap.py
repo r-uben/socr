@@ -11,6 +11,7 @@ Hermetic: no provider, no network, no live model.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -155,3 +156,106 @@ def test_escalation_fires_when_budget_permits_it(tmp_path: Path):
     assert degraded is False
     assert out is bo
     assert state.total_cost == PROFILE_GEMINI.cost_per_page_usd  # the call WAS paid for
+
+
+# ---------------------------------------------------------------------------
+# 3 — a call that was actually made must be billed, even on an early exit
+#     (round-2 review finding: reviewer flagged this as GH-160's own third
+#     acceptance criterion, not out of scope)
+# ---------------------------------------------------------------------------
+
+
+def test_escalation_timeout_still_bills_the_attempt(tmp_path: Path):
+    state = _state_with_spend(tmp_path, spent=0.0)
+    ps = state.pages[1]
+    bo = PageOutput(page_num=1, text="native", status=PageStatus.SUCCESS, engine="qwen")
+    ps.attempts.append(bo)
+    ps.best_output = bo
+
+    pipe = _pipeline(escalation_timeout_sec=0.05)
+
+    def _run_provider_hangs(profile, page_num):
+        time.sleep(0.5)
+        return PageOutput(
+            page_num=page_num, text="x", status=PageStatus.SUCCESS, engine=profile.engine.value
+        )
+
+    degraded, out = pipe._escalate_table_page(
+        state,
+        1,
+        ps,
+        bo,
+        PROFILE_GEMINI,
+        _run_provider_hangs,
+        state.handle.path,
+        needs_escalation=True,
+    )
+    assert degraded is True  # lane disabled for the rest of the document
+    assert out is bo
+    assert state.total_cost == PROFILE_GEMINI.cost_per_page_usd, (
+        "a call that was actually launched is billable even though it timed out"
+    )
+
+
+def test_escalation_wrong_engine_still_bills_the_attempt(tmp_path: Path):
+    state = _state_with_spend(tmp_path, spent=0.0)
+    ps = state.pages[1]
+    bo = PageOutput(page_num=1, text="native", status=PageStatus.SUCCESS, engine="qwen")
+    ps.attempts.append(bo)
+    ps.best_output = bo
+
+    pipe = _pipeline()
+
+    def _run_provider_wrong_engine(profile, page_num):
+        # A failed engine call converted to native text by a DIFFERENT engine
+        # -- the exact shape `_run_engine_on_pages` produces on failure.
+        return PageOutput(
+            page_num=page_num, text="fallback", status=PageStatus.SUCCESS, engine="qwen"
+        )
+
+    degraded, out = pipe._escalate_table_page(
+        state,
+        1,
+        ps,
+        bo,
+        PROFILE_GEMINI,
+        _run_provider_wrong_engine,
+        state.handle.path,
+        needs_escalation=True,
+    )
+    assert degraded is False
+    assert out is bo
+    assert state.total_cost == PROFILE_GEMINI.cost_per_page_usd, (
+        "the call was made (and answered by the wrong engine) -- still billable"
+    )
+
+
+def test_escalation_empty_candidate_still_bills_the_attempt(tmp_path: Path):
+    state = _state_with_spend(tmp_path, spent=0.0)
+    ps = state.pages[1]
+    bo = PageOutput(page_num=1, text="native", status=PageStatus.SUCCESS, engine="qwen")
+    ps.attempts.append(bo)
+    ps.best_output = bo
+
+    pipe = _pipeline()
+
+    def _run_provider_empty(profile, page_num):
+        return PageOutput(
+            page_num=page_num, text="", status=PageStatus.SUCCESS, engine=profile.engine.value
+        )
+
+    degraded, out = pipe._escalate_table_page(
+        state,
+        1,
+        ps,
+        bo,
+        PROFILE_GEMINI,
+        _run_provider_empty,
+        state.handle.path,
+        needs_escalation=True,
+    )
+    assert degraded is False
+    assert out is bo
+    assert state.total_cost == PROFILE_GEMINI.cost_per_page_usd, (
+        "the call was made and answered with no usable text -- still billable"
+    )
