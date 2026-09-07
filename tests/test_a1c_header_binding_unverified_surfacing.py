@@ -484,3 +484,220 @@ def test_to_dict_carries_table_corroboration_when_set() -> None:
     d = corroborated.to_dict()
     assert d["table_corroboration"] == record
     assert PageOutput.from_dict(d).table_corroboration == record
+
+
+# --------------------------------------------------------------------------
+# 5. CLI summary line: mirrors
+#    tests/test_ladder_status_surfacing.py::TestCliSummary::test_print_summary_names_both_terminals.
+# --------------------------------------------------------------------------
+
+
+def _make_summary_pipeline() -> UnifiedPipeline:
+    from socr.core.config import EngineType as _EngineType
+
+    return UnifiedPipeline(
+        PipelineConfig(
+            primary_engine=_EngineType.DEEPSEEK,
+            enabled_engines=list(_EngineType),
+            agentic=False,
+            quiet=False,
+            native_first=True,
+        )
+    )
+
+
+def _make_summary_state(tmp_path: Path, page_count: int = 1) -> DocumentState:
+    from unittest.mock import patch as _patch
+
+    pdf = tmp_path / "doc.pdf"
+    with _patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=pdf, page_count=page_count)
+    state = DocumentState(handle=handle)
+    for pn in range(1, page_count + 1):
+        ps = state.pages[pn]
+        ps.is_born_digital = True
+        ps.native_text = f"page {pn} prose"
+    return state
+
+
+def test_print_summary_names_header_binding_unverified_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A HEADER_BINDING_UNVERIFIED page prints the count line; a clean control
+    page does not.
+
+    ``_phase_assemble`` re-derives every page's shipped output via
+    ``finalized_page_records`` (``_select_and_finalize_page`` walks
+    ``state.pages[n].attempts`` from scratch) rather than trusting a
+    hand-set ``best_output`` directly -- unlike C2's ladder-terminal guard,
+    there is no separate post-selection override attribute for this failure
+    mode; it is produced INSIDE the selection cascade itself from real
+    corroboration data. Patching ``finalized_page_records`` to return the
+    exact finalized records is the seam that keeps this test hermetic
+    without needing native words / a detected table bbox to actually trip
+    the corroboration branch (that is covered end-to-end by
+    ``structure_class_grid_corroboration`` tests above); this test only
+    needs to prove the CLI reads ``failure_mode`` correctly once it is set.
+    """
+    from unittest.mock import patch as _patch
+
+    from socr.core.manifest import (
+        FinalizedPageRecord,
+        PageDisposition,
+        PageEnding,
+        PagePrimaryReason,
+        provenance_to_disposition,
+    )
+
+    pipeline = _make_summary_pipeline()
+    state = _make_summary_state(tmp_path, page_count=2)
+
+    corroborated = PageOutput(
+        page_num=1,
+        text="| A | B |\n| --- | --- |\n| 1 | 2 |\n",
+        status=PageStatus.WARNING,
+        engine="qwen",
+        audit_passed=False,
+        failure_mode=FailureMode.HEADER_BINDING_UNVERIFIED,
+        table_corroboration={"engine": "qwen", "bound": 1, "total": 1},
+    )
+    clean = PageOutput(
+        page_num=2,
+        text="page 2 clean text",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+    )
+    records = [
+        FinalizedPageRecord(
+            output=corroborated,
+            disposition=provenance_to_disposition(
+                SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED
+            ),
+            selection_provenance=SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED,
+        ),
+        FinalizedPageRecord(
+            output=clean,
+            disposition=PageDisposition(
+                PageEnding.NATIVE_PROSE, PagePrimaryReason.CLEAN_NATIVE_PROSE
+            ),
+            selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+        ),
+    ]
+
+    with _patch("socr.core.manifest.finalized_page_records", return_value=records):
+        result = pipeline._phase_assemble(state, tmp_path)
+    pipeline._print_summary(result, state)
+
+    captured = capsys.readouterr()
+    assert "header binding unverified" in captured.out
+    assert "[1]" in captured.out
+
+
+# --------------------------------------------------------------------------
+# 6. Per-row markers: A1b's ``_apply_row_corroboration_disclosure`` /
+#    ``_splice_unverified_row_markers`` already splice a trailing
+#    ``<!-- row unverified -->`` marker onto each unbound candidate row
+#    BEFORE this ticket's code runs (``grid_winner`` is already the
+#    disclosed/spliced output by the time A1c's return builds
+#    ``table_corroboration``) -- this section pins that the markers land on
+#    EXACTLY the unbound rows (never a bound one) for a two-unbound-row
+#    candidate, and that they survive ``_phase_assemble`` into the final
+#    stitched ``.md``, not only the per-page fragment.
+# --------------------------------------------------------------------------
+
+
+def test_two_unbound_rows_marked_exactly_and_no_others(tmp_path: Path) -> None:
+    """Force two of the three GOOD_MD rows (2018, 2020) unbound via a hand-
+    built ``RowCorroboration`` (same technique as A1b's own single-row
+    placement test, ``test_row_unverified_marker_spliced_for_unbound_row``
+    in ``test_s1_structure_class_winner_corroboration.py``) patched in as
+    ``structure_class_grid_corroboration``'s return, so the real
+    ``clears`` share/extra-share gate (which a genuine 2/3-bound candidate
+    would fail) is not in the way of testing marker PLACEMENT.
+    """
+    from dataclasses import replace as dc_replace
+    from unittest.mock import patch as _patch
+
+    from socr.tables.row_corroboration import corroborate_rows
+
+    fallback_attempt = PageOutput(
+        page_num=1,
+        text=GOOD_MD,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+        confidence=0.9,
+    )
+    p = _corroboration_page(winner_attempt=fallback_attempt)
+    state = _state_with_page(tmp_path, p)
+
+    real_rc = corroborate_rows(NATIVE_WORDS, GOOD_MD, REGION)
+    forced_rc = dc_replace(real_rc, bound=1, unbound_rows=((0, 2),))
+
+    with _patch(
+        "socr.core.manifest.structure_class_grid_corroboration",
+        return_value=(forced_rc, "bbox_union", 1.0),
+    ):
+        winner, provenance = _select_page_output_tagged(state, 1)
+
+    assert provenance is SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED
+    lines = (winner.text or "").splitlines()
+    marked = [ln for ln in lines if "row unverified" in ln]
+    assert len(marked) == 2, lines
+    assert any("2018" in ln for ln in marked)
+    assert any("2020" in ln for ln in marked)
+    assert not any("2019" in ln for ln in marked)
+    unmarked_2019 = [ln for ln in lines if "2019" in ln]
+    assert unmarked_2019 and "row unverified" not in unmarked_2019[0]
+
+
+def test_two_unbound_row_markers_survive_phase_assemble_into_final_md(
+    tmp_path: Path,
+) -> None:
+    """Same forced two-unbound-row candidate, but through the real
+    ``_phase_assemble`` -> per-page fragment -> stitched final ``.md``
+    path, so a regression that only preserved markers on the in-memory
+    winner (but dropped them somewhere in fragment flush / stitching /
+    the byte-identity fallback) would be caught here, not just at the
+    selection-seam level above.
+    """
+    from dataclasses import replace as dc_replace
+    from unittest.mock import patch as _patch
+
+    from socr.tables.row_corroboration import corroborate_rows
+
+    fallback_attempt = PageOutput(
+        page_num=1,
+        text=GOOD_MD,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+        confidence=0.9,
+    )
+    p = _corroboration_page(winner_attempt=fallback_attempt)
+    pdf_path = _make_pdf(tmp_path)
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    state.pages[1] = p
+
+    pipeline = _make_pipeline()
+    pipeline._scan_root = pdf_path.parent
+    out_dir = tmp_path / "out"
+
+    real_rc = corroborate_rows(NATIVE_WORDS, GOOD_MD, REGION)
+    forced_rc = dc_replace(real_rc, bound=1, unbound_rows=((0, 2),))
+
+    with _patch(
+        "socr.core.manifest.structure_class_grid_corroboration",
+        return_value=(forced_rc, "bbox_union", 1.0),
+    ):
+        pipeline._phase_assemble(state, out_dir)
+
+    final_md_path = next(p for p in out_dir.rglob("*.md") if p.parent.name != "pages")
+    final_text = final_md_path.read_text()
+    marked_lines = [ln for ln in final_text.splitlines() if "row unverified" in ln]
+    assert len(marked_lines) == 2, final_text
+    assert any("2018" in ln for ln in marked_lines)
+    assert any("2020" in ln for ln in marked_lines)
+    assert "2019" in final_text
+    assert not any("2019" in ln for ln in marked_lines)

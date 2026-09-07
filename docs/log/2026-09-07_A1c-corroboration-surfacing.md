@@ -146,6 +146,54 @@ A1b merged to `main` before this branch was cut). No conflict.
   → **4279 passed, 4 xfailed**, 201.90s.
 - `uvx ruff@0.16.0 format --check .` → `592 files already formatted`.
 
+## ACCEPT-WITH-FIXES review (amended eac26d4)
+
+Three fixes requested on review; all three addressed in this amendment:
+
+1. **CLI summary line was untested.** Added
+   `test_print_summary_names_header_binding_unverified_count`, mirroring
+   `test_ladder_status_surfacing.py::TestCliSummary::test_print_summary_names_both_terminals`.
+   The C2 ladder-terminal pattern that test mirrors relies on a separate post-selection
+   override attribute (`ps.table_ladder_disposition`) that doesn't exist for this ending, so a
+   naive port (hand-setting `state.pages[1].best_output`/`attempts`) failed — `_phase_assemble`
+   re-derives the winner via the full `finalized_page_records`/selection cascade and doesn't
+   preserve a hand-set `failure_mode` for an ending with no override seam. Fixed by patching
+   `socr.core.manifest.finalized_page_records` directly (imported locally inside
+   `_phase_assemble`, so the patch is visible at call time) to return two hand-built
+   `FinalizedPageRecord`s — one `HEADER_BINDING_UNVERIFIED`, one clean control. Pins the
+   difference: the corroborated page's count line and page number print; the clean control's
+   don't.
+
+2. **Per-row marking was previously verified only for A1b's own note-block precedent, not
+   for A1c's ship path or assembly survival.** No new production code was needed: A1b's
+   `_apply_row_corroboration_disclosure` / `_splice_unverified_row_markers` already splice a
+   trailing `<!-- row unverified -->` onto each unbound candidate row (per
+   `RowCorroboration.unbound_rows`) *before* A1c's return builds `table_corroboration` — A1c
+   ships whatever text A1b already spliced. Two new tests close the gap:
+   `test_two_unbound_rows_marked_exactly_and_no_others` (a hand-built `RowCorroboration` with
+   `unbound_rows=((0, 2),)` on the 3-row `GOOD_MD` fixture, patched in as
+   `structure_class_grid_corroboration`'s return, run through `_select_page_output_tagged`
+   directly) pins that exactly the two forced rows (2018, 2020) carry the marker and the
+   untouched row (2019) does not. `test_two_unbound_row_markers_survive_phase_assemble_into_final_md`
+   drives the same forced record through a real `_phase_assemble` call and reads the final
+   stitched `.md` off disk (`out_dir.rglob("*.md")`, excluding the `pages/` fragment
+   directory) to confirm the markers survive fragment flush and stitching, not only the
+   in-memory winner. The forced/monkeypatched approach (rather than a naturally occurring
+   2-of-3-unbound fixture) is deliberate and mirrors A1b's own precedent
+   (`test_row_unverified_marker_spliced_for_unbound_row`): a genuine 2-of-3-bound candidate
+   would fail `RowCorroboration.clears`'s own share gate (`ROW_CORROBORATION_MIN = 36/39`) and
+   never reach this branch at all, so forcing the record is the only way to test marker
+   *placement* in isolation from the *admission* gate.
+
+3. **Event name.** A1c reuses A1b's existing `structure_class_row_corroborated` audit-event
+   kind — this is the intended, correct choice. The ticket text's `table_row_corroborated` was
+   a draft name that was never implemented anywhere on `main` or this branch; it is superseded
+   by the name A1b actually shipped. No new audit-event kind was introduced by A1c.
+
+Re-run after these fixes: `tests/test_a1c_header_binding_unverified_surfacing.py` → **12
+passed** (was 10; +2 marker tests, CLI test already counted). Full suite and ruff re-run
+below.
+
 ## Live verification (real Ollama, outside the synthetic P6 corpus)
 
 Pending — run against `~/Data/socr/census-ecb-2026-09-06/in/ecb-reports-2003-report-p80-82.pdf`
