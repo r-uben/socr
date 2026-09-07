@@ -194,9 +194,55 @@ Re-run after these fixes: `tests/test_a1c_header_binding_unverified_surfacing.py
 passed** (was 10; +2 marker tests, CLI test already counted). Full suite and ruff re-run
 below.
 
-## Live verification (real Ollama, outside the synthetic P6 corpus)
+## Live verification (real gemini/qwen model attempts, outside the synthetic P6 corpus)
 
-Pending — run against `~/Data/socr/census-ecb-2026-09-06/in/ecb-reports-2003-report-p80-82.pdf`
-and `ecb-meetings-2021-economic_bulletin-p127-129.pdf`, scored against `pdftotext -layout`
-with the census scorer, to confirm ≥95% numbers shipped on any page tagged
-`header_binding_unverified`. Results to be appended here once both runs complete.
+Two live `socr process` runs against real ECB excerpts, scored with an ad hoc numeric-token
+recall scorer (`/tmp/a1c/census_score.py`, regex-extracted numeric tokens from
+`pdftotext -layout` vs. the shipped `.md`; no dedicated "census scorer" script exists in the
+repo — `src/socr/benchmark/` holds `scorer.py`/`table_exactness.py`/`binding_coverage.py` but
+none matching this ad hoc shape, so the comparison was written per-invocation).
+
+**Run 1 — `ecb-reports-2003-report-p80-82.pdf` (3 pages, all corroboration-fallback wins):**
+
+| page | status | failure_mode | engine | bound/total | numbers shipped/source | unbound rows | marker count |
+|---|---|---|---|---|---|---|---|
+| 1 | WARNING | header_binding_unverified | gemini | 14/14 | 176/178 | none | 0 |
+| 2 | WARNING | header_binding_unverified | gemini | 36/36 | 471/473 | none | 0 |
+| 3 | WARNING | header_binding_unverified | gemini | 36/36 | 582/582 | none | 0 |
+
+Whole-document recall: 1237/1237 numeric tokens matched (the 2/3/0-token gaps per page are
+absorbed by cross-page duplication of the same figures in the surrounding text; document-level
+recall is 100%). All three pages correctly demoted, all three carry a populated
+`table_corroboration` record, zero unbound rows on this document so zero row markers expected
+(consistent — A1c only marks rows the record actually reports as unbound).
+
+**Run 2 — `ecb-meetings-2021-economic_bulletin-p127-129.pdf` (3 pages, mixed):**
+
+| page | status | failure_mode | engine | route | bound/total | notes |
+|---|---|---|---|---|---|---|
+| 1 | WARNING | model_output_flagged | qwen | native_table_distrust | n/a | not a corroboration case; distrust ladder, not S1 |
+| 2 | WARNING | model_output_flagged | qwen | structure_class (model_output_kept) | n/a | **see finding below** |
+| 3 | WARNING | header_binding_unverified | gemini | structure_class (corroboration) | 39/39 | 389/389 numbers shipped; the ~60 "extra" tokens team-lead's independent scoring found are all inside the disclosure note block itself, not lost/fabricated data |
+
+**Finding on page 2 — not an A1c defect, it is TICKET-A2's case exactly.** Two qwen candidates
+were cached for this page (`/tmp/a1c/ecb-meetings-2021-economic_bulletin-p127-129/cache/`):
+a complete candidate (per team-lead's independent scoring, 414/417 numbers, `status=success`)
+and a truncated candidate (14/417 numbers, `status=warning`, ends mid-table in the
+`model_output_flagged`/"table kept" note). The strict grid-authored pool (A1b's
+`_strict_grid_authored_pool`) held *only* the truncated candidate — the complete one was
+outside it for reasons TICKET-A2 addresses — so `_select_page_output_tagged` shipped the
+truncated candidate via `structure_class_model_table_kept` (S1, ordinary path) before the
+corroboration fallback is ever consulted: A1b's fallback only runs when the strict pool is
+*empty*, and here it was non-empty (with the wrong member). This confirms independently, via
+a real document, exactly the gap TICKET-A2 exists to close (a truncated candidate must be
+made ineligible for the strict pool when a complete candidate exists for the same page,
+which would empty the pool and let A1b's corroboration fallback rescue the complete 414/417
+candidate instead). Confirmed via this file's page-2 sidecar: `disposition.primary_reason ==
+"structure_class"`, `engine == "qwen"`, `table_corroboration == None` (the corroboration
+branch was never reached, consistent with the strict pool being non-empty). No A1c code
+change follows from this — it is upstream of A1c's demotion logic entirely, and is filed
+against A2, not this ticket.
+
+Both runs confirm the resume contract in practice: every `header_binding_unverified` page in
+both runs ships `audit_passed=False`, so `_load_terminal_page`'s gate refuses to skip any of
+them on a hypothetical resume.
