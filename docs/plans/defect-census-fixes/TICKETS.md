@@ -127,6 +127,11 @@ on all 6 pages, each with `header_binding_unverified`.
 ### TICKET-A2 — a truncated candidate never beats a complete one · TODO · depends-on: A1c · wave 4
 **Problem:** bulletin p3: qwen's output ends mid-number (`| 2019 | 364.2 | 7,05`), 34/389
 numbers + 55 wrong, shipped WARNING over gemini's complete, ladder-ACCEPTED 389/389.
+Reproduced live on main+A1c (2026-09-07, `/tmp/a1c/ecb-meetings-2021-economic_bulletin-p127-129`,
+p2): two qwen candidates cached, complete 414/417 (status success) and truncated 14/417 (status
+warning, ends in the flag note); the S1 strict pool held ONLY the truncated one, so it shipped via
+`structure_class_model_table_kept` and the A1b corroboration fallback never ran. A2 must make the
+truncated candidate ineligible so the pool empties and A1b rescues the complete one.
 **Do:** `DEFECT_TABLE_TRUNCATED` in `table_output_defect`, evaluated on raw rows *before*
 strict parsing discards malformed rows: final table row unterminated relative to the
 candidate's own style (mixed terminated rows + unterminated last row), or numeric-row count
