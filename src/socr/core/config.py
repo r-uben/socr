@@ -47,15 +47,16 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
 # default backend is qwen3.5:cloud (Ollama Cloud, no extra key): ~0.57 quality
 # at ~49s/page on the owner's Mac and the only engine that cleared all three
 # hard page types (math/table/equation). Gemini is the quality escalation when
-# Qwen is unavailable. DeepSeek-OCR (~0.085 socOCRbench) and Mistral (worse AND
-# ~5x pricier than Gemini) are deliberately OUT of the auto path; reach them
+# Qwen is unavailable. DeepSeek-OCR (~0.085 socOCRbench), Mistral (worse AND
+# ~5x pricier than Gemini), and Nougat (GH-637: produced nothing on any table
+# page in the 2026-09-06 ECB defect census, matching D1's auto_eligible=False
+# ruling in providers.py) are deliberately OUT of the auto path; reach them
 # only via an explicit --primary. Empirics in [[reference-sococrbench]].
 AUTO_ENGINE_ORDER: list[EngineType] = [
     EngineType.QWEN,  # qwen3.5:cloud — practical cheap winner; native PDF-free per-page
     EngineType.GEMINI,  # Best quality, paid — escalation when Qwen is unavailable
     EngineType.MARKER,  # Local, layout-aware
     EngineType.GLM,  # Local, small model, fast
-    EngineType.NOUGAT,  # Local, academic papers only
 ]
 
 # GH-353 table judge ladder — CLI₁ (ollama-cloud glm-5.3-flash) per-call wall-clock

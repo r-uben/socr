@@ -60,11 +60,12 @@ def resolve_auto_engine() -> EngineType:
 # Qwen-VL leads: best open OCR quality (socOCRbench ~0.47-0.58), though slower per page
 # than GLM. Quality-first ordering — the tiered router only sends *easy* pages here anyway.
 # DeepSeek-OCR is dropped (~0.085 socOCRbench, near dead last); use --primary deepseek
-# to invoke it explicitly.
+# to invoke it explicitly. Nougat is dropped too (GH-637: produced nothing on any table
+# page in the 2026-09-06 ECB defect census, matching D1's auto_eligible=False in
+# core/providers.py); use --primary nougat to invoke it explicitly.
 _LOCAL_ENGINE_ORDER: list[EngineType] = [
     EngineType.QWEN,  # Qwen3-VL via Ollama; best open quality, ~slower
     EngineType.GLM,  # 0.9B, fast, ~10s/page
-    EngineType.NOUGAT,  # Academic papers only
     EngineType.MARKER,  # Layout-aware, CPU-friendly
 ]
 
