@@ -141,7 +141,11 @@ truncated; audit event `candidate_truncated {engine}`. If it is the only candida
 ships, flagged.
 **Files:** `src/socr/tables/structure_check.py`, `src/socr/core/manifest.py`,
 `src/socr/core/audit_log.py`, `src/socr/core/tables_trust.py`,
-`tests/tables/test_structure_check_truncated.py`.
+`tests/tables/test_structure_check_truncated.py`; plus two small shared helpers added at
+implementation (reviewer-accepted deviation): `tables/reconcile.py` (`raw_table_block_lines`,
+raw rows before strict parsing) and `tables/row_corroboration.py`
+(`table_shaped_native_row_count`, so the shortfall term reuses A1b's row-shape count instead
+of a second implementation).
 **Done when:** deterministic test (no provider) with a (truncated, complete) candidate pair
 picks complete and with (truncated) alone ships it flagged; a candidate with all rows
 unterminated (its own style) is not truncated. On the branch the bulletin p3 fixture ships
