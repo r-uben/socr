@@ -21,10 +21,10 @@ nothing dispatched.
 | A1b | selection | DONE (#640 merged 2026-09-07; #639 filed) | A1a | 2 |
 | A1c | surfacing + resume | DONE (#644 merged 2026-09-07; live: report p1-p3 99-100% flagged) | A1b | 3 |
 | A2 | truncation guard | DONE (#647 merged 2026-09-07) | A1c | 4 |
-| B1 | marker scope (#591) | DONE-LOCAL (ac4aa4a; reviewer ACCEPT; #591 stays OPEN: remainder #649, calibration #650) | A2 | 5 |
+| B1 | marker scope (#591) | DONE (#651 merged 2026-09-07; #591 open: #649, #650) | A2 | 5 |
 | D3 | Fed re-measure | TODO | A2 | 5 |
 | D2 | route cost (measure) | TODO | B1 | 6 |
-| E1 | scan ≠ chart (#511) | TODO | B1 | 6 |
+| E1 | scan ≠ chart (#511) | DONE-LOCAL (72628a1+f3d9989; reviewer ACCEPT; dense-label blind spot #653) | B1 | 6 |
 | E2 | table_not_scorable scope | TODO | E1 | 7 |
 | F1a | ditto text (#625) | TODO | A2 | 7 |
 | F1b | derived-cell provenance | TODO | F1a | 8 |
@@ -37,4 +37,4 @@ nothing dispatched.
 - Waves 7–9: E2, F1a, F1b, F2.
 
 ## Next action
-B1 in review at ac4aa4a; push on owner's word, CI, merge. Then D3 (Fed re-measure), E1 (#511).
+E1 in review at 72628a1; push on owner's word, CI, merge. Then D3 (needs host memory), D2, E2 (open issue first), F.
