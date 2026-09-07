@@ -93,8 +93,13 @@ class _State:
 
 
 class _PageState:
-    def __init__(self, has_tables=True):
+    def __init__(self, has_tables=True, detected_table_count=0):
         self.has_tables = has_tables
+        # GH-655 (E2): the independent region-detector count, defaulted to 0
+        # (no detected table) unless a test opts in — matches the real
+        # PageState default and lets the prose-fragment fixtures below reflect
+        # what the born-digital detector actually saw on them.
+        self.detected_table_count = detected_table_count
         self.attempts = []
         self.native_table_structure_failed = False
         self.native_table_unverifiable = False
@@ -192,6 +197,14 @@ def test_prose_fragments_are_not_a_grid(tmp_path):
     discriminate — it is True on those pages too.
 
     A grid needs at least two value columns; these have one.
+
+    GH-655 TICKET-E2: this exact fixture is the census's reproduction of the
+    over-flagging bug (every prose page of a transcript, 3/3) — `has_tables`
+    alone is not enough to emit `table_not_scorable`, the independent
+    region-detector count must also be positive. `_PageState()` defaults it
+    to 0 (nothing detected), so no event fires here; see
+    `test_prose_fragments_still_surface_when_a_table_is_detected` below for
+    the pinned difference.
     """
     opened = _one_column_pdf(tmp_path / "prose.pdf", [("November", "2022"), ("CP", "749")])
     pipe = _pipeline()
@@ -199,7 +212,25 @@ def test_prose_fragments_are_not_a_grid(tmp_path):
 
     assert not pipe._table_page_needs_escalation(state, 1, opened[0], _PageState(), _out(_SHIFTED))
     opened.close()
-    # #123 TICKET-C1: not-scorable is now surfaced, not silently absent.
+    assert state.events == []
+
+
+def test_prose_fragments_still_surface_when_a_table_is_detected(tmp_path):
+    """GH-655 TICKET-E2: pins the difference against the test above.
+
+    Identical fixture and call, changing only `detected_table_count` from 0
+    to 1. Scoping the emitter to the detector count must not suppress a
+    genuine not-scorable table — only the false-positive prose case where no
+    table was actually detected.
+    """
+    opened = _one_column_pdf(tmp_path / "prose.pdf", [("November", "2022"), ("CP", "749")])
+    pipe = _pipeline()
+    state = _State()
+
+    assert not pipe._table_page_needs_escalation(
+        state, 1, opened[0], _PageState(detected_table_count=1), _out(_SHIFTED)
+    )
+    opened.close()
     assert [e.kind for e in state.events] == ["table_not_scorable"]
 
 
@@ -226,8 +257,10 @@ def test_a_single_wide_row_is_not_a_grid(tmp_path):
 def test_a_non_grid_page_costs_nothing(tmp_path):
     """End to end: no provider call, no spend.
 
-    #123 TICKET-C1: an ``AuditEvent`` IS now expected — a not-scorable page must
-    surface, not disappear. What must still be zero is provider cost.
+    GH-655 TICKET-E2: this fixture has no detected table (`_PageState()`
+    defaults `detected_table_count` to 0), so the event is no longer
+    expected either — the point this test pins is unchanged (zero provider
+    cost on a page with no table), only the events assertion moves with it.
     """
     opened = _one_column_pdf(tmp_path / "prose2.pdf", [("November", "2022"), ("CP", "749")])
     pdf_path = tmp_path / "prose2.pdf"
@@ -244,7 +277,7 @@ def test_a_non_grid_page_costs_nothing(tmp_path):
     pipe._escalate_table_page(state, 1, ps, bo, _GEMINI, run_provider, pdf_path)
 
     assert calls == [], "a page with no table must never reach the provider"
-    assert [e.kind for e in state.events] == ["table_not_scorable"]
+    assert state.events == []
     assert state.engine_runs == ()
 
 

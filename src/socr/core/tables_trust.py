@@ -158,6 +158,13 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # "table_not_scorable" — B1's grid gate (no usable ground truth) used to
         # make a page silently disappear from measurement; routed through the
         # same mechanism rather than a second one, per the B1 review finding.
+        # GH-655 TICKET-E2: the emitter (orchestrator._table_page_needs_escalation)
+        # only fires this kind when the page's independent table-region detector
+        # found at least one table (``detected_table_count > 0``). The census
+        # measured the un-scoped emitter flagging every prose page of a transcript
+        # (3/3) because the grid-gate alone accepts numeric prose as
+        # "not-a-scorable-grid" too — this module still just reads whatever kinds
+        # reach it, so nothing here changes; the scoping lives at the emit site.
         "table_unexplained_lanes",
         "table_not_scorable",
         # GH-151 TICKET-B1 review: a fourth shape of the same rule. A2/A2b's

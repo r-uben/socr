@@ -428,6 +428,15 @@ def test_a_not_scorable_page_surfaces_with_no_escalation_provider(tmp_path):
     (no cloud provider, --strict-local, or a cost cap) must not lose this
     signal. This drives the escalation-independent call site directly: no
     provider is passed anywhere.
+
+    GH-655 TICKET-E2: this fixture is two lines of numeric prose, not a table —
+    the same shape the census measured over-flagging every prose page of a
+    transcript (3/3). `has_tables=True` alone (the lane-cooccupancy heuristic)
+    is no longer enough to emit `table_not_scorable`; the independent
+    region-detector count must also be positive. With it left at the default
+    (0, no detected table), no event fires — see
+    `test_the_same_page_surfaces_once_a_table_is_actually_detected` below for
+    the pinned difference when a table IS detected.
     """
     doc = fitz.open()
     pg = doc.new_page()
@@ -445,7 +454,44 @@ def test_a_not_scorable_page_surfaces_with_no_escalation_provider(tmp_path):
     pipe = object.__new__(UnifiedPipeline)
     pipe.config = PipelineConfig()
     state = SimpleNamespace(events=[], handle=SimpleNamespace(path=path))
-    ps = SimpleNamespace(has_tables=True)
+    ps = SimpleNamespace(has_tables=True, detected_table_count=0)
+    bo = PageOutput(page_num=1, text="some text", status=PageStatus.SUCCESS, engine="qwen")
+
+    pipe._surface_table_scoring(state, 1, ps, bo)
+
+    assert state.events == []
+
+    trust = build_tables_trust("obr_efo_2022_11.pdf", state.events)
+    payload = trust.to_dict()
+    assert trust.untrusted_pages == []
+    assert payload["pages"] == {}
+
+
+def test_the_same_page_surfaces_once_a_table_is_actually_detected(tmp_path):
+    """GH-655 TICKET-E2: pins the difference against the test above.
+
+    Identical fixture and call, changing only `detected_table_count` from 0 to
+    1 — the independent region detector actually found a table on this page.
+    The event must still fire in that case; scoping the emitter must not
+    suppress a real not-scorable table, only the false-positive prose case.
+    """
+    doc = fitz.open()
+    pg = doc.new_page()
+    y = 200.0
+    for label, value in [("November", "2022"), ("CP", "749")]:
+        pg.insert_text((60.0, y), label, fontsize=9)
+        pg.insert_text((300.0, y), value, fontsize=9)
+        y += 18.0
+    pg.draw_line(fitz.Point(50, 190), fitz.Point(470, 190))
+    pg.draw_line(fitz.Point(50, y), fitz.Point(470, y))
+    path = tmp_path / "prose.pdf"
+    doc.save(path)
+    doc.close()
+
+    pipe = object.__new__(UnifiedPipeline)
+    pipe.config = PipelineConfig()
+    state = SimpleNamespace(events=[], handle=SimpleNamespace(path=path))
+    ps = SimpleNamespace(has_tables=True, detected_table_count=1)
     bo = PageOutput(page_num=1, text="some text", status=PageStatus.SUCCESS, engine="qwen")
 
     pipe._surface_table_scoring(state, 1, ps, bo)
