@@ -353,3 +353,17 @@ above, not with the other 3 firing sites).
 4. D2 (route cost) is still TODO; the ~3h01m / 103-page wall time here
    (dominated by the three born-digital documents) is a useful reference point
    for that ticket.
+
+## Addendum 2026-09-08 — re-run of class A with tesseract installed
+
+`tesseract 5.5.3` (brew) + `pytesseract` installed into the venv (neither is declared in
+`pyproject.toml`; #658). Re-ran 1977/1982/1990 on the same pinned tree into `out-tesseract/`.
+Every page identical to the first run: p3 still `error / qwen / hallucination`, 6/62, 11/67,
+1/66 numbers shipped. The reject reason changed from "no local content evidence available"
+to `content labels unsupported by page evidence: ['nbsp']` (1977, 1982) and
+`['nbsp','settlements--']` / `['quad','settlements--']` (1990). Direct test on 1977 p3:
+tesseract page OCR yields 62 numbers and supports all 62 of the qwen candidate's numbers; the
+native text layer supports all 62 as well. The candidate is perfect; the label tokeniser turns
+the model's `&nbsp;` indentation (#624) and a trailing `--` into "content labels" that no page
+carries, and `_content_supported` fails closed. Filed as #659 (content-label tokeniser). The environment half of #658 is therefore necessary but not
+sufficient for class A.
