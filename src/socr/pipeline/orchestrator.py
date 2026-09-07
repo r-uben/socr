@@ -3165,6 +3165,323 @@ class UnifiedPipeline:
             raise RuntimeError(f"chart-lane PNG save failed for p{page_num}: {exc}") from exc
         return str(out_path)
 
+    def _doc_and_figures_dir(self, pdf_path: Path, output_dir: Path) -> tuple[Path, Path]:
+        """Return ``(doc_dir, figures_dir)`` for *pdf_path* under *output_dir*.
+
+        One derivation, shared by the agentic loop's chart-lane renders and by
+        the GH-189 assembly-time chart-region pass. Two copies of this would
+        drift, and a crop written under a directory the markdown does not name
+        is a broken reference, not a preserved chart. Falls back to a sibling
+        ``figures/`` when the output contract is unavailable (unit-test /
+        partial-pipeline scenario).
+        """
+        try:
+            from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
+
+            scan_root = self._scan_root or pdf_path.parent
+            doc_dir = doc_dir_for(output_dir, relative_key(pdf_path, scan_root))
+            return doc_dir, figures_dir_for(doc_dir)
+        except Exception as exc:
+            logger.debug("could not compute figures_dir via contract: %s", exc)
+            return output_dir, output_dir / "figures"
+
+    def _preserve_chart_regions(
+        self, state: DocumentState, page_texts: list[str], output_dir: Path
+    ) -> list[str]:
+        """GH-189: guarantee every detected chart region survives into the page body.
+
+        A page carrying BOTH chart marks and a table signal is held out of the
+        page-level chart lane (GH-150 B1) and keeps its normal route, where the
+        chart is represented by an inline placeholder in ``ps.native_text``. That
+        placeholder was only ever resolved on the ``not decision.accepted``
+        branch, and even then into ``native_text`` -- so when the judge ACCEPTED
+        a rung, the accepted candidate shipped, ``native_text`` was not consulted,
+        and the chart left the document with no trace at page status, document
+        status, metadata or CLI. That is the cardinal no-silent-loss violation.
+
+        Enforced HERE, at assembly, rather than at the routing site, for three
+        reasons: it is the one place every selection path converges (accepted
+        rung, later table reread/escalation, manifest-selected native fallback);
+        the inventory is recomputed from the PDF so a RESUMED page is covered
+        exactly like a freshly routed one; and it produces the shared body that
+        the unchanged authoritative fragment writer later serializes, so
+        fragments, saved markdown and metadata cannot disagree. Deliberately NOT
+        inside ``_rewrite_all_fragments``, which receives an already-saved body
+        and must stay a writer.
+
+        The inventory is the DETECTED regions, never the references a candidate
+        happened to emit: "rendered nothing" must not satisfy the invariant
+        vacuously. An accepted attempt's ``audit_passed`` is never touched --
+        that boolean selects the winner (manifest.py), and flipping it to flag a
+        missing chart would discard the correct table (the #252 defect).
+
+        Returns ``page_texts`` unchanged when no page has a chart region, which
+        is what keeps chart-free documents byte-identical.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.core.manifest import is_page_failed_marker
+        from socr.core.pdf import open_pdf
+        from socr.figures.chart_regions import (
+            ALREADY_PRESENT,
+            RENDER_FAILED,
+            UNRESOLVED_PLACEMENT,
+            chart_region_anchors,
+            reconcile_chart_region_refs,
+            table_bindings,
+        )
+        from socr.tables.reconstruct import chart_region_bboxes
+
+        candidates = [
+            pn
+            for pn in sorted(state.pages)
+            if 1 <= pn <= len(page_texts) and self._page_has_tables(pn, state.pages[pn])
+        ]
+        if not candidates:
+            return page_texts
+
+        _doc_dir, figures_dir = self._doc_and_figures_dir(state.handle.path, output_dir)
+        texts = list(page_texts)
+        changed = False
+        inventory: dict[int, list] = {}
+
+        for pn in candidates:
+            ps = state.pages[pn]
+            body = texts[pn - 1]
+            # A fail-closed floor page ships a whole-PAGE image in place of its
+            # body; that image already contains the chart, so inserting a crop
+            # would duplicate it and corrupt the marker.
+            if not body or is_page_failed_marker(body):
+                continue
+            try:
+                with open_pdf(str(state.handle.path)) as _doc:
+                    _page = _doc[pn - 1]
+                    bboxes = chart_region_bboxes(_page)
+                    if not bboxes:
+                        continue
+                    anchors = chart_region_anchors(_page, bboxes)
+            except Exception as exc:
+                logger.warning("GH-189: chart region inventory failed for p%d: %s", pn, exc)
+                state.events.append(
+                    AuditEvent(
+                        page_num=pn,
+                        kind="chart_region_inventory_failed",
+                        engine="chart_region",
+                        detail=(
+                            "chart region inventory could not be built; the page's chart "
+                            "preservation was not checked"
+                        ),
+                        data={"error_type": type(exc).__name__, "error": str(exc)},
+                    )
+                )
+                ps.chart_region_placement_unresolved = True
+                continue
+
+            bindings = table_bindings(bboxes, list(getattr(ps, "detected_table_bboxes", []) or []))
+            assets = self._render_chart_region_crops(state.handle.path, pn, bboxes, figures_dir)
+            new_body, outcomes = reconcile_chart_region_refs(body, assets, anchors, bindings)
+            inventory[pn] = assets
+
+            for oc in outcomes:
+                if oc.disposition == RENDER_FAILED:
+                    ps.chart_region_render_failed = True
+                elif oc.disposition == UNRESOLVED_PLACEMENT:
+                    ps.chart_region_placement_unresolved = True
+                state.events.append(
+                    AuditEvent(
+                        page_num=pn,
+                        kind=(
+                            "chart_region_not_preserved"
+                            if oc.disposition == RENDER_FAILED
+                            else "chart_region_preserved"
+                        ),
+                        engine="chart_region",
+                        detail=oc.detail
+                        or (
+                            "crop already referenced by the winning text"
+                            if oc.disposition == ALREADY_PRESENT
+                            else oc.disposition
+                        ),
+                        data={
+                            "region_index": oc.region_index,
+                            "disposition": oc.disposition,
+                            "path": oc.rel_path,
+                            "region_count": len(bboxes),
+                        },
+                    )
+                )
+
+            if new_body != body:
+                texts[pn - 1] = new_body
+                changed = True
+
+        state._chart_region_assets = inventory
+        return texts if changed else page_texts
+
+    def _chart_region_figures(self, state: DocumentState) -> list:
+        """``FigureInfo`` records for every successfully rendered chart-region crop.
+
+        GH-189 piece 7: the crops must reach ``figure_refs`` even with ordinary
+        figure extraction switched off. ``final_result.figures`` is the carrier
+        the LAST sidecar flush reads (``extra_figures``), so a one-off write here
+        would simply be overwritten by it.
+        """
+        from socr.core.result import FigureInfo
+
+        figures: list = []
+        for pn, assets in sorted(getattr(state, "_chart_region_assets", {}).items()):
+            for asset in assets:
+                if not asset.rendered:
+                    continue
+                figures.append(
+                    FigureInfo(
+                        figure_num=asset.region_index,
+                        page_num=pn,
+                        figure_type="chart",
+                        description=f"chart region {asset.region_index}",
+                        image_path=asset.rel_path,
+                        engine="chart_region",
+                        bbox=asset.bbox,
+                    )
+                )
+        return figures
+
+    def _merge_chart_region_figures(self, state: DocumentState, result) -> None:
+        """Add the GH-189 chart-region crops to *result*'s figure list, once.
+
+        Called twice: once when the result is built, and again after the figure
+        phase, which ASSIGNS ``result.figures`` wholesale and would otherwise
+        drop them. Deduplicated on ``(page_num, image_path)`` so the second call
+        is a no-op and no page ever carries the same crop twice.
+        """
+        existing = {
+            (getattr(f, "page_num", None), getattr(f, "image_path", None))
+            for f in (getattr(result, "figures", None) or [])
+        }
+        for fig in self._chart_region_figures(state):
+            key = (fig.page_num, fig.image_path)
+            if key in existing:
+                continue
+            existing.add(key)
+            result.figures.append(fig)
+
+    @staticmethod
+    def _chart_region_note(state) -> str | None:
+        """GH-189: name the pages whose chart region was lost or mis-placeable.
+
+        Mirrors ``_chart_detection_failed_note``: a consumer reading
+        ``metadata.json`` (and the CLI, which prints ``result.error``) must see
+        the debt without opening ``audit_log.json``. ``None`` on a clean run.
+        """
+        lost = sorted(
+            n for n, p in state.pages.items() if getattr(p, "chart_region_render_failed", False)
+        )
+        unplaced = sorted(
+            n
+            for n, p in state.pages.items()
+            if getattr(p, "chart_region_placement_unresolved", False)
+        )
+        parts = []
+        if lost:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in lost)}: a detected chart region could "
+                "not be rendered; the chart ships as a marker and is preserved nowhere"
+            )
+        if unplaced:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in unplaced)}: a detected chart region is "
+                "preserved but its position in the page could not be established"
+            )
+        return "; ".join(parts) or None
+
+    def _render_chart_region_crops(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        bboxes: list,
+        figures_dir: Path,
+        *,
+        indices: list[int] | None = None,
+    ) -> list:
+        """GH-189: render one PNG crop per chart-region bbox, reporting EVERY outcome.
+
+        The rendering internals of ``_render_chart_region_pngs`` (below), lifted so
+        a caller that must account for regions the WINNING candidate never mentioned
+        can drive them from an explicit bbox inventory instead of from placeholder
+        text.  That wrapper returns the unchanged string on failure -- an outcome its
+        caller cannot tell apart from "this page has no chart" -- which is exactly how
+        a dropped chart stayed silent.  This returns one ``ChartRegionAsset`` per
+        requested region carrying ``rendered`` and the exception text, so a failed
+        crop is a fact the audit can name.
+
+        Renders regardless of ``--save-figures`` / ``--describe-figures``: once a
+        model's text has won the page, the crop is the chart's only representation.
+
+        ``indices`` are 1-based detector ordinals; ``None`` means every region.
+        Never raises.
+        """
+        from socr.figures.chart_regions import ChartRegionAsset, chart_region_filename
+
+        wanted = list(indices) if indices is not None else list(range(1, len(bboxes) + 1))
+        assets: list = []
+        for region_idx in wanted:
+            if region_idx < 1 or region_idx > len(bboxes):
+                continue
+            bbox = bboxes[region_idx - 1]
+            rect = (float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1))
+            fname = chart_region_filename(page_num, region_idx)
+            out_path = figures_dir / fname
+            try:
+                import fitz
+
+                from socr.core.born_digital import upright_rotation_for
+                from socr.core.pdf import open_pdf
+                from socr.figures.extractor import RENDER_DPI
+
+                figures_dir.mkdir(parents=True, exist_ok=True)
+                with open_pdf(str(pdf_path)) as _doc:
+                    _page = _doc[page_num - 1]
+                    # GH-307: clip-scoped, matching the crop path -- a region
+                    # can run against the page's dominant direction.
+                    mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
+                    _rotation = upright_rotation_for(_page, clip=bbox)
+                    if _rotation:
+                        mat = mat.prerotate(_rotation)
+                    pix = _page.get_pixmap(matrix=mat, clip=bbox)
+                    pix.save(str(out_path))
+                # A path is not a render. Check the asset the markdown will point
+                # at actually exists and has bytes -- a stale or truncated file
+                # would otherwise be reported as a successful preservation.
+                if not out_path.exists() or out_path.stat().st_size == 0:
+                    raise RuntimeError("crop PNG missing or empty after save")
+                assets.append(
+                    ChartRegionAsset(
+                        page_num=page_num,
+                        region_index=region_idx,
+                        bbox=rect,
+                        rel_path=f"{figures_dir.name}/{fname}",
+                        rendered=True,
+                    )
+                )
+                logger.debug("GH-189: saved chart region PNG %s", out_path)
+            except Exception as render_exc:
+                logger.warning(
+                    "chart region PNG render failed for p%d region %d: %s",
+                    page_num,
+                    region_idx,
+                    render_exc,
+                )
+                assets.append(
+                    ChartRegionAsset(
+                        page_num=page_num,
+                        region_index=region_idx,
+                        bbox=rect,
+                        rel_path="",
+                        rendered=False,
+                        error=f"{type(render_exc).__name__}: {render_exc}",
+                    )
+                )
+        return assets
+
     def _render_chart_region_pngs(
         self,
         pdf_path: Path,
@@ -3204,62 +3521,31 @@ class UnifiedPipeline:
             return native_text
 
         try:
-            import fitz
-
             from socr.core.pdf import open_pdf
-            from socr.figures.extractor import RENDER_DPI
             from socr.tables.reconstruct import chart_region_bboxes
 
-            figures_dir.mkdir(parents=True, exist_ok=True)
-
             with open_pdf(str(pdf_path)) as _doc:
-                _page = _doc[page_num - 1]
-                bboxes = chart_region_bboxes(_page)
+                bboxes = chart_region_bboxes(_doc[page_num - 1])
 
-            rendered_indices: set[int] = set()
-            for m in pattern.finditer(native_text):
-                region_idx = int(m.group(1))
-                if region_idx < 1 or region_idx > len(bboxes):
-                    continue
-                bbox = bboxes[region_idx - 1]
-                fname = f"chart_region_p{page_num}_{region_idx}.png"
-                out_path = figures_dir / fname
-                try:
-                    with open_pdf(str(pdf_path)) as _doc:
-                        _page = _doc[page_num - 1]
-                        # GH-307: clip-scoped, matching the crop path -- a region
-                        # can run against the page's dominant direction.
-                        from socr.core.born_digital import upright_rotation_for
-
-                        mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-                        _rotation = upright_rotation_for(_page, clip=bbox)
-                        if _rotation:
-                            mat = mat.prerotate(_rotation)
-                        pix = _page.get_pixmap(matrix=mat, clip=bbox)
-                        pix.save(str(out_path))
-                    rendered_indices.add(region_idx)
-                    logger.debug("TR-2: saved chart region PNG %s", out_path)
-                except Exception as render_exc:
-                    logger.warning(
-                        "TR-2 chart region PNG render failed for p%d region %d: %s",
-                        page_num,
-                        region_idx,
-                        render_exc,
-                    )
-
-            if not rendered_indices:
+            indices = sorted({int(m.group(1)) for m in pattern.finditer(native_text)})
+            rendered: dict[int, str] = {
+                a.region_index: a.rel_path
+                for a in self._render_chart_region_crops(
+                    pdf_path, page_num, bboxes, figures_dir, indices=indices
+                )
+                if a.rendered
+            }
+            if not rendered:
                 # No PNGs saved — return original text so strip_phantom_images
                 # removes the placeholder and the audit records the failure.
                 return native_text
 
             # Update placeholder paths to ``figures/{filename}`` so the files
             # resolve correctly against ``doc_dir`` in strip_phantom_images.
-            figures_dir_name = figures_dir.name
-
             def _replace_path(m: re.Match[str]) -> str:
                 region_idx = int(m.group(1))
-                if region_idx in rendered_indices:
-                    return f"({figures_dir_name}/chart_region_p{page_num}_{region_idx}.png)"
+                if region_idx in rendered:
+                    return f"({rendered[region_idx]})"
                 return m.group(0)  # keep original if PNG was not saved
 
             return pattern.sub(_replace_path, native_text)
@@ -6445,23 +6731,9 @@ class UnifiedPipeline:
         # location alongside the rest of the document outputs.  Falls back to a
         # sibling ``figures/`` directory next to the PDF when the contract is not
         # available (unit-test / partial-pipeline scenario).
-        _chart_figures_dir: Path | None = None
-        _agentic_doc_dir: Path | None = None
-        try:
-            from ocr_output_contract import doc_dir_for, figures_dir_for, relative_key
-
-            _chart_pdf_path = state.handle.path
-            _chart_scan_root = self._scan_root or _chart_pdf_path.parent
-            _chart_doc_dir = doc_dir_for(
-                output_dir, relative_key(_chart_pdf_path, _chart_scan_root)
-            )
-            _agentic_doc_dir = _chart_doc_dir
-            _chart_figures_dir = figures_dir_for(_chart_doc_dir)
-        except Exception as exc:
-            logger.debug("PP-7: could not compute chart figures_dir via contract: %s", exc)
-            # Fallback: sibling figures/ next to the output dir.
-            _chart_figures_dir = output_dir / "figures"
-            _agentic_doc_dir = output_dir
+        _agentic_doc_dir, _chart_figures_dir = self._doc_and_figures_dir(
+            state.handle.path, output_dir
+        )
 
         # ====================================================================
         # ONE fused loop over ALL pages in page order (native AND ocr).
@@ -9859,6 +10131,11 @@ class UnifiedPipeline:
 
         pre_records = finalized_page_records(state)
         page_texts = canonical_page_texts(state, records=pre_records)
+        # GH-189: the chart-region preservation pass runs on the SELECTED page
+        # bodies, before ``_canonical_body`` and therefore before the fragment
+        # flush, the status aggregation, the initial save and the metadata --
+        # so every terminal writer serializes the same reconciled text.
+        page_texts = self._preserve_chart_regions(state, page_texts, output_dir)
         final_text, has_text = self._canonical_body(state, page_texts=page_texts)
 
         self._backfill_missing_table_ladder_terminals(state, page_texts)
@@ -10140,6 +10417,26 @@ class UnifiedPipeline:
         # fail-soft route is deliberate (#297) and the content is kept, so this is
         # the "completed with warnings, output written" path.
         pages_ok = pages_ok and not chart_detection_failed_pages
+        # GH-189: a detected chart region on a mixed chart+table page could not
+        # be rendered, so the chart is preserved NOWHERE and the page ships a
+        # marker in its place. The table the page shipped may be perfect, so
+        # this is not a page failure -- but lost content cannot leave the run
+        # reporting a clean SUCCESS. AUDIT_FAILED: "completed with warnings,
+        # output written". The accepted attempt's ``audit_passed`` is
+        # deliberately untouched; it selects the winner, and flipping it here
+        # would discard the page's correct table (the #252 defect).
+        #
+        # An UNRESOLVED PLACEMENT is deliberately NOT in this bucket. Nothing is
+        # lost there: the crop ships, referenced exactly once, inside a block
+        # that says in the output itself that its position is not established --
+        # the most visible surface there is, plus a page event, the metadata note
+        # below and the CLI line that prints it. Demoting the document for it
+        # would report a content loss that did not happen, on every page where a
+        # model rewrote the prose the anchors were drawn from.
+        chart_region_lost_pages = sorted(
+            n for n, pg in state.pages.items() if getattr(pg, "chart_region_render_failed", False)
+        )
+        pages_ok = pages_ok and not chart_region_lost_pages
 
         # GH-353: table judge ladder terminals (C2). Keyed off
         # ``PageState.table_ladder_disposition`` FIRST -- the durable field
@@ -10609,6 +10906,10 @@ class UnifiedPipeline:
             cost=state.total_cost,
             audit_passed=status == DocumentStatus.SUCCESS,
         )
+        # GH-189 piece 7: the chart crops must reach ``figure_refs`` even with
+        # ordinary figure extraction switched off, and ``final_result.figures``
+        # is the carrier every terminal sidecar writer reads.
+        self._merge_chart_region_figures(state, final_result)
         if failed_pages:
             from socr.core.result import LOST_CONTENT_NOTE
 
@@ -10669,6 +10970,14 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_chart_note}"
             else:
                 final_result.error = _chart_note
+        # GH-189: surface a lost or unplaceable chart region at document level,
+        # for the same reason GH-318 does above.
+        _chart_region_note = self._chart_region_note(state)
+        if _chart_region_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_chart_region_note}"
+            else:
+                final_result.error = _chart_region_note
         _trust_note = self._tables_trust_note(state)
         if _trust_note:
             if final_result.error:
@@ -10773,6 +11082,10 @@ class UnifiedPipeline:
                 final_text = embedded_text
                 final_result.pages[0].text = final_text
                 self._save_markdown(state, final_text, output_dir)
+            # GH-189: ``_describe_and_embed_figures`` ASSIGNS ``result.figures``,
+            # so the chart-region crops added at construction are gone by here.
+            # Re-merge before anything else reads the list.
+            self._merge_chart_region_figures(state, final_result)
             # Finalize the record (real fingerprint, final status), replacing
             # the provisional pre-figures entry -- unless the phase raised, in
             # which case there is nothing to finalize and the provisional entry
@@ -11151,6 +11464,54 @@ class UnifiedPipeline:
             logger.warning("table-trust note derivation failed (non-fatal): %s", exc)
             return None
 
+    def _drop_chart_region_duplicates(self, state: DocumentState, extracted: list) -> list:
+        """Remove extracted figures that re-localise an already-preserved chart region.
+
+        The test is geometric and threshold-free: an extracted figure is a
+        duplicate when its bbox CENTRE lies inside a registered chart region on
+        the same page. Every suppression is journalled -- a dropped asset must
+        never be invisible, even when dropping it is the right answer.
+        """
+        regions = getattr(state, "_chart_region_assets", None)
+        if not regions:
+            return extracted
+
+        from socr.core.audit_log import AuditEvent
+
+        kept: list = []
+        for fig in extracted:
+            bbox = getattr(fig, "bbox", None)
+            assets = regions.get(getattr(fig, "page_num", None)) or []
+            hit = None
+            if bbox is not None and assets:
+                cx = (float(bbox[0]) + float(bbox[2])) / 2.0
+                cy = (float(bbox[1]) + float(bbox[3])) / 2.0
+                for asset in assets:
+                    ax0, ay0, ax1, ay1 = asset.bbox
+                    if ax0 <= cx <= ax1 and ay0 <= cy <= ay1:
+                        hit = asset
+                        break
+            if hit is None:
+                kept.append(fig)
+                continue
+            state.events.append(
+                AuditEvent(
+                    page_num=hit.page_num,
+                    kind="chart_region_duplicate_suppressed",
+                    engine="chart_region",
+                    detail=(
+                        "figure extraction re-localised a chart region that is already "
+                        "preserved by its own crop; the duplicate asset was not emitted"
+                    ),
+                    data={
+                        "region_index": hit.region_index,
+                        "path": hit.rel_path,
+                        "figure_num": getattr(fig, "figure_num", None),
+                    },
+                )
+            )
+        return kept
+
     def _describe_and_embed_figures(
         self,
         state: DocumentState,
@@ -11220,7 +11581,14 @@ class UnifiedPipeline:
                     f"(no localizable figures)[/dim]"
                 )
         extraction: ExtractionResult = extractor.extract(state.handle.path, skip_pages=skip_pages)
-        extracted = extraction.figures
+        # GH-189: a chart region registered for mandatory preservation already
+        # has its own crop referenced from the page body, at the position the
+        # reconciliation established. Ordinary extraction localising the SAME
+        # source region would emit a second asset for it under a different
+        # filename -- the same chart twice, in two places. Suppressed here
+        # rather than de-duplicated in markdown afterwards, so only one PNG is
+        # ever written and only one figure record ever exists.
+        extracted = self._drop_chart_region_duplicates(state, extraction.figures)
 
         # Cap-reached: signal in console and durable audit log so silently
         # dropped later figures are not invisible to the operator.  The event

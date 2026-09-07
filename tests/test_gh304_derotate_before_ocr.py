@@ -137,7 +137,7 @@ def test_prerotate_returns_the_matrix_and_mutates_it() -> None:
       ``pipeline/orchestrator.py`` (``_render_adjudication_crop``)
     - assignment: ``engines/base.py``, ``core/document.py`` (x2),
       ``review/html.py``, ``pipeline/orchestrator.py``
-      (``_render_chart_page_png``, ``_render_chart_region_pngs``)
+      (``_render_chart_page_png``, ``_render_chart_region_crops``)
 
     GH-440: the mutate-only entry first named the D3 floor render, which does
     not call ``prerotate`` at all -- ``_render_d3_floor_png`` delegates to
@@ -178,7 +178,7 @@ _ASSIGNMENT_SITES = {
     ("core/document.py", "render_page"),
     ("engines/base.py", "process_pages"),
     ("pipeline/orchestrator.py", "_render_chart_page_png"),
-    ("pipeline/orchestrator.py", "_render_chart_region_pngs"),
+    ("pipeline/orchestrator.py", "_render_chart_region_crops"),
     ("review/html.py", "_render_page_image"),
 }
 
