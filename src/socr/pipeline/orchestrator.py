@@ -3238,13 +3238,20 @@ class UnifiedPipeline:
         if not candidates:
             return page_texts
 
-        # Precondition, not a page verdict: this pass reconciles the SOURCE
-        # against the winner, so with no readable source there is nothing to
-        # reconcile and no evidence that any chart exists to lose. Recorded at
-        # document level and skipped, rather than flagged per page -- marking
-        # every table page's chart "unchecked" would report a preservation doubt
-        # the run has no grounds for. In production the source was already read
-        # by extraction; this is reachable when the file moves under a resume.
+        # This pass reconciles the SOURCE against the winner, so with no readable
+        # source it cannot run. Recorded at document level either way -- and, for
+        # every page EXTRACTION already showed to carry chart content, carried
+        # into page reporting as a skipped check. An unreadable source does not
+        # prove a chart was lost, but it does prevent verifying one that is known
+        # to be there, and "could not verify" must not read as "verified".
+        #
+        # The evidence has to be independent of the PDF, since the PDF is what is
+        # missing: the arbitration event the agentic loop emits for every mixed
+        # chart+table page, or the chart-region placeholder the chart-aware
+        # rowizer wrote into the page's native text at extraction. A page with a
+        # table signal and NO such evidence is not flagged -- claiming an
+        # unchecked chart on a page nothing ever called a chart page would report
+        # a doubt the run has no grounds for.
         if not state.handle.path.exists():
             logger.warning(
                 "GH-189: source PDF is not readable at assembly (%s); chart-region "
@@ -3253,6 +3260,18 @@ class UnifiedPipeline:
             )
             from socr.core.audit_log import AuditEvent as _SourceEvent
 
+            arbitrated = {
+                getattr(e, "page_num", 0)
+                for e in state.events
+                if getattr(e, "kind", "") == "chart_table_arbitration"
+            }
+            known_chart_pages = [
+                pn
+                for pn in candidates
+                if pn in arbitrated or f"chart_region_p{pn}_" in (state.pages[pn].native_text or "")
+            ]
+            for pn in known_chart_pages:
+                state.pages[pn].chart_region_inventory_failed = True
             state.events.append(
                 _SourceEvent(
                     page_num=0,
@@ -3262,7 +3281,10 @@ class UnifiedPipeline:
                         "the source document could not be opened at assembly, so chart "
                         "region preservation did not run for any page"
                     ),
-                    data={"path": str(state.handle.path)},
+                    data={
+                        "path": str(state.handle.path),
+                        "known_chart_pages": known_chart_pages,
+                    },
                 )
             )
             return page_texts

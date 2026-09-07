@@ -52,9 +52,7 @@ _PLACED = frozenset({PLACED_ANCHOR, PLACED_TABLE_BOUND})
 #: or not its position could be established.
 PRESERVED_DISPOSITIONS = frozenset({PLACED_ANCHOR, PLACED_TABLE_BOUND, UNRESOLVED_PLACEMENT})
 
-_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
 _FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
-_IMAGE_REF_FULL_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]*)[^)]*\)")
 
 
 @dataclass(frozen=True)
@@ -244,32 +242,200 @@ def unresolved_placement_note(page_num: int, indices: list[int]) -> str:
     )
 
 
-def _image_targets(line: str) -> list[str]:
-    """Every image TARGET on a line, in order. Alt text is never consulted."""
-    return [m.group(1) for m in _IMAGE_REF_RE.finditer(line)]
+def _parse_image_token(line: str, start: int) -> tuple[int, str] | None:
+    """Parse one complete ``![alt](dest "title")`` at *start*; ``(end, dest)`` or None.
+
+    A real scan, not a prefix regex. ``[^)]*`` stops at the first ``)``, so an
+    image whose title carries one -- ``![c](x.png "model (A)")`` -- was removed
+    only as far as that paren and left ``") `` sitting in the prose. Handles
+    escapes, a bracketed ``<dest>``, balanced parentheses in a bare destination,
+    and a quoted or parenthesised title.
+    """
+    n = len(line)
+    if not line.startswith("![", start):
+        return None
+    i, depth = start + 2, 1
+    while i < n:
+        c = line[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    if i >= n or line[i] != "]":
+        return None
+    i += 1
+    if i >= n or line[i] != "(":
+        return None
+    i += 1
+    while i < n and line[i] in " \t":
+        i += 1
+
+    dest: list[str] = []
+    if i < n and line[i] == "<":
+        i += 1
+        while i < n and line[i] != ">":
+            if line[i] == "\\" and i + 1 < n:
+                dest.append(line[i + 1])
+                i += 2
+                continue
+            dest.append(line[i])
+            i += 1
+        if i >= n:
+            return None
+        i += 1
+    else:
+        depth = 0
+        while i < n:
+            c = line[i]
+            if c == "\\" and i + 1 < n:
+                dest.append(line[i + 1])
+                i += 2
+                continue
+            if c in " \t":
+                break
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            dest.append(c)
+            i += 1
+
+    while i < n and line[i] in " \t":
+        i += 1
+    if i < n and line[i] in "\"'(":
+        closer = ")" if line[i] == "(" else line[i]
+        i += 1
+        while i < n and line[i] != closer:
+            if line[i] == "\\" and i + 1 < n:
+                i += 2
+                continue
+            i += 1
+        if i >= n:
+            return None
+        i += 1
+        while i < n and line[i] in " \t":
+            i += 1
+    if i >= n or line[i] != ")":
+        return None
+    return i + 1, "".join(dest)
+
+
+def _in_ranges(index: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= index < end for start, end in ranges)
+
+
+def live_image_tokens(line: str, literal: list[tuple[int, int]]) -> list[tuple[int, int, str]]:
+    """``(start, end, destination)`` for each LIVE image on *line*, in order.
+
+    A token whose ``!`` falls inside a literal range is markdown the page is
+    SHOWING, not a reference the page is making, so it is skipped -- it is
+    neither removed nor counted toward the exactly-once check.
+    """
+    out: list[tuple[int, int, str]] = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] == "!" and not _in_ranges(i, literal):
+            parsed = _parse_image_token(line, i)
+            if parsed is not None:
+                end, dest = parsed
+                out.append((i, end, dest))
+                i = end
+                continue
+        i += 1
+    return out
+
+
+def markdown_literal_context(lines: list[str]) -> tuple[set[int], dict[int, list[tuple[int, int]]]]:
+    """Where markdown is showing image syntax rather than using it.
+
+    Returns the wholly-literal line numbers (fenced code, and lines inside a
+    multi-line HTML comment) and, per line, the character ranges covered by
+    inline code spans and HTML comments.
+
+    One context pass, computed on the ORIGINAL body and shared by removal,
+    counting and insertion. Independent regex exceptions per markdown construct
+    would disagree about which bytes form an image, which is how the fence-only
+    fix left inline code and comments still being edited.
+
+    Inline code spans are resolved within a line; a backtick span carried across
+    a line break is rare enough, and failing to see one only means an owned
+    reference inside it is treated as live.
+    """
+    fenced: set[int] = set()
+    ranges: dict[int, list[tuple[int, int]]] = {}
+    in_fence = False
+    in_comment = False
+    for idx, line in enumerate(lines):
+        if _FENCE_RE.match(line) and not in_comment:
+            fenced.add(idx)
+            in_fence = not in_fence
+            ranges[idx] = []
+            continue
+        if in_fence:
+            fenced.add(idx)
+            ranges[idx] = []
+            continue
+        found: list[tuple[int, int]] = []
+        i, n = 0, len(line)
+        while i < n:
+            if in_comment:
+                k = line.find("-->", i)
+                if k == -1:
+                    found.append((i, n))
+                    i = n
+                else:
+                    found.append((i, k + 3))
+                    in_comment = False
+                    i = k + 3
+                continue
+            if line.startswith("<!--", i):
+                k = line.find("-->", i + 4)
+                if k == -1:
+                    found.append((i, n))
+                    in_comment = True
+                    i = n
+                else:
+                    found.append((i, k + 3))
+                    i = k + 3
+                continue
+            if line[i] == "`":
+                run = 1
+                while i + run < n and line[i + run] == "`":
+                    run += 1
+                fence = "`" * run
+                close = line.find(fence, i + run)
+                while close != -1 and close + run < n and line[close + run] == "`":
+                    close = line.find(fence, close + 1)
+                if close == -1:
+                    i += run
+                    continue
+                found.append((i, close + run))
+                i = close + run
+                continue
+            i += 1
+        ranges[idx] = found
+        if in_comment:
+            fenced.add(idx)
+    return fenced, ranges
 
 
 def code_fence_spans(lines: list[str]) -> list[tuple[int, int]]:
-    """Inclusive line spans of fenced code blocks, fence lines included.
-
-    Computed on the ORIGINAL body, before anything is removed. Literal image
-    syntax inside a fence is CONTENT -- a markdown example the page is showing
-    the reader -- not a live reference to one of our crops. Deleting it would
-    edit the accepted text and move the example's image outside its own block,
-    so block protection has to cover removal, not only insertion.
-    """
+    """Inclusive line spans that are wholly literal, for insertion protection."""
+    fenced, _ranges = markdown_literal_context(lines)
     spans: list[tuple[int, int]] = []
-    open_at: int | None = None
-    for i, line in enumerate(lines):
-        if not _FENCE_RE.match(line):
-            continue
-        if open_at is None:
-            open_at = i
+    for idx in sorted(fenced):
+        if spans and spans[-1][1] == idx - 1:
+            spans[-1] = (spans[-1][0], idx)
         else:
-            spans.append((open_at, i))
-            open_at = None
-    if open_at is not None:
-        spans.append((open_at, len(lines) - 1))
+            spans.append((idx, idx))
     return spans
 
 
@@ -277,17 +443,20 @@ def _owns(target: str, filenames: set[str]) -> bool:
     return target.rsplit("/", 1)[-1] in filenames
 
 
-def _strip_owned_tokens(line: str, filenames: set[str]) -> str:
-    """Remove owned image TOKENS from *line*, leaving everything else intact.
+def _strip_owned_tokens(line: str, filenames: set[str], literal: list[tuple[int, int]]) -> str:
+    """Remove owned LIVE image tokens from *line*, leaving everything else intact.
 
-    Token-level, never line-level: an owned reference embedded in a sentence
-    must not take the sentence with it, and a line mixing an owned crop with an
+    Token-level, never line-level: an owned reference embedded in a sentence must
+    not take the sentence with it, and a line mixing an owned crop with an
     unrelated figure is not an all-or-nothing unit. Only the whitespace the
     removal itself collapsed is normalised, and only on a line actually edited.
     """
-    out = _IMAGE_REF_FULL_RE.sub(lambda m: "" if _owns(m.group(1), filenames) else m.group(0), line)
-    if out == line:
+    hits = [t for t in live_image_tokens(line, literal) if _owns(t[2], filenames)]
+    if not hits:
         return line
+    out = line
+    for start, end, _dest in reversed(hits):
+        out = out[:start] + out[end:]
     return re.sub(r"[ \t]{2,}", " ", out).rstrip()
 
 
@@ -295,30 +464,31 @@ def _strip_owned(
     lines: list[str],
     filenames: set[str],
     prefixes: tuple[str, ...],
-    code_spans: list[tuple[int, int]],
+    context: tuple[set[int], dict[int, list[tuple[int, int]]]],
 ) -> list[str]:
     """Remove every owned artifact and the ONE blank separator it brought.
 
-    Three cases, in order: a line inside a code fence is content and is never
-    touched; a line that is one of this module's own markers is dropped whole;
-    any other line has its owned image tokens removed, and is dropped only if
-    that emptied it.
+    Three cases, in order: a wholly-literal line (fenced code, or inside an HTML
+    comment) is content and is never touched; a line that is one of this
+    module's own markers is dropped whole; any other line has its owned LIVE
+    image tokens removed -- skipping any that sit inside an inline code span or
+    a comment on that line -- and is dropped only if that emptied it.
 
     Dropping a line exactly inverts ``_insert_block``, so reconciling this
     module's own output reproduces it byte-for-byte instead of accumulating
     blank lines.
     """
-    protected = [any(a <= i <= b for a, b in code_spans) for i in range(len(lines))]
+    literal_lines, literal_ranges = context
     rewritten: list[str | None] = []
     for i, line in enumerate(lines):
-        if protected[i]:
+        if i in literal_lines:
             rewritten.append(line)
             continue
         stripped = line.strip()
         if stripped and any(stripped.startswith(prefix) for prefix in prefixes):
             rewritten.append(None)
             continue
-        new = _strip_owned_tokens(line, filenames)
+        new = _strip_owned_tokens(line, filenames, literal_ranges.get(i, []))
         if new != line and not new.strip() and stripped:
             rewritten.append(None)  # the line was nothing but owned references
         else:
@@ -517,7 +687,7 @@ def reconcile_chart_region_refs(
         + [unresolved_placement_prefix(page_num)]
     )
     original = text.split("\n")
-    lines = _strip_owned(original, filenames, prefixes, code_fence_spans(original))
+    lines = _strip_owned(original, filenames, prefixes, markdown_literal_context(original))
     spans = protected_spans(lines)
 
     ordered = sorted(assets, key=lambda a: (a.bbox[1], a.region_index))

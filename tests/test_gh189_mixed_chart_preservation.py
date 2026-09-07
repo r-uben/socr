@@ -807,3 +807,100 @@ def test_slots_running_backwards_against_the_source_are_all_unresolved() -> None
     )
     assert out.index(a.rel_path) < out.index(b.rel_path), f"source order lost:\n{out}"
     assert "Unresolved chart placement" in out
+
+
+# ---------------------------------------------------------------------------
+# Markdown context and token parsing (round 4 review)
+# ---------------------------------------------------------------------------
+
+
+def test_image_syntax_inside_an_inline_code_span_is_literal() -> None:
+    """Showing markdown is not making a reference."""
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    literal = f"`{image_ref(asset)}`"
+    out, _outcomes = reconcile_chart_region_refs(
+        f"Example {literal}\nTail", [asset], {1: ("", "Tail")}, {}
+    )
+    assert literal in out, f"the inline code span was edited:\n{out}"
+    assert out.count(asset.rel_path) == 2, (
+        f"the literal occurrence should not replace the live one:\n{out}"
+    )
+
+
+def test_image_syntax_inside_an_html_comment_is_literal() -> None:
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    comment = f"<!-- example {image_ref(asset)} -->"
+    out, _outcomes = reconcile_chart_region_refs(
+        f"Intro\n{comment}\nTail", [asset], {1: ("Intro", "Tail")}, {}
+    )
+    assert comment in out, f"the HTML comment was edited:\n{out}"
+
+
+def test_a_multi_line_html_comment_is_literal_throughout() -> None:
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    comment = f"<!-- example\n{image_ref(asset)}\n-->"
+    out, _outcomes = reconcile_chart_region_refs(
+        f"Intro\n{comment}\nTail", [asset], {1: ("Intro", "Tail")}, {}
+    )
+    assert comment in out, f"the multi-line comment was edited:\n{out}"
+
+
+def test_a_title_containing_parentheses_is_removed_whole() -> None:
+    """A prefix regex stopped at the first ``)`` and left the rest in the prose."""
+    from socr.figures.chart_regions import reconcile_chart_region_refs
+
+    asset = _asset(1)
+    text = f'Intro ![chart]({asset.rel_path} "model (A)") Tail'
+    out, _outcomes = reconcile_chart_region_refs(text, [asset], {}, {})
+    assert out.startswith("Intro Tail\n"), f"the token was only partly removed:\n{out}"
+    assert '"model (A)"' not in out
+
+
+def test_an_angle_bracketed_destination_is_recognised() -> None:
+    from socr.figures.chart_regions import reconcile_chart_region_refs
+
+    asset = _asset(1)
+    text = f"Intro ![chart](<{asset.rel_path}>) Tail"
+    out, _outcomes = reconcile_chart_region_refs(text, [asset], {}, {})
+    assert out.startswith("Intro Tail\n"), f"a bracketed destination was missed:\n{out}"
+
+
+def test_an_unreadable_source_reports_a_skipped_check_only_for_known_chart_pages(
+    tmp_path: Path,
+) -> None:
+    """The check could not run; that is not preservation, and not a free pass either."""
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState, PageState
+
+    pipeline = _make_pipeline()
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=tmp_path / "gone.pdf", page_count=2)
+    state = DocumentState(handle=handle)
+    # p1 was shown to carry a chart at extraction; p2 is an ordinary table page.
+    state.pages[1] = PageState(
+        page_num=1,
+        is_born_digital=True,
+        has_tables=True,
+        native_text="![chart region 1](chart_region_p1_1.png)",
+    )
+    state.pages[2] = PageState(
+        page_num=2, is_born_digital=True, has_tables=True, native_text="| a |\n| - |\n| 1 |"
+    )
+
+    texts = ["one", "two"]
+    assert pipeline._preserve_chart_regions(state, texts, tmp_path) is texts
+
+    assert state.pages[1].chart_region_inventory_failed is True
+    assert state.pages[2].chart_region_inventory_failed is False, (
+        "a table page nothing ever called a chart page was reported as unchecked"
+    )
+    events = [e for e in state.events if getattr(e, "kind", "") == "chart_region_source_unreadable"]
+    assert len(events) == 1 and events[0].data["known_chart_pages"] == [1]
+    note = pipeline._chart_region_note(state)
+    assert note is not None and "never checked" in note and "page(s) 1" in note
