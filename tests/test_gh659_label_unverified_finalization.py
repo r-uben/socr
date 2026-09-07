@@ -669,5 +669,66 @@ def test_retirement_preserves_unrelated_active_distrust(tmp_path: Path) -> None:
     assert json.loads(trust_path.read_text())["untrusted_pages"] == [2]
 
 
+# --------------------------------------------------------------------------
+# 11. Astra round 5 P2: an event-free rerun through the REAL CALLER
+#     (``_write_audit_log``, not ``_write_tables_trust`` directly) must still
+#     retire a stale trust file -- the early return on empty ``audit.events``
+#     used to skip trust reconciliation entirely.
+# --------------------------------------------------------------------------
+
+
+def test_event_free_rerun_removes_stale_trust_through_write_audit_log(tmp_path: Path) -> None:
+    """A genuinely clean rerun: ``build_run_audit`` returns no events at all
+    (not merely a page whose doubt retired -- NOTHING happened this run).
+    ``_write_audit_log`` used to ``return`` right there, before
+    ``_write_tables_trust`` ever ran, so round 4's retirement fix never got a
+    chance to fire and a prior run's file was left stale on disk.
+    """
+    pipeline = _pipeline()
+    trust_path = tmp_path / "tables_trust.json"
+    audit_log_path = tmp_path / "audit_log.json"
+
+    build_tables_trust(
+        "doc.pdf",
+        [
+            AuditEvent(
+                page_num=1,
+                kind=LABEL_UNVERIFIED_KIND,
+                engine="qwen",
+                detail=LABEL_DETAIL,
+                data={"cause": ""},
+            )
+        ],
+    ).save(trust_path)
+    assert trust_path.exists()
+
+    state = SimpleNamespace(handle=SimpleNamespace(filename="doc.pdf"))
+    with patch(
+        "socr.core.audit_log.build_run_audit",
+        return_value=SimpleNamespace(events=[]),
+    ):
+        pipeline._write_audit_log(state, tmp_path, records=[])
+
+    assert not trust_path.exists()
+    assert not audit_log_path.exists()
+
+
+def test_clean_first_run_writes_no_audit_or_trust_files(tmp_path: Path) -> None:
+    """The other half of the same contract: a run with nothing to report and
+    NO prior file must stay artifact-free -- the fix must not start writing
+    an empty ``tables_trust.json`` on every clean run just to be safe.
+    """
+    pipeline = _pipeline()
+    state = SimpleNamespace(handle=SimpleNamespace(filename="doc.pdf"))
+    with patch(
+        "socr.core.audit_log.build_run_audit",
+        return_value=SimpleNamespace(events=[]),
+    ):
+        pipeline._write_audit_log(state, tmp_path, records=[])
+
+    assert not (tmp_path / "tables_trust.json").exists()
+    assert not (tmp_path / "audit_log.json").exists()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

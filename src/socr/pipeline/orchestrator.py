@@ -11914,18 +11914,26 @@ class UnifiedPipeline:
 
         ``records``: #659 round 3, threaded through to ``_write_tables_trust``
         so ``LABEL_UNVERIFIED_KIND`` resolves off the final winning candidate.
+
+        #659 round 5 (Astra P2): ``_write_tables_trust`` runs regardless of
+        whether THIS run produced any events. A genuinely clean rerun with an
+        empty ``audit.events`` used to return before ever reaching it, so a
+        prior run's ``tables_trust.json`` in the same directory survived --
+        the trust sidecar's own retirement (round 4's fix) never got a
+        chance to fire. Only the audit_log.json write and its console line
+        are conditional on there being something to write.
         """
         try:
             from socr.core.audit_log import build_run_audit
 
             audit = build_run_audit(state)
-            if not audit.events:
-                return  # a clean run leaves no audit log to inspect
-            audit.save(doc_dir / "audit_log.json")
-            if not self.config.quiet:
-                console.print(
-                    f"  [dim]Audit log: {doc_dir / 'audit_log.json'} ({audit.summary_line()})[/dim]"
-                )
+            if audit.events:
+                audit.save(doc_dir / "audit_log.json")
+                if not self.config.quiet:
+                    console.print(
+                        f"  [dim]Audit log: {doc_dir / 'audit_log.json'} "
+                        f"({audit.summary_line()})[/dim]"
+                    )
             self._write_tables_trust(state, audit, doc_dir, records=records)
         except Exception as exc:  # never lose output over an audit-log write
             logger.warning("audit log write failed (non-fatal): %s", exc)
