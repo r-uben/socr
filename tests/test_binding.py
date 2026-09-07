@@ -1936,5 +1936,114 @@ def test_grazing_caption_and_footnote_are_excluded_as_on_main():
     assert _label(words) == "Treasury"
 
 
+# ---------------------------------------------------------------------------
+# GH-609: VI-A2 round 2 — majority-overlap-area membership
+# ---------------------------------------------------------------------------
+
+
+def test_wide_deep_dipping_caption_is_excluded_by_area_but_was_admitted_by_centroid():
+    """cubic P2's actual hole: a caption WIDER than the table that also dips
+    more than half its own height into the region from above.
+
+    Bilateral x-overflow (past both table edges) pulls the caption's own box
+    area mostly outside the region without moving its centroid off the
+    region's own x-center — so a pure centroid point test admits it (the
+    bug: prose pollution) while majority-overlap-area, computed over the
+    caption's own box, correctly excludes it. The shallow-graze fixture
+    (``test_grazing_caption_and_footnote_are_excluded_as_on_main``) never
+    exercised this: that caption's centroid stayed outside on both tests,
+    so it could not tell centroid and area apart.
+    """
+    from socr.tables.binding import _word_majority_overlaps_region, _words_in_region
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    # Region is [100,400]x[60,200]; the caption spans the whole page width
+    # and dips well past the region's top edge.
+    caption = (50.0, 40.0, 450.0, 90.0, "Caption", 1, 0, 0)
+
+    def _centroid_in(word, box):
+        rx0, ry0, rx1, ry1 = box
+        cx, cy = (word[0] + word[2]) / 2.0, (word[1] + word[3]) / 2.0
+        return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
+
+    assert _centroid_in(caption, region) is True, "fixture must land its centroid inside"
+    assert _word_majority_overlaps_region(caption, region) is False, (
+        "fixture must be majority-outside its own box area"
+    )
+
+    scoped = _words_in_region([caption], region)
+    assert caption not in scoped
+
+
+def test_grazer_that_only_touches_the_region_is_boundary_not_bound():
+    """The y-straddle graze (minority overlap) stays out of binding and is
+    recorded as a boundary word — visible, not silently absent."""
+    from socr.tables.binding import _native_rows, _partition_words_by_region
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    caption = (150.0, 59.4, 220.0, 60.2, "Caption", 1, 0, 0)
+    treasury_row = [
+        (140.0, 70.0, 170.0, 80.0, "OLS", 0, 0, 0),
+        (240.0, 70.0, 270.0, 80.0, "IV", 0, 0, 1),
+        (115.0, 100.0, 180.0, 110.0, "Treasury", 0, 1, 0),
+        (200.0, 100.0, 230.0, 110.0, "0.50", 0, 1, 1),
+        (300.0, 100.0, 330.0, 110.0, "0.51", 0, 1, 2),
+    ]
+    words = [caption, *treasury_row]
+
+    kept, boundary = _partition_words_by_region(words, region)
+    assert caption not in kept
+    assert caption in boundary
+
+    rows, _, _ = _native_rows(kept)
+    data = [row for row in rows if not row.is_parent]
+    assert data
+    assert "Caption" not in data[0].row_path[-1]
+
+
+def test_fully_inside_and_fully_outside_words_are_unaffected():
+    """Regression control: a word wholly inside and one wholly outside the
+    region behave the same as before the predicate changed — no boundary
+    entry, no change in membership."""
+    from socr.tables.binding import _partition_words_by_region
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    inside = (150.0, 100.0, 200.0, 110.0, "Inside", 0, 0, 0)
+    outside = (10.0, 10.0, 40.0, 20.0, "Outside", 1, 0, 0)
+
+    kept, boundary = _partition_words_by_region([inside, outside], region)
+    assert kept == [inside]
+    assert boundary == []
+
+
+def test_boundary_words_is_absent_on_main_and_populated_on_the_fix():
+    """GH-609 (d): a rejected-but-touching word must be visible on the
+    BindingResult, never silently dropped. ``boundary_words`` does not
+    exist on main's BindingResult at all -- this assertion cannot pass
+    there, only on the fix.
+    """
+    from socr.tables.binding import bind
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    footnote = (150.0, 199.8, 220.0, 200.6, "Footnote", 2, 0, 0)
+    words = [
+        (140.0, 70.0, 170.0, 80.0, "OLS", 0, 0, 0),
+        (240.0, 70.0, 270.0, 80.0, "IV", 0, 0, 1),
+        (115.0, 100.0, 180.0, 110.0, "Treasury", 0, 1, 0),
+        (200.0, 100.0, 230.0, 110.0, "0.50", 0, 1, 1),
+        (300.0, 100.0, 330.0, 110.0, "0.51", 0, 1, 2),
+        footnote,
+    ]
+    md = """
+|          | OLS  | IV   |
+|----------|------|------|
+| Treasury | 0.50 | 0.51 |
+"""
+    result = bind(words, md, region=region)
+    assert hasattr(result, "boundary_words"), "BindingResult has no boundary_words on main"
+    assert footnote in result.boundary_words
+    assert result.row_label_contradictions == []
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
