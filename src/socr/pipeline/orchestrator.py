@@ -6752,18 +6752,41 @@ class UnifiedPipeline:
                         ps.best_output = decision.final_output
 
                         # GH-90: scanned-table source-evidence fail-closed floor.
-                        _source_ev_rejected = any(
-                            "source_evidence_table" in (att.reason or "")
+                        _source_ev_attempts = [
+                            att
                             for att in decision.attempts
+                            if "source_evidence_table" in (att.reason or "")
+                        ]
+                        _source_ev_rejected = bool(_source_ev_attempts)
+                        # #658: reduce over the attempts the source-evidence gate
+                        # ACTUALLY ADJUDICATED, and let a contradiction win.
+                        #
+                        # ``any(no_witness)`` over every attempt was wrong twice
+                        # over. It read attempts the gate never saw, and it let
+                        # the FIRST reading decide: a page whose first read found
+                        # no witness and whose second read got real evidence and
+                        # refuted the table was floored as "nothing read this
+                        # page", and the terminal rollup then faithfully reported
+                        # that the table "was neither corroborated nor
+                        # contradicted" about a table a witness had contradicted.
+                        # Reader-execution failures are in the no-witness family,
+                        # so one transient failed read reaches this inside a
+                        # single run, with no install changing.
+                        #
+                        # Contradiction is the positive signal and is required
+                        # explicitly, never inferred from "not no-witness": an
+                        # attempt that never reached the gate (timeout, transport
+                        # error) carries no source-evidence verdict at all and
+                        # must not be counted as a witnessed refutation. With
+                        # neither signal present this falls back to the
+                        # pre-ticket reading.
+                        _source_ev_contradicted = any(
+                            att.output.failure_mode is FailureMode.HALLUCINATION
+                            for att in _source_ev_attempts
                         )
-                        # #658: read the attempt's recorded FAILURE MODE rather
-                        # than its reason text. The judge stamps the mode on the
-                        # same output whose reason latched the floor above, so
-                        # the two can never disagree, and no string parsing sits
-                        # between the finding and the disposition.
-                        _source_ev_no_witness = any(
+                        _source_ev_no_witness = not _source_ev_contradicted and any(
                             att.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
-                            for att in decision.attempts
+                            for att in _source_ev_attempts
                         )
                         if _source_ev_rejected and not ps.is_born_digital:
                             self._apply_scanned_table_floor(

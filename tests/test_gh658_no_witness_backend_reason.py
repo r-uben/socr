@@ -855,3 +855,194 @@ def test_absent_backend_survives_judge_floor_finalization_and_resume(tmp_path: P
     )
     assert resumed.pages[1].scanned_table_no_witness is True
     assert UnifiedPipeline._no_witness_backend_pages(resumed) == [1]
+
+
+# --------------------------------------------------------------------------
+# 4. The PRODUCER of the terminal mode, through real routing.
+#    Everything above either stubs the finalized records or hands the floor a
+#    cause already decided. This section drives ``_phase_agentic``'s own
+#    reduction over a two-attempt ladder, which is where the cause is chosen.
+# --------------------------------------------------------------------------
+
+
+def _gate_attempt(*, no_witness: bool, engine_name: str, reason_suffix: str):
+    """A ProviderAttempt shaped exactly as the source-evidence judge leaves one."""
+    from socr.core.config import EngineType as _EngineType
+    from socr.pipeline.agentic import ProviderAttempt
+
+    marker = f"[{CAUSE_NO_WITNESS_BACKEND}] " if no_witness else ""
+    out = PageOutput(
+        page_num=1,
+        text=CANDIDATE_TABLE,
+        status=PageStatus.ERROR,
+        engine=engine_name,
+        audit_passed=False,
+        failure_mode=(FailureMode.NO_WITNESS_BACKEND if no_witness else FailureMode.HALLUCINATION),
+    )
+    return ProviderAttempt(
+        engine=_EngineType.QWEN,
+        output=out,
+        cost_usd=0.0,
+        accepted=False,
+        reason=f"source_evidence_table: {marker}{reason_suffix}",
+        provider_id="qwen-local",
+        model="qwen3-vl",
+        backend="ollama",
+    )
+
+
+def _unrelated_attempt(engine_name: str):
+    """An attempt the source-evidence gate never adjudicated: a timeout. It
+    carries no verdict about the table and must not act as one.
+    """
+    from socr.core.config import EngineType as _EngineType
+    from socr.pipeline.agentic import ProviderAttempt
+
+    out = PageOutput(
+        page_num=1,
+        text="",
+        status=PageStatus.ERROR,
+        engine=engine_name,
+        audit_passed=False,
+        failure_mode=FailureMode.TIMEOUT,
+    )
+    return ProviderAttempt(
+        engine=_EngineType.QWEN,
+        output=out,
+        cost_usd=0.0,
+        accepted=False,
+        reason="provider timed out after 600s",
+        provider_id="qwen-local",
+        model="qwen3-vl",
+        backend="ollama",
+    )
+
+
+def _run_ladder(tmp_path: Path, attempts: list):
+    """Drive the REAL ``_phase_agentic`` over one scanned page with this ladder,
+    then finalize it, and return (page state, shipped output).
+    """
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.manifest import _select_page_output_tagged
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline.agentic import PageDecision
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    doc.new_page(width=500, height=700)
+    doc.save(str(pdf))
+    doc.close()
+
+    config = PipelineConfig(
+        primary_engine=EngineType.QWEN,
+        agentic=True,
+        judge_backend="heuristic",
+        enabled_engines=[EngineType.QWEN],
+        quiet=True,
+        save_figures=False,
+        write_manifest=False,
+        native_first=False,
+        dual_pass_tables=False,
+        escalate_ambiguous_tables=False,
+        table_judge_ladder=False,
+    )
+    pipeline = UnifiedPipeline(config)
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    ps = state.pages[1]
+    ps.is_born_digital = False
+    ps.has_tables = True
+    ps.native_text = ""
+
+    def _route(page_num, *a, **kw):
+        return PageDecision(
+            page_num=page_num,
+            final_output=attempts[-1].output,
+            attempts=list(attempts),
+            accepted=False,
+        )
+
+    with (
+        patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
+        patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
+        patch("socr.pipeline.orchestrator.probe_ollama_idle", return_value=True),
+        patch.object(pipeline, "_resolve_judge_model", return_value=""),
+    ):
+        pipeline._phase_agentic(state, tmp_path / "out")
+
+    shipped, _prov = _select_page_output_tagged(state, 1)
+    return state.pages[1], shipped
+
+
+def test_a_later_contradiction_beats_an_earlier_missing_witness(tmp_path: Path) -> None:
+    """The producer's own reduction, through real routing.
+
+    First rung: no witness. Second rung: a witness READ the page and refuted
+    the table. The floor must record the contradiction -- ``any(no_witness)``
+    over every attempt let the FIRST reading decide, and the terminal rollup
+    then reported "neither corroborated nor contradicted" about a table a
+    witness had contradicted.
+    """
+    ps, shipped = _run_ladder(
+        tmp_path / "a",
+        [
+            _gate_attempt(no_witness=True, engine_name="qwen", reason_suffix="no OCR witness"),
+            _gate_attempt(
+                no_witness=False,
+                engine_name="gemini",
+                reason_suffix="numeric tokens unsupported by page evidence: ['62.5']",
+            ),
+        ],
+    )
+
+    assert ps.scanned_table_evidence_failed is True, "the floor must still apply"
+    assert ps.scanned_table_no_witness is False
+    assert shipped.failure_mode is FailureMode.HALLUCINATION
+    assert UnifiedPipeline._no_witness_backend_pages(state_of(ps)) == []
+
+
+def state_of(ps):
+    """A minimal DocumentState carrying just this page, for the rollup helper."""
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=Path("/tmp/x.pdf"), page_count=1)
+    st = DocumentState(handle=handle)
+    st.pages[1] = ps
+    return st
+
+
+def test_every_gate_attempt_unwitnessed_still_reports_no_witness(tmp_path: Path) -> None:
+    """The control. Two rungs, neither ever read the page: the cause survives.
+
+    Without this the fix above could satisfy its sibling by simply never
+    reporting a no-witness page again.
+    """
+    ps, shipped = _run_ladder(
+        tmp_path / "b",
+        [
+            _gate_attempt(no_witness=True, engine_name="qwen", reason_suffix="no OCR witness"),
+            _gate_attempt(no_witness=True, engine_name="gemini", reason_suffix="no OCR witness"),
+        ],
+    )
+
+    assert ps.scanned_table_evidence_failed is True
+    assert ps.scanned_table_no_witness is True
+    assert shipped.failure_mode is FailureMode.NO_WITNESS_BACKEND
+    assert UnifiedPipeline._no_witness_backend_pages(state_of(ps)) == [1]
+
+
+def test_an_unrelated_later_failure_is_not_a_witnessed_contradiction(tmp_path: Path) -> None:
+    """A timeout after a no-witness read never reached the source-evidence gate,
+    so it holds no verdict about the table. Reading "not no-witness" off it
+    would silently convert an unwitnessed page back into an accusation.
+    """
+    ps, shipped = _run_ladder(
+        tmp_path / "c",
+        [
+            _gate_attempt(no_witness=True, engine_name="qwen", reason_suffix="no OCR witness"),
+            _unrelated_attempt("gemini"),
+        ],
+    )
+
+    assert ps.scanned_table_evidence_failed is True
+    assert ps.scanned_table_no_witness is True
+    assert shipped.failure_mode is FailureMode.NO_WITNESS_BACKEND
