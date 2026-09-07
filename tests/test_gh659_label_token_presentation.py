@@ -196,6 +196,17 @@ def test_label_unverified_flag_reaches_the_audit_events() -> None:
     # The base reject kind must NOT also fire -- this page was accepted.
     assert not any(e.kind == "source_evidence_table_reject" for e in events)
 
+    # Astra review round 1 (P1): the event alone is decoration with no
+    # consumer. The output itself must carry a standing, candidate-associated
+    # marker -- WARNING status, an audit note, and the field the finalization
+    # note/CLI/tables_trust reporting reads -- without flipping the winner
+    # selector (``audit_passed`` stays whatever it was).
+    assert output.status is PageStatus.WARNING
+    assert output.audit_passed is True
+    assert output.table_label_unverified
+    assert "reserve" in output.table_label_unverified
+    assert any("unverified" in note for note in output.audit_notes)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

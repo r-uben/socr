@@ -151,6 +151,13 @@ _WITNESS_STATE_RANK: dict[str, int] = {
 #: grep one token to learn the run had no OCR witness at all.
 NO_WITNESS_BACKEND_KIND: str = "source_evidence_no_witness_backend"
 
+#: #659: audit event kind for a table that SHIPPED (numerics fully
+#: corroborated) but carries a content-label token the page evidence did not
+#: confirm. A constant, not a literal, so ``tables_trust.py`` and
+#: ``orchestrator.py`` cannot spell it differently from the emitter (the same
+#: reason ``NO_WITNESS_BACKEND_KIND`` is one).
+LABEL_UNVERIFIED_KIND: str = "source_evidence_table_label_unverified"
+
 
 @dataclass(frozen=True)
 class TableTokens:

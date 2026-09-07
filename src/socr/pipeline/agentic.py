@@ -619,12 +619,24 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
             )
 
         if result.content_unverified:
-            # #659: the table ships (numerics are fully corroborated) but a
-            # content label the model emitted was not found by the page's
-            # evidence witness. Not a reject -- see ``content_unverified``'s
-            # docstring -- but it must not disappear either, so it gets its
-            # own audit note the same way #658's no-witness ending got one
-            # alongside (not instead of) the base reject event.
+            # Astra review (cf. #658): an event with no consumer disappears.
+            # The table ships (numerics are fully corroborated) -- this must
+            # NOT flip ``audit_passed``, which is what selects the winner --
+            # but it must become a STANDING, candidate-associated outcome, not
+            # decoration on an otherwise-clean page: WARNING status, an audit
+            # note on the shipped output itself (survives to the finalized
+            # page and the resumed sidecar via ``table_label_unverified``,
+            # which is what makes this retire automatically the day a
+            # different, fully-supported candidate wins instead), a
+            # ``TABLE_DISTRUST_KINDS`` entry for ``tables_trust.json``, and a
+            # document-metadata / CLI note (see ``orchestrator.py``'s
+            # ``_label_unverified_note`` and ``_label_unverified_pages``).
+            output.table_label_unverified = result.content_unverified
+            if output.status is PageStatus.SUCCESS:
+                output.status = PageStatus.WARNING
+            output.audit_notes.append(
+                f"table label unverified by page evidence: {result.content_unverified}"
+            )
             self._emit_event(
                 page_num=page_num,
                 kind="source_evidence_table_label_unverified",

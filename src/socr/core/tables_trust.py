@@ -128,6 +128,13 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # complete, so the page is not verified.
         "dualpass_crop_failed",
         "source_evidence_table_reject",
+        # #659: the same gate's SHIP-flagged ending -- every numeric token is
+        # corroborated but a content-label token is not, so the table ships
+        # (this is not a reject, unlike the two entries around it) with its
+        # label doubt on record. A consumer of ``tables_trust.json`` must see
+        # this page too: the numbers are trustworthy, the row/column label
+        # attached to them is not independently confirmed.
+        "source_evidence_table_label_unverified",
         # #658: the same gate's other fail-closed ending -- no classical OCR
         # backend, so nothing read the page's pixels. Listed for exactly the
         # reason the line above is: the page ships a table nothing corroborated.

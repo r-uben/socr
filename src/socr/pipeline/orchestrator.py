@@ -2470,7 +2470,7 @@ class UnifiedPipeline:
             TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
             TABLE_LADDER_EVENT_KINDS,
         )
-        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
+        from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 
         return frozenset(
             TABLE_LADDER_EVENT_KINDS
@@ -2509,6 +2509,14 @@ class UnifiedPipeline:
             # run would report a clean SUCCESS on a document whose mathematics
             # is known to be missing.
             | {UNRESOLVED_MATH_KIND}
+            # #659: the terminal ``table_label_unverified`` field on the
+            # winning ``PageOutput`` is what makes the page note/CLI line
+            # retire when a later, fully-supported candidate wins -- and that
+            # field round-trips through the sidecar on its own. This event is
+            # still what ``tables_trust.json`` reads (its history is real
+            # history and must not disappear on resume, same as every other
+            # distrust kind), so it is replayed the same as the rest.
+            | {LABEL_UNVERIFIED_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -3777,6 +3785,41 @@ class UnifiedPipeline:
             f"page(s) {', '.join(str(n) for n in pages)}: scanned table(s) shipped the "
             "fail-closed floor with NO local OCR witness -- nothing read the page pixels, "
             f"so the table was neither corroborated nor contradicted ({clauses})"
+        )
+
+    @staticmethod
+    def _label_unverified_pages(records: list) -> list[int]:
+        """#659: pages whose FINAL winning output carries a label-unverified doubt.
+
+        Read from ``rec.output.table_label_unverified`` -- the field lives on
+        the CANDIDATE that shipped, not on ``PageState`` or on history -- so a
+        page whose earlier attempt was flagged but whose later, fully-supported
+        candidate won instead reports nothing here. Same precedence principle
+        as ``_no_witness_backend_pages``: this is a terminal diagnosis, not a
+        union over every event the page ever produced.
+        """
+        return sorted({rec.output.page_num for rec in records if rec.output.table_label_unverified})
+
+    @staticmethod
+    def _label_unverified_note(records: list) -> str | None:
+        """Document-level one-liner naming pages with an unverified table label.
+
+        Mirrors ``_no_witness_backend_note``: a consumer gating on
+        ``metadata.json`` must see that a shipped table carries a label the
+        page's OCR witness did not confirm, without parsing the full audit
+        log. Unlike the no-witness ending, this is NOT a failure -- the
+        table's numbers are fully corroborated, only a label token is in
+        doubt -- so the wording says "shipped with an unverified label", not
+        "failed". ``None`` on a clean run.
+        """
+        pages = UnifiedPipeline._label_unverified_pages(records)
+        if not pages:
+            return None
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: table shipped with an unverified "
+            "row/column label (every numeric value is corroborated by page evidence; a "
+            "content-label token was not) -- see source_evidence_table_label_unverified "
+            "in audit_log.json"
         )
 
     @staticmethod
@@ -11121,6 +11164,17 @@ class UnifiedPipeline:
                     # that would not rasterise.
                     for _clause in self._no_witness_clauses(state, no_witness_pages):
                         console.print(f"    [yellow]{_clause}[/yellow]")
+                # #659: a shipped table with one unconfirmed label token is not
+                # a failure -- printed in yellow, alongside the other ship-with-
+                # doubt lines below, not with the red no-witness/failed lines
+                # above.
+                label_unverified_pages = self._label_unverified_pages(pre_records)
+                if label_unverified_pages:
+                    console.print(
+                        f"  [yellow]{len(label_unverified_pages)} table page(s) shipped with "
+                        f"an unverified row/column label (numbers corroborated): "
+                        f"{label_unverified_pages}[/yellow]"
+                    )
                 if native_fallback_pages:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
@@ -11422,6 +11476,16 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_witness_note}"
             else:
                 final_result.error = _witness_note
+        # #659: surface a shipped-but-unverified-label table at document
+        # level, for the same no-silent-loss reason as the note above -- but
+        # this one is not a failure, so it never overrides a failure note that
+        # already occupies the free-text field; it only appends.
+        _label_note = self._label_unverified_note(pre_records)
+        if _label_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_label_note}"
+            else:
+                final_result.error = _label_note
         _chart_note = self._chart_detection_failed_note(state)
         if _chart_note:
             if final_result.error:
