@@ -5962,10 +5962,14 @@ class UnifiedPipeline:
     def _transcribe_cell_token(self, crop_path: Path) -> str | None:
         """Constrained transcriber seam. Returns a token or None. Never raises.
 
-        ``strict_local`` skips the cloud POST; encoding-garbage disproof
-        still runs. Tests patch this method rather than httpx.
+        ``strict_local`` and GH-154's zero-cap-pinned policy both skip the
+        cloud POST (``table_judge_rung1_model`` is a cloud model, e.g.
+        ``glm-5.3-flash:cloud``); encoding-garbage disproof still runs.
+        Tests patch this method rather than httpx.
         """
-        if self.config.strict_local:
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config):
             return None
         from socr.judge.cell_transcribe import transcribe_cell
 
@@ -7689,18 +7693,21 @@ class UnifiedPipeline:
     def _resolve_crop_vlm_model(self) -> str | None:
         """Vision model for bounded table-crop reread (dual-pass / crop fallback).
 
-        Honors ``strict_local``: cloud judge models (e.g. ``qwen3.5:cloud``) are
-        never used for crop repair — only the local instruct VLM
-        (``qwen3-vl:30b-a3b-instruct``) or another explicitly local override.
+        Honors ``strict_local`` and GH-154's zero-cap-pinned policy: cloud judge
+        models (e.g. ``qwen3.5:cloud``) are never used for crop repair under
+        either — only the local instruct VLM (``qwen3-vl:30b-a3b-instruct``)
+        or another explicitly local override.
         """
-        from socr.core.providers import PROFILE_QWEN_LOCAL
+        from socr.core.providers import PROFILE_QWEN_LOCAL, zero_cap_pinned_forbids_cloud
 
         # vLLM/server backend (HPC): use the HF model id served by vLLM, not an
-        # ollama tag. The crop-reader factory routes to the OpenAI-compatible reader.
+        # ollama tag. The crop-reader factory routes to the OpenAI-compatible
+        # reader. A configured local/HPC inference server, not paid cloud
+        # egress -- the zero-cap-pinned policy does not apply to it.
         if self.config.qwen_backend in ("vllm", "sglang", "api"):
             return self.config.qwen_vllm_model
 
-        if self.config.strict_local:
+        if self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config):
             if self.config.judge_model and "cloud" not in self.config.judge_model:
                 return self.config.judge_model
             return PROFILE_QWEN_LOCAL.model
@@ -11867,6 +11874,7 @@ class UnifiedPipeline:
           - This path stays default-off (config.recover_clean_equations = False).
         """
         from socr.core.audit_log import AuditEvent
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.math.equation_latex import process_equation_region
         from socr.math.recover import DEFAULT_MODEL
 
@@ -11889,6 +11897,31 @@ class UnifiedPipeline:
         # default-config clean-equation run to a cloud endpoint, violating
         # the consilium local-first mandate (20260615T210537Z-6621).
         model = self.config.clean_equation_model or DEFAULT_MODEL
+
+        # GH-154 round 4: this legacy path calls ``process_equation_region``
+        # directly and never goes through ``_equation_lane_provider``, so an
+        # explicit ``--clean-equation-model qwen3.5:cloud`` (or any other
+        # cloud override) bypassed both ``--strict-local`` and an EXPLICIT
+        # ``--max-cost-per-page 0`` entirely. Same policy, same shared
+        # predicate as every other direct-model entry point.
+        if "cloud" in model.casefold() and (
+            self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
+        ):
+            reason = (
+                f"model call skipped: remote model {model} forbidden by "
+                "strict-local/--max-cost-per-page 0 policy"
+            )
+            for page_num in sorted(regions_by_page):
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_lane_no_region",
+                        engine="native+equations",
+                        detail=f"{reason}; native prose ships unchanged",
+                    )
+                )
+            return
+
         accepted_total = 0
         rejected_total = 0
 
@@ -11982,6 +12015,7 @@ class UnifiedPipeline:
         """
         import os
 
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.engines.gemini_api import (
             GeminiAPIConfig,
             GeminiAPIEngine,
@@ -11991,6 +12025,15 @@ class UnifiedPipeline:
 
         # Build a Gemini engine if credentials are available (used as fallback)
         def _try_gemini() -> GeminiAPIEngine | None:
+            # GH-154 round 4: this factory built (and returned/fell back to)
+            # Gemini unconditionally whenever an API key was present -- neither
+            # --strict-local nor an EXPLICIT --max-cost-per-page 0 stopped
+            # figure-description cloud egress. Same shared policy as every
+            # other cloud entry point.
+            if getattr(self.config, "strict_local", False) or zero_cap_pinned_forbids_cloud(
+                self.config
+            ):
+                return None
             api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
             if not api_key:
                 return None

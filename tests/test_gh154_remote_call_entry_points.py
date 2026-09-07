@@ -15,6 +15,8 @@ Hermetic: no provider, no network, no live model.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from socr.core.config import PipelineConfig
 from socr.core.providers import zero_cap_pinned_forbids_cloud
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -130,3 +132,185 @@ def test_pinned_zero_refuses_to_build_the_adjudicator():
 def test_unpinned_zero_still_builds_the_adjudicator_by_default():
     pipe = _pipeline(table_judge_ladder=True, max_cost_per_page=0.0)
     assert pipe._build_table_cell_adjudicator() is not None
+
+
+# ---------------------------------------------------------------------------
+# Round 4 (Astra/Codex re-review of 80dbdb6): five more dispatch boundaries
+# that read the config flags directly, bypassing every ladder above.
+# ---------------------------------------------------------------------------
+
+
+# 5 — table crop reread's vision-model resolver -----------------------------
+
+
+def test_pinned_zero_blocks_crop_reader_cloud_model():
+    pipe = _pipeline(
+        max_cost_per_page=0, max_cost_per_page_pinned=True, judge_model="qwen3.5:cloud"
+    )
+    assert "cloud" not in (pipe._resolve_crop_vlm_model() or "")
+
+
+def test_unpinned_zero_still_allows_crop_reader_cloud_model_by_default():
+    pipe = _pipeline(max_cost_per_page=0.0, judge_model="qwen3.5:cloud")
+    assert pipe._resolve_crop_vlm_model() == "qwen3.5:cloud"
+
+
+def test_pinned_zero_leaves_hpc_server_backend_alone():
+    # Control (review: "do not equate every server URL with paid cloud"): a
+    # configured vLLM/HPC inference server is not cloud egress, so the policy
+    # must not touch it even when pinned.
+    pipe = _pipeline(
+        max_cost_per_page=0,
+        max_cost_per_page_pinned=True,
+        qwen_backend="vllm",
+        qwen_vllm_model="Qwen/Qwen3-VL-30B-A3B-Instruct",
+    )
+    assert pipe._resolve_crop_vlm_model() == "Qwen/Qwen3-VL-30B-A3B-Instruct"
+
+
+# 6 — cell disproof transcriber ----------------------------------------------
+
+
+def test_pinned_zero_blocks_disproof_transcriber():
+    from pathlib import Path
+
+    pipe = _pipeline(max_cost_per_page=0, max_cost_per_page_pinned=True)
+    with patch("socr.judge.cell_transcribe.transcribe_cell") as mock_call:
+        result = pipe._transcribe_cell_token(Path("/tmp/not-read-by-stub.png"))
+    mock_call.assert_not_called()
+    assert result is None
+
+
+def test_unpinned_zero_still_calls_disproof_transcriber_by_default():
+    from pathlib import Path
+
+    pipe = _pipeline(max_cost_per_page=0.0)
+    with patch("socr.judge.cell_transcribe.transcribe_cell", return_value="10") as mock_call:
+        result = pipe._transcribe_cell_token(Path("/tmp/not-read-by-stub.png"))
+    mock_call.assert_called_once()
+    assert result == "10"
+
+
+# 7 — figure-description Gemini fallback ------------------------------------
+
+
+def test_pinned_zero_blocks_figure_description_gemini_fallback(monkeypatch):
+    pipe = _pipeline(max_cost_per_page=0, max_cost_per_page_pinned=True)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+    with (
+        patch("socr.engines.gemini_api.OllamaFigureEngine.is_available", return_value=False),
+        patch("socr.engines.gemini_api.GeminiAPIEngine.initialize") as mock_init,
+    ):
+        engine = pipe._get_vision_engine()
+    mock_init.assert_not_called()
+    assert engine is None
+
+
+def test_unpinned_zero_still_tries_figure_description_gemini_fallback_by_default(monkeypatch):
+    pipe = _pipeline(max_cost_per_page=0.0)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+    with (
+        patch("socr.engines.gemini_api.OllamaFigureEngine.is_available", return_value=False),
+        patch("socr.engines.gemini_api.GeminiAPIEngine.initialize", return_value=True) as mock_init,
+    ):
+        engine = pipe._get_vision_engine()
+    mock_init.assert_called_once()
+    assert engine is not None
+
+
+# 8 — legacy clean-equation recovery (direct process_equation_region call) --
+
+
+def _state_with_one_equation_region(tmp_path):
+    import fitz
+
+    from socr.core.audit_log import AuditEvent
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pdf = tmp_path / "doc.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(str(pdf))
+    doc.close()
+    state = DocumentState(DocumentHandle(pdf))
+    state.events.append(
+        AuditEvent(
+            page_num=1,
+            kind="equation_region_detected",
+            engine="equation_region",
+            data={"crop_path": None},
+        )
+    )
+    return state
+
+
+def test_pinned_zero_blocks_legacy_clean_equation_cloud_model(tmp_path):
+    from socr.core.result import PageOutput, PageStatus
+
+    state = _state_with_one_equation_region(tmp_path)
+    po = PageOutput(page_num=1, text="native", status=PageStatus.SUCCESS, engine="qwen")
+
+    pipe = _pipeline(
+        max_cost_per_page=0,
+        max_cost_per_page_pinned=True,
+        clean_equation_model="qwen3.5:cloud",
+    )
+
+    with patch("socr.math.equation_latex.process_equation_region") as mock_proc:
+        pipe._attach_equation_latex_sidecars(state, [po])
+    mock_proc.assert_not_called()
+    assert po.text == "native"  # unchanged: no sidecar attached
+
+
+def test_unpinned_zero_still_calls_legacy_clean_equation_cloud_model_by_default(tmp_path):
+    from socr.core.result import PageOutput, PageStatus
+    from socr.math.equation_latex import EquationLatexResult
+
+    state = _state_with_one_equation_region(tmp_path)
+    po = PageOutput(page_num=1, text="native", status=PageStatus.SUCCESS, engine="qwen")
+
+    pipe = _pipeline(max_cost_per_page=0.0, clean_equation_model="qwen3.5:cloud")
+
+    fake_result = EquationLatexResult(
+        region_index=0,
+        page_num=1,
+        crop_path=None,
+        raw_latex="",
+        validation_ok=False,
+        validation_reason="no crop",
+        latex_attached=False,
+        model_id="qwen3.5:cloud",
+    )
+    with patch("socr.math.equation_latex.process_equation_region") as mock_proc:
+        mock_proc.return_value = fake_result
+        pipe._attach_equation_latex_sidecars(state, [po])
+    mock_proc.assert_called_once()
+
+
+# 9 — HPC pipeline's Gemini fallback -----------------------------------------
+
+
+def _hpc_pipeline(**overrides):
+    from socr.pipeline.hpc_pipeline import HPCPipeline
+
+    cfg = PipelineConfig(quiet=True, **overrides)
+    pipe = object.__new__(HPCPipeline)
+    pipe.config = cfg
+    return pipe
+
+
+def test_pinned_zero_blocks_hpc_gemini_fallback():
+    pipe = _hpc_pipeline(max_cost_per_page=0, max_cost_per_page_pinned=True)
+    with patch("socr.engines.gemini.GeminiEngine.is_available") as mock_avail:
+        result = pipe._fallback_to_gemini([1, 2])
+    mock_avail.assert_not_called()
+    assert result == {}
+
+
+def test_unpinned_zero_still_tries_hpc_gemini_fallback_by_default():
+    pipe = _hpc_pipeline(max_cost_per_page=0.0)
+    with patch("socr.engines.gemini.GeminiEngine.is_available", return_value=False) as mock_avail:
+        result = pipe._fallback_to_gemini([1, 2])
+    mock_avail.assert_called_once()
+    assert result == {}
