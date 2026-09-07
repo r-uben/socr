@@ -157,17 +157,19 @@ def _label_row_words(y: float, label: str, values: list[str]) -> list[tuple]:
 
 
 def _unaligned_footnote_words(n: int, y_start: float = 500.0) -> list[tuple]:
-    """*n* numeric footnote lines, each carrying 2 genuine numbers, positioned
-    so no two (own pair or across footnotes) ever share an x-lane -- see
+    """*n* numeric footnote lines LED BY A MARKER (``1) 45 12``, the issue's
+    own real repro shape and the shape round 3 requires before it will even
+    consider excluding a band), each carrying 2 genuine numbers, positioned
+    so no two (own trio or across footnotes) ever share an x-lane -- see
     ``tests/tables/test_row_corroboration.py::_footnote_bands`` for the
     identical construction and its tolerance-clearance rationale."""
     words: list[tuple] = []
     for i in range(n):
         y = y_start + i * 20.0
-        first_x = 500.0 + i * 50.0
-        second_x = first_x + 30.0
-        words.append((first_x, y, first_x + 10.0, y + 10.0, "45"))
-        words.append((second_x, y, second_x + 10.0, y + 10.0, "12"))
+        base = 500.0 + i * 200.0
+        words.append((base, y, base + 20.0, y + 10.0, f"{i + 1})"))
+        words.append((base + 20.0, y, base + 30.0, y + 10.0, "45"))
+        words.append((base + 50.0, y, base + 60.0, y + 10.0, "12"))
     return words
 
 
@@ -252,6 +254,87 @@ def test_aligned_marker_footnotes_do_not_truncate_complete_table() -> None:
         ]
     complete_md = "| Item | A | B |\n|---|---|---|\n"
     complete_md += "".join(f"| {label} | {a} | {b} |\n" for label, a, b in md_rows)
+    assert table_truncated(complete_md, words) is False
+
+
+# ---------------------------------------------------------------------------
+# #643 round 3 (reviewed, Astra's second pass): the round-2 allowlist itself
+# lost source evidence -- a marker-led row was dropped whenever nothing else
+# on the page happened to share its lane, even with no prose signal at all.
+# Round 3 is a denylist: every shape-eligible band counts unless positively
+# excluded. Mirrors the round-3 probes in test_row_corroboration.py through
+# THIS caller too, at a 10-row scale so structure_check's own
+# ``_STRAY_HEADER_BAND_ALLOWANCE`` (== 1) cannot swallow the signal.
+# ---------------------------------------------------------------------------
+
+
+def _numbered_table_words(
+    rows: list[tuple[str, str]], x_marker: float = 10.0, y_start: float = 10.0
+) -> list[tuple]:
+    """A marker-led, single-numeric-column table: ``1) Alpha | 80``."""
+    words: list[tuple] = []
+    for i, (label, value) in enumerate(rows):
+        y = y_start + i * 20.0
+        words += [
+            (x_marker, y, x_marker + 20.0, y + 10.0, f"{i + 1})"),
+            (x_marker + 20.0, y, x_marker + 200.0, y + 10.0, label),
+            (x_marker + 200.0, y, x_marker + 220.0, y + 10.0, value),
+        ]
+    return words
+
+
+def _numbered_table_md(rows: list[tuple[str, str]]) -> str:
+    md = "| Item | Value |\n|---|---|\n"
+    md += "".join(f"| {i + 1}) {label} | {value} |\n" for i, (label, value) in enumerate(rows))
+    return md
+
+
+def test_complete_and_truncated_numbered_table() -> None:
+    """A COMPLETE 10-row numbered table must not be flagged truncated -- the
+    printed row numbers must never be misread as footnote markers stripping
+    every row. The SAME page with the candidate's last 3 rows dropped must
+    still be flagged."""
+    rows = [(f"Item{i}", str(80 + i)) for i in range(10)]
+    words = _numbered_table_words(rows)
+    complete_md = _numbered_table_md(rows)
+    truncated_md = _numbered_table_md(rows[:-3])
+    assert table_truncated(complete_md, words) is False
+    assert table_truncated(truncated_md, words) is True
+
+
+def test_genuine_second_numbered_table_still_flags_truncation() -> None:
+    """Two REAL numbered tables at different x offsets. A candidate covering
+    only the first must still be flagged truncated -- the second table's own
+    rows establish their own lane from EACH OTHER, so being marker-led does
+    not exempt them."""
+    rows1 = [(f"Item{i}", str(80 + i)) for i in range(5)]
+    words1 = _numbered_table_words(rows1, x_marker=10.0, y_start=10.0)
+    rows2 = [(f"Line{i}", str(500 + i)) for i in range(5)]
+    words2 = _numbered_table_words(rows2, x_marker=600.0, y_start=300.0)
+    words = words1 + words2
+    md1 = _numbered_table_md(rows1)
+    assert table_truncated(md1, words) is True
+
+
+def test_one_row_second_numbered_table_beside_multirow_first_not_truncating() -> None:
+    """A one-row second table (still marker-led, ``1) Solo | 999``) beside a
+    10-row first table must not, by itself, cause the first table's own
+    COMPLETE candidate to be flagged truncated -- its single remaining
+    numeric token triggers neither exclusion test, so nothing in this
+    module chokes on it. (The exact ``table_shaped_native_row_count`` this
+    produces -- 11, not 10 -- is pinned directly in
+    ``test_row_corroboration.py``'s mirror of this fixture;
+    ``_STRAY_HEADER_BAND_ALLOWANCE`` makes 10 vs. 11 indistinguishable
+    through THIS caller's boolean output alone.)"""
+    rows1 = [(f"Item{i}", str(80 + i)) for i in range(10)]
+    words1 = _numbered_table_words(rows1, x_marker=10.0, y_start=10.0)
+    words2 = [
+        (600.0, 500.0, 620.0, 510.0, "1)"),
+        (620.0, 500.0, 700.0, 510.0, "Solo"),
+        (800.0, 500.0, 820.0, 510.0, "999"),
+    ]
+    words = words1 + words2
+    complete_md = _numbered_table_md(rows1)
     assert table_truncated(complete_md, words) is False
 
 

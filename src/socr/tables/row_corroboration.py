@@ -216,10 +216,11 @@ class _NativeBand:
     token_x0: tuple[float, ...] = ()  # each token's own x0, same order as ``tokens`` (#643)
     token_x1: tuple[float, ...] = ()  # each token's own x1, same order as ``tokens`` (#643 round 2)
     numeric_tokens_contiguous: bool = True  # no non-numeric WORD sits between this band's
-    # first and last genuine numeric token (#643 round 2) -- False for a footnote/prose
-    # line like "1) See pages 45 and 12", where "See pages"/"and" interleave the numbers;
-    # True (vacuously) for <= 1 numeric token, and for an ordinary table row (label, then
-    # an unbroken run of values).
+    # SECOND and LAST genuine numeric token (#643 round 3; the FIRST is deliberately
+    # excluded from this check -- it is routinely a row/footnote marker or a numeric row
+    # label, always followed by ordinary label text before the values start) -- False for
+    # a footnote/prose line like "1) See pages 45 and 12", where "and" interleaves the two
+    # VALUES; True (vacuously) for <= 1 numeric token, and for an ordinary table row.
 
 
 def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
@@ -311,10 +312,20 @@ def baseline_bands(words: list) -> list[_NativeBand]:
                 tokens.append(normalized)
                 token_x0.append(word[0])
                 token_x1.append(word[2])
-        if any(is_numeric_flags):
-            first_idx = is_numeric_flags.index(True)
-            last_idx = len(is_numeric_flags) - 1 - is_numeric_flags[::-1].index(True)
-            contiguous = all(is_numeric_flags[first_idx : last_idx + 1])
+        numeric_idxs = [i for i, flag in enumerate(is_numeric_flags) if flag]
+        if len(numeric_idxs) >= 2:
+            # #643 round 3: contiguity is checked from the SECOND numeric
+            # token onward, never the first. The first numeric token is
+            # routinely a row/footnote marker ("1)") OR a numeric row label
+            # (a bare year); either way it is always followed by ordinary
+            # non-numeric label text before the row's own values start
+            # ("1) Alpha 80" -- "Alpha" is a normal label, not prose) and
+            # penalising that would misclassify every ordinary numbered
+            # table row as a footnote (round-2 review, P1). A non-numeric
+            # WORD between the SECOND and LAST numeric token, however, is
+            # the actual footnote/prose signature ("1) See pages 45 and
+            # 12" -- "and" splits two VALUES, not a label from a value).
+            contiguous = all(is_numeric_flags[numeric_idxs[1] : numeric_idxs[-1] + 1])
         else:
             contiguous = True
         y_center = statistics.mean((w[1] + w[3]) / 2.0 for w in band_words)
@@ -432,73 +443,46 @@ def is_column_index_row(tokens: tuple[str, ...]) -> bool:
 
 #: A footnote/cross-reference marker rendered as a plain numeric token by
 #: the shared numeric-token regex (``NUM_TOKEN_RE`` permits an unpaired
-#: trailing ``)``, unlike ``_SPEC_NUMBER_RE`` above which requires BOTH
-#: parens) -- e.g. ``1)``, ``12)``. Reviewed round-2 addendum (#643):
-#: distinguishes a footnote's own leading marker from an ordinary numeric
-#: table value, which never carries a bare trailing paren.
-_FOOTNOTE_MARKER_TOKEN_RE = re.compile(r"^\d{1,3}\)$")
+#: trailing ``)`` or ``.``, unlike ``_SPEC_NUMBER_RE`` above which requires
+#: BOTH parens) -- e.g. ``1)``, ``12)``, ``1.``. Reviewed round-2 addendum
+#: (#643): distinguishes a footnote/row marker from an ordinary numeric
+#: table value, which is never rendered as a bare digit-plus-punctuation.
+_FOOTNOTE_MARKER_TOKEN_RE = re.compile(r"^\d{1,3}[.)]$")
+
+#: x-lane clustering tolerance (points), reused from
+#: ``reconstruct._LANE_X_TOL_PT`` -- kept local rather than imported since
+#: that name is private to that module (same convention as
+#: ``_SPEC_NUMBER_RE`` above). #643 round 3 (reviewed): the vertical
+#: ``_ROW_BAND_TOLERANCE_FRACTION`` was an unvalidated reuse for a
+#: horizontal question; this is instead the SAME statistic
+#: ``reconstruct.py`` already measures and ships for the identical
+#: question ("do these numeric tokens' x-positions belong to the same
+#: printed column"), not a fraction of an unrelated axis's word height.
+_LANE_X_TOL_PT = 6.0
 
 
-def _is_footnote_marker_prose_band(band: _NativeBand) -> bool:
-    """#643 round 2 (reviewed addendum, P2): True for a footnote/prose LINE
-    whose numbers must not be treated as a table row, independent of
-    whether its x-positions happen to recur elsewhere on the page.
-
-    Column-lane recurrence alone cannot separate a genuine table column
-    from two footnotes that happen to share identical phrasing (e.g.
-    ``1) See pages 45 and 12`` / ``2) See pages 45 and 12``) -- repeated
-    phrasing repeats x-offsets just as naturally as a real column does.
-    This adds an INDEPENDENT, geometry-free signal: a band both (a) led by
-    a footnote-marker-shaped token (``_FOOTNOTE_MARKER_TOKEN_RE`` -- a bare
-    "12)", never printed as a table value) and (b) whose numeric tokens are
-    NOT contiguous (some non-numeric WORD -- "See pages", "and" -- sits
-    between them, the signature of numbers embedded in running prose,
-    ``numeric_tokens_contiguous``) is a footnote, not a table row.
-
-    Both conditions are required so this never suppresses a genuine
-    numbered data row (a real row's numeric cells sit unbroken, so (b)
-    alone already fails for it) or a real second table (whose rows are not
-    marker-led at all, so (a) fails). A footnote WITHOUT this exact
-    marker+interleaving shape (e.g. ``1) 45 12``, numbers contiguous) is
-    unaffected by this function -- it is excluded, when it is, by the
-    ordinary lane-recurrence check below, on the geometric grounds that its
-    own x-position does not repeat anywhere.
-    """
-    return bool(
-        band.tokens
-        and _FOOTNOTE_MARKER_TOKEN_RE.match(band.tokens[0])
-        and not band.numeric_tokens_contiguous
-    )
-
-
-def _established_lanes(bands: list[_NativeBand], tolerance: float, axis: str) -> list[float]:
-    """Positions on *axis* (``"x0"`` or ``"x1"``) that recur, within
-    *tolerance*, across >= 2 distinct *bands* -- the geometric signature of
-    a genuine printed table COLUMN.
+def _established_lanes(value_lists: list[tuple[float, ...]], tolerance: float) -> list[float]:
+    """Positions that recur, within *tolerance*, across >= 2 of *value_lists*
+    (each inner tuple is one band's own token positions on one axis) -- the
+    geometric signature of a genuine printed table COLUMN.
 
     A real table's numeric columns sit at the same x-position down every
-    row it has -- left-aligned columns share x0, right-aligned/decimal
-    columns of differing digit-widths share x1 instead (#643 round 2, P1:
-    ``8`` and ``888`` right-aligned to the same margin have x0 20/40, x1
-    130/130). Checking both axes independently and treating either as a
-    hit is what lets a right-aligned column still establish a lane. A
-    one-off numeric token sitting in running prose (an UNaligned footnote's
-    inline figure) does not recur on EITHER axis, because there is no
-    second footnote line to share it with at the same offset. Two is the
-    minimum count that can call a shared position a repeating pattern at
-    all -- one occurrence proves nothing about recurrence, the same
-    reasoning ``is_column_index_row`` uses for its own ``len(tokens) < 2``
-    floor.
+    row it has. Two is the minimum count that can call a shared position a
+    repeating pattern at all -- one occurrence proves nothing about
+    recurrence, the same reasoning ``is_column_index_row`` uses for its own
+    ``len(tokens) < 2`` floor.
 
     Clusters greedily by sorted position (same running-mean algorithm
     ``baseline_bands`` uses for y-centres), so lanes belonging to
     DIFFERENT tables on the same page cluster independently as long as
     their offsets differ by more than *tolerance* -- neither table's lanes
-    suppress the other's.
+    suppress the other's. Callers control which bands' values are eligible
+    to establish a lane by what they pass in *value_lists* -- see
+    ``table_shaped_native_row_count``'s leave-one-out use for why a
+    marker-led band under test is excluded from its OWN lane evidence.
     """
-    get_values = (lambda band: band.token_x0) if axis == "x0" else (lambda band: band.token_x1)
     points: list[tuple[float, int]] = [
-        (value, band_idx) for band_idx, band in enumerate(bands) for value in get_values(band)
+        (value, band_idx) for band_idx, values in enumerate(value_lists) for value in values
     ]
     if not points:
         return []
@@ -524,80 +508,100 @@ def _established_lanes(bands: list[_NativeBand], tolerance: float, axis: str) ->
 
 
 def table_shaped_native_row_count(words: list, row_shape_min: int) -> int:
-    """Count of native baseline bands that look like a table row, by shape
-    AND column-lane structure (TICKET-#643, round 2 reviewed).
+    """Count of native baseline bands that look like a table row (TICKET-#643,
+    round 3 reviewed -- evidence policy flipped to DEFAULT KEEP).
 
     Factored out of ``manifest._row_shape_reconciliation_ok`` (TICKET-A1b,
     #634) so TICKET-A2's truncation term (#645) can reuse the identical
     "table-shaped row" definition without a second implementation drifting
-    from it. A band is shape-eligible when it has at least
-    ``row_shape_min`` numeric tokens (a caller-supplied, per-candidate
-    floor — see ``_row_shape_reconciliation_ok``'s own docstring for why
-    that floor is derived from the candidate rather than a named constant),
-    is not the printed column-index legend row (``is_column_index_row``, a
-    table convention, not data), and is not a marker-led footnote whose
-    numbers sit embedded in prose (``_is_footnote_marker_prose_band``).
+    from it.
 
-    #643: shape alone over-counts a numeric footnote/cross-reference band
-    that happens to carry >= ``row_shape_min`` genuine numbers (``1) 45 12``
-    reads as a 2-3 column table row when the candidate itself is a narrow
-    table). This is deliberately NOT resolved by matching the CANDIDATE's
-    own column positions — the candidate is markdown text with no x0 at
-    all, so anchoring to it would let a candidate select which native
-    bands get to count (selection-by-agreement). Instead a shape-eligible
-    band counts only when at least ``row_shape_min`` of its OWN tokens sit,
-    by x0 OR x1, in a lane ``_established_lanes`` finds recurring across
-    >= 2 shape-eligible bands -- evidence derived purely from the native
-    page's own geometry, independent of the candidate. A footnote line's
-    numbers sit at whatever x the preceding prose text happens to end; a
-    real table's do not, on EITHER edge. Two independent tables at
-    different x offsets each establish their OWN lanes from their OWN
-    rows, so a candidate covering only one still sees the other's rows
-    counted (no regression on the two-table truncation case -- see
-    ``_row_shape_reconciliation_ok``'s "two independent tables" note). Two
-    footnotes that happen to repeat identical phrasing (so their numbers
-    DO recur geometrically) are still excluded up front by
-    ``_is_footnote_marker_prose_band``, which needs no lane data at all.
+    Rounds 1-2 built an ALLOWLIST: a band counted only when its own
+    geometry positively matched a recurring column lane, defaulting every
+    unmatched band to "not a table row". Round-2 review (P1 x2) found this
+    silently erased genuine source evidence twice over -- an ordinary
+    numbered table row (``1) Alpha | 80``) was misread as a footnote
+    because its leading row-number LOOKS like a footnote marker, and a
+    real one-row second table at another x-offset was dropped simply
+    because nothing else on the page shared its lane. An allowlist cannot
+    tell "not yet proven to recur" apart from "proven not to be a table
+    row" -- and a candidate omitting either kind of row must still fail
+    reconciliation, not pass because the denominator quietly shrank.
 
-    When no lane recurs on EITHER axis (e.g. a real table with only one
-    data row on the page, or too few shape-eligible bands to show a
-    pattern at all) this falls back to the plain shape-eligible count
-    (the pre-#643 behaviour) rather than 0 -- round-2 review (P1): an
-    absence of established lanes is doubt about the LANE MODEL, not proof
-    the page has no table-shaped rows, and must not silently convert
-    present source-row evidence (a genuinely missing/truncated row) into
-    an unconditional pass. Both callers already treat 0 as an abstention
-    (nothing to reconcile against); this preserves that same posture only
-    when there truly are no shape-eligible bands at all, and otherwise
-    keeps giving them something to reconcile against, exactly as before
-    this ticket.
+    Round 3 (this version) is a DENYLIST instead: every shape-eligible
+    band counts UNLESS there is POSITIVE evidence it is a footnote/prose
+    line, not a table row. A band is shape-eligible when it has at least
+    ``row_shape_min`` genuine numeric tokens, AFTER first stripping a
+    leading marker token (``_FOOTNOTE_MARKER_TOKEN_RE`` -- ``1)``, ``12.``)
+    from consideration -- the marker itself is never one of the
+    candidate's own column values, so it must not inflate the width check
+    either way -- and is not the printed column-index legend row
+    (``is_column_index_row``, a table convention, not data).
+
+    A shape-eligible band that is NOT marker-led always counts -- lane
+    geometry says nothing useful about it (a real second table's own rows
+    are not marker-led, so they are never at risk of the allowlist
+    failure mode above). A MARKER-LED band is excluded only when EITHER:
+
+    - its numeric tokens after the marker are NOT contiguous
+      (``numeric_tokens_contiguous`` -- a non-numeric WORD such as "See
+      pages"/"and" sits between two of its VALUES, the signature of
+      numbers embedded in running prose: ``1) See pages 45 and 12``).
+      This alone separates a numbered LABEL ("1) Alpha") from footnote
+      prose, since the ordinary label text right after the marker is not
+      itself between two numeric tokens.
+    - OR it has >= 2 remaining numeric tokens and NONE of them sits, by
+      x0 or x1, in a lane that recurs across >= 2 OTHER shape-eligible
+      bands (this band itself excluded from the lane evidence, so a
+      marker-led band can never help establish its own excuse to survive)
+      -- the original ticket's synthetic repro, ``1) 45 12``, whose
+      numbers are contiguous but whose position matches nothing else on
+      the page.
+
+    A marker-led band with exactly ONE remaining numeric token (``1)
+    Alpha | 80``) triggers neither test and is kept -- an ordinary row
+    number is not evidence of anything.
     """
-    shape_eligible = [
-        band
-        for band in baseline_bands(words)
-        if band.tokens
-        and len(band.tokens) >= row_shape_min
-        and not is_column_index_row(band.tokens)
-        and not _is_footnote_marker_prose_band(band)
-    ]
-    if not shape_eligible:
-        return 0
-    tolerance = _median_word_height(words) * _ROW_BAND_TOLERANCE_FRACTION
-    lanes_x0 = _established_lanes(shape_eligible, tolerance, "x0")
-    lanes_x1 = _established_lanes(shape_eligible, tolerance, "x1")
-    if not lanes_x0 and not lanes_x1:
-        return len(shape_eligible)
-    return sum(
-        1
-        for band in shape_eligible
-        if sum(
-            1
-            for x0, x1 in zip(band.token_x0, band.token_x1)
-            if any(abs(x0 - lane) <= tolerance for lane in lanes_x0)
-            or any(abs(x1 - lane) <= tolerance for lane in lanes_x1)
-        )
-        >= row_shape_min
-    )
+    candidates: list[tuple[_NativeBand, tuple[str, ...], tuple[float, ...], tuple[float, ...]]] = []
+    for band in baseline_bands(words):
+        if not band.tokens:
+            continue
+        marker_led = bool(_FOOTNOTE_MARKER_TOKEN_RE.match(band.tokens[0]))
+        if marker_led:
+            core_tokens = band.tokens[1:]
+            core_x0 = band.token_x0[1:]
+            core_x1 = band.token_x1[1:]
+        else:
+            core_tokens = band.tokens
+            core_x0 = band.token_x0
+            core_x1 = band.token_x1
+        if len(core_tokens) < row_shape_min or not core_tokens:
+            continue
+        if is_column_index_row(core_tokens):
+            continue
+        candidates.append((band, core_tokens, core_x0, core_x1, marker_led))
+
+    count = 0
+    for i, (band, core_tokens, core_x0, core_x1, marker_led) in enumerate(candidates):
+        if not marker_led:
+            count += 1
+            continue
+        if not band.numeric_tokens_contiguous:
+            continue  # excluded: numbers embedded in prose
+        if len(core_tokens) >= 2:
+            others_x0 = [c[2] for j, c in enumerate(candidates) if j != i]
+            others_x1 = [c[3] for j, c in enumerate(candidates) if j != i]
+            lanes_x0 = _established_lanes(others_x0, _LANE_X_TOL_PT)
+            lanes_x1 = _established_lanes(others_x1, _LANE_X_TOL_PT)
+            matches_a_lane = any(
+                any(abs(x0 - lane) <= _LANE_X_TOL_PT for lane in lanes_x0)
+                or any(abs(x1 - lane) <= _LANE_X_TOL_PT for lane in lanes_x1)
+                for x0, x1 in zip(core_x0, core_x1)
+            )
+            if not matches_a_lane:
+                continue  # excluded: no recurring lane anywhere else on the page
+        count += 1
+    return count
 
 
 def numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:

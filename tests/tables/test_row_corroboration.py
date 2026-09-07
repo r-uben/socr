@@ -345,23 +345,24 @@ def _narrow_table(rows: list[tuple[str, str, str]]) -> tuple[list[tuple], str]:
 
 
 def _footnote_bands(n: int, y_start: float = 500.0) -> list[tuple]:
-    """*n* numeric footnote-style lines (``1) 45 12``), each carrying exactly
-    2 genuine numeric tokens -- same width as the narrow table's own rows,
-    so shape alone cannot distinguish them (#643's actual failure mode).
-    Positioned so no two footnotes (nor any footnote and the table) share an
-    x-lane: real table columns recur at the same x down every row, a
-    footnote's inline numbers sit wherever its own preceding text ends --
-    each footnote's pair here sits 50.0pt from the next footnote's and
-    30.0pt from its own second token, both well clear of the row-band
-    x-tolerance (half a word-height, ~5.0pt at this fixture's 10.0pt words),
-    so no two footnote tokens (own pair or across footnotes) ever cluster."""
+    """*n* numeric footnote-style lines, LED BY A MARKER (``1) 45 12``) --
+    the issue's own real repro shape, and the shape ``table_shaped_native_row_count``
+    round 3 requires before it will even consider excluding a band (a bare,
+    unmarked numeric line is never distinguishable from a real data row and
+    is deliberately kept). Marker + 2 genuine numeric tokens -- same width
+    as the narrow table's own rows, so shape alone cannot distinguish them
+    (#643's actual failure mode). Positioned in per-footnote clusters
+    200.0pt apart (marker/first/second at +0/+20/+50 within each cluster)
+    so no two footnotes' tokens, nor any footnote token and the table's own
+    column x (100.0/160.0), ever land within the 6.0pt lane tolerance of
+    each other or of one another across footnotes."""
     words: list[tuple] = []
     for i in range(n):
         y = y_start + i * 20.0
-        first_x = 500.0 + i * 50.0
-        second_x = first_x + 30.0
-        words.append(w(first_x, y, "45"))
-        words.append(w(second_x, y, "12"))
+        base = 500.0 + i * 200.0
+        words.append(w(base, y, f"{i + 1})"))
+        words.append(w(base + 20.0, y, "45"))
+        words.append(w(base + 50.0, y, "12"))
     return words
 
 
@@ -421,3 +422,91 @@ def test_second_table_at_a_different_x_lane_still_counts_when_candidate_covers_o
     words = table1_words + table2_words
     assert table_shaped_native_row_count(words, row_shape_min=2) == 6
     assert _row_shape_reconciliation_ok(words, table1_markdown) is False
+
+
+# ---------------------------------------------------------------------------
+# #643 round 3 (reviewed, Astra's second pass): the round-2 allowlist was
+# itself an evidence-loss bug -- a marker-led band that positively matched no
+# footnote signal was still dropped whenever nothing ELSE on the page shared
+# its lane. Round 3 flips to a denylist: every shape-eligible band counts
+# UNLESS excluded by explicit prose/no-recurrence evidence. These tests pin
+# the two reviewer regressions plus the explicitly requested "genuine second
+# numbered table" and "multirow first table beside a one-row second table"
+# variants, at a scale (10 rows) large enough that structure_check's own
+# stray-header-band allowance cannot swallow the signal (see the mirrored
+# tests in test_structure_check_truncated.py for that caller).
+# ---------------------------------------------------------------------------
+
+
+def _numbered_table(
+    rows: list[tuple[str, str]], x_marker: float = 10.0, y_start: float = 10.0
+) -> tuple[list[tuple], str]:
+    """A marker-led, single-numeric-column table: ``1) Alpha | 80``. The
+    marker is ordinary table structure (a printed row number), not a
+    footnote -- round 3's whole point. *y_start* lets two independent
+    tables sit on their own, non-overlapping y-bands (a shared y would
+    merge their rows into one band -- an unrelated baseline_bands
+    artefact, not the thing under test here)."""
+    words: list[tuple] = []
+    md_rows: list[list[str]] = []
+    for i, (label, value) in enumerate(rows):
+        y = y_start + i * 20.0
+        words += [
+            w(x_marker, y, f"{i + 1})"),
+            w(x_marker + 20.0, y, label),
+            w(x_marker + 200.0, y, value),
+        ]
+        md_rows.append([f"{i + 1}) {label}", value])
+    markdown = md_table(["Item", "Value"], md_rows)
+    return words, markdown
+
+
+def test_complete_numbered_table_reconciles():
+    """A COMPLETE 10-row numbered table must reconcile -- the printed row
+    numbers must never be misread as footnote markers stripping every row."""
+    rows = [(f"Item{i}", str(80 + i)) for i in range(10)]
+    words, markdown = _numbered_table(rows)
+    assert table_shaped_native_row_count(words, row_shape_min=1) == 10
+    assert _row_shape_reconciliation_ok(words, markdown) is True
+
+
+def test_truncated_numbered_table_still_rejected():
+    """The SAME numbered page, candidate missing its last 3 rows, must still
+    be rejected -- round 3's default-keep policy for marker-led rows must
+    not also excuse a genuinely dropped row."""
+    rows = [(f"Item{i}", str(80 + i)) for i in range(10)]
+    words, _ = _numbered_table(rows)
+    truncated_markdown = md_table(
+        ["Item", "Value"], [[f"{i + 1}) Item{i}", str(80 + i)] for i in range(7)]
+    )
+    assert table_shaped_native_row_count(words, row_shape_min=1) == 10
+    assert _row_shape_reconciliation_ok(words, truncated_markdown) is False
+
+
+def test_genuine_second_numbered_table_still_counted():
+    """Two REAL numbered tables at different x offsets. A candidate covering
+    only the first must still be rejected -- the second table's own rows
+    establish their own lane from EACH OTHER (leave-one-out), so it is never
+    mistaken for footnote prose just because it is also marker-led."""
+    rows1 = [(f"Item{i}", str(80 + i)) for i in range(5)]
+    words1, markdown1 = _numbered_table(rows1, x_marker=10.0, y_start=10.0)
+    rows2 = [(f"Line{i}", str(500 + i)) for i in range(5)]
+    words2, _ = _numbered_table(rows2, x_marker=600.0, y_start=300.0)
+    words = words1 + words2
+    assert table_shaped_native_row_count(words, row_shape_min=1) == 10
+    assert _row_shape_reconciliation_ok(words, markdown1) is False
+
+
+def test_one_row_second_numbered_table_beside_multirow_first():
+    """A one-row second table (still marker-led, ``1) Solo | 999``) sitting
+    beside a 10-row first table. Its single row has only ONE remaining
+    numeric token after the marker is stripped, so neither exclusion test
+    applies (the contiguity test is vacuous below 2 tokens, and the lane
+    test only runs at >= 2) -- it must be kept regardless of whether
+    anything else shares its lane."""
+    rows1 = [(f"Item{i}", str(80 + i)) for i in range(10)]
+    words1, markdown1 = _numbered_table(rows1, x_marker=10.0)
+    words2 = [w(600.0, 500.0, "1)"), w(620.0, 500.0, "Solo"), w(820.0, 500.0, "999")]
+    words = words1 + words2
+    assert table_shaped_native_row_count(words, row_shape_min=1) == 11
+    assert _row_shape_reconciliation_ok(words, markdown1) is False
