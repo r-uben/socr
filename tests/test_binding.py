@@ -1936,5 +1936,223 @@ def test_grazing_caption_and_footnote_are_excluded_as_on_main():
     assert _label(words) == "Treasury"
 
 
+# ---------------------------------------------------------------------------
+# GH-609: VI-A2 round 2 — majority-overlap-area membership
+# ---------------------------------------------------------------------------
+
+
+def test_wide_deep_dipping_caption_is_excluded_by_area_but_was_admitted_by_centroid():
+    """cubic P2's actual hole: a caption WIDER than the table that also dips
+    more than half its own height into the region from above.
+
+    Bilateral x-overflow (past both table edges) pulls the caption's own box
+    area mostly outside the region without moving its centroid off the
+    region's own x-center — so a pure centroid point test admits it (the
+    bug: prose pollution) while majority-overlap-area, computed over the
+    caption's own box, correctly excludes it. The shallow-graze fixture
+    (``test_grazing_caption_and_footnote_are_excluded_as_on_main``) never
+    exercised this: that caption's centroid stayed outside on both tests,
+    so it could not tell centroid and area apart.
+    """
+    from socr.tables.binding import _word_majority_overlaps_region, _words_in_region
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    # Region is [100,400]x[60,200]; the caption spans the whole page width
+    # and dips well past the region's top edge.
+    caption = (50.0, 40.0, 450.0, 90.0, "Caption", 1, 0, 0)
+
+    def _centroid_in(word, box):
+        rx0, ry0, rx1, ry1 = box
+        cx, cy = (word[0] + word[2]) / 2.0, (word[1] + word[3]) / 2.0
+        return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
+
+    assert _centroid_in(caption, region) is True, "fixture must land its centroid inside"
+    assert _word_majority_overlaps_region(caption, region) is False, (
+        "fixture must be majority-outside its own box area"
+    )
+
+    scoped = _words_in_region([caption], region)
+    assert caption not in scoped
+
+
+def test_grazer_that_only_touches_the_region_is_boundary_not_bound():
+    """The y-straddle graze (minority overlap) stays out of binding and is
+    recorded as a boundary word — visible, not silently absent."""
+    from socr.tables.binding import _native_rows, _partition_words_by_region
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    caption = (150.0, 59.4, 220.0, 60.2, "Caption", 1, 0, 0)
+    treasury_row = [
+        (140.0, 70.0, 170.0, 80.0, "OLS", 0, 0, 0),
+        (240.0, 70.0, 270.0, 80.0, "IV", 0, 0, 1),
+        (115.0, 100.0, 180.0, 110.0, "Treasury", 0, 1, 0),
+        (200.0, 100.0, 230.0, 110.0, "0.50", 0, 1, 1),
+        (300.0, 100.0, 330.0, 110.0, "0.51", 0, 1, 2),
+    ]
+    words = [caption, *treasury_row]
+
+    kept, boundary, unresolved = _partition_words_by_region(words, region)
+    assert caption not in kept
+    assert caption in boundary
+    assert caption not in unresolved, "a shallow single-axis graze is confidently external prose"
+
+    rows, _, _ = _native_rows(kept)
+    data = [row for row in rows if not row.is_parent]
+    assert data
+    assert "Caption" not in data[0].row_path[-1]
+
+
+def test_fully_inside_and_fully_outside_words_are_unaffected():
+    """Regression control: a word wholly inside and one wholly outside the
+    region behave the same as before the predicate changed — no boundary
+    entry, no change in membership."""
+    from socr.tables.binding import _partition_words_by_region
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    inside = (150.0, 100.0, 200.0, 110.0, "Inside", 0, 0, 0)
+    outside = (10.0, 10.0, 40.0, 20.0, "Outside", 1, 0, 0)
+
+    kept, boundary, unresolved = _partition_words_by_region([inside, outside], region)
+    assert kept == [inside]
+    assert boundary == []
+    assert unresolved == []
+
+
+def test_boundary_words_is_absent_on_main_and_populated_on_the_fix():
+    """GH-609 (d): a rejected-but-touching word must be visible on the
+    BindingResult, never silently dropped. ``boundary_words`` does not
+    exist on main's BindingResult at all -- this assertion cannot pass
+    there, only on the fix.
+    """
+    from socr.tables.binding import bind
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    footnote = (150.0, 199.8, 220.0, 200.6, "Footnote", 2, 0, 0)
+    words = [
+        (140.0, 70.0, 170.0, 80.0, "OLS", 0, 0, 0),
+        (240.0, 70.0, 270.0, 80.0, "IV", 0, 0, 1),
+        (115.0, 100.0, 180.0, 110.0, "Treasury", 0, 1, 0),
+        (200.0, 100.0, 230.0, 110.0, "0.50", 0, 1, 1),
+        (300.0, 100.0, 330.0, 110.0, "0.51", 0, 1, 2),
+        footnote,
+    ]
+    md = """
+|          | OLS  | IV   |
+|----------|------|------|
+| Treasury | 0.50 | 0.51 |
+"""
+    result = bind(words, md, region=region)
+    assert hasattr(result, "boundary_words"), "BindingResult has no boundary_words on main"
+    assert footnote in result.boundary_words
+    assert footnote not in result.unresolved_boundary_words, (
+        "a shallow single-axis graze must not force an abstain"
+    )
+    assert result.row_label_contradictions == []
+
+
+def test_overflowing_numeric_cell_is_rejected_and_forces_non_pass_disposition():
+    """Astra round-2 review, requested case: a numeric last-column cell
+    genuinely majority-outside the region (TL inside, box crosses the far
+    edge by more than half its own width) is correctly excluded from the
+    words the row/column geometry is built from. The dropped value must be
+    visible on the result (``unresolved_boundary_words``) and the table
+    must never read as a fully-checked PASS: with the model's markdown
+    still claiming "0.51" for that cell and no native word bound to it, the
+    C4 dropped-digit signal (``native_unbound``) makes this an honest
+    CONTRADICT, not a silently-accepted PASS.
+    """
+    from socr.tables.binding import BindingEvidence, bind, classify_binding_evidence
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    # "0.51" box: x0=390 (inside), x1=440 -- 50pt wide, only 10pt (20%)
+    # inside the region on x; y fully inside. Overlap fraction 0.2 < 0.5.
+    overflow_cell = (390.0, 100.0, 440.0, 110.0, "0.51", 0, 1, 2)
+    words = [
+        (140.0, 70.0, 170.0, 80.0, "OLS", 0, 0, 0),
+        (240.0, 70.0, 270.0, 80.0, "IV", 0, 0, 1),
+        (115.0, 100.0, 180.0, 110.0, "Treasury", 0, 1, 0),
+        (200.0, 100.0, 230.0, 110.0, "0.50", 0, 1, 1),
+        overflow_cell,
+    ]
+    md = """
+|          | OLS  | IV   |
+|----------|------|------|
+| Treasury | 0.50 | 0.51 |
+"""
+    result = bind(words, md, region=region)
+    assert overflow_cell in result.boundary_words
+    assert overflow_cell in result.unresolved_boundary_words, (
+        "a numeric token must never be classified as confidently external prose"
+    )
+    assert result.fully_checked is False
+    assert classify_binding_evidence(result) is not BindingEvidence.PASS
+
+
+def test_centroid_exactly_on_region_boundary_old_admits_new_rejects_and_flags_unresolved():
+    """The exact half-and-half edge: old closed-interval centroid test
+    admitted a word whose centroid sat exactly ON the region's edge;
+    strict majority-overlap (``> 0.5``, not ``>=``) rejects it. This must
+    not become a new silent drop -- it is flagged unresolved."""
+    from socr.tables.binding import (
+        _partition_words_by_region,
+        _word_majority_overlaps_region,
+    )
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    # x-span [380, 420]: width 40, overlap [380,400] = 20 -> frac_x = 0.5
+    # exactly. y fully inside -> frac_y = 1.0. Old centroid: cx = 400.0,
+    # exactly on the closed interval's rx1 -> admitted under `<=`.
+    edge_word = (380.0, 100.0, 420.0, 110.0, "Edge", 0, 1, 0)
+
+    def _old_centroid_in(word, box):
+        rx0, ry0, rx1, ry1 = box
+        cx, cy = (word[0] + word[2]) / 2.0, (word[1] + word[3]) / 2.0
+        return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
+
+    assert _old_centroid_in(edge_word, region) is True, "fixture must sit exactly on the old edge"
+    assert _word_majority_overlaps_region(edge_word, region) is False
+
+    kept, boundary, unresolved = _partition_words_by_region([edge_word], region)
+    assert edge_word not in kept
+    assert edge_word in boundary
+    assert edge_word in unresolved, "exact half-and-half must not be silently classed as prose"
+
+
+def test_simultaneous_xy_clipping_60_percent_each_axis_is_rejected_and_unresolved():
+    """Astra round-2 review, second named geometry: a word clipped 60% on
+    BOTH axes independently (36% area) has its centroid inside on both
+    axes -- the old centroid test would have admitted it -- but majority
+    area correctly excludes it, and it must be flagged unresolved rather
+    than silently treated as confidently-external prose (it is not a pure
+    single-axis graze: neither axis is fully contained)."""
+    from socr.tables.binding import (
+        _partition_words_by_region,
+        _word_axis_overlap_fractions,
+        _word_majority_overlaps_region,
+    )
+
+    region = (100.0, 60.0, 400.0, 200.0)
+    # x-span [340, 440]: width 100, overlap with [100,400] is [340,400] = 60
+    # -> frac_x = 0.6. y-span [140, 240]: height 100, overlap with [60,200]
+    # is [140,200] = 60 -> frac_y = 0.6. Area = 0.6 * 0.6 = 0.36.
+    clipped = (340.0, 140.0, 440.0, 240.0, "Label", 0, 1, 0)
+
+    frac_x, frac_y = _word_axis_overlap_fractions(clipped, region)
+    assert frac_x == pytest.approx(0.6)
+    assert frac_y == pytest.approx(0.6)
+
+    def _old_centroid_in(word, box):
+        rx0, ry0, rx1, ry1 = box
+        cx, cy = (word[0] + word[2]) / 2.0, (word[1] + word[3]) / 2.0
+        return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
+
+    assert _old_centroid_in(clipped, region) is True, "centroid inside on both axes under old rule"
+    assert _word_majority_overlaps_region(clipped, region) is False
+
+    kept, boundary, unresolved = _partition_words_by_region([clipped], region)
+    assert clipped not in kept
+    assert clipped in unresolved
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
