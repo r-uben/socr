@@ -225,9 +225,15 @@ def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, flo
 def words_in_region(words: list, region: tuple | None) -> list:
     """Filter *words* to those whose box-centroid falls inside *region*.
 
-    Same centroid predicate as ``binding.words_in_region`` (GH-330 /
-    GH-331); duplicated locally rather than imported since that name is
-    private to ``binding.py``. ``region=None`` returns *words* unchanged.
+    GH-609 round 3: this is a PURE centroid point test, duplicated from
+    ``binding.py`` back when that module used the same predicate (GH-330 /
+    GH-331). It no longer matches: ``binding._words_in_region`` switched to
+    a majority-overlap-area rule (GH-609) that provably rejects some words
+    this centroid test still admits (a caption/label wider than the region
+    that also dips deep enough for its centroid to land inside). This
+    module's own predicate is UNCHANGED here -- fixing the drift between
+    the two is #608's scope, not this one's. ``region=None`` returns
+    *words* unchanged.
     """
     if region is None:
         return words

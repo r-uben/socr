@@ -694,6 +694,24 @@ TABLE_LADDER_WITHHELD_KIND = "table_ladder_withheld"
 #: Kept out of ``TABLE_LADDER_EVENT_KINDS`` so the GH-359 drift guard
 #: (exactly those three terminals) stays about terminals.
 TABLE_BINDING_ADJUDICATED_KIND = "table_binding_adjudicated"
+#: GH-609 round 2/3: the binder rejected a boundary word (numeric, or clipped
+#: on both axes) it could not rule out as table content -- a coverage-gap
+#: signal, not a ladder terminal or a contradiction. Same reasoning as
+#: ``TABLE_BINDING_ADJUDICATED_KIND`` for staying out of
+#: ``TABLE_LADDER_EVENT_KINDS``; unlike it, this one must persist through a
+#: later ladder acceptance (see ``tables_trust.NON_RESOLVABLE_DISTRUST_KINDS``)
+#: since the excluded word is not put back by a guard accepting the table's
+#: content.
+TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND = "table_binding_boundary_unresolved"
+#: GH-609 round 4: the ONLY evidence that clears a
+#: ``TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND`` distrust. Carries the SAME
+#: ``table_id`` plus the specific word(s), by text and bbox, that a later
+#: binding for that table demonstrably bound or confidently excluded --
+#: never emitted from a generic ladder ACCEPTED or an empty current boundary
+#: list, neither of which proves anything about a SPECIFIC previously
+#: excluded word (see ``tables_trust.NON_RESOLVABLE_DISTRUST_KINDS`` and its
+#: word-keyed clearance in ``build_tables_trust``).
+TABLE_BINDING_BOUNDARY_RESOLVED_KIND = "table_binding_boundary_resolved"
 
 #: All audit-event kinds this module defines, for callers that want to
 #: sanity-check membership without importing each constant by name.

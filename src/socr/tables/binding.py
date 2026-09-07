@@ -1073,20 +1073,43 @@ class BindingResult:
     row_binding: dict = field(default_factory=dict)
     candidate_row_labels: tuple[str, ...] = ()
     row_label_unverifiable_paths: tuple[tuple[str, ...], ...] = ()
+    #: Words the region membership predicate rejected but that still touch
+    #: *region* (positive overlap, at or under the majority-overlap
+    #: threshold) — GH-609. A word with zero overlap carries no signal about
+    #: the predicate's edge and is left out. Existing to make an excluded
+    #: word visible instead of silently vanishing from the binding.
+    boundary_words: list = field(default_factory=list)
+    #: Subset of ``boundary_words`` that could still be table content --
+    #: numeric-bearing, or clipped on both axes rather than a confidently
+    #: external single-axis graze (GH-609 round 2, Astra P1). A non-empty
+    #: list here means the binding is NOT ``fully_checked``: a possibly
+    #: dropped cell must abstain rather than silently pass.
+    unresolved_boundary_words: list = field(default_factory=list)
+    #: The region-admitted words this attempt actually fed into row/column
+    #: binding -- populated ONLY once ``bind()`` gets past the markdown parse
+    #: gate (GH-609 round 5). Empty on a parse failure / no-numeric-lanes
+    #: absence-of-evidence result, even though ``boundary_words`` /
+    #: ``unresolved_boundary_words`` are computed earlier and so are NOT
+    #: empty in that case. A caller that needs "was this specific word
+    #: actually bound, on an attempt that really evaluated geometry" must
+    #: read this field, not merely the absence of an unresolved entry.
+    region_scoped_words: tuple = ()
 
     @property
     def fully_checked(self) -> bool:
         """True when nothing about this binding was left unresolved: every
         lane bound to exactly one candidate column, every native data row
         bound to exactly one candidate row, every bound row label checked,
-        and no cell's geometry was ambiguous. False means some region of the
-        table was never actually compared — a different fact from whether the parts that WERE
-        compared agreed (MAJOR 2)."""
+        no cell's geometry was ambiguous, and no boundary-rejected word could
+        still be table content. False means some region of the table was
+        never actually compared — a different fact from whether the parts
+        that WERE compared agreed (MAJOR 2)."""
         return (
             not self.row_binding_unverifiable
             and not self.row_label_unverifiable
             and not self.column_binding_unverifiable
             and self.ambiguous_count == 0
+            and not self.unresolved_boundary_words
         )
 
     @property
@@ -1271,53 +1294,179 @@ def _record_inventions_on_parent_row(
         )
 
 
-def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
-    """True when the centroid of *word*'s box falls inside *region*.
+def _word_overlap_fraction(word: tuple, region: tuple[float, float, float, float]) -> float:
+    """Fraction of *word*'s own box area that overlaps *region*.
 
-    A symmetric point test on the word's own box — ``((x0+x1)/2, (y0+y1)/2)``
-    against the closed region. No distance or pt threshold.
-
-    Leading stubs whose ``x0`` sits a fraction of a point outside the
-    region's min-x stay in: a ~10 pt glyph has its centroid trivially
-    inside (GH-331 / VI-A2). A caption or footnote whose box merely grazes
-    the region from above or below stays out: its centroid is still
-    outside. Box intersection admitted those grazers and re-opened the
-    prose-pollution GH-330 was written to stop.
+    Denominator is the word's own box area, not the region's, so a small
+    stub fully swallowed by a big region always scores ~1.0 while a big
+    caption that only dips an edge into the region scores near 0.0. A
+    degenerate (zero-area) word box scores 0.0 rather than dividing by zero.
     """
     rx0, ry0, rx1, ry1 = region
-    cx = (word[0] + word[2]) / 2.0
-    cy = (word[1] + word[3]) / 2.0
-    return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
+    wx0, wy0, wx1, wy1 = word[0], word[1], word[2], word[3]
+    word_area = max(0.0, wx1 - wx0) * max(0.0, wy1 - wy0)
+    if word_area <= 0.0:
+        return 0.0
+    ix0, iy0 = max(wx0, rx0), max(wy0, ry0)
+    ix1, iy1 = min(wx1, rx1), min(wy1, ry1)
+    inter_area = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    return inter_area / word_area
 
 
-def _words_in_region(words: list, region: tuple | None) -> list:
-    """Filter *words* to those whose box-centroid falls inside *region*.
+def _word_majority_overlaps_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
+    """True when more than half of *word*'s own box area overlaps *region*.
 
-    GH-330. ``bind`` was only ever called with a whole page's words, so on a page
-    with prose above the table and notes below it, lane clustering ran over text
-    that is not in the table at all — which is why column binding was unverifiable
-    on every real page measured. Every native table region already arrives as a
-    ``(rect, markdown)`` pair, so the rect was available all along and simply never
-    passed in.
+    GH-609 (VI-A2 round 2). Replaces the pure centroid point-test, which two
+    boundary shapes fell through:
 
-    Centroid, not top-left and not box intersection: a stub whose ``x0`` is
-    10⁻³ pt left of the region's min-x is still a table word (GH-331 /
-    VI-A2); a caption whose box dips a fraction of a point in from above
-    is not. Kept here rather than imported so ``binding`` stays free of
-    ``fitz``.
+    A stub whose ``x0`` sits a fraction of a point outside the region's
+    min-x still scores ~1.0 here, same as it did under centroid (GH-331 /
+    VI-A2) — one-sided sub-point overflow moves the area fraction and the
+    centroid together, they never disagree on that shape.
 
-    ``region=None`` returns *words* unchanged — byte-for-byte the old behaviour.
+    A caption or title WIDER than the table that also dips deep enough into
+    the region from above (more than half its own height) used to slip
+    through: its centroid can land inside the region even though the
+    majority of its OWN box area sits outside it (bilateral x-overflow past
+    both table edges pulls the box's total area down without moving its
+    centroid, which tracks only the box's true midpoint). Majority-overlap
+    area catches this; a point test on the midpoint cannot (cubic P2 — the
+    "deeper overlap" case the shallow-graze fixture never exercised).
+
+    A word whose top-left sits inside the region but whose box crosses out
+    through the far edge by MORE than half its own extent on that single
+    axis, with the other axis fully contained, is excluded by both tests
+    identically: on one axis alone, "more than half the box overlaps" and
+    "the box's midpoint is inside" are the same condition (both reduce to
+    comparing the overlap length to half the word's own length), so this
+    shape never lets majority-overlap-area be looser than centroid.
+
+    This is NOT a general equivalence across two axes, though (round-2
+    review correction): the 2-D area fraction is the PRODUCT of the two
+    per-axis fractions, so area > 0.5 forces BOTH per-axis fractions above
+    0.5, which is strictly more than either alone needs to be > 0.5. A word
+    can have both per-axis fractions comfortably above 0.5 (its midpoint on
+    each axis is inside, so centroid says "in") while their product is
+    below 0.5 (majority-overlap-area says "out") -- the wide/deep caption
+    above is exactly that shape, and it is a real, not merely academic,
+    divergence. Any word this predicate rejects while still touching the
+    region is recorded in ``BindingResult.boundary_words`` (never silent)
+    rather than admitted outright; a subset that a numeric token or
+    both-axes-clipped shape marks as possibly-still-table-content is
+    additionally recorded in ``unresolved_boundary_words`` and forces
+    ``fully_checked`` False (GH-609 round 2).
+    """
+    return _word_overlap_fraction(word, region) > 0.5
+
+
+def _word_axis_overlap_fractions(
+    word: tuple, region: tuple[float, float, float, float]
+) -> tuple[float, float]:
+    """Per-axis overlap fraction of *word*'s own extent against *region*.
+
+    ``(frac_x, frac_y)``, each in ``[0, 1]``: the fraction of the word's OWN
+    width/height that lies within the region's x/y span. A degenerate
+    (zero-width or zero-height) word box scores 0.0 on that axis.
+    """
+    rx0, ry0, rx1, ry1 = region
+    wx0, wy0, wx1, wy1 = word[0], word[1], word[2], word[3]
+    wdx, wdy = wx1 - wx0, wy1 - wy0
+    frac_x = max(0.0, min(wx1, rx1) - max(wx0, rx0)) / wdx if wdx > 0.0 else 0.0
+    frac_y = max(0.0, min(wy1, ry1) - max(wy0, ry0)) / wdy if wdy > 0.0 else 0.0
+    return frac_x, frac_y
+
+
+def _boundary_word_is_unresolved(word: tuple, region: tuple[float, float, float, float]) -> bool:
+    """True when a boundary-rejected word might still be table content.
+
+    Astra round-2 review, P1: recording a rejection in ``boundary_words``
+    alone does not make a dropped numeric cell visible to evidence
+    classification -- it has to affect whether the binding counts as fully
+    checked. Two conditions mark a rejection as unresolved rather than
+    confidently-external prose:
+
+    A numeric token is ALWAYS unresolved: a dropped digit is exactly the
+    silent-content-loss shape this repo forbids, so geometry never gets to
+    wave a number away as prose.
+
+    A non-numeric word is unresolved when it is clipped on BOTH axes (each
+    per-axis overlap fraction is at least half) rather than fully contained
+    on one axis and merely grazing the other. A pure single-axis graze --
+    fully inside the region's x-range but only its top or bottom edge dips
+    in (a caption from above, a footnote from below) -- has its entire
+    departure from the region attributable to ONE direction; geometry alone
+    can call that confidently external. A word partially clipped on both
+    axes (the wide/deep caption; a label or overflowing cell spanning past
+    two edges at once) cannot be told apart from a genuine table cell by
+    geometry alone, so it stays open -- as does the exact half-and-half
+    edge (old closed-interval centroid admitted it; strict majority
+    rejects it), since ``>= 0.5`` on both axes catches that boundary too.
+    """
+    text = str(word[4]).strip() if len(word) > 4 else ""
+    if text and is_numeric_token(text):
+        return True
+    frac_x, frac_y = _word_axis_overlap_fractions(word, region)
+    return frac_x >= 0.5 and frac_y >= 0.5
+
+
+def _partition_words_by_region(words: list, region: tuple | None) -> tuple[list, list, list]:
+    """Split *words* into (kept, boundary, unresolved_boundary).
+
+    ``kept`` holds words admitted under ``_word_majority_overlaps_region``.
+    ``boundary`` holds words the predicate rejected but that still touch
+    *region* (positive overlap, at or under the half-area threshold) — GH-609:
+    a word with zero overlap carries no signal about the predicate's edge and
+    is left out of both lists. ``unresolved_boundary`` is the subset of
+    ``boundary`` that ``_boundary_word_is_unresolved`` cannot rule out as
+    table content (round 2). ``region=None`` returns *words* unchanged with
+    both other lists empty — byte-for-byte the old unscoped behaviour.
     """
     if region is None:
-        return words
+        return words, [], []
     try:
         x0, y0, x1, y1 = (float(v) for v in region)
     except (TypeError, ValueError):
-        return words  # a malformed region is an absence of scoping, not a conviction
+        return words, [], []  # a malformed region is an absence of scoping, not a conviction
     if not (x0 <= x1 and y0 <= y1):
-        return words
+        return words, [], []
     box = (x0, y0, x1, y1)
-    return [w for w in words if _word_centroid_in_region(w, box)]
+    kept: list = []
+    boundary: list = []
+    unresolved: list = []
+    for w in words:
+        frac = _word_overlap_fraction(w, box)
+        if frac > 0.5:
+            kept.append(w)
+        elif frac > 0.0:
+            boundary.append(w)
+            if _boundary_word_is_unresolved(w, box):
+                unresolved.append(w)
+    return kept, boundary, unresolved
+
+
+def _words_in_region(words: list, region: tuple | None) -> list:
+    """Filter *words* to those whose box majority-overlaps *region*.
+
+    GH-330 / GH-609. ``bind`` was only ever called with a whole page's words, so
+    on a page with prose above the table and notes below it, lane clustering ran
+    over text that is not in the table at all — which is why column binding was
+    unverifiable on every real page measured. Every native table region already
+    arrives as a ``(rect, markdown)`` pair, so the rect was available all along
+    and simply never passed in.
+
+    Majority overlap area, not top-left and not a centroid point test: a stub
+    whose ``x0`` is 10⁻³ pt left of the region's min-x is still a table word
+    (GH-331 / VI-A2); a caption whose box dips a fraction of a point in from
+    above is not; a caption WIDER than the table that dips deep into it from
+    above is not, even though its centroid can land inside (GH-609). Kept
+    here rather than imported so ``binding`` stays free of ``fitz``.
+
+    ``region=None`` returns *words* unchanged — byte-for-byte the old behaviour.
+    Callers that need the rejected-but-touching words too should call
+    ``_partition_words_by_region`` directly instead.
+    """
+    kept, _boundary, _unresolved = _partition_words_by_region(words, region)
+    return kept
 
 
 def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingResult:
@@ -1331,14 +1480,30 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     *region*, when given, is the candidate's own ``(x0, y0, x1, y1)`` extent; words
     outside it are dropped before any geometry is computed (GH-330). Omitting it is
     the unscoped whole-page fallback, whose column binding is expected to be
-    unverifiable on any page that carries text outside the table.
+    unverifiable on any page that carries text outside the table. A word the
+    region predicate rejected but that still touched *region* is recorded on
+    the result's ``boundary_words`` (GH-609) rather than vanishing silently;
+    the subset that might still be table content additionally lands in
+    ``unresolved_boundary_words`` and forces ``fully_checked`` False
+    (round 2).
     """
-    words = _words_in_region(words, region)
+    words, boundary_words, unresolved_boundary_words = _partition_words_by_region(words, region)
     result = BindingResult()
+    result.boundary_words = boundary_words
+    result.unresolved_boundary_words = unresolved_boundary_words
 
     grid = parse_grid(markdown)
     if grid is None:
         return result
+
+    # GH-609 round 5: the region-admitted words this attempt ACTUALLY fed into
+    # row/column binding, set only past the parse-failure gate above. This is
+    # the "was this word really evaluated" signal a caller needs to tell a
+    # positive resolution ("bound, on a candidate that parsed") apart from an
+    # absence of evidence ("bind() never got past parse_grid") -- an empty
+    # ``unresolved_boundary_words`` on the latter proves nothing about any
+    # specific word, admitted or not.
+    result.region_scoped_words = tuple(words)
 
     candidate_grid = grid
     physical_n_cand_cols = candidate_grid.n_cols - 1

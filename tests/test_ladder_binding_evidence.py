@@ -20,7 +20,8 @@ flag-off comparison never pins an absolute outcome measured on one machine
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import fitz
 import pytest
@@ -182,6 +183,21 @@ def _bo(text: str, engine: str = "qwen") -> PageOutput:
 
 def _events_of_kind(state: DocumentState, kind: str) -> list[AuditEvent]:
     return [e for e in state.events if e.kind == kind]
+
+
+def _fake_open_pdf(words: list) -> MagicMock:
+    """A drop-in replacement for ``socr.core.pdf.open_pdf`` whose page 1
+    ``get_text("words")`` returns exactly ``words`` -- so a boundary
+    resolution check can be driven from KNOWN geometry rather than whatever
+    PyMuPDF's real text-insertion layout happens to produce."""
+    fake_page = MagicMock()
+    fake_page.get_text.return_value = words
+    fake_doc = MagicMock()
+    fake_doc.__getitem__.return_value = fake_page
+    mock_open_pdf = MagicMock()
+    mock_open_pdf.return_value.__enter__.return_value = fake_doc
+    mock_open_pdf.return_value.__exit__.return_value = False
+    return mock_open_pdf
 
 
 # ---------------------------------------------------------------------------
@@ -647,3 +663,470 @@ class TestGateBindingEvidenceHelper:
         # contradiction still caps acceptance at UNVERIFIED, never REJECTED,
         # even though the underlying evidence is now typed CONTRADICT.
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+
+
+# ---------------------------------------------------------------------------
+# GH-609 round 2 (Astra P1): a boundary-rejected word the geometry predicate
+# could not rule out as table content must reach the run's durable audit
+# trail, not vanish into an in-memory ``BindingResult`` field nobody reads.
+# ---------------------------------------------------------------------------
+
+
+class TestUnresolvedBindingBoundaryAudit:
+    def test_unresolved_boundary_word_emits_a_durable_audit_event(self, tmp_path: Path) -> None:
+        from socr.tables.binding import bind
+
+        region = (100.0, 60.0, 400.0, 200.0)
+        # A real ``bind()`` call on the exact overflowing-numeric-cell shape
+        # pinned in test_binding.py -- TL inside, majority of the box past
+        # the region's right edge -- so this is the real binder's own
+        # output, not a hand-built BindingResult standing in for it.
+        overflow_cell = (390.0, 100.0, 440.0, 110.0, "0.51", 0, 1, 2)
+        words = [
+            (140.0, 70.0, 170.0, 80.0, "OLS", 0, 0, 0),
+            (240.0, 70.0, 270.0, 80.0, "IV", 0, 0, 1),
+            (115.0, 100.0, 180.0, 110.0, "Treasury", 0, 1, 0),
+            (200.0, 100.0, 230.0, 110.0, "0.50", 0, 1, 1),
+            overflow_cell,
+        ]
+        md = """
+|          | OLS  | IV   |
+|----------|------|------|
+| Treasury | 0.50 | 0.51 |
+"""
+        binding_result = bind(words, md, region=region)
+        assert binding_result.unresolved_boundary_words, (
+            "fixture premise: bind() must reject a numeric cell as unresolved"
+        )
+
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)  # real PDF path; not read by this call
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+
+        pipeline._record_unresolved_binding_boundary(state, 1, witness, binding_result)
+
+        events = _events_of_kind(state, "table_binding_boundary_unresolved")
+        assert len(events) == 1
+        event = events[0]
+        assert event.page_num == 1
+        assert event.data["table_id"] == "t1"
+        assert event.data["words"] == [{"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}]
+
+    def test_fully_checked_binding_emits_no_boundary_event(self, tmp_path: Path) -> None:
+        """Regression control: no unresolved boundary words -> no event, and
+        a None binding (ABSTAIN before bind() ever ran) is a safe no-op."""
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+
+        pipeline._record_unresolved_binding_boundary(state, 1, witness, None)
+        pipeline._record_unresolved_binding_boundary(state, 1, witness, BindingResult())
+
+        assert _events_of_kind(state, "table_binding_boundary_unresolved") == []
+
+    def test_gate_level_run_emits_the_event_for_a_real_witness(self, tmp_path: Path) -> None:
+        """End-to-end through ``_run_table_judge_gate`` on the exact
+        row-shift fixture PDF already used by this file's gate tests, with
+        an extra caption word positioned to be a genuine unresolved boundary
+        rejection (numeric-bearing would be more direct, but this exercises
+        the real ``prepare_table_witnesses`` -> ``bind()`` path end to end)."""
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_CORRECT_MD)
+
+        rung = _accept_rung("high")
+        with (
+            patch.object(pipeline, "_transcribe_cell_token", return_value=None),
+            patch.object(
+                pipeline,
+                "_binding_evidence_for_witness",
+                return_value=(
+                    BindingResult(unresolved_boundary_words=[(0.0, 0.0, 1.0, 1.0, "1.23")]),
+                    BindingEvidence.ABSTAIN,
+                ),
+            ),
+        ):
+            pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
+
+        events = _events_of_kind(state, "table_binding_boundary_unresolved")
+        assert len(events) == 1
+        assert events[0].data["words"] == [{"text": "1.23", "bbox": [0.0, 0.0, 1.0, 1.0]}]
+
+    def test_boundary_unresolved_round_trips_through_flush_and_restore(
+        self, tmp_path: Path
+    ) -> None:
+        """GH-609 round 3 (Astra P2): the event must survive a real
+        flush -> resume -> restore cycle with its table_id and word
+        text/bbox intact -- ``resume_restore_kinds`` previously omitted it,
+        so ``_restore_terminal_page_state``'s allowlist filter silently
+        dropped it from the resumed run's ``state.events``.
+
+        Also exercises P1's persistence requirement post-resume: a LATER
+        ``table_ladder_accepted`` for the same table must still leave
+        ``tables_trust`` reporting the boundary uncertainty.
+        """
+        from socr.core.document import DocumentHandle
+        from socr.core.tables_trust import build_tables_trust
+        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        out_dir = tmp_path / "out"
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+
+        accepted = PageOutput(
+            page_num=1,
+            text="Treasury 0.50 0.51",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        )
+        ps = state.pages[1]
+        ps.attempts.append(accepted)
+        ps.best_output = accepted
+        state.events.append(
+            AuditEvent(
+                page_num=1,
+                kind=TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+                detail=(
+                    "table t1: 1 boundary word(s) rejected by region membership "
+                    "but not confidently external"
+                ),
+                data={
+                    "table_id": "t1",
+                    "words": [{"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}],
+                },
+            )
+        )
+
+        pipeline._flush_page_fragment(state, 1, accepted.text, out_dir)
+        pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+
+        resumed_state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        resumed_page = pipeline._load_terminal_page(resumed_state, 1, out_dir)
+        assert resumed_page is not None, "fixture premise: the page must skip-and-keep on resume"
+        pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
+
+        restored = [
+            e for e in resumed_state.events if e.kind == TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+        ]
+        assert len(restored) == 1, "the event must survive resume, not be dropped by the allowlist"
+        assert restored[0].data["table_id"] == "t1"
+        assert restored[0].data["words"] == [{"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}]
+
+        # P1, exercised post-resume: a LATER ladder acceptance for the same
+        # table must not make tables_trust drop the boundary uncertainty.
+        resumed_state.events.append(
+            AuditEvent(page_num=1, kind="table_ladder_accepted", data={"table_id": "t1"})
+        )
+        trust = build_tables_trust(resumed_state.handle.filename, resumed_state.events)
+        assert trust.untrusted_pages == [1]
+        assert TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND in trust.to_dict()["pages"]["1"]["reasons"]
+
+
+# ---------------------------------------------------------------------------
+# GH-609 round 4 (Astra P2): the standing boundary distrust must have an
+# evidence-based path back to resolved -- a SPECIFIC word, by text and bbox,
+# demonstrably present in a later pass's own native words and no longer
+# unresolved. Never a generic acceptance, never merely an empty current list.
+# ---------------------------------------------------------------------------
+
+
+class TestBoundaryResolutionEvent:
+    def test_a_word_now_actually_bound_in_a_later_pass_emits_a_resolution(
+        self, tmp_path: Path
+    ) -> None:
+        """Positive disposition #1 (Astra round 5, P1): the word is in
+        ``region_scoped_words`` -- the region-admitted words a SUCCESSFUL
+        ``bind()`` attempt actually fed into row/column binding. That field
+        is only ever populated past a real parse, so this cannot be
+        satisfied by an empty/no-op binding result."""
+        from socr.core.tables_trust import build_tables_trust
+        from socr.judge.table_verdict import (
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        )
+        from socr.tables.binding import BindingResult
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        pipeline = _make_pipeline()
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+        word = (390.0, 100.0, 440.0, 110.0, "0.51", 0, 1, 2)
+
+        # First pass: the word is unresolved.
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([word])):
+            pipeline._record_unresolved_binding_boundary(
+                state, 1, witness, BindingResult(unresolved_boundary_words=[word])
+            )
+        assert _events_of_kind(state, TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND)
+        assert _events_of_kind(state, TABLE_BINDING_BOUNDARY_RESOLVED_KIND) == []
+
+        # Second pass: the SAME word is present in this pass's own native
+        # words AND was actually admitted into a real bind() attempt's
+        # region-scoped word pool -- positive proof it was bound, not merely
+        # "not currently flagged unresolved".
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([word])):
+            pipeline._record_unresolved_binding_boundary(
+                state,
+                1,
+                witness,
+                BindingResult(unresolved_boundary_words=[], region_scoped_words=(word,)),
+            )
+
+        resolved = _events_of_kind(state, TABLE_BINDING_BOUNDARY_RESOLVED_KIND)
+        assert len(resolved) == 1
+        assert resolved[0].data["table_id"] == "t1"
+        assert resolved[0].data["words"] == [{"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}]
+
+        trust = build_tables_trust(state.handle.filename, state.events)
+        assert trust.untrusted_pages == [], "the matching resolution must clear the table"
+
+    def test_a_word_now_confidently_external_in_a_later_pass_emits_a_resolution(
+        self, tmp_path: Path
+    ) -> None:
+        """Positive disposition #2: the word is in ``boundary_words`` (a
+        real, computed geometric classification -- populated regardless of
+        parse outcome) while absent from ``unresolved_boundary_words``."""
+        from socr.core.tables_trust import build_tables_trust
+        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_RESOLVED_KIND
+        from socr.tables.binding import BindingResult
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        pipeline = _make_pipeline()
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+        word = (390.0, 100.0, 440.0, 110.0, "0.51", 0, 1, 2)
+
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([word])):
+            pipeline._record_unresolved_binding_boundary(
+                state, 1, witness, BindingResult(unresolved_boundary_words=[word])
+            )
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([word])):
+            pipeline._record_unresolved_binding_boundary(
+                state,
+                1,
+                witness,
+                BindingResult(unresolved_boundary_words=[], boundary_words=[word]),
+            )
+
+        resolved = _events_of_kind(state, TABLE_BINDING_BOUNDARY_RESOLVED_KIND)
+        assert len(resolved) == 1
+        trust = build_tables_trust(state.handle.filename, state.events)
+        assert trust.untrusted_pages == []
+
+    def test_an_empty_binding_from_a_parse_failure_never_emits_a_resolution(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression Astra reproduced: a real ``bind()`` call on
+        unparsable markdown returns an empty result -- ``unresolved_boundary_words``
+        is empty, but so are ``region_scoped_words`` and ``boundary_words``,
+        because the region-admitted word never got past the parse gate. An
+        empty binding must never substitute for a positive disposition."""
+        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_RESOLVED_KIND
+        from socr.tables.binding import BindingResult, bind
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        pipeline = _make_pipeline()
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+        word = (10.0, 20.0, 30.0, 40.0, "12", 0, 0, 0)
+
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([word])):
+            pipeline._record_unresolved_binding_boundary(
+                state, 1, witness, BindingResult(unresolved_boundary_words=[word])
+            )
+
+        # A REAL bind() call on markdown that fails to parse -- the word is
+        # fully inside the region (so it WOULD be admitted, were parsing to
+        # succeed), but parse_grid("not a table") returns None and bind()
+        # returns before region_scoped_words is ever set.
+        real_result = bind([word], "not a table", region=(0.0, 0.0, 100.0, 100.0))
+        assert real_result.region_scoped_words == (), "fixture premise: parse must have failed"
+        assert real_result.boundary_words == [], "fixture premise: word must be fully admitted"
+
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([word])):
+            pipeline._record_unresolved_binding_boundary(state, 1, witness, real_result)
+
+        assert _events_of_kind(state, TABLE_BINDING_BOUNDARY_RESOLVED_KIND) == []
+
+    def test_a_word_simply_absent_from_the_later_pass_does_not_emit_a_resolution(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression control: an EMPTY current boundary list proves nothing
+        about a specific word if that word is not even among this pass's own
+        native words -- the witness could simply be gone. Only a word
+        PRESENT and no longer unresolved is evidence of resolution."""
+        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_RESOLVED_KIND
+        from socr.tables.binding import BindingResult
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        pipeline = _make_pipeline()
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+        word = (390.0, 100.0, 440.0, 110.0, "0.51", 0, 1, 2)
+        other_word = (10.0, 10.0, 20.0, 20.0, "Other", 0, 0, 0)
+
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([word])):
+            pipeline._record_unresolved_binding_boundary(
+                state, 1, witness, BindingResult(unresolved_boundary_words=[word])
+            )
+
+        # This pass's native words do not include the original word at all.
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([other_word])):
+            pipeline._record_unresolved_binding_boundary(
+                state, 1, witness, BindingResult(unresolved_boundary_words=[])
+            )
+
+        assert _events_of_kind(state, TABLE_BINDING_BOUNDARY_RESOLVED_KIND) == []
+
+    def test_an_unrelated_acceptance_event_never_triggers_a_resolution(
+        self, tmp_path: Path
+    ) -> None:
+        """A generic table_ladder_accepted must not be treated as, or
+        produce, resolution evidence -- only this method's own word-keyed
+        comparison does."""
+        from socr.core.tables_trust import build_tables_trust
+        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_RESOLVED_KIND
+        from socr.tables.binding import BindingResult
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        pipeline = _make_pipeline()
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+        word = (390.0, 100.0, 440.0, 110.0, "0.51", 0, 1, 2)
+
+        with patch("socr.core.pdf.open_pdf", _fake_open_pdf([word])):
+            pipeline._record_unresolved_binding_boundary(
+                state, 1, witness, BindingResult(unresolved_boundary_words=[word])
+            )
+        state.events.append(
+            AuditEvent(page_num=1, kind="table_ladder_accepted", data={"table_id": "t1"})
+        )
+
+        assert _events_of_kind(state, TABLE_BINDING_BOUNDARY_RESOLVED_KIND) == []
+        trust = build_tables_trust(state.handle.filename, state.events)
+        assert trust.untrusted_pages == [1], (
+            "an unrelated acceptance must not clear the boundary signal"
+        )
+
+    def test_resolution_round_trips_through_flush_and_restore(self, tmp_path: Path) -> None:
+        """The resolution event must survive resume just like its
+        unresolved counterpart, and tables_trust must read the resumed
+        state.events as clear."""
+        from socr.core.document import DocumentHandle
+        from socr.core.tables_trust import build_tables_trust
+        from socr.judge.table_verdict import (
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        )
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        out_dir = tmp_path / "out"
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+
+        accepted = PageOutput(
+            page_num=1,
+            text="Treasury 0.50 0.51",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        )
+        ps = state.pages[1]
+        ps.attempts.append(accepted)
+        ps.best_output = accepted
+        word_dict = {"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}
+        state.events.append(
+            AuditEvent(
+                page_num=1,
+                kind=TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+                data={"table_id": "t1", "words": [word_dict]},
+            )
+        )
+        state.events.append(
+            AuditEvent(
+                page_num=1,
+                kind=TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+                data={"table_id": "t1", "words": [word_dict]},
+            )
+        )
+
+        pipeline._flush_page_fragment(state, 1, accepted.text, out_dir)
+        pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+
+        resumed_state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        resumed_page = pipeline._load_terminal_page(resumed_state, 1, out_dir)
+        assert resumed_page is not None
+        pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
+
+        assert len(_events_of_kind(resumed_state, TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND)) == 1
+        assert len(_events_of_kind(resumed_state, TABLE_BINDING_BOUNDARY_RESOLVED_KIND)) == 1
+
+        trust = build_tables_trust(resumed_state.handle.filename, resumed_state.events)
+        assert trust.untrusted_pages == [], "resumed events must still clear via the resolution"
+
+    def test_recurrence_of_the_same_word_after_resolution_survives_resume(
+        self, tmp_path: Path
+    ) -> None:
+        """Astra round 5 (P1): unresolved A -> resolved A -> unresolved A
+        must round-trip through resume as still distrusted -- an earlier
+        resolution must not permanently immunise a word's later recurrence."""
+        from socr.core.document import DocumentHandle
+        from socr.core.tables_trust import build_tables_trust
+        from socr.judge.table_verdict import (
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        )
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        out_dir = tmp_path / "out"
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+
+        accepted = PageOutput(
+            page_num=1,
+            text="Treasury 0.50 0.51",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        )
+        ps = state.pages[1]
+        ps.attempts.append(accepted)
+        ps.best_output = accepted
+        word_dict = {"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}
+        for kind in (
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        ):
+            state.events.append(
+                AuditEvent(page_num=1, kind=kind, data={"table_id": "t1", "words": [word_dict]})
+            )
+
+        # Sanity: pre-resume, the recurrence must already read as distrusted.
+        pre_trust = build_tables_trust(state.handle.filename, state.events)
+        assert pre_trust.untrusted_pages == [1], "fixture premise: the recurrence must reopen it"
+
+        pipeline._flush_page_fragment(state, 1, accepted.text, out_dir)
+        pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+
+        resumed_state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        resumed_page = pipeline._load_terminal_page(resumed_state, 1, out_dir)
+        assert resumed_page is not None
+        pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
+
+        assert len(_events_of_kind(resumed_state, TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND)) == 2
+        assert len(_events_of_kind(resumed_state, TABLE_BINDING_BOUNDARY_RESOLVED_KIND)) == 1
+
+        trust = build_tables_trust(resumed_state.handle.filename, resumed_state.events)
+        assert trust.untrusted_pages == [1], (
+            "the resumed event ORDER must still show the later recurrence as unresolved"
+        )

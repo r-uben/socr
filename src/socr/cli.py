@@ -263,7 +263,11 @@ def common_options(f):
         "--max-cost-per-page",
         type=float,
         default=0.0,
-        help="Skip providers above this $/page (0=no cap)",
+        help=(
+            "Skip providers above this $/page (0=no cap if omitted; pass 0 "
+            "explicitly to also exclude cloud-tier rungs priced at $0, e.g. "
+            "qwen-cloud -- GH-154)"
+        ),
     )(f)
     f = click.option(
         "--cost-budget",
@@ -576,6 +580,7 @@ def build_config(
         config.judge_model = judge_model
     if _explicitly_given("max_cost_per_page"):
         config.max_cost_per_page = max_cost_per_page
+        config.max_cost_per_page_pinned = True
     if _explicitly_given("cost_budget"):
         config.cost_budget = cost_budget
     if _explicitly_given("write_manifest"):

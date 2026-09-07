@@ -62,6 +62,37 @@ def test_max_cost_per_page_cap():
     assert EngineType.GEMINI in [p.engine for p in ladder]
 
 
+def test_gh154_zero_cap_pinned_excludes_zero_priced_cloud():
+    """GH-154: PROFILE_QWEN_CLOUD is priced at $0.00, so an unpinned cap of 0
+    (the PipelineConfig default meaning "no cap") always let it through --
+    ``--max-cost-per-page 0`` looked like a cost fence but admitted cloud
+    egress regardless. Falsifies main: with ``zero_cap_pinned=True`` (the
+    caller's signal that the user explicitly typed 0), the $0 cloud rung is
+    dropped; the untouched default (``zero_cap_pinned=False``, matching every
+    other caller and every unset run) still includes it.
+    """
+    profiles = [PROFILE_QWEN_LOCAL, PROFILE_QWEN_CLOUD]
+
+    unpinned = provider_ladder(profiles, max_cost_per_page=0.0, zero_cap_pinned=False)
+    assert PROFILE_QWEN_CLOUD in unpinned  # unset default: unaffected, cloud stays
+
+    pinned = provider_ladder(profiles, max_cost_per_page=0.0, zero_cap_pinned=True)
+    assert PROFILE_QWEN_CLOUD not in pinned  # explicit zero: cloud excluded
+    assert PROFILE_QWEN_LOCAL in pinned  # local/free rungs are untouched
+
+
+def test_gh154_zero_cap_pinned_is_inert_above_zero():
+    # A real positive cap keeps pricing normal rungs by their own $/page; the
+    # pinned flag only changes behaviour at the exact 0 sentinel.
+    ladder = provider_ladder(
+        [PROFILE_QWEN_LOCAL, PROFILE_QWEN_CLOUD, PROFILE_GEMINI],
+        max_cost_per_page=0.001,
+        zero_cap_pinned=True,
+    )
+    assert PROFILE_QWEN_CLOUD in ladder
+    assert PROFILE_GEMINI in ladder
+
+
 def test_per_page_only_filter():
     reg = {
         EngineType.GLM: ProviderProfile(EngineType.GLM, "local", 0.0, supports_per_page=True),

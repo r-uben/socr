@@ -47,15 +47,16 @@ ENGINE_PRIORITY: dict[EngineType, int] = {
 # default backend is qwen3.5:cloud (Ollama Cloud, no extra key): ~0.57 quality
 # at ~49s/page on the owner's Mac and the only engine that cleared all three
 # hard page types (math/table/equation). Gemini is the quality escalation when
-# Qwen is unavailable. DeepSeek-OCR (~0.085 socOCRbench) and Mistral (worse AND
-# ~5x pricier than Gemini) are deliberately OUT of the auto path; reach them
+# Qwen is unavailable. DeepSeek-OCR (~0.085 socOCRbench), Mistral (worse AND
+# ~5x pricier than Gemini), and Nougat (GH-637: produced nothing on any table
+# page in the 2026-09-06 ECB defect census, matching D1's auto_eligible=False
+# ruling in providers.py) are deliberately OUT of the auto path; reach them
 # only via an explicit --primary. Empirics in [[reference-sococrbench]].
 AUTO_ENGINE_ORDER: list[EngineType] = [
     EngineType.QWEN,  # qwen3.5:cloud — practical cheap winner; native PDF-free per-page
     EngineType.GEMINI,  # Best quality, paid — escalation when Qwen is unavailable
     EngineType.MARKER,  # Local, layout-aware
     EngineType.GLM,  # Local, small model, fast
-    EngineType.NOUGAT,  # Local, academic papers only
 ]
 
 # GH-353 table judge ladder — CLI₁ (ollama-cloud glm-5.3-flash) per-call wall-clock
@@ -338,6 +339,14 @@ class PipelineConfig:
     judge_backend: str = "auto"  # "auto" | "vlm" | "heuristic"
     judge_model: str = ""  # VLM model for the judge (e.g. qwen2-vl:7b); "" = default
     max_cost_per_page: float = 0.0  # 0 = no per-page price cap
+    # True when the user passed --max-cost-per-page explicitly (including 0).
+    # GH-154: the bare float can't distinguish "the user typed 0" from "the
+    # flag was never given" (both leave max_cost_per_page == 0.0, the same
+    # value the rest of the codebase treats as "no cap"). This flag lets
+    # provider_ladder's zero_cap_pinned kwarg give an EXPLICIT zero its own
+    # meaning -- exclude cloud-tier rungs regardless of price -- without
+    # touching the "0 = no cap" default every other caller relies on.
+    max_cost_per_page_pinned: bool = False
     cost_budget: float = 0.0  # 0 = unlimited total budget per document
     write_manifest: bool = False  # write reproducibility manifest + blob cache
 

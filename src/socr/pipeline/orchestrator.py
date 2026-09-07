@@ -1119,6 +1119,15 @@ class UnifiedPipeline:
                 for e in sorted(cfg.enabled_engines, key=lambda x: x.value)
             },
             "max_cost_per_page": cfg.max_cost_per_page,
+            # GH-154 round 3: an EXPLICIT ``--max-cost-per-page 0`` and an
+            # OMITTED one both leave ``max_cost_per_page == 0.0``, but
+            # ``zero_cap_pinned_forbids_cloud`` now makes them route
+            # differently -- the pinned case excludes cloud/remote rungs the
+            # unpinned default still admits. Two configs with the same numeric
+            # cap must not share a fingerprint when only this bit differs, or
+            # a resume could reuse a terminal page an opposite-policy run
+            # would route (or refuse) differently.
+            "max_cost_per_page_pinned": getattr(cfg, "max_cost_per_page_pinned", False),
             "cost_budget": cfg.cost_budget,
             # GH-96: the escalation lane rewrites page text, so a resumed run must
             # not reuse fragments produced with the flag in the other state — that
@@ -2232,12 +2241,15 @@ class UnifiedPipeline:
 
     def _corrupt_math_model_disabled_reason(self) -> str:
         """Why the direct equation-model call is forbidden by run policy."""
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
         model = self.config.math_model or ""
-        if self.config.strict_local and "cloud" in model.casefold():
+        is_cloud = "cloud" in model.casefold()
+        if self.config.strict_local and is_cloud:
             return f"model call skipped: strict-local forbids remote model {model}"
-        if "cloud" in model.casefold() and (
-            self.config.max_cost_per_page > 0 or self.config.cost_budget > 0
-        ):
+        if is_cloud and zero_cap_pinned_forbids_cloud(self.config):
+            return f"model call skipped: --max-cost-per-page 0 forbids remote model {model}"
+        if is_cloud and (self.config.max_cost_per_page > 0 or self.config.cost_budget > 0):
             return "model call skipped: remote equation model has no configured price"
         return ""
 
@@ -2454,6 +2466,8 @@ class UnifiedPipeline:
         """
         from socr.judge.table_verdict import (
             TABLE_BINDING_ADJUDICATED_KIND,
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
             TABLE_LADDER_EVENT_KINDS,
         )
         from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
@@ -2461,6 +2475,18 @@ class UnifiedPipeline:
         return frozenset(
             TABLE_LADDER_EVENT_KINDS
             | {TABLE_BINDING_ADJUDICATED_KIND}
+            # GH-609 round 3 (Astra P2): explicit inclusion, not folded into
+            # TABLE_LADDER_EVENT_KINDS -- that set is deliberately the GH-359
+            # drift guard's exact three/four terminals, and this kind is
+            # neither a terminal nor resolvable by one (see
+            # tables_trust.NON_RESOLVABLE_DISTRUST_KINDS). Without this, a
+            # resumed run's audit trail silently drops which boundary word
+            # geometry could not rule out as table content.
+            | {TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND}
+            # GH-609 round 4: its companion resolution event, same reasoning
+            # -- dropping it on resume would silently un-resolve a table that
+            # a prior run had already proven clean, word for word.
+            | {TABLE_BINDING_BOUNDARY_RESOLVED_KIND}
             | cls.EQUATION_LANE_EVENT_KINDS
             # GH-519: the chart lane's debt is a standing property of the page,
             # not of the run that noticed it. GH-563 is the cautionary case: a
@@ -2540,13 +2566,15 @@ class UnifiedPipeline:
 
         Fail-closed: no rung, no call, native prose ships.
         """
-        from socr.core.providers import TIER_LOCAL, provider_ladder
+        from socr.core.providers import TIER_LOCAL, provider_ladder, zero_cap_pinned_forbids_cloud
         from socr.math.recover import DEFAULT_MODEL
 
         model = self.config.clean_equation_model or DEFAULT_MODEL
         is_cloud = "cloud" in model.casefold()
         if self.config.strict_local and is_cloud:
             return None, f"model call skipped: strict-local forbids remote model {model}"
+        if is_cloud and zero_cap_pinned_forbids_cloud(self.config):
+            return None, f"model call skipped: --max-cost-per-page 0 forbids remote model {model}"
         if is_cloud and (self.config.max_cost_per_page > 0 or self.config.cost_budget > 0):
             return None, "model call skipped: remote equation model has no configured price"
 
@@ -2562,6 +2590,7 @@ class UnifiedPipeline:
             profiles,
             per_page_only=True,
             max_cost_per_page=self.config.max_cost_per_page,
+            zero_cap_pinned=self.config.max_cost_per_page_pinned,
         )
         for profile in ladder:
             if (getattr(profile, "model", "") or "") != model:
@@ -4406,21 +4435,49 @@ class UnifiedPipeline:
     # GH-96: table escalation lane
     # ------------------------------------------------------------------
 
-    def _resolve_table_escalation_provider(self, available: list):
-        """Cheapest non-local provider from the ALREADY tier-filtered ladder.
+    def _build_ladder_and_escalation_profile(self, available: list) -> tuple[list, object]:
+        """Build the routing ladder, then derive the escalation rung FROM IT.
+
+        GH-160: split out of ``_phase_agentic`` so the fix (deriving escalation
+        from the cost-filtered ladder rather than the merely tier-filtered
+        ``available``) is directly testable without driving the whole
+        page-major loop. ``available`` here is already tier-filtered by the
+        caller (``--strict-local``); this is the ONE place both
+        ``--max-cost-per-page`` and the escalation lane read the same ladder.
+        """
+        from socr.core.providers import provider_ladder
+
+        ladder = provider_ladder(
+            available,
+            per_page_only=True,
+            max_cost_per_page=self.config.max_cost_per_page,
+            zero_cap_pinned=self.config.max_cost_per_page_pinned,
+        )
+        # GH-96/GH-160: escalation provider, chosen from ``ladder`` -- the ALREADY
+        # tier- AND cost-filtered list -- so --strict-local and
+        # --max-cost-per-page suppress the lane for free. Choosing from the
+        # merely tier-filtered ``available`` (main's prior behaviour) let
+        # escalation call a rung --max-cost-per-page had priced out of routing.
+        return ladder, self._resolve_table_escalation_provider(ladder)
+
+    def _resolve_table_escalation_provider(self, ladder: list):
+        """Cheapest non-local provider from the ALREADY tier- and cost-filtered ladder.
 
         Derived rather than named. Naming ``EngineType.GEMINI`` literally would
-        bypass ``--strict-local`` entirely: that flag filters ``available`` by tier
+        bypass ``--strict-local`` entirely: that flag filters candidates by tier
         before the ladder is built, but ``run_provider`` accepts any engine, so a
         hardcoded escalation engine would still fire on exactly the configuration
-        the reference run used. Choosing from ``available`` makes ``--strict-local``
-        and ``--max-cost-per-page`` suppress the lane for free.
+        the reference run used. GH-160: this must select from ``ladder`` -- the
+        list already passed through ``provider_ladder(..., max_cost_per_page=...)``
+        -- not the merely tier-filtered ``available``, or ``--max-cost-per-page``
+        cannot suppress the lane; ``--strict-local`` and ``--max-cost-per-page``
+        both suppress it for free this way.
         """
         if not getattr(self.config, "escalate_ambiguous_tables", False):
             return None
         from socr.core.providers import TIER_LOCAL
 
-        candidates = [p for p in available if p.tier != TIER_LOCAL and p.supports_per_page]
+        candidates = [p for p in ladder if p.tier != TIER_LOCAL and p.supports_per_page]
         if not candidates:
             return None
         return min(candidates, key=lambda p: p.cost_per_page_usd)
@@ -4625,6 +4682,25 @@ class UnifiedPipeline:
         from socr.core.audit_log import AuditEvent
         from socr.tables.escalation_decision import decide_escalation
 
+        def _record_attempt_cost() -> None:
+            # GH-160 round 2: `run_provider` was actually invoked on every path
+            # below this point -- timeout, wrong-engine, empty/non-success, and
+            # accepted/rejected alike -- so all of them are billable. Recording
+            # only on the last (accepted/rejected) path under-reported spend on
+            # the earlier three, which also fed a wrong number into the
+            # remaining-budget gate above on a document's NEXT escalation call.
+            state.record_engine_run(
+                EngineResult(
+                    document_path=pdf_path,
+                    engine=profile.engine.value,
+                    status=DocumentStatus.SUCCESS,
+                    pages=[],
+                    pages_processed=1,
+                    cost=profile.cost_per_page_usd,
+                ),
+                page_nums=[page_num],
+            )
+
         try:
             from socr.core.pdf import open_pdf
 
@@ -4636,6 +4712,35 @@ class UnifiedPipeline:
                     )
                 if not needs_escalation:
                     return False, bo
+
+                # GH-160: the profile itself was already priced under
+                # --max-cost-per-page by ``_resolve_table_escalation_provider``,
+                # but a per-page cap says nothing about what the DOCUMENT has
+                # left under --cost-budget. Same fail-closed rule the generic
+                # OCR branch and the equation lane apply (see
+                # ``_equation_lane_remaining_budget``): an unmetered earlier
+                # call makes the remaining budget unknowable, so it is treated
+                # as zero rather than as unlimited.
+                if self.config.cost_budget > 0:
+                    total_cost = state.total_cost
+                    remaining = (
+                        0.0
+                        if total_cost is None
+                        else max(self.config.cost_budget - total_cost, 0.0)
+                    )
+                    if remaining < profile.cost_per_page_usd:
+                        state.events.append(
+                            AuditEvent(
+                                page_num=page_num,
+                                kind="table_escalation_refused",
+                                engine=profile.engine.value,
+                                detail=(
+                                    f"remaining budget ${remaining:.4f} < escalation rung "
+                                    f"price ${profile.cost_per_page_usd:.4f}"
+                                ),
+                            )
+                        )
+                        return False, bo
                 incumbent_text = bo.text or ""
 
                 # A cloud CLI has no timeout of its own and was observed wedged for
@@ -4662,7 +4767,19 @@ class UnifiedPipeline:
                             ),
                         )
                     )
+                    _record_attempt_cost()
                     return True, bo
+                except Exception:
+                    # GH-160 round 3: `run_provider` raised something OTHER than
+                    # a timeout (e.g. an API error surfaced by `.result()`). The
+                    # call was still launched -- and may have partially billed
+                    # before failing -- so it is billable the same way a timeout
+                    # is; only the OUTER function-level handler is left to log
+                    # and keep the incumbent, so shut the executor down and
+                    # record the attempt here before re-raising into it.
+                    ex.shutdown(wait=False)
+                    _record_attempt_cost()
+                    raise
 
                 # `_run_engine_on_pages` converts a failed engine call into a
                 # native-text PageOutput. Assigning that would replace a structured
@@ -4681,6 +4798,7 @@ class UnifiedPipeline:
                             ),
                         )
                     )
+                    _record_attempt_cost()
                     return False, bo
                 if out.status is not PageStatus.SUCCESS or not (out.text or "").strip():
                     state.events.append(
@@ -4691,27 +4809,31 @@ class UnifiedPipeline:
                             detail=f"candidate status={out.status}, no usable text",
                         )
                     )
+                    _record_attempt_cost()
                     return False, bo
 
-                decision = decide_escalation(page, incumbent_text, out.text)
+                try:
+                    decision = decide_escalation(page, incumbent_text, out.text)
+                except Exception:
+                    # GH-160 round 3: the provider ALREADY answered successfully
+                    # by this point (the SUCCESS/non-empty checks above passed)
+                    # -- a raise while comparing candidates must not make that
+                    # completed, billable call disappear from the document's
+                    # spend. The outer function-level handler still logs the
+                    # failure and keeps the incumbent text; this only ensures
+                    # the attempt is metered before that happens.
+                    _record_attempt_cost()
+                    raise
 
             # Cost is recorded by hand: `route_page` does this for ladder calls, and
             # a bare `run_provider` does not, so without it the document
             # under-reports what it spent. Recorded against the PAGE here, ABOVE
             # the accept/reject branch: a refused candidate is never appended to
             # ``ps.attempts``, so this is the only place its real spend is seen
-            # (round 5).
-            state.record_engine_run(
-                EngineResult(
-                    document_path=pdf_path,
-                    engine=profile.engine.value,
-                    status=DocumentStatus.SUCCESS,
-                    pages=[],
-                    pages_processed=1,
-                    cost=profile.cost_per_page_usd,
-                ),
-                page_nums=[page_num],
-            )
+            # (round 5). GH-160 round 2: the timeout/wrong-engine/empty-status
+            # early returns above record their own attempt via
+            # ``_record_attempt_cost`` since they exit before this line.
+            _record_attempt_cost()
 
             if not decision.accepted:
                 if not self.config.quiet:
@@ -4903,8 +5025,9 @@ class UnifiedPipeline:
     def _build_table_judge_rungs(self) -> list:
         """Construct the ladder's rung sequence once per document.
 
-        Returns ``[]`` when the ladder flag is off, or when ``strict_local``
-        is set: both rungs are cloud (ollama-cloud, gemini CLI), so
+        Returns ``[]`` when the ladder flag is off, when ``strict_local``
+        is set, or when GH-154's ``zero_cap_pinned_forbids_cloud`` policy
+        forbids it: both rungs are cloud (ollama-cloud, gemini CLI), so
         ``strict_local and table_judge_ladder`` makes every rung unavailable
         BEFORE the first call (G1's documented interaction) -- an empty rung
         list is the fail-open signal ``_run_table_judge_gate`` reads to
@@ -4914,7 +5037,13 @@ class UnifiedPipeline:
         tests can override it to inject fake ``RungCallable``s without a
         live ollama daemon or a ``gemini`` binary on disk.
         """
-        if not self.config.table_judge_ladder or self.config.strict_local:
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if (
+            not self.config.table_judge_ladder
+            or self.config.strict_local
+            or zero_cap_pinned_forbids_cloud(self.config)
+        ):
             return []
 
         from socr.judge.table_rung_gemini import make_gemini_rung
@@ -4976,10 +5105,17 @@ class UnifiedPipeline:
           reachable is no evidence at all about it (cold review round 1,
           finding 2).
 
-        Both rungs are cloud rungs, so the ladder and ``strict_local`` gates
-        are checked before touching either external seam.
+        Both rungs are cloud rungs, so the ladder, ``strict_local``, and
+        GH-154's zero-cap-pinned gates are all checked before touching either
+        external seam.
         """
-        if not self.config.table_judge_ladder or self.config.strict_local:
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if (
+            not self.config.table_judge_ladder
+            or self.config.strict_local
+            or zero_cap_pinned_forbids_cloud(self.config)
+        ):
             return False
 
         kinds = [k for k in (rung_kinds or []) if k]
@@ -5288,6 +5424,203 @@ class UnifiedPipeline:
 
         return binding_result, classify_binding_evidence(binding_result)
 
+    @staticmethod
+    def _boundary_word_key(word) -> tuple[str, tuple[float, float, float, float]] | None:
+        """Identity key for a boundary word: (text, bbox), rounded to kill
+        float-repr noise across two independent extractions of the same PDF.
+        ``None`` for a malformed entry (either a raw word tuple with fewer
+        than 5 fields, or a persisted ``{"text": ..., "bbox": [...]}`` dict
+        missing either key) -- never a false match on absence.
+        """
+        if isinstance(word, dict):
+            text = word.get("text")
+            bbox = word.get("bbox")
+        elif len(word) > 4:
+            text = word[4]
+            bbox = word[:4]
+        else:
+            return None
+        if text is None or bbox is None or len(bbox) != 4:
+            return None
+        try:
+            return str(text), tuple(round(float(v), 3) for v in bbox)
+        except (TypeError, ValueError):
+            return None
+
+    def _record_unresolved_binding_boundary(
+        self, state: DocumentState, page_num: int, witness, binding
+    ) -> None:
+        """Make a possibly-dropped boundary word durable, not just in-memory.
+
+        GH-609 round 2 (Astra P1). ``BindingResult.unresolved_boundary_words``
+        already forces ``fully_checked`` False so a possibly-dropped numeric
+        cell cannot be classified PASS -- but that field lived only on the
+        in-process ``BindingResult`` with no consumer, so the drop was still
+        invisible to anything reading the run's audit trail or the page
+        sidecar metadata. This appends one ``AuditEvent`` per witness with an
+        unresolved boundary word, carrying its text and bbox, so a downstream
+        reader (or a human) can see exactly what geometry could not rule out
+        as table content. Fires independent of the evidence verdict: a table
+        that also CONTRADICTs elsewhere still had this specific coverage gap.
+
+        Round 3 (Astra P1 again): the event's kind is in
+        ``TABLE_DISTRUST_KINDS`` (``tables_trust.py``), so it also reaches
+        ``tables_trust.json``, the document metadata note and the CLI trust
+        summary -- and it is in ``tables_trust.NON_RESOLVABLE_DISTRUST_KINDS``
+        so a later ``table_ladder_accepted``/``table_escalation_accepted`` on
+        the SAME table does not clear it; the excluded word is not put back
+        by a guard accepting the table's content. It is also added
+        explicitly to ``resume_restore_kinds`` (round 3, P2) so a resumed run
+        does not silently drop it.
+
+        Round 4 (Astra P2): that non-resolvable design had no way BACK to
+        resolved -- a generic later ACCEPTED proves nothing about this
+        specific word (GH-609's whole point is that content verdict and
+        geometry coverage are different facts), and an empty current
+        boundary list proves nothing either (the witness could simply be
+        gone this pass). The only honest evidence is the SAME word, by text
+        and bbox, demonstrably present among THIS pass's own native words and
+        no longer classified unresolved -- either it is now bound (kept), or
+        it is now confidently external. When that holds for a word this
+        table previously reported unresolved, emit a companion
+        ``TABLE_BINDING_BOUNDARY_RESOLVED_KIND`` event naming exactly that
+        word; ``build_tables_trust`` clears the standing distrust only when
+        every word ever reported unresolved for this table has a matching
+        resolution (``tables_trust.NON_RESOLVABLE_DISTRUST_KINDS`` word-keyed
+        clearance), never on kind/table_id alone. The original unresolved
+        event is never mutated or removed -- history stays in the audit log;
+        only the REDUCED current-trust view changes.
+
+        Round 5 (Astra P1 again): "no longer classified unresolved" was
+        satisfied by ``binding.unresolved_boundary_words`` simply being
+        EMPTY -- which a markdown parse failure / no-numeric-lanes absence
+        of evidence also produces, unconditionally, for every word ever
+        computed. That let a totally unevaluated ``bind()`` attempt
+        masquerade as "now bound or confidently excluded" for a word it
+        never looked at past the region partition. The fix requires a
+        POSITIVE per-word disposition from an attempt that actually reached
+        row/column binding: the word is in ``binding.region_scoped_words``
+        (the region-admitted words a SUCCESSFUL ``parse_grid`` fed into
+        binding -- empty on parse failure, unlike ``boundary_words``/
+        ``unresolved_boundary_words``, which the partition step populates
+        regardless of parse outcome), or it is in ``binding.boundary_words``
+        while absent from ``binding.unresolved_boundary_words`` (confidently
+        external, a geometric classification that does not depend on parse
+        success). Neither an absent binding nor an empty unresolved list
+        alone is that disposition.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.table_verdict import (
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        )
+        from socr.tables.binding import BindingResult
+
+        if not isinstance(binding, BindingResult):
+            return
+
+        table_id = witness.table_id
+        bound_keys = {
+            key
+            for w in binding.region_scoped_words
+            if (key := self._boundary_word_key(w)) is not None
+        }
+        external_keys = {
+            key
+            for w in binding.boundary_words
+            if w not in binding.unresolved_boundary_words
+            and (key := self._boundary_word_key(w)) is not None
+        }
+        # A word this attempt POSITIVELY disposed of, either by actually
+        # binding it (only possible past a successful parse) or by
+        # confidently classifying it as external prose. Deliberately NOT
+        # "absent from unresolved_keys" -- that is also true of every word
+        # on a parse-failure result, which disposed of nothing.
+        current_resolvable_keys = bound_keys | external_keys
+
+        # Best-effort: read this pass's OWN native words independently, so a
+        # resolution can be proven from THIS witness's actual geometry rather
+        # than merely inferred from the boundary lists' absence. A read
+        # failure here must never block the (unconditional) unresolved
+        # emission below -- it only means no resolution can be PROVEN yet.
+        native_words: list = []
+        try:
+            from socr.core.pdf import open_pdf
+
+            with open_pdf(state.handle.path) as doc:
+                native_words = doc[page_num - 1].get_text("words")
+        except Exception as exc:
+            logger.debug(
+                "boundary resolution check: could not re-read native words on p%d (%s: %s)",
+                page_num,
+                type(exc).__name__,
+                exc,
+            )
+
+        if native_words and current_resolvable_keys:
+            present_now = {
+                key for w in native_words if (key := self._boundary_word_key(w)) is not None
+            }
+            prior_unresolved: set = set()
+            for ev in state.events:
+                if (
+                    getattr(ev, "kind", "") != TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+                    or getattr(ev, "page_num", None) != page_num
+                ):
+                    continue
+                ev_data = getattr(ev, "data", None) or {}
+                if str(ev_data.get("table_id", "")) != str(table_id):
+                    continue
+                for w in ev_data.get("words") or []:
+                    key = self._boundary_word_key(w)
+                    if key is not None:
+                        prior_unresolved.add(key)
+
+            newly_resolved = prior_unresolved & present_now & current_resolvable_keys
+            if newly_resolved:
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+                        detail=(
+                            f"table {table_id}: {len(newly_resolved)} previously unresolved "
+                            "boundary word(s) now bound or confidently excluded"
+                        ),
+                        data={
+                            "table_id": table_id,
+                            "words": [
+                                {"text": text, "bbox": list(bbox)}
+                                for text, bbox in sorted(newly_resolved)
+                            ],
+                        },
+                    )
+                )
+
+        if not binding.unresolved_boundary_words:
+            return
+
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+                detail=(
+                    f"table {table_id}: "
+                    f"{len(binding.unresolved_boundary_words)} boundary word(s) rejected by "
+                    "region membership but not confidently external"
+                ),
+                data={
+                    "table_id": table_id,
+                    "words": [
+                        {
+                            "text": str(w[4]) if len(w) > 4 else "",
+                            "bbox": [w[0], w[1], w[2], w[3]],
+                        }
+                        for w in binding.unresolved_boundary_words
+                    ],
+                },
+            )
+        )
+
     def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
         """The E1 clamp's question, unchanged: is there a genuine contradiction?
 
@@ -5310,10 +5643,21 @@ class UnifiedPipeline:
         ``strict_local`` forbids cloud egress and the adjudicator is a cloud
         CLI, so it is not built at all there -- the guard chain then falls
         through to its fail-closed terminal without ever attempting egress,
-        exactly as ``_build_table_judge_rungs`` does for the readers. A
-        separate method so tests can inject a fake without a real binary.
+        exactly as ``_build_table_judge_rungs`` does for the readers. GH-154:
+        an EXPLICIT ``--max-cost-per-page 0`` forbids it the same way, even
+        though ``table_judge_adjudicator_cost_per_call_usd`` defaults to
+        $0.00 -- a price-only check would otherwise wave a $0 cloud call
+        through exactly like the $0 ``qwen-cloud`` rung this ticket started
+        from. A separate method so tests can inject a fake without a real
+        binary.
         """
-        if not self.config.table_judge_ladder or self.config.strict_local:
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if (
+            not self.config.table_judge_ladder
+            or self.config.strict_local
+            or zero_cap_pinned_forbids_cloud(self.config)
+        ):
             return None
         from socr.judge.table_rung_ollama import make_ollama_cell_adjudicator
 
@@ -5695,6 +6039,7 @@ class UnifiedPipeline:
                         continue
 
                     binding, evidence = self._binding_evidence_for_witness(state, page_num, witness)
+                    self._record_unresolved_binding_boundary(state, page_num, witness, binding)
                     if isinstance(binding, BindingResult) and (
                         binding.contradicted_cells or binding.row_label_contradictions
                     ):
@@ -6329,10 +6674,14 @@ class UnifiedPipeline:
     def _transcribe_cell_token(self, crop_path: Path) -> str | None:
         """Constrained transcriber seam. Returns a token or None. Never raises.
 
-        ``strict_local`` skips the cloud POST; encoding-garbage disproof
-        still runs. Tests patch this method rather than httpx.
+        ``strict_local`` and GH-154's zero-cap-pinned policy both skip the
+        cloud POST (``table_judge_rung1_model`` is a cloud model, e.g.
+        ``glm-5.3-flash:cloud``); encoding-garbage disproof still runs.
+        Tests patch this method rather than httpx.
         """
-        if self.config.strict_local:
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config):
             return None
         from socr.judge.cell_transcribe import transcribe_cell
 
@@ -6577,7 +6926,6 @@ class UnifiedPipeline:
         ``_classify`` remains doc-wide (``_phase_analyze``); the fused loop
         handles only the post-classification per-page lifecycle (fork C2).
         """
-        from socr.core.providers import provider_ladder
         from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
 
         if not self.config.quiet:
@@ -6784,12 +7132,7 @@ class UnifiedPipeline:
             from socr.core.providers import TIER_LOCAL
 
             available = [p for p in available if p.tier == TIER_LOCAL]
-        ladder = provider_ladder(
-            available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
-        )
-        # GH-96: escalation provider, chosen from the ALREADY tier-filtered list so
-        # --strict-local and --max-cost-per-page suppress the lane for free.
-        _escalation_profile = self._resolve_table_escalation_provider(available)
+        ladder, _escalation_profile = self._build_ladder_and_escalation_profile(available)
         _escalation_degraded = False
 
         no_ocr_provider_pages: set[int] = set()
@@ -8058,15 +8401,42 @@ class UnifiedPipeline:
         every page sidecar flush. An explicit ``--judge-model`` short-circuits
         the probing entirely and is returned verbatim, so an operator override
         is never silently discarded because the daemon was briefly unreachable.
+
+        GH-154 round 5: that short-circuit, the memoized cache, and the
+        candidate ladder's own default order (``_JUDGE_MODEL_CANDIDATES[0]``
+        is ``qwen3.5:cloud``) were all three cloud-first with no policy check
+        -- a local-only OCR rung under an EXPLICIT ``--max-cost-per-page 0``
+        still shipped its page image to the cloud for judging. A forbidden
+        cloud identity, whether explicit, cached, or the next candidate in
+        line, is treated as absent here; ``_build_page_judge`` already
+        degrades to the heuristic judge when this returns None, so no
+        separate change is needed there.
         """
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.judge.ollama_judge import OllamaVisionJudge
 
+        forbid_cloud = self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
+
+        def _permitted(model: str) -> bool:
+            return "cloud" not in model.casefold() or not forbid_cloud
+
         if self.config.judge_model:
-            return self.config.judge_model
+            if _permitted(self.config.judge_model):
+                return self.config.judge_model
+            # Forbidden explicit override: fall through to the same
+            # local-first auto-resolution an unset judge_model gets, rather
+            # than silently honoring an operator setting that violates the
+            # run's own cost/locality policy.
         if self._judge_model_cache is not False:
-            return self._judge_model_cache  # type: ignore[return-value]
+            cached = self._judge_model_cache
+            if cached is None or _permitted(cached):
+                return cached  # type: ignore[return-value]
+            # A memoized cloud identity that policy now forbids: re-resolve
+            # instead of returning stale cloud provenance.
         resolved: str | None = None
         for model in self._JUDGE_MODEL_CANDIDATES:
+            if not _permitted(model):
+                continue
             try:
                 if OllamaVisionJudge(model=model).is_available():
                     resolved = model
@@ -8079,18 +8449,21 @@ class UnifiedPipeline:
     def _resolve_crop_vlm_model(self) -> str | None:
         """Vision model for bounded table-crop reread (dual-pass / crop fallback).
 
-        Honors ``strict_local``: cloud judge models (e.g. ``qwen3.5:cloud``) are
-        never used for crop repair — only the local instruct VLM
-        (``qwen3-vl:30b-a3b-instruct``) or another explicitly local override.
+        Honors ``strict_local`` and GH-154's zero-cap-pinned policy: cloud judge
+        models (e.g. ``qwen3.5:cloud``) are never used for crop repair under
+        either — only the local instruct VLM (``qwen3-vl:30b-a3b-instruct``)
+        or another explicitly local override.
         """
-        from socr.core.providers import PROFILE_QWEN_LOCAL
+        from socr.core.providers import PROFILE_QWEN_LOCAL, zero_cap_pinned_forbids_cloud
 
         # vLLM/server backend (HPC): use the HF model id served by vLLM, not an
-        # ollama tag. The crop-reader factory routes to the OpenAI-compatible reader.
+        # ollama tag. The crop-reader factory routes to the OpenAI-compatible
+        # reader. A configured local/HPC inference server, not paid cloud
+        # egress -- the zero-cap-pinned policy does not apply to it.
         if self.config.qwen_backend in ("vllm", "sglang", "api"):
             return self.config.qwen_vllm_model
 
-        if self.config.strict_local:
+        if self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config):
             if self.config.judge_model and "cloud" not in self.config.judge_model:
                 return self.config.judge_model
             return PROFILE_QWEN_LOCAL.model
@@ -12602,6 +12975,7 @@ class UnifiedPipeline:
         behaviour: every page with detected regions is in scope.
         """
         from socr.core.audit_log import AuditEvent
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.math.equation_latex import process_equation_region
         from socr.math.recover import DEFAULT_MODEL
 
@@ -12626,6 +13000,31 @@ class UnifiedPipeline:
         # default-config clean-equation run to a cloud endpoint, violating
         # the consilium local-first mandate (20260615T210537Z-6621).
         model = self.config.clean_equation_model or DEFAULT_MODEL
+
+        # GH-154 round 4: this legacy path calls ``process_equation_region``
+        # directly and never goes through ``_equation_lane_provider``, so an
+        # explicit ``--clean-equation-model qwen3.5:cloud`` (or any other
+        # cloud override) bypassed both ``--strict-local`` and an EXPLICIT
+        # ``--max-cost-per-page 0`` entirely. Same policy, same shared
+        # predicate as every other direct-model entry point.
+        if "cloud" in model.casefold() and (
+            self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
+        ):
+            reason = (
+                f"model call skipped: remote model {model} forbidden by "
+                "strict-local/--max-cost-per-page 0 policy"
+            )
+            for page_num in sorted(regions_by_page):
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="equation_lane_no_region",
+                        engine="native+equations",
+                        detail=f"{reason}; native prose ships unchanged",
+                    )
+                )
+            return
+
         accepted_total = 0
         rejected_total = 0
 
@@ -12778,6 +13177,7 @@ class UnifiedPipeline:
         """
         import os
 
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.engines.gemini_api import (
             GeminiAPIConfig,
             GeminiAPIEngine,
@@ -12787,6 +13187,15 @@ class UnifiedPipeline:
 
         # Build a Gemini engine if credentials are available (used as fallback)
         def _try_gemini() -> GeminiAPIEngine | None:
+            # GH-154 round 4: this factory built (and returned/fell back to)
+            # Gemini unconditionally whenever an API key was present -- neither
+            # --strict-local nor an EXPLICIT --max-cost-per-page 0 stopped
+            # figure-description cloud egress. Same shared policy as every
+            # other cloud entry point.
+            if getattr(self.config, "strict_local", False) or zero_cap_pinned_forbids_cloud(
+                self.config
+            ):
+                return None
             api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
             if not api_key:
                 return None
