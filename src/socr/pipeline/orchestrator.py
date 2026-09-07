@@ -2417,6 +2417,12 @@ class UnifiedPipeline:
             "equation_region_reading_unsafe_markup",
             "equation_lane_no_region",
             "equation_lane_detection_failed",
+            # GH-157: a terminal disposition -- a detected region whose sidecar
+            # was never attached because no PageOutput existed for its page.
+            # Dropping it on resume would make that skip invisible again on
+            # every run after the one that recorded it, the exact shape this
+            # allowlist exists to close.
+            "equation_sidecar_skipped_no_page_output",
         }
     )
 

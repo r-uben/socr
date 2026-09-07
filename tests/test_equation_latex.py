@@ -935,3 +935,90 @@ class TestSkippedNoPageOutputIsAudited:
 
         skipped = [e for e in state.events if e.kind == "equation_sidecar_skipped_no_page_output"]
         assert skipped == []
+
+
+class TestSkippedSkipEventSurvivesResume:
+    """GH-157 follow-up (CI on #664): the skip event must be in
+    EQUATION_LANE_EVENT_KINDS, or ``_restore_terminal_page_state`` drops it on
+    resume and the record exists only on the run that produced it.
+
+    Driven through the REAL flush + restore round trip, not by asserting
+    membership in a set, per the gh522 lesson (test_gh522_lane_events_survive_resume.py).
+    """
+
+    def test_skip_event_survives_flush_and_restore(self, tmp_path):
+        import json
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.config import PipelineConfig
+        from socr.core.document import DocumentHandle
+        from socr.core.result import PageOutput, PageStatus
+        from socr.core.state import DocumentState, PageState
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        cfg = PipelineConfig()
+        cfg.recover_clean_equations = True
+        cfg.detect_equations = True
+        orch = UnifiedPipeline(cfg)
+
+        doc_path = tmp_path / "doc.pdf"
+        handle = DocumentHandle(path=doc_path)
+        state = DocumentState(handle=handle)
+
+        crop = tmp_path / "equation_0_page4.png"
+        crop.write_bytes(b"fakepng")
+        state.pages[4] = PageState(page_num=4, is_born_digital=True, native_text="native prose")
+        state.events.append(
+            AuditEvent(
+                page_num=4,
+                kind="equation_region_detected",
+                engine="detect_equations",
+                detail="test",
+                data={
+                    "source_bbox": [0.0, 0.0, 1.0, 1.0],
+                    "padded_bbox": [0.0, 0.0, 1.0, 1.0],
+                    "has_eq_number": False,
+                    "crop_path": str(crop),
+                    "detection_time_s": 0.001,
+                    "source_text": "native prose",
+                    "equation_label": None,
+                    "region_index": 0,
+                },
+            )
+        )
+
+        # Produce the skip event for real: no PageOutput for page 4.
+        orch._attach_equation_latex_sidecars(state, [])
+        skipped = [e for e in state.events if e.kind == "equation_sidecar_skipped_no_page_output"]
+        assert len(skipped) == 1, "nothing to resume -- the skip event was never produced"
+
+        po = PageOutput(page_num=4, text="native prose", status=PageStatus.SUCCESS, engine="native")
+        state.pages[4].best_output = po
+
+        out_dir = tmp_path / "out"
+        orch._scan_root = state.handle.path.parent
+        orch._flush_page_sidecar(state, 4, out_dir)
+
+        sidecar = next(out_dir.rglob("pages/00004.json"))
+        kinds = [ev.get("kind") for ev in json.loads(sidecar.read_text()).get("audit_events", [])]
+        assert "equation_sidecar_skipped_no_page_output" in kinds, (
+            f"the skip event never reached the sidecar, so the restore below is vacuous: {kinds}"
+        )
+
+        resumed = DocumentState(handle=DocumentHandle(path=doc_path))
+        assert not resumed.events
+        resumed.pages[4] = PageState(page_num=4, is_born_digital=True, native_text="native prose")
+        resumed_po = PageOutput(
+            page_num=4, text="native prose", status=PageStatus.SUCCESS, engine="native"
+        )
+        orch._restore_terminal_page_state(resumed, 4, resumed_po, out_dir)
+
+        restored = [
+            e for e in resumed.events if e.kind == "equation_sidecar_skipped_no_page_output"
+        ]
+        assert len(restored) == 1, (
+            "the skip event did not survive the resume; the resumed run's audit "
+            "log silently drops the fact that this region's sidecar was never attached"
+        )
+        assert restored[0].data.get("crop_path") == str(crop)
+        assert restored[0].data.get("region_index") == 0
