@@ -339,6 +339,14 @@ class PipelineConfig:
     judge_backend: str = "auto"  # "auto" | "vlm" | "heuristic"
     judge_model: str = ""  # VLM model for the judge (e.g. qwen2-vl:7b); "" = default
     max_cost_per_page: float = 0.0  # 0 = no per-page price cap
+    # True when the user passed --max-cost-per-page explicitly (including 0).
+    # GH-154: the bare float can't distinguish "the user typed 0" from "the
+    # flag was never given" (both leave max_cost_per_page == 0.0, the same
+    # value the rest of the codebase treats as "no cap"). This flag lets
+    # provider_ladder's zero_cap_pinned kwarg give an EXPLICIT zero its own
+    # meaning -- exclude cloud-tier rungs regardless of price -- without
+    # touching the "0 = no cap" default every other caller relies on.
+    max_cost_per_page_pinned: bool = False
     cost_budget: float = 0.0  # 0 = unlimited total budget per document
     write_manifest: bool = False  # write reproducibility manifest + blob cache
 

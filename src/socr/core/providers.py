@@ -211,6 +211,7 @@ def provider_ladder(
     per_page_only: bool = False,
     max_cost_per_page: float = 0.0,
     include_ineligible: bool = False,
+    zero_cap_pinned: bool = False,
 ) -> list[ProviderProfile]:
     """Providers ordered cheapest-first — the escalation ladder for a page.
 
@@ -225,11 +226,24 @@ def provider_ladder(
         registry: cost table override (defaults to DEFAULT_PROVIDERS). Ignored
             when ``available`` is a ``list[ProviderProfile]``.
         per_page_only: keep only providers that can OCR individual pages.
-        max_cost_per_page: if > 0, drop providers above this price cap.
+        max_cost_per_page: if > 0, drop providers above this price cap. ``<= 0``
+            is the "no cap" sentinel (the PipelineConfig default) UNLESS
+            ``zero_cap_pinned`` says the caller means it literally.
         include_ineligible: if True, include providers with auto_eligible=False
             (DeepSeek, Mistral, Nougat). Default False — they are excluded from
             the automatic routing ladder and only reachable via explicit
             --primary.
+        zero_cap_pinned: GH-154. ``max_cost_per_page`` defaults to 0.0, which
+            everywhere else in the codebase means "no cap" -- so a cloud rung
+            priced at $0.00 (``PROFILE_QWEN_CLOUD``, an Ollama-Cloud estimate)
+            always passes the price check and a cap of exactly 0 silently
+            allows cloud egress. Set this True only when the CALLER already
+            knows the user explicitly typed ``--max-cost-per-page 0`` (not
+            just left it at its default): with ``max_cost_per_page <= 0.0``
+            AND this flag True, cloud-tier profiles are dropped regardless of
+            their listed price, matching the documented equivalent-to-
+            --strict-local intent for spend. False (the default) leaves every
+            existing caller's behaviour unchanged.
     """
     if available is not None and available and isinstance(next(iter(available)), ProviderProfile):
         profiles: list[ProviderProfile] = list(available)  # type: ignore[arg-type]
@@ -241,12 +255,14 @@ def provider_ladder(
             avail = set(available)  # type: ignore[arg-type]
         profiles = [p for e, p in reg.items() if e in avail]
 
+    zero_cap_active = zero_cap_pinned and max_cost_per_page <= 0.0
     ladder = [
         p
         for p in profiles
         if (not per_page_only or p.supports_per_page)
         and (max_cost_per_page <= 0.0 or p.cost_per_page_usd <= max_cost_per_page)
         and (include_ineligible or p.auto_eligible)
+        and not (zero_cap_active and p.tier == TIER_CLOUD)
     ]
     return sorted(ladder, key=_sort_key)
 

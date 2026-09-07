@@ -2525,6 +2525,7 @@ class UnifiedPipeline:
             profiles,
             per_page_only=True,
             max_cost_per_page=self.config.max_cost_per_page,
+            zero_cap_pinned=self.config.max_cost_per_page_pinned,
         )
         for profile in ladder:
             if (getattr(profile, "model", "") or "") != model:
