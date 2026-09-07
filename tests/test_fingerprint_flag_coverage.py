@@ -258,3 +258,33 @@ def test_table_judge_rung1_host_is_ignored_while_the_ladder_is_off() -> None:
     assert _fingerprint(
         table_judge_ladder=False, table_judge_rung1_host="http://alpha:11434"
     ) == _fingerprint(table_judge_ladder=False, table_judge_rung1_host="http://beta:11434")
+
+
+def test_gh154_pinned_zero_cap_has_its_own_fingerprint_key() -> None:
+    """GH-154 round 3 (Astra/Codex review): an OMITTED ``--max-cost-per-page``
+    and an EXPLICIT ``--max-cost-per-page 0`` both leave
+    ``max_cost_per_page == 0.0`` on the config, but
+    ``zero_cap_pinned_forbids_cloud`` now routes them differently -- the
+    pinned run excludes cloud/remote rungs the unpinned default still
+    admits. ``_socr_source_digest`` distinguishes CODE versions, not two
+    CONFIGURATIONS under the same code, so the pinned bit must be its own
+    fingerprint key.
+    """
+    extra_unpinned = _fingerprint_extra(max_cost_per_page=0.0, max_cost_per_page_pinned=False)
+    extra_pinned = _fingerprint_extra(max_cost_per_page=0.0, max_cost_per_page_pinned=True)
+    assert extra_unpinned["max_cost_per_page_pinned"] is False
+    assert extra_pinned["max_cost_per_page_pinned"] is True
+
+    assert _fingerprint(max_cost_per_page=0.0, max_cost_per_page_pinned=False) != _fingerprint(
+        max_cost_per_page=0.0, max_cost_per_page_pinned=True
+    ), "omitted-zero and explicit-zero route differently and must not share a fingerprint"
+
+
+def test_gh154_pinned_bit_recorded_verbatim_above_zero() -> None:
+    """Control: the bit is recorded unconditionally (not only near zero), so
+    a real positive cap still carries it through into the fingerprint extra
+    exactly as set -- there is no hidden gate that only engages near zero.
+    """
+    extra = _fingerprint_extra(max_cost_per_page=0.05, max_cost_per_page_pinned=True)
+    assert extra["max_cost_per_page_pinned"] is True
+    assert extra["max_cost_per_page"] == 0.05

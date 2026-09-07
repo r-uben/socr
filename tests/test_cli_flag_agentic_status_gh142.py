@@ -132,6 +132,13 @@ _UNEXERCISED = {
     "deepseek_vllm_url",
     "qwen_vllm_model",
     "qwen_model_pinned",
+    # GH-154: read by provider_ladder's zero_cap_pinned kwarg (via
+    # _build_ladder_and_escalation_profile / _equation_lane_provider) to give
+    # an EXPLICIT --max-cost-per-page 0 its own meaning. This fixture's default
+    # max_cost_per_page=0.0 leaves it False, so the branch it gates is unreached
+    # here; see tests/test_providers.py::test_gh154_zero_cap_pinned_* for the
+    # falsification.
+    "max_cost_per_page_pinned",
     "judge_backend",  # read by _build_page_judge, stubbed here
     # Read only inside the table-extractor block, which is gated on
     # _resolve_crop_vlm_model() finding a live vision model. Pinned to None in

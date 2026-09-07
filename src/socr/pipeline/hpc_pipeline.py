@@ -430,6 +430,22 @@ class HPCPipeline:
         if not failed_pages:
             return {}
 
+        # GH-154 round 4: the caller gates this on ``hpc.cloud_fallback`` alone
+        # (a feature switch), which says nothing about ``--strict-local`` or an
+        # EXPLICIT ``--max-cost-per-page 0``. Gemini is paid cloud egress, not
+        # a configured local/HPC inference server, so the same shared policy
+        # applies here too -- checked independently of the call site for
+        # defense in depth.
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config):
+            if not self.config.quiet:
+                console.print(
+                    "  [dim]Gemini fallback skipped: forbidden by strict-local/"
+                    "--max-cost-per-page 0 policy[/dim]"
+                )
+            return {}
+
         if not self.config.quiet:
             console.print(f"  [dim]Gemini fallback for {len(failed_pages)} pages...[/dim]")
 
