@@ -1595,20 +1595,82 @@ def structure_class_floor_text(p, page_num: int) -> str:
     return table_floor_text_for_source(p, page_num, getattr(p, "native_text", "") or "")
 
 
-def table_floor_text_for_source(p, page_num: int, source_text: str) -> str:
-    """The GH-520 four-condition coverage check plus splice, over ANY source.
+def _table_bbox_sane(p) -> bool:
+    """B1 / #591 bbox sanity checks the panel asked for.
+
+    A detected-table bbox that is structurally not the table it claims to
+    bound must fail the GH-520 guard closed, rather than licence a splice
+    around the wrong box (#639: on ECB annex pages ``detected_table_bboxes``
+    is the caption/units box, not the body).
+
+    Too small: the bbox union's own native bands (clustered the same way
+    row corroboration clusters them) contain no genuine numeric token at
+    all -- the box left the table's numeric rows outside it.
+
+    Too large: within the bbox union, bands carrying no numeric token
+    (prose) outnumber the bands that do -- the box swallowed paragraph
+    text beyond the table's own rows. A single spanning units/legend band
+    is normal and does not trip this; a majority of prose bands does.
+
+    Neither check is a licence on its own -- both run alongside the four
+    coverage/reconstruction conditions below, and any one failing floors
+    the whole page. Returns True (no objection) when there is nothing to
+    check against, leaving the existing four conditions to decide.
+    """
+    words = getattr(p, "native_words", None) or []
+    bboxes = getattr(p, "detected_table_bboxes", None) or []
+    if not words or not bboxes:
+        return True
+
+    from socr.tables.row_corroboration import baseline_bands, words_in_region
+
+    region = _union_bbox(list(bboxes))
+    if region is None:
+        return True
+
+    bands = baseline_bands(words_in_region(words, region))
+    if not bands:
+        return False  # too small: no native band at all inside the claimed box
+    numeric_bands = [b for b in bands if b.tokens]
+    if not numeric_bands:
+        return False  # too small: the box captured no numeric row
+    prose_bands = [b for b in bands if not b.tokens]
+    return len(prose_bands) <= len(numeric_bands)  # too large otherwise
+
+
+def table_floor_text_for_source(
+    p, page_num: int, source_text: str, *, fallback_marker: str | None = None
+) -> str:
+    """The GH-520 coverage check plus splice, over ANY source.
 
     Factored out of ``structure_class_floor_text`` for P1's withhold path,
     which must splice the SELECTED output's text -- a model winner, not
     necessarily the native layer. Substituting ``p.native_text`` there would
     ship a different page's bytes than the one selection chose.
 
+    B1 / #591 extended this to a fifth call site (the ``page_failed`` ending,
+    ``_select_page_output_tagged``'s no-text-anywhere fallback) via
+    ``fallback_marker``: that caller wants its own whole-page marker text
+    (``page_failed_marker``, "no usable OCR output") on a guard failure, not
+    this function's D3-style "unverifiable table" default -- the page may
+    have failed for a reason that has nothing to do with a table at all.
+    Every early return below uses it in place of the D3 marker when given;
+    the SPLICE itself is unaffected (the D3 marker still stamps each
+    covered table region, unchanged, because the guard passed there).
+
     The conditions themselves are unchanged and unweakened: they are the
-    argument, and the docstring above is where that argument lives.
+    argument, and ``structure_class_floor_text``'s docstring is where that
+    argument lives. ``_table_bbox_sane`` (B1) adds two more: a bbox that is
+    structurally not the table it claims to bound (too small or too large)
+    fails closed the same as an uncovered or unreconstructed one.
     """
     d3_marker = f"[page {page_num} failed: unverifiable table — see image]"
     png_ref = getattr(p, "d3_floor_png_ref", "")
-    whole_page = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
+    whole_page = (
+        fallback_marker
+        if fallback_marker is not None
+        else (f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker)
+    )
 
     source_text = source_text or ""
     if not source_text.strip():
@@ -1632,8 +1694,78 @@ def table_floor_text_for_source(p, page_num: int, source_text: str) -> str:
     if len(blocks) != detected_count:
         return whole_page
 
+    if not _table_bbox_sane(p):
+        return whole_page
+
     spliced = splice_all_table_regions(source_text, d3_marker, png_ref)
     return spliced if spliced else whole_page
+
+
+#: Minimum share of an OCR attempt's outside-table vocabulary (tokens of 4+
+#: letters, lowercased) that must also appear among the page's native words
+#: for B1's ``UNVERIFIABLE_TABLE_SCANNED`` prose-corroboration guard
+#: (``_prose_corroboration_ok``) to allow splicing that attempt's prose
+#: around the withheld table region, rather than fail closed to the bare
+#: marker. Unlike ``ROW_CORROBORATION_MIN`` / ``EXTRA_NUMBERS_MAX_SHARE``
+#: (row_corroboration.py), this is NOT set strictly between two measured
+#: anchors: the only two real fixtures checked (2026-09-07, see
+#: docs/log/2026-09-07_B1-page-failed-marker-scope.md) both measured 1.0 --
+#: Fed 1989-11-14 p3's nougat attempt (failure_mode=hallucination) read the
+#: page's real vocabulary but reordered it into the wrong table rows/columns,
+#: which token-overlap cannot see; ECB survey-2013 p1's genuine gemini
+#: attempt also measured 1.0. No fabricated-vocabulary fixture exists in the
+#: census set to anchor the low side. 0.5 is a defensive floor, not a
+#: calibrated threshold: an attempt whose outside-table vocabulary is
+#: majority-corroborated by the native text layer is accepted; one that
+#: shares less than half is refused. Flagged as a follow-up to calibrate
+#: against a genuine fabrication fixture when one turns up.
+PROSE_CORROBORATION_MIN: float = 0.5
+
+_PROSE_TOKEN_RE = re.compile(r"[a-z]{4,}")
+
+
+def _prose_corroboration_ok(p, attempt_text: str) -> bool:
+    """B1 / #591: geometric-only corroboration for ``UNVERIFIABLE_TABLE_SCANNED``.
+
+    ``UNVERIFIABLE_TABLE_SCANNED`` splices ``best_output.text`` -- an OCR
+    attempt the page's own audit already flagged (``failure_mode=
+    hallucination``) -- around the withheld table region with no coverage
+    guard at all. Unlike ``table_floor_text_for_source``, this branch has no
+    reconstructed native table to reconcile against (a scanned page reaches
+    it precisely because native table detection found nothing), so the only
+    available check is mechanical: does the attempt's own vocabulary overlap
+    words the page's native text layer actually contains?
+
+    Deliberately does NOT parse or trust the attempt's structure (row order,
+    column binding) -- it can only tell "these are real words on this page",
+    not "these words are attributed to the right place". That is why the
+    ``UNVERIFIABLE_TABLE_SCANNED`` marker still fires whenever
+    ``splice_all_table_regions`` can't find a markdown table block to work
+    around: this guard governs the PROSE around a spliced table, not the
+    table region itself.
+
+    No witness (``p.native_words`` empty, e.g. the page has no real text
+    layer, or the caching gate in ``orchestrator.py`` never ran for it) fails
+    closed -- absence of a check is not corroboration.
+    """
+    words = getattr(p, "native_words", None) or []
+    if not words:
+        return False
+    bboxes = getattr(p, "detected_table_bboxes", None) or []
+    native_tokens: set[str] = set()
+    for w in words:
+        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if any(bx0 <= cx <= bx1 and by0 <= cy <= by1 for bx0, by0, bx1, by1 in bboxes):
+            continue
+        native_tokens.update(_PROSE_TOKEN_RE.findall(text.lower()))
+    if not native_tokens:
+        return False
+    attempt_tokens = set(_PROSE_TOKEN_RE.findall((attempt_text or "").lower()))
+    if not attempt_tokens:
+        return False
+    overlap = len(attempt_tokens & native_tokens) / len(attempt_tokens)
+    return overlap >= PROSE_CORROBORATION_MIN
 
 
 class PageEnding(str, Enum):
@@ -1977,7 +2109,26 @@ def _select_page_output_tagged(
         png_ref = getattr(p, "d3_floor_png_ref", "")
 
         best_output_text = (p.best_output.text or "") if p.best_output else ""
-        d3_text = splice_all_table_regions(best_output_text, marker_line=d3_marker, png_ref=png_ref)
+
+        # B1 (#591): GH-520's four-condition coverage guard
+        # (table_floor_text_for_source) cannot apply to this branch -- its
+        # first condition requires detected_table_count > 0, but a page
+        # reaches here (``not p.is_born_digital``) precisely because native
+        # table DETECTION found nothing on it (measured: Fed 1989-11-14 p3,
+        # detected_table_count=0, 0 detected bboxes) -- there is no detected
+        # geometry to reconcile splice_all_table_regions's blocks against.
+        # The mechanical check available here instead is
+        # ``_prose_corroboration_ok``: does the attempt's own vocabulary
+        # overlap words the page's native text layer actually contains?
+        # Unguarded, this branch spliced ``best_output.text`` -- an attempt
+        # the page's own audit already flagged HALLUCINATION -- with nothing
+        # checking it against reality first.
+        if _prose_corroboration_ok(p, best_output_text):
+            d3_text = splice_all_table_regions(
+                best_output_text, marker_line=d3_marker, png_ref=png_ref
+            )
+        else:
+            d3_text = None
 
         if d3_text is None:
             d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
@@ -2407,11 +2558,24 @@ def _select_page_output_tagged(
             provider_backend=attempt.provider_backend,
         ), SelectionProvenance.BEST_ATTEMPT_FLAGGED
     # Nothing anywhere produced text: ship an EXPLICIT failure marker, never
-    # a silent gap between page headers.
+    # a silent gap between page headers -- B1 / #591: unless native prose
+    # outside a detected table survives the same GH-520 coverage guard the
+    # structure-class floor and the withhold ending already apply, in which
+    # case that prose ships and only the table region(s) marker.
+    whole_page_marker = page_failed_marker(page_num)
+    native_text = getattr(p, "native_text", "") or ""
+    floor_text = table_floor_text_for_source(
+        p, page_num, native_text, fallback_marker=whole_page_marker
+    )
+    # R7: the cascade must be single-return-per-ending (test_r7_winner_kind_tags.py),
+    # so both outcomes share ONE return, differing only in which values they carry
+    # -- not two returns tagged with the same SelectionProvenance member.
+    prose_kept = floor_text != whole_page_marker and bool(native_text.strip())
     return PageOutput(
         page_num=page_num,
-        text=page_failed_marker(page_num),
+        text=floor_text if prose_kept else whole_page_marker,
         status=PageStatus.ERROR,
+        engine="native" if prose_kept else "",
         audit_passed=False,
     ), SelectionProvenance.NO_TEXT_MARKER
 

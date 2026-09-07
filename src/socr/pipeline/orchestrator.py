@@ -1630,11 +1630,25 @@ class UnifiedPipeline:
         # table has nothing for the fallback to score against. Best-effort:
         # any failure to open/read the PDF leaves ``native_words`` at its
         # default empty list, which only ever makes the fallback abstain.
+        #
+        # B1 (#591): also cache for a page ``born_digital`` classified
+        # ``not is_born_digital`` -- ``apply_born_digital`` never copies
+        # ``pa.native_text`` onto ``PageState`` for such a page (state.py
+        # ``apply_born_digital``: the assignment is gated on
+        # ``if pa.is_born_digital``), so a genuinely scanned-with-a-real-text-
+        # -layer page (measured: Fed 1989-11-14 p3, 295 native words, 0
+        # detected tables) would otherwise reach
+        # ``UNVERIFIABLE_TABLE_SCANNED``'s prose-corroboration guard with NO
+        # witness at all -- not "no evidence of corroboration", but no data
+        # to check in the first place. Widening this filter is what makes
+        # that guard able to fire on the exact fixture it exists to protect.
         try:
             from socr.core.pdf import open_pdf
 
             pages_needing_words = [
-                pa.page_num for pa in assessment.pages if pa.detected_table_count > 0
+                pa.page_num
+                for pa in assessment.pages
+                if pa.detected_table_count > 0 or not pa.is_born_digital
             ]
             if pages_needing_words:
                 doc = open_pdf(state.handle.path)

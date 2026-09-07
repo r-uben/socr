@@ -95,6 +95,17 @@ def _md_table(header: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def _native_words_for(text: str) -> list[tuple]:
+    """B1 (#591): synthetic native-word witness for
+    ``manifest._prose_corroboration_ok``, whose guard on
+    ``UNVERIFIABLE_TABLE_SCANNED`` requires the attempt's vocabulary to
+    overlap ``PageState.native_words``. Geometry is irrelevant here (these
+    fixtures never set ``detected_table_bboxes``, so nothing is excluded by
+    region) -- only the token text matters, so every word gets the same
+    placeholder bbox."""
+    return [(0.0, 0.0, 1.0, 1.0, tok, 0, 0, 0) for tok in text.split()]
+
+
 # ---------------------------------------------------------------------------
 # Task t1: Stable Native Table-Region Identity During Per-Region Verification
 # ---------------------------------------------------------------------------
@@ -1155,6 +1166,7 @@ class TestTask5_ScannedPageProsePreservation:
         state = DocumentState(handle=_make_handle(1))
         ps = state.pages[1]
         ps.is_born_digital = False
+        ps.native_words = _native_words_for(model_text)
         ps.scanned_table_evidence_failed = True
         ps.d3_floor_png_ref = "![Scanned Page 1](figures/scanned_p1.png)"
 
@@ -1198,6 +1210,7 @@ class TestTask5_ScannedPageProsePreservation:
         state = DocumentState(handle=_make_handle(1))
         ps = state.pages[1]
         ps.is_born_digital = False
+        ps.native_words = _native_words_for(model_text)
         accepted = PageOutput(
             page_num=1,
             text=model_text,
@@ -1231,6 +1244,7 @@ class TestTask5_ScannedPageProsePreservation:
         state = DocumentState(handle=_make_handle(1))
         ps = state.pages[1]
         ps.is_born_digital = False
+        ps.native_words = _native_words_for(model_text)
         ps.scanned_table_evidence_failed = True
         ps.d3_floor_png_ref = "![Scanned](figures/p1.png)"
 
