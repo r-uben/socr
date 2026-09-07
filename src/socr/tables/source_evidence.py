@@ -95,13 +95,24 @@ NO_READING_STATES: frozenset[str] = frozenset(
 #: operator none of them.
 WITNESS_STATE_MESSAGES: dict[str, str] = {
     WITNESS_PACKAGE_MISSING: (
-        "the pytesseract package is not installed (install socr's scanned extra)"
+        "the pytesseract package is not installed; install it into socr's environment "
+        "('uv pip install pytesseract') and install the tesseract executable it drives"
     ),
     WITNESS_BINARY_MISSING: (
-        "the tesseract executable is not installed or not on PATH (e.g. 'brew install tesseract')"
+        "the tesseract executable is not installed or not on PATH ('brew install tesseract' "
+        "on macOS, 'apt install tesseract-ocr' on Debian/Ubuntu)"
     ),
-    WITNESS_EXEC_ERROR: "the classical OCR reader raised on every attempt",
-    WITNESS_RENDER_ERROR: "the page could not be rasterised, so no image reached the OCR reader",
+    # Deliberately NOT an install instruction. The reader is present and
+    # reachable; telling the operator to install it again is advice that cannot
+    # work, and it hides the actual failure.
+    WITNESS_EXEC_ERROR: (
+        "the classical OCR reader is installed but failed while reading this page; "
+        "installing it again will not help -- see the recorded error"
+    ),
+    WITNESS_RENDER_ERROR: (
+        "the page could not be rasterised, so no image ever reached the OCR reader; "
+        "the OCR install is not the problem here"
+    ),
     WITNESS_NOT_ATTEMPTED: "no classical OCR read was attempted on this page",
 }
 
@@ -174,6 +185,12 @@ class SourceEvidenceResult:
     #: ending that predates the distinction. Currently only
     #: ``CAUSE_NO_WITNESS_BACKEND`` is emitted.
     cause: str = ""
+    #: #658: WHICH no-reading state produced the cause above -- one of the
+    #: ``WITNESS_*`` values. Carried separately from ``cause`` because every
+    #: consumer's DECISION is the same (do not call this a hallucination) while
+    #: the operator's ACTION is not: a missing install is fixed by installing,
+    #: a crashed reader and an unrenderable page are not.
+    witness_state: str = ""
 
 
 def page_has_native_words(page) -> bool:
@@ -276,9 +293,11 @@ def classical_ocr_with_state(pix) -> tuple[str, str, str]:
     perfectly good candidates as fabrications. Each outcome needs a different
     operator action, so each gets its own state.
 
-    ``pytesseract.get_tesseract_version()`` separates a missing package from a
-    missing binary and is called only after ``image_to_string`` has already
-    failed, so the happy path costs nothing extra.
+    The absent-executable case is taken from ``TesseractNotFoundError``, which
+    is the exception pytesseract raises for exactly that, rather than from a
+    version probe. A probe that raises says only "this call failed": a present
+    but BROKEN executable raises there too, and reading that as "not installed"
+    tells the operator to install something they already have.
     """
     try:
         import pytesseract
@@ -291,12 +310,11 @@ def classical_ocr_with_state(pix) -> tuple[str, str, str]:
         text = pytesseract.image_to_string(img) or ""
     except Exception as exc:
         logger.debug("classical OCR failed: %s", exc)
-        # Distinguish "the tool is not there" from "the tool broke on this
-        # image": only the first is fixed by an install.
-        try:
-            pytesseract.get_tesseract_version()
-        except Exception:
+        not_found = getattr(pytesseract, "TesseractNotFoundError", ())
+        if not_found and isinstance(exc, not_found):
             return "", WITNESS_BINARY_MISSING, WITNESS_STATE_MESSAGES[WITNESS_BINARY_MISSING]
+        # Installed and reachable, but it failed on this page. Not an install
+        # problem, and it must never be reported as one.
         return "", WITNESS_EXEC_ERROR, f"{type(exc).__name__}: {exc}"
     if not text.strip():
         return "", WITNESS_EMPTY_READING, ""
@@ -475,6 +493,7 @@ def verify_table_tokens(
                 passed=False,
                 reason=f"no classical OCR witness read this page: {why}{detail}",
                 cause=CAUSE_NO_WITNESS_BACKEND,
+                witness_state=bundle.witness_state,
             )
         return SourceEvidenceResult(
             verifiable=False,

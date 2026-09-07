@@ -592,7 +592,11 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                     detail=result.reason,
                     data={
                         "cause": result.cause,
-                        "witness_backend": "absent",
+                        # The precise state, never a flat "absent": an OCR
+                        # reader that crashed and a page that would not
+                        # rasterise are both unwitnessed, and neither is fixed
+                        # by installing anything.
+                        "witness_state": result.witness_state,
                     },
                 )
             output.audit_passed = False

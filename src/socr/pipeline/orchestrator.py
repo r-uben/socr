@@ -2434,6 +2434,7 @@ class UnifiedPipeline:
             TABLE_BINDING_ADJUDICATED_KIND,
             TABLE_LADDER_EVENT_KINDS,
         )
+        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
 
         return frozenset(
             TABLE_LADDER_EVENT_KINDS
@@ -2446,6 +2447,13 @@ class UnifiedPipeline:
             # summary below both read this event, so dropping it on resume
             # would silently retire the debt.
             | {VISUAL_VALUES_NOT_TRANSCRIBED_KIND}
+            # #658: same contract, same reason. The witness state lives ONLY on
+            # this event, and the document note and CLI line read it to say
+            # which fix applies to which page. Dropping it on resume would not
+            # retire the finding -- the page's own flag and failure mode still
+            # name it -- but it would silently downgrade the explanation to
+            # "cause not recorded" on every resumed run.
+            | {NO_WITNESS_BACKEND_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -3606,61 +3614,111 @@ class UnifiedPipeline:
 
     @staticmethod
     def _no_witness_backend_pages(state, records: list | None = None) -> list[int]:
-        """#658: pages the source-evidence gate could not witness at all.
+        """#658: pages whose FINAL outcome is "nothing read this page".
 
-        A UNION of four sources, not a fallback chain, because each one is
-        blind on its own: the audit event is the emit site but ``state.events``
-        does not survive resume; the persisted ``scanned_table_no_witness`` flag
-        does survive but is set only where the scanned floor applied; a
-        ``PageOutput.failure_mode`` covers the attempts but only the ones still
-        in memory; and the finalized records are the authoritative shipped set
-        yet exist only inside assemble. The finding is "this run had no OCR
-        witness for this page", which stays true whichever source names it.
+        A TERMINAL diagnosis, deliberately not a union over history. An earlier
+        draft OR-ed every no-witness audit event and every historical attempt
+        into this set, so a page whose first read failed and whose later reread
+        SUCCEEDED -- or whose later witness contradicted the table outright --
+        still reported that its table "was neither corroborated nor
+        contradicted". That sentence was then false about the page that shipped.
+
+        Precedence, not a union:
+
+        1. the finalized records, when assemble has them: they ARE the shipped
+           set, and a page whose shipped output is no longer a no-witness floor
+           is not one, whatever earlier attempts recorded;
+        2. otherwise the page's own final state -- the persisted
+           ``scanned_table_no_witness`` flag (cleared when a reread is
+           accepted) or the failure mode of ``best_output``, the winner.
+
+        ``attempts`` and ``state.events`` are consulted by neither: those are
+        history, and history is what made the note lie.
         """
-        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
-
-        pages = {
-            e.page_num
-            for e in state.events
-            if getattr(e, "kind", "") == NO_WITNESS_BACKEND_KIND and e.page_num
-        }
+        if records:
+            return sorted(
+                {
+                    rec.output.page_num
+                    for rec in records
+                    if rec.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
+                }
+            )
+        pages: set[int] = set()
         for num, ps_ in state.pages.items():
-            # The persisted flag first: it is the only one of the four sources
-            # that survives a resume intact, which is exactly the run where the
-            # events list is empty and the attempts were rebuilt from a sidecar.
             if getattr(ps_, "scanned_table_no_witness", False):
                 pages.add(num)
                 continue
-            outputs = list(getattr(ps_, "attempts", None) or [])
             best = getattr(ps_, "best_output", None)
-            if best is not None:
-                outputs.append(best)
-            if any(o.failure_mode is FailureMode.NO_WITNESS_BACKEND for o in outputs):
+            if best is not None and best.failure_mode is FailureMode.NO_WITNESS_BACKEND:
                 pages.add(num)
-        for rec in records or ():
-            if rec.output.failure_mode is FailureMode.NO_WITNESS_BACKEND:
-                pages.add(rec.output.page_num)
         return sorted(pages)
+
+    @staticmethod
+    def _no_witness_states(state, pages: list[int]) -> dict[str, list[int]]:
+        """Group terminally-unwitnessed pages by WHY, newest event per page.
+
+        The witness state lives only on the audit event, and the events are
+        history -- but here history is being used to explain pages whose
+        terminal status is already settled by the caller, never to select them.
+        A resumed run has no events; those pages group under "" and get the
+        generic wording, which is the honest thing to say when the cause was
+        not carried across the resume.
+        """
+        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
+
+        wanted = set(pages)
+        by_page: dict[int, str] = {}
+        for e in state.events:
+            if getattr(e, "kind", "") != NO_WITNESS_BACKEND_KIND:
+                continue
+            if e.page_num not in wanted:
+                continue
+            by_page[e.page_num] = str((getattr(e, "data", None) or {}).get("witness_state") or "")
+        grouped: dict[str, list[int]] = {}
+        for num in pages:
+            grouped.setdefault(by_page.get(num, ""), []).append(num)
+        return {k: sorted(v) for k, v in grouped.items()}
+
+    @staticmethod
+    def _no_witness_clauses(state, pages: list[int]) -> list[str]:
+        """One clause per distinct cause: which pages, and what actually fixes it.
+
+        A single sentence cannot serve these pages. "Install tesseract" is the
+        right advice for a missing binary and useless-to-harmful advice for a
+        reader that is installed and crashed, or for a page that would not
+        rasterise -- the operator is sent to fix a component that works.
+        """
+        from socr.tables.source_evidence import WITNESS_STATE_MESSAGES
+
+        clauses = []
+        for witness_state, nums in sorted(UnifiedPipeline._no_witness_states(state, pages).items()):
+            why = WITNESS_STATE_MESSAGES.get(
+                witness_state,
+                "the cause was not recorded on this run; see the "
+                "source_evidence_no_witness_backend entries in audit_log.json",
+            )
+            clauses.append(f"page(s) {', '.join(str(n) for n in nums)}: {why}")
+        return clauses
 
     @staticmethod
     def _no_witness_backend_note(state, records: list | None = None) -> str | None:
         """Document-level one-liner naming the pages with no OCR witness (#658).
 
         Mirrors ``_fabricated_url_note``: a consumer gating on ``metadata.json``
-        must see that these pages were failed closed for a MISSING TOOL and not
-        for fabricated content, without parsing the full audit log. Names the
-        remedy, because unlike every other note here this failure is fixed on
-        the host rather than in the document. ``None`` on a clean run.
+        must see that these pages were failed closed because nothing READ them
+        and not because they fabricated content, without parsing the full audit
+        log. Carries a remedy per cause, because unlike every other note here
+        this failure is fixed on the host rather than in the document.
+        ``None`` on a clean run.
         """
         pages = UnifiedPipeline._no_witness_backend_pages(state, records)
         if not pages:
             return None
+        clauses = "; ".join(UnifiedPipeline._no_witness_clauses(state, pages))
         return (
-            f"page(s) {', '.join(str(n) for n in pages)}: "
-            "scanned table(s) failed closed with NO local OCR witness -- no classical "
-            "OCR backend is installed, so nothing read the page pixels and the table "
-            "was neither corroborated nor contradicted; install tesseract and "
-            "pytesseract, then re-run these pages"
+            f"page(s) {', '.join(str(n) for n in pages)}: scanned table(s) shipped the "
+            "fail-closed floor with NO local OCR witness -- nothing read the page pixels, "
+            f"so the table was neither corroborated nor contradicted ({clauses})"
         )
 
     @staticmethod
@@ -10500,13 +10558,15 @@ class UnifiedPipeline:
                 no_witness_pages = self._no_witness_backend_pages(state, pre_records)
                 if no_witness_pages:
                     console.print(
-                        f"  [red]{len(no_witness_pages)} scanned table page(s) had NO local "
-                        f"OCR witness (no classical OCR backend installed), so the table "
-                        f"could be neither corroborated nor contradicted: {no_witness_pages}"
-                        f"[/red]\n"
-                        f"    [yellow]Install tesseract (e.g. 'brew install tesseract') and "
-                        f"the pytesseract package, then re-run these pages.[/yellow]"
+                        f"  [red]{len(no_witness_pages)} scanned table page(s) shipped the "
+                        f"fail-closed floor with NO local OCR witness, so the table could be "
+                        f"neither corroborated nor contradicted: {no_witness_pages}[/red]"
                     )
+                    # One line per CAUSE. A blanket "install tesseract" is wrong
+                    # for a reader that is installed and crashed, and for a page
+                    # that would not rasterise.
+                    for _clause in self._no_witness_clauses(state, no_witness_pages):
+                        console.print(f"    [yellow]{_clause}[/yellow]")
                 if native_fallback_pages:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "

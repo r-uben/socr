@@ -410,9 +410,19 @@ def _records(mode: FailureMode) -> list:
     ]
 
 
-def _assemble(tmp_path: Path, mode: FailureMode):
+def _assemble(tmp_path: Path, mode: FailureMode, witness_state: str = WITNESS_BINARY_MISSING):
     pipeline = _pipeline()
     state = _state(tmp_path)
+    if mode is FailureMode.NO_WITNESS_BACKEND:
+        state.events.append(
+            AuditEvent(
+                page_num=1,
+                kind=NO_WITNESS_BACKEND_KIND,
+                engine="qwen",
+                detail="no classical OCR witness read this page",
+                data={"cause": CAUSE_NO_WITNESS_BACKEND, "witness_state": witness_state},
+            )
+        )
     with patch("socr.core.manifest.finalized_page_records", return_value=_records(mode)):
         return pipeline._phase_assemble(state, tmp_path)
 
@@ -435,42 +445,134 @@ def test_document_metadata_names_the_missing_backend_only_for_the_no_witness_run
     assert "tesseract" not in contra_error
 
 
+def test_a_crashed_reader_is_never_told_to_install_the_reader(tmp_path: Path) -> None:
+    """Reviewer follow-up: ``exec_error`` and ``render_error`` are unwitnessed
+    too, but the reader is installed and working. Advising an install there
+    sends the operator to fix a component that is not broken.
+    """
+    crashed = _assemble(tmp_path / "a", FailureMode.NO_WITNESS_BACKEND, WITNESS_EXEC_ERROR)
+    unrenderable = _assemble(tmp_path / "b", FailureMode.NO_WITNESS_BACKEND, WITNESS_RENDER_ERROR)
+    absent = _assemble(tmp_path / "c", FailureMode.NO_WITNESS_BACKEND, WITNESS_BINARY_MISSING)
+
+    # An INSTRUCTION to install, not the word "install" -- the crashed-reader
+    # message legitimately says the reader "is installed".
+    commands = ("brew install", "apt install", "uv pip install", "pip install")
+    for result in (crashed, unrenderable):
+        error = result.error or ""
+        # Still reported, still fail-closed, still not a hallucination.
+        assert "NO local OCR witness" in error
+        assert not any(cmd in error for cmd in commands)
+    # The control: a genuinely absent binary DOES get the install instruction.
+    assert "brew install tesseract" in (absent.error or "")
+
+
 def test_cli_run_report_line_names_the_pages_and_the_remedy(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _assemble(tmp_path / "a", FailureMode.NO_WITNESS_BACKEND)
-    absent_out = capsys.readouterr().out
+    # Rich hard-wraps the console to the terminal width, so a phrase can be
+    # split across lines. Compare on collapsed whitespace, not raw output.
+    absent_out = " ".join(capsys.readouterr().out.split())
     _assemble(tmp_path / "b", FailureMode.HALLUCINATION)
-    contra_out = capsys.readouterr().out
+    contra_out = " ".join(capsys.readouterr().out.split())
 
-    assert "NO local" in absent_out
-    assert "OCR witness" in absent_out
-    assert "Install tesseract" in absent_out
+    assert "NO local OCR witness" in absent_out
+    assert "brew install tesseract" in absent_out
     assert "[1]" in absent_out
     assert "OCR witness" not in contra_out
 
 
-def test_note_helper_reads_the_event_when_the_page_record_does_not_carry_it(
-    tmp_path: Path,
-) -> None:
-    """The two sources are a union, not a fallback: an event alone is enough
-    (the winner may be a later candidate whose own mode is clean), which is
-    what keeps the finding visible after selection replaces the attempt.
+def test_a_historical_event_alone_is_not_a_terminal_diagnosis(tmp_path: Path) -> None:
+    """Reviewer item 3. An earlier draft OR-ed every no-witness event into the
+    reported set, so a page whose later reader succeeded still shipped the
+    sentence "neither corroborated nor contradicted" -- false about the page
+    that actually shipped.
+
+    An event with no matching terminal outcome must produce no note at all.
     """
     state = _state(tmp_path)
-    assert UnifiedPipeline._no_witness_backend_note(state) is None
     state.events.append(
         AuditEvent(
-            page_num=3,
+            page_num=1,
             kind=NO_WITNESS_BACKEND_KIND,
             engine="qwen",
             detail="no classical OCR witness",
-            data={"cause": CAUSE_NO_WITNESS_BACKEND},
+            data={"cause": CAUSE_NO_WITNESS_BACKEND, "witness_state": WITNESS_BINARY_MISSING},
         )
     )
-    note = UnifiedPipeline._no_witness_backend_note(state)
-    assert note is not None
-    assert "page(s) 3" in note
+    assert UnifiedPipeline._no_witness_backend_pages(state) == []
+    assert UnifiedPipeline._no_witness_backend_note(state) is None
+
+
+def test_a_later_successful_read_retires_the_finding(tmp_path: Path) -> None:
+    """The same page, twice: floored for want of a witness, then rescued by a
+    reread. The historical event stays in the log; the terminal diagnosis must
+    follow the page that shipped.
+    """
+    pdf = tmp_path / "doc.pdf"
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=pdf, page_count=1)
+    state = DocumentState(handle=handle)
+    _floored_scanned_page(state, no_witness=True)
+    state.events.append(
+        AuditEvent(
+            page_num=1,
+            kind=NO_WITNESS_BACKEND_KIND,
+            engine="qwen",
+            detail="no classical OCR witness",
+            data={"cause": CAUSE_NO_WITNESS_BACKEND, "witness_state": WITNESS_BINARY_MISSING},
+        )
+    )
+    assert UnifiedPipeline._no_witness_backend_pages(state) == [1]
+
+    # The reread lands: the floor is released and a witnessed reading wins.
+    ps = state.pages[1]
+    ps.scanned_table_evidence_failed = False
+    ps.scanned_table_no_witness = False
+    ps.best_output = PageOutput(
+        page_num=1,
+        text=CANDIDATE_TABLE,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+    )
+    assert UnifiedPipeline._no_witness_backend_pages(state) == []
+    assert UnifiedPipeline._no_witness_backend_note(state) is None
+
+
+def test_a_later_contradiction_is_not_reported_as_no_witness(tmp_path: Path) -> None:
+    """The other half of item 3: the later witness READ the page and refuted the
+    table. That page is a hallucination ending, and the note must not claim it
+    was never contradicted.
+    """
+    pipeline = _pipeline()
+    state = _state(tmp_path)
+    state.events.append(
+        AuditEvent(
+            page_num=1,
+            kind=NO_WITNESS_BACKEND_KIND,
+            engine="qwen",
+            detail="no classical OCR witness",
+            data={"cause": CAUSE_NO_WITNESS_BACKEND, "witness_state": WITNESS_BINARY_MISSING},
+        )
+    )
+    with patch(
+        "socr.core.manifest.finalized_page_records",
+        return_value=_records(FailureMode.HALLUCINATION),
+    ):
+        result = pipeline._phase_assemble(state, tmp_path)
+    assert "neither corroborated nor contradicted" not in (result.error or "")
+    assert (
+        UnifiedPipeline._no_witness_backend_pages(state, _records(FailureMode.HALLUCINATION)) == []
+    )
+
+
+def test_resume_replays_the_event_so_the_remedy_survives(tmp_path: Path) -> None:
+    """The witness state lives only on the audit event, and the note reads it to
+    pick a remedy. ``resume_restore_kinds`` must replay it, or a resumed run
+    degrades to "cause not recorded" on a page it can still fully explain.
+    """
+    assert NO_WITNESS_BACKEND_KIND in UnifiedPipeline.resume_restore_kinds()
 
 
 # --------------------------------------------------------------------------
@@ -616,7 +718,11 @@ def test_reason_survives_the_sidecar_round_trip_and_the_resumed_rerun(tmp_path: 
     assert not run2.events
     assert UnifiedPipeline._no_witness_backend_pages(run2) == [1]
     note = UnifiedPipeline._no_witness_backend_note(run2)
-    assert note is not None and "tesseract" in note
+    assert note is not None
+    assert "page(s) 1" in note
+    # No event survived this restore path, so the note says so instead of
+    # guessing a remedy it cannot support.
+    assert "audit_log.json" in note
 
 
 def test_pre_ticket_sidecar_restores_the_reading_it_was_written_with(tmp_path: Path) -> None:
@@ -657,3 +763,95 @@ def test_pre_ticket_sidecar_restores_the_reading_it_was_written_with(tmp_path: P
     assert run2.pages[1].scanned_table_evidence_failed is True
     assert run2.pages[1].scanned_table_no_witness is False
     assert UnifiedPipeline._no_witness_backend_pages(run2) == []
+
+
+def test_absent_backend_survives_judge_floor_finalization_and_resume(tmp_path: Path) -> None:
+    """Reviewer item 1's falsifier, as ONE chain rather than four seams.
+
+    Absent backend -> the real judge -> the real latch predicate copied from
+    ``_phase_agentic`` -> the real ``_apply_scanned_table_floor`` -> the real
+    ``_select_page_output_tagged`` -> the real sidecar -> the real restore.
+    The no-witness cause must arrive at the far end, and the floor's shipped
+    bytes and status must be exactly what a hallucination floor ships.
+
+    Nothing here stubs a finalized record, which is what made the earlier
+    document-level tests unable to prove this: they asserted on a record they
+    had built themselves.
+    """
+    import json
+
+    from socr.core.manifest import _select_page_output_tagged
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.touch()
+    out_dir = tmp_path / "out"
+    pipeline = _pipeline()
+
+    # 1. The judge, with no OCR backend anywhere.
+    decision, attempt, events = _assess(witness=_witness(WITNESS_BINARY_MISSING))
+    assert attempt.failure_mode is FailureMode.NO_WITNESS_BACKEND
+
+    # 2. The latch predicate and the no-witness derivation, verbatim from
+    #    ``_phase_agentic`` -- so a change to either fails here.
+    assert "source_evidence_table" in (decision.reason or "")
+    no_witness = attempt.failure_mode is FailureMode.NO_WITNESS_BACKEND
+
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=pdf, page_count=1)
+    state = DocumentState(handle=handle)
+    ps = state.pages[1]
+    ps.is_born_digital = False
+    ps.has_tables = True
+    ps.native_text = ""
+    attempt.page_num = 1
+    ps.attempts.append(attempt)
+    ps.best_output = attempt
+    state.events.extend(events)
+
+    # 3. The real floor.
+    pipeline._apply_scanned_table_floor(ps, pdf, 1, None, no_witness=no_witness)
+    assert ps.scanned_table_evidence_failed is True
+    assert ps.scanned_table_no_witness is True
+
+    # 4. The real finalization.
+    shipped, provenance = _select_page_output_tagged(state, 1)
+    from socr.core.manifest import SelectionProvenance
+
+    assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
+    assert shipped.failure_mode is FailureMode.NO_WITNESS_BACKEND
+    assert shipped.status is PageStatus.ERROR
+    assert shipped.audit_passed is False
+
+    # The floor's CONTENT is unchanged: same bytes a hallucination floor ships.
+    control_state = DocumentState(handle=handle)
+    _floored_scanned_page(control_state, no_witness=False)
+    control_state.pages[1].d3_floor_png_ref = ps.d3_floor_png_ref
+    control_shipped, control_prov = _select_page_output_tagged(control_state, 1)
+    assert shipped.text == control_shipped.text
+    assert provenance == control_prov
+
+    # 5. The real sidecar, and the real restore.
+    ps.best_output = shipped
+    sidecar = pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+    assert sidecar is not None
+    meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert meta["failure_mode"] == FailureMode.NO_WITNESS_BACKEND.value
+
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle2 = DocumentHandle(path=pdf, page_count=1)
+    resumed = DocumentState(handle=handle2)
+    pipeline._restore_terminal_page_state(
+        resumed,
+        1,
+        PageOutput(
+            page_num=1,
+            text=shipped.text,
+            status=PageStatus(meta["status"]),
+            engine="qwen",
+            audit_passed=False,
+            failure_mode=FailureMode(meta["failure_mode"]),
+        ),
+        out_dir,
+    )
+    assert resumed.pages[1].scanned_table_no_witness is True
+    assert UnifiedPipeline._no_witness_backend_pages(resumed) == [1]
