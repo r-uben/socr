@@ -1246,8 +1246,11 @@ def has_chart_marks(page) -> bool:
                 page_label = getattr(page, "number", "?")
 
             largest = 0.0
-            largest_rect = None
             unmeasurable = False
+            # GH-656: track EVERY placement that clears the area bar, not just
+            # the largest -- a scan/decorative largest raster must not shadow
+            # a smaller qualifying raster that IS a real chart.
+            qualifying: list[tuple[float, object]] = []
             for image in raster_images:
                 try:
                     rects = page.get_image_rects(image[0])
@@ -1266,7 +1269,8 @@ def has_chart_marks(page) -> bool:
                     area = abs(rect.width) * abs(rect.height)
                     if area > largest:
                         largest = area
-                        largest_rect = rect
+                    if area >= CHART_MIN_CLUSTER_AREA:
+                        qualifying.append((area, rect))
 
             if unmeasurable:
                 logger.debug(
@@ -1277,37 +1281,44 @@ def has_chart_marks(page) -> bool:
                 )
                 return True
 
-            if largest >= CHART_MIN_CLUSTER_AREA:
-                if largest_rect is not None and _raster_is_scan_or_decorative(
-                    page, largest_rect, page_area
-                ):
+            if qualifying:
+                # Largest first: prefer the raster most likely to BE the chart,
+                # but do not let it veto a smaller one that clears the bar.
+                qualifying.sort(key=lambda item: item[0], reverse=True)
+                for area, rect in qualifying:
+                    if _raster_is_scan_or_decorative(page, rect, page_area):
+                        continue
                     logger.debug(
-                        "has_chart_marks p%s: raster rejected — %d image(s), largest "
-                        "placement %.0fpt2 covers the page with dense native text "
-                        "(scan or decorative page raster, not a chart; GH-511)",
+                        "has_chart_marks p%s: raster path — %d embedded image(s), "
+                        "qualifying placement %.0fpt2 >= %.0f",
                         page_label,
                         len(raster_images),
-                        largest,
+                        area,
+                        CHART_MIN_CLUSTER_AREA,
                     )
-                    return False
+                    return True
+
+                # GH-656: every qualifying raster is scan/decorative (GH-511).
+                # Do not claim chart from raster, but do NOT reject the page --
+                # fall through to the vector path so a real chart drawn beneath
+                # a full-page decorative/scan raster is still found.
                 logger.debug(
-                    "has_chart_marks p%s: raster path — %d embedded image(s), "
-                    "largest placement %.0fpt2 >= %.0f",
+                    "has_chart_marks p%s: raster path — %d image(s), all %d "
+                    "qualifying placement(s) scan/decorative (GH-511); falling "
+                    "through to vector path (GH-656)",
+                    page_label,
+                    len(raster_images),
+                    len(qualifying),
+                )
+            else:
+                logger.debug(
+                    "has_chart_marks p%s: raster rejected — %d image(s), largest "
+                    "placement %.0fpt2 < %.0f (logo/decoration, not a chart)",
                     page_label,
                     len(raster_images),
                     largest,
                     CHART_MIN_CLUSTER_AREA,
                 )
-                return True
-
-            logger.debug(
-                "has_chart_marks p%s: raster rejected — %d image(s), largest "
-                "placement %.0fpt2 < %.0f (logo/decoration, not a chart)",
-                page_label,
-                len(raster_images),
-                largest,
-                CHART_MIN_CLUSTER_AREA,
-            )
     except Exception as exc:
         logger.debug("has_chart_marks: get_images() failed: %s", exc)
 
