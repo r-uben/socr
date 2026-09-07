@@ -3908,21 +3908,49 @@ class UnifiedPipeline:
     # GH-96: table escalation lane
     # ------------------------------------------------------------------
 
-    def _resolve_table_escalation_provider(self, available: list):
-        """Cheapest non-local provider from the ALREADY tier-filtered ladder.
+    def _build_ladder_and_escalation_profile(self, available: list) -> tuple[list, object]:
+        """Build the routing ladder, then derive the escalation rung FROM IT.
+
+        GH-160: split out of ``_phase_agentic`` so the fix (deriving escalation
+        from the cost-filtered ladder rather than the merely tier-filtered
+        ``available``) is directly testable without driving the whole
+        page-major loop. ``available`` here is already tier-filtered by the
+        caller (``--strict-local``); this is the ONE place both
+        ``--max-cost-per-page`` and the escalation lane read the same ladder.
+        """
+        from socr.core.providers import provider_ladder
+
+        ladder = provider_ladder(
+            available,
+            per_page_only=True,
+            max_cost_per_page=self.config.max_cost_per_page,
+            zero_cap_pinned=self.config.max_cost_per_page_pinned,
+        )
+        # GH-96/GH-160: escalation provider, chosen from ``ladder`` -- the ALREADY
+        # tier- AND cost-filtered list -- so --strict-local and
+        # --max-cost-per-page suppress the lane for free. Choosing from the
+        # merely tier-filtered ``available`` (main's prior behaviour) let
+        # escalation call a rung --max-cost-per-page had priced out of routing.
+        return ladder, self._resolve_table_escalation_provider(ladder)
+
+    def _resolve_table_escalation_provider(self, ladder: list):
+        """Cheapest non-local provider from the ALREADY tier- and cost-filtered ladder.
 
         Derived rather than named. Naming ``EngineType.GEMINI`` literally would
-        bypass ``--strict-local`` entirely: that flag filters ``available`` by tier
+        bypass ``--strict-local`` entirely: that flag filters candidates by tier
         before the ladder is built, but ``run_provider`` accepts any engine, so a
         hardcoded escalation engine would still fire on exactly the configuration
-        the reference run used. Choosing from ``available`` makes ``--strict-local``
-        and ``--max-cost-per-page`` suppress the lane for free.
+        the reference run used. GH-160: this must select from ``ladder`` -- the
+        list already passed through ``provider_ladder(..., max_cost_per_page=...)``
+        -- not the merely tier-filtered ``available``, or ``--max-cost-per-page``
+        cannot suppress the lane; ``--strict-local`` and ``--max-cost-per-page``
+        both suppress it for free this way.
         """
         if not getattr(self.config, "escalate_ambiguous_tables", False):
             return None
         from socr.core.providers import TIER_LOCAL
 
-        candidates = [p for p in available if p.tier != TIER_LOCAL and p.supports_per_page]
+        candidates = [p for p in ladder if p.tier != TIER_LOCAL and p.supports_per_page]
         if not candidates:
             return None
         return min(candidates, key=lambda p: p.cost_per_page_usd)
@@ -4138,6 +4166,35 @@ class UnifiedPipeline:
                     )
                 if not needs_escalation:
                     return False, bo
+
+                # GH-160: the profile itself was already priced under
+                # --max-cost-per-page by ``_resolve_table_escalation_provider``,
+                # but a per-page cap says nothing about what the DOCUMENT has
+                # left under --cost-budget. Same fail-closed rule the generic
+                # OCR branch and the equation lane apply (see
+                # ``_equation_lane_remaining_budget``): an unmetered earlier
+                # call makes the remaining budget unknowable, so it is treated
+                # as zero rather than as unlimited.
+                if self.config.cost_budget > 0:
+                    total_cost = state.total_cost
+                    remaining = (
+                        0.0
+                        if total_cost is None
+                        else max(self.config.cost_budget - total_cost, 0.0)
+                    )
+                    if remaining < profile.cost_per_page_usd:
+                        state.events.append(
+                            AuditEvent(
+                                page_num=page_num,
+                                kind="table_escalation_refused",
+                                engine=profile.engine.value,
+                                detail=(
+                                    f"remaining budget ${remaining:.4f} < escalation rung "
+                                    f"price ${profile.cost_per_page_usd:.4f}"
+                                ),
+                            )
+                        )
+                        return False, bo
                 incumbent_text = bo.text or ""
 
                 # A cloud CLI has no timeout of its own and was observed wedged for
@@ -6078,7 +6135,6 @@ class UnifiedPipeline:
         ``_classify`` remains doc-wide (``_phase_analyze``); the fused loop
         handles only the post-classification per-page lifecycle (fork C2).
         """
-        from socr.core.providers import provider_ladder
         from socr.pipeline.agentic import DEFAULT_PROVIDER_TIMEOUTS
 
         if not self.config.quiet:
@@ -6285,12 +6341,7 @@ class UnifiedPipeline:
             from socr.core.providers import TIER_LOCAL
 
             available = [p for p in available if p.tier == TIER_LOCAL]
-        ladder = provider_ladder(
-            available, per_page_only=True, max_cost_per_page=self.config.max_cost_per_page
-        )
-        # GH-96: escalation provider, chosen from the ALREADY tier-filtered list so
-        # --strict-local and --max-cost-per-page suppress the lane for free.
-        _escalation_profile = self._resolve_table_escalation_provider(available)
+        ladder, _escalation_profile = self._build_ladder_and_escalation_profile(available)
         _escalation_degraded = False
 
         no_ocr_provider_pages: set[int] = set()
