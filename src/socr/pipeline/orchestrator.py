@@ -2432,6 +2432,7 @@ class UnifiedPipeline:
         """
         from socr.judge.table_verdict import (
             TABLE_BINDING_ADJUDICATED_KIND,
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
             TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
             TABLE_LADDER_EVENT_KINDS,
         )
@@ -2447,6 +2448,10 @@ class UnifiedPipeline:
             # resumed run's audit trail silently drops which boundary word
             # geometry could not rule out as table content.
             | {TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND}
+            # GH-609 round 4: its companion resolution event, same reasoning
+            # -- dropping it on resume would silently un-resolve a table that
+            # a prior run had already proven clean, word for word.
+            | {TABLE_BINDING_BOUNDARY_RESOLVED_KIND}
             | cls.EQUATION_LANE_EVENT_KINDS
             # GH-519: the chart lane's debt is a standing property of the page,
             # not of the run that noticed it. GH-563 is the cautionary case: a
@@ -4797,6 +4802,29 @@ class UnifiedPipeline:
 
         return binding_result, classify_binding_evidence(binding_result)
 
+    @staticmethod
+    def _boundary_word_key(word) -> tuple[str, tuple[float, float, float, float]] | None:
+        """Identity key for a boundary word: (text, bbox), rounded to kill
+        float-repr noise across two independent extractions of the same PDF.
+        ``None`` for a malformed entry (either a raw word tuple with fewer
+        than 5 fields, or a persisted ``{"text": ..., "bbox": [...]}`` dict
+        missing either key) -- never a false match on absence.
+        """
+        if isinstance(word, dict):
+            text = word.get("text")
+            bbox = word.get("bbox")
+        elif len(word) > 4:
+            text = word[4]
+            bbox = word[:4]
+        else:
+            return None
+        if text is None or bbox is None or len(bbox) != 4:
+            return None
+        try:
+            return str(text), tuple(round(float(v), 3) for v in bbox)
+        except (TypeError, ValueError):
+            return None
+
     def _record_unresolved_binding_boundary(
         self, state: DocumentState, page_num: int, witness, binding
     ) -> None:
@@ -4822,12 +4850,101 @@ class UnifiedPipeline:
         by a guard accepting the table's content. It is also added
         explicitly to ``resume_restore_kinds`` (round 3, P2) so a resumed run
         does not silently drop it.
+
+        Round 4 (Astra P2): that non-resolvable design had no way BACK to
+        resolved -- a generic later ACCEPTED proves nothing about this
+        specific word (GH-609's whole point is that content verdict and
+        geometry coverage are different facts), and an empty current
+        boundary list proves nothing either (the witness could simply be
+        gone this pass). The only honest evidence is the SAME word, by text
+        and bbox, demonstrably present among THIS pass's own native words and
+        no longer classified unresolved -- either it is now bound (kept), or
+        it is now confidently external. When that holds for a word this
+        table previously reported unresolved, emit a companion
+        ``TABLE_BINDING_BOUNDARY_RESOLVED_KIND`` event naming exactly that
+        word; ``build_tables_trust`` clears the standing distrust only when
+        every word ever reported unresolved for this table has a matching
+        resolution (``tables_trust.NON_RESOLVABLE_DISTRUST_KINDS`` word-keyed
+        clearance), never on kind/table_id alone. The original unresolved
+        event is never mutated or removed -- history stays in the audit log;
+        only the REDUCED current-trust view changes.
         """
         from socr.core.audit_log import AuditEvent
-        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+        from socr.judge.table_verdict import (
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        )
         from socr.tables.binding import BindingResult
 
-        if not isinstance(binding, BindingResult) or not binding.unresolved_boundary_words:
+        if not isinstance(binding, BindingResult):
+            return
+
+        table_id = witness.table_id
+        current_unresolved_keys = {
+            key
+            for w in binding.unresolved_boundary_words
+            if (key := self._boundary_word_key(w)) is not None
+        }
+
+        # Best-effort: read this pass's OWN native words independently, so a
+        # resolution can be proven from THIS witness's actual geometry rather
+        # than merely inferred from the boundary lists' absence. A read
+        # failure here must never block the (unconditional) unresolved
+        # emission below -- it only means no resolution can be PROVEN yet.
+        native_words: list = []
+        try:
+            from socr.core.pdf import open_pdf
+
+            with open_pdf(state.handle.path) as doc:
+                native_words = doc[page_num - 1].get_text("words")
+        except Exception as exc:
+            logger.debug(
+                "boundary resolution check: could not re-read native words on p%d (%s: %s)",
+                page_num,
+                type(exc).__name__,
+                exc,
+            )
+
+        if native_words:
+            present_now = {
+                key for w in native_words if (key := self._boundary_word_key(w)) is not None
+            }
+            prior_unresolved: set = set()
+            for ev in state.events:
+                if (
+                    getattr(ev, "kind", "") != TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+                    or getattr(ev, "page_num", None) != page_num
+                ):
+                    continue
+                ev_data = getattr(ev, "data", None) or {}
+                if str(ev_data.get("table_id", "")) != str(table_id):
+                    continue
+                for w in ev_data.get("words") or []:
+                    key = self._boundary_word_key(w)
+                    if key is not None:
+                        prior_unresolved.add(key)
+
+            newly_resolved = (prior_unresolved & present_now) - current_unresolved_keys
+            if newly_resolved:
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+                        detail=(
+                            f"table {table_id}: {len(newly_resolved)} previously unresolved "
+                            "boundary word(s) now bound or confidently excluded"
+                        ),
+                        data={
+                            "table_id": table_id,
+                            "words": [
+                                {"text": text, "bbox": list(bbox)}
+                                for text, bbox in sorted(newly_resolved)
+                            ],
+                        },
+                    )
+                )
+
+        if not binding.unresolved_boundary_words:
             return
 
         state.events.append(
@@ -4835,12 +4952,12 @@ class UnifiedPipeline:
                 page_num=page_num,
                 kind=TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
                 detail=(
-                    f"table {witness.table_id}: "
+                    f"table {table_id}: "
                     f"{len(binding.unresolved_boundary_words)} boundary word(s) rejected by "
                     "region membership but not confidently external"
                 ),
                 data={
-                    "table_id": witness.table_id,
+                    "table_id": table_id,
                     "words": [
                         {
                             "text": str(w[4]) if len(w) > 4 else "",

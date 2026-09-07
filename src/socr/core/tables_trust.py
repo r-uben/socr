@@ -25,6 +25,7 @@ from pathlib import Path
 from socr.judge.table_verdict import (
     CAUSE_DETAIL_PHRASES,
     CAUSE_UNKNOWN,
+    TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
     TABLE_LADDER_UNVERIFIED_KIND,
 )
@@ -234,7 +235,71 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
 # the table puts it back. Numeric contradiction (native_unbound / C4, already
 # outside TABLE_DISTRUST_KINDS entirely) and this uncertain-coverage signal
 # must stay distinguishable, and both must survive an unrelated acceptance.
+#
+# GH-609 round 4 (Astra P2): "never cleared by RESOLVING_KINDS" does not mean
+# "never cleared at all" -- it means the ONLY thing that clears a kind in
+# this set is the word-keyed mechanism below (``_boundary_fully_resolved_tables``),
+# never a generic ACCEPTED and never merely the ABSENCE of a current
+# unresolved event.
 NON_RESOLVABLE_DISTRUST_KINDS: frozenset[str] = frozenset({TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND})
+
+#: GH-609 round 4: maps each ``NON_RESOLVABLE_DISTRUST_KINDS`` member to the
+#: kind whose matching, word-keyed event resolves it. A kind in
+#: ``NON_RESOLVABLE_DISTRUST_KINDS`` with no entry here can never clear at
+#: all (fail closed, not an oversight).
+BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND: dict[str, str] = {
+    TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND: TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+}
+
+
+def _word_key(entry: dict) -> tuple[str, tuple[float, ...]] | None:
+    """Identity key for one persisted boundary-word dict, or ``None`` for a
+    malformed entry (missing/short ``bbox``) -- never a false match."""
+    if not isinstance(entry, dict):
+        return None
+    bbox = entry.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        return str(entry.get("text", "")), tuple(round(float(v), 3) for v in bbox)
+    except (TypeError, ValueError):
+        return None
+
+
+def _boundary_fully_resolved_tables(events: list) -> set[tuple[str, int, str]]:
+    """``(unresolved_kind, page_num, table_id)`` triples where EVERY word
+    ever reported unresolved for that table under that kind has a matching
+    word-keyed resolution event (per ``BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND``).
+
+    Cumulative and word-keyed, not kind/table_id-only: a table that later
+    reports a NEW unresolved word (a fresh unresolved event naming a word not
+    yet resolved) stays distrusted even if every OLDER word was resolved --
+    ``unresolved <= resolved`` per table, not "a resolution event exists for
+    this table_id at all". A ``NON_RESOLVABLE_DISTRUST_KINDS`` member absent
+    from ``BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND`` never appears here --
+    fail closed, not an oversight.
+    """
+    unresolved_by_table: dict[tuple[str, int, str], set] = {}
+    resolved_by_table: dict[tuple[str, int, str], set] = {}
+    for unresolved_kind, resolved_kind in BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND.items():
+        for event in events:
+            kind = getattr(event, "kind", "")
+            if kind not in (unresolved_kind, resolved_kind):
+                continue
+            data = getattr(event, "data", None) or {}
+            table_id = data.get("table_id")
+            if table_id is None:
+                continue
+            key = (unresolved_kind, getattr(event, "page_num", 0), str(table_id))
+            target = unresolved_by_table if kind == unresolved_kind else resolved_by_table
+            word_keys = {wk for w in (data.get("words") or []) if (wk := _word_key(w)) is not None}
+            target.setdefault(key, set()).update(word_keys)
+
+    return {
+        key
+        for key, words in unresolved_by_table.items()
+        if words and words <= resolved_by_table.get(key, set())
+    }
 
 
 # GH-353 TICKET-B2: fallback wording for the ladder terminals when the
@@ -395,24 +460,30 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
         # opt-in resolves nothing -- see the module comment above.
     trust.resolved_pages = sorted(resolved_pages)
 
+    # GH-609 round 4: word-keyed clearance for NON_RESOLVABLE_DISTRUST_KINDS
+    # members, computed once up front -- see ``_boundary_fully_resolved_tables``.
+    boundary_resolved = _boundary_fully_resolved_tables(events)
+
     for event in events:
         page_num = getattr(event, "page_num", 0)
         kind = getattr(event, "kind", "")
         if kind not in TABLE_DISTRUST_KINDS:
             continue
         non_resolvable = kind in NON_RESOLVABLE_DISTRUST_KINDS
-
-        if not non_resolvable and page_num in resolved_pages:
-            continue
-
         data = getattr(event, "data", None) or {}
         table_id = data.get("table_id")
-        if (
-            not non_resolvable
-            and table_id is not None
-            and (page_num, str(table_id)) in resolved_tables
-        ):
-            continue
+
+        if non_resolvable:
+            if table_id is not None and (kind, page_num, str(table_id)) in boundary_resolved:
+                continue
+            # A non-resolvable kind is NEVER cleared by resolved_pages/
+            # resolved_tables (a generic ACCEPTED proves nothing about a
+            # SPECIFIC excluded word) -- only by the word-keyed check above.
+        else:
+            if page_num in resolved_pages:
+                continue
+            if table_id is not None and (page_num, str(table_id)) in resolved_tables:
+                continue
 
         page = trust.pages.setdefault(page_num, PageTrust(page_num=page_num))
         page.reasons.append(kind)

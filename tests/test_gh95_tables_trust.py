@@ -774,3 +774,97 @@ def test_an_ordinary_distrust_kind_alongside_it_still_gets_cleared_normally():
     trust = build_tables_trust("doc.pdf", events)
 
     assert trust.untrusted_pages == [], "the ordinary distrust kind must still resolve as before"
+
+
+# ---------------------------------------------------------------------------
+# GH-609 round 4 (Astra P2): the only evidence that clears
+# TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND is a matching, word-keyed
+# TABLE_BINDING_BOUNDARY_RESOLVED_KIND event -- never a generic ACCEPTED
+# (already pinned above) and never merely an absent current unresolved event.
+# ---------------------------------------------------------------------------
+
+_BOUNDARY_WORD = {"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}
+_OTHER_WORD = {"text": "1.23", "bbox": [0.0, 0.0, 1.0, 1.0]}
+
+
+def _boundary_event(page: int, kind: str, table_id: str, words: list) -> AuditEvent:
+    return AuditEvent(page_num=page, kind=kind, data={"table_id": table_id, "words": words})
+
+
+def test_a_matching_resolution_event_clears_the_boundary_signal():
+    from socr.judge.table_verdict import (
+        TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+        TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+    )
+
+    events = [
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND, "0", [_BOUNDARY_WORD]),
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_RESOLVED_KIND, "0", [_BOUNDARY_WORD]),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == [], "the matching word-keyed resolution must clear the table"
+
+
+def test_a_resolution_event_for_a_different_word_does_not_clear_it():
+    """The resolution must name the SAME word -- a resolution for a
+    different word on the same table is not evidence about this one."""
+    from socr.judge.table_verdict import (
+        TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+        TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+    )
+
+    events = [
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND, "0", [_BOUNDARY_WORD]),
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_RESOLVED_KIND, "0", [_OTHER_WORD]),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == [5]
+
+
+def test_a_resolution_for_another_table_does_not_clear_this_one():
+    """A clean binding / resolution on a DIFFERENT table_id on the same page
+    must not clear this table's boundary distrust."""
+    from socr.judge.table_verdict import (
+        TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+        TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+    )
+
+    events = [
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND, "0", [_BOUNDARY_WORD]),
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_RESOLVED_KIND, "1", [_BOUNDARY_WORD]),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == [5]
+    assert "table_binding_boundary_unresolved" in trust.to_dict()["pages"]["5"]["reasons"]
+
+
+def test_a_new_unresolved_word_reopens_distrust_after_an_earlier_word_resolved():
+    """A table that resolves word A but later reports word B unresolved must
+    stay distrusted -- ``unresolved <= resolved`` per table, not "some
+    resolution event exists for this table_id"."""
+    from socr.judge.table_verdict import (
+        TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+        TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+    )
+
+    events = [
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND, "0", [_BOUNDARY_WORD]),
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_RESOLVED_KIND, "0", [_BOUNDARY_WORD]),
+        _boundary_event(5, TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND, "0", [_OTHER_WORD]),
+    ]
+
+    trust = build_tables_trust("doc.pdf", events)
+
+    assert trust.untrusted_pages == [5]
+
+
+def test_resolution_kind_is_not_itself_a_distrust_kind():
+    from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_RESOLVED_KIND
+
+    assert TABLE_BINDING_BOUNDARY_RESOLVED_KIND not in TABLE_DISTRUST_KINDS
