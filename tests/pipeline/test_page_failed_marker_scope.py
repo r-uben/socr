@@ -515,6 +515,88 @@ def test_prose_corroboration_guard_no_witness_fails_closed():
     assert output.text == "[page 1 failed: unverifiable table — see image]"
 
 
+# ---------------------------------------------------------------------------
+# #650: PROSE_CORROBORATION_MIN=0.5 was set with no low anchor -- neither
+# census fixture (Fed p3 nougat, ECB survey p1) contained a fabrication, so
+# both measured overlap 1.0. FABRICATED_ATTEMPT_MD above is a real
+# low-anchor (measured ratio below), but its vocabulary shares almost
+# nothing with the page at all -- an easy case for ANY positive floor to
+# catch. The harder, more realistic case per the issue: a model that
+# *paraphrases* the page's own prose (reusing a good share of its real
+# vocabulary) while inventing sentences/claims the native layer does not
+# contain at all -- the way a hallucinating OCR attempt actually behaves,
+# not a wall of unrelated text. This fixture is built to land close to the
+# 0.5 floor rather than far below it, so the assertion actually exercises
+# the threshold rather than a case any cutoff would separate.
+# ---------------------------------------------------------------------------
+
+NEAR_FLOOR_FABRICATED_ATTEMPT_MD = (
+    "This quarter, respondents in section four reported that the survey "
+    "responses were quietly redirected to an undisclosed offshore account "
+    "before regulators could specify a reason for the missing funds.\n\n"
+    "| Category | Jan | Apr |\n"
+    "|---|---|---|\n"
+    "| Decrease | 41 | 39 |\n"
+    "|---|\n"
+)
+
+
+def test_prose_corroboration_near_floor_fabrication_measured_ratios(monkeypatch):
+    """#650: measure both fixtures' overlap ratios directly (not just the
+    pass/fail verdict) and pin that the 0.5 floor is load-bearing -- with it
+    monkeypatched to 0.0, the same fabricated attempt's verdict flips.
+
+    Measured (via ``_PROSE_TOKEN_RE`` outside-table tokens, see manifest.py;
+    ``_scanned_table_state``'s default ``detected_table_bboxes=[]`` means
+    the table-row words also count as native vocabulary here, same as the
+    other tests in this section):
+      * genuine (``GENUINE_ATTEMPT_MD``): overlap ratio 0.947 -- passes 0.5.
+      * fabricated, paraphrase-style (``NEAR_FLOOR_FABRICATED_ATTEMPT_MD``):
+        overlap ratio 0.458 -- BELOW 0.5, but much closer to the floor than
+        ``FABRICATED_ATTEMPT_MD``'s 0.05 above, despite reusing a
+        substantial share of the page's real vocabulary (quarter, section,
+        four, respondents, survey, responses, specify, reason all appear
+        genuinely on the page), because it invents an entire unrelated
+        claim (an offshore account, missing funds, regulators) the native
+        layer does not contain. The floor separates this realistic,
+        near-boundary case, not just the far-below-floor wall-of-noise case
+        in ``test_prose_corroboration_guard_violated_ships_marker_only``.
+    """
+    from socr.core.manifest import _PROSE_TOKEN_RE
+
+    ps = _scanned_table_state(attempt_text=NEAR_FLOOR_FABRICATED_ATTEMPT_MD)
+
+    def _measured_ratio(attempt_text: str) -> float:
+        bboxes = ps.detected_table_bboxes
+        native_tokens: set[str] = set()
+        for w in ps.native_words:
+            x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            if any(bx0 <= cx <= bx1 and by0 <= cy <= by1 for bx0, by0, bx1, by1 in bboxes):
+                continue
+            native_tokens.update(_PROSE_TOKEN_RE.findall(text.lower()))
+        attempt_tokens = set(_PROSE_TOKEN_RE.findall(attempt_text.lower()))
+        return len(attempt_tokens & native_tokens) / len(attempt_tokens)
+
+    genuine_ratio = _measured_ratio(GENUINE_ATTEMPT_MD)
+    fabricated_ratio = _measured_ratio(NEAR_FLOOR_FABRICATED_ATTEMPT_MD)
+
+    assert genuine_ratio == pytest.approx(0.9474, abs=0.001)
+    assert fabricated_ratio == pytest.approx(0.4583, abs=0.001)
+    assert fabricated_ratio < PROSE_CORROBORATION_MIN < genuine_ratio
+
+    # The floor separates the two cases at its real value...
+    assert _prose_corroboration_ok(ps, GENUINE_ATTEMPT_MD) is True
+    assert _prose_corroboration_ok(ps, NEAR_FLOOR_FABRICATED_ATTEMPT_MD) is False
+
+    # ...and is load-bearing: monkeypatching it to 0.0 flips the fabricated
+    # verdict (any nonzero overlap now clears the floor), proving the guard
+    # actually depends on PROSE_CORROBORATION_MIN rather than always failing
+    # closed for some unrelated reason.
+    monkeypatch.setattr("socr.core.manifest.PROSE_CORROBORATION_MIN", 0.0)
+    assert _prose_corroboration_ok(ps, NEAR_FLOOR_FABRICATED_ATTEMPT_MD) is True
+
+
 @pytest.mark.skipif(not FED_1989_P3.exists(), reason="fixture not present on this machine")
 def test_fed_1989_11_14_p3_scanned_branch_guard_passes_but_no_table_block_to_splice():
     """Real fixture, real cached attempt: measured finding for #591/B1.
