@@ -120,6 +120,58 @@ def _open_page(pdf_path: Path):
     return doc, doc[0]
 
 
+# A raster well above CHART_MIN_CLUSTER_AREA but well below
+# SCAN_RASTER_PAGE_COVERAGE_MIN -- same shape as the #510 small-raster gate
+# fixture in test_has_chart_marks_scan_raster.py, so it is a *qualifying*,
+# non-scan raster by construction (the coverage gate rejects it as scan
+# regardless of any native text density).
+SMALL_QUALIFYING_RECT = fitz.Rect(50, 50, 250, 250)  # 200x200 = 40000pt2
+
+
+def _make_scan_plus_small_raster_doc(tmp_path: Path, name: str, *, small_first: bool) -> Path:
+    """Two DISTINCT raster placements (two xrefs): a full-page scan/decorative
+    raster and a smaller qualifying non-scan raster. ``small_first`` controls
+    image ENUMERATION order (the order ``page.get_images()`` will return
+    them) so the fixture also exercises order independence."""
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    if small_first:
+        page.insert_image(SMALL_QUALIFYING_RECT, stream=_rgb_png(), keep_proportion=False)
+        page.insert_image(FULL_PAGE_RECT, stream=_rgb_png(), keep_proportion=False)
+    else:
+        page.insert_image(FULL_PAGE_RECT, stream=_rgb_png(), keep_proportion=False)
+        page.insert_image(SMALL_QUALIFYING_RECT, stream=_rgb_png(), keep_proportion=False)
+
+    raster_area = FULL_PAGE_RECT.width * FULL_PAGE_RECT.height
+    word_count = round(3.0 * raster_area / 10000.0)  # Fed-scan-shaped density
+    _place_words_grid(page, FULL_PAGE_RECT, word_count)
+
+    pdf_path = tmp_path / name
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
+def _make_same_xref_two_placements_doc(tmp_path: Path, name: str) -> Path:
+    """ONE image (one xref) placed TWICE: once full-page (scan/decorative
+    shaped) and once at the smaller, non-scan-qualifying size. Exercises the
+    ``get_image_rects(xref)`` multi-rect branch directly, as distinct from
+    two different images."""
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    xref = page.insert_image(FULL_PAGE_RECT, stream=_rgb_png(), keep_proportion=False)
+    page.insert_image(SMALL_QUALIFYING_RECT, xref=xref)
+
+    raster_area = FULL_PAGE_RECT.width * FULL_PAGE_RECT.height
+    word_count = round(3.0 * raster_area / 10000.0)
+    _place_words_grid(page, FULL_PAGE_RECT, word_count)
+
+    pdf_path = tmp_path / name
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
 class TestE1Fallthrough:
     def test_setup_sanity_raster_is_scan_shaped_and_qualifying(self) -> None:
         """Fixture self-check: the raster clears both gates that make main
@@ -149,5 +201,44 @@ class TestE1Fallthrough:
         doc, page = _open_page(pdf)
         try:
             assert has_chart_marks(page) is False
+        finally:
+            doc.close()
+
+    def test_smaller_nonscan_raster_found_when_largest_is_scan(self, tmp_path: Path) -> None:
+        """Reviewer addendum: the largest placement is scan/decorative, but a
+        SMALLER, DISTINCT raster placement also clears CHART_MIN_CLUSTER_AREA
+        and is not itself scan/decorative -- must be found (True), never
+        vetoed by the largest placement's rejection."""
+        pdf = _make_scan_plus_small_raster_doc(tmp_path, "scan_plus_small.pdf", small_first=False)
+        doc, page = _open_page(pdf)
+        try:
+            assert has_chart_marks(page) is True
+        finally:
+            doc.close()
+
+    def test_smaller_nonscan_raster_found_regardless_of_enumeration_order(
+        self, tmp_path: Path
+    ) -> None:
+        """Reviewer addendum: same fixture, but the smaller non-scan raster is
+        inserted (and therefore enumerated by page.get_images()) BEFORE the
+        full-page scan raster. Selection must not depend on image order --
+        largest-first ranking inside has_chart_marks should give the same
+        answer either way."""
+        pdf = _make_scan_plus_small_raster_doc(tmp_path, "small_first.pdf", small_first=True)
+        doc, page = _open_page(pdf)
+        try:
+            assert has_chart_marks(page) is True
+        finally:
+            doc.close()
+
+    def test_same_xref_two_placements_one_scan_one_qualifying(self, tmp_path: Path) -> None:
+        """Reviewer addendum: a single image (one xref, via get_image_rects)
+        placed twice -- once full-page/scan-shaped, once at a smaller
+        qualifying size -- must still be found True through the smaller
+        placement, exercising the multi-rect-per-xref branch directly."""
+        pdf = _make_same_xref_two_placements_doc(tmp_path, "same_xref.pdf")
+        doc, page = _open_page(pdf)
+        try:
+            assert has_chart_marks(page) is True
         finally:
             doc.close()
