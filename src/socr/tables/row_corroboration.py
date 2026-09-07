@@ -400,6 +400,28 @@ def is_column_index_row(tokens: tuple[str, ...]) -> bool:
     return values == list(range(1, len(values) + 1))
 
 
+def table_shaped_native_row_count(words: list, row_shape_min: int) -> int:
+    """Count of native baseline bands that look like a table row, by shape alone.
+
+    Factored out of ``manifest._row_shape_reconciliation_ok`` (TICKET-A1b,
+    #634) so TICKET-A2's truncation term (#645) can reuse the identical
+    "table-shaped row" definition without a second implementation drifting
+    from it. A band counts iff it has at least ``row_shape_min`` numeric
+    tokens (a caller-supplied, per-candidate floor — see
+    ``_row_shape_reconciliation_ok``'s own docstring for why that floor is
+    derived from the candidate rather than a named constant) and is not the
+    printed column-index legend row (``is_column_index_row``, a table
+    convention, not data).
+    """
+    return sum(
+        1
+        for band in baseline_bands(words)
+        if band.tokens
+        and len(band.tokens) >= row_shape_min
+        and not is_column_index_row(band.tokens)
+    )
+
+
 def numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
     """Return each row's ordered genuine numeric tokens, anchored to a numeric label.
 

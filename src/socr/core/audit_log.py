@@ -168,6 +168,11 @@ def build_run_audit(state) -> RunAudit:
         # page", either the row-corroborated candidate that shipped or the
         # ladder-accepted candidate the floor overrode anyway.
         "structure_class_row_corroborated": 6,
+        # TICKET-A2 (#645): same phase/rank as the row-corroboration line
+        # above -- one more shape of the S1 winner-selection story, a
+        # candidate dropped from consideration because it ends mid-emission
+        # while another candidate for the page does not.
+        "candidate_truncated": 6,
         "structure_floor_overrode_ladder": 6,
         "page_failed": 7,
     }

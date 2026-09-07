@@ -195,6 +195,14 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # exists to fully adjudicate the numbers, only an ordered-row
         # reproduction check; a consumer must still be told.
         "structure_class_row_corroborated",
+        # TICKET-A2 (#645): a candidate was dropped from S1 grid-winner
+        # selection because it ends mid-emission (a final row breaking its
+        # block's own style, or a numeric row-count shortfall past A1b's
+        # allowance) while another page candidate is not truncated. The page
+        # ships whatever candidate survived that drop -- possibly the S1
+        # floor, possibly A1b's corroboration fallback -- either way a
+        # consumer must be told a reading was discarded as incomplete.
+        "candidate_truncated",
         # TICKET-A1b (#634): generalises #589 (option c) -- the judge ladder
         # ACCEPTED some table on this page, but S1's structure-class floor
         # still discarded every candidate and shipped the fail-closed marker

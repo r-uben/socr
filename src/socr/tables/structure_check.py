@@ -62,6 +62,7 @@ imported by this module.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -70,6 +71,7 @@ from socr.tables.reconcile import (
     TABLE_EMISSION_LATEX_LEAK,
     TABLE_EMISSION_WIDTH_MISMATCH,
     find_table_blocks,
+    raw_table_block_lines,
     table_content_defect,
     table_emission_defect,
 )
@@ -241,9 +243,115 @@ def structural_gate_fires(reports: Sequence[GridStructureReport]) -> bool:
 DEFECT_NONE = ""
 DEFECT_GRID_SHAPE = "grid_shape"
 DEFECT_HEADER_UNATTRIBUTED = "header_unattributed"
+DEFECT_TABLE_TRUNCATED = "table_truncated"
 DEFECT_TABLE_LATEX_LEAK = TABLE_EMISSION_LATEX_LEAK
 DEFECT_TABLE_WIDTH_MISMATCH = TABLE_EMISSION_WIDTH_MISMATCH
 DEFECT_TABLE_CONTENT_EMPTY = TABLE_CONTENT_EMPTY
+
+
+def _final_row_truncated(block_lines: Sequence[str]) -> bool:
+    """TICKET-A2 (#645) term (a): does this table block's last row break the
+    block's own established leading/trailing-pipe style?
+
+    Reads ``block_lines`` (header, separator, body -- ``raw_table_block_lines``'s
+    own contract, ORIGINAL text, before ``_parse_grid`` can reshape or drop a
+    malformed row). A row's "style" here is only whether it ends with ``|`` --
+    a model that writes every row bordered on both sides and then stops mid
+    number, e.g. the census fixture's ``| 2019 | 364.2 | 7,05`` with no
+    closing pipe, breaks that style on exactly its last row. Needs at least
+    two body rows to call: one to establish the style, one (the last) to
+    compare against it -- a single-body-row block or an empty block abstains
+    (returns False), since there is nothing to establish a style from.
+
+    Deliberately conservative: a candidate whose rows are ALL unterminated
+    (no trailing-pipe convention at all -- some models never close the right
+    border) is not truncated by this term. Only a MIXED block -- terminated
+    rows, then an unterminated final one -- is, since that mix is the actual
+    signature of a row cut off mid-emission rather than a candidate's own
+    consistent formatting choice.
+    """
+    body = [ln for ln in block_lines[2:] if ln.strip()]
+    if len(body) < 2:
+        return False
+    trailing = [ln.strip().endswith("|") for ln in body]
+    *earlier, last = trailing
+    return bool(earlier) and all(earlier) and not last
+
+
+#: TICKET-A2 (#645): ``table_shaped_native_row_count`` counts every native
+#: band matching the candidate's own row width, INCLUDING a candidate's own
+#: printed header/legend row when that row happens to be numeric-shaped
+#: (e.g. year column headers) and slips past ``is_column_index_row``'s
+#: narrower sequential-digit convention -- ``numeric_body_rows`` strips the
+#: analogous row from the CANDIDATE side, so an otherwise-complete candidate
+#: can look exactly one native row short with no truncation involved. One
+#: such stray band is indistinguishable from a real header row; only a
+#: shortfall exceeding it is treated as evidence of a dropped DATA row.
+_STRAY_HEADER_BAND_ALLOWANCE = 1
+
+
+def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
+    """TICKET-A2 (#645) term (b): candidate's numeric body-row count falls
+    short of the native table-shaped row count by more than A1b's own
+    row-count allowance permits -- and by more than one stray header/legend
+    band could explain (see ``_STRAY_HEADER_BAND_ALLOWANCE``).
+
+    Reuses ``row_corroboration.table_shaped_native_row_count`` (the exact
+    function ``manifest._row_shape_reconciliation_ok`` calls) rather than a
+    second implementation of "table-shaped row", and
+    ``row_corroboration.ROW_CORROBORATION_MIN`` (36/39) rather than a second
+    named allowance -- both already measured and owned by A1b/A1a. Abstains
+    (returns False) with no ``words`` -- exception-path callers of
+    ``table_output_defect`` supply none, matching every other geometry-needing
+    term in this module.
+    """
+    if not words:
+        return False
+    from socr.tables.row_corroboration import (
+        ROW_CORROBORATION_MIN,
+        numeric_body_rows,
+        table_blocks,
+        table_shaped_native_row_count,
+    )
+
+    candidate_rows = [
+        row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
+    ]
+    if not candidate_rows:
+        return False
+
+    row_shape_min = min(len(row) for row in candidate_rows)
+    native_table_rows = table_shaped_native_row_count(words, row_shape_min)
+    if native_table_rows <= 0:
+        return False
+
+    count = len(candidate_rows)
+    if count >= native_table_rows - _STRAY_HEADER_BAND_ALLOWANCE:
+        return False
+    return count < math.ceil(native_table_rows * ROW_CORROBORATION_MIN)
+
+
+def table_truncated(output_md: str, words: list | None) -> bool:
+    """TICKET-A2 (#645): whether *output_md* looks like it was cut off
+    mid-emission rather than being a complete (if otherwise defective)
+    reading of the page.
+
+    Two independent terms, either firing truncates the WHOLE candidate --
+    partial content anywhere on the page is not a complete reading of it:
+
+    (a) ``_final_row_truncated`` on any table block's RAW lines (before
+        ``_parse_grid`` can reshape or drop the very row this is looking
+        for) -- a final row breaking the block's own established
+        leading/trailing-pipe style.
+    (b) ``_truncated_row_shortfall`` -- the candidate's own numeric body
+        rows undercount the native table-shaped row count by more than
+        A1b's row-count allowance, i.e. whole rows are simply missing from
+        the end (or middle) of the emission.
+    """
+    for block_lines in raw_table_block_lines(output_md):
+        if _final_row_truncated(block_lines):
+            return True
+    return _truncated_row_shortfall(words, output_md)
 
 
 def table_output_defect(
@@ -263,15 +371,21 @@ def table_output_defect(
        can erase all-blank rows. GH-190 closes the shipping consequence of
        that parser blind spot by inspecting raw rows; ``_parse_grid`` itself
        and reconciliation diffs remain blind and deliberately unchanged.
-    3. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
+    3. ``table_truncated`` (TICKET-A2, #645), also on raw rows before
+       ``_parse_grid`` can reshape or drop the row this term is looking for: a
+       final row breaking its block's own leading/trailing-pipe style, or a
+       numeric-row count undercutting the native table-shaped row count by
+       more than A1b's row-count allowance permits. Needs ``words`` for its
+       second half; abstains on that half without it, same as term 4.
+    4. ``structural_gate_fires`` on the emitted grid (B1's own predicate,
        ragged OR detached_label_rows, unchanged -- see ``structural_gate_fires``
        docstring). String-only, no I/O.
-    4. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only
+    5. ``header_cut.header_cut_verdict`` on each emitted table block. Runs only
        when the shape and preceding terms did not already fire, and only when
        the caller supplied both native words and the page's drawn horizontal
        rules.
 
-    **On term 4 and the four reverts that precede it.** Earlier implementations
+    **On term 5 and the four reverts that precede it.** Earlier implementations
     of a header-attribution disjunct (GH-151 T3's token-pattern rule,
     ``062bdef``'s year-band rule, the positional rule, and the normalized
     comparison) each failed in one of two directions: abstaining on the
@@ -312,6 +426,9 @@ def table_output_defect(
     content_defect = table_content_defect(output_md)
     if content_defect:
         return content_defect
+
+    if table_truncated(output_md, words):
+        return DEFECT_TABLE_TRUNCATED
 
     reports = check_markdown(output_md)
     if structural_gate_fires(reports):

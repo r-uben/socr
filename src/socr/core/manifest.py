@@ -906,6 +906,106 @@ def _reaches_structure_class_branch(p) -> bool:
     return any(not (a.engine or "").startswith("native") for a in p.attempts)
 
 
+def _truncated_grid_reading_ids(p) -> frozenset[int]:
+    """TICKET-A2 (#645): ``id()`` of every ``_grid_reading_attempt`` candidate
+    on this page that ``structure_check.table_truncated`` flags, scored
+    across ALL of them -- best_output and every attempt, deduplicated -- not
+    scoped to whichever narrower pool (strict or corroboration) happens to be
+    asking.
+
+    That wider universe is load-bearing, not cosmetic: the ticket's own live
+    fixture (ECB economic bulletin p2, 2026-09-07) has the S1 STRICT pool
+    holding ONLY the truncated qwen candidate (14/417 words, ends mid-flag)
+    while the complete qwen candidate (414/417) only ever clears the WIDER
+    ``_grid_reading_attempt`` pool the corroboration fallback scores against.
+    Comparing truncation only within the strict pool would see a single-member
+    pool and have nothing to compare against, so the truncated one would ship
+    unchallenged -- scoring against the union of both pools' membership is
+    what lets ``_strict_grid_authored_pool`` see that a complete reading
+    exists at all and empty itself in favour of it.
+
+    Returns an empty set when every candidate truncates (a truncated reading
+    is still the only evidence there is -- TICKET-A2's own "if it is the only
+    candidate, it still ships, flagged" clause) or when fewer than two
+    candidates exist to compare.
+    """
+    words = getattr(p, "native_words", None) or []
+    seen: set[int] = set()
+    universe: list[PageOutput] = []
+    for out in [p.best_output, *p.attempts]:
+        if out is None or id(out) in seen or not _grid_reading_attempt(out):
+            continue
+        seen.add(id(out))
+        universe.append(out)
+    if len(universe) < 2:
+        return frozenset()
+
+    from socr.tables.structure_check import table_truncated
+
+    flags = {id(out): table_truncated(out.text or "", words) for out in universe}
+    if not any(flags.values()) or all(flags.values()):
+        return frozenset()
+    return frozenset(oid for oid, truncated in flags.items() if truncated)
+
+
+def structure_class_truncated_engines(p) -> tuple[str, ...]:
+    """TICKET-A2 (#645): engines dropped as truncated for this page's S1
+    branch, in candidate order, for the caller's ``candidate_truncated``
+    audit event.
+
+    Mirrors ``structure_class_grid_corroboration``'s own gate
+    (``_reaches_structure_class_branch``) so the two functions describe the
+    same page consistently. Empty when nothing was dropped -- including the
+    "every candidate truncates" case, where TICKET-A2 says nothing is dropped
+    by design.
+    """
+    if not _reaches_structure_class_branch(p):
+        return ()
+    truncated_ids = _truncated_grid_reading_ids(p)
+    if not truncated_ids:
+        return ()
+    seen: set[int] = set()
+    engines: list[str] = []
+    for out in [p.best_output, *p.attempts]:
+        if out is None or id(out) in seen or not _grid_reading_attempt(out):
+            continue
+        seen.add(id(out))
+        if id(out) in truncated_ids:
+            engines.append(out.engine or "")
+    return tuple(engines)
+
+
+def _truncated_candidate_events(page_num: int, truncated_engines: tuple[str, ...]) -> list:
+    """TICKET-A2 (#645): one ``candidate_truncated`` ``AuditEvent`` per
+    dropped engine.
+
+    Pulled out of ``_select_page_output_tagged`` as a comprehension-built
+    list rather than an in-place ``for`` loop: R7 (test_r7_winner_kind_tags.py)
+    asserts that cascade function's body is loop-free by AST inspection, since
+    a loop there could break the "exactly one ending per page" guarantee the
+    ``SelectionProvenance`` tag depends on. This helper's own loop is outside
+    that function entirely, so the guarantee is untouched.
+    """
+    from socr.core.audit_log import AuditEvent
+
+    return [
+        AuditEvent(
+            page_num=page_num,
+            kind="candidate_truncated",
+            engine=truncated_engine,
+            detail=(
+                "TICKET-A2 (#645): dropped as a grid-winner "
+                "candidate -- ends mid-emission (a final row "
+                "breaking the block's own style, or a numeric "
+                "row-count shortfall past A1b's own row-count "
+                "allowance) and another candidate on this page "
+                "is not truncated"
+            ),
+        )
+        for truncated_engine in truncated_engines
+    ]
+
+
 def _strict_grid_authored_pool(p) -> list[PageOutput]:
     """S1 case (i)'s own candidate pool: every judge-cleared grid-authored
     attempt, ``best_output`` first.
@@ -914,10 +1014,25 @@ def _strict_grid_authored_pool(p) -> list[PageOutput]:
     and the corroboration fallback's own gate agree, byte-for-byte, on when
     this pool is non-empty -- the fallback must never fire when case (i)
     already has something to ship.
+
+    TICKET-A2 (#645): a candidate ``_truncated_grid_reading_ids`` flags is
+    dropped from this pool whenever ANY candidate for the page (not only this
+    pool) is not truncated -- a truncated reading must never beat a complete
+    one, and must not block the corroboration fallback from reaching a
+    complete one either. If dropping truncated candidates would empty an
+    otherwise non-empty pool, it empties: that is the whole point (the
+    ticket's own live fixture -- see ``_truncated_grid_reading_ids``'s
+    docstring), and lets ``_row_corroborated_grid_winner`` run instead of a
+    truncated candidate shipping via case (i).
     """
     if _grid_authored_attempt(p.best_output):
-        return [p.best_output]
-    return [out for out in p.attempts if _grid_authored_attempt(out)]
+        pool = [p.best_output]
+    else:
+        pool = [out for out in p.attempts if _grid_authored_attempt(out)]
+    truncated_ids = _truncated_grid_reading_ids(p)
+    if truncated_ids:
+        pool = [out for out in pool if id(out) not in truncated_ids]
+    return pool
 
 
 def _union_bbox(
@@ -1016,10 +1131,9 @@ def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
     """
     from socr.tables.row_corroboration import (
         ROW_CORROBORATION_MIN,
-        baseline_bands,
-        is_column_index_row,
         numeric_body_rows,
         table_blocks,
+        table_shaped_native_row_count,
     )
 
     candidate_rows = [
@@ -1029,13 +1143,7 @@ def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
         return True
 
     row_shape_min = min(len(row) for row in candidate_rows)
-    native_table_rows = sum(
-        1
-        for band in baseline_bands(words)
-        if band.tokens
-        and len(band.tokens) >= row_shape_min
-        and not is_column_index_row(band.tokens)
-    )
+    native_table_rows = table_shaped_native_row_count(words, row_shape_min)
     if native_table_rows <= 0:
         return True
 
@@ -1111,6 +1219,13 @@ def _row_corroborated_grid_winner(p):
     band-run-distance-anchored (round 2 follow-up) designs both broke on
     real fixtures, and why the shape-based replacement does not need a
     region argument at all (it always reconciles against the whole page).
+
+    TICKET-A2 (#645): a candidate ``_truncated_grid_reading_ids`` flags is
+    dropped from the pool below whenever any other page candidate is not
+    truncated -- the ticket's own live fixture reaches this fallback
+    precisely because A2 emptied the strict pool of the truncated candidate,
+    so this pool must not turn around and score that same truncated
+    candidate back in.
     """
     words = getattr(p, "native_words", None) or []
     if not words:
@@ -1128,6 +1243,12 @@ def _row_corroborated_grid_winner(p):
             continue
         seen_ids.add(id(out))
         candidates.append(out)
+
+    truncated_ids = _truncated_grid_reading_ids(p)
+    if truncated_ids:
+        candidates = [out for out in candidates if id(out) not in truncated_ids]
+    if not candidates:
+        return None
 
     scored = []
     for out in candidates:
@@ -2065,6 +2186,9 @@ def _select_page_output_tagged(
         # without any external rung ever having run, so their presence alone
         # must not trip this branch either.
         if _reaches_structure_class_branch(p):
+            truncated_engines = structure_class_truncated_engines(p)
+            if truncated_engines:
+                state.events.extend(_truncated_candidate_events(page_num, truncated_engines))
             grid_winner = structure_class_grid_winner(p)
             if grid_winner is not None:
                 # TICKET-A1b (#634) case (i)-b: this winner came from the

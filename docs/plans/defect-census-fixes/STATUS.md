@@ -19,8 +19,8 @@ nothing dispatched.
 | C1 | native geometry (#592) | DONE (#631 merged 2026-09-06) | — | 1 |
 | D1 | throughput | DONE (#632 merged 2026-09-06) | — | 1 |
 | A1b | selection | DONE (#640 merged 2026-09-07; #639 filed) | A1a | 2 |
-| A1c | surfacing + resume | REVIEW (#641, eac26d4, socr-a1c) | A1b | 3 |
-| A2 | truncation guard | TODO | A1c | 4 |
+| A1c | surfacing + resume | DONE (#644 merged 2026-09-07; live: report p1-p3 99-100% flagged) | A1b | 3 |
+| A2 | truncation guard | REVIEW (#645, f5b5c43, socr-a2; reviewer ACCEPT-WITH-FIXES, hygiene) | A1c | 4 |
 | B1 | marker scope (#591) | TODO | A2 | 5 |
 | D3 | Fed re-measure | TODO | A2 | 5 |
 | D2 | route cost (measure) | TODO | B1 | 6 |
@@ -37,4 +37,4 @@ nothing dispatched.
 - Waves 7–9: E2, F1a, F1b, F2.
 
 ## Next action
-A1c (#641) in review at eac26d4 + two live ECB runs pending; push on owner's word, CI for the exact head, merge. Then A2. Follow-ups filed: #639 (detector bbox), #643 (narrow-table false reject).
+A2 (#645) live run pending, then push on owner's word, CI, merge. Then B1 (#591), D3.
