@@ -24,8 +24,8 @@ nothing dispatched.
 | B1 | marker scope (#591) | DONE (#651 merged 2026-09-07; #591 open: #649, #650) | A2 | 5 |
 | D3 | Fed re-measure | TODO | A2 | 5 |
 | D2 | route cost (measure) | TODO | B1 | 6 |
-| E1 | scan ≠ chart (#511) | DONE-LOCAL (72628a1+f3d9989; reviewer ACCEPT; dense-label blind spot #653) | B1 | 6 |
-| E2 | table_not_scorable scope | TODO | E1 | 7 |
+| E1 | scan ≠ chart (#511) | DONE (#654 merged 2026-09-07; #653) | B1 | 6 |
+| E2 | table_not_scorable scope | DONE-LOCAL (052d70a+fdcc9a6; reviewer ACCEPT after the OR-gate fix) | E1 | 7 |
 | F1a | ditto text (#625) | TODO | A2 | 7 |
 | F1b | derived-cell provenance | TODO | F1a | 8 |
 | F2 | nbsp hierarchy (#624) | TODO | F1b | 9 |
@@ -37,4 +37,4 @@ nothing dispatched.
 - Waves 7–9: E2, F1a, F1b, F2.
 
 ## Next action
-E1 in review at 72628a1; push on owner's word, CI, merge. Then D3 (needs host memory), D2, E2 (open issue first), F.
+E2 in review at 052d70a; push on owner's word, CI, merge. Then D2/D3 (need host memory), F1a/F1b/F2.

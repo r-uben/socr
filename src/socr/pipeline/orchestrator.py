@@ -2046,9 +2046,16 @@ class UnifiedPipeline:
             )
 
     def _assessment_for_page(self, page_num: int):
-        if not self._last_assessment:
+        # GH-655 (E2): ``getattr`` rather than a direct attribute read -- a test
+        # double built with ``object.__new__(UnifiedPipeline)`` never runs
+        # ``__init__`` (which sets ``_last_assessment = None``), and
+        # ``_page_detected_table_count`` now reaches this on every prose page
+        # a table-scoring test drives, not just the has_tables branch the
+        # older callers happened to short-circuit before.
+        last_assessment = getattr(self, "_last_assessment", None)
+        if not last_assessment:
             return None
-        return next((p for p in self._last_assessment.pages if p.page_num == page_num), None)
+        return next((p for p in last_assessment.pages if p.page_num == page_num), None)
 
     def _page_has_tables(self, page_num: int, ps: PageState | None = None) -> bool:
         """Whether the born-digital detector found table-like structure."""
@@ -2056,6 +2063,53 @@ class UnifiedPipeline:
             return True
         pa = self._assessment_for_page(page_num)
         return bool(pa and pa.has_tables)
+
+    def _page_detected_table_count(self, page_num: int, ps: PageState | None = None) -> int:
+        """GH-655 (E2): the independent table-region-detector count for this page.
+
+        ``ps.detected_table_count`` is only propagated onto ``PageState`` for
+        born-digital pages (``DocumentState.apply_born_digital``), so it falls
+        back to the assessment directly for pages where that copy never ran —
+        the assessment itself stamps ``detected_table_count`` unconditionally
+        for every page (``BornDigitalDetector._assess_page``). Distinct from
+        ``_page_has_tables``: ``has_tables`` is the lane-cooccupancy heuristic,
+        which the census measured false-firing on prose (every page of a
+        transcript flagged 3/3, 400 events across 68 Fed documents) because
+        numeric prose can satisfy a row/column co-occupancy test without
+        containing a table. The detector count is the narrower, structural
+        signal already trusted elsewhere for the same reason (GH-520's D3 floor
+        scoping, orchestrator.py ~L1651).
+        """
+        ps_count = int(getattr(ps, "detected_table_count", 0) or 0) if ps is not None else 0
+        if ps_count:
+            return ps_count
+        pa = self._assessment_for_page(page_num)
+        return int(getattr(pa, "detected_table_count", 0) or 0) if pa else 0
+
+    def _page_has_scorable_table_evidence(self, page_num: int, ps: PageState | None = None) -> bool:
+        """GH-655 (E2, round 2): whether *any* table-region signal fired for this page.
+
+        ``detected_table_count`` alone under-counts: GH-520 documents a case
+        (a borderless table only the lane-cooccupancy pass sees, e.g. a
+        Fed minutes "Table 1. Economic projections" page) where the region
+        detector returns 0/None yet a real table was reconstructed from the
+        native text layer, recorded as ``native_table_region_count`` on the
+        ``PageState``/assessment. GH-520 itself treats a bare
+        ``detected_table_count == 0`` as insufficient evidence and fails
+        closed rather than trusting it as "no table" -- E2 must not read
+        that same zero as "no table" either, or a real table page loses its
+        only distrust signal. So this ORs the two counts: either one being
+        positive is enough to know a table is actually on the page. The 12
+        ECB prose false positives that motivated E2 have both counts at 0,
+        so they stay suppressed.
+        """
+        if self._page_detected_table_count(page_num, ps) > 0:
+            return True
+        ps_native = int(getattr(ps, "native_table_region_count", 0) or 0) if ps is not None else 0
+        if ps_native:
+            return True
+        pa = self._assessment_for_page(page_num)
+        return bool(pa and int(getattr(pa, "native_table_region_count", 0) or 0) > 0)
 
     def _is_native_eligible_without_ocr(self, page_num: int, ps: PageState) -> bool:
         """Whether a page is native-eligible, WITHOUT the table exclusion.
@@ -3948,16 +4002,26 @@ class UnifiedPipeline:
         except Exception:
             return False
         if not rows_establish_grid(gt_rows):
-            state.events.append(
-                AuditEvent(
-                    page_num=page_num,
-                    kind="table_not_scorable",
-                    detail=(
-                        f"native text layer parsed {len(gt_rows)} row(s) that do not "
-                        "form a grid; not scorable against ground truth"
-                    ),
+            # GH-655 (E2): the grid gate alone over-fires on numeric prose (a
+            # transcript page can parse rows that fail the grid test without
+            # ever containing a table). Only surface the distrust event when
+            # either table-region signal actually found a table on this page
+            # -- otherwise this is a prose page with no ground truth to be
+            # missing, not a table nobody could score. Round 2: OR in
+            # ``native_table_region_count`` too (see
+            # ``_page_has_scorable_table_evidence``) -- a borderless table
+            # the detector misses at 0 can still be real (GH-520).
+            if self._page_has_scorable_table_evidence(page_num, ps):
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="table_not_scorable",
+                        detail=(
+                            f"native text layer parsed {len(gt_rows)} row(s) that do not "
+                            "form a grid; not scorable against ground truth"
+                        ),
+                    )
                 )
-            )
             return False
 
         try:
@@ -3966,13 +4030,14 @@ class UnifiedPipeline:
             return False
 
         if report.ceiling_note:
-            state.events.append(
-                AuditEvent(
-                    page_num=page_num,
-                    kind="table_not_scorable",
-                    detail=report.ceiling_note,
+            if self._page_has_scorable_table_evidence(page_num, ps):
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind="table_not_scorable",
+                        detail=report.ceiling_note,
+                    )
                 )
-            )
         elif report.unexplained_lanes:
             state.events.append(
                 AuditEvent(
