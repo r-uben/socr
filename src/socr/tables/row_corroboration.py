@@ -213,14 +213,17 @@ class RowCorroboration:
 class _NativeBand:
     tokens: tuple[str, ...]  # left-to-right normalized numeric tokens, spec-numbers excluded
     y_center: float  # the band's clustered word y-centre (mean), for skipped-band reporting
-    token_x0: tuple[float, ...] = ()  # each token's own x0, same order as ``tokens`` (#643)
-    token_x1: tuple[float, ...] = ()  # each token's own x1, same order as ``tokens`` (#643 round 2)
     numeric_tokens_contiguous: bool = True  # no non-numeric WORD sits between this band's
     # SECOND and LAST genuine numeric token (#643 round 3; the FIRST is deliberately
     # excluded from this check -- it is routinely a row/footnote marker or a numeric row
     # label, always followed by ordinary label text before the values start) -- False for
     # a footnote/prose line like "1) See pages 45 and 12", where "and" interleaves the two
     # VALUES; True (vacuously) for <= 1 numeric token, and for an ordinary table row.
+    non_numeric_word_count: int = 0  # count of this band's WORDS that are not genuine numeric
+    # tokens (#643 round 4) -- a footnote line's marker + label + prose easily outnumbers its
+    # one or two genuine values; an ordinary data row's single label never outnumbers its
+    # (usually several) numeric columns. See ``table_shaped_native_row_count``'s prose-heavy
+    # exclusion term.
 
 
 def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
@@ -302,16 +305,12 @@ def baseline_bands(words: list) -> list[_NativeBand]:
     for band_words in raw_bands:
         band_words_sorted = sorted(band_words, key=lambda w: w[0])
         tokens = []
-        token_x0 = []
-        token_x1 = []
         is_numeric_flags = []
         for word in band_words_sorted:
             is_numeric, normalized = _is_genuine_numeric(word[4])
             is_numeric_flags.append(is_numeric)
             if is_numeric:
                 tokens.append(normalized)
-                token_x0.append(word[0])
-                token_x1.append(word[2])
         numeric_idxs = [i for i, flag in enumerate(is_numeric_flags) if flag]
         if len(numeric_idxs) >= 2:
             # #643 round 3: contiguity is checked from the SECOND numeric
@@ -328,14 +327,14 @@ def baseline_bands(words: list) -> list[_NativeBand]:
             contiguous = all(is_numeric_flags[numeric_idxs[1] : numeric_idxs[-1] + 1])
         else:
             contiguous = True
+        non_numeric_word_count = sum(1 for flag in is_numeric_flags if not flag)
         y_center = statistics.mean((w[1] + w[3]) / 2.0 for w in band_words)
         bands.append(
             _NativeBand(
                 tokens=tuple(tokens),
                 y_center=y_center,
-                token_x0=tuple(token_x0),
-                token_x1=tuple(token_x1),
                 numeric_tokens_contiguous=contiguous,
+                non_numeric_word_count=non_numeric_word_count,
             )
         )
     return bands
@@ -449,157 +448,76 @@ def is_column_index_row(tokens: tuple[str, ...]) -> bool:
 #: table value, which is never rendered as a bare digit-plus-punctuation.
 _FOOTNOTE_MARKER_TOKEN_RE = re.compile(r"^\d{1,3}[.)]$")
 
-#: x-lane clustering tolerance (points), reused from
-#: ``reconstruct._LANE_X_TOL_PT`` -- kept local rather than imported since
-#: that name is private to that module (same convention as
-#: ``_SPEC_NUMBER_RE`` above). #643 round 3 (reviewed): the vertical
-#: ``_ROW_BAND_TOLERANCE_FRACTION`` was an unvalidated reuse for a
-#: horizontal question; this is instead the SAME statistic
-#: ``reconstruct.py`` already measures and ships for the identical
-#: question ("do these numeric tokens' x-positions belong to the same
-#: printed column"), not a fraction of an unrelated axis's word height.
-_LANE_X_TOL_PT = 6.0
-
-
-def _established_lanes(value_lists: list[tuple[float, ...]], tolerance: float) -> list[float]:
-    """Positions that recur, within *tolerance*, across >= 2 of *value_lists*
-    (each inner tuple is one band's own token positions on one axis) -- the
-    geometric signature of a genuine printed table COLUMN.
-
-    A real table's numeric columns sit at the same x-position down every
-    row it has. Two is the minimum count that can call a shared position a
-    repeating pattern at all -- one occurrence proves nothing about
-    recurrence, the same reasoning ``is_column_index_row`` uses for its own
-    ``len(tokens) < 2`` floor.
-
-    Clusters greedily by sorted position (same running-mean algorithm
-    ``baseline_bands`` uses for y-centres), so lanes belonging to
-    DIFFERENT tables on the same page cluster independently as long as
-    their offsets differ by more than *tolerance* -- neither table's lanes
-    suppress the other's. Callers control which bands' values are eligible
-    to establish a lane by what they pass in *value_lists* -- see
-    ``table_shaped_native_row_count``'s leave-one-out use for why a
-    marker-led band under test is excluded from its OWN lane evidence.
-    """
-    points: list[tuple[float, int]] = [
-        (value, band_idx) for band_idx, values in enumerate(value_lists) for value in values
-    ]
-    if not points:
-        return []
-    points.sort(key=lambda p: p[0])
-    lane_sum = 0.0
-    lane_count = 0
-    lane_band_ids: set[int] = set()
-    lanes: list[float] = []
-    for value, band_idx in points:
-        if lane_count and abs(value - lane_sum / lane_count) <= tolerance:
-            lane_sum += value
-            lane_count += 1
-            lane_band_ids.add(band_idx)
-        else:
-            if len(lane_band_ids) >= 2:
-                lanes.append(lane_sum / lane_count)
-            lane_sum = value
-            lane_count = 1
-            lane_band_ids = {band_idx}
-    if len(lane_band_ids) >= 2:
-        lanes.append(lane_sum / lane_count)
-    return lanes
-
 
 def table_shaped_native_row_count(words: list, row_shape_min: int) -> int:
     """Count of native baseline bands that look like a table row (TICKET-#643,
-    round 3 reviewed -- evidence policy flipped to DEFAULT KEEP).
+    round 4 reviewed -- geometry-free DENYLIST).
 
     Factored out of ``manifest._row_shape_reconciliation_ok`` (TICKET-A1b,
     #634) so TICKET-A2's truncation term (#645) can reuse the identical
     "table-shaped row" definition without a second implementation drifting
     from it.
 
-    Rounds 1-2 built an ALLOWLIST: a band counted only when its own
-    geometry positively matched a recurring column lane, defaulting every
-    unmatched band to "not a table row". Round-2 review (P1 x2) found this
-    silently erased genuine source evidence twice over -- an ordinary
-    numbered table row (``1) Alpha | 80``) was misread as a footnote
-    because its leading row-number LOOKS like a footnote marker, and a
-    real one-row second table at another x-offset was dropped simply
-    because nothing else on the page shared its lane. An allowlist cannot
-    tell "not yet proven to recur" apart from "proven not to be a table
-    row" -- and a candidate omitting either kind of row must still fail
-    reconciliation, not pass because the denominator quietly shrank.
+    Round 3 stripped a leading marker token before comparing a band's width
+    to ``row_shape_min``, but the CANDIDATE side (``numeric_body_rows``)
+    never strips it -- a numeric-looking stub such as ``3)`` is anchored as
+    one of the candidate's own row tokens, so a marker-led candidate row
+    genuinely has one MORE numeric token than its data columns alone. That
+    mismatch made every source row look "too narrow" and let a truncated
+    candidate (``3) | 12 | 45`` alone, against four real source rows) pass
+    in both callers. This version compares LIKE WITH LIKE: the marker is
+    never stripped for the width check, exactly mirroring how the
+    candidate parser counts it.
 
-    Round 3 (this version) is a DENYLIST instead: every shape-eligible
-    band counts UNLESS there is POSITIVE evidence it is a footnote/prose
-    line, not a table row. A band is shape-eligible when it has at least
-    ``row_shape_min`` genuine numeric tokens, AFTER first stripping a
-    leading marker token (``_FOOTNOTE_MARKER_TOKEN_RE`` -- ``1)``, ``12.``)
-    from consideration -- the marker itself is never one of the
-    candidate's own column values, so it must not inflate the width check
-    either way -- and is not the printed column-index legend row
-    (``is_column_index_row``, a table convention, not data).
+    Round 3 also excluded a band when NO OTHER band shared its lane --
+    but a genuinely short numbered table (one or two rows) has no other
+    band to share a lane with at all; the absence of a second row is not
+    positive evidence that the first is a footnote. Round 4 deletes lane
+    recurrence entirely -- geometry is never used to exclude a band.
 
-    A shape-eligible band that is NOT marker-led always counts -- lane
-    geometry says nothing useful about it (a real second table's own rows
-    are not marker-led, so they are never at risk of the allowlist
-    failure mode above). A MARKER-LED band is excluded only when EITHER:
+    A band is shape-eligible when it has at least ``row_shape_min``
+    genuine numeric tokens (marker included, per above) and is not the
+    printed column-index legend row (``is_column_index_row``, a table
+    convention, not data). A shape-eligible band that is NOT led by a
+    marker-shaped token (``_FOOTNOTE_MARKER_TOKEN_RE``) always counts -- a
+    real second table's own rows are never marker-led, so they can never
+    be at risk here. A MARKER-LED band is excluded only on POSITIVE prose
+    evidence:
 
-    - its numeric tokens after the marker are NOT contiguous
+    - its numeric tokens (after the marker) are NOT contiguous
       (``numeric_tokens_contiguous`` -- a non-numeric WORD such as "See
-      pages"/"and" sits between two of its VALUES, the signature of
-      numbers embedded in running prose: ``1) See pages 45 and 12``).
-      This alone separates a numbered LABEL ("1) Alpha") from footnote
-      prose, since the ordinary label text right after the marker is not
-      itself between two numeric tokens.
-    - OR it has >= 2 remaining numeric tokens and NONE of them sits, by
-      x0 or x1, in a lane that recurs across >= 2 OTHER shape-eligible
-      bands (this band itself excluded from the lane evidence, so a
-      marker-led band can never help establish its own excuse to survive)
-      -- the original ticket's synthetic repro, ``1) 45 12``, whose
-      numbers are contiguous but whose position matches nothing else on
-      the page.
+      pages"/"and" sits between two of its VALUES: ``1) See pages 45 and
+      12``). An ordinary label right after the marker is not itself
+      between two numeric tokens, so ``1) Alpha | 80`` is unaffected.
+    - OR its non-numeric WORDS outnumber its genuine numeric tokens
+      (``non_numeric_word_count`` -- prose-heavy, even without two
+      numbers straddled by a single interleaving word).
 
-    A marker-led band with exactly ONE remaining numeric token (``1)
-    Alpha | 80``) triggers neither test and is kept -- an ordinary row
-    number is not evidence of anything.
+    Deliberately accepted (owner ruling, #643 round 4): a marker led by a
+    BARE run of numbers with no prose at all (``1) 45 12``, the issue's
+    own original synthetic repro) triggers NEITHER test -- one non-numeric
+    word (the marker's own punctuation aside) does not outnumber two
+    numeric tokens, and there is nothing else to interleave. It is KEPT,
+    and a page carrying such lines alongside a real table stays
+    fail-closed exactly as pre-#643. A REAL cross-reference footnote
+    always carries prose ("See pages", "and", "cf.") and is excluded by
+    the first test above; only a footnote with no prose at all -- of
+    which no real fixture is on file -- survives, and it is
+    indistinguishable from a genuine numbered data row by ANY property
+    available at this call site.
     """
-    candidates: list[tuple[_NativeBand, tuple[str, ...], tuple[float, ...], tuple[float, ...]]] = []
+    count = 0
     for band in baseline_bands(words):
-        if not band.tokens:
+        if not band.tokens or len(band.tokens) < row_shape_min:
+            continue
+        if is_column_index_row(band.tokens):
             continue
         marker_led = bool(_FOOTNOTE_MARKER_TOKEN_RE.match(band.tokens[0]))
         if marker_led:
-            core_tokens = band.tokens[1:]
-            core_x0 = band.token_x0[1:]
-            core_x1 = band.token_x1[1:]
-        else:
-            core_tokens = band.tokens
-            core_x0 = band.token_x0
-            core_x1 = band.token_x1
-        if len(core_tokens) < row_shape_min or not core_tokens:
-            continue
-        if is_column_index_row(core_tokens):
-            continue
-        candidates.append((band, core_tokens, core_x0, core_x1, marker_led))
-
-    count = 0
-    for i, (band, core_tokens, core_x0, core_x1, marker_led) in enumerate(candidates):
-        if not marker_led:
-            count += 1
-            continue
-        if not band.numeric_tokens_contiguous:
-            continue  # excluded: numbers embedded in prose
-        if len(core_tokens) >= 2:
-            others_x0 = [c[2] for j, c in enumerate(candidates) if j != i]
-            others_x1 = [c[3] for j, c in enumerate(candidates) if j != i]
-            lanes_x0 = _established_lanes(others_x0, _LANE_X_TOL_PT)
-            lanes_x1 = _established_lanes(others_x1, _LANE_X_TOL_PT)
-            matches_a_lane = any(
-                any(abs(x0 - lane) <= _LANE_X_TOL_PT for lane in lanes_x0)
-                or any(abs(x1 - lane) <= _LANE_X_TOL_PT for lane in lanes_x1)
-                for x0, x1 in zip(core_x0, core_x1)
-            )
-            if not matches_a_lane:
-                continue  # excluded: no recurring lane anywhere else on the page
+            if not band.numeric_tokens_contiguous:
+                continue  # excluded: a non-numeric word splits two values
+            if band.non_numeric_word_count > len(band.tokens):
+                continue  # excluded: prose-heavy line
         count += 1
     return count
 

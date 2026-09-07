@@ -156,13 +156,12 @@ def _label_row_words(y: float, label: str, values: list[str]) -> list[tuple]:
     return words
 
 
-def _unaligned_footnote_words(n: int, y_start: float = 500.0) -> list[tuple]:
-    """*n* numeric footnote lines LED BY A MARKER (``1) 45 12``, the issue's
-    own real repro shape and the shape round 3 requires before it will even
-    consider excluding a band), each carrying 2 genuine numbers, positioned
-    so no two (own trio or across footnotes) ever share an x-lane -- see
+def _bare_marker_footnote_words(n: int, y_start: float = 500.0) -> list[tuple]:
+    """*n* BARE numeric footnote lines led by a marker (``1) 45 12``, no
+    prose at all) -- the issue's own original synthetic repro. #643 round
+    4 (owner ruling): deliberately KEPT, not excluded -- see
     ``tests/tables/test_row_corroboration.py::_footnote_bands`` for the
-    identical construction and its tolerance-clearance rationale."""
+    identical construction and the ruling's full rationale."""
     words: list[tuple] = []
     for i in range(n):
         y = y_start + i * 20.0
@@ -173,40 +172,44 @@ def _unaligned_footnote_words(n: int, y_start: float = 500.0) -> list[tuple]:
     return words
 
 
-def test_footnote_bands_do_not_truncate_complete_narrow_table() -> None:
-    """#643: unaligned footnote bands must not inflate ``native_table_rows``
-    into flagging a COMPLETE 3-row narrow-table candidate as truncated."""
+def test_bare_marker_footnotes_stay_fail_closed_through_structure_check() -> None:
+    """#643 round 4 (owner ruling): a COMPLETE 3-row narrow-table candidate
+    sharing a page with 5 BARE marker-led numeric lines (no prose) IS
+    flagged truncated -- accepted, documented collateral (see the mirrored
+    test and its rationale in test_row_corroboration.py), not a bug."""
     rows = [("Revenue", "1,204", "980"), ("Costs", "500", "410"), ("Total", "704", "570")]
     words: list[tuple] = []
     md_rows = []
     for i, (label, a, b) in enumerate(rows):
         words += _label_row_words(10.0 + i * 20.0, label, [a, b])
         md_rows.append((label, a, b))
-    words += _unaligned_footnote_words(5)
+    words += _bare_marker_footnote_words(5)
     complete_md = "| Item | A | B |\n|---|---|---|\n"
     complete_md += "".join(f"| {label} | {a} | {b} |\n" for label, a, b in md_rows)
-    assert table_truncated(complete_md, words) is False
+    assert table_truncated(complete_md, words) is True
 
 
-def test_truncated_narrow_candidate_with_footnotes_still_flagged() -> None:
-    """The SAME native page as above, but the candidate now emits only 1 of
-    its 3 real rows: the footnote exemption must not also exempt a genuinely
-    dropped data row."""
+def test_truncated_narrow_candidate_also_flagged_with_bare_footnotes_present() -> None:
+    """The SAME native page as above, candidate now emitting only 1 of its 3
+    real rows: also flagged -- the bare-footnote collateral does not make a
+    genuinely truncated candidate look any more complete."""
     rows = [("Revenue", "1,204", "980"), ("Costs", "500", "410"), ("Total", "704", "570")]
     words: list[tuple] = []
     for i, (label, a, b) in enumerate(rows):
         words += _label_row_words(10.0 + i * 20.0, label, [a, b])
-    words += _unaligned_footnote_words(5)
+    words += _bare_marker_footnote_words(5)
     truncated_md = "| Item | A | B |\n|---|---|---|\n| Revenue | 1,204 | 980 |\n"
     assert table_truncated(truncated_md, words) is True
 
 
 def test_right_aligned_column_truncation_still_detected() -> None:
-    """Reviewed round-2 (P1): a right-aligned numeric column (values of
-    differing digit-width sharing an x1 margin, not an x0) must still
-    establish a lane and catch a truncated candidate -- x0-only lane
-    detection missed this (values' x0 differs with their width; only x1
-    recurs)."""
+    """A right-aligned numeric column (values of differing digit-width, so
+    x0 differs even though x1 recurs) must still catch a truncated
+    candidate. Originally written for round-2's x0/x1 lane check; round 4
+    deleted lane geometry entirely, but these rows are not marker-led, so
+    they are unconditionally counted regardless -- kept as a general
+    truncation-detection regression test, since alignment must never
+    matter to whether a row counts."""
     values = [str(10 + i) if i % 2 == 0 else str(100 + i) for i in range(10)]
     words: list[tuple] = []
     rows = []
@@ -304,9 +307,10 @@ def test_complete_and_truncated_numbered_table() -> None:
 
 def test_genuine_second_numbered_table_still_flags_truncation() -> None:
     """Two REAL numbered tables at different x offsets. A candidate covering
-    only the first must still be flagged truncated -- the second table's own
-    rows establish their own lane from EACH OTHER, so being marker-led does
-    not exempt them."""
+    only the first must still be flagged truncated -- each row has exactly
+    ONE remaining numeric token after its own marker, so being marker-led
+    does not exempt either table (neither exclusion test fires, regardless
+    of x position)."""
     rows1 = [(f"Item{i}", str(80 + i)) for i in range(5)]
     words1 = _numbered_table_words(rows1, x_marker=10.0, y_start=10.0)
     rows2 = [(f"Line{i}", str(500 + i)) for i in range(5)]

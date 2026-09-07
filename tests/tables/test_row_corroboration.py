@@ -345,17 +345,17 @@ def _narrow_table(rows: list[tuple[str, str, str]]) -> tuple[list[tuple], str]:
 
 
 def _footnote_bands(n: int, y_start: float = 500.0) -> list[tuple]:
-    """*n* numeric footnote-style lines, LED BY A MARKER (``1) 45 12``) --
-    the issue's own real repro shape, and the shape ``table_shaped_native_row_count``
-    round 3 requires before it will even consider excluding a band (a bare,
-    unmarked numeric line is never distinguishable from a real data row and
-    is deliberately kept). Marker + 2 genuine numeric tokens -- same width
-    as the narrow table's own rows, so shape alone cannot distinguish them
-    (#643's actual failure mode). Positioned in per-footnote clusters
-    200.0pt apart (marker/first/second at +0/+20/+50 within each cluster)
-    so no two footnotes' tokens, nor any footnote token and the table's own
-    column x (100.0/160.0), ever land within the 6.0pt lane tolerance of
-    each other or of one another across footnotes."""
+    """*n* BARE numeric footnote-style lines, LED BY A MARKER (``1) 45 12``,
+    no prose at all) -- the issue's own original synthetic repro. #643
+    round 4 (owner ruling): a marker-led line with no prose has no property
+    -- lexical or geometric -- that distinguishes it from a genuine
+    numbered data row, and is deliberately KEPT (not excluded); a page
+    combining bare lines like these with a real table stays fail-closed,
+    exactly as it did before #643. Only a marker-led line that ALSO carries
+    prose (a real cross-reference footnote, e.g. "1) See pages 45 and 12")
+    is excluded -- see ``test_aligned_marker_footnotes_do_not_truncate_complete_table``
+    in test_structure_check_truncated.py, and ``test_aligned_numeric_footnotes``
+    in test_gh643_reviewed_probes.py, for that side of the line."""
     words: list[tuple] = []
     for i in range(n):
         y = y_start + i * 20.0
@@ -366,43 +366,45 @@ def _footnote_bands(n: int, y_start: float = 500.0) -> list[tuple]:
     return words
 
 
-def test_footnote_bands_do_not_inflate_native_table_rows_count():
-    """#643: a COMPLETE 3-row narrow-table candidate must reconcile even when
-    5 numeric footnote lines share the page. Pre-fix, shape alone counts all
-    8 bands as table-shaped (native_table_rows=8, threshold ceil(8*36/39)=8,
-    candidate=3 -> rejected); the footnotes' numbers never recur at the
-    table's own x-lanes, so the lane-aware count excludes them
-    (native_table_rows=3, threshold=3, candidate=3 -> OK). Fails on main."""
+def test_bare_marker_footnotes_stay_fail_closed_by_design():
+    """#643 round 4 (owner ruling): a COMPLETE 3-row narrow-table candidate
+    sharing a page with 5 BARE marker-led numeric lines (no prose) is
+    correctly REJECTED -- table_shaped_native_row_count counts all 8 bands
+    (native_table_rows=8, threshold=ceil(8*36/39)=8, candidate=3 -> fails).
+    This is accepted, documented collateral, not a bug: nothing at this
+    call site can tell ``1) 45 12`` apart from a genuine numbered data row
+    when it carries no prose at all. A real cross-reference footnote always
+    carries prose and is excluded instead (see the aligned-prose-footnote
+    tests elsewhere in this file and in test_structure_check_truncated.py)."""
     table_words, markdown = _narrow_table(
         [("Revenue", "1,204", "980"), ("Costs", "500", "410"), ("Total", "704", "570")]
     )
     words = table_words + _footnote_bands(5)
-    assert table_shaped_native_row_count(words, row_shape_min=2) == 3
-    assert _row_shape_reconciliation_ok(words, markdown) is True
+    assert table_shaped_native_row_count(words, row_shape_min=2) == 8
+    assert _row_shape_reconciliation_ok(words, markdown) is False
 
 
-def test_truncated_narrow_candidate_still_rejected_with_footnote_bands_present():
-    """#643 must not admit a truncated candidate: the SAME native page as
-    above (3 real rows + 5 footnote bands), but the candidate itself now
-    emits only 1 of its 3 real rows. The lane fix still excludes the
-    footnotes (native_table_rows=3), and 1 < ceil(3*36/39)=3 still fails --
-    the footnote exemption does not also exempt a dropped data row."""
+def test_truncated_narrow_candidate_also_rejected_with_bare_footnotes_present():
+    """The SAME native page as above (3 real rows + 5 bare marker-led
+    lines), candidate now emitting only 1 of its 3 real rows: also
+    rejected (1 < ceil(8*36/39)=8) -- the bare-footnote collateral does not
+    somehow make a genuinely truncated candidate look MORE complete."""
     table_words, _ = _narrow_table(
         [("Revenue", "1,204", "980"), ("Costs", "500", "410"), ("Total", "704", "570")]
     )
     words = table_words + _footnote_bands(5)
     truncated_markdown = md_table(["Item", "A", "B"], [["Revenue", "1,204", "980"]])
-    assert table_shaped_native_row_count(words, row_shape_min=2) == 3
+    assert table_shaped_native_row_count(words, row_shape_min=2) == 8
     assert _row_shape_reconciliation_ok(words, truncated_markdown) is False
 
 
 def test_second_table_at_a_different_x_lane_still_counts_when_candidate_covers_only_one():
-    """Reviewer addendum: two REAL tables at different x offsets, each with
-    its own 3-row lane structure. A candidate covering only the first table
-    must still be rejected -- the second table's rows establish their OWN
-    lanes from their own 3 rows and are not silently dropped just because
-    they sit outside the first table's x positions (no regression on the
-    existing "two independent tables" reconciliation case)."""
+    """Reviewer addendum: two REAL tables at different x offsets. A
+    candidate covering only the first table must still be rejected --
+    neither table's rows are marker-led, so #643 round 4's denylist never
+    touches either one; both are unconditionally counted regardless of x
+    position (no regression on the existing "two independent tables"
+    reconciliation case, and no lane geometry involved at all)."""
     table1_words, table1_markdown = _narrow_table(
         [("Revenue", "1,204", "980"), ("Costs", "500", "410"), ("Total", "704", "570")]
     )
@@ -485,9 +487,11 @@ def test_truncated_numbered_table_still_rejected():
 
 def test_genuine_second_numbered_table_still_counted():
     """Two REAL numbered tables at different x offsets. A candidate covering
-    only the first must still be rejected -- the second table's own rows
-    establish their own lane from EACH OTHER (leave-one-out), so it is never
-    mistaken for footnote prose just because it is also marker-led."""
+    only the first must still be rejected -- each row has exactly ONE
+    remaining numeric token after its own marker, so neither exclusion test
+    (contiguity is vacuous below 2 tokens; 1 label word never outnumbers 1
+    value) fires for either table, marker-led or not, regardless of x
+    position."""
     rows1 = [(f"Item{i}", str(80 + i)) for i in range(5)]
     words1, markdown1 = _numbered_table(rows1, x_marker=10.0, y_start=10.0)
     rows2 = [(f"Line{i}", str(500 + i)) for i in range(5)]
@@ -499,14 +503,52 @@ def test_genuine_second_numbered_table_still_counted():
 
 def test_one_row_second_numbered_table_beside_multirow_first():
     """A one-row second table (still marker-led, ``1) Solo | 999``) sitting
-    beside a 10-row first table. Its single row has only ONE remaining
-    numeric token after the marker is stripped, so neither exclusion test
-    applies (the contiguity test is vacuous below 2 tokens, and the lane
-    test only runs at >= 2) -- it must be kept regardless of whether
-    anything else shares its lane."""
+    beside a 10-row first table. #643 round 4: neither exclusion test fires
+    (contiguity is vacuous below 2 numeric tokens after the marker, and the
+    marker + 1 label word never outnumbers its 2 numeric tokens) -- kept
+    regardless of it being the only row of its own table."""
     rows1 = [(f"Item{i}", str(80 + i)) for i in range(10)]
     words1, markdown1 = _numbered_table(rows1, x_marker=10.0)
     words2 = [w(600.0, 500.0, "1)"), w(620.0, 500.0, "Solo"), w(820.0, 500.0, "999")]
     words = words1 + words2
     assert table_shaped_native_row_count(words, row_shape_min=1) == 11
     assert _row_shape_reconciliation_ok(words, markdown1) is False
+
+
+# ---------------------------------------------------------------------------
+# #643 round 4 (reviewed, Astra's third pass): round 3's marker-stripping
+# disagreed with the CANDIDATE side's own parser (numeric_body_rows anchors
+# a numeric stub like "3)" as a real row token, so a marker-led candidate
+# row genuinely has one MORE numeric token than its own data columns) --
+# every source row then looked "too narrow" and a truncated candidate
+# passed in both callers. Round 3's lane-recurrence exclusion also erased a
+# genuinely short (one- or two-row) numbered table, since a short table has
+# no "other" band to share a lane with. Round 4 deletes lane recurrence
+# entirely and compares candidate/source width LIKE WITH LIKE (marker
+# never stripped for the width check). These pin the two additional
+# scenarios requested beyond Astra's own probe file
+# (test_gh643_reviewed_probes_round4.py): a one-row numbered table and a
+# marker-only numeric stub row, both kept.
+# ---------------------------------------------------------------------------
+
+
+def test_one_row_numbered_table_with_two_numerics_kept():
+    """A single-row numbered table (marker + label + 2 numeric values) is
+    kept -- the absence of a second row is not evidence of anything."""
+    words = [
+        w(10.0, 20.0, "3)"),
+        w(35.0, 20.0, "Alpha"),
+        w(130.0, 20.0, "12"),
+        w(210.0, 20.0, "45"),
+    ]
+    assert table_shaped_native_row_count(words, row_shape_min=2) == 1
+
+
+def test_marker_only_numeric_stub_row_kept():
+    """A band whose ONLY genuine numeric token is a row-number marker (no
+    data value on that printed line at all -- e.g. a numbered index column
+    beside a blank data cell) triggers neither exclusion test (only 1
+    numeric token, so contiguity is vacuous; 1 label word does not
+    outnumber it) and is kept."""
+    words = [w(10.0, 20.0, "3)"), w(35.0, 20.0, "Alpha")]
+    assert table_shaped_native_row_count(words, row_shape_min=1) == 1
