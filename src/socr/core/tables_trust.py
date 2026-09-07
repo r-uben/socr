@@ -126,6 +126,15 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # complete, so the page is not verified.
         "dualpass_crop_failed",
         "source_evidence_table_reject",
+        # #658: the same gate's other fail-closed ending -- no classical OCR
+        # backend, so nothing read the page's pixels. Listed for exactly the
+        # reason the line above is: the page ships a table nothing corroborated.
+        # The emit site raises this kind ALONGSIDE the one above rather than
+        # instead of it, so this entry is not what keeps such a page untrusted;
+        # it is here so the set stays complete if that pairing ever changes,
+        # and so a page reaching the sidecar with only this kind is still read
+        # as what it is -- unverified.
+        "source_evidence_no_witness_backend",
         "table_row_repetition_truncated",
         # GH-96: an escalation that was refused or timed out leaves the SUSPECT
         # table shipping, so the page stays untrusted. An ACCEPTED escalation is

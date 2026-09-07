@@ -556,7 +556,17 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
 
         if not result.verifiable or not result.passed:
             from socr.core.result import FailureMode
+            from socr.tables.source_evidence import CAUSE_NO_WITNESS_BACKEND
 
+            # #658: the gate has two fail-closed endings and they are not the
+            # same finding. A missing tesseract means nothing ever read the
+            # pixels, so socr holds no evidence about this table; calling that
+            # HALLUCINATION accuses the model of inventing content on the sole
+            # ground that the host is missing an install. The page stays
+            # fail-closed either way -- unwitnessed is still unverified -- and
+            # only the reason, the failure mode and one EXTRA audit event
+            # change; the generic reject event below is emitted in both cases.
+            no_witness = result.cause == CAUSE_NO_WITNESS_BACKEND
             self._emit_event(
                 page_num=page_num,
                 kind="source_evidence_table_reject",
@@ -565,14 +575,46 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 data={
                     "verifiable": result.verifiable,
                     "passed": result.passed,
+                    "cause": result.cause,
                 },
             )
+            if no_witness:
+                # A SECOND event, not a replacement for the one above: every
+                # consumer of the generic reject kind (``tables_trust``'s
+                # distrust set among them) must keep seeing this page, and a
+                # page that lost its reject event would read as trusted. This
+                # one exists so an operator can count unwitnessed pages with a
+                # single grep instead of parsing a sentence.
+                self._emit_event(
+                    page_num=page_num,
+                    kind="source_evidence_no_witness_backend",
+                    engine=output.engine or "",
+                    detail=result.reason,
+                    data={
+                        "cause": result.cause,
+                        # The precise state, never a flat "absent": an OCR
+                        # reader that crashed and a page that would not
+                        # rasterise are both unwitnessed, and neither is fixed
+                        # by installing anything.
+                        "witness_state": result.witness_state,
+                    },
+                )
             output.audit_passed = False
             output.status = PageStatus.ERROR
-            output.failure_mode = FailureMode.HALLUCINATION
+            output.failure_mode = (
+                FailureMode.NO_WITNESS_BACKEND if no_witness else FailureMode.HALLUCINATION
+            )
+            # #658 reviewer item 3: the ``source_evidence_table`` token in this
+            # reason is a LOAD-BEARING marker, not a label -- the scanned-table
+            # fail-closed floor latches on ``"source_evidence_table" in
+            # att.reason`` (orchestrator ``_phase_agentic``). Renaming the
+            # prefix for the no-witness ending silently stopped the floor from
+            # applying to exactly these pages, which is the fail-OPEN direction.
+            # The distinguishing token is ADDED inside the same prefix instead.
+            marker = f"[{CAUSE_NO_WITNESS_BACKEND}] " if no_witness else ""
             return AcceptDecision(
                 accept=False,
-                reason=f"source_evidence_table: {result.reason}",
+                reason=f"source_evidence_table: {marker}{result.reason}",
                 confidence=0.0,
             )
 

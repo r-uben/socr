@@ -205,6 +205,60 @@ def test_perturbed_recorded_items_report_exact_delta():
     assert "no candidate row" in row.note
 
 
+def test_cleared_recorded_item_with_evidence_lands_in_removed():
+    """TICKET-A1 (#613): a recorded item that legitimately vanished --
+    bound to a real candidate row, label-compared, verified -- must land in
+    ``row.removed``, not ``row.unchecked_removed``. Every other pin in this
+    module for a vanished item is a genuine UNCHECKED case (unbound,
+    ambiguous, or disputed); this is the CLEARED counterpart, with real
+    ``bind()`` evidence behind it, so ``_item_unchecked_reason`` returning
+    ``None`` for a bound-and-verified miss is exercised at all.
+
+    Built on the same doc00 page-1 fixture as
+    ``test_perturbed_recorded_items_report_exact_delta``: the real candidate
+    grid binds a SECOND row, "Term premium", to native row ``("Term
+    premium",)`` with no dispute (it never appears in ``fresh_items`` --
+    only genuine contradictions do). Recording a stale/superseded item for
+    that same row (``model_token="Term premium"``, a wrong old
+    ``native_token``) reproduces exactly the "recorded item corrected on
+    this tree" shape: the frozen key does not recur in ``fresh_items``, but
+    the row IS bound and verified, so it must clear, not go UNCHECKED.
+    """
+    records = discover_pages(FIXTURE_CORPUS)
+    record = next(r for r in records if r.page_num == 1)
+
+    cleared_item = {
+        "kind": "row_label",
+        "native_token": "Old wrong native label for term premium",
+        "model_token": "Term premium",
+    }
+    perturbed_adjudication = {
+        "p1-t0": {
+            "status": "held",
+            "items": [cleared_item],
+        }
+    }
+    perturbed_record = record.__class__(
+        doc_slug=record.doc_slug,
+        page_num=record.page_num,
+        sidecar_path=record.sidecar_path,
+        pdf_path=record.pdf_path,
+        cache_dir=record.cache_dir,
+        model_markdown=record.model_markdown,
+        is_fail_closed_marker=record.is_fail_closed_marker,
+        provenance_engines_by_table=record.provenance_engines_by_table,
+        binding_adjudication=perturbed_adjudication,
+    )
+
+    rows = replay_page(perturbed_record, labels=None)
+    assert len(rows) == 1
+    row = rows[0]
+    cleared_key = ("row_label", "Old wrong native label for term premium", "Term premium")
+    assert row.removed == (cleared_key,)
+    assert cleared_key not in row.unchecked_removed
+    assert row.unchecked_removed == ()
+
+
 def test_sidecar_bytes_unchanged_by_replay():
     sidecar_path = FIXTURE_CORPUS / "out" / "doc00" / "doc00" / "pages" / "00001.json"
     before = sidecar_path.read_bytes()

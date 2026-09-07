@@ -751,7 +751,7 @@ def _grid_shaped_attempt(out: PageOutput | None) -> bool:
     """
     if out is None:
         return False
-    if (out.engine or "").startswith("native"):
+    if (out.engine or "").startswith(_NATIVE_TEXT_LANES):
         return False
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
@@ -790,7 +790,7 @@ def _grid_reading_attempt(out: PageOutput | None) -> bool:
     """
     if out is None:
         return False
-    if (out.engine or "").startswith("native"):
+    if (out.engine or "").startswith(_NATIVE_TEXT_LANES):
         return False
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
@@ -2139,7 +2139,17 @@ def _select_page_output_tagged(
             status=PageStatus.ERROR,
             engine=p.best_output.engine if p.best_output else "qwen",
             audit_passed=False,
-            failure_mode=FailureMode.HALLUCINATION,
+            # #658: this branch REBUILDS the shipped output from scratch, so a
+            # fixed HALLUCINATION here overwrote the honest attempt-level reason
+            # and the sidecar the corpus actually reads still said the model
+            # invented the table. The floor is unchanged -- same marker text,
+            # same ERROR, same provenance -- only the recorded cause follows the
+            # page's own flag.
+            failure_mode=(
+                FailureMode.NO_WITNESS_BACKEND
+                if getattr(p, "scanned_table_no_witness", False)
+                else FailureMode.HALLUCINATION
+            ),
         ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
     if p.is_born_digital and p.native_text:
         # TR-3: D3 fail-closed floor.  When the OCR ladder failed for a table
@@ -2786,6 +2796,40 @@ def _apply_chart_region_guard(output: PageOutput, p) -> PageOutput:
     return replace(output, status=PageStatus.WARNING)
 
 
+def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
+    """#165: demote a page whose detected math-glyph damage survived into its body.
+
+    A REPORTING guard, not a routing one. It runs after selection because the
+    question it answers is about the bytes that ship: a recovery the selector
+    discarded covered nothing, and a page can only be judged on the copy that
+    wins. Nothing here re-selects -- the text, engine, provenance, table
+    disposition, ``audit_passed`` and any existing ``failure_mode`` are all
+    carried through untouched, so no candidate changes rank because of it. The
+    document-level demotion is carried by the explicit unresolved-math page set
+    in ``_phase_assemble``, not by a new ``FailureMode`` the ladder would read.
+
+    SUCCESS becomes WARNING; an existing WARNING or ERROR is already at least as
+    loud and is left alone. Idempotent, because every finalization seam
+    (provisional records, assemble pre-records, final body records, terminal
+    sidecars, manifest replay) runs it again on its own output.
+    """
+    from socr.math.accounting import unresolved_math_detail
+
+    detail = unresolved_math_detail(
+        has_unmapped_math_glyphs=bool(getattr(p, "has_unmapped_math_glyphs", False)),
+        evidence=getattr(p, "math_recovery_evidence", None),
+        text=output.text or "",
+    )
+    if detail is None:
+        return output
+    notes = list(output.audit_notes or [])
+    if detail.detail not in notes:
+        notes.append(detail.detail)
+    if output.status is PageStatus.SUCCESS:
+        return replace(output, status=PageStatus.WARNING, audit_notes=notes)
+    return replace(output, audit_notes=notes)
+
+
 def _select_and_finalize_page(
     state: DocumentState,
     page_num: int,
@@ -2799,8 +2843,9 @@ def _select_and_finalize_page(
       2. Optional saved-body text replacement
       3. _apply_table_emission_guard
       4. _apply_ladder_disposition_guard
-      5. _apply_chart_region_guard
-      6. Disposition construction from the guarded output and provenance.
+      5. _apply_unresolved_math_guard
+      6. _apply_chart_region_guard
+      7. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
     if saved_text is not None:
@@ -2809,6 +2854,7 @@ def _select_and_finalize_page(
     p = state.pages.get(page_num)
     if p is not None:
         output = _apply_ladder_disposition_guard(output, page_num, p)
+        output = _apply_unresolved_math_guard(output, p)
         output = _apply_chart_region_guard(output, p)
 
     text = (output.text or "").strip()

@@ -131,6 +131,19 @@ class FailureMode(str, Enum):
     #: winner is EXACTLY the case this mode exists to stop from shipping
     #: silently as an undemoted SUCCESS.
     HEADER_BINDING_UNVERIFIED = "header_binding_unverified"
+    #: #658: a scanned table page failed the source-evidence gate because this
+    #: host has NO classical OCR backend, so the gate never read the pixels and
+    #: holds no evidence about the table at all.
+    #:
+    #: NOT a reuse of ``HALLUCINATION``, and the difference is what the operator
+    #: must do. HALLUCINATION says a witness read the page and the model's
+    #: numbers were not there -- distrust the model. This says no witness exists
+    #: -- install tesseract and re-run. Measured on the Fed swap-line pages
+    #: (1977/1982/1990 p3): candidates carrying 62/62, 67/67 and 66/66 of the
+    #: page's numbers with zero extras were all marked fabrications by a host
+    #: with no tesseract. The page still fails closed under this mode; only the
+    #: reason changes.
+    NO_WITNESS_BACKEND = "no_witness_backend"
 
 
 #: #259 round 2: the ONE rejection disposition a page may be kept on. The

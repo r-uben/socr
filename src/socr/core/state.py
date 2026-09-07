@@ -50,6 +50,13 @@ class PageState:
     #: CAN be a digit or an operator -- an unrecovered minus is a sign flip -- so
     #: the page must never be silently trusted.
     has_unrecovered_symbol_glyphs: bool = False
+    #: #165: sparse, span-level coverage evidence from whichever recovery lane
+    #: actually ran on this page, recorded AFTER the splice so it describes what
+    #: went into the body rather than what a model returned. Read only by
+    #: ``socr.math.accounting.unresolved_math_detail``; ``None`` means "no lane
+    #: recorded coverage", which is UNKNOWN and therefore unresolved -- never
+    #: "nothing was damaged" (that is ``has_unmapped_math_glyphs``).
+    math_recovery_evidence: dict | None = None
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
@@ -124,6 +131,14 @@ class PageState:
     #: consult, which only ever makes the fallback abstain, never mis-fire.
     native_words: list[tuple] = field(default_factory=list)
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
+    #: #658: the gate rejected the table because NOTHING READ THE PIXELS (no
+    #: classical OCR backend, a crashed reader, an unrenderable page), not
+    #: because a witness contradicted it. A sibling of the flag above rather
+    #: than a value on it: the floor applies identically either way, and only
+    #: the failure mode the floor stamps differs. Persisted in the page sidecar
+    #: so a resumed run reports the same reason instead of silently falling
+    #: back to "hallucination".
+    scanned_table_no_witness: bool = False
     #: What this page has actually SPENT, as a recorded fact rather than a
     #: derivation (cold review rounds 4-5). Every site that journals an
     #: ``EngineResult`` for this page adds to it: each ladder rung ``route_page``

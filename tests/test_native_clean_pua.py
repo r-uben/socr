@@ -76,6 +76,19 @@ class TestMathFontRegex:
         assert not _MATH_FONT_RE.search("IKEVWL+STIXGeneral-Regular")
         assert not _MATH_FONT_RE.search("IKEVWL+TimesLTStd-Roman")
 
+    def test_includes_pazomath_family(self) -> None:
+        # GH-219: mathpazo's dedicated math family, subset-prefixed as real PDFs do.
+        assert _MATH_FONT_RE.search("ABCDEF+PazoMath")
+        assert _MATH_FONT_RE.search("ABCDEF+PazoMath-Italic")
+
+    def test_excludes_urw_palladio_body_font(self) -> None:
+        # URWPalladioL is the mathpazo companion body font (Palatino roman/italic
+        # prose) and is NOT math-exclusive -- matching it would flag every
+        # Palatino-typeset paper as math. Only the dedicated PazoMath family
+        # is safe to whitelist here.
+        assert not _MATH_FONT_RE.search("ABCDEF+URWPalladioL-Roma")
+        assert not _MATH_FONT_RE.search("ABCDEF+URWPalladioL-Ital")
+
 
 def _born_digital_pdf(path: Path) -> None:
     doc = fitz.open()

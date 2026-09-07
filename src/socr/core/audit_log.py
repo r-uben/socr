@@ -36,6 +36,11 @@ _ESCALATION_MODES = {
     FailureMode.GARBAGE,
     FailureMode.REFUSAL,
     FailureMode.NATIVE_TABLE_STRUCTURE_FAILED,
+    # #658: these attempts were refused by the source-evidence gate and handed
+    # to the next engine exactly as before -- they were recorded here under
+    # HALLUCINATION until the no-witness ending got its own mode, and dropping
+    # them now would quietly shrink the escalation record.
+    FailureMode.NO_WITNESS_BACKEND,
 }
 
 

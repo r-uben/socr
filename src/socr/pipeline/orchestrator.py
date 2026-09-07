@@ -13,7 +13,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -63,6 +63,12 @@ from socr.core.result import (
 from socr.core.state import DocumentState, PageState, add_page_cost
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
+from socr.math.accounting import (
+    UNRESOLVED_MATH_KIND,
+    UnresolvedMathDetail,
+    missing_coverage_witnesses,
+    unresolved_math_detail,
+)
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
 from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
 from socr.judge.table_cell_guard import GuardDisposition, evaluate_cell_guard
@@ -2265,6 +2271,7 @@ class UnifiedPipeline:
 
         from socr.core.audit_log import AuditEvent
         from socr.core.pdf import open_pdf
+        from socr.math.accounting import corrupt_region_evidence
         from socr.math.recover import recover_math_regions, splice_math
 
         ps = state.pages[page_num]
@@ -2292,6 +2299,15 @@ class UnifiedPipeline:
             error = f"corrupt-equation region recovery failed: {exc}"
             logger.warning("%s on p%d", error, page_num)
             text = native_text
+
+        # #165: span-level coverage evidence, recorded AFTER ``splice_math``
+        # because that is what sets ``source_aligned`` -- before it, a resolved
+        # region says a model returned syntax-valid LaTeX, not that the
+        # replacement went into the body. Assigned unconditionally so a
+        # reprocessed page cannot inherit the previous attempt's coverage; the
+        # failure path above leaves ``regions`` empty, which is recorded as
+        # "enumerated nothing" rather than as an absent field.
+        ps.math_recovery_evidence = corrupt_region_evidence(regions, native_text)
 
         if not regions:
             unresolved = (
@@ -2417,6 +2433,12 @@ class UnifiedPipeline:
             "equation_region_reading_unsafe_markup",
             "equation_lane_no_region",
             "equation_lane_detection_failed",
+            # GH-157: a terminal disposition -- a detected region whose sidecar
+            # was never attached because no PageOutput existed for its page.
+            # Dropping it on resume would make that skip invisible again on
+            # every run after the one that recorded it, the exact shape this
+            # allowlist exists to close.
+            "equation_sidecar_skipped_no_page_output",
         }
     )
 
@@ -2434,6 +2456,7 @@ class UnifiedPipeline:
             TABLE_BINDING_ADJUDICATED_KIND,
             TABLE_LADDER_EVENT_KINDS,
         )
+        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
 
         return frozenset(
             TABLE_LADDER_EVENT_KINDS
@@ -2446,6 +2469,20 @@ class UnifiedPipeline:
             # summary below both read this event, so dropping it on resume
             # would silently retire the debt.
             | {VISUAL_VALUES_NOT_TRANSCRIBED_KIND}
+            # #658: same contract, same reason. The witness state lives ONLY on
+            # this event, and the document note and CLI line read it to say
+            # which fix applies to which page. Dropping it on resume would not
+            # retire the finding -- the page's own flag and failure mode still
+            # name it -- but it would silently downgrade the explanation to
+            # "cause not recorded" on every resumed run.
+            | {NO_WITNESS_BACKEND_KIND}
+            # #165: the unresolved-math record is a standing property of the
+            # page's SOURCE, not of the run that noticed it. A resumed page is
+            # not re-assessed and not re-recovered, so without this replay the
+            # damage would be reported once and then vanish -- and the resumed
+            # run would report a clean SUCCESS on a document whose mathematics
+            # is known to be missing.
+            | {UNRESOLVED_MATH_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -3671,6 +3708,8 @@ class UnifiedPipeline:
         pdf_path: Path,
         page_num: int,
         figures_dir: Path | None,
+        *,
+        no_witness: bool = False,
     ) -> None:
         """GH-90: mark a scanned page whose table evidence failed for the D3 floor.
 
@@ -3683,6 +3722,12 @@ class UnifiedPipeline:
         whole-page marker, discarding the prose.
         """
         ps.scanned_table_evidence_failed = True
+        # #658: carry WHY the gate refused into the floor. Without this the
+        # demotion below and the floor's own reconstruction in
+        # ``_select_page_output_tagged`` both stamp HALLUCINATION, so the honest
+        # attempt-level reason died one selection later and the shipped sidecar
+        # still accused the model.
+        ps.scanned_table_no_witness = bool(no_witness)
         if figures_dir is not None:
             ps.d3_floor_png_ref = self._render_d3_floor_png(
                 pdf_path,
@@ -3692,7 +3737,9 @@ class UnifiedPipeline:
         if ps.best_output is not None:
             ps.best_output.status = PageStatus.ERROR
             ps.best_output.audit_passed = False
-            ps.best_output.failure_mode = FailureMode.HALLUCINATION
+            ps.best_output.failure_mode = (
+                FailureMode.NO_WITNESS_BACKEND if no_witness else FailureMode.HALLUCINATION
+            )
 
     # ------------------------------------------------------------------
     # GH-86: per-page VLM placeholder cleanup (agentic pre-flush seam)
@@ -3935,6 +3982,115 @@ class UnifiedPipeline:
         return (
             f"page(s) {', '.join(labels)}: "
             "fabricated image reference(s) removed (no provenance in the source document)"
+        )
+
+    @staticmethod
+    def _no_witness_backend_pages(state, records: list | None = None) -> list[int]:
+        """#658: pages whose FINAL outcome is "nothing read this page".
+
+        A TERMINAL diagnosis, deliberately not a union over history. An earlier
+        draft OR-ed every no-witness audit event and every historical attempt
+        into this set, so a page whose first read failed and whose later reread
+        SUCCEEDED -- or whose later witness contradicted the table outright --
+        still reported that its table "was neither corroborated nor
+        contradicted". That sentence was then false about the page that shipped.
+
+        Precedence, not a union:
+
+        1. the finalized records, when assemble has them: they ARE the shipped
+           set, and a page whose shipped output is no longer a no-witness floor
+           is not one, whatever earlier attempts recorded;
+        2. otherwise the page's own final state -- the persisted
+           ``scanned_table_no_witness`` flag (cleared when a reread is
+           accepted) or the failure mode of ``best_output``, the winner.
+
+        ``attempts`` and ``state.events`` are consulted by neither: those are
+        history, and history is what made the note lie.
+        """
+        if records:
+            return sorted(
+                {
+                    rec.output.page_num
+                    for rec in records
+                    if rec.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
+                }
+            )
+        pages: set[int] = set()
+        for num, ps_ in state.pages.items():
+            if getattr(ps_, "scanned_table_no_witness", False):
+                pages.add(num)
+                continue
+            best = getattr(ps_, "best_output", None)
+            if best is not None and best.failure_mode is FailureMode.NO_WITNESS_BACKEND:
+                pages.add(num)
+        return sorted(pages)
+
+    @staticmethod
+    def _no_witness_states(state, pages: list[int]) -> dict[str, list[int]]:
+        """Group terminally-unwitnessed pages by WHY, newest event per page.
+
+        The witness state lives only on the audit event, and the events are
+        history -- but here history is being used to explain pages whose
+        terminal status is already settled by the caller, never to select them.
+        A resumed run has no events; those pages group under "" and get the
+        generic wording, which is the honest thing to say when the cause was
+        not carried across the resume.
+        """
+        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
+
+        wanted = set(pages)
+        by_page: dict[int, str] = {}
+        for e in state.events:
+            if getattr(e, "kind", "") != NO_WITNESS_BACKEND_KIND:
+                continue
+            if e.page_num not in wanted:
+                continue
+            by_page[e.page_num] = str((getattr(e, "data", None) or {}).get("witness_state") or "")
+        grouped: dict[str, list[int]] = {}
+        for num in pages:
+            grouped.setdefault(by_page.get(num, ""), []).append(num)
+        return {k: sorted(v) for k, v in grouped.items()}
+
+    @staticmethod
+    def _no_witness_clauses(state, pages: list[int]) -> list[str]:
+        """One clause per distinct cause: which pages, and what actually fixes it.
+
+        A single sentence cannot serve these pages. "Install tesseract" is the
+        right advice for a missing binary and useless-to-harmful advice for a
+        reader that is installed and crashed, or for a page that would not
+        rasterise -- the operator is sent to fix a component that works.
+        """
+        from socr.tables.source_evidence import WITNESS_STATE_MESSAGES
+
+        clauses = []
+        for witness_state, nums in sorted(UnifiedPipeline._no_witness_states(state, pages).items()):
+            why = WITNESS_STATE_MESSAGES.get(
+                witness_state,
+                "the cause was not recorded on this run; see the "
+                "source_evidence_no_witness_backend entries in audit_log.json",
+            )
+            clauses.append(f"page(s) {', '.join(str(n) for n in nums)}: {why}")
+        return clauses
+
+    @staticmethod
+    def _no_witness_backend_note(state, records: list | None = None) -> str | None:
+        """Document-level one-liner naming the pages with no OCR witness (#658).
+
+        Mirrors ``_fabricated_url_note``: a consumer gating on ``metadata.json``
+        must see that these pages were failed closed because nothing READ them
+        and not because they fabricated content, without parsing the full audit
+        log. Carries a remedy per cause, because unlike every other note here
+        this failure is fixed on the host rather than in the document.
+        ``None`` on a clean run.
+        """
+        pages = UnifiedPipeline._no_witness_backend_pages(state, records)
+        if not pages:
+            return None
+        clauses = "; ".join(UnifiedPipeline._no_witness_clauses(state, pages))
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: scanned table(s) shipped the "
+            "fail-closed floor with NO local OCR witness -- nothing read the page pixels, "
+            f"so the table was neither corroborated nor contradicted ({clauses})"
         )
 
     @staticmethod
@@ -4626,6 +4782,7 @@ class UnifiedPipeline:
                 "native_table_header_unattributed",  # GH-200
                 "native_table_unverifiable",
                 "scanned_table_evidence_failed",
+                "scanned_table_no_witness",  # #658: qualifies the flag above
             )
             if getattr(ps, name, False)
         ]
@@ -6953,13 +7110,49 @@ class UnifiedPipeline:
                         ps.best_output = decision.final_output
 
                         # GH-90: scanned-table source-evidence fail-closed floor.
-                        _source_ev_rejected = any(
-                            "source_evidence_table" in (att.reason or "")
+                        _source_ev_attempts = [
+                            att
                             for att in decision.attempts
+                            if "source_evidence_table" in (att.reason or "")
+                        ]
+                        _source_ev_rejected = bool(_source_ev_attempts)
+                        # #658: reduce over the attempts the source-evidence gate
+                        # ACTUALLY ADJUDICATED, and let a contradiction win.
+                        #
+                        # ``any(no_witness)`` over every attempt was wrong twice
+                        # over. It read attempts the gate never saw, and it let
+                        # the FIRST reading decide: a page whose first read found
+                        # no witness and whose second read got real evidence and
+                        # refuted the table was floored as "nothing read this
+                        # page", and the terminal rollup then faithfully reported
+                        # that the table "was neither corroborated nor
+                        # contradicted" about a table a witness had contradicted.
+                        # Reader-execution failures are in the no-witness family,
+                        # so one transient failed read reaches this inside a
+                        # single run, with no install changing.
+                        #
+                        # Contradiction is the positive signal and is required
+                        # explicitly, never inferred from "not no-witness": an
+                        # attempt that never reached the gate (timeout, transport
+                        # error) carries no source-evidence verdict at all and
+                        # must not be counted as a witnessed refutation. With
+                        # neither signal present this falls back to the
+                        # pre-ticket reading.
+                        _source_ev_contradicted = any(
+                            att.output.failure_mode is FailureMode.HALLUCINATION
+                            for att in _source_ev_attempts
+                        )
+                        _source_ev_no_witness = not _source_ev_contradicted and any(
+                            att.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
+                            for att in _source_ev_attempts
                         )
                         if _source_ev_rejected and not ps.is_born_digital:
                             self._apply_scanned_table_floor(
-                                ps, state.handle.path, page_num, _chart_figures_dir
+                                ps,
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                                no_witness=_source_ev_no_witness,
                             )
 
                         # #263: rotated-shredded floor PNG. The page's native layer is
@@ -7230,7 +7423,16 @@ class UnifiedPipeline:
                             self._detect_and_crop_equations(state, [page_num], output_dir)
                             # GH-36b: LaTeX sidecar (behind recover_clean_equations flag).
                             if _recover_eq:
-                                self._attach_equation_latex_sidecars(state, [bo])
+                                # GH-157 (cold review #664): pin this call's
+                                # scope to the current page explicitly. Without
+                                # it, a later page's call would re-examine an
+                                # earlier page's already-attached regions --
+                                # found via the accumulated state.events -- and
+                                # wrongly report that earlier page as missing a
+                                # PageOutput, since only THIS page's is passed.
+                                self._attach_equation_latex_sidecars(
+                                    state, [bo], page_nums=[page_num]
+                                )
 
                 # GH-86: strip VLM sentinel image refs before provisional flush.
                 if _agentic_doc_dir is not None:
@@ -7703,8 +7905,9 @@ class UnifiedPipeline:
 
         Effects are mutations on objects passed in: appends the native
         ``PageOutput`` to ``ps.attempts``, sets ``ps.best_output``, and appends
-        up to three audit events (#92 unmapped math glyphs, #136 encoding
-        hygiene, #217 unrecovered symbol glyphs) to ``state.events``.
+        up to two audit events (#136 encoding hygiene, #217 unrecovered symbol
+        glyphs) to ``state.events``. The #92 unmapped-math-glyph record moved to
+        outcome-time accounting in ``_phase_assemble`` (#165).
         """
         # Tier 1: born-digital trusted native text — free, no OCR.
         # GH-151 TICKET-B1 / GH-200 / #211: a page reaches here
@@ -7735,33 +7938,18 @@ class UnifiedPipeline:
         ps.attempts.append(native_out)
         ps.best_output = native_out
 
-        # #92: born-digital page shipped as native text while carrying
-        # unmapped math glyphs (PUA / weak ToUnicode) that equation recovery
-        # did not reach. The prose is sound, but the math symbols are
-        # font-private and lost — surface it (never silent). Page stays
-        # SUCCESS (prose is usable); the event records the math-glyph gap.
-        if getattr(ps, "has_unmapped_math_glyphs", False) and not (
-            self.config.detect_equations and self.config.recover_clean_equations
-        ):
-            from socr.core.audit_log import AuditEvent
-
-            state.events.append(
-                AuditEvent(
-                    page_num=page_num,
-                    kind="native_math_unrecovered",
-                    engine="native",
-                    detail=(
-                        "born-digital native text shipped with unmapped math glyphs "
-                        "(private-use codepoints, weak ToUnicode); math symbols not "
-                        "recovered — enable --detect-equations --recover-clean-equations "
-                        "for region OCR -> LaTeX"
-                    ),
-                    data={
-                        "has_equations": ps.has_equations,
-                        "recover_clean_equations": self.config.recover_clean_equations,
-                    },
-                )
-            )
+        # #92 / #165: the unmapped-math-glyph (PUA / weak ToUnicode) record used
+        # to be emitted HERE, suppressed whenever ``--detect-equations`` and
+        # ``--recover-clean-equations`` were both set. That gate answered a
+        # question about the run's CONFIGURATION, and the only durable signal of
+        # lost mathematics could therefore be silenced by two flags that had not
+        # recovered a single glyph. It was also premature: this native branch
+        # runs before the region lanes, so a page later recovered in full still
+        # carried the warning.
+        #
+        # The record now follows the OUTCOME instead, and is raised once per
+        # affected page from ``_phase_assemble`` against the bytes that actually
+        # ship (see ``socr.math.accounting``). Nothing is emitted here.
 
         # #136: the text layer showed cosmetic encoding corruption (lost
         # spaces, fused words) in the flag band. The page ships SUCCESS —
@@ -8221,6 +8409,10 @@ class UnifiedPipeline:
             # are NOT cleared: they are true of the page either way.
             ps.native_table_structure_failed = False
             ps.scanned_table_evidence_failed = False
+            # #658: clear the sibling reason with the flag it qualifies. A
+            # released page that kept it would report a no-witness floor it no
+            # longer sits under.
+            ps.scanned_table_no_witness = False
             ps.d3_floor_png_ref = ""
             ps.rotated_shred_png_ref = ""
             state.events.extend(judge_events)
@@ -9109,6 +9301,18 @@ class UnifiedPipeline:
                 list(b) for b in (getattr(ps, "detected_table_bboxes", []) or [])
             ]
 
+        # #165: the math-glyph damage signal and whatever coverage a lane proved
+        # for it. Written ONLY on affected pages, following the sparse rule
+        # above: the overwhelming majority of pages carry no PUA at all and must
+        # keep their existing sidecar bytes. Absence therefore restores as "no
+        # damage detected on the run that wrote this", which is what those runs
+        # recorded -- never as "damage, since recovered".
+        if ps and bool(getattr(ps, "has_unmapped_math_glyphs", False)):
+            payload["has_unmapped_math_glyphs"] = True
+            evidence = getattr(ps, "math_recovery_evidence", None)
+            if evidence:
+                payload["math_recovery_evidence"] = dict(evidence)
+
         # P1: sparse table retry latch -- persisted ONLY when True so default-off
         # sidecars remain byte-identical and satisfy P6 disposition persistence contracts.
         if bool(getattr(ps, "table_judge_retry_pending", False)):
@@ -9740,6 +9944,18 @@ class UnifiedPipeline:
             ps.scanned_table_evidence_failed = bool(
                 meta.get("scanned_table_evidence_failed", False)
             )
+            # #658: DERIVED, not a new sidecar key. The sidecar already
+            # persists the winning output's ``failure_mode``, and the scanned
+            # floor is the sole writer of both that mode and the flag -- so the
+            # reason is already on disk and a second key would only add a way
+            # for the two to disagree. It also keeps the P6 sidecar key set
+            # frozen (``test_sidecar_only_additive_key_is_disposition``).
+            # A pre-ticket sidecar records HALLUCINATION and restores False,
+            # which is exactly what that record meant when it was written.
+            ps.scanned_table_no_witness = (
+                ps.scanned_table_evidence_failed
+                and page_out.failure_mode is FailureMode.NO_WITNESS_BACKEND
+            )
             # #263: restore the shredded-page image ref too, so a resumed run's
             # floor ships marker + image exactly as the first run did instead of
             # silently degrading to a bare marker.
@@ -9781,6 +9997,19 @@ class UnifiedPipeline:
             # both of which derive from ``state.events`` -- see
             # ``_tables_trust_note`` / ``build_tables_trust``). Restoring the
             # events, never re-judging: no rung is invoked here.
+            # #165: restore the damage signal and its coverage evidence before
+            # finalization, so the resumed page reaches the same accounting the
+            # original run did. OR'd rather than assigned: a live assessment on
+            # this run that found damage must never be cleared by a sidecar that
+            # predates the field. Evidence is only ever taken from the sidecar
+            # when this run recorded none -- a fresh recovery is the better
+            # witness, and a stale one must not vouch for it.
+            if bool(meta.get("has_unmapped_math_glyphs", False)):
+                ps.has_unmapped_math_glyphs = True
+            if ps.math_recovery_evidence is None:
+                restored_evidence = meta.get("math_recovery_evidence")
+                if isinstance(restored_evidence, dict):
+                    ps.math_recovery_evidence = dict(restored_evidence)
             disposition_raw = meta.get("table_ladder_disposition")
             ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
@@ -10437,6 +10666,55 @@ class UnifiedPipeline:
             getattr(e, "kind", "") == "fabricated_image_ref" and getattr(e, "page_num", None) == 0
             for e in state.events
         )
+        # #165 / #140: detected math-glyph damage that survived into the bytes
+        # this run ships. Derived from the SAME finalized records the
+        # disposition buckets use, and through the same helper the manifest
+        # guard applies, so the page's WARNING and the document's demotion can
+        # never disagree. Deliberately NOT keyed off
+        # ``state.pages_needing_repair`` (attempt state, blind to what selection
+        # kept) nor off the two recovery flags, which is the #165 defect.
+        #
+        # Placed AFTER the document-level image sweeps above, and reconciled
+        # against ``final_text``, because those sweeps run on the assembled body
+        # rather than on any page's output: a sweep that removes a recovered
+        # region's crop reference removes the evidence pointer with it, and a
+        # per-page-only reading would then certify coverage the shipped document
+        # no longer carries.
+        unresolved_math_details = {}
+        for r in pre_records:
+            _mp = state.pages.get(r.output.page_num)
+            _detail = unresolved_math_detail(
+                has_unmapped_math_glyphs=bool(getattr(_mp, "has_unmapped_math_glyphs", False)),
+                evidence=getattr(_mp, "math_recovery_evidence", None),
+                text=r.output.text or "",
+            )
+            if _detail is None and has_text:
+                # Witnesses only. Re-running the whole reduction against
+                # ``final_text`` would read ANOTHER page's surviving private-use
+                # codepoints as this page's, and attribute the damage to the
+                # wrong page -- that page raises its own record.
+                _missing = missing_coverage_witnesses(
+                    getattr(_mp, "math_recovery_evidence", None), final_text
+                )
+                if _missing:
+                    _detail = UnresolvedMathDetail(
+                        reason=(
+                            f"{len(_missing)} recovered replacement(s) were removed from the "
+                            "assembled document after the page was finalized"
+                        ),
+                        lane=str((getattr(_mp, "math_recovery_evidence", None) or {}).get("lane")),
+                        regions_total=int(
+                            (getattr(_mp, "math_recovery_evidence", None) or {}).get(
+                                "regions_total", 0
+                            )
+                        ),
+                        regions_covered=0,
+                        residual_pua=0,
+                    )
+            if _detail is not None:
+                unresolved_math_details[r.output.page_num] = _detail
+        unresolved_math_pages = sorted(unresolved_math_details)
+
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
@@ -10460,6 +10738,11 @@ class UnifiedPipeline:
         # GH-271: syntax-valid crop transcription is still mathematically
         # unverified, so the document must not report a clean success.
         pages_ok = pages_ok and not corrupt_math_hybrid_pages
+        # #165: detected math-glyph damage no retained recovery covers. The page
+        # keeps its prose, so this is AUDIT_FAILED rather than ERROR -- the same
+        # "completed with warnings, output written" path every other content-
+        # doubt bucket above takes.
+        pages_ok = pages_ok and not unresolved_math_pages
         # NOT a page failure -- the owner was explicit that the page is not failed
         # and the table is kept. AUDIT_FAILED at the document level is the
         # "completed with warnings, output written" path, which is the honest
@@ -10547,6 +10830,60 @@ class UnifiedPipeline:
 
         state.status = status
 
+        # #165: reconcile the standing unresolved-math record, per page, against
+        # the CURRENT reduction. This event is a STANDING statement about the
+        # page's outcome, not a log line about an attempt, and there are three
+        # ways a run arrives holding a stale one: a resumed page replays its
+        # persisted copy through ``resume_restore_kinds`` before this point,
+        # assemble can be re-entered, and a re-run can change the answer. Merely
+        # skipping pages that already have an event -- the first version -- left
+        # the audit log describing an earlier outcome while the page note, the
+        # document status and the metadata described the current one.
+        #
+        # So: a page whose reason changed has its record replaced, a page the
+        # current reduction clears has its record RETIRED, and every unresolved
+        # page ends with exactly one current record. The recovery attempts
+        # themselves are separate kinds (``corrupt_math_region_recovery`` and
+        # the lane's own events) and are never touched -- the history stays, it
+        # is only the standing verdict that is kept true.
+        #
+        # Deliberately OUTSIDE the defect-report block below: retiring a stale
+        # warning is exactly the case where this run has no findings to report,
+        # so a gate on "something went wrong" would skip the one situation the
+        # retirement exists for.
+        if unresolved_math_pages or any(
+            getattr(ev, "kind", "") == UNRESOLVED_MATH_KIND for ev in state.events
+        ):
+            from socr.core.audit_log import AuditEvent as _UnresolvedMathEvent
+
+            _kept: list = []
+            _current_pages: set[int] = set()
+            for ev in state.events:
+                if getattr(ev, "kind", "") != UNRESOLVED_MATH_KIND:
+                    _kept.append(ev)
+                    continue
+                _detail = unresolved_math_details.get(ev.page_num)
+                if (
+                    _detail is not None
+                    and ev.detail == _detail.detail
+                    and ev.page_num not in _current_pages
+                ):
+                    _kept.append(ev)
+                    _current_pages.add(ev.page_num)
+            state.events[:] = _kept
+            for n in unresolved_math_pages:
+                if n in _current_pages:
+                    continue
+                state.events.append(
+                    _UnresolvedMathEvent(
+                        page_num=n,
+                        kind=UNRESOLVED_MATH_KIND,
+                        engine="native",
+                        detail=unresolved_math_details[n].detail,
+                        data=unresolved_math_details[n].as_data(),
+                    )
+                )
+
         if (
             failed_pages
             or native_fallback_pages
@@ -10557,6 +10894,7 @@ class UnifiedPipeline:
             or structure_class_floor_pages
             or d3_model_table_pages
             or corrupt_math_hybrid_pages
+            or unresolved_math_pages
             or value_drift_pages
             or table_rejected_pages
             or table_unverified_pages
@@ -10760,6 +11098,22 @@ class UnifiedPipeline:
                         f"  [red]{len(failed_pages)} page(s) produced no usable "
                         f"output: {failed_pages}[/red]"
                     )
+                # #658: printed right after the failed-page line because it
+                # explains part of it -- these pages failed closed for a missing
+                # tool, not for anything the document or the model did, and the
+                # operator's next action is an install rather than a re-read.
+                no_witness_pages = self._no_witness_backend_pages(state, pre_records)
+                if no_witness_pages:
+                    console.print(
+                        f"  [red]{len(no_witness_pages)} scanned table page(s) shipped the "
+                        f"fail-closed floor with NO local OCR witness, so the table could be "
+                        f"neither corroborated nor contradicted: {no_witness_pages}[/red]"
+                    )
+                    # One line per CAUSE. A blanket "install tesseract" is wrong
+                    # for a reader that is installed and crashed, and for a page
+                    # that would not rasterise.
+                    for _clause in self._no_witness_clauses(state, no_witness_pages):
+                        console.print(f"    [yellow]{_clause}[/yellow]")
                 if native_fallback_pages:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
@@ -10770,6 +11124,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(corrupt_math_hybrid_pages)} page(s) shipped "
                         "crop-backed equation candidate(s); mathematical fidelity "
                         f"remains unverified: {corrupt_math_hybrid_pages}[/yellow]"
+                    )
+                if unresolved_math_pages:
+                    console.print(
+                        f"  [yellow]{len(unresolved_math_pages)} page(s) shipped unmapped "
+                        "math glyphs no retained recovery covers; the mathematics on them "
+                        f"is lost, not merely unverified: {unresolved_math_pages}[/yellow]"
                     )
                 if native_only_distrust_pages:
                     console.print(
@@ -10993,6 +11353,23 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_math_note}"
             else:
                 final_result.error = _math_note
+        if unresolved_math_pages:
+            # #165: no "enable the recovery flags" advice. The flags may already
+            # have run; the honest note says what is missing and where the
+            # evidence is, and leaves the remedy to the reader.
+            _unresolved_note = (
+                "unrecovered math glyphs on page(s) "
+                + ", ".join(str(n) for n in unresolved_math_pages)
+                + "; inspect the source page and any retained crops ("
+                + "; ".join(
+                    f"p{n}: {unresolved_math_details[n].reason}" for n in unresolved_math_pages
+                )
+                + ")"
+            )
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_unresolved_note}"
+            else:
+                final_result.error = _unresolved_note
 
         # PP-2 cascade HALT: propagate the halt reason into the result error
         # so callers and tests can detect a partial-save due to a wedged backend.
@@ -11033,6 +11410,15 @@ class UnifiedPipeline:
         # for the same reason GH-225 does above — the audit event is durable but
         # a consumer reading metadata.json must not have to open audit_log.json
         # to learn that a page's routing was never decided.
+        # #658: surface the no-witness ending at document level, for the same
+        # no-silent-loss reason as the notes around it -- and because this one
+        # names a fix the operator can actually apply.
+        _witness_note = self._no_witness_backend_note(state, pre_records)
+        if _witness_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_witness_note}"
+            else:
+                final_result.error = _witness_note
         _chart_note = self._chart_detection_failed_note(state)
         if _chart_note:
             if final_result.error:
@@ -12040,6 +12426,7 @@ class UnifiedPipeline:
         page_out,
         result,
         native_text: str,
+        region_native_text: str | None = None,
     ) -> tuple[str, bool]:
         """Gate the ONE additive post-verdict step (cold review rounds 2-3).
 
@@ -12073,6 +12460,13 @@ class UnifiedPipeline:
         purpose: it is shipped text, and quoting the invented number there would
         put it back in the corpus by the back door. The numbers live in the
         ``equation_sidecar_refused`` audit event only.
+
+        ``native_text`` is the FULL PAGE text and stays that way -- it is only
+        used below to feed the numeric-presence oracle, which is deliberately
+        page-scoped. ``region_native_text`` (GH-164) is the region's own native
+        slice; it is what the refusal rebuild below falls back to, so a refused
+        region never re-appends the whole page. Defaults to ``native_text``
+        when omitted so any other caller keeps today's (page-scoped) behaviour.
 
         Returns ``(block_to_append, latex_attached)``.
         """
@@ -12133,9 +12527,10 @@ class UnifiedPipeline:
 
         from socr.math.equation_latex import build_equation_sidecar
 
+        fallback_text = native_text if region_native_text is None else region_native_text
         block, latex_attached = build_equation_sidecar(
             crop_path=(result.crop_ref or result.crop_path),
-            native_text=native_text,
+            native_text=fallback_text,
             raw_latex="",
             validation_ok=False,
             validation_reason=refusal,
@@ -12167,6 +12562,7 @@ class UnifiedPipeline:
         self,
         state: DocumentState,
         page_outputs: list,
+        page_nums: Iterable[int] | None = None,
     ) -> None:
         """GH-36b: read equation crop PNGs → 1A-validated LaTeX → 1C sidecar.
 
@@ -12190,6 +12586,20 @@ class UnifiedPipeline:
           - The crop PNG is always the visual ground truth — always inlined.
           - 1B (full render / image-compare) is NOT performed here.
           - This path stays default-off (config.recover_clean_equations = False).
+
+        ``page_nums`` (GH-157, cold review round 2 on #664): the real agentic
+        caller invokes this method ONCE PER PAGE with only that page's
+        ``PageOutput`` (``page_outputs=[bo]``), while ``state.events`` keeps
+        accumulating across the whole document. Without an explicit scope,
+        page 2's call would re-examine page 1's already-attached regions too
+        -- found via the accumulated events -- and, since page 1's
+        ``PageOutput`` is absent from THIS call's ``page_outputs``, wrongly
+        report page 1 as missing one. ``page_outputs`` cannot serve as the
+        scope by itself: an in-scope page with a genuinely absent
+        ``PageOutput`` must still emit the skip event, which is the whole
+        point of GH-157. ``None`` (legacy/whole-document callers, and tests
+        that pass every relevant page's output at once) keeps today's
+        behaviour: every page with detected regions is in scope.
         """
         from socr.core.audit_log import AuditEvent
         from socr.math.equation_latex import process_equation_region
@@ -12207,6 +12617,8 @@ class UnifiedPipeline:
         # Build a fast lookup from page_num to the PageOutput entry.
         output_by_page: dict[int, object] = {po.page_num: po for po in page_outputs}
 
+        scope = set(regions_by_page) if page_nums is None else set(page_nums)
+
         # GH-36b: use the dedicated clean-equation model field (defaults to
         # qwen3-vl:30b-a3b-instruct — the validated local instruct VLM).
         # Do NOT fall back to math_model here: that field defaults to
@@ -12218,25 +12630,84 @@ class UnifiedPipeline:
         rejected_total = 0
 
         for page_num, region_data_list in sorted(regions_by_page.items()):
-            po = output_by_page.get(page_num)
-            if po is None:
-                # Page not in prose_pages (shouldn't happen, but be defensive).
-                logger.warning(
-                    "GH-36b: page %d has detected equations but no PageOutput; skipping",
-                    page_num,
-                )
+            if page_num not in scope:
+                # Out of scope for THIS call -- e.g. a page already handled by
+                # its own earlier per-page call. Not this call's business, and
+                # emitting an event for it would be a false "missing" report.
                 continue
 
-            native_text = state.pages[page_num].native_text or ""
+            po = output_by_page.get(page_num)
+            if po is None:
+                # GH-157: page in scope but not in page_outputs (shouldn't
+                # happen, but be defensive). This used to be a silent
+                # warning-only skip: crops stayed on disk, no sidecar was ever
+                # attached, and the page shipped as if nothing was detected.
+                # Never fabricate a PageOutput here -- there is nothing to
+                # attach a sidecar to -- but the disposition must be visible
+                # at page/document level, so emit one terminal audit event per
+                # skipped region.
+                for region_index, rdata in enumerate(region_data_list):
+                    crop_path = rdata.get("crop_path")
+                    # Idempotent per region/outcome: this method can run again
+                    # over the same scope (e.g. a retried page), and a repeat
+                    # skip event for a disposition already on record would
+                    # inflate the count without adding information.
+                    already_recorded = any(
+                        e.kind == "equation_sidecar_skipped_no_page_output"
+                        and e.page_num == page_num
+                        and e.data.get("region_index") == region_index
+                        for e in state.events
+                    )
+                    if already_recorded:
+                        continue
+                    logger.warning(
+                        "GH-157: page %d region %d has a detected equation but "
+                        "no PageOutput; skipping (crop=%r)",
+                        page_num,
+                        region_index,
+                        crop_path,
+                    )
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="equation_sidecar_skipped_no_page_output",
+                            engine="equation_latex",
+                            detail=(
+                                f"region {region_index} has a detected equation crop "
+                                f"but no PageOutput exists for page {page_num}; "
+                                f"sidecar not attached (crop={crop_path!r})"
+                            ),
+                            data={
+                                "region_index": region_index,
+                                "crop_path": crop_path,
+                            },
+                        )
+                    )
+                continue
+
+            # GH-164: this is the FULL PAGE text. Kept only for the guard's
+            # numeric-presence oracle below, which stays page-scoped by design
+            # (it needs the whole page as its source of truth for "did this
+            # number appear anywhere"). It must NEVER be used as the per-region
+            # rejected-sidecar fallback -- that was the GH-164 bug: one region's
+            # rejection appended the entire page prose, and N rejected regions
+            # multiplied it N times.
+            page_native_text = state.pages[page_num].native_text or ""
 
             for region_index, rdata in enumerate(region_data_list):
                 crop_path = rdata.get("crop_path")
+                # GH-164: the region's OWN native slice, not the full page. This
+                # is what a rejected sidecar falls back to, so a page with
+                # several rejected regions gets each region's own text once
+                # instead of the whole page repeated once per rejection.
+                region_native_text = rdata.get("source_text") or ""
 
                 result = process_equation_region(
                     region_index=region_index,
                     page_num=page_num,
                     crop_path=crop_path,
-                    native_text=native_text,
+                    native_text=region_native_text,
+                    source_text=region_native_text,
                     model=model,
                     host=self.config.math_model_host
                     if hasattr(self.config, "math_model_host")
@@ -12248,7 +12719,7 @@ class UnifiedPipeline:
                 # so it goes through the delimiter and numeric-presence guards
                 # before any of it can reach shipped bytes.
                 _block, _latex_attached = self._guard_equation_sidecar_block(
-                    state, page_num, po, result, native_text
+                    state, page_num, po, result, page_native_text, region_native_text
                 )
                 if _block:
                     if po.text:

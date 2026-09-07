@@ -34,7 +34,6 @@ Identical to C1 rev 4 §(d): same three items, same triples. Coverage after A2 =
 
 | doc | p | table | native \| model | verdict | reason |
 |---|---|---|---|---|---|
-| doc | p | table | native\|model | **verdict** | reason |
 | doc03 | 1 | p1-t0 | S&P\| | **abstained** | column test: leftmost line crosses R or second line starts before R |
 | doc03 | 1 | p1-t0 | \|R$^{2}$ | **abstained** | native chain breaks at native row 3 (band 2) |
 | doc04 | 3 | p3-t0 | 1t 1t\|**ROTATED PCs** $\math | **abstained** | no origin (no second rule group) |

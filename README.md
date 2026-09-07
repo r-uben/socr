@@ -24,18 +24,17 @@ Engines are installed separately because they have different dependencies (torch
 ## Usage
 
 ```bash
-# Process a PDF (deterministic mode)
+# Process a PDF: cost-aware agentic routing, page-major (the only control loop).
+# Processes + saves one page at a time (pages/NNN.md), resumable on re-run,
+# byte-identical final output. `--agentic` is accepted for compatibility but is
+# always on — it's a no-op.
 socr paper.pdf
-
-# Cost-aware agentic mode: processes + saves one page at a time (pages/NNN.md),
-# resumable on re-run, byte-identical final output.
-socr paper.pdf --agentic
-socr paper.pdf --agentic --strict-local           # local-only (free), page-by-page
-socr paper.pdf --agentic --cost-budget 0.05       # cap spend per document
+socr paper.pdf --strict-local           # local-only (free), page-by-page
+socr paper.pdf --cost-budget 0.05       # cap spend per document
 # Interrupted a run? Just run it again — finished pages are skipped:
-socr paper.pdf --agentic                          # resumes from the last saved page
+socr paper.pdf                          # resumes from the last saved page
 
-# Choose engine (deterministic mode)
+# Choose the first rung of the cost ladder
 socr paper.pdf --primary gemini
 socr paper.pdf --save-figures
 
@@ -53,21 +52,10 @@ socr engines
 ## How it works
 
 socr routes **each page** to an OCR engine, checks the result, and re-tries on a
-different engine when the result is poor. It runs in two modes that differ in how
-the engine for a page is chosen.
+different engine when the result is poor. There is one control loop — agentic,
+cost-aware, page-major — and it is always on.
 
-### Deterministic mode (default)
-
-```
-PDF → classify each page → easy: local engine · hard: primary engine
-    → heuristic audit → fallback on failed pages → Markdown
-```
-
-The engine is chosen **up front** from predicted page difficulty (tables,
-equations, layout). Born-digital prose uses native text for free. Quality is
-checked by heuristics; failed pages fall back to another engine.
-
-### Agentic, cost-aware mode (`--agentic`)
+### Agentic, cost-aware routing (the only control loop)
 
 ```
 PDF → for each page, in order:
@@ -157,9 +145,11 @@ socr process <PDF> [OPTIONS]
   -q, --quiet / -v, --verbose  Output verbosity
   --dry-run / --reprocess      List-only / force reprocess
 
-  # Agentic cost-aware routing (page-major; progressive save + resume)
-  --agentic                    Per page: cheapest provider first, judge escalates,
-                               then flush pages/NNN.md to disk before the next page.
+  # Agentic cost-aware routing (page-major; progressive save + resume; the only
+  # control loop — always on; --agentic is accepted for compatibility as a no-op)
+  --agentic                    No-op; cost-aware routing is always on. Per page:
+                               cheapest provider first, judge escalates, then
+                               flush pages/NNN.md to disk before the next page.
                                Re-running resumes from the last finished page.
   --strict-local               Only local/free rungs (no paid cloud)
   --judge-backend MODE         auto | vlm | heuristic (default: auto)
@@ -169,7 +159,6 @@ socr process <PDF> [OPTIONS]
   --write-manifest             Write a replayable manifest + blob cache
   --detect-equations           Detect display-equation regions, save crop PNGs (model-free)
   --recover-clean-equations    Also read equation crops to LaTeX into a sidecar (opt-in)
-  --legacy-routing             Use the old deterministic backbone instead of agentic
 
 socr batch <DIR> [OPTIONS]
   Same options as process, plus:
