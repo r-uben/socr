@@ -25,7 +25,7 @@ nothing dispatched.
 | D3 | Fed re-measure | TODO | A2 | 5 |
 | D2 | route cost (measure) | TODO | B1 | 6 |
 | E1 | scan ≠ chart (#511) | DONE (#654 merged 2026-09-07; #653) | B1 | 6 |
-| E2 | table_not_scorable scope | REWORK (reviewer REJECT: borderless table loses its flag; widen gate to native_table_region_count) | E1 | 7 |
+| E2 | table_not_scorable scope | DONE-LOCAL (052d70a+fdcc9a6; reviewer ACCEPT after the OR-gate fix) | E1 | 7 |
 | F1a | ditto text (#625) | TODO | A2 | 7 |
 | F1b | derived-cell provenance | TODO | F1a | 8 |
 | F2 | nbsp hierarchy (#624) | TODO | F1b | 9 |
