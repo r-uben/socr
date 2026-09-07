@@ -259,3 +259,117 @@ def test_escalation_empty_candidate_still_bills_the_attempt(tmp_path: Path):
     assert state.total_cost == PROFILE_GEMINI.cost_per_page_usd, (
         "the call was made and answered with no usable text -- still billable"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4 — round 3 (Astra/Codex review): a completed, billable call must not
+#     disappear from spend just because something AFTER it raised, and a
+#     failure BEFORE the call was ever launched must not be billed.
+# ---------------------------------------------------------------------------
+
+
+def test_successful_provider_then_comparison_error_still_metered(tmp_path: Path):
+    """The provider answered successfully; `decide_escalation` then raises
+    while comparing candidates. That is a real, completed, billable call --
+    losing its spend because the COMPARISON failed (not the call) means the
+    document under-reports what it actually spent, and the next escalation's
+    remaining-budget check sees a bigger number than is true.
+    """
+    state = _state_with_spend(tmp_path, spent=0.0)
+    ps = state.pages[1]
+    bo = PageOutput(page_num=1, text="native", status=PageStatus.SUCCESS, engine="qwen")
+    ps.attempts.append(bo)
+    ps.best_output = bo
+
+    pipe = _pipeline()
+
+    def _run_provider(profile, page_num):
+        return PageOutput(
+            page_num=page_num,
+            text="candidate",
+            status=PageStatus.SUCCESS,
+            engine=profile.engine.value,
+        )
+
+    with patch(
+        "socr.tables.escalation_decision.decide_escalation",
+        side_effect=ValueError("comparison failed"),
+    ):
+        degraded, out = pipe._escalate_table_page(
+            state,
+            1,
+            ps,
+            bo,
+            PROFILE_GEMINI,
+            _run_provider,
+            state.handle.path,
+            needs_escalation=True,
+        )
+    assert degraded is False
+    assert out is bo  # comparison never completed: incumbent text is kept
+    assert state.total_cost == PROFILE_GEMINI.cost_per_page_usd, (
+        "the provider call completed and must be metered even though comparing it raised"
+    )
+
+
+def test_provider_exception_after_submission_still_metered(tmp_path: Path):
+    """`run_provider` itself raises something OTHER than a timeout (e.g. an
+    API error surfaced through `future.result()`). The call was launched --
+    it is billable the same way a timeout is.
+    """
+    state = _state_with_spend(tmp_path, spent=0.0)
+    ps = state.pages[1]
+    bo = PageOutput(page_num=1, text="native", status=PageStatus.SUCCESS, engine="qwen")
+    ps.attempts.append(bo)
+    ps.best_output = bo
+
+    pipe = _pipeline()
+
+    def _run_provider_raises(profile, page_num):
+        raise RuntimeError("upstream API error")
+
+    degraded, out = pipe._escalate_table_page(
+        state,
+        1,
+        ps,
+        bo,
+        PROFILE_GEMINI,
+        _run_provider_raises,
+        state.handle.path,
+        needs_escalation=True,
+    )
+    assert degraded is False  # the outer handler keeps the incumbent, lane stays live
+    assert out is bo
+    assert state.total_cost == PROFILE_GEMINI.cost_per_page_usd, (
+        "the call was launched (and raised) -- still billable"
+    )
+
+
+def test_pre_submission_failure_is_not_billed(tmp_path: Path):
+    """A failure BEFORE `run_provider` was ever submitted -- here, the PDF
+    cannot even be opened -- must NOT be billed: no call was made.
+    """
+    state = _state_with_spend(tmp_path, spent=0.0)
+    ps = state.pages[1]
+    bo = PageOutput(page_num=1, text="native", status=PageStatus.SUCCESS, engine="qwen")
+    ps.attempts.append(bo)
+    ps.best_output = bo
+
+    pipe = _pipeline()
+
+    def _run_provider_must_not_fire(profile, page_num):
+        raise AssertionError("run_provider must not be called before the PDF even opens")
+
+    degraded, out = pipe._escalate_table_page(
+        state,
+        1,
+        ps,
+        bo,
+        PROFILE_GEMINI,
+        _run_provider_must_not_fire,
+        tmp_path / "does-not-exist.pdf",
+        needs_escalation=True,
+    )
+    assert degraded is False
+    assert out is bo
+    assert state.total_cost == 0.0, "no call was ever launched -- nothing is billable"

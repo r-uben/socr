@@ -4242,6 +4242,17 @@ class UnifiedPipeline:
                     )
                     _record_attempt_cost()
                     return True, bo
+                except Exception:
+                    # GH-160 round 3: `run_provider` raised something OTHER than
+                    # a timeout (e.g. an API error surfaced by `.result()`). The
+                    # call was still launched -- and may have partially billed
+                    # before failing -- so it is billable the same way a timeout
+                    # is; only the OUTER function-level handler is left to log
+                    # and keep the incumbent, so shut the executor down and
+                    # record the attempt here before re-raising into it.
+                    ex.shutdown(wait=False)
+                    _record_attempt_cost()
+                    raise
 
                 # `_run_engine_on_pages` converts a failed engine call into a
                 # native-text PageOutput. Assigning that would replace a structured
@@ -4274,7 +4285,18 @@ class UnifiedPipeline:
                     _record_attempt_cost()
                     return False, bo
 
-                decision = decide_escalation(page, incumbent_text, out.text)
+                try:
+                    decision = decide_escalation(page, incumbent_text, out.text)
+                except Exception:
+                    # GH-160 round 3: the provider ALREADY answered successfully
+                    # by this point (the SUCCESS/non-empty checks above passed)
+                    # -- a raise while comparing candidates must not make that
+                    # completed, billable call disappear from the document's
+                    # spend. The outer function-level handler still logs the
+                    # failure and keeps the incumbent text; this only ensures
+                    # the attempt is metered before that happens.
+                    _record_attempt_cost()
+                    raise
 
             # Cost is recorded by hand: `route_page` does this for ladder calls, and
             # a bare `run_provider` does not, so without it the document
