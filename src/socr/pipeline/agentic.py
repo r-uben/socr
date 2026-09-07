@@ -618,6 +618,21 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 confidence=0.0,
             )
 
+        if result.content_unverified:
+            # #659: the table ships (numerics are fully corroborated) but a
+            # content label the model emitted was not found by the page's
+            # evidence witness. Not a reject -- see ``content_unverified``'s
+            # docstring -- but it must not disappear either, so it gets its
+            # own audit note the same way #658's no-witness ending got one
+            # alongside (not instead of) the base reject event.
+            self._emit_event(
+                page_num=page_num,
+                kind="source_evidence_table_label_unverified",
+                engine=output.engine or "",
+                detail=result.content_unverified,
+                data={"cause": ""},
+            )
+
         return self._inner.assess(output, provider)
 
     def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:
