@@ -30,6 +30,7 @@ from socr.judge.table_verdict import (
     TABLE_LADDER_UNVERIFIED_KIND,
 )
 from socr.tables.reconcile import PATCH_ELIGIBLE_NOTE
+from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND
 
 # Audit kinds that mean "the digits in this page's table(s) may be wrong".
 #
@@ -448,12 +449,33 @@ class TablesTrust:
         return line
 
 
-def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
+def build_tables_trust(
+    pdf_filename: str,
+    events: list,
+    *,
+    label_unverified_pages: frozenset[int] | None = None,
+) -> TablesTrust:
     """Derive the trust index from a run's audit events.
 
     Only ``TABLE_DISTRUST_KINDS`` contribute. Pages with no distrust event do not
     appear at all, so a clean document yields an empty index and prose-only pages
     stay unmarked.
+
+    ``label_unverified_pages``: #659 round 3 (Astra P2b). Every OTHER member of
+    ``TABLE_DISTRUST_KINDS`` either has no resolution mechanism at all, or is
+    resolved by a dedicated RESOLVING event carrying a ``table_id`` (see
+    ``RESOLVING_KINDS`` above). ``LABEL_UNVERIFIED_KIND`` has neither: the
+    scanned-table gate tokenises the WHOLE page's markdown, not a per-region
+    witness, so there is no table id to fabricate one from, and its terminal
+    truth genuinely lives on the FINAL selected candidate's own data field
+    (``PageOutput.table_label_unverified``), not on a follow-up event. Pass the
+    CURRENT set of pages whose finalized winner still carries that field (e.g.
+    ``UnifiedPipeline._label_unverified_pages(records)``) and a page whose
+    later, fully-supported candidate won drops out of THIS run's trust index,
+    even though the emitting event is still in ``events`` and stays in
+    ``audit_log.json`` as real history. ``None`` (no records available, e.g. a
+    caller deriving trust from bare history) keeps the old, history-only
+    behaviour rather than silently trusting an unknown page clean.
     """
     trust = TablesTrust(pdf_filename=pdf_filename)
 
@@ -513,6 +535,17 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
                 continue
             if table_id is not None and (page_num, str(table_id)) in resolved_tables:
                 continue
+
+        # #659 round 3: this kind's resolution lives on the FINAL winning
+        # candidate, not on a follow-up event -- see the parameter's docstring
+        # above. Skip only when the caller actually supplied the current set;
+        # ``None`` means "unknown", not "resolved everywhere".
+        if (
+            kind == LABEL_UNVERIFIED_KIND
+            and label_unverified_pages is not None
+            and page_num not in label_unverified_pages
+        ):
+            continue
 
         page = trust.pages.setdefault(page_num, PageTrust(page_num=page_num))
         page.reasons.append(kind)

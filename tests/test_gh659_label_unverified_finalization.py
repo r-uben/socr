@@ -26,7 +26,7 @@ ladder, no real tesseract.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -39,12 +39,14 @@ from socr.core.manifest import (
     PageEnding,
     PagePrimaryReason,
     SelectionProvenance,
+    finalized_page_records,
 )
-from socr.core.result import PageOutput, PageStatus
+from socr.core.result import DocumentStatus, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.core.tables_trust import TABLE_DISTRUST_KINDS, build_tables_trust
+from socr.pipeline.agentic import HeuristicPageJudge, SourceEvidenceTableJudge
 from socr.pipeline.orchestrator import UnifiedPipeline
-from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND
+from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, SourceEvidenceResult
 
 CANDIDATE_TABLE = "| Country | Amount |\n| --- | --- |\n| Germany | 10 |\n"
 LABEL_DETAIL = "content labels unverified by page evidence: ['germany']"
@@ -239,6 +241,246 @@ def test_clean_run_names_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "unverified row/column label" not in error
     out = capsys.readouterr().out
     assert "unverified row/column label" not in out
+
+
+# --------------------------------------------------------------------------
+# 5. Astra round 3 P1 (executed): a REAL judge chain must still ACCEPT a
+#    candidate whose only doubt is an unverified label, and must NOT flip
+#    status at judge time.
+# --------------------------------------------------------------------------
+
+
+def test_flagged_candidate_reaches_a_real_accepting_judge_chain() -> None:
+    """The core regression from round 3. ``HeuristicPageJudge.assess`` and
+    ``VLMPageJudge.assess`` both treat any output whose ``status`` is not
+    SUCCESS as empty/error input and reject on sight (agentic.py:371/398). At
+    dde5399, ``SourceEvidenceTableJudge`` set ``output.status = WARNING``
+    BEFORE handing that same output to the inner judge, so the ladder
+    rejected -- and re-routed or fell back on -- the exact candidate this
+    ticket exists to ship flagged. This drives a REAL ``HeuristicPageJudge``
+    (not a MagicMock stand-in for the inner judge; only its ``checker``
+    boundary dependency is mocked, same as Astra's own probe) through
+    ``SourceEvidenceTableJudge`` and requires an ACCEPT.
+    """
+    checker = MagicMock()
+    checker.check.return_value.passed = True
+    checker.check.return_value.errors = []
+    inner = HeuristicPageJudge(checker)
+    judge = SourceEvidenceTableJudge(
+        inner=inner,
+        get_fitz_page=lambda pn: object(),
+        native_trusted=lambda pn: False,
+    )
+    output = PageOutput(
+        page_num=1,
+        text=CANDIDATE_TABLE,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=True,
+    )
+    supported_but_unverified_label = SourceEvidenceResult(
+        True, True, "numeric support", content_unverified=LABEL_DETAIL
+    )
+    with patch(
+        "socr.tables.source_evidence.verify_scanned_table",
+        return_value=supported_but_unverified_label,
+    ):
+        decision = judge.assess(output, MagicMock())
+
+    assert decision.accept is True
+    # Judge-time status is untouched -- the WARNING promotion happens only at
+    # finalization (see test_finalization_guard_promotes_a_real_candidate below).
+    assert output.status is PageStatus.SUCCESS
+    assert output.table_label_unverified == LABEL_DETAIL
+
+
+# --------------------------------------------------------------------------
+# 6. Astra round 3 P1: the WARNING promotion is proven through the REAL
+#    ``finalized_page_records`` path, not asserted about a hand-built record
+#    (the round-2 tests all patched ``finalized_page_records`` directly).
+# --------------------------------------------------------------------------
+
+
+def test_finalization_guard_promotes_a_real_candidate() -> None:
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=Path("doc.pdf"), page_count=1)
+    state = DocumentState(handle=handle)
+    ps = state.pages[1]
+    ps.is_born_digital = False
+    candidate = PageOutput(
+        page_num=1,
+        text=CANDIDATE_TABLE,
+        status=PageStatus.SUCCESS,  # exactly what the judge now leaves it as
+        engine="qwen",
+        audit_passed=True,
+        table_label_unverified=LABEL_DETAIL,
+    )
+    ps.attempts.append(candidate)
+    ps.best_output = candidate
+
+    records = finalized_page_records(state)
+    assert len(records) == 1
+    assert records[0].output.status is PageStatus.WARNING
+    assert records[0].output.audit_passed is True
+    assert records[0].output.table_label_unverified == LABEL_DETAIL
+
+
+def test_finalization_guard_never_demotes_a_harder_failure() -> None:
+    """A page already ERROR for a more specific reason keeps that status --
+    the label doubt is real but strictly less severe than an actual failure.
+    """
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=Path("doc.pdf"), page_count=1)
+    state = DocumentState(handle=handle)
+    ps = state.pages[1]
+    ps.is_born_digital = False
+    candidate = PageOutput(
+        page_num=1,
+        text="[page 1 failed: some harder problem]",
+        status=PageStatus.ERROR,
+        engine="qwen",
+        audit_passed=False,
+        table_label_unverified=LABEL_DETAIL,
+    )
+    ps.attempts.append(candidate)
+    ps.best_output = candidate
+
+    records = finalized_page_records(state)
+    assert records[0].output.status is PageStatus.ERROR
+
+
+# --------------------------------------------------------------------------
+# 7. Astra round 3 P2a: an otherwise-clean document whose ONLY defect is the
+#    label flag must not report SUCCESS, and the CLI line must be reachable
+#    even though it is the sole issue (previously nested inside an unrelated
+#    defect-bucket condition).
+# --------------------------------------------------------------------------
+
+
+def test_label_only_document_is_not_reported_clean(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Deliberately only ONE defect on the page (the label flag) -- every
+    other bucket this document could fall into stays empty. If the CLI line
+    or the AUDIT_FAILED status depended on some OTHER bucket also firing
+    (P2a's failure mode), this test's page would report SUCCESS and silence.
+    """
+    pipeline = _pipeline()
+    state = _state(tmp_path, page_count=1)
+    only_defect = PageOutput(
+        page_num=1,
+        text=CANDIDATE_TABLE,
+        status=PageStatus.WARNING,
+        engine="qwen",
+        audit_passed=True,
+        table_label_unverified=LABEL_DETAIL,
+    )
+    records = [
+        FinalizedPageRecord(
+            output=only_defect,
+            disposition=_disposition(),
+            selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+        )
+    ]
+    with patch("socr.core.manifest.finalized_page_records", return_value=records):
+        result = pipeline._phase_assemble(state, tmp_path)
+
+    # Content-retained, non-clean: the same "completed with warnings, output
+    # written" policy #189/#165 use for a shipped-but-disputed page.
+    assert result.status is DocumentStatus.AUDIT_FAILED
+    assert result.markdown and "Germany" in result.markdown
+    out = capsys.readouterr().out
+    assert "unverified row/column label" in out
+    assert "[1]" in out
+
+
+# --------------------------------------------------------------------------
+# 8. Astra round 3 P2b: ``build_tables_trust`` retirement through a STALE
+#    historical event once the FINAL winner carries no doubt, including a
+#    page whose markdown holds two separate table blocks.
+# --------------------------------------------------------------------------
+
+
+def test_stale_event_does_not_untrust_a_page_whose_final_winner_is_clean() -> None:
+    """The event that was emitted against an EARLIER, since-superseded
+    candidate stays in ``events`` (real history, per the docstring), but
+    ``label_unverified_pages`` -- the CURRENT set, from finalized records --
+    tells ``build_tables_trust`` this page's winner carries no doubt, so it
+    must not appear untrusted.
+    """
+    stale_event = AuditEvent(
+        page_num=1,
+        kind=LABEL_UNVERIFIED_KIND,
+        engine="qwen",
+        detail=LABEL_DETAIL,
+        data={"cause": ""},
+    )
+    # Without the current-final-state filter (label_unverified_pages=None):
+    # old, history-only behaviour -- the page stays untrusted.
+    trust_history_only = build_tables_trust("doc.pdf", [stale_event])
+    assert 1 in trust_history_only.untrusted_pages
+
+    # With it, and page 1's current winner clean: the page clears.
+    trust_current = build_tables_trust("doc.pdf", [stale_event], label_unverified_pages=frozenset())
+    assert 1 not in trust_current.untrusted_pages
+
+
+def test_two_table_page_stays_untrusted_until_both_tables_are_clean() -> None:
+    """A page whose markdown carries TWO table blocks, one still doubted.
+    ``collect_table_tokens`` aggregates content tokens across every table
+    block on the page (whole-page scope, not per-region), so a single
+    ``table_label_unverified`` field on the final output already reflects
+    "at least one of this page's tables is still doubted" -- verified here
+    at the trust-reducer boundary that consumes that field.
+    """
+    two_table_markdown = (
+        "| Country | Amount |\n| --- | --- |\n| Germany | 10 |\n\n"
+        "| City | Population |\n| --- | --- |\n| Berlin | 20 |\n"
+    )
+    event = AuditEvent(
+        page_num=1,
+        kind=LABEL_UNVERIFIED_KIND,
+        engine="qwen",
+        detail=LABEL_DETAIL,
+        data={"cause": ""},
+    )
+    # Page 1's CURRENT winner still carries the doubt (one of its two tables
+    # is unresolved) -- stays untrusted.
+    still_doubted = build_tables_trust("doc.pdf", [event], label_unverified_pages=frozenset({1}))
+    assert 1 in still_doubted.untrusted_pages
+
+    # A later run where BOTH tables on page 1 are clean -- the page's current
+    # winner carries no doubt at all, and clears despite the same history.
+    both_clean = build_tables_trust("doc.pdf", [event], label_unverified_pages=frozenset())
+    assert 1 not in both_clean.untrusted_pages
+    del two_table_markdown  # documentation fixture; the reducer is page-scoped
+
+
+def test_unrelated_distrust_kind_on_the_same_page_is_never_suppressed() -> None:
+    """The current-final-state filter is scoped to ``LABEL_UNVERIFIED_KIND``
+    only -- a DIFFERENT distrust kind on the same page must still count even
+    when the label doubt itself has retired.
+    """
+    events = [
+        AuditEvent(
+            page_num=1,
+            kind=LABEL_UNVERIFIED_KIND,
+            engine="qwen",
+            detail=LABEL_DETAIL,
+            data={"cause": ""},
+        ),
+        AuditEvent(
+            page_num=1,
+            kind="native_table_verifier_warn",
+            engine="native",
+            detail="unrelated native table concern",
+            data={},
+        ),
+    ]
+    trust = build_tables_trust("doc.pdf", events, label_unverified_pages=frozenset())
+    assert 1 in trust.untrusted_pages
+    assert "native_table_verifier_warn" in trust.pages[1].reasons
+    assert LABEL_UNVERIFIED_KIND not in trust.pages[1].reasons
 
 
 if __name__ == "__main__":

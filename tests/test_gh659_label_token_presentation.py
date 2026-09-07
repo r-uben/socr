@@ -198,10 +198,19 @@ def test_label_unverified_flag_reaches_the_audit_events() -> None:
 
     # Astra review round 1 (P1): the event alone is decoration with no
     # consumer. The output itself must carry a standing, candidate-associated
-    # marker -- WARNING status, an audit note, and the field the finalization
-    # note/CLI/tables_trust reporting reads -- without flipping the winner
+    # marker -- a data field and an audit note -- without flipping the winner
     # selector (``audit_passed`` stays whatever it was).
-    assert output.status is PageStatus.WARNING
+    #
+    # Astra review round 2 (P1): status must NOT change here. Both
+    # HeuristicPageJudge and VLMPageJudge treat any non-SUCCESS status as
+    # empty/error input and reject on sight; this test's ``inner`` is a
+    # MagicMock stand-in, but the real judge chain (see
+    # tests/test_gh659_label_unverified_finalization.py's
+    # test_flagged_candidate_reaches_a_real_accepting_judge_chain) would have
+    # rejected the very candidate this ticket exists to ship if this line
+    # still set WARNING. The reporting status change now happens at
+    # finalization (``manifest._apply_label_unverified_guard``), never here.
+    assert output.status is PageStatus.SUCCESS
     assert output.audit_passed is True
     assert output.table_label_unverified
     assert "reserve" in output.table_label_unverified
