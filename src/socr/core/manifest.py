@@ -1588,7 +1588,7 @@ class PageDisposition:
 class SelectionProvenance(str, Enum):
     """R7: which of ``_select_page_output_tagged``'s endings shipped this page.
 
-    The cascade is 15 returns and **zero loops** (AST-verified), so exactly one
+    The cascade is 16 returns and **zero loops** (AST-verified), so exactly one
     ending runs per page and this tag is a total, exclusive classification of the
     SHIP axis. It is deliberately not a classification of the page: orthogonal
     alerts (``value_drift``, ``fabricated_ref``, ``text_grid_rejected``) co-occur
@@ -1631,6 +1631,16 @@ class SelectionProvenance(str, Enum):
     ROTATED_TEXT_SHREDDED = "rotated_text_shredded"
     #: #259: ladder accepted nothing but the model produced a table -- kept flagged
     FLAGGED_MODEL_KEPT = "flagged_model_kept"
+    #: TICKET-A1c (#641): the winner came from A1b's row-corroboration fallback
+    #: (the strict grid-authored pool was empty) -- ships WARNING /
+    #: ``FailureMode.HEADER_BINDING_UNVERIFIED`` UNCONDITIONALLY, regardless of
+    #: the candidate's own ``audit_passed``, because only its ROW shape was ever
+    #: checked, never its HEADER/column binding. Deliberately a SEPARATE member
+    #: from ``STRUCTURE_CLASS_GRID_FLAGGED`` (R7: two endings must never share
+    #: one tag) even though both map to the same base disposition below -- they
+    #: are different SHIP reasons (a rescued fallback candidate vs. an
+    #: ordinarily-authored one the judge rejected).
+    STRUCTURE_CLASS_GRID_CORROBORATED = "structure_class_grid_corroborated"
     #: structure-class: an attempt authored a grid and it passed audit
     STRUCTURE_CLASS_GRID_PASSING = "structure_class_grid_passing"
     #: structure-class: grid winner kept but demoted to WARNING
@@ -1679,6 +1689,9 @@ _PROVENANCE_TO_DISPOSITION: dict[SelectionProvenance, PageDisposition] = {
     ),
     SelectionProvenance.FLAGGED_MODEL_KEPT: PageDisposition(
         PageEnding.MODEL_OUTPUT, PagePrimaryReason.NATIVE_TABLE_DISTRUST
+    ),
+    SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED: PageDisposition(
+        PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
     ),
     SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING: PageDisposition(
         PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS
@@ -2067,6 +2080,48 @@ def _select_page_output_tagged(
                     grid_winner = _apply_row_corroboration_disclosure(
                         state, page_num, grid_winner, corroboration, region_kind, coverage_share
                     )
+                    # TICKET-A1c (#641): a corroboration-fallback winner never
+                    # cleared the strict grid-authored pool, so nothing ever
+                    # verified its HEADER binding -- only A1a's row check ran,
+                    # and that check is blind to header/column identity by
+                    # construction (it compares ordered NUMBER runs, not
+                    # labels). The "clean pass ships untouched" rule two
+                    # paragraphs below is stated for an ORDINARY grid-authored
+                    # winner, whose header attribution the strict pool gate
+                    # itself already vetted -- it does not hold for this
+                    # candidate regardless of its own ``audit_passed``. Ship
+                    # WARNING / ``HEADER_BINDING_UNVERIFIED`` unconditionally
+                    # (never the undemoted PASSING ending) so a clean-passing
+                    # corroboration winner cannot ship as a silent SUCCESS --
+                    # exactly the gap A1b's own review left open.
+                    header_text = "\n".join(
+                        line
+                        for layout in _table_block_layout(grid_winner.text or "")
+                        for line in layout["header_lines"]
+                    )
+                    kept_text = grid_winner.text
+                    note = kept_table_flag_note(state, page_num, kept_text)
+                    if note:
+                        kept_text = f"{kept_text.rstrip()}\n\n{note}\n"
+                    return replace(
+                        grid_winner,
+                        text=kept_text,
+                        status=PageStatus.WARNING,
+                        audit_passed=False,
+                        failure_mode=FailureMode.HEADER_BINDING_UNVERIFIED,
+                        table_corroboration={
+                            "engine": grid_winner.engine or "",
+                            "bound": corroboration.bound,
+                            "total": corroboration.total,
+                            "share": corroboration.share,
+                            "extra_numbers": list(corroboration.extra_numbers),
+                            "skipped_native_rows": corroboration.skipped_native_rows,
+                            "unbound_rows": [list(idxs) for idxs in corroboration.unbound_rows],
+                            "corroboration_region": region_kind,
+                            "coverage_share": coverage_share,
+                            "header_text": header_text,
+                        },
+                    ), SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED
                 # (i) a grid-authoring model attempt from ``p.attempts``, body
                 # untouched, flagged only per its own status (S1 spec,
                 # verbatim) WHEN it is a clean pass. MAJOR 7(a) on #269: a

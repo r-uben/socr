@@ -64,7 +64,7 @@ def test_cascade_is_loop_free_so_exactly_one_ending_runs() -> None:
     fn = _cascade()
     loops = [n for n in ast.walk(fn) if isinstance(n, (ast.For, ast.While))]
     assert loops == [], "a loop in the cascade breaks one-ending-per-page"
-    assert len(_returns(fn)) == 15
+    assert len(_returns(fn)) == 16
 
 
 def test_every_ending_carries_a_tag() -> None:
@@ -82,9 +82,9 @@ def test_tags_and_endings_are_in_bijection() -> None:
     to kill.
     """
     used = [n for r in _returns(_cascade()) for n in _tag_names(r)]
-    assert len(used) == len(set(used)) == 16, "two endings share a tag or tag count != 16"
+    assert len(used) == len(set(used)) == 17, "two endings share a tag or tag count != 17"
     assert set(used) == {k.name for k in SelectionProvenance}
-    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 16
+    assert len({k.value for k in SelectionProvenance}) == len(list(SelectionProvenance)) == 17
 
 
 def test_tag_order_matches_enum_declaration_order() -> None:
@@ -173,8 +173,8 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         by_disposition[d].add(member)
         by_reason[d.primary_reason].add(member)
 
-    # 1. Total count of mapped provenance members must be exactly 16
-    assert len(list(SelectionProvenance)) == 16
+    # 1. Total count of mapped provenance members must be exactly 17
+    assert len(list(SelectionProvenance)) == 17
 
     # 2. Check full disposition equivalence groups (exactly 14 distinct disposition pairs)
     assert len(by_disposition) == 14
@@ -183,6 +183,7 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.STRUCTURE_CLASS): {
             SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
             SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
+            SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED,
         },
         PageDisposition(PageEnding.MODEL_OUTPUT, PagePrimaryReason.UNACCEPTED_OUTPUT_KEPT): {
             SelectionProvenance.BEST_OUTPUT_UNVERIFIED,
@@ -203,6 +204,7 @@ def test_provenance_to_disposition_pins_allowed_equivalence_groups() -> None:
         PagePrimaryReason.STRUCTURE_CLASS: {
             SelectionProvenance.STRUCTURE_CLASS_GRID_PASSING,
             SelectionProvenance.STRUCTURE_CLASS_GRID_FLAGGED,
+            SelectionProvenance.STRUCTURE_CLASS_GRID_CORROBORATED,
             SelectionProvenance.STRUCTURE_CLASS_FLOOR,
         },
         PagePrimaryReason.NATIVE_TABLE_UNVERIFIABLE: {

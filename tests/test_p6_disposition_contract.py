@@ -137,10 +137,17 @@ def test_from_dict_ignores_unknown_sibling_keys() -> None:
 
 
 def test_selection_provenance_keeps_all_sixteen_members() -> None:
+    """TICKET-A1c (#641) added a 17th ending (``STRUCTURE_CLASS_GRID_CORROBORATED``)
+    after this Stage A/B ticket's own count was pinned; the "16" in the test name
+    is now historical, not current -- see ``tests/test_r7_winner_kind_tags.py``
+    for the live, AST-derived count that tracks the cascade itself.
+    """
     SelectionProvenance = manifest.SelectionProvenance
-    assert len(list(SelectionProvenance)) == 16, (
-        "the selector's 16 endings must not be merged in this task -- Stage A/B "
-        "is behaviour-preserving; merging is S3/S4 of the design doc, out of scope"
+    assert len(list(SelectionProvenance)) == 17, (
+        "the selector's endings must not be silently merged in this task -- Stage "
+        "A/B is behaviour-preserving; merging is S3/S4 of the design doc, out of "
+        "scope. A count change is only legitimate when a real ending was added "
+        "(TICKET-A1c, #641) or removed, never a Stage A/B refactor."
     )
 
 
