@@ -17,6 +17,7 @@ table is UNVERIFIABLE and must NOT be accepted.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from collections import Counter
@@ -40,6 +41,23 @@ _EVIDENCE_OCR_DPI: int = 150
 
 # Alphabetic runs in evidence text: at least _MIN_CONTENT_TOKEN_LEN chars.
 _CONTENT_TOKEN_RE = re.compile(rf"[A-Za-z][A-Za-z0-9\-]{{{_MIN_CONTENT_TOKEN_LEN - 1},}}")
+
+
+def _content_token(raw: str) -> str | None:
+    """Fold a raw ``_CONTENT_TOKEN_RE`` match to a comparable label token.
+
+    #659: the regex above deliberately allows internal dashes so a hyphenated
+    word ("socio-economic") stays one token, but that same class lets a
+    LEADING/TRAILING dash ride along too -- a VLM's ``Settlements--`` rule
+    decoration was tokenised as ``settlements--`` and then never matched the
+    bare ``settlements`` any OCR witness reads off the page. Presentation, not
+    content, so it is stripped here rather than loosened out of the regex
+    (which still must not swallow a genuinely hyphenated word's edges other
+    than the decoration itself).
+    """
+    token = raw.strip("-").lower()
+    return token if len(token) >= _MIN_CONTENT_TOKEN_LEN else None
+
 
 OcrImageFn = Callable[[object], str]
 
@@ -133,6 +151,13 @@ _WITNESS_STATE_RANK: dict[str, int] = {
 #: grep one token to learn the run had no OCR witness at all.
 NO_WITNESS_BACKEND_KIND: str = "source_evidence_no_witness_backend"
 
+#: #659: audit event kind for a table that SHIPPED (numerics fully
+#: corroborated) but carries a content-label token the page evidence did not
+#: confirm. A constant, not a literal, so ``tables_trust.py`` and
+#: ``orchestrator.py`` cannot spell it differently from the emitter (the same
+#: reason ``NO_WITNESS_BACKEND_KIND`` is one).
+LABEL_UNVERIFIED_KIND: str = "source_evidence_table_label_unverified"
+
 
 @dataclass(frozen=True)
 class TableTokens:
@@ -191,6 +216,17 @@ class SourceEvidenceResult:
     #: the operator's ACTION is not: a missing install is fixed by installing,
     #: a crashed reader and an unrenderable page are not.
     witness_state: str = ""
+    #: #659: set on an otherwise-PASSED verdict when every numeric token is
+    #: supported but at least one content-label token is not. A label the
+    #: page evidence does not confirm is weaker signal than an unsupported
+    #: NUMBER (a table's values are the citable content; a stub word going
+    #: unread by a noisy OCR witness is common and not on its own evidence of
+    #: fabrication), so this does not reject -- but it must not go unsaid
+    #: either, so the caller surfaces it as an audit note rather than
+    #: silently shipping the page as fully corroborated. "" when every
+    #: emitted content label was found, or when there was no numeric token to
+    #: anchor the trade-off (see ``is_alpha_only`` below, which still rejects).
+    content_unverified: str = ""
 
 
 def page_has_native_words(page) -> bool:
@@ -224,8 +260,14 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
                 # evidence on scanned pages.
                 if row_idx == 0:
                     continue
-                for m in _CONTENT_TOKEN_RE.finditer(cell):
-                    raw_content.add(m.group(0).lower())
+                # #659: decode HTML entities BEFORE tokenising -- a VLM's
+                # "&nbsp;" indentation is presentation, not content, and left
+                # raw it tokenises to the bogus content label "nbsp".
+                decoded = html.unescape(cell)
+                for m in _CONTENT_TOKEN_RE.finditer(decoded):
+                    token = _content_token(m.group(0))
+                    if token is not None:
+                        raw_content.add(token)
 
     numeric = _numeric_multiset_from_tokens(raw_numeric)
     has_numeric = bool(numeric)
@@ -245,14 +287,17 @@ def _tokens_from_plain_text(text: str) -> tuple[Counter, set[str]]:
 
     raw_numeric: list[str] = []
     content: set[str] = set()
-    for word in re.findall(r"\S+", text):
+    decoded_text = html.unescape(text)
+    for word in re.findall(r"\S+", decoded_text):
         word = word.strip(".,;:!?()[]\"'")
         if not word:
             continue
         if is_numeric_token(word):
             raw_numeric.append(word)
         for m in _CONTENT_TOKEN_RE.finditer(word):
-            content.add(m.group(0).lower())
+            token = _content_token(m.group(0))
+            if token is not None:
+                content.add(token)
     return _numeric_multiset_from_tokens(raw_numeric), content
 
 
@@ -512,6 +557,9 @@ def verify_table_tokens(
         )
 
     if tokens.is_alpha_only and not _content_supported(tokens.content, bundle.content):
+        # No numeric token exists to anchor the #659 unverified-label
+        # trade-off below -- a pure-label table's content IS the claim, so an
+        # unsupported label here stays a reject, same as before #659.
         missing = sorted(tokens.content - bundle.content)[:5]
         return SourceEvidenceResult(
             verifiable=True,
@@ -519,14 +567,16 @@ def verify_table_tokens(
             reason=f"content labels unsupported by page evidence: {missing}",
         )
 
-    if tokens.has_numeric and tokens.content:
-        if not _content_supported(tokens.content, bundle.content):
-            missing = sorted(tokens.content - bundle.content)[:5]
-            return SourceEvidenceResult(
-                verifiable=True,
-                passed=False,
-                reason=f"content labels unsupported by page evidence: {missing}",
-            )
+    content_unverified = ""
+    if (
+        tokens.has_numeric
+        and tokens.content
+        and not _content_supported(tokens.content, bundle.content)
+    ):
+        # #659: numerics are fully supported (the check above already passed)
+        # and only a label is unconfirmed -- flag, do not reject.
+        missing = sorted(tokens.content - bundle.content)[:5]
+        content_unverified = f"content labels unverified by page evidence: {missing}"
 
     if not tokens.has_numeric and not tokens.is_alpha_only:
         return SourceEvidenceResult(
@@ -539,6 +589,7 @@ def verify_table_tokens(
         verifiable=True,
         passed=True,
         reason="source evidence supports emitted table tokens",
+        content_unverified=content_unverified,
     )
 
 

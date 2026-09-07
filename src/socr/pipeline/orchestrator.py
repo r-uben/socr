@@ -2470,7 +2470,7 @@ class UnifiedPipeline:
             TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
             TABLE_LADDER_EVENT_KINDS,
         )
-        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
+        from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 
         return frozenset(
             TABLE_LADDER_EVENT_KINDS
@@ -2509,6 +2509,14 @@ class UnifiedPipeline:
             # run would report a clean SUCCESS on a document whose mathematics
             # is known to be missing.
             | {UNRESOLVED_MATH_KIND}
+            # #659: the terminal ``table_label_unverified`` field on the
+            # winning ``PageOutput`` is what makes the page note/CLI line
+            # retire when a later, fully-supported candidate wins -- and that
+            # field round-trips through the sidecar on its own. This event is
+            # still what ``tables_trust.json`` reads (its history is real
+            # history and must not disappear on resume, same as every other
+            # distrust kind), so it is replayed the same as the rest.
+            | {LABEL_UNVERIFIED_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -3777,6 +3785,41 @@ class UnifiedPipeline:
             f"page(s) {', '.join(str(n) for n in pages)}: scanned table(s) shipped the "
             "fail-closed floor with NO local OCR witness -- nothing read the page pixels, "
             f"so the table was neither corroborated nor contradicted ({clauses})"
+        )
+
+    @staticmethod
+    def _label_unverified_pages(records: list) -> list[int]:
+        """#659: pages whose FINAL winning output carries a label-unverified doubt.
+
+        Read from ``rec.output.table_label_unverified`` -- the field lives on
+        the CANDIDATE that shipped, not on ``PageState`` or on history -- so a
+        page whose earlier attempt was flagged but whose later, fully-supported
+        candidate won instead reports nothing here. Same precedence principle
+        as ``_no_witness_backend_pages``: this is a terminal diagnosis, not a
+        union over every event the page ever produced.
+        """
+        return sorted({rec.output.page_num for rec in records if rec.output.table_label_unverified})
+
+    @staticmethod
+    def _label_unverified_note(records: list) -> str | None:
+        """Document-level one-liner naming pages with an unverified table label.
+
+        Mirrors ``_no_witness_backend_note``: a consumer gating on
+        ``metadata.json`` must see that a shipped table carries a label the
+        page's OCR witness did not confirm, without parsing the full audit
+        log. Unlike the no-witness ending, this is NOT a failure -- the
+        table's numbers are fully corroborated, only a label token is in
+        doubt -- so the wording says "shipped with an unverified label", not
+        "failed". ``None`` on a clean run.
+        """
+        pages = UnifiedPipeline._label_unverified_pages(records)
+        if not pages:
+            return None
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: table shipped with an unverified "
+            "row/column label (every numeric value is corroborated by page evidence; a "
+            "content-label token was not) -- see source_evidence_table_label_unverified "
+            "in audit_log.json"
         )
 
     @staticmethod
@@ -10552,6 +10595,12 @@ class UnifiedPipeline:
         table_rejected_pages = orthogonal_buckets["table_rejected_pages"]
         table_unverified_pages = orthogonal_buckets["table_unverified_pages"]
         table_withheld_pages = orthogonal_buckets["table_withheld_pages"]
+        # #659 round 3 (Astra P2a): hoisted here, once, rather than computed
+        # inline inside the CLI print block below -- it must also gate
+        # ``pages_ok``/``state.status`` and the outer event-emission ``if``
+        # below, or an otherwise-clean document whose ONLY defect is a label
+        # doubt reports SUCCESS and never reaches the dedicated CLI line.
+        label_unverified_pages = self._label_unverified_pages(pre_records)
 
         def _kept_defect(page_num: int) -> str:
             # ``best_output``, not the finalized record (cold review round 2,
@@ -10787,6 +10836,12 @@ class UnifiedPipeline:
         # "completed with warnings, output written" path, which is the honest
         # one: content shipped, and a named value on it is disputed.
         pages_ok = pages_ok and not value_drift_pages
+        # #659: same reasoning as ``value_drift_pages`` immediately above --
+        # NOT a page failure (the table ships, numerics fully corroborated),
+        # but the document cannot report a clean SUCCESS while one of its
+        # labels is disputed. AUDIT_FAILED is the honest "completed with
+        # warnings, output written" outcome.
+        pages_ok = pages_ok and not label_unverified_pages
         pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
         pages_ok = pages_ok and not text_grid_rejected_pages
         # GH-318: chart eligibility raised and the page took the non-chart route
@@ -10906,6 +10961,7 @@ class UnifiedPipeline:
             or table_rejected_pages
             or table_unverified_pages
             or table_withheld_pages
+            or label_unverified_pages
         ):
             from socr.core.audit_log import AuditEvent
 
@@ -11121,6 +11177,18 @@ class UnifiedPipeline:
                     # that would not rasterise.
                     for _clause in self._no_witness_clauses(state, no_witness_pages):
                         console.print(f"    [yellow]{_clause}[/yellow]")
+                # #659: a shipped table with one unconfirmed label token is not
+                # a failure -- printed in yellow, alongside the other ship-with-
+                # doubt lines below, not with the red no-witness/failed lines
+                # above. ``label_unverified_pages`` is computed once, above,
+                # so this line is reachable even when it is the document's
+                # ONLY defect (Astra P2a).
+                if label_unverified_pages:
+                    console.print(
+                        f"  [yellow]{len(label_unverified_pages)} table page(s) shipped with "
+                        f"an unverified row/column label (numbers corroborated): "
+                        f"{label_unverified_pages}[/yellow]"
+                    )
                 if native_fallback_pages:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
@@ -11422,13 +11490,23 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_witness_note}"
             else:
                 final_result.error = _witness_note
+        # #659: surface a shipped-but-unverified-label table at document
+        # level, for the same no-silent-loss reason as the note above -- but
+        # this one is not a failure, so it never overrides a failure note that
+        # already occupies the free-text field; it only appends.
+        _label_note = self._label_unverified_note(pre_records)
+        if _label_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_label_note}"
+            else:
+                final_result.error = _label_note
         _chart_note = self._chart_detection_failed_note(state)
         if _chart_note:
             if final_result.error:
                 final_result.error = f"{final_result.error}; {_chart_note}"
             else:
                 final_result.error = _chart_note
-        _trust_note = self._tables_trust_note(state)
+        _trust_note = self._tables_trust_note(state, pre_records)
         if _trust_note:
             if final_result.error:
                 final_result.error = f"{final_result.error}; {_trust_note}"
@@ -11688,7 +11766,7 @@ class UnifiedPipeline:
 
         # Durable per-run audit log of notable events (RECITATION escalations,
         # judge rejections, dual-pass patches). Always written; never fatal.
-        self._write_audit_log(state, doc_dir)
+        self._write_audit_log(state, doc_dir, records=final_records)
 
         return final_result
 
@@ -11829,24 +11907,40 @@ class UnifiedPipeline:
         except Exception as exc:  # never lose output over a metadata write
             logger.warning("metadata write failed (non-fatal): %s", exc)
 
-    def _write_audit_log(self, state: DocumentState, doc_dir: Path) -> None:
-        """Write audit_log.json next to the output; surface a one-line summary."""
+    def _write_audit_log(
+        self, state: DocumentState, doc_dir: Path, records: list | None = None
+    ) -> None:
+        """Write audit_log.json next to the output; surface a one-line summary.
+
+        ``records``: #659 round 3, threaded through to ``_write_tables_trust``
+        so ``LABEL_UNVERIFIED_KIND`` resolves off the final winning candidate.
+
+        #659 round 5 (Astra P2): ``_write_tables_trust`` runs regardless of
+        whether THIS run produced any events. A genuinely clean rerun with an
+        empty ``audit.events`` used to return before ever reaching it, so a
+        prior run's ``tables_trust.json`` in the same directory survived --
+        the trust sidecar's own retirement (round 4's fix) never got a
+        chance to fire. Only the audit_log.json write and its console line
+        are conditional on there being something to write.
+        """
         try:
             from socr.core.audit_log import build_run_audit
 
             audit = build_run_audit(state)
-            if not audit.events:
-                return  # a clean run leaves no audit log to inspect
-            audit.save(doc_dir / "audit_log.json")
-            if not self.config.quiet:
-                console.print(
-                    f"  [dim]Audit log: {doc_dir / 'audit_log.json'} ({audit.summary_line()})[/dim]"
-                )
-            self._write_tables_trust(state, audit, doc_dir)
+            if audit.events:
+                audit.save(doc_dir / "audit_log.json")
+                if not self.config.quiet:
+                    console.print(
+                        f"  [dim]Audit log: {doc_dir / 'audit_log.json'} "
+                        f"({audit.summary_line()})[/dim]"
+                    )
+            self._write_tables_trust(state, audit, doc_dir, records=records)
         except Exception as exc:  # never lose output over an audit-log write
             logger.warning("audit log write failed (non-fatal): %s", exc)
 
-    def _write_tables_trust(self, state: DocumentState, audit, doc_dir: Path) -> None:
+    def _write_tables_trust(
+        self, state: DocumentState, audit, doc_dir: Path, records: list | None = None
+    ) -> None:
         """GH-95: write tables_trust.json beside audit_log.json.
 
         Separate file rather than an inline callout in the assembled markdown:
@@ -11856,14 +11950,36 @@ class UnifiedPipeline:
 
         Non-fatal by the same rule as the audit log: a trust-sidecar write must
         never lose OCR output.
+
+        ``records``: #659 round 3, same reason as ``_tables_trust_note``'s
+        parameter of the same name -- lets ``LABEL_UNVERIFIED_KIND`` resolve
+        off the final winning candidate instead of raw event history.
         """
         try:
             from socr.core.tables_trust import build_tables_trust
 
-            trust = build_tables_trust(state.handle.filename, audit.events)
+            label_pages = (
+                frozenset(self._label_unverified_pages(records)) if records is not None else None
+            )
+            trust = build_tables_trust(
+                state.handle.filename, audit.events, label_unverified_pages=label_pages
+            )
+            trust_path = doc_dir / "tables_trust.json"
             if not trust.pages:
-                return  # every table trusted — no sidecar to write
-            trust.save(doc_dir / "tables_trust.json")
+                # #659 round 4 (Astra P2): every table trusted on THIS run.
+                # A prior run's ``tables_trust.json`` in the same directory
+                # (e.g. an earlier attempt whose label doubt has since
+                # retired via ``label_unverified_pages``) must not survive as
+                # a stale artifact -- the file's own contract is "absent
+                # means clean", so an untrusted_pages entry left behind after
+                # retirement lies about the CURRENT run. Remove it if
+                # present; a genuinely clean run where the file never
+                # existed is unaffected (no-op, matching the pre-#659
+                # "nothing to write" behaviour).
+                if trust_path.exists():
+                    trust_path.unlink()
+                return
+            trust.save(trust_path)
             if not self.config.quiet:
                 console.print(f"  [yellow]Table trust:[/yellow] {trust.summary_line()}")
         except Exception as exc:
@@ -11892,20 +12008,34 @@ class UnifiedPipeline:
             return None
 
     @staticmethod
-    def _tables_trust_note(state: DocumentState) -> str | None:
+    def _tables_trust_note(state: DocumentState, records: list | None = None) -> str | None:
         """GH-95: document-level table-distrust pointer, or None when clean.
 
         Derived from ``state.events`` rather than ``build_run_audit`` because
         every distrust kind is appended at the source; the derived-escalation
         half of the audit contributes none of them. Non-fatal: a note that
         cannot be derived must never fail the run.
+
+        ``records``: #659 round 3. When the finalized page records are
+        available, ``LABEL_UNVERIFIED_KIND`` resolves off the FINAL winning
+        candidate rather than raw event history -- see
+        ``build_tables_trust``'s ``label_unverified_pages`` parameter.
+        ``None`` (the default, and every pre-#659 caller) keeps the old,
+        history-only behaviour.
         """
         try:
             from socr.core.tables_trust import build_tables_trust, trust_note
 
             events = list(getattr(state, "events", []))
             filename = getattr(getattr(state, "handle", None), "filename", "")
-            return trust_note(build_tables_trust(filename, events))
+            label_pages = (
+                frozenset(UnifiedPipeline._label_unverified_pages(records))
+                if records is not None
+                else None
+            )
+            return trust_note(
+                build_tables_trust(filename, events, label_unverified_pages=label_pages)
+            )
         except Exception as exc:
             logger.warning("table-trust note derivation failed (non-fatal): %s", exc)
             return None

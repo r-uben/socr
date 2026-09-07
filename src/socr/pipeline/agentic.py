@@ -618,6 +618,42 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 confidence=0.0,
             )
 
+        if result.content_unverified:
+            # Astra review round 1 (cf. #658): an event with no consumer
+            # disappears. The table ships (numerics are fully corroborated) --
+            # this must NOT flip ``audit_passed``, which is what selects the
+            # winner -- so it becomes a STANDING, candidate-associated outcome
+            # via a data field on the output itself: it survives to the
+            # finalized page and the resumed sidecar (``table_label_unverified``,
+            # which is what makes the warning retire automatically the day a
+            # different, fully-supported candidate wins instead), feeds
+            # ``TABLE_DISTRUST_KINDS`` (``tables_trust.json``), and a
+            # document-metadata / CLI note (``orchestrator.py``'s
+            # ``_label_unverified_note`` / ``_label_unverified_pages``).
+            #
+            # Astra review round 2 (P1): this used to also flip
+            # ``output.status`` to WARNING right here, before the ``return``
+            # below hands the SAME output to ``self._inner``. Both
+            # ``HeuristicPageJudge`` and ``VLMPageJudge`` treat any non-SUCCESS
+            # status as empty/error input and reject on sight -- so setting
+            # WARNING at judge time rejected the very candidate this ticket
+            # exists to ship. The reporting status change belongs at
+            # FINALIZATION, once a page has already been selected and no judge
+            # will see it again -- see ``manifest._apply_label_unverified_guard``,
+            # the same pattern #658 and #165 use for a post-selection status
+            # demotion. ``audit_notes`` is safe to append here: no judge reads it.
+            output.table_label_unverified = result.content_unverified
+            output.audit_notes.append(
+                f"table label unverified by page evidence: {result.content_unverified}"
+            )
+            self._emit_event(
+                page_num=page_num,
+                kind="source_evidence_table_label_unverified",
+                engine=output.engine or "",
+                detail=result.content_unverified,
+                data={"cause": ""},
+            )
+
         return self._inner.assess(output, provider)
 
     def _emit_event(self, page_num: int, kind: str, engine: str, detail: str, data: dict) -> None:

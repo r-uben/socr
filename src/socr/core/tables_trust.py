@@ -30,6 +30,7 @@ from socr.judge.table_verdict import (
     TABLE_LADDER_UNVERIFIED_KIND,
 )
 from socr.tables.reconcile import PATCH_ELIGIBLE_NOTE
+from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND
 
 # Audit kinds that mean "the digits in this page's table(s) may be wrong".
 #
@@ -128,6 +129,13 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # complete, so the page is not verified.
         "dualpass_crop_failed",
         "source_evidence_table_reject",
+        # #659: the same gate's SHIP-flagged ending -- every numeric token is
+        # corroborated but a content-label token is not, so the table ships
+        # (this is not a reject, unlike the two entries around it) with its
+        # label doubt on record. A consumer of ``tables_trust.json`` must see
+        # this page too: the numbers are trustworthy, the row/column label
+        # attached to them is not independently confirmed.
+        "source_evidence_table_label_unverified",
         # #658: the same gate's other fail-closed ending -- no classical OCR
         # backend, so nothing read the page's pixels. Listed for exactly the
         # reason the line above is: the page ships a table nothing corroborated.
@@ -441,12 +449,33 @@ class TablesTrust:
         return line
 
 
-def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
+def build_tables_trust(
+    pdf_filename: str,
+    events: list,
+    *,
+    label_unverified_pages: frozenset[int] | None = None,
+) -> TablesTrust:
     """Derive the trust index from a run's audit events.
 
     Only ``TABLE_DISTRUST_KINDS`` contribute. Pages with no distrust event do not
     appear at all, so a clean document yields an empty index and prose-only pages
     stay unmarked.
+
+    ``label_unverified_pages``: #659 round 3 (Astra P2b). Every OTHER member of
+    ``TABLE_DISTRUST_KINDS`` either has no resolution mechanism at all, or is
+    resolved by a dedicated RESOLVING event carrying a ``table_id`` (see
+    ``RESOLVING_KINDS`` above). ``LABEL_UNVERIFIED_KIND`` has neither: the
+    scanned-table gate tokenises the WHOLE page's markdown, not a per-region
+    witness, so there is no table id to fabricate one from, and its terminal
+    truth genuinely lives on the FINAL selected candidate's own data field
+    (``PageOutput.table_label_unverified``), not on a follow-up event. Pass the
+    CURRENT set of pages whose finalized winner still carries that field (e.g.
+    ``UnifiedPipeline._label_unverified_pages(records)``) and a page whose
+    later, fully-supported candidate won drops out of THIS run's trust index,
+    even though the emitting event is still in ``events`` and stays in
+    ``audit_log.json`` as real history. ``None`` (no records available, e.g. a
+    caller deriving trust from bare history) keeps the old, history-only
+    behaviour rather than silently trusting an unknown page clean.
     """
     trust = TablesTrust(pdf_filename=pdf_filename)
 
@@ -501,6 +530,28 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
             # A non-resolvable kind is NEVER cleared by resolved_pages/
             # resolved_tables (a generic ACCEPTED proves nothing about a
             # SPECIFIC excluded word) -- only by the word-keyed check above.
+        elif kind == LABEL_UNVERIFIED_KIND and label_unverified_pages is not None:
+            # #659 round 4 (Astra P1): when the caller supplies the current
+            # final set, LABEL_UNVERIFIED_KIND's resolution is decided
+            # ENTIRELY by that set -- never by the generic ``resolved_pages``
+            # / ``resolved_tables`` history below. That history is keyed off
+            # UNRELATED resolving events (``table_escalation_accepted`` and
+            # friends), and checking it FIRST let a page-wide acceptance
+            # recorded for some other reason silently erase a label doubt the
+            # caller explicitly says is still live on the CURRENT winner --
+            # chronology the reducer has no business consulting for this
+            # kind. The same branch also runs in the other direction: a page
+            # absent from ``label_unverified_pages`` retires here even when
+            # no resolving event was ever emitted for it, because the
+            # current winner is simply clean. ``label_unverified_pages is
+            # None`` (the caller has no final records) falls through to the
+            # untouched history-only ``else`` branch every other kind still
+            # uses, same as the non-resolvable branch above never touches it
+            # either -- the three are mutually exclusive by kind, so their
+            # relative order here does not matter, only that neither of the
+            # two special cases falls through into the generic check.
+            if page_num not in label_unverified_pages:
+                continue
         else:
             if page_num in resolved_pages:
                 continue
