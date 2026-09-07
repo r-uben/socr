@@ -2434,6 +2434,7 @@ class UnifiedPipeline:
             TABLE_BINDING_ADJUDICATED_KIND,
             TABLE_LADDER_EVENT_KINDS,
         )
+        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
 
         return frozenset(
             TABLE_LADDER_EVENT_KINDS
@@ -2446,6 +2447,13 @@ class UnifiedPipeline:
             # summary below both read this event, so dropping it on resume
             # would silently retire the debt.
             | {VISUAL_VALUES_NOT_TRANSCRIBED_KIND}
+            # #658: same contract, same reason. The witness state lives ONLY on
+            # this event, and the document note and CLI line read it to say
+            # which fix applies to which page. Dropping it on resume would not
+            # retire the finding -- the page's own flag and failure mode still
+            # name it -- but it would silently downgrade the explanation to
+            # "cause not recorded" on every resumed run.
+            | {NO_WITNESS_BACKEND_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -3328,6 +3336,8 @@ class UnifiedPipeline:
         pdf_path: Path,
         page_num: int,
         figures_dir: Path | None,
+        *,
+        no_witness: bool = False,
     ) -> None:
         """GH-90: mark a scanned page whose table evidence failed for the D3 floor.
 
@@ -3340,6 +3350,12 @@ class UnifiedPipeline:
         whole-page marker, discarding the prose.
         """
         ps.scanned_table_evidence_failed = True
+        # #658: carry WHY the gate refused into the floor. Without this the
+        # demotion below and the floor's own reconstruction in
+        # ``_select_page_output_tagged`` both stamp HALLUCINATION, so the honest
+        # attempt-level reason died one selection later and the shipped sidecar
+        # still accused the model.
+        ps.scanned_table_no_witness = bool(no_witness)
         if figures_dir is not None:
             ps.d3_floor_png_ref = self._render_d3_floor_png(
                 pdf_path,
@@ -3349,7 +3365,9 @@ class UnifiedPipeline:
         if ps.best_output is not None:
             ps.best_output.status = PageStatus.ERROR
             ps.best_output.audit_passed = False
-            ps.best_output.failure_mode = FailureMode.HALLUCINATION
+            ps.best_output.failure_mode = (
+                FailureMode.NO_WITNESS_BACKEND if no_witness else FailureMode.HALLUCINATION
+            )
 
     # ------------------------------------------------------------------
     # GH-86: per-page VLM placeholder cleanup (agentic pre-flush seam)
@@ -3592,6 +3610,115 @@ class UnifiedPipeline:
         return (
             f"page(s) {', '.join(labels)}: "
             "fabricated image reference(s) removed (no provenance in the source document)"
+        )
+
+    @staticmethod
+    def _no_witness_backend_pages(state, records: list | None = None) -> list[int]:
+        """#658: pages whose FINAL outcome is "nothing read this page".
+
+        A TERMINAL diagnosis, deliberately not a union over history. An earlier
+        draft OR-ed every no-witness audit event and every historical attempt
+        into this set, so a page whose first read failed and whose later reread
+        SUCCEEDED -- or whose later witness contradicted the table outright --
+        still reported that its table "was neither corroborated nor
+        contradicted". That sentence was then false about the page that shipped.
+
+        Precedence, not a union:
+
+        1. the finalized records, when assemble has them: they ARE the shipped
+           set, and a page whose shipped output is no longer a no-witness floor
+           is not one, whatever earlier attempts recorded;
+        2. otherwise the page's own final state -- the persisted
+           ``scanned_table_no_witness`` flag (cleared when a reread is
+           accepted) or the failure mode of ``best_output``, the winner.
+
+        ``attempts`` and ``state.events`` are consulted by neither: those are
+        history, and history is what made the note lie.
+        """
+        if records:
+            return sorted(
+                {
+                    rec.output.page_num
+                    for rec in records
+                    if rec.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
+                }
+            )
+        pages: set[int] = set()
+        for num, ps_ in state.pages.items():
+            if getattr(ps_, "scanned_table_no_witness", False):
+                pages.add(num)
+                continue
+            best = getattr(ps_, "best_output", None)
+            if best is not None and best.failure_mode is FailureMode.NO_WITNESS_BACKEND:
+                pages.add(num)
+        return sorted(pages)
+
+    @staticmethod
+    def _no_witness_states(state, pages: list[int]) -> dict[str, list[int]]:
+        """Group terminally-unwitnessed pages by WHY, newest event per page.
+
+        The witness state lives only on the audit event, and the events are
+        history -- but here history is being used to explain pages whose
+        terminal status is already settled by the caller, never to select them.
+        A resumed run has no events; those pages group under "" and get the
+        generic wording, which is the honest thing to say when the cause was
+        not carried across the resume.
+        """
+        from socr.tables.source_evidence import NO_WITNESS_BACKEND_KIND
+
+        wanted = set(pages)
+        by_page: dict[int, str] = {}
+        for e in state.events:
+            if getattr(e, "kind", "") != NO_WITNESS_BACKEND_KIND:
+                continue
+            if e.page_num not in wanted:
+                continue
+            by_page[e.page_num] = str((getattr(e, "data", None) or {}).get("witness_state") or "")
+        grouped: dict[str, list[int]] = {}
+        for num in pages:
+            grouped.setdefault(by_page.get(num, ""), []).append(num)
+        return {k: sorted(v) for k, v in grouped.items()}
+
+    @staticmethod
+    def _no_witness_clauses(state, pages: list[int]) -> list[str]:
+        """One clause per distinct cause: which pages, and what actually fixes it.
+
+        A single sentence cannot serve these pages. "Install tesseract" is the
+        right advice for a missing binary and useless-to-harmful advice for a
+        reader that is installed and crashed, or for a page that would not
+        rasterise -- the operator is sent to fix a component that works.
+        """
+        from socr.tables.source_evidence import WITNESS_STATE_MESSAGES
+
+        clauses = []
+        for witness_state, nums in sorted(UnifiedPipeline._no_witness_states(state, pages).items()):
+            why = WITNESS_STATE_MESSAGES.get(
+                witness_state,
+                "the cause was not recorded on this run; see the "
+                "source_evidence_no_witness_backend entries in audit_log.json",
+            )
+            clauses.append(f"page(s) {', '.join(str(n) for n in nums)}: {why}")
+        return clauses
+
+    @staticmethod
+    def _no_witness_backend_note(state, records: list | None = None) -> str | None:
+        """Document-level one-liner naming the pages with no OCR witness (#658).
+
+        Mirrors ``_fabricated_url_note``: a consumer gating on ``metadata.json``
+        must see that these pages were failed closed because nothing READ them
+        and not because they fabricated content, without parsing the full audit
+        log. Carries a remedy per cause, because unlike every other note here
+        this failure is fixed on the host rather than in the document.
+        ``None`` on a clean run.
+        """
+        pages = UnifiedPipeline._no_witness_backend_pages(state, records)
+        if not pages:
+            return None
+        clauses = "; ".join(UnifiedPipeline._no_witness_clauses(state, pages))
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: scanned table(s) shipped the "
+            "fail-closed floor with NO local OCR witness -- nothing read the page pixels, "
+            f"so the table was neither corroborated nor contradicted ({clauses})"
         )
 
     @staticmethod
@@ -4283,6 +4410,7 @@ class UnifiedPipeline:
                 "native_table_header_unattributed",  # GH-200
                 "native_table_unverifiable",
                 "scanned_table_evidence_failed",
+                "scanned_table_no_witness",  # #658: qualifies the flag above
             )
             if getattr(ps, name, False)
         ]
@@ -6624,13 +6752,49 @@ class UnifiedPipeline:
                         ps.best_output = decision.final_output
 
                         # GH-90: scanned-table source-evidence fail-closed floor.
-                        _source_ev_rejected = any(
-                            "source_evidence_table" in (att.reason or "")
+                        _source_ev_attempts = [
+                            att
                             for att in decision.attempts
+                            if "source_evidence_table" in (att.reason or "")
+                        ]
+                        _source_ev_rejected = bool(_source_ev_attempts)
+                        # #658: reduce over the attempts the source-evidence gate
+                        # ACTUALLY ADJUDICATED, and let a contradiction win.
+                        #
+                        # ``any(no_witness)`` over every attempt was wrong twice
+                        # over. It read attempts the gate never saw, and it let
+                        # the FIRST reading decide: a page whose first read found
+                        # no witness and whose second read got real evidence and
+                        # refuted the table was floored as "nothing read this
+                        # page", and the terminal rollup then faithfully reported
+                        # that the table "was neither corroborated nor
+                        # contradicted" about a table a witness had contradicted.
+                        # Reader-execution failures are in the no-witness family,
+                        # so one transient failed read reaches this inside a
+                        # single run, with no install changing.
+                        #
+                        # Contradiction is the positive signal and is required
+                        # explicitly, never inferred from "not no-witness": an
+                        # attempt that never reached the gate (timeout, transport
+                        # error) carries no source-evidence verdict at all and
+                        # must not be counted as a witnessed refutation. With
+                        # neither signal present this falls back to the
+                        # pre-ticket reading.
+                        _source_ev_contradicted = any(
+                            att.output.failure_mode is FailureMode.HALLUCINATION
+                            for att in _source_ev_attempts
+                        )
+                        _source_ev_no_witness = not _source_ev_contradicted and any(
+                            att.output.failure_mode is FailureMode.NO_WITNESS_BACKEND
+                            for att in _source_ev_attempts
                         )
                         if _source_ev_rejected and not ps.is_born_digital:
                             self._apply_scanned_table_floor(
-                                ps, state.handle.path, page_num, _chart_figures_dir
+                                ps,
+                                state.handle.path,
+                                page_num,
+                                _chart_figures_dir,
+                                no_witness=_source_ev_no_witness,
                             )
 
                         # #263: rotated-shredded floor PNG. The page's native layer is
@@ -7892,6 +8056,10 @@ class UnifiedPipeline:
             # are NOT cleared: they are true of the page either way.
             ps.native_table_structure_failed = False
             ps.scanned_table_evidence_failed = False
+            # #658: clear the sibling reason with the flag it qualifies. A
+            # released page that kept it would report a no-witness floor it no
+            # longer sits under.
+            ps.scanned_table_no_witness = False
             ps.d3_floor_png_ref = ""
             ps.rotated_shred_png_ref = ""
             state.events.extend(judge_events)
@@ -9411,6 +9579,18 @@ class UnifiedPipeline:
             ps.scanned_table_evidence_failed = bool(
                 meta.get("scanned_table_evidence_failed", False)
             )
+            # #658: DERIVED, not a new sidecar key. The sidecar already
+            # persists the winning output's ``failure_mode``, and the scanned
+            # floor is the sole writer of both that mode and the flag -- so the
+            # reason is already on disk and a second key would only add a way
+            # for the two to disagree. It also keeps the P6 sidecar key set
+            # frozen (``test_sidecar_only_additive_key_is_disposition``).
+            # A pre-ticket sidecar records HALLUCINATION and restores False,
+            # which is exactly what that record meant when it was written.
+            ps.scanned_table_no_witness = (
+                ps.scanned_table_evidence_failed
+                and page_out.failure_mode is FailureMode.NO_WITNESS_BACKEND
+            )
             # #263: restore the shredded-page image ref too, so a resumed run's
             # floor ships marker + image exactly as the first run did instead of
             # silently degrading to a bare marker.
@@ -10394,6 +10574,22 @@ class UnifiedPipeline:
                         f"  [red]{len(failed_pages)} page(s) produced no usable "
                         f"output: {failed_pages}[/red]"
                     )
+                # #658: printed right after the failed-page line because it
+                # explains part of it -- these pages failed closed for a missing
+                # tool, not for anything the document or the model did, and the
+                # operator's next action is an install rather than a re-read.
+                no_witness_pages = self._no_witness_backend_pages(state, pre_records)
+                if no_witness_pages:
+                    console.print(
+                        f"  [red]{len(no_witness_pages)} scanned table page(s) shipped the "
+                        f"fail-closed floor with NO local OCR witness, so the table could be "
+                        f"neither corroborated nor contradicted: {no_witness_pages}[/red]"
+                    )
+                    # One line per CAUSE. A blanket "install tesseract" is wrong
+                    # for a reader that is installed and crashed, and for a page
+                    # that would not rasterise.
+                    for _clause in self._no_witness_clauses(state, no_witness_pages):
+                        console.print(f"    [yellow]{_clause}[/yellow]")
                 if native_fallback_pages:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
@@ -10663,6 +10859,15 @@ class UnifiedPipeline:
         # for the same reason GH-225 does above — the audit event is durable but
         # a consumer reading metadata.json must not have to open audit_log.json
         # to learn that a page's routing was never decided.
+        # #658: surface the no-witness ending at document level, for the same
+        # no-silent-loss reason as the notes around it -- and because this one
+        # names a fix the operator can actually apply.
+        _witness_note = self._no_witness_backend_note(state, pre_records)
+        if _witness_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_witness_note}"
+            else:
+                final_result.error = _witness_note
         _chart_note = self._chart_detection_failed_note(state)
         if _chart_note:
             if final_result.error:

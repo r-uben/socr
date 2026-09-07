@@ -124,6 +124,14 @@ class PageState:
     #: consult, which only ever makes the fallback abstain, never mis-fire.
     native_words: list[tuple] = field(default_factory=list)
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
+    #: #658: the gate rejected the table because NOTHING READ THE PIXELS (no
+    #: classical OCR backend, a crashed reader, an unrenderable page), not
+    #: because a witness contradicted it. A sibling of the flag above rather
+    #: than a value on it: the floor applies identically either way, and only
+    #: the failure mode the floor stamps differs. Persisted in the page sidecar
+    #: so a resumed run reports the same reason instead of silently falling
+    #: back to "hallucination".
+    scanned_table_no_witness: bool = False
     #: What this page has actually SPENT, as a recorded fact rather than a
     #: derivation (cold review rounds 4-5). Every site that journals an
     #: ``EngineResult`` for this page adds to it: each ladder rung ``route_page``
