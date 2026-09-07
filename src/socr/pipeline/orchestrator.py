@@ -3238,6 +3238,35 @@ class UnifiedPipeline:
         if not candidates:
             return page_texts
 
+        # Precondition, not a page verdict: this pass reconciles the SOURCE
+        # against the winner, so with no readable source there is nothing to
+        # reconcile and no evidence that any chart exists to lose. Recorded at
+        # document level and skipped, rather than flagged per page -- marking
+        # every table page's chart "unchecked" would report a preservation doubt
+        # the run has no grounds for. In production the source was already read
+        # by extraction; this is reachable when the file moves under a resume.
+        if not state.handle.path.exists():
+            logger.warning(
+                "GH-189: source PDF is not readable at assembly (%s); chart-region "
+                "preservation did not run",
+                state.handle.path,
+            )
+            from socr.core.audit_log import AuditEvent as _SourceEvent
+
+            state.events.append(
+                _SourceEvent(
+                    page_num=0,
+                    kind="chart_region_source_unreadable",
+                    engine="chart_region",
+                    detail=(
+                        "the source document could not be opened at assembly, so chart "
+                        "region preservation did not run for any page"
+                    ),
+                    data={"path": str(state.handle.path)},
+                )
+            )
+            return page_texts
+
         _doc_dir, figures_dir = self._doc_and_figures_dir(state.handle.path, output_dir)
         texts = list(page_texts)
         changed = False
@@ -10432,21 +10461,29 @@ class UnifiedPipeline:
         # deliberately untouched; it selects the winner, and flipping it here
         # would discard the page's correct table (the #252 defect).
         #
-        # An UNRESOLVED PLACEMENT is deliberately NOT in this bucket, and neither
-        # is an inventory failure. Both are reported -- the finalized page copy
-        # goes WARNING (``_apply_chart_region_guard`` in manifest.py), the audit
-        # carries a per-region event, and the note below reaches metadata and the
-        # CLI. What they are not is a LOST-CONTENT verdict at document level:
-        # under an unresolved placement the crop ships, referenced exactly once,
-        # inside a block that states in the output itself that its position is
-        # not established, and an inventory failure means the check never ran,
-        # not that a chart went missing. Naming either of them the same way as a
-        # chart that is preserved nowhere would make the document-level signal
-        # unable to distinguish the two.
+        # Kept as its own bucket, separate from the unresolved one below, because
+        # the two need distinct wording and distinct CLI treatment: this one says
+        # a chart is gone, that one says its position or its check is in doubt.
         chart_region_lost_pages = sorted(
             n for n, pg in state.pages.items() if getattr(pg, "chart_region_render_failed", False)
         )
         pages_ok = pages_ok and not chart_region_lost_pages
+        # GH-189: an unresolved placement, or an inventory the pass could not
+        # build at all. Neither is lost content -- the crop ships under an
+        # unresolved placement, and an inventory failure means the check never
+        # ran -- and neither is a page failure, so both take the SAME
+        # AUDIT_FAILED path: "completed with warnings, output written". That
+        # status reports unresolved quality with the output retained; it does not
+        # assert that anything was lost, which is what the separate bucket above
+        # is for. A page the pipeline has told the reader to distrust cannot sit
+        # under a document that reports a clean SUCCESS.
+        chart_region_unresolved_pages = sorted(
+            n
+            for n, pg in state.pages.items()
+            if getattr(pg, "chart_region_placement_unresolved", False)
+            or getattr(pg, "chart_region_inventory_failed", False)
+        )
+        pages_ok = pages_ok and not chart_region_unresolved_pages
 
         # GH-353: table judge ladder terminals (C2). Keyed off
         # ``PageState.table_ladder_disposition`` FIRST -- the durable field

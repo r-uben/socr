@@ -54,7 +54,7 @@ PRESERVED_DISPOSITIONS = frozenset({PLACED_ANCHOR, PLACED_TABLE_BOUND, UNRESOLVE
 
 _IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
 _FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
-_IMAGE_LINE_RE = re.compile(r"(?:!\[[^\]]*\]\([^)]*\)\s*)+")
+_IMAGE_REF_FULL_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]*)[^)]*\)")
 
 
 @dataclass(frozen=True)
@@ -249,52 +249,102 @@ def _image_targets(line: str) -> list[str]:
     return [m.group(1) for m in _IMAGE_REF_RE.finditer(line)]
 
 
-def _is_owned(line: str, filenames: set[str], prefixes: tuple[str, ...]) -> bool:
-    """True when *line* is an artifact THIS module wrote for one of these regions.
+def code_fence_spans(lines: list[str]) -> list[tuple[int, int]]:
+    """Inclusive line spans of fenced code blocks, fence lines included.
 
-    Ownership is decided on the image TARGET's basename or on a marker's exact
-    generated prefix -- never on a bare filename mention. A model that happened
-    to name ``chart_region_p1_1.png`` in prose has not written our marker, and a
-    stale link to a crop that does not exist is not evidence that anything was
-    preserved (finding 4).
+    Computed on the ORIGINAL body, before anything is removed. Literal image
+    syntax inside a fence is CONTENT -- a markdown example the page is showing
+    the reader -- not a live reference to one of our crops. Deleting it would
+    edit the accepted text and move the example's image outside its own block,
+    so block protection has to cover removal, not only insertion.
     """
-    stripped = line.strip()
-    if not stripped:
-        return False
-    if any(stripped.startswith(prefix) for prefix in prefixes):
-        return True
-    # Only a line that is NOTHING BUT image references may be dropped; a ref
-    # embedded in a sentence would take the sentence with it.
-    if not _IMAGE_LINE_RE.fullmatch(stripped):
-        return False
-    targets = _image_targets(stripped)
-    return bool(targets) and all(t.rsplit("/", 1)[-1] in filenames for t in targets)
+    spans: list[tuple[int, int]] = []
+    open_at: int | None = None
+    for i, line in enumerate(lines):
+        if not _FENCE_RE.match(line):
+            continue
+        if open_at is None:
+            open_at = i
+        else:
+            spans.append((open_at, i))
+            open_at = None
+    if open_at is not None:
+        spans.append((open_at, len(lines) - 1))
+    return spans
 
 
-def _strip_owned(lines: list[str], filenames: set[str], prefixes: tuple[str, ...]) -> list[str]:
+def _owns(target: str, filenames: set[str]) -> bool:
+    return target.rsplit("/", 1)[-1] in filenames
+
+
+def _strip_owned_tokens(line: str, filenames: set[str]) -> str:
+    """Remove owned image TOKENS from *line*, leaving everything else intact.
+
+    Token-level, never line-level: an owned reference embedded in a sentence
+    must not take the sentence with it, and a line mixing an owned crop with an
+    unrelated figure is not an all-or-nothing unit. Only the whitespace the
+    removal itself collapsed is normalised, and only on a line actually edited.
+    """
+    out = _IMAGE_REF_FULL_RE.sub(lambda m: "" if _owns(m.group(1), filenames) else m.group(0), line)
+    if out == line:
+        return line
+    return re.sub(r"[ \t]{2,}", " ", out).rstrip()
+
+
+def _strip_owned(
+    lines: list[str],
+    filenames: set[str],
+    prefixes: tuple[str, ...],
+    code_spans: list[tuple[int, int]],
+) -> list[str]:
     """Remove every owned artifact and the ONE blank separator it brought.
 
-    Exactly inverts ``_insert_block``, so reconciling this module's own output
-    reproduces it byte-for-byte instead of accumulating blank lines.
+    Three cases, in order: a line inside a code fence is content and is never
+    touched; a line that is one of this module's own markers is dropped whole;
+    any other line has its owned image tokens removed, and is dropped only if
+    that emptied it.
+
+    Dropping a line exactly inverts ``_insert_block``, so reconciling this
+    module's own output reproduces it byte-for-byte instead of accumulating
+    blank lines.
     """
-    keep = [not _is_owned(ln, filenames, prefixes) for ln in lines]
-    if all(keep):
-        return list(lines)
+    protected = [any(a <= i <= b for a, b in code_spans) for i in range(len(lines))]
+    rewritten: list[str | None] = []
+    for i, line in enumerate(lines):
+        if protected[i]:
+            rewritten.append(line)
+            continue
+        stripped = line.strip()
+        if stripped and any(stripped.startswith(prefix) for prefix in prefixes):
+            rewritten.append(None)
+            continue
+        new = _strip_owned_tokens(line, filenames)
+        if new != line and not new.strip() and stripped:
+            rewritten.append(None)  # the line was nothing but owned references
+        else:
+            rewritten.append(new)
+
+    if all(v is not None for v in rewritten):
+        # Nothing was dropped, so no blank separator has to be reclaimed -- but
+        # a line may still have had an inline token removed from it.
+        return [v for v in rewritten if v is not None]
+
     out: list[str] = []
-    i, n = 0, len(lines)
+    i, n = 0, len(rewritten)
     while i < n:
-        if keep[i]:
-            out.append(lines[i])
+        value = rewritten[i]
+        if value is not None:
+            out.append(value)
             i += 1
             continue
         i += 1
         if out and not out[-1].strip():
-            if i < n and not lines[i].strip():
+            if i < n and rewritten[i] is not None and not rewritten[i].strip():
                 i += 1  # drop the blank that followed
             elif i >= n:
                 out.pop()  # end of body: drop the blank that preceded
         elif not out:
-            if i < n and not lines[i].strip():
+            if i < n and rewritten[i] is not None and not rewritten[i].strip():
                 i += 1
     return out
 
@@ -314,17 +364,7 @@ def protected_spans(lines: list[str]) -> list[tuple[int, int]]:
     from socr.tables.reconcile import find_table_blocks
 
     spans = [(b.start, b.end) for b in find_table_blocks("\n".join(lines))]
-    fence_open: int | None = None
-    for i, line in enumerate(lines):
-        if not _FENCE_RE.match(line):
-            continue
-        if fence_open is None:
-            fence_open = i
-        else:
-            spans.append((fence_open, i))
-            fence_open = None
-    if fence_open is not None:
-        spans.append((fence_open, len(lines) - 1))
+    spans.extend(code_fence_spans(lines))
     return spans
 
 
@@ -476,12 +516,13 @@ def reconcile_chart_region_refs(
         [render_failure_prefix(a.page_num, a.region_index) for a in assets]
         + [unresolved_placement_prefix(page_num)]
     )
-    lines = _strip_owned(text.split("\n"), filenames, prefixes)
+    original = text.split("\n")
+    lines = _strip_owned(original, filenames, prefixes, code_fence_spans(original))
     spans = protected_spans(lines)
 
     ordered = sorted(assets, key=lambda a: (a.bbox[1], a.region_index))
     outcomes: list[ChartRegionOutcome] = []
-    slots: dict[int, list[ChartRegionAsset]] = {}
+    placements: list[tuple[ChartRegionAsset, int, str, str]] = []
     unresolved: list[ChartRegionAsset] = []
 
     for asset in ordered:
@@ -510,15 +551,45 @@ def reconcile_chart_region_refs(
                 )
             )
             continue
-        slots.setdefault(slot, []).append(asset)
-        outcomes.append(
-            ChartRegionOutcome(
-                asset.page_num, asset.region_index, disposition, asset.rel_path, detail
-            )
-        )
+        placements.append((asset, slot, disposition, detail))
 
-    for slot in sorted(slots, reverse=True):
-        lines = _insert_block(lines, slot, _interleave([image_ref(a) for a in slots[slot]]))
+    # Cross-slot monotonicity. Each region resolves its slot independently, so
+    # nothing above notices that the winner's layout runs BACKWARDS against the
+    # source: two charts whose surviving anchors appear in the opposite order
+    # each bind happily and ship reversed, both labelled placed. The per-region
+    # above/below contradiction check cannot see it, because only one anchor
+    # survives for each. So compare the resolved slots against source order
+    # here, once, and when they disagree refuse EVERY placement on the page:
+    # a body whose geometry contradicts the source cannot position any of them,
+    # and the alternative -- keeping the ones that happen to fit -- would pick
+    # which charts to believe on no evidence. They still ship, source-ordered,
+    # in the labelled unresolved block; what is withheld is only the CLAIM.
+    slot_order = [slot for _asset, slot, _d, _t in placements]
+    if slot_order != sorted(slot_order):
+        for asset, _slot, _d, _t in placements:
+            unresolved.append(asset)
+            outcomes.append(
+                ChartRegionOutcome(
+                    asset.page_num,
+                    asset.region_index,
+                    UNRESOLVED_PLACEMENT,
+                    asset.rel_path,
+                    "the winner's anchor order runs backwards against the source order",
+                )
+            )
+        unresolved.sort(key=lambda a: (a.bbox[1], a.region_index))
+        placements = []
+    else:
+        slots: dict[int, list[ChartRegionAsset]] = {}
+        for asset, slot, disposition, detail in placements:
+            slots.setdefault(slot, []).append(asset)
+            outcomes.append(
+                ChartRegionOutcome(
+                    asset.page_num, asset.region_index, disposition, asset.rel_path, detail
+                )
+            )
+        for slot in sorted(slots, reverse=True):
+            lines = _insert_block(lines, slot, _interleave([image_ref(a) for a in slots[slot]]))
 
     if unresolved:
         block = [unresolved_placement_note(page_num, [a.region_index for a in unresolved]), ""]

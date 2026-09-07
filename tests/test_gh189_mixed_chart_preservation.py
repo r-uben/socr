@@ -424,6 +424,8 @@ def test_unplaceable_crops_are_preserved_but_never_claimed_in_source_order(
     tmp_path: Path,
 ) -> None:
     """No unique anchor and no 1:1 table binding: preserved, and labelled as such."""
+    from socr.core.result import DocumentStatus
+
     # Every usable anchor removed; the table alone won the page.
     winner = "| Year | Value | Share |\n| --- | --- | --- |\n" + TABLE_ROW
     pdf = _make_mixed_chart_table_pdf(tmp_path)
@@ -452,11 +454,12 @@ def test_unplaceable_crops_are_preserved_but_never_claimed_in_source_order(
     note = pipeline._chart_region_note(state)
     assert note is not None and "position in the page could not be established" in note
     assert note in (result.error or ""), f"the note never reached metadata: {result.error!r}"
-    # Nothing was LOST, so the note does not say so and the document is not
-    # demoted for it. The PAGE is still reported as a warning: the reader has to
-    # be told the position is unestablished.
+    # Nothing was LOST, so the note does not say so -- but a page the reader is
+    # told to distrust cannot sit under a clean SUCCESS. AUDIT_FAILED is the
+    # "output written, quality unresolved" path, not a lost-content verdict.
     assert "preserved nowhere" not in note
     assert _final_page_status(out_dir) == "warning"
+    assert result.status is DocumentStatus.AUDIT_FAILED
 
 
 def test_a_single_source_table_binds_a_chart_with_no_usable_anchor(tmp_path: Path) -> None:
@@ -712,6 +715,8 @@ def test_the_recovery_asset_survives_end_to_end_when_a_crop_fails(tmp_path: Path
 
 def test_an_inventory_failure_is_never_reported_as_a_preserved_chart(tmp_path: Path) -> None:
     """The check never ran, so nothing may claim a crop was retained."""
+    from socr.core.result import DocumentStatus
+
     pdf = _make_mixed_chart_table_pdf(tmp_path)
     out_dir = tmp_path / "out"
     with patch(
@@ -730,6 +735,75 @@ def test_an_inventory_failure_is_never_reported_as_a_preserved_chart(tmp_path: P
     assert "preserved" not in note, f"the note claims a preservation that did not happen: {note}"
     assert note in (result.error or "")
     assert _final_page_status(out_dir) == "warning"
+    assert result.status is DocumentStatus.AUDIT_FAILED
 
     events = [e for e in state.events if getattr(e, "kind", "") == "chart_region_inventory_failed"]
     assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Markdown context and global order (round 3 review, findings 1-3)
+# ---------------------------------------------------------------------------
+
+
+def test_literal_image_syntax_inside_a_code_fence_is_content() -> None:
+    """Finding 1: block protection has to cover REMOVAL, not only insertion."""
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    code = f"```markdown\n{image_ref(asset)}\n```"
+    text = f"Intro\n{code}\nTail"
+    out, _outcomes = reconcile_chart_region_refs(text, [asset], {1: ("Intro", "Tail")}, {})
+    assert code in out, f"the fenced example was edited:\n{out}"
+
+
+def test_an_owned_reference_inside_a_sentence_is_removed_without_the_sentence() -> None:
+    """Finding 2: line-level removal cannot enforce exactly-once on inline refs."""
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    text = f"Intro {image_ref(asset)} retained prose\nTail"
+    out, _outcomes = reconcile_chart_region_refs(text, [asset], {1: ("", "Tail")}, {})
+    assert "retained prose" in out, f"the sentence was deleted with the token:\n{out}"
+    assert "Intro" in out
+    assert out.count(asset.rel_path) == 1, f"the crop is referenced twice:\n{out}"
+
+
+def test_a_stale_inline_reference_is_replaced_by_the_failure_marker() -> None:
+    """The same path must clear a broken inline link when the render failed."""
+    from socr.figures.chart_regions import reconcile_chart_region_refs
+
+    asset = _asset(1, rendered=False)
+    text = f"Intro ![chart region 1](figures/{asset.filename}) retained prose"
+    out, _outcomes = reconcile_chart_region_refs(text, [asset], {}, {})
+    assert "retained prose" in out
+    assert asset.filename not in out.split("NOT preserved")[0], (
+        f"a broken inline link survived beside the marker:\n{out}"
+    )
+    assert "NOT preserved" in out
+
+
+def test_a_line_mixing_an_owned_crop_with_another_image_keeps_the_other() -> None:
+    """Removal is per token, so an unrelated figure on the same line survives."""
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    text = f"{image_ref(asset)} ![other](figures/other.png)\nTail"
+    out, _outcomes = reconcile_chart_region_refs(text, [asset], {1: ("", "Tail")}, {})
+    assert "figures/other.png" in out, f"an unrelated figure was deleted:\n{out}"
+    assert out.count(asset.rel_path) == 1
+
+
+def test_slots_running_backwards_against_the_source_are_all_unresolved() -> None:
+    """Finding 3: per-region checks cannot see a globally reversed layout."""
+    from socr.figures.chart_regions import UNRESOLVED_PLACEMENT, reconcile_chart_region_refs
+
+    a, b = _asset(1, 10.0), _asset(2, 40.0)
+    out, outcomes = reconcile_chart_region_refs(
+        "Top\nBottom", [a, b], {1: ("Bottom", ""), 2: ("Top", "")}, {}
+    )
+    assert [o.disposition for o in outcomes] == [UNRESOLVED_PLACEMENT] * 2, (
+        f"a reversed layout was reported as placed: {outcomes}"
+    )
+    assert out.index(a.rel_path) < out.index(b.rel_path), f"source order lost:\n{out}"
+    assert "Unresolved chart placement" in out
