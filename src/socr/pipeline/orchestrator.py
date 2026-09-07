@@ -11588,6 +11588,7 @@ class UnifiedPipeline:
         page_out,
         result,
         native_text: str,
+        region_native_text: str | None = None,
     ) -> tuple[str, bool]:
         """Gate the ONE additive post-verdict step (cold review rounds 2-3).
 
@@ -11621,6 +11622,13 @@ class UnifiedPipeline:
         purpose: it is shipped text, and quoting the invented number there would
         put it back in the corpus by the back door. The numbers live in the
         ``equation_sidecar_refused`` audit event only.
+
+        ``native_text`` is the FULL PAGE text and stays that way -- it is only
+        used below to feed the numeric-presence oracle, which is deliberately
+        page-scoped. ``region_native_text`` (GH-164) is the region's own native
+        slice; it is what the refusal rebuild below falls back to, so a refused
+        region never re-appends the whole page. Defaults to ``native_text``
+        when omitted so any other caller keeps today's (page-scoped) behaviour.
 
         Returns ``(block_to_append, latex_attached)``.
         """
@@ -11681,9 +11689,10 @@ class UnifiedPipeline:
 
         from socr.math.equation_latex import build_equation_sidecar
 
+        fallback_text = native_text if region_native_text is None else region_native_text
         block, latex_attached = build_equation_sidecar(
             crop_path=(result.crop_ref or result.crop_path),
-            native_text=native_text,
+            native_text=fallback_text,
             raw_latex="",
             validation_ok=False,
             validation_reason=refusal,
@@ -11775,16 +11784,29 @@ class UnifiedPipeline:
                 )
                 continue
 
-            native_text = state.pages[page_num].native_text or ""
+            # GH-164: this is the FULL PAGE text. Kept only for the guard's
+            # numeric-presence oracle below, which stays page-scoped by design
+            # (it needs the whole page as its source of truth for "did this
+            # number appear anywhere"). It must NEVER be used as the per-region
+            # rejected-sidecar fallback -- that was the GH-164 bug: one region's
+            # rejection appended the entire page prose, and N rejected regions
+            # multiplied it N times.
+            page_native_text = state.pages[page_num].native_text or ""
 
             for region_index, rdata in enumerate(region_data_list):
                 crop_path = rdata.get("crop_path")
+                # GH-164: the region's OWN native slice, not the full page. This
+                # is what a rejected sidecar falls back to, so a page with
+                # several rejected regions gets each region's own text once
+                # instead of the whole page repeated once per rejection.
+                region_native_text = rdata.get("source_text") or ""
 
                 result = process_equation_region(
                     region_index=region_index,
                     page_num=page_num,
                     crop_path=crop_path,
-                    native_text=native_text,
+                    native_text=region_native_text,
+                    source_text=region_native_text,
                     model=model,
                     host=self.config.math_model_host
                     if hasattr(self.config, "math_model_host")
@@ -11796,7 +11818,7 @@ class UnifiedPipeline:
                 # so it goes through the delimiter and numeric-presence guards
                 # before any of it can reach shipped bytes.
                 _block, _latex_attached = self._guard_equation_sidecar_block(
-                    state, page_num, po, result, native_text
+                    state, page_num, po, result, page_native_text, region_native_text
                 )
                 if _block:
                     if po.text:

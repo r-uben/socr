@@ -768,3 +768,90 @@ class TestCleanEquationModelResolution:
         cfg = PipelineConfig()
         assert ":8b" not in cfg.clean_equation_model
         assert cfg.clean_equation_model != "qwen3-vl:30b"  # non-instruct thinking variant
+
+
+class TestRejectedSidecarRegionScope:
+    """GH-164: a rejected region's fallback is its own native slice, not the page.
+
+    Before the fix, ``_attach_equation_latex_sidecars`` passed the FULL PAGE
+    ``native_text`` into every region's ``process_equation_region`` call, so a
+    rejected (1A-failed) region's fallback re-appended the entire page prose.
+    With two rejected regions on one page, prose outside both regions ended up
+    tripled: once in the original ``PageOutput.text`` and once more per
+    rejected region's fallback block.
+    """
+
+    def test_two_rejected_regions_keep_page_prose_single_copy(self, tmp_path):
+        """Two rejected regions -> each falls back to its OWN slice only."""
+        from socr.core.audit_log import AuditEvent
+        from socr.core.config import PipelineConfig
+        from socr.core.result import PageOutput, PageStatus
+        from socr.core.state import DocumentState, PageState
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        crop_a = tmp_path / "equation_0_page1.png"
+        crop_a.write_bytes(b"fakepng-a")
+        crop_b = tmp_path / "equation_1_page1.png"
+        crop_b.write_bytes(b"fakepng-b")
+
+        cfg = PipelineConfig()
+        cfg.recover_clean_equations = True
+        cfg.detect_equations = True
+        orch = UnifiedPipeline(cfg)
+
+        handle = MagicMock()
+        handle.path = tmp_path / "doc.pdf"
+        handle.filename = "doc.pdf"
+        state = DocumentState(handle=handle)
+
+        page_text = (
+            "Intro prose about the model. "
+            "REGION_ONE_SOURCE_SLICE "
+            "middle prose connecting the two equations. "
+            "REGION_TWO_SOURCE_SLICE "
+            "closing prose."
+        )
+        state.pages[1] = PageState(page_num=1, is_born_digital=True, native_text=page_text)
+
+        for idx, (crop, slice_text) in enumerate(
+            [(crop_a, "REGION_ONE_SOURCE_SLICE"), (crop_b, "REGION_TWO_SOURCE_SLICE")]
+        ):
+            state.events.append(
+                AuditEvent(
+                    page_num=1,
+                    kind="equation_region_detected",
+                    engine="detect_equations",
+                    detail="test",
+                    data={
+                        "source_bbox": [0.0, 0.0, 1.0, 1.0],
+                        "padded_bbox": [0.0, 0.0, 1.0, 1.0],
+                        "has_eq_number": False,
+                        "crop_path": str(crop),
+                        "detection_time_s": 0.001,
+                        "source_text": slice_text,
+                        "equation_label": None,
+                        "region_index": idx,
+                    },
+                )
+            )
+
+        po = PageOutput(page_num=1, text=page_text, status=PageStatus.SUCCESS, engine="native")
+
+        # Force both regions to fail 1A (empty engine output) so the rejected-
+        # sidecar fallback path runs for real -- process_equation_region and
+        # build_equation_sidecar are NOT mocked, only the network-touching leaf.
+        with patch("socr.math.equation_latex.latex_for_crop", return_value=""):
+            orch._attach_equation_latex_sidecars(state, [po])
+
+        # Prose that belongs to NEITHER region must not be duplicated: the bug
+        # re-appended it once per rejected region (here: 1 + 2 = 3 copies).
+        assert po.text.count("Intro prose about the model.") == 1
+        assert po.text.count("middle prose connecting the two equations.") == 1
+        assert po.text.count("closing prose.") == 1
+        # Each region's own slice legitimately appears twice: once in the
+        # original page body, once in its own rejected-sidecar fallback.
+        assert po.text.count("REGION_ONE_SOURCE_SLICE") == 2
+        assert po.text.count("REGION_TWO_SOURCE_SLICE") == 2
+
+        rejected = [e for e in state.events if e.kind == "equation_latex_rejected_kept_crop"]
+        assert len(rejected) == 2
