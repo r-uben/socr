@@ -21,7 +21,7 @@ nothing dispatched.
 | A1b | selection | DONE (#640 merged 2026-09-07; #639 filed) | A1a | 2 |
 | A1c | surfacing + resume | DONE (#644 merged 2026-09-07; live: report p1-p3 99-100% flagged) | A1b | 3 |
 | A2 | truncation guard | DONE (#647 merged 2026-09-07) | A1c | 4 |
-| B1 | marker scope (#591) | REVIEW (ac4aa4a, socr-b1; re-ruled: also the scanned-table ending, prose-corroboration guard) | A2 | 5 |
+| B1 | marker scope (#591) | DONE-LOCAL (ac4aa4a; reviewer ACCEPT; #591 stays OPEN: remainder #649, calibration #650) | A2 | 5 |
 | D3 | Fed re-measure | TODO | A2 | 5 |
 | D2 | route cost (measure) | TODO | B1 | 6 |
 | E1 | scan ≠ chart (#511) | TODO | B1 | 6 |
