@@ -2772,6 +2772,40 @@ def _shipped_marker_reason(text: str) -> PagePrimaryReason:
     return PagePrimaryReason.SHIPPED_FAILURE_MARKER
 
 
+def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
+    """#165: demote a page whose detected math-glyph damage survived into its body.
+
+    A REPORTING guard, not a routing one. It runs after selection because the
+    question it answers is about the bytes that ship: a recovery the selector
+    discarded covered nothing, and a page can only be judged on the copy that
+    wins. Nothing here re-selects -- the text, engine, provenance, table
+    disposition, ``audit_passed`` and any existing ``failure_mode`` are all
+    carried through untouched, so no candidate changes rank because of it. The
+    document-level demotion is carried by the explicit unresolved-math page set
+    in ``_phase_assemble``, not by a new ``FailureMode`` the ladder would read.
+
+    SUCCESS becomes WARNING; an existing WARNING or ERROR is already at least as
+    loud and is left alone. Idempotent, because every finalization seam
+    (provisional records, assemble pre-records, final body records, terminal
+    sidecars, manifest replay) runs it again on its own output.
+    """
+    from socr.math.accounting import unresolved_math_detail
+
+    detail = unresolved_math_detail(
+        has_unmapped_math_glyphs=bool(getattr(p, "has_unmapped_math_glyphs", False)),
+        evidence=getattr(p, "math_recovery_evidence", None),
+        text=output.text or "",
+    )
+    if detail is None:
+        return output
+    notes = list(output.audit_notes or [])
+    if detail.detail not in notes:
+        notes.append(detail.detail)
+    if output.status is PageStatus.SUCCESS:
+        return replace(output, status=PageStatus.WARNING, audit_notes=notes)
+    return replace(output, audit_notes=notes)
+
+
 def _select_and_finalize_page(
     state: DocumentState,
     page_num: int,
@@ -2794,6 +2828,7 @@ def _select_and_finalize_page(
     p = state.pages.get(page_num)
     if p is not None:
         output = _apply_ladder_disposition_guard(output, page_num, p)
+        output = _apply_unresolved_math_guard(output, p)
 
     text = (output.text or "").strip()
 
