@@ -855,3 +855,83 @@ class TestRejectedSidecarRegionScope:
 
         rejected = [e for e in state.events if e.kind == "equation_latex_rejected_kept_crop"]
         assert len(rejected) == 2
+
+
+class TestSkippedNoPageOutputIsAudited:
+    """GH-157: a page with detected regions but no PageOutput must not be a
+    silent skip -- it must surface a terminal audit event per region."""
+
+    def _make_state_and_event(self, tmp_path, *, page_num=3):
+        from socr.core.audit_log import AuditEvent
+        from socr.core.state import DocumentState, PageState
+
+        handle = MagicMock()
+        handle.path = tmp_path / "doc.pdf"
+        handle.filename = "doc.pdf"
+        state = DocumentState(handle=handle)
+        state.pages[page_num] = PageState(
+            page_num=page_num, is_born_digital=True, native_text="native prose"
+        )
+        crop = tmp_path / f"equation_0_page{page_num}.png"
+        crop.write_bytes(b"fakepng")
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="equation_region_detected",
+                engine="detect_equations",
+                detail="test",
+                data={
+                    "source_bbox": [0.0, 0.0, 1.0, 1.0],
+                    "padded_bbox": [0.0, 0.0, 1.0, 1.0],
+                    "has_eq_number": False,
+                    "crop_path": str(crop),
+                    "detection_time_s": 0.001,
+                    "source_text": "native prose",
+                    "equation_label": None,
+                    "region_index": 0,
+                },
+            )
+        )
+        return state, crop
+
+    def test_no_page_output_emits_exactly_one_skip_event(self, tmp_path):
+        from socr.core.config import PipelineConfig
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        cfg = PipelineConfig()
+        cfg.recover_clean_equations = True
+        cfg.detect_equations = True
+        orch = UnifiedPipeline(cfg)
+
+        state, crop = self._make_state_and_event(tmp_path)
+
+        # No PageOutput at all for page 3 -- the skip path.
+        orch._attach_equation_latex_sidecars(state, [])
+
+        skipped = [e for e in state.events if e.kind == "equation_sidecar_skipped_no_page_output"]
+        assert len(skipped) == 1
+        assert skipped[0].data["crop_path"] == str(crop)
+        assert skipped[0].data["region_index"] == 0
+
+        # And it never claims success/rejection events it didn't earn.
+        latex_events = [e for e in state.events if "equation_latex" in e.kind]
+        assert latex_events == []
+
+    def test_with_page_output_no_skip_event(self, tmp_path):
+        from socr.core.config import PipelineConfig
+        from socr.core.result import PageOutput, PageStatus
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        cfg = PipelineConfig()
+        cfg.recover_clean_equations = True
+        cfg.detect_equations = True
+        orch = UnifiedPipeline(cfg)
+
+        state, crop = self._make_state_and_event(tmp_path)
+        po = PageOutput(page_num=3, text="native prose", status=PageStatus.SUCCESS, engine="native")
+
+        with patch("socr.math.equation_latex.latex_for_crop", return_value=""):
+            orch._attach_equation_latex_sidecars(state, [po])
+
+        skipped = [e for e in state.events if e.kind == "equation_sidecar_skipped_no_page_output"]
+        assert skipped == []

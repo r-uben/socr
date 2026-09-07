@@ -11777,11 +11777,38 @@ class UnifiedPipeline:
         for page_num, region_data_list in sorted(regions_by_page.items()):
             po = output_by_page.get(page_num)
             if po is None:
-                # Page not in prose_pages (shouldn't happen, but be defensive).
-                logger.warning(
-                    "GH-36b: page %d has detected equations but no PageOutput; skipping",
-                    page_num,
-                )
+                # GH-157: page not in page_outputs (shouldn't happen, but be
+                # defensive). This used to be a silent warning-only skip: crops
+                # stayed on disk, no sidecar was ever attached, and the page
+                # shipped as if nothing was detected. Never fabricate a
+                # PageOutput here -- there is nothing to attach a sidecar to --
+                # but the disposition must be visible at page/document level,
+                # so emit one terminal audit event per skipped region.
+                for region_index, rdata in enumerate(region_data_list):
+                    crop_path = rdata.get("crop_path")
+                    logger.warning(
+                        "GH-157: page %d region %d has a detected equation but "
+                        "no PageOutput; skipping (crop=%r)",
+                        page_num,
+                        region_index,
+                        crop_path,
+                    )
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="equation_sidecar_skipped_no_page_output",
+                            engine="equation_latex",
+                            detail=(
+                                f"region {region_index} has a detected equation crop "
+                                f"but no PageOutput exists for page {page_num}; "
+                                f"sidecar not attached (crop={crop_path!r})"
+                            ),
+                            data={
+                                "region_index": region_index,
+                                "crop_path": crop_path,
+                            },
+                        )
+                    )
                 continue
 
             # GH-164: this is the FULL PAGE text. Kept only for the guard's
