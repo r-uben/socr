@@ -652,40 +652,244 @@ def test_a_fresh_recovery_outranks_a_restored_one(tmp_path: Path) -> None:
     coverage the previous run proved.
     """
     regions = [_region(DAMAGED_EQUATION, valid=False)]
-    fresh = corrupt_region_evidence(regions)
-    assert fresh["covered_crops"] == []
+    fresh = corrupt_region_evidence(regions, PUA_NATIVE_TEXT)
+    assert fresh["covered_replacements"] == []
     assert (
         unresolved_math_detail(has_unmapped_math_glyphs=True, evidence=fresh, text=PUA_NATIVE_TEXT)
         is not None
     )
 
 
-def test_a_witness_removed_from_the_assembled_body_is_missing() -> None:
-    """The document-level reconciliation's own question, at unit level.
+def test_a_surviving_crop_link_is_not_a_surviving_transcription() -> None:
+    """Astra's P1, pinned at the seam.
 
-    Assemble's per-page reduction reads each page's finalized output, but the
-    image sweeps that run afterwards operate on the ASSEMBLED body. If one of
-    them removes a recovered region's crop reference, the evidence pointer is
-    gone from the document while the page's own copy still had it -- so the
-    reconciliation re-asks, against `final_text`, whether the replacements are
-    still there. It asks about witnesses only: run in full against the whole
-    document, the residual-PUA term would read another page's damage as this
-    page's and name the wrong page.
+    The first version's witness was the crop's Markdown plus the fixed candidate
+    header -- a prefix EVERY successful replacement shares. Delete the
+    ``$$ ... $$`` reading and leave the image link behind and the page read as
+    fully recovered, which is precisely the silent loss this accounting exists
+    to prevent: an image proves a crop was kept, never that the transcription
+    survived.
+
+    Also covers the reconciliation's own question, which the document level asks
+    against the assembled body rather than against one page's output.
     """
-    from socr.math.accounting import LANE_CORRUPT_REGION, missing_coverage_witnesses
-    from socr.math.recover import _CORRUPT_CANDIDATE_HEADER
+    from socr.math.accounting import missing_coverage_witnesses
+    from socr.math.recover import _CORRUPT_CANDIDATE_HEADER, _region_replacement
 
-    crop = "equations/p1_r1.png"
-    evidence = {"lane": LANE_CORRUPT_REGION, "regions_total": 1, "covered_crops": [crop]}
-    intact = f"prose\n![Corrupt equation crop]({crop})\n{_CORRUPT_CANDIDATE_HEADER}\n$$\nx\n$$"
+    region = _region(DAMAGED_EQUATION)
+    region.source_aligned = True
+    evidence = corrupt_region_evidence([region], PUA_NATIVE_TEXT)
+    complete = _region_replacement(region)
 
-    assert missing_coverage_witnesses(evidence, intact) == []
-    assert missing_coverage_witnesses(evidence, "prose with the crop reference swept away") == [
-        crop
-    ]
-    # A refusal wears the same crop reference; only the candidate header
-    # distinguishes it, so the recogniser must not accept the crop alone.
-    refusal = f"prose\n![Corrupt equation crop]({crop})\n[corrupt equation unresolved: bad latex]"
-    assert missing_coverage_witnesses(evidence, refusal) == [crop]
+    def detail(text):
+        return unresolved_math_detail(has_unmapped_math_glyphs=True, evidence=evidence, text=text)
+
+    assert detail(complete) is None, "the intact replacement must still clear"
+    assert missing_coverage_witnesses(evidence, complete) == []
+
+    crop_only = f"![Corrupt equation crop]({region.crop_path})\n{_CORRUPT_CANDIDATE_HEADER}"
+    assert detail(crop_only) is not None, (
+        "the reading was deleted and only the image link remained, and the page "
+        "was reported as fully recovered"
+    )
+    assert missing_coverage_witnesses(evidence, crop_only) == [complete]
+
+    truncated = complete.replace("f_o(T)", "")
+    assert detail(truncated) is not None
+    substituted = complete.replace(r"\hat{T} = f_o(T)", r"\hat{T} = f_o(S)")
+    assert detail(substituted) is not None, "a different reading is not this reading"
+
     # A lane that proves no span coverage has no witnesses to lose.
-    assert missing_coverage_witnesses({"lane": "clean_region", "covered_crops": [crop]}, "") == []
+    assert missing_coverage_witnesses({"lane": "clean_region"}, "") == []
+
+
+def test_identical_damaged_spans_need_their_own_occurrences() -> None:
+    """Occurrence identity. Two identical damaged spans are two losses.
+
+    ``splice_math`` walks a forward cursor precisely so a duplicated corrupt
+    equation gets its own evidence twice. A witness check that asked whether the
+    replacement APPEARS would let one surviving copy vouch for both.
+    """
+    from socr.math.accounting import missing_coverage_witnesses
+    from socr.math.recover import _region_replacement
+
+    native = f"{DAMAGED_EQUATION}\nprose between the two displays\n{DAMAGED_EQUATION}"
+    regions = [_region(DAMAGED_EQUATION), _region(DAMAGED_EQUATION)]
+    for r in regions:
+        r.source_aligned = True
+    evidence = corrupt_region_evidence(regions, native)
+    one = _region_replacement(regions[0])
+
+    assert missing_coverage_witnesses(evidence, f"{one}\nprose between\n{one}") == []
+    assert missing_coverage_witnesses(evidence, f"{one}\nprose between") == [one]
+    assert (
+        unresolved_math_detail(
+            has_unmapped_math_glyphs=True, evidence=evidence, text=f"{one}\nprose between"
+        )
+        is not None
+    )
+
+
+def test_regions_the_lane_never_enumerated_are_not_covered() -> None:
+    """Astra's denominator finding.
+
+    ``len(regions)`` counts what recovery PROPOSED. A damaged span the detector
+    never proposed leaves no mark in that count, so "every enumerated region
+    resolved" can be true of a page most of whose mathematics was never looked
+    at. The page's own damaged-glyph count is the denominator that closes it --
+    and the shipped body having no private-use codepoints left does not, because
+    omission clears them exactly as well as recovery.
+    """
+    from socr.math.recover import _region_replacement
+
+    # Three damaged glyphs in the source; the lane enumerated one region
+    # carrying one of them, and resolved it.
+    native = f"{PUA} first display\nprose\n{PUA}{PUA} second display never proposed"
+    region = _region(f"{PUA} first display")
+    region.source_aligned = True
+    evidence = corrupt_region_evidence([region], native)
+
+    assert evidence["source_pua_chars"] == 3
+    assert evidence["covered_pua_chars"] == 1
+
+    # The body carries the retained replacement AND no PUA at all -- the second
+    # display was simply dropped downstream. Every earlier term passes.
+    body = f"{_region_replacement(region)}\nprose\nsecond display never proposed"
+    assert count_pua_chars(body) == 0
+
+    result = unresolved_math_detail(has_unmapped_math_glyphs=True, evidence=evidence, text=body)
+    assert result is not None, (
+        "a page whose second damaged span was never enumerated, and whose text "
+        "was then dropped, reported as fully recovered"
+    )
+    assert "1 of 3 damaged glyph(s)" in result.reason
+
+
+def test_a_partially_recovered_page_records_the_reduction(tmp_path: Path) -> None:
+    """The denominator, through the real lane rather than at the seam.
+
+    The corrupt lane enumerates one region on a page carrying a second damaged
+    display it never proposed. The region recovers cleanly, and the page is
+    still unresolved.
+    """
+    native = f"{PUA_NATIVE_TEXT}\nand a second display {PUA}z + {PUA}w nobody proposed."
+    _, state, result, _ = _run(
+        tmp_path,
+        native_text=native,
+        corrupt=True,
+        regions=[_region(DAMAGED_EQUATION)],
+        tag="denominator",
+    )
+
+    events = _unresolved_events(state)
+    assert len(events) == 1
+    assert events[0].data["reason"].startswith("the recovered regions account for 3 of 5")
+    assert state.status is DocumentStatus.AUDIT_FAILED
+    assert "unrecovered math glyphs on page(s) 1" in (result.error or "")
+
+
+def _doc_dir(pipeline, state: DocumentState, out_dir: Path) -> Path:
+    from ocr_output_contract import doc_dir_for, relative_key
+
+    return doc_dir_for(out_dir, relative_key(state.handle.path, pipeline._scan_root))
+
+
+def _recovered_page(pipeline, state: DocumentState, out_dir: Path):
+    """Put this page into the state a COMPLETE retained recovery leaves it in.
+
+    Built from the real `_region_replacement` and the real crop on disk, so the
+    phantom-image sweep keeps the reference and the clearance is the production
+    one rather than a hand-written body that happens to satisfy the check.
+    """
+    from socr.math.recover import _region_replacement
+
+    region = _region(DAMAGED_EQUATION)
+    region.source_aligned = True
+    _write_crops(_doc_dir(pipeline, state, out_dir) / "equations", [region])
+    body = PUA_NATIVE_TEXT.replace(DAMAGED_EQUATION, _region_replacement(region))
+    out = PageOutput(
+        page_num=1,
+        text=body,
+        status=PageStatus.WARNING,
+        engine="native+math",
+        audit_passed=False,
+    )
+    state.pages[1].math_recovery_evidence = corrupt_region_evidence([region], PUA_NATIVE_TEXT)
+    state.pages[1].attempts = [out]
+    state.pages[1].best_output = out
+    return out
+
+
+def test_a_standing_warning_is_retired_once_the_page_is_covered(tmp_path: Path) -> None:
+    """Astra's P2, in its sharpest form: unresolved -> resolved.
+
+    The record is a STANDING statement about the page, and a resumed run replays
+    its persisted copy before assemble runs. Skipping pages that already carry
+    one -- the first version -- left the audit log saying the mathematics was
+    lost while the page note, the document status and the metadata all said it
+    had been recovered. The stale verdict has to be retired, not merely not
+    duplicated.
+    """
+    pipeline, state, _, out_dir = _run(tmp_path, tag="retire")
+    assert _unresolved_events(state)
+
+    resumed = DocumentState(handle=DocumentHandle.from_path(state.handle.path))
+    stale = PageOutput(
+        page_num=1,
+        text=PUA_NATIVE_TEXT,
+        status=PageStatus.WARNING,
+        engine="native",
+        audit_passed=True,
+    )
+    pipeline._restore_terminal_page_state(resumed, 1, stale, out_dir)
+    assert _unresolved_events(resumed), "nothing stale to retire; the test is vacuous"
+
+    out2 = tmp_path / "retire" / "out2"
+    _recovered_page(pipeline, resumed, out2)
+    result = pipeline._phase_assemble(resumed, out2)
+
+    assert _unresolved_events(resumed) == [], (
+        "the audit log still reports lost mathematics on a page this run recovered"
+    )
+    assert "unrecovered math glyphs" not in (result.error or "")
+    assert _final_status(resumed) is not PageStatus.SUCCESS, (
+        "the separate corrupt-hybrid fidelity doubt was retired along with it"
+    )
+
+
+def test_a_changed_reason_replaces_the_standing_record(tmp_path: Path) -> None:
+    """The other repeat: still unresolved, but for a different reason.
+
+    One current record per unresolved page. A page that moves from "no recovery
+    evidence at all" to "the regions account for 3 of 5 damaged glyphs" must
+    read as the latter, and must not accumulate both.
+    """
+    pipeline, state, _, out_dir = _run(tmp_path, tag="reason")
+    first = _unresolved_events(state)
+    assert len(first) == 1
+    assert "no recovery evidence" in first[0].data["reason"]
+
+    # Same page, same damage, a partial recovery this time.
+    from socr.math.recover import _region_replacement
+
+    region = _region(DAMAGED_EQUATION)
+    region.source_aligned = True
+    native = f"{PUA_NATIVE_TEXT}\nand a second display {PUA}z nobody proposed."
+    state.pages[1].native_text = native
+    state.pages[1].math_recovery_evidence = corrupt_region_evidence([region], native)
+    partial = PageOutput(
+        page_num=1,
+        text=native.replace(DAMAGED_EQUATION, _region_replacement(region)),
+        status=PageStatus.WARNING,
+        engine="native+math",
+        audit_passed=False,
+    )
+    state.pages[1].attempts = [partial]
+    state.pages[1].best_output = partial
+
+    pipeline._phase_assemble(state, out_dir)
+
+    second = _unresolved_events(state)
+    assert len(second) == 1, f"the record accumulated instead of being replaced: {second}"
+    assert "3 of 4 damaged glyph(s)" in second[0].data["reason"]
+    assert second[0].detail != first[0].detail

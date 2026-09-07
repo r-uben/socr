@@ -23,8 +23,12 @@ following establishes coverage on its own:
 
 Coverage is therefore asserted only for the corrupt-region lane, and only when
 that lane enumerated at least one damaged region, resolved and aligned EVERY
-region it enumerated, each of those replacements is still present verbatim in
-the selected body, and no PUA codepoint survives in that body. Everything else
+region it enumerated, those regions' sources account for EVERY damaged glyph in
+the page's own source layer, each retained replacement is still present in the
+selected body with its own occurrence, and no PUA codepoint survives in that
+body. The last term is a corroboration and never the proof -- see above.
+The replacement itself is the witness, not the crop reference beside it: an
+image proves a crop was kept, not that the transcription survived. Everything else
 -- including the clean-region and legacy equation lanes, whose attachment
 records do not map back to the damaged source spans -- stays unresolved. That
 is a conservative answer, not a complete one: a lane gains the ability to clear
@@ -36,6 +40,7 @@ because its callers run inside repeated page finalization.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 #: The audit-event kind naming detected math-glyph damage that survived into the
@@ -75,55 +80,70 @@ class UnresolvedMathDetail:
         }
 
 
-def corrupt_region_evidence(regions: list) -> dict:
+def corrupt_region_evidence(regions: list, native_text: str) -> dict:
     """Sparse coverage evidence for one corrupt-region recovery attempt.
 
     Called AFTER ``splice_math``, which is what sets ``source_aligned``: before
     it, ``region.resolved`` cannot be read as "this replacement went into the
-    body". Each covered region contributes its crop path, which is the witness
-    :func:`unresolved_math_detail` later looks for in the selected text.
+    body".
+
+    Two things are recorded, and both are load-bearing.
+
+    The RETAINED REPLACEMENT of each covered region, verbatim. An earlier
+    version stored the crop path and looked for the crop's Markdown plus the
+    fixed candidate header, which is a prefix EVERY successful replacement
+    shares: deleting the ``$$ ... $$`` reading while leaving the image link
+    behind still read as complete coverage. A crop preserves visual evidence
+    and proves nothing about whether the transcription survived, so the witness
+    is the reading itself. It is taken from ``_region_replacement`` -- the same
+    function ``splice_math`` splices with -- rather than rebuilt here, because a
+    re-derivation can drift from what was actually written and then match
+    nothing at all.
+
+    The DENOMINATOR, as the damaged glyph count of the page's own source. The
+    region list is what recovery happened to enumerate, so "every region
+    resolved" says nothing about a damaged span the detector never proposed.
+    Counting private-use codepoints on both sides makes the claim checkable:
+    coverage holds only when the covered regions' sources account for every
+    damaged glyph the page had.
     """
+    from socr.core.born_digital import count_pua_chars
+    from socr.math.recover import _region_replacement
+
+    covered = [r for r in regions if r.resolved and r.source_aligned and r.crop_path]
     return {
         "lane": LANE_CORRUPT_REGION,
         "regions_total": len(regions),
-        "covered_crops": [
-            str(region.crop_path)
-            for region in regions
-            if region.resolved and region.source_aligned and region.crop_path
-        ],
+        "source_pua_chars": count_pua_chars(native_text or ""),
+        "covered_pua_chars": sum(count_pua_chars(r.source_text or "") for r in covered),
+        "covered_replacements": [_region_replacement(r) for r in covered],
     }
 
 
-def _resolved_witness(crop_path: str) -> str:
-    """The exact bytes ``splice_math`` writes for a RESOLVED region's crop.
-
-    Built from ``recover``'s own constants rather than restated here, so a change
-    to the replacement markup cannot leave this recogniser silently matching
-    nothing. The candidate header is load-bearing: an ALIGNED BUT UNRESOLVED
-    region emits the same crop reference followed by the unresolved marker, so
-    the crop path alone would read a refusal as a recovery.
-    """
-    from socr.math.recover import _CORRUPT_CANDIDATE_HEADER
-
-    return f"![Corrupt equation crop]({crop_path})\n{_CORRUPT_CANDIDATE_HEADER}"
-
-
 def missing_coverage_witnesses(evidence: dict | None, text: str) -> list[str]:
-    """Which of ``evidence``'s recovered replacements are absent from ``text``.
+    """Which retained replacements in ``evidence`` are absent from ``text``.
+
+    Occurrence identity, not mere membership. Two damaged spans with identical
+    source text yield two regions and two identical replacements, and
+    ``splice_math`` writes both; a single surviving copy covers one of them, so
+    the check counts occurrences rather than asking whether the string appears.
 
     Split out from :func:`unresolved_math_detail` because the document-level
-    reconciliation needs exactly this question and nothing else: run against the
-    ASSEMBLED body, the residual-PUA term would read another page's surviving
-    codepoints as this page's damage and blame the wrong page.
+    reconciliation needs exactly this question and nothing else: run in full
+    against the ASSEMBLED body, the residual-PUA term would read another page's
+    surviving codepoints as this page's damage and blame the wrong page.
     """
     if not evidence or evidence.get("lane") != LANE_CORRUPT_REGION:
         return []
     body = text or ""
-    return [
-        str(crop)
-        for crop in (evidence.get("covered_crops") or [])
-        if _resolved_witness(str(crop)) not in body
-    ]
+    missing: list[str] = []
+    seen: Counter[str] = Counter()
+    for replacement in evidence.get("covered_replacements") or []:
+        rep = str(replacement)
+        seen[rep] += 1
+        if not rep or body.count(rep) < seen[rep]:
+            missing.append(rep)
+    return missing
 
 
 def unresolved_math_detail(
@@ -160,8 +180,10 @@ def unresolved_math_detail(
 
     lane = str(evidence.get("lane") or "")
     regions_total = int(evidence.get("regions_total") or 0)
-    covered_crops = [str(c) for c in (evidence.get("covered_crops") or [])]
-    regions_covered = len(covered_crops)
+    replacements = [str(c) for c in (evidence.get("covered_replacements") or [])]
+    regions_covered = len(replacements)
+    source_pua = int(evidence.get("source_pua_chars") or 0)
+    covered_pua = int(evidence.get("covered_pua_chars") or 0)
 
     if lane != LANE_CORRUPT_REGION:
         return UnresolvedMathDetail(
@@ -196,12 +218,33 @@ def unresolved_math_detail(
             residual_pua=residual,
         )
 
+    # The denominator the region list cannot supply. "Every enumerated region
+    # resolved" is a statement about what the detector proposed; a damaged span
+    # it never proposed leaves no trace in that count. Comparing damaged glyphs
+    # in the covered regions' sources against damaged glyphs in the page's own
+    # source is the check that closes it -- and it is the reason clearance does
+    # NOT rest on the shipped body having no private-use codepoints left, which
+    # omission achieves just as well as recovery.
+    if source_pua <= 0 or covered_pua != source_pua:
+        return UnresolvedMathDetail(
+            reason=(
+                f"the recovered regions account for {covered_pua} of {source_pua} "
+                "damaged glyph(s) in the page source; the remainder is unlocalised"
+            ),
+            lane=lane,
+            regions_total=regions_total,
+            regions_covered=regions_covered,
+            residual_pua=residual,
+        )
+
     missing = missing_coverage_witnesses(evidence, body)
     if missing:
         return UnresolvedMathDetail(
             reason=(
                 f"{len(missing)} recovered replacement(s) are absent from the "
-                "selected body, so the shipped page does not carry them"
+                "selected body, so the shipped page does not carry the reading "
+                "(a surviving crop link is evidence of a crop, not of a "
+                "transcription)"
             ),
             lane=lane,
             regions_total=regions_total,

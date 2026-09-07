@@ -2307,7 +2307,7 @@ class UnifiedPipeline:
         # reprocessed page cannot inherit the previous attempt's coverage; the
         # failure path above leaves ``regions`` empty, which is recorded as
         # "enumerated nothing" rather than as an absent field.
-        ps.math_recovery_evidence = corrupt_region_evidence(regions)
+        ps.math_recovery_evidence = corrupt_region_evidence(regions, native_text)
 
         if not regions:
             unresolved = (
@@ -10464,6 +10464,60 @@ class UnifiedPipeline:
 
         state.status = status
 
+        # #165: reconcile the standing unresolved-math record, per page, against
+        # the CURRENT reduction. This event is a STANDING statement about the
+        # page's outcome, not a log line about an attempt, and there are three
+        # ways a run arrives holding a stale one: a resumed page replays its
+        # persisted copy through ``resume_restore_kinds`` before this point,
+        # assemble can be re-entered, and a re-run can change the answer. Merely
+        # skipping pages that already have an event -- the first version -- left
+        # the audit log describing an earlier outcome while the page note, the
+        # document status and the metadata described the current one.
+        #
+        # So: a page whose reason changed has its record replaced, a page the
+        # current reduction clears has its record RETIRED, and every unresolved
+        # page ends with exactly one current record. The recovery attempts
+        # themselves are separate kinds (``corrupt_math_region_recovery`` and
+        # the lane's own events) and are never touched -- the history stays, it
+        # is only the standing verdict that is kept true.
+        #
+        # Deliberately OUTSIDE the defect-report block below: retiring a stale
+        # warning is exactly the case where this run has no findings to report,
+        # so a gate on "something went wrong" would skip the one situation the
+        # retirement exists for.
+        if unresolved_math_pages or any(
+            getattr(ev, "kind", "") == UNRESOLVED_MATH_KIND for ev in state.events
+        ):
+            from socr.core.audit_log import AuditEvent as _UnresolvedMathEvent
+
+            _kept: list = []
+            _current_pages: set[int] = set()
+            for ev in state.events:
+                if getattr(ev, "kind", "") != UNRESOLVED_MATH_KIND:
+                    _kept.append(ev)
+                    continue
+                _detail = unresolved_math_details.get(ev.page_num)
+                if (
+                    _detail is not None
+                    and ev.detail == _detail.detail
+                    and ev.page_num not in _current_pages
+                ):
+                    _kept.append(ev)
+                    _current_pages.add(ev.page_num)
+            state.events[:] = _kept
+            for n in unresolved_math_pages:
+                if n in _current_pages:
+                    continue
+                state.events.append(
+                    _UnresolvedMathEvent(
+                        page_num=n,
+                        kind=UNRESOLVED_MATH_KIND,
+                        engine="native",
+                        detail=unresolved_math_details[n].detail,
+                        data=unresolved_math_details[n].as_data(),
+                    )
+                )
+
         if (
             failed_pages
             or native_fallback_pages
@@ -10533,27 +10587,6 @@ class UnifiedPipeline:
                             "crop_paths": crop_paths,
                             "audit_passed": False,
                         },
-                    )
-                )
-            # #165: one record per affected page, raised against the shipped
-            # bytes. Upserted, not appended: a resumed page replays its own
-            # persisted copy through ``resume_restore_kinds`` before this runs,
-            # and finalization is re-entered more than once per document.
-            _seen_unresolved_math = {
-                ev.page_num
-                for ev in state.events
-                if getattr(ev, "kind", "") == UNRESOLVED_MATH_KIND
-            }
-            for n in unresolved_math_pages:
-                if n in _seen_unresolved_math:
-                    continue
-                state.events.append(
-                    AuditEvent(
-                        page_num=n,
-                        kind=UNRESOLVED_MATH_KIND,
-                        engine="native",
-                        detail=unresolved_math_details[n].detail,
-                        data=unresolved_math_details[n].as_data(),
                     )
                 )
             # GH-211 MAJOR-2: --native-only distrust pages get their own kind
