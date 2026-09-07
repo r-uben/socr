@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from socr.core.config import PipelineConfig
 from socr.core.providers import zero_cap_pinned_forbids_cloud
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -314,3 +316,93 @@ def test_unpinned_zero_still_tries_hpc_gemini_fallback_by_default():
         result = pipe._fallback_to_gemini([1, 2])
     mock_avail.assert_called_once()
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Round 5 (Astra/Codex re-review of 5b9ba7f): the ordinary page-level VLM
+# judge -- the default judge_backend=auto path every agentic page takes --
+# still shipped page images to the cloud under pinned zero.
+# ---------------------------------------------------------------------------
+
+# 10 — _resolve_judge_model: explicit / cached / candidate-ladder cloud -----
+
+
+@pytest.mark.parametrize("explicit_model", ["", "qwen3.5:cloud"])
+def test_pinned_zero_blocks_page_judge_cloud_model(explicit_model):
+    pipe = _pipeline(max_cost_per_page=0, max_cost_per_page_pinned=True, judge_model=explicit_model)
+    pipe._judge_model_cache = False
+    with patch("socr.judge.ollama_judge.OllamaVisionJudge.is_available", return_value=True):
+        chosen = pipe._resolve_judge_model()
+    assert "cloud" not in (chosen or "").lower()
+
+
+def test_unpinned_zero_still_resolves_cloud_page_judge_by_default():
+    pipe = _pipeline(max_cost_per_page=0.0)
+    pipe._judge_model_cache = False
+    with patch("socr.judge.ollama_judge.OllamaVisionJudge.is_available", return_value=True):
+        chosen = pipe._resolve_judge_model()
+    assert chosen == "qwen3.5:cloud"
+
+
+def test_pinned_zero_ignores_a_stale_cached_cloud_identity():
+    # A cloud identity memoized before this pipeline instance's cap was
+    # pinned (or from a prior call under a different policy) must not be
+    # returned verbatim -- it is re-resolved under the current policy.
+    pipe = _pipeline(max_cost_per_page=0, max_cost_per_page_pinned=True)
+    pipe._judge_model_cache = "qwen3.5:cloud"
+    with patch("socr.judge.ollama_judge.OllamaVisionJudge.is_available", return_value=True):
+        chosen = pipe._resolve_judge_model()
+    assert "cloud" not in (chosen or "").lower()
+
+
+def test_pinned_zero_with_no_local_judge_available_resolves_none():
+    pipe = _pipeline(max_cost_per_page=0, max_cost_per_page_pinned=True)
+    pipe._judge_model_cache = False
+    with patch("socr.judge.ollama_judge.OllamaVisionJudge.is_available", return_value=False):
+        chosen = pipe._resolve_judge_model()
+    assert chosen is None
+
+
+# 11 — the composed judge builder: zero cloud provider calls under the policy
+
+
+def test_pinned_zero_degrades_composed_judge_to_heuristic_with_no_cloud_call(tmp_path):
+    from socr.core.config import PipelineConfig
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+    from socr.pipeline.orchestrator import JUDGE_IDENTITY_HEURISTIC, UnifiedPipeline
+
+    from test_p35_cold_review_round2 import _build_fixture_pdf
+
+    pdf = _build_fixture_pdf(tmp_path)
+    state = DocumentState(DocumentHandle(pdf))
+
+    cfg = PipelineConfig(
+        quiet=True,
+        judge_backend="auto",
+        max_cost_per_page=0,
+        max_cost_per_page_pinned=True,
+    )
+    pipe = UnifiedPipeline(cfg)
+
+    # A spy in place of the real OllamaVisionJudge: records every model it
+    # was CONSTRUCTED with (never available, forcing the heuristic
+    # degradation this test also checks for) so the assertion is "no
+    # instance was ever built for the cloud model" -- a stronger claim than
+    # merely mocking `.is_available()`, which cannot see which model asked.
+    seen_models: list[str] = []
+
+    class _SpyOllamaVisionJudge:
+        def __init__(self, model: str) -> None:
+            seen_models.append(model)
+            self.model = model
+
+        def is_available(self) -> bool:
+            return False
+
+    with patch("socr.judge.ollama_judge.OllamaVisionJudge", _SpyOllamaVisionJudge):
+        pipe._build_page_judge(state)
+
+    assert "qwen3.5:cloud" not in seen_models, "no provider call is permitted under pinned zero"
+    assert state.agentic_judge_model == JUDGE_IDENTITY_HEURISTIC
+    assert any(e.kind == "judge_degraded_to_heuristic" for e in state.events)

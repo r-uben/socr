@@ -7672,15 +7672,42 @@ class UnifiedPipeline:
         every page sidecar flush. An explicit ``--judge-model`` short-circuits
         the probing entirely and is returned verbatim, so an operator override
         is never silently discarded because the daemon was briefly unreachable.
+
+        GH-154 round 5: that short-circuit, the memoized cache, and the
+        candidate ladder's own default order (``_JUDGE_MODEL_CANDIDATES[0]``
+        is ``qwen3.5:cloud``) were all three cloud-first with no policy check
+        -- a local-only OCR rung under an EXPLICIT ``--max-cost-per-page 0``
+        still shipped its page image to the cloud for judging. A forbidden
+        cloud identity, whether explicit, cached, or the next candidate in
+        line, is treated as absent here; ``_build_page_judge`` already
+        degrades to the heuristic judge when this returns None, so no
+        separate change is needed there.
         """
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.judge.ollama_judge import OllamaVisionJudge
 
+        forbid_cloud = self.config.strict_local or zero_cap_pinned_forbids_cloud(self.config)
+
+        def _permitted(model: str) -> bool:
+            return "cloud" not in model.casefold() or not forbid_cloud
+
         if self.config.judge_model:
-            return self.config.judge_model
+            if _permitted(self.config.judge_model):
+                return self.config.judge_model
+            # Forbidden explicit override: fall through to the same
+            # local-first auto-resolution an unset judge_model gets, rather
+            # than silently honoring an operator setting that violates the
+            # run's own cost/locality policy.
         if self._judge_model_cache is not False:
-            return self._judge_model_cache  # type: ignore[return-value]
+            cached = self._judge_model_cache
+            if cached is None or _permitted(cached):
+                return cached  # type: ignore[return-value]
+            # A memoized cloud identity that policy now forbids: re-resolve
+            # instead of returning stale cloud provenance.
         resolved: str | None = None
         for model in self._JUDGE_MODEL_CANDIDATES:
+            if not _permitted(model):
+                continue
             try:
                 if OllamaVisionJudge(model=model).is_available():
                     resolved = model
