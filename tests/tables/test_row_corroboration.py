@@ -8,10 +8,12 @@ the behavioural claim it pins so a body-swapped or logic-stripped module
 
 from __future__ import annotations
 
+from socr.core.manifest import _row_shape_reconciliation_ok
 from socr.tables.row_corroboration import (
     EXTRA_NUMBERS_MAX_SHARE,
     ROW_CORROBORATION_MIN,
     corroborate_rows,
+    table_shaped_native_row_count,
 )
 
 REGION = (0.0, 0.0, 400.0, 400.0)
@@ -327,3 +329,95 @@ def test_column_index_legend_row_excluded_not_counted_as_data_row():
     assert result.total == 1  # the index row does not count
     assert result.bound == 1
     assert result.clears is True
+
+
+def _narrow_table(rows: list[tuple[str, str, str]]) -> tuple[list[tuple], str]:
+    """A 2-numeric-column table (label + two values, lane x0 = 100.0/160.0),
+    matching #643's repro shape ("for a 2-3 column table [ROW_SHAPE_MIN] is 2")."""
+    words: list[tuple] = []
+    md_rows: list[list[str]] = []
+    for i, (label, a, b) in enumerate(rows):
+        y = 10.0 + i * 20.0
+        words += native_row(y, label, [a, b])
+        md_rows.append([label, a, b])
+    markdown = md_table(["Item", "A", "B"], md_rows)
+    return words, markdown
+
+
+def _footnote_bands(n: int, y_start: float = 500.0) -> list[tuple]:
+    """*n* numeric footnote-style lines (``1) 45 12``), each carrying exactly
+    2 genuine numeric tokens -- same width as the narrow table's own rows,
+    so shape alone cannot distinguish them (#643's actual failure mode).
+    Positioned so no two footnotes (nor any footnote and the table) share an
+    x-lane: real table columns recur at the same x down every row, a
+    footnote's inline numbers sit wherever its own preceding text ends --
+    each footnote's pair here sits 50.0pt from the next footnote's and
+    30.0pt from its own second token, both well clear of the row-band
+    x-tolerance (half a word-height, ~5.0pt at this fixture's 10.0pt words),
+    so no two footnote tokens (own pair or across footnotes) ever cluster."""
+    words: list[tuple] = []
+    for i in range(n):
+        y = y_start + i * 20.0
+        first_x = 500.0 + i * 50.0
+        second_x = first_x + 30.0
+        words.append(w(first_x, y, "45"))
+        words.append(w(second_x, y, "12"))
+    return words
+
+
+def test_footnote_bands_do_not_inflate_native_table_rows_count():
+    """#643: a COMPLETE 3-row narrow-table candidate must reconcile even when
+    5 numeric footnote lines share the page. Pre-fix, shape alone counts all
+    8 bands as table-shaped (native_table_rows=8, threshold ceil(8*36/39)=8,
+    candidate=3 -> rejected); the footnotes' numbers never recur at the
+    table's own x-lanes, so the lane-aware count excludes them
+    (native_table_rows=3, threshold=3, candidate=3 -> OK). Fails on main."""
+    table_words, markdown = _narrow_table(
+        [("Revenue", "1,204", "980"), ("Costs", "500", "410"), ("Total", "704", "570")]
+    )
+    words = table_words + _footnote_bands(5)
+    assert table_shaped_native_row_count(words, row_shape_min=2) == 3
+    assert _row_shape_reconciliation_ok(words, markdown) is True
+
+
+def test_truncated_narrow_candidate_still_rejected_with_footnote_bands_present():
+    """#643 must not admit a truncated candidate: the SAME native page as
+    above (3 real rows + 5 footnote bands), but the candidate itself now
+    emits only 1 of its 3 real rows. The lane fix still excludes the
+    footnotes (native_table_rows=3), and 1 < ceil(3*36/39)=3 still fails --
+    the footnote exemption does not also exempt a dropped data row."""
+    table_words, _ = _narrow_table(
+        [("Revenue", "1,204", "980"), ("Costs", "500", "410"), ("Total", "704", "570")]
+    )
+    words = table_words + _footnote_bands(5)
+    truncated_markdown = md_table(["Item", "A", "B"], [["Revenue", "1,204", "980"]])
+    assert table_shaped_native_row_count(words, row_shape_min=2) == 3
+    assert _row_shape_reconciliation_ok(words, truncated_markdown) is False
+
+
+def test_second_table_at_a_different_x_lane_still_counts_when_candidate_covers_only_one():
+    """Reviewer addendum: two REAL tables at different x offsets, each with
+    its own 3-row lane structure. A candidate covering only the first table
+    must still be rejected -- the second table's rows establish their OWN
+    lanes from their own 3 rows and are not silently dropped just because
+    they sit outside the first table's x positions (no regression on the
+    existing "two independent tables" reconciliation case)."""
+    table1_words, table1_markdown = _narrow_table(
+        [("Revenue", "1,204", "980"), ("Costs", "500", "410"), ("Total", "704", "570")]
+    )
+    table2_rows = [
+        ("Assets", "3,001", "2,900"),
+        ("Liab.", "1,500", "1,400"),
+        ("Equity", "900", "850"),
+    ]
+    table2_words = []
+    for i, (label, a, b) in enumerate(table2_rows):
+        y = 300.0 + i * 20.0
+        table2_words += [
+            w(10.0, y, label),
+            w(300.0, y, a),
+            w(360.0, y, b),
+        ]
+    words = table1_words + table2_words
+    assert table_shaped_native_row_count(words, row_shape_min=2) == 6
+    assert _row_shape_reconciliation_ok(words, table1_markdown) is False

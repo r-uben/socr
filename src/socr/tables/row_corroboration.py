@@ -213,6 +213,7 @@ class RowCorroboration:
 class _NativeBand:
     tokens: tuple[str, ...]  # left-to-right normalized numeric tokens, spec-numbers excluded
     y_center: float  # the band's clustered word y-centre (mean), for skipped-band reporting
+    token_x0: tuple[float, ...] = ()  # each token's own x0, same order as ``tokens`` (#643)
 
 
 def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
@@ -257,6 +258,11 @@ def _is_genuine_numeric(text: str) -> tuple[bool, str]:
     return True, normalized
 
 
+def _median_word_height(words: list) -> float:
+    heights = [w[3] - w[1] for w in words if w[3] > w[1]]
+    return statistics.median(heights) if heights else 0.0
+
+
 def baseline_bands(words: list) -> list[_NativeBand]:
     """Cluster *words* into ordered baseline bands (top to bottom).
 
@@ -268,9 +274,7 @@ def baseline_bands(words: list) -> list[_NativeBand]:
     """
     if not words:
         return []
-    heights = [w[3] - w[1] for w in words if w[3] > w[1]]
-    median_height = statistics.median(heights) if heights else 0.0
-    tolerance = median_height * _ROW_BAND_TOLERANCE_FRACTION
+    tolerance = _median_word_height(words) * _ROW_BAND_TOLERANCE_FRACTION
 
     centered = sorted(words, key=lambda w: (w[1] + w[3]) / 2.0)
     raw_bands: list[list[tuple]] = []
@@ -291,12 +295,14 @@ def baseline_bands(words: list) -> list[_NativeBand]:
     for band_words in raw_bands:
         band_words_sorted = sorted(band_words, key=lambda w: w[0])
         tokens = []
+        token_x0 = []
         for word in band_words_sorted:
             is_numeric, normalized = _is_genuine_numeric(word[4])
             if is_numeric:
                 tokens.append(normalized)
+                token_x0.append(word[0])
         y_center = statistics.mean((w[1] + w[3]) / 2.0 for w in band_words)
-        bands.append(_NativeBand(tokens=tuple(tokens), y_center=y_center))
+        bands.append(_NativeBand(tokens=tuple(tokens), y_center=y_center, token_x0=tuple(token_x0)))
     return bands
 
 
@@ -400,25 +406,108 @@ def is_column_index_row(tokens: tuple[str, ...]) -> bool:
     return values == list(range(1, len(values) + 1))
 
 
+def _established_column_lanes(bands: list[_NativeBand], tolerance: float) -> list[float]:
+    """x0 positions that recur, within *tolerance*, across >= 2 distinct
+    *bands* -- the geometric signature of a genuine printed table COLUMN.
+
+    A real table's numeric columns sit at the same x-position down every
+    row it has; a one-off numeric token sitting in running prose (a
+    footnote's inline figure, e.g. ``1) 45 12``) does not recur at any
+    consistent x, because there is no second footnote line to share it with
+    at the same offset. Two is the minimum count that can call a shared
+    position a repeating pattern at all -- one occurrence proves nothing
+    about recurrence, the same reasoning ``is_column_index_row`` uses for
+    its own ``len(tokens) < 2`` floor.
+
+    Clusters greedily by sorted x0 (same running-mean algorithm
+    ``baseline_bands`` uses for y-centres), so lanes belonging to
+    DIFFERENT tables on the same page cluster independently as long as
+    their x-offsets differ by more than *tolerance* -- neither table's
+    lanes suppress the other's.
+    """
+    points: list[tuple[float, int]] = [
+        (x0, band_idx) for band_idx, band in enumerate(bands) for x0 in band.token_x0
+    ]
+    if not points:
+        return []
+    points.sort(key=lambda p: p[0])
+    lane_x_sum = 0.0
+    lane_x_count = 0
+    lane_band_ids: set[int] = set()
+    lanes: list[float] = []
+    for x0, band_idx in points:
+        if lane_x_count and abs(x0 - lane_x_sum / lane_x_count) <= tolerance:
+            lane_x_sum += x0
+            lane_x_count += 1
+            lane_band_ids.add(band_idx)
+        else:
+            if len(lane_band_ids) >= 2:
+                lanes.append(lane_x_sum / lane_x_count)
+            lane_x_sum = x0
+            lane_x_count = 1
+            lane_band_ids = {band_idx}
+    if len(lane_band_ids) >= 2:
+        lanes.append(lane_x_sum / lane_x_count)
+    return lanes
+
+
 def table_shaped_native_row_count(words: list, row_shape_min: int) -> int:
-    """Count of native baseline bands that look like a table row, by shape alone.
+    """Count of native baseline bands that look like a table row, by shape
+    AND column-lane structure (TICKET-#643 round 2).
 
     Factored out of ``manifest._row_shape_reconciliation_ok`` (TICKET-A1b,
     #634) so TICKET-A2's truncation term (#645) can reuse the identical
     "table-shaped row" definition without a second implementation drifting
-    from it. A band counts iff it has at least ``row_shape_min`` numeric
-    tokens (a caller-supplied, per-candidate floor — see
-    ``_row_shape_reconciliation_ok``'s own docstring for why that floor is
-    derived from the candidate rather than a named constant) and is not the
-    printed column-index legend row (``is_column_index_row``, a table
-    convention, not data).
+    from it. A band is shape-eligible when it has at least
+    ``row_shape_min`` numeric tokens (a caller-supplied, per-candidate
+    floor — see ``_row_shape_reconciliation_ok``'s own docstring for why
+    that floor is derived from the candidate rather than a named constant)
+    and is not the printed column-index legend row (``is_column_index_row``,
+    a table convention, not data).
+
+    #643: shape alone over-counts a numeric footnote/cross-reference band
+    that happens to carry >= ``row_shape_min`` genuine numbers (``1) 45 12``
+    reads as a 2-3 column table row when the candidate itself is a narrow
+    table). This is deliberately NOT resolved by matching the CANDIDATE's
+    own column positions — the candidate is markdown text with no x0 at
+    all, so anchoring to it would let a candidate select which native
+    bands get to count (selection-by-agreement). Instead a shape-eligible
+    band counts only when at least ``row_shape_min`` of its OWN token
+    positions sit in a lane ``_established_column_lanes`` finds recurring
+    across >= 2 shape-eligible bands -- evidence derived purely from the
+    native page's own geometry, independent of the candidate. A footnote
+    line's numbers sit at whatever x the preceding prose text happens to
+    end; a real table's do not. Two independent tables at different x
+    offsets each establish their OWN lanes from their OWN rows, so a
+    candidate covering only one still sees the other's rows counted (no
+    regression on the two-table truncation case -- see
+    ``_row_shape_reconciliation_ok``'s "two independent tables" note).
+
+    When no lane recurs (e.g. a real table with only one data row on the
+    page, or too few shape-eligible bands to show a pattern at all) this
+    returns 0 -- both callers already treat a non-positive count as an
+    ABSENCE of evidence to reconcile against, not a conviction, so this
+    degrades to the pre-#643 abstention posture rather than a new failure
+    mode.
     """
-    return sum(
-        1
+    shape_eligible = [
+        band
         for band in baseline_bands(words)
         if band.tokens
         and len(band.tokens) >= row_shape_min
         and not is_column_index_row(band.tokens)
+    ]
+    if not shape_eligible:
+        return 0
+    tolerance = _median_word_height(words) * _ROW_BAND_TOLERANCE_FRACTION
+    lanes = _established_column_lanes(shape_eligible, tolerance)
+    if not lanes:
+        return 0
+    return sum(
+        1
+        for band in shape_eligible
+        if sum(1 for x0 in band.token_x0 if any(abs(x0 - lane) <= tolerance for lane in lanes))
+        >= row_shape_min
     )
 
 
