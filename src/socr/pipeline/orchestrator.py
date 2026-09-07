@@ -13,7 +13,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -2417,6 +2417,12 @@ class UnifiedPipeline:
             "equation_region_reading_unsafe_markup",
             "equation_lane_no_region",
             "equation_lane_detection_failed",
+            # GH-157: a terminal disposition -- a detected region whose sidecar
+            # was never attached because no PageOutput existed for its page.
+            # Dropping it on resume would make that skip invisible again on
+            # every run after the one that recorded it, the exact shape this
+            # allowlist exists to close.
+            "equation_sidecar_skipped_no_page_output",
         }
     )
 
@@ -7065,7 +7071,16 @@ class UnifiedPipeline:
                             self._detect_and_crop_equations(state, [page_num], output_dir)
                             # GH-36b: LaTeX sidecar (behind recover_clean_equations flag).
                             if _recover_eq:
-                                self._attach_equation_latex_sidecars(state, [bo])
+                                # GH-157 (cold review #664): pin this call's
+                                # scope to the current page explicitly. Without
+                                # it, a later page's call would re-examine an
+                                # earlier page's already-attached regions --
+                                # found via the accumulated state.events -- and
+                                # wrongly report that earlier page as missing a
+                                # PageOutput, since only THIS page's is passed.
+                                self._attach_equation_latex_sidecars(
+                                    state, [bo], page_nums=[page_num]
+                                )
 
                 # GH-86: strip VLM sentinel image refs before provisional flush.
                 if _agentic_doc_dir is not None:
@@ -11793,6 +11808,7 @@ class UnifiedPipeline:
         page_out,
         result,
         native_text: str,
+        region_native_text: str | None = None,
     ) -> tuple[str, bool]:
         """Gate the ONE additive post-verdict step (cold review rounds 2-3).
 
@@ -11826,6 +11842,13 @@ class UnifiedPipeline:
         purpose: it is shipped text, and quoting the invented number there would
         put it back in the corpus by the back door. The numbers live in the
         ``equation_sidecar_refused`` audit event only.
+
+        ``native_text`` is the FULL PAGE text and stays that way -- it is only
+        used below to feed the numeric-presence oracle, which is deliberately
+        page-scoped. ``region_native_text`` (GH-164) is the region's own native
+        slice; it is what the refusal rebuild below falls back to, so a refused
+        region never re-appends the whole page. Defaults to ``native_text``
+        when omitted so any other caller keeps today's (page-scoped) behaviour.
 
         Returns ``(block_to_append, latex_attached)``.
         """
@@ -11886,9 +11909,10 @@ class UnifiedPipeline:
 
         from socr.math.equation_latex import build_equation_sidecar
 
+        fallback_text = native_text if region_native_text is None else region_native_text
         block, latex_attached = build_equation_sidecar(
             crop_path=(result.crop_ref or result.crop_path),
-            native_text=native_text,
+            native_text=fallback_text,
             raw_latex="",
             validation_ok=False,
             validation_reason=refusal,
@@ -11920,6 +11944,7 @@ class UnifiedPipeline:
         self,
         state: DocumentState,
         page_outputs: list,
+        page_nums: Iterable[int] | None = None,
     ) -> None:
         """GH-36b: read equation crop PNGs → 1A-validated LaTeX → 1C sidecar.
 
@@ -11943,6 +11968,20 @@ class UnifiedPipeline:
           - The crop PNG is always the visual ground truth — always inlined.
           - 1B (full render / image-compare) is NOT performed here.
           - This path stays default-off (config.recover_clean_equations = False).
+
+        ``page_nums`` (GH-157, cold review round 2 on #664): the real agentic
+        caller invokes this method ONCE PER PAGE with only that page's
+        ``PageOutput`` (``page_outputs=[bo]``), while ``state.events`` keeps
+        accumulating across the whole document. Without an explicit scope,
+        page 2's call would re-examine page 1's already-attached regions too
+        -- found via the accumulated events -- and, since page 1's
+        ``PageOutput`` is absent from THIS call's ``page_outputs``, wrongly
+        report page 1 as missing one. ``page_outputs`` cannot serve as the
+        scope by itself: an in-scope page with a genuinely absent
+        ``PageOutput`` must still emit the skip event, which is the whole
+        point of GH-157. ``None`` (legacy/whole-document callers, and tests
+        that pass every relevant page's output at once) keeps today's
+        behaviour: every page with detected regions is in scope.
         """
         from socr.core.audit_log import AuditEvent
         from socr.math.equation_latex import process_equation_region
@@ -11960,6 +11999,8 @@ class UnifiedPipeline:
         # Build a fast lookup from page_num to the PageOutput entry.
         output_by_page: dict[int, object] = {po.page_num: po for po in page_outputs}
 
+        scope = set(regions_by_page) if page_nums is None else set(page_nums)
+
         # GH-36b: use the dedicated clean-equation model field (defaults to
         # qwen3-vl:30b-a3b-instruct — the validated local instruct VLM).
         # Do NOT fall back to math_model here: that field defaults to
@@ -11971,25 +12012,84 @@ class UnifiedPipeline:
         rejected_total = 0
 
         for page_num, region_data_list in sorted(regions_by_page.items()):
-            po = output_by_page.get(page_num)
-            if po is None:
-                # Page not in prose_pages (shouldn't happen, but be defensive).
-                logger.warning(
-                    "GH-36b: page %d has detected equations but no PageOutput; skipping",
-                    page_num,
-                )
+            if page_num not in scope:
+                # Out of scope for THIS call -- e.g. a page already handled by
+                # its own earlier per-page call. Not this call's business, and
+                # emitting an event for it would be a false "missing" report.
                 continue
 
-            native_text = state.pages[page_num].native_text or ""
+            po = output_by_page.get(page_num)
+            if po is None:
+                # GH-157: page in scope but not in page_outputs (shouldn't
+                # happen, but be defensive). This used to be a silent
+                # warning-only skip: crops stayed on disk, no sidecar was ever
+                # attached, and the page shipped as if nothing was detected.
+                # Never fabricate a PageOutput here -- there is nothing to
+                # attach a sidecar to -- but the disposition must be visible
+                # at page/document level, so emit one terminal audit event per
+                # skipped region.
+                for region_index, rdata in enumerate(region_data_list):
+                    crop_path = rdata.get("crop_path")
+                    # Idempotent per region/outcome: this method can run again
+                    # over the same scope (e.g. a retried page), and a repeat
+                    # skip event for a disposition already on record would
+                    # inflate the count without adding information.
+                    already_recorded = any(
+                        e.kind == "equation_sidecar_skipped_no_page_output"
+                        and e.page_num == page_num
+                        and e.data.get("region_index") == region_index
+                        for e in state.events
+                    )
+                    if already_recorded:
+                        continue
+                    logger.warning(
+                        "GH-157: page %d region %d has a detected equation but "
+                        "no PageOutput; skipping (crop=%r)",
+                        page_num,
+                        region_index,
+                        crop_path,
+                    )
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="equation_sidecar_skipped_no_page_output",
+                            engine="equation_latex",
+                            detail=(
+                                f"region {region_index} has a detected equation crop "
+                                f"but no PageOutput exists for page {page_num}; "
+                                f"sidecar not attached (crop={crop_path!r})"
+                            ),
+                            data={
+                                "region_index": region_index,
+                                "crop_path": crop_path,
+                            },
+                        )
+                    )
+                continue
+
+            # GH-164: this is the FULL PAGE text. Kept only for the guard's
+            # numeric-presence oracle below, which stays page-scoped by design
+            # (it needs the whole page as its source of truth for "did this
+            # number appear anywhere"). It must NEVER be used as the per-region
+            # rejected-sidecar fallback -- that was the GH-164 bug: one region's
+            # rejection appended the entire page prose, and N rejected regions
+            # multiplied it N times.
+            page_native_text = state.pages[page_num].native_text or ""
 
             for region_index, rdata in enumerate(region_data_list):
                 crop_path = rdata.get("crop_path")
+                # GH-164: the region's OWN native slice, not the full page. This
+                # is what a rejected sidecar falls back to, so a page with
+                # several rejected regions gets each region's own text once
+                # instead of the whole page repeated once per rejection.
+                region_native_text = rdata.get("source_text") or ""
 
                 result = process_equation_region(
                     region_index=region_index,
                     page_num=page_num,
                     crop_path=crop_path,
-                    native_text=native_text,
+                    native_text=region_native_text,
+                    source_text=region_native_text,
                     model=model,
                     host=self.config.math_model_host
                     if hasattr(self.config, "math_model_host")
@@ -12001,7 +12101,7 @@ class UnifiedPipeline:
                 # so it goes through the delimiter and numeric-presence guards
                 # before any of it can reach shipped bytes.
                 _block, _latex_attached = self._guard_equation_sidecar_block(
-                    state, page_num, po, result, native_text
+                    state, page_num, po, result, page_native_text, region_native_text
                 )
                 if _block:
                     if po.text:
