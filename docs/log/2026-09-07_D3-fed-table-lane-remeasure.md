@@ -88,7 +88,95 @@ multiset recall cannot distinguish "correct values, wrong table binding" from
 "values genuinely missing" — that limitation is inherent to this scorer, not new
 to this run.
 
+## Page classification (table / figure / prose)
+
+The per-document recall table above mixes three different page kinds under one
+number, and that mixing is what makes 1977/1982/1990/2020 look uniformly bad.
+Every page in the sample was reclassified by hand: for the three born-digital SEP
+documents (2008, 2019, 2020), by reading the actual page title via `pdftotext
+-layout -f N -l N` (`"Table N. ..."` vs `"Figure N.X. Distribution of
+participants' ..."` vs narrative prose with no title); for the five scanned
+documents, by `detected_table_count` from the sidecar (the swap-line renewal page
+is the only true table in each). A **figure** page here is a SEP histogram/dot-plot
+chart whose "numbers" are axis-tick labels (`-1.0, -0.8, ..., 8`, a `Number of
+participants` axis), not table cells — the repo's figures policy treats these as
+gist-only, so losing axis-tick text is not a table-lane defect. Classification and
+full per-page detail: `~/Data/socr/d3-fed-remeasure-2026-09-07/page_classification.json`
+(script: `classify_and_report.py` in the same directory).
+
+| class | pages | source numbers | shipped | recall |
+|---|---:|---:|---:|---:|
+| prose | 76 | 1,008 | 1,003 | 99.5% |
+| table (born-digital) | 5 | 572 | 364 | 63.6% |
+| table_scanned (swap-line) | 3 | 194 | 33 | 17.0% |
+| **table + table_scanned** | **8** | **766** | **397** | **51.8%** |
+| figure (SEP charts, gist-only) | 19 | 2,084 | 745 | 35.7% |
+| **all pages** | **103** | **3,858** | **2,145** | **55.6%** |
+
+(This 3,858/2,145 whole-sample total is close to but not identical to the team
+lead's independently-scored 3,775/1,843 — likely a difference in disclosure-marker
+stripping or numeric-token thresholds between the two scorers; not reconciled
+further here since the class split below is the number that matters for the
+verdict, not the unscoped aggregate.)
+
+**The table-lane verdict is about the 8 `table`/`table_scanned` rows only:
+51.8% recall (397/766), not the 55.6% whole-sample or the lower figure-diluted
+number.** Prose is essentially undamaged (99.5%). Figure pages lose axis-tick
+labels as designed/expected and are excluded from the table verdict below.
+
 ## Per-class findings
+
+**Class B — SEP figure pages, gist-only by policy, not a table-lane defect.**
+19 pages: 2008 pp16–19 (Figure 2.A–D), 2019 pp15–16/18–22 (Figures 1–3.A–E, minus
+p17 which is prose), 2020 pp17–19/21–24/26 (Figures 1–4). Spot-checked 2008 p16:
+the qwen candidate has 272/273 "numbers" but they are histogram axis ticks
+(`-1.0- -0.8- ... 5.1`), zero pipe rows — the floor correctly withholds it as a
+table candidate. The old run shipped these as loose prose text (no structural
+loss to lose, since it never tried to structure them); main's 35.7% figure
+recall is axis-tick text the repo doesn't promise to preserve. Not counted
+toward the table-lane verdict.
+
+**Class A — scanned swap-line tables (1977 p3, 1982 p3, 1990 p3), zero-witness
+design gap.** Old run: 100% recall on all three. Main: 10%, 39%, 2%. The cache
+holds a candidate for all three that transcribes the table **exactly** (100%
+numeric-multiset recall against `pdftotext`, `best_cand=1.0` in the scorer
+output) — and the ladder rejects it every time with `judge_reason:
+"source_evidence_table: no local content evidence available for scanned
+table"`. Root cause, confirmed in code: `tables/source_evidence.py` builds
+scanned-page evidence from classical OCR (`pytesseract`) when installed, and
+explicitly excludes the page's native text layer when it is distrusted (GH-163,
+line ~191/337) — on this machine `pytesseract`/`tesseract` is absent
+(`which tesseract` → not found), so the evidence bundle is empty
+(`"no local content evidence available for scanned table"`, line 282), and
+`corroborate_rows` abstains per its documented `total == 0 → abstain, never
+clears` rule (A1a) — a provably correct candidate cannot pass without a witness.
+**The fix is a ticket (a scan-specific witness, or environment fix + explicit
+fallback policy), not this log.** B1's marker-scoping fix (`#651`) is confirmed
+working here: all three pages ship the D3 marker (`[page N failed: unverifiable
+table — see image]` + page image) scoped to the table region only — the
+surrounding prose on the same page is preserved, checked directly in the
+sidecar text. The census's original complaint was the marker replacing the
+*whole* page; that shape is gone.
+
+**Class C — real born-digital table pages: 4 of 5 fine, one regression worth its
+own ticket.** 2008 p15 (Table 2), 2019 p14/p23 (Table 1/2), 2020 p20 (Table 2)
+all ship at recall ≥ 95% in this sample (2020 p20: 73/73 = 100%). **2020 p16
+(Table 1, "Economic projections... June 2020") is the exception: main ships
+0/205 (0%)** — `status=error`, `failure_mode=structure_class_ladder_exhausted`,
+`landscape_page_refused=true` — while the cached gemini candidate scores 85.9%
+recall (176/205) and was never shipped. This is a genuine table-lane regression
+against the old run (94.1% document-level recall on this page under the
+heuristic judge), not a figure-classification artifact. `landscape_page_refused`
+fired 4 times total in the whole 103-page sample (2019 p14 — shipped SUCCESS
+unaffected; 2020 pp16/19/21 — p16 is this table regression, p19/p21 are figure
+pages), not "4x in 2020" as a single cluster of table loss — of the 3 in 2020,
+only p16 is a real table page. #393 (rejected `/curia` alternative for GH-367)
+is the open, mechanically-specified fix for exactly this shape: rotated-page
+coordinate-frame mismatch between native word geometry and the upright-rendered
+table crop, which would explain why a landscape-refused page's row/structure
+checks fail even when a high-recall candidate exists. Cite #393, not #263 (#263
+is confirmed closed above — it is a routing signal, not a failure, on the other
+3 firing sites).
 
 **#511 large half (scan ≠ chart, E1) — fixed, broadly.** On the five scanned
 documents, `chart_asset_page` fired on 20 of 27 pages under the old run (every
@@ -137,49 +225,13 @@ them without a deeper geometry dump. This is the single largest disagreement
 between what the plan believes is fixed and what this sample shows; it needs its
 own look, out of D3's scope to diagnose further.
 
-**November swap-line table (1977/1982/1990, page 3 in each) — still lossy, by a
-different, more principled mechanism.** All three ship a scoped D3 marker
-(`[page N failed: unverifiable table — see image]` plus the page image); the
-surrounding prose on the same page is preserved (confirms B1's marker-scoping
-fix — the census's original complaint was the marker replacing the *whole*
-page). But the cache holds a candidate for all three pages that transcribes the
-table **exactly** (100% numeric-multiset recall against `pdftotext`, including
-every ditto-implied value) — and the ladder rejects it every time with
-`judge_reason: "source_evidence_table: no local content evidence available for
-scanned table"`. These are pure scans with no native text layer, so
-`corroborate_rows` has nothing to score against and abstains per its documented
-`total == 0 → abstain, never clears` rule (A1a) — a correct-but-unwitnessed
-candidate cannot pass. Net effect vs the old run: the old heuristic-judge run
-shipped this table's values (with the ditto/`&nbsp;` cosmetic defects the census
-flagged, #625/#624) as `SUCCESS`; main now refuses to trust it at all and ships
-nothing for the table. That is a deliberate, principled trade (never ship
-unwitnessed content) but it is still a content-loss regression against the old
-run's number, and F1a/F1b/F2 (ditto text, derived-cell provenance, `&nbsp;`
-hierarchy — all TODO) do not touch this shape, because the table doesn't reach
-the point where those normalizers would run. Scanned tables with zero native
-text layer are the shape D3/A1a-A1b cannot corroborate by construction; that is
-worth a named follow-up (a scan-specific corroboration signal, or a deliberate
-policy choice to trust word-count-derived table candidates below some floor when
-evidence is unavailable) rather than folding it into F1a/F1b/F2 as currently
-scoped.
-
-**Born-digital dense tables (2008 SEP projections, 2019/2020 FOMC minutes) — hard
-shapes, correctly failing loud rather than silently wrong, still a net content
-loss.** 16 of 76 born-digital pages across the three documents are
-`warning`/`error` (2008: 4/20, 2019: 5/29, 2020: 7/27). Spot-checked 2008 p16
-(33 native lanes vs a 3-column model read, `value_guard_row_count_warning` +
-`native_table_verifier_warn` + `table_escalation_rejected 0%`) — `main` ships the
-D3 marker rather than a 3-column mis-binding of a 33-lane table; the old run's
-manifest shows this same page shipped `engine=qwen`, `failure_mode=none` (silent
-`SUCCESS`) under the heuristic judge, with no way from the old artifacts alone to
-confirm whether that silent output was actually right or wrong. I was not able to
-recover per-page text from the old run's single assembled `.md` (no page
-boundary markers in the phase-major output) to check directly; this is a real gap
-in the old-run comparison, noted rather than papered over. Separately, several
-low-recall "success" pages in 2008/2019 (pp14/15/18 across docs) are SEP
-fan-chart pages losing only histogram axis-tick labels — the same
-"drop-chart-axis-ticks-only" shape already recorded on the 2026-09-06 ECB sample,
-not a table-lane defect and not new.
+(The swap-line table and the born-digital table pages are covered above as
+class A and class C, with the corrected per-page numbers — including that
+2020 p20's dense multi-lane table actually ships at 100% recall, and that the
+"born-digital dense tables are broadly lossy" framing from the first draft of
+this log conflated real table pages with SEP figure pages; see the
+classification table and the note above F1a/F1b/F2 do not touch class A's
+shape, because that table never reaches the normalizer at all.)
 
 **Corroboration path (A1a/A1b) rarely exercised in this sample.**
 `table_corroboration` populated on exactly 1 of 103 pages (2008 p12, `bound=16
@@ -194,31 +246,56 @@ at scale by this measurement.
 
 ## Verdict: is institution 1 (Fed) fixed?
 
-**Partially, and unevenly across defect classes.** Fixed or closed in this
-sample: #511 large half (scan≠chart), the E2 `table_not_scorable` prose
-over-firing, and #263 (confirmed absent, was already believed closed). **Not
-fixed**: #592 (column-wise attendee lists) persists on 3 of 5 sampled scanned
-documents — the plan's belief that this class is resolved does not hold on this
-sample and needs its own investigation. **Behavior-changed, not fixed**: the
-hardest table shapes — scanned tables with no native text layer (November
-swap-line renewal, 1977/1982/1990) and dense multi-lane born-digital tables
-(2008/2019/2020) — now fail loudly with a scoped marker instead of shipping
-silently-plausible-but-unverified content, which is the correct safety
-direction, but real prose/table content is still not delivered on 16 of 76
-born-digital pages and on all 3 sampled swap-line tables. F1a/F1b/F2 (ditto,
-provenance, `&nbsp;`) remain TODO and, per the finding above, would not resolve
-the swap-line table's loss even once implemented, because that table currently
-never reaches the normalizer at all.
+**No — not on the table lane, and the failure mode is now well-characterized
+instead of an unscoped aggregate.** The verdict is scoped to the 8 pages that
+are actually tables (5 born-digital + 3 scanned); the 19 SEP figure pages are
+excluded as gist-only by policy, and the 76 prose pages (99.5% recall) confirm
+the loss is table-specific, not a general regression.
+
+**Table-lane recall: 51.8% (397/766 numbers), against ~97% document-level
+recall for the same page set under the old heuristic-judge run.** That gap
+splits into two named, differently-actionable causes, not one:
+
+- **Class A — scanned tables, structurally cannot pass (1977/1982/1990 p3,
+  17.0% recall).** A provably correct cached candidate (100% recall on all
+  three) is rejected every time because the evidence bundle is empty
+  (`pytesseract` absent on this machine, native text layer excluded by design
+  per GH-163). This is an environment + witness-design gap, not a table-ladder
+  logic bug. **The fix is a ticket, not this log** — either install classical
+  OCR in the runtime, or add a policy for scanned tables with zero available
+  witnesses.
+- **Class C — one born-digital table regression (2020 p16, 63.6% class
+  recall driven down from what would otherwise be ~100%).** 2008 p15, 2019
+  p14/p23, and 2020 p20 all ship at ≥95% recall — the born-digital table
+  lane is essentially fixed. 2020 p16 alone ships 0/205 while an 85.9%-recall
+  candidate sits unused in cache, gated out by
+  `structure_class_ladder_exhausted` + `landscape_page_refused`. #393 (open,
+  mechanically specified) is the right existing issue for this shape —
+  rotated-page coordinate-frame mismatch between native word geometry and the
+  upright-rendered crop.
+
+**Also not fixed, unrelated to the table ladder:** #592 (column-wise attendee
+lists) persists on 3 of 5 sampled scanned documents — the plan's belief that
+C1 resolved this class does not hold on this sample.
+
+**Confirmed fixed or closed:** #511 large half (scan≠chart, E1), the E2
+`table_not_scorable` prose over-firing, and #263 (confirmed absent as a
+failure mode — the landscape-refusal event is a routing signal, fires 4 times
+total across the sample, and only correlates with the one class-C regression
+above, not with the other 3 firing sites).
 
 ## Open items for the plan owner
 
-1. Reopen investigation on #592 — 3/5 native-engine pages in this sample still
+1. Class A (scanned-table zero-witness rejection) needs its own ticket — a
+   scan-specific witness path, or an explicit policy for trusting a
+   high-confidence candidate when no witness is available. Not in scope for
+   F1a/F1b/F2 as currently written (that table never reaches the normalizer).
+2. Class C's single regression (2020 p16) plus the 3 other landscape-refusal
+   sites point at #393 (rotated-page coordinate-frame mismatch) as the
+   relevant open issue — worth confirming #393 explains 2020 p16 specifically
+   before scoping a fix.
+3. Reopen investigation on #592 — 3/5 native-engine pages in this sample still
    split honorific from name; C1's fix is geometry-dependent, not general.
-2. Scanned tables with zero native-text evidence (`source_evidence_table: no
-   local content evidence available`) cannot pass A1a/A1b's corroboration gate
-   even when the candidate is provably correct (measured: 3/3 such candidates in
-   this sample were 100% right and still rejected) — needs its own ticket; not
-   in scope for F1a/F1b/F2 as written.
-3. D2 (route cost) is still TODO; the ~3h01m / 103-page wall time here (dominated
-   by the three born-digital documents) is a useful reference point for that
-   ticket.
+4. D2 (route cost) is still TODO; the ~3h01m / 103-page wall time here
+   (dominated by the three born-digital documents) is a useful reference point
+   for that ticket.
