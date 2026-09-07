@@ -19,8 +19,9 @@ accounting (#675, Refs — routing criterion open); #154/#160/#637 cost caps + n
 #609 majority-overlap membership + boundary evidence (#673, Refs — sub-case 1 surfaced not
 bound; #608 alignment still separate).
 
-In final review at time of writing: #189 mixed-page chart preservation (PR #672, 5 Astra
-rounds); #659 label tokens flag-not-reject (PR #668, 5 rounds, rebasing).
+In final review at time of writing: #189 mixed-page chart preservation (PR #672, 5 Astra rounds).
+#659 label tokens flag-not-reject merged as #668 after 5 Astra rounds and two rebases.
+
 
 Parked: #643 (PR #663 draft) — four rounds showed no geometric/lexical footnote exclusion
 that does not delete a real table row; needs font-size / bottom-rule evidence. Filed
