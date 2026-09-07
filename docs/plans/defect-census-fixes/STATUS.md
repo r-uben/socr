@@ -24,7 +24,7 @@ nothing dispatched.
 | B1 | marker scope (#591) | DONE (#651 merged 2026-09-07; #591 open: #649, #650) | A2 | 5 |
 | D3 | Fed re-measure | TODO | A2 | 5 |
 | D2 | route cost (measure) | TODO | B1 | 6 |
-| E1 | scan ≠ chart (#511) | REVIEW (72628a1, socr-e1; density rule; slide exports reclassified) | B1 | 6 |
+| E1 | scan ≠ chart (#511) | DONE-LOCAL (72628a1+f3d9989; reviewer ACCEPT; dense-label blind spot #653) | B1 | 6 |
 | E2 | table_not_scorable scope | TODO | E1 | 7 |
 | F1a | ditto text (#625) | TODO | A2 | 7 |
 | F1b | derived-cell provenance | TODO | F1a | 8 |
