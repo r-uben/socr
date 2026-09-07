@@ -123,5 +123,39 @@ is now a single `state.events.extend(_truncated_candidate_events(...))`.
 
 ## Live pipeline verification
 
-Pending — run next: `socr process` on the census ECB bulletin fixture,
-scored with the census numeric-multiset scorer against `pdftotext -layout`.
+Ran `PYTHONPATH=src ~/venvs/socr/bin/socr process
+~/Data/socr/census-ecb-2026-09-06/in/ecb-meetings-2021-economic_bulletin-p127-129.pdf
+-o /tmp/a2/` on the branch, Ollama available. The run was killed partway
+through page 3 by the host's OOM pressure (`bdpisl036` background task,
+status `killed`, "system is running low on memory") — the `socr` process
+itself was gone, not a socr-internal failure. Per team-lead's instruction,
+**not re-run**; page 3 is reported as not scored, and the decision to re-run
+once memory is available is team-lead's.
+
+Pages 1-2 survived (per-page ledger flush) and were scored per-page: source
+numbers from `pdftotext -layout -f N -l N` on the original PDF, matched
+against that page's shipped `NNN.md`, normalized (commas/percent/trailing-dot
+stripped) exactly as `census_score.py` normalizes, one-shot ad hoc script
+since the shared scorer takes a whole-document pdf/md pair and this run only
+has two of three pages.
+
+| page | status | failure_mode | engine | source numbers | matched | missing | recall |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | warning | header_binding_unverified | qwen | 497 | 496 | 1 (`20`) | 0.998 |
+| 2 | warning | header_binding_unverified | qwen | 417 | 416 | 1 (`35.5`) | 0.998 |
+| 3 | — run killed by memory pressure, not re-run — | | | | | | |
+
+Both surviving pages are effectively complete (single-token misses, not the
+34/389-shipped defect this ticket targets). Note this run's page 2 does not
+reproduce the specific truncated-vs-complete qwen pair documented in the
+Problem section above (that pair was observed in an earlier cached run,
+`/tmp/a1c/...-p127-129`, 2026-09-07) — Ollama model output is stochastic, and
+this run's page 2 shipped a single non-truncated qwen candidate rather than
+the truncated/complete pair. No document-level `audit_log.json` exists for
+this run (it is written at assemble time, which never ran given the crash),
+so no `candidate_truncated` event count is available for this specific
+attempt; the deterministic unit/integration tests above (built from the
+actual cached truncated-candidate JSON for this same fixture) are the
+guard's real evidence, not this one stochastic partial run. Page 3 (the
+ticket's own headline defect, `5.5 Counterparts to M3`) is unverified live
+until team-lead reruns with memory available.
