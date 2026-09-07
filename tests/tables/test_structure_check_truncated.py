@@ -309,6 +309,31 @@ def test_truncation_guard_pins_the_difference_strict_pool() -> None:
     assert with_guard != without_guard
 
 
+def test_cross_pool_truncated_strict_loses_to_complete_wide_pool_only() -> None:
+    """TICKET-A2 cross-pool difference (#648, the #645 bulletin p2 shape):
+    the truncated candidate is the ONLY strict-pool member (judge-cleared,
+    ``audit_passed=True``), while the complete candidate only clears the
+    WIDER ``_grid_reading_attempt`` pool (``audit_passed=False`` -- never
+    admitted to the strict pool at all). A within-pool comparison (both
+    candidates strict, as ``test_truncated_candidate_loses_to_complete_one``
+    above exercises) would miss this: here the strict pool never contains
+    the complete candidate to compare against in the first place, so only
+    scoring truncation against the WIDER union (``_truncated_grid_reading_ids``)
+    lets the strict pool see a complete alternative exists and empty itself,
+    letting the row-corroboration fallback ship the complete wide-pool-only
+    reading instead of the truncated strict one.
+    """
+    truncated = _strict_grid_output("qwen", MIXED_STYLE_MD)
+    complete = _grid_reading_output("gemini", COMPLETE_MD)
+    p = _strict_page([truncated, complete])
+
+    assert _strict_grid_authored_pool(p) == []
+    winner = structure_class_grid_winner(p)
+    assert winner is not None
+    assert winner.engine == "gemini"
+    assert structure_class_truncated_engines(p) == ("qwen",)
+
+
 # ---------------------------------------------------------------------------
 # Layer 2: S1 winner-selection integration -- real fixtures
 # ---------------------------------------------------------------------------

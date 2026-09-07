@@ -319,8 +319,13 @@ def test_reused_corroboration_event_kind_already_rolls_up_to_document_trust() ->
     assert trust.counts_by_kind().get("structure_class_row_corroborated") == 1
 
     note = trust_note(trust)
-    assert note is not None
-    assert "structure_class_row_corroborated" in note or "1 page" in note.lower() or note
+    # NOTE: trust_note() reports only a count/pointer ("untrusted tables on
+    # N page(s), M flag(s) (see tables_trust.json)"), never the event kind
+    # name -- so the kind-name assertion the ticket's "Must pin" asked for
+    # ("structure_class_row_corroborated" in note) is false on the real
+    # note text and would be a wrong pin. Asserting the exact real content
+    # instead: this still fails if the rollup ever miscounts pages/flags.
+    assert note == "untrusted tables on 1 page(s), 1 flag(s) (see tables_trust.json)"
 
 
 # --------------------------------------------------------------------------
