@@ -123,3 +123,122 @@ re-run confirms 600/600 files clean.
 | --- | --- | --- | --- |
 | ECB transcript p1–3 | 0 | `untrusted_page_count: 3`, all `table_not_scorable` | `untrusted_page_count: 0`, no events |
 | ECB survey 2013 p2 | 3 | flags (real table) | unchanged — still flags |
+
+## Round 2 — reviewer blocker: `detected_table_count == 0` is not the same as "no table"
+
+Review rejected round 1 with a confirmed counterexample: `fed-meetings-2010-11-03-minutes`
+page 11 ("Table 1. Economic projections", real numbers) has
+`native_table_region_count: 2` in its persisted sidecar (`pages/00011.json`) but never
+serializes a `detected_table_count` key at all — this Fed corpus run predates that field
+reaching every page's `PageState` copy, so `getattr(ps, "detected_table_count", 0)` reads
+0. Under the round-1 gate (`detected_table_count > 0`), this page — a real, borderless
+table only the native reconstruction pass sees — loses its only distrust signal. GH-520's
+own docstring documents exactly this asymmetry and treats a bare `detected_table_count ==
+0` as insufficient evidence, failing closed rather than reading it as "no table" (the
+structure-class floor scoping). E2's gate had reintroduced the same mistake GH-520 exists
+to prevent.
+
+**Fix:** both emission sites now call a new `_page_has_scorable_table_evidence` helper
+instead of `_page_detected_table_count(...) > 0` directly:
+
+```python
+def _page_has_scorable_table_evidence(self, page_num, ps=None) -> bool:
+    if self._page_detected_table_count(page_num, ps) > 0:
+        return True
+    # falls back through ps.native_table_region_count, then the assessment's
+    return ...
+```
+
+i.e. `detected_table_count > 0 OR native_table_region_count > 0`, checking `PageState`
+first and the document-level assessment second for each, mirroring the existing
+`_page_detected_table_count` fallback shape. `_page_detected_table_count` itself is
+unchanged and still used internally.
+
+### New tests
+
+- `tests/pipeline/test_table_not_scorable_scope.py::test_borderless_table_with_zero_detected_count_still_flags`
+  — synthetic pin: `detected_table_count=0`, `native_table_region_count=2` — event fires.
+  This is the direct "pin the difference" test for the OR-gate itself.
+- `tests/pipeline/test_table_not_scorable_scope.py::test_fed_minutes_p11_borderless_table_survives_missing_detected_count`
+  — real-fixture reproduction of the reviewer's exact case: reads the actual persisted
+  `pages/00011.json` sidecar from
+  `~/repos/research/central-bank-network/data/ocr-runs/fed-01/fed-meetings-2010-2010-11-2010-11-03-minutes/`,
+  asserts the sidecar genuinely has no `detected_table_count` key and a positive
+  `native_table_region_count`, drives `_table_page_needs_escalation` against the real
+  source PDF page (`ocr-staging/fed-01/pdf/fed-meetings-2010-2010-11-2010-11-03-minutes.pdf`,
+  page 11), and asserts `table_not_scorable` fires and `untrusted_page_count == 1`. Also
+  updated `test_prose_page_yields_zero_untrusted_pages` /
+  `test_detected_table_page_still_flags` to set `native_table_region_count=0` explicitly
+  (previously implicit via `SimpleNamespace` attribute absence, which `getattr` already
+  tolerated, but explicit is clearer given the new OR branch) and threaded
+  `native_table_region_count` through `_score_one_page`'s `ps` construction for the
+  existing ECB real-fixture tests.
+
+### Reviewer's requested counts, reproduced
+
+**ECB (12/13 suppressed correctly).** Re-scored every page of all 9 in-corpus ECB PDFs
+(30 pages total) through the fixed code (`BornDigitalDetector` + `_surface_table_scoring`,
+no model). Before the fix, the live census runs recorded 13 `table_not_scorable` events
+across 5 of the 9 documents (`tables_trust.json` `counts_by_kind`). After the fix: 1 event
+survives (`ecb-speeches-2025-speech-p21-23.pdf` page 3, `detected_table_count=2`, a real
+table) — **12 of 13 suppressed**, the 1 remaining is a genuine table page, confirming the
+gate does not overcorrect into losing the true positive.
+
+**Fed (3 of 400 events rescued by the OR gate).** Scanned every `audit_log.json` under
+`~/repos/research/central-bank-network/data/ocr-runs/fed-01` (767 documents) for
+`table_not_scorable` events and cross-referenced each event's page against its persisted
+`pages/NNNNN.json` sidecar. Total: **400 events across 68 documents** — matches the
+census log's headline figure exactly. Of those 400: **0 had `detected_table_count > 0`**
+recorded in the sidecar (this corpus run predates that field, which is the actual root
+cause the census caught), **3 had `native_table_region_count > 0`** (rescued only by the
+round-2 OR gate — the Fed p11 case above is one of the 3), and **397 had neither** (both
+signals 0, correctly suppressed as false positives on numeric prose). This is the full
+population, not a sample — a stronger form of the "3 of 12" figure quoted in review,
+which was evidently a hand-checked subset of the same 400. Reproduction script inlined
+below for the record:
+
+```python
+import json, glob, os
+
+base = "."  # run from central-bank-network/data/ocr-runs/fed-01
+total = rescued = already = neither = 0
+for docdir in sorted(glob.glob(os.path.join(base, "*"))):
+    audit = os.path.join(docdir, "audit_log.json")
+    if not os.path.isdir(docdir) or not os.path.exists(audit):
+        continue
+    events = json.load(open(audit))
+    events = events if isinstance(events, list) else events.get("events", [])
+    for e in [e for e in events if e.get("kind") == "table_not_scorable"]:
+        total += 1
+        pn = e.get("page_num")
+        pj = os.path.join(docdir, "pages", f"{pn:05d}.json") if pn else None
+        detected = native = None
+        if pj and os.path.exists(pj):
+            pd = json.load(open(pj))
+            detected = pd.get("detected_table_count")
+            native = pd.get("native_table_region_count", 0) or 0
+        if detected:
+            already += 1
+        elif native:
+            rescued += 1
+        else:
+            neither += 1
+print(total, already, rescued, neither)  # 400 0 3 397
+```
+
+### Updated test results (round 2)
+
+- Targeted (`test_gh95_tables_trust.py` + `test_gh96_escalation_lane.py` +
+  `test_gh96_table_exactness.py` + `test_gh96_escalation_decision.py` +
+  `test_gh96_escalation_canary.py` + `test_table_not_scorable_scope.py`): 110 passed.
+- New scope file alone: 6 passed (0 skipped — all real fixtures present, including the
+  new Fed p11 fixture).
+- Golden / byte-identity + agentic fuse (`test_pp2_agentic_fuse.py`,
+  `test_p3_judged_bytes_ship.py`, `test_p6_stage_c_difference.py`,
+  `test_p6_stage_ab_difference.py`): 67 passed.
+- Full suite: 4329 passed, 4 xfailed, 0 failed, 607.91s (0:10:07). Foreground, waited on.
+
+## Ruff (round 2)
+
+`uvx ruff@0.16.0 format --check .` clean after round-2 edits (re-run before commit).
+

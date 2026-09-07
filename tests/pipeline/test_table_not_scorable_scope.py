@@ -30,6 +30,7 @@ ollama -- so no need to patch ``_available_engines_for_agentic``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,7 @@ import fitz
 import pytest
 
 from socr.core.config import PipelineConfig
+from socr.core.pdf import open_pdf
 from socr.core.result import PageOutput, PageStatus
 from socr.core.tables_trust import build_tables_trust
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -83,7 +85,7 @@ def test_prose_page_yields_zero_untrusted_pages(tmp_path):
 
     pipe = _pipeline()
     state = SimpleNamespace(events=[], handle=SimpleNamespace(path=path))
-    ps = SimpleNamespace(has_tables=True, detected_table_count=0)
+    ps = SimpleNamespace(has_tables=True, detected_table_count=0, native_table_region_count=0)
     bo = PageOutput(page_num=1, text="some prose", status=PageStatus.SUCCESS, engine="native")
 
     pipe._surface_table_scoring(state, 1, ps, bo)
@@ -107,7 +109,38 @@ def test_detected_table_page_still_flags(tmp_path):
 
     pipe = _pipeline()
     state = SimpleNamespace(events=[], handle=SimpleNamespace(path=path))
-    ps = SimpleNamespace(has_tables=True, detected_table_count=1)
+    ps = SimpleNamespace(has_tables=True, detected_table_count=1, native_table_region_count=0)
+    bo = PageOutput(page_num=1, text="some prose", status=PageStatus.SUCCESS, engine="native")
+
+    pipe._surface_table_scoring(state, 1, ps, bo)
+
+    trust = build_tables_trust("prose.pdf", state.events)
+    payload = trust.to_dict()
+
+    assert payload["untrusted_page_count"] == 1
+    assert [e.kind for e in state.events] == ["table_not_scorable"]
+
+
+def test_borderless_table_with_zero_detected_count_still_flags(tmp_path):
+    """GH-655 round 2 (reviewer blocker): a page where the region detector
+    found nothing (``detected_table_count == 0``/``None``) but the native
+    reconstruction lane DID see table regions (``native_table_region_count``
+    > 0) must still surface `table_not_scorable`.
+
+    This is the shape reviewer measured on
+    ``fed-meetings-2010-11-03-minutes`` page 11 ("Table 1. Economic
+    projections"): a real, borderless table only the lane-cooccupancy /
+    reconstruction pass sees. GH-520 itself treats a bare
+    ``detected_table_count == 0`` as insufficient evidence and fails closed
+    rather than reading it as "no table" -- E2's gate must do the same,
+    or a real table page silently loses its only distrust signal.
+    """
+    path = tmp_path / "prose.pdf"
+    _prose_fragment_pdf(path)
+
+    pipe = _pipeline()
+    state = SimpleNamespace(events=[], handle=SimpleNamespace(path=path))
+    ps = SimpleNamespace(has_tables=True, detected_table_count=0, native_table_region_count=2)
     bo = PageOutput(page_num=1, text="some prose", status=PageStatus.SUCCESS, engine="native")
 
     pipe._surface_table_scoring(state, 1, ps, bo)
@@ -147,7 +180,11 @@ def _score_one_page(pdf_path: Path, page_num: int):
 
     pipe = _pipeline()
     state = SimpleNamespace(events=[], handle=SimpleNamespace(path=pdf_path))
-    ps = SimpleNamespace(has_tables=pa.has_tables, detected_table_count=pa.detected_table_count)
+    ps = SimpleNamespace(
+        has_tables=pa.has_tables,
+        detected_table_count=pa.detected_table_count,
+        native_table_region_count=pa.native_table_region_count,
+    )
     # The native text is what shipped, unmodified, since no OCR ran.
     bo = PageOutput(
         page_num=page_num, text=pa.native_text or "", status=PageStatus.SUCCESS, engine="native"
@@ -192,3 +229,71 @@ def test_ecb_survey_2013_p2_detected_table_page_unaffected():
     if events:
         assert payload["untrusted_page_count"] == 1
         assert "table_not_scorable" in payload["pages"]["2"]["reasons"]
+
+
+# ---------------------------------------------------------------------------
+# GH-655 round 2 (reviewer blocker): a real, persisted sidecar with a
+# borderless table -- ``detected_table_count`` absent/0, ``native_table_
+# region_count`` positive. Reads the actual JSON sidecar the census run
+# produced, not a re-detection -- a resumed page's ``PageState`` is built
+# from exactly this kind of persisted payload, and a fresh re-run of the
+# region detector on this machine's PyMuPDF version is not guaranteed to
+# reproduce the same count the census run saw (only the persisted fact
+# matters here: this page's sidecar never carried ``detected_table_count``
+# at all, which ``getattr(..., 0)`` reads as 0).
+# ---------------------------------------------------------------------------
+
+FED_MINUTES_PDF = (
+    Path.home()
+    / "repos/research/central-bank-network/data/ocr-staging/fed-01/pdf"
+    / "fed-meetings-2010-2010-11-2010-11-03-minutes.pdf"
+)
+FED_MINUTES_P11_SIDECAR = (
+    Path.home()
+    / "repos/research/central-bank-network/data/ocr-runs/fed-01"
+    / "fed-meetings-2010-2010-11-2010-11-03-minutes/pages/00011.json"
+)
+
+
+@pytest.mark.skipif(
+    not (FED_MINUTES_PDF.exists() and FED_MINUTES_P11_SIDECAR.exists()),
+    reason="fixture not present on this machine",
+)
+def test_fed_minutes_p11_borderless_table_survives_missing_detected_count():
+    """GH-655 round 2: reviewer's exact reproduction case.
+
+    Page 11 of the Fed's 2010-11-03 minutes carries "Table 1. Economic
+    projections" -- a real, borderless table. Its persisted sidecar
+    (``pages/00011.json``) has ``native_table_region_count: 2`` but never
+    serialized a ``detected_table_count`` key at all (this run predates
+    the field reaching every page's ``PageState`` copy) -- exactly the
+    shape a plain ``detected_table_count > 0`` gate reads as "no table"
+    and a resumed page would silently lose its only distrust signal for.
+    """
+    sidecar = json.loads(FED_MINUTES_P11_SIDECAR.read_text())
+    assert "detected_table_count" not in sidecar, (
+        "fixture premise changed: sidecar now carries detected_table_count"
+    )
+    assert sidecar.get("native_table_region_count", 0) > 0, sidecar.get("native_table_region_count")
+
+    pipe = _pipeline()
+    state = SimpleNamespace(events=[], handle=SimpleNamespace(path=FED_MINUTES_PDF))
+    ps = SimpleNamespace(
+        has_tables=True,
+        detected_table_count=sidecar.get("detected_table_count", 0),
+        native_table_region_count=sidecar["native_table_region_count"],
+    )
+    with open_pdf(FED_MINUTES_PDF) as doc:
+        page = doc[10]  # 0-indexed: PDF page 11
+        text = page.get_text()
+        bo = PageOutput(page_num=11, text=text, status=PageStatus.SUCCESS, engine="native")
+        pipe._table_page_needs_escalation(state, 11, page, ps, bo)
+
+    trust = build_tables_trust(FED_MINUTES_PDF.name, state.events)
+    payload = trust.to_dict()
+    # Measured directly against this fixture: the native rows on this page
+    # fail the grid test, so the event fires -- confirmed by running this
+    # exact scenario before writing the assertion (not assumed).
+    assert [e.kind for e in state.events] == ["table_not_scorable"]
+    assert payload["untrusted_page_count"] == 1
+    assert "table_not_scorable" in payload["pages"]["11"]["reasons"]
