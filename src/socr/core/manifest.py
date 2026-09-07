@@ -751,7 +751,7 @@ def _grid_shaped_attempt(out: PageOutput | None) -> bool:
     """
     if out is None:
         return False
-    if (out.engine or "").startswith("native"):
+    if (out.engine or "").startswith(_NATIVE_TEXT_LANES):
         return False
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
@@ -790,7 +790,7 @@ def _grid_reading_attempt(out: PageOutput | None) -> bool:
     """
     if out is None:
         return False
-    if (out.engine or "").startswith("native"):
+    if (out.engine or "").startswith(_NATIVE_TEXT_LANES):
         return False
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
