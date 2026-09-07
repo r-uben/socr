@@ -11956,9 +11956,22 @@ class UnifiedPipeline:
             trust = build_tables_trust(
                 state.handle.filename, audit.events, label_unverified_pages=label_pages
             )
+            trust_path = doc_dir / "tables_trust.json"
             if not trust.pages:
-                return  # every table trusted — no sidecar to write
-            trust.save(doc_dir / "tables_trust.json")
+                # #659 round 4 (Astra P2): every table trusted on THIS run.
+                # A prior run's ``tables_trust.json`` in the same directory
+                # (e.g. an earlier attempt whose label doubt has since
+                # retired via ``label_unverified_pages``) must not survive as
+                # a stale artifact -- the file's own contract is "absent
+                # means clean", so an untrusted_pages entry left behind after
+                # retirement lies about the CURRENT run. Remove it if
+                # present; a genuinely clean run where the file never
+                # existed is unaffected (no-op, matching the pre-#659
+                # "nothing to write" behaviour).
+                if trust_path.exists():
+                    trust_path.unlink()
+                return
+            trust.save(trust_path)
             if not self.config.quiet:
                 console.print(f"  [yellow]Table trust:[/yellow] {trust.summary_line()}")
         except Exception as exc:

@@ -25,7 +25,9 @@ ladder, no real tesseract.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -481,6 +483,190 @@ def test_unrelated_distrust_kind_on_the_same_page_is_never_suppressed() -> None:
     assert 1 in trust.untrusted_pages
     assert "native_table_verifier_warn" in trust.pages[1].reasons
     assert LABEL_UNVERIFIED_KIND not in trust.pages[1].reasons
+
+
+# --------------------------------------------------------------------------
+# 9. Astra round 4 P1: an UNRELATED historical whole-page resolving event
+#    must never override the caller's explicit current label-doubt answer,
+#    in either direction.
+# --------------------------------------------------------------------------
+
+
+def test_current_label_doubt_outranks_historical_whole_page_acceptance() -> None:
+    """A page-wide RESOLVING event recorded for a DIFFERENT reason
+    (``table_escalation_accepted``, GH-96 -- an accepted crop-reread
+    escalation, nothing to do with the label gate) must not silently erase a
+    label doubt the caller explicitly says is still live on the current
+    winner. The reducer used to check the generic ``resolved_pages`` set
+    BEFORE the label-specific branch, so chronology it has no business
+    consulting for this kind overrode the caller's explicit answer.
+    """
+    events = [
+        AuditEvent(page_num=1, kind="table_escalation_accepted", engine="qwen", detail="", data={}),
+        AuditEvent(
+            page_num=1,
+            kind=LABEL_UNVERIFIED_KIND,
+            engine="qwen",
+            detail=LABEL_DETAIL,
+            data={"cause": ""},
+        ),
+    ]
+    trust = build_tables_trust("doc.pdf", events, label_unverified_pages=frozenset({1}))
+    assert 1 in trust.untrusted_pages
+
+
+def test_clean_final_winner_retires_despite_the_same_historical_acceptance() -> None:
+    """The other direction, same mixed history: when the caller's current set
+    says page 1 is now clean, the SAME ``table_escalation_accepted`` +
+    label-unverified history must not keep it untrusted either.
+    """
+    events = [
+        AuditEvent(page_num=1, kind="table_escalation_accepted", engine="qwen", detail="", data={}),
+        AuditEvent(
+            page_num=1,
+            kind=LABEL_UNVERIFIED_KIND,
+            engine="qwen",
+            detail=LABEL_DETAIL,
+            data={"cause": ""},
+        ),
+    ]
+    trust = build_tables_trust("doc.pdf", events, label_unverified_pages=frozenset())
+    assert 1 not in trust.untrusted_pages
+
+
+# --------------------------------------------------------------------------
+# 10. Astra round 4 P2: retirement must update the ON-DISK artifact, not only
+#     the in-memory reducer -- a two-run write into the same directory.
+# --------------------------------------------------------------------------
+
+
+def _write_run(pipeline: UnifiedPipeline, doc_dir: Path, events: list, records: list) -> None:
+    state = SimpleNamespace(handle=SimpleNamespace(filename="doc.pdf"))
+    audit = SimpleNamespace(events=events)
+    pipeline._write_tables_trust(state, audit, doc_dir, records=records)
+
+
+def test_clean_final_run_removes_a_stale_tables_trust_json(tmp_path: Path) -> None:
+    """'Absent means clean' is ``tables_trust.json``'s own contract (a
+    prose-only run never writes one) -- leaving stale content behind once
+    the doubt it recorded has retired lies about the CURRENT run to any
+    consumer that only reads the sidecar.
+    """
+    pipeline = _pipeline()
+    trust_path = tmp_path / "tables_trust.json"
+
+    _write_run(
+        pipeline,
+        tmp_path,
+        [
+            AuditEvent(
+                page_num=1,
+                kind=LABEL_UNVERIFIED_KIND,
+                engine="qwen",
+                detail=LABEL_DETAIL,
+                data={"cause": ""},
+            )
+        ],
+        [
+            FinalizedPageRecord(
+                output=_flagged_output(page_num=1),
+                disposition=_disposition(),
+                selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+            )
+        ],
+    )
+    assert trust_path.exists()
+    assert json.loads(trust_path.read_text())["untrusted_pages"] == [1]
+
+    # Second run: page 1's FINAL winner is now clean. The stale event is kept
+    # in this run's history (real history must survive), but the current
+    # winner carries no doubt, so the file must retire.
+    _write_run(
+        pipeline,
+        tmp_path,
+        [
+            AuditEvent(
+                page_num=1,
+                kind=LABEL_UNVERIFIED_KIND,
+                engine="qwen",
+                detail=LABEL_DETAIL,
+                data={"cause": ""},
+            )
+        ],
+        [
+            FinalizedPageRecord(
+                output=_clean_output(page_num=1),
+                disposition=_disposition(),
+                selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+            )
+        ],
+    )
+    assert not trust_path.exists()
+
+
+def test_retirement_preserves_unrelated_active_distrust(tmp_path: Path) -> None:
+    """Same two-run shape, but page 2 carries a DIFFERENT, still-active
+    distrust kind throughout. Retiring page 1's label doubt must not touch
+    page 2's entry -- the file is REWRITTEN with the current state, not
+    blanked just because one page's doubt cleared.
+    """
+    pipeline = _pipeline()
+    trust_path = tmp_path / "tables_trust.json"
+    label_event = AuditEvent(
+        page_num=1,
+        kind=LABEL_UNVERIFIED_KIND,
+        engine="qwen",
+        detail=LABEL_DETAIL,
+        data={"cause": ""},
+    )
+    unrelated_event = AuditEvent(
+        page_num=2,
+        kind="native_table_verifier_warn",
+        engine="native",
+        detail="unrelated native table concern",
+        data={},
+    )
+
+    _write_run(
+        pipeline,
+        tmp_path,
+        [label_event, unrelated_event],
+        [
+            FinalizedPageRecord(
+                output=_flagged_output(page_num=1),
+                disposition=_disposition(),
+                selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+            ),
+            FinalizedPageRecord(
+                output=_clean_output(page_num=2),
+                disposition=_disposition(),
+                selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+            ),
+        ],
+    )
+    assert json.loads(trust_path.read_text())["untrusted_pages"] == [1, 2]
+
+    # Page 1 clears; page 2's unrelated distrust is still active and must
+    # remain -- so the file is not removed, only rewritten without page 1.
+    _write_run(
+        pipeline,
+        tmp_path,
+        [label_event, unrelated_event],
+        [
+            FinalizedPageRecord(
+                output=_clean_output(page_num=1),
+                disposition=_disposition(),
+                selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+            ),
+            FinalizedPageRecord(
+                output=_clean_output(page_num=2),
+                disposition=_disposition(),
+                selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+            ),
+        ],
+    )
+    assert trust_path.exists()
+    assert json.loads(trust_path.read_text())["untrusted_pages"] == [2]
 
 
 if __name__ == "__main__":

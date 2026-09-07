@@ -530,22 +530,33 @@ def build_tables_trust(
             # A non-resolvable kind is NEVER cleared by resolved_pages/
             # resolved_tables (a generic ACCEPTED proves nothing about a
             # SPECIFIC excluded word) -- only by the word-keyed check above.
+        elif kind == LABEL_UNVERIFIED_KIND and label_unverified_pages is not None:
+            # #659 round 4 (Astra P1): when the caller supplies the current
+            # final set, LABEL_UNVERIFIED_KIND's resolution is decided
+            # ENTIRELY by that set -- never by the generic ``resolved_pages``
+            # / ``resolved_tables`` history below. That history is keyed off
+            # UNRELATED resolving events (``table_escalation_accepted`` and
+            # friends), and checking it FIRST let a page-wide acceptance
+            # recorded for some other reason silently erase a label doubt the
+            # caller explicitly says is still live on the CURRENT winner --
+            # chronology the reducer has no business consulting for this
+            # kind. The same branch also runs in the other direction: a page
+            # absent from ``label_unverified_pages`` retires here even when
+            # no resolving event was ever emitted for it, because the
+            # current winner is simply clean. ``label_unverified_pages is
+            # None`` (the caller has no final records) falls through to the
+            # untouched history-only ``else`` branch every other kind still
+            # uses, same as the non-resolvable branch above never touches it
+            # either -- the three are mutually exclusive by kind, so their
+            # relative order here does not matter, only that neither of the
+            # two special cases falls through into the generic check.
+            if page_num not in label_unverified_pages:
+                continue
         else:
             if page_num in resolved_pages:
                 continue
             if table_id is not None and (page_num, str(table_id)) in resolved_tables:
                 continue
-
-        # #659 round 3: this kind's resolution lives on the FINAL winning
-        # candidate, not on a follow-up event -- see the parameter's docstring
-        # above. Skip only when the caller actually supplied the current set;
-        # ``None`` means "unknown", not "resolved everywhere".
-        if (
-            kind == LABEL_UNVERIFIED_KIND
-            and label_unverified_pages is not None
-            and page_num not in label_unverified_pages
-        ):
-            continue
 
         page = trust.pages.setdefault(page_num, PageTrust(page_num=page_num))
         page.reasons.append(kind)
