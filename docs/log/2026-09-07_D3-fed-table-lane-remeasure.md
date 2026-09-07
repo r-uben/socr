@@ -150,8 +150,10 @@ line ~191/337) — on this machine `pytesseract`/`tesseract` is absent
 (`"no local content evidence available for scanned table"`, line 282), and
 `corroborate_rows` abstains per its documented `total == 0 → abstain, never
 clears` rule (A1a) — a provably correct candidate cannot pass without a witness.
-**The fix is a ticket (a scan-specific witness, or environment fix + explicit
-fallback policy), not this log.** B1's marker-scoping fix (`#651`) is confirmed
+Filed as **#658** ("scanned table pages fail closed with 'no local content
+evidence' when classical OCR is absent — perfect candidates discarded (Fed
+swap-line tables, D3)") — cite #658 for this class, not a new ticket.
+**The fix is that ticket, not this log.** B1's marker-scoping fix (`#651`) is confirmed
 working here: all three pages ship the D3 marker (`[page N failed: unverifiable
 table — see image]` + page image) scoped to the table region only — the
 surrounding prose on the same page is preserved, checked directly in the
@@ -219,10 +221,56 @@ all five scanned documents:
 3 of 5 sampled pages still ship the exact defect the census reported (honorific
 and name on separate lines, geometrically column-interleaved), all `SUCCESS`, all
 `engine=native`. C1 (`#631`, "native geometry #592", DONE) evidently fixed some
-column geometries and not others — 1970's typewriter layout binds correctly,
-1968/1977/1990's do not, and I did not find an obvious layout difference between
-them without a deeper geometry dump. This is the single largest disagreement
-between what the plan believes is fixed and what this sample shows; it needs its
+column geometries and not others.
+
+**Geometry dump, calling the real `socr.core.born_digital` functions directly
+against each PDF's page 1** (not a reimplementation — `_median_word_space_width`,
+`_line_word_extents`, `_cluster_two_bands`, `_try_aligned_run`,
+`_find_aligned_runs`, imported and run in-process): on all three still-broken
+pages, `_find_aligned_runs` returns zero runs, and the reason is **not** a failed
+gap/width-ratio/fill-share check — it never reaches those. It fails the
+bijection precondition (`len(left) != len(right)` inside `_try_aligned_run`) on
+every extension it tries within the 4-block fail-streak window:
+
+| doc | step (blocks walked from `PRESENT:`) | left (honorific) lines | right (name) lines | result |
+|---|---|---:|---:|---|
+| 1968 p1 | +1 block | 1 | 4 | bijection fails |
+| 1968 p1 | +2 | 1 | 7 | bijection fails |
+| 1968 p1 | +3 | 1 | 11 | bijection fails |
+| 1968 p1 | +4 (streak limit) | 12 | 2 | bijection fails — gives up |
+| 1977 p1 | +1 | 13 | 2 | bijection fails |
+| 1977 p1 | +2 | 13 | 10 | bijection fails |
+| 1977 p1 | +3 | 13 | 12 | bijection fails |
+| 1977 p1 | +4 (streak limit) | 14 | 12 | bijection fails — gives up |
+| 1990 p1 | +1 | 1 | 7 | bijection fails |
+| 1990 p1 | +2 | 1 | 10 | bijection fails |
+| 1990 p1 | +3 | 11 | 3 | bijection fails |
+| 1990 p1 | +4 (streak limit) | 11 | 9 | bijection fails — gives up |
+
+**Root cause: the source PDF stores the honorific column and the name column as
+separate multi-line text blocks whose line counts never match at any point
+within the fail-streak window.** 1968's "Mr." column is split across 3 PDF
+blocks (4+3+4 = 11 lines); its name column is split across 3 different blocks
+(2+8+2 = 12 lines) — the block boundaries don't align 1:1 with visual rows, so
+`_find_aligned_runs`'s block-granularity walk (`block_lines[end]` added whole,
+one block at a time, capped at 4 consecutive non-matches) exhausts its
+fail-streak budget before a block-range boundary happens to land on equal
+left/right counts. **This does not reopen #592 as "C1's three geometric
+discriminants declined a list shape they should have caught"** — the gap
+(word-space), left/right width-ratio, and right-block fill-share checks the
+team lead asked about never execute on these pages; the precondition ahead of
+them is what fails. It is a distinct, narrower shape: block segmentation from
+the source PDF doesn't line up with C1's per-block walk, on documents where the
+honorific and name columns happen to break across an unequal number of PDF
+text blocks. Worth naming precisely in a follow-up ticket (walk at line
+granularity across block boundaries, or raise the fail-streak budget) rather
+than folding into a "loosen the geometric thresholds" fix, which would not
+touch this cause. 1970 (fixed) was not checked at this depth — plausible it
+simply has one PDF block per column with matching line counts, but not
+confirmed.
+
+This is the single largest disagreement between what the plan believes is
+fixed and what this sample shows; it needs its
 own look, out of D3's scope to diagnose further.
 
 (The swap-line table and the born-digital table pages are covered above as
@@ -286,16 +334,22 @@ above, not with the other 3 firing sites).
 
 ## Open items for the plan owner
 
-1. Class A (scanned-table zero-witness rejection) needs its own ticket — a
-   scan-specific witness path, or an explicit policy for trusting a
-   high-confidence candidate when no witness is available. Not in scope for
-   F1a/F1b/F2 as currently written (that table never reaches the normalizer).
+1. Class A (scanned-table zero-witness rejection) is #658 — a scan-specific
+   witness path, or an explicit policy for trusting a high-confidence
+   candidate when no witness is available. Not in scope for F1a/F1b/F2 as
+   currently written (that table never reaches the normalizer).
 2. Class C's single regression (2020 p16) plus the 3 other landscape-refusal
    sites point at #393 (rotated-page coordinate-frame mismatch) as the
    relevant open issue — worth confirming #393 explains 2020 p16 specifically
    before scoping a fix.
-3. Reopen investigation on #592 — 3/5 native-engine pages in this sample still
-   split honorific from name; C1's fix is geometry-dependent, not general.
+3. #592 needs a follow-up, but narrower than "geometric thresholds too
+   strict": on the 3 still-broken pages, `_find_aligned_runs`'s bijection
+   precondition (`len(left) == len(right)`) never holds within the 4-block
+   fail-streak window, because the source PDF splits the honorific and name
+   columns across an unequal number of text blocks — the gap/width-ratio/
+   fill-share checks never execute. A line-granularity walk across block
+   boundaries (or a larger fail-streak budget) is the shape of fix this
+   points at, not a threshold change.
 4. D2 (route cost) is still TODO; the ~3h01m / 103-page wall time here
    (dominated by the three born-digital documents) is a useful reference point
    for that ticket.
