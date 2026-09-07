@@ -13,7 +13,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -6907,7 +6907,16 @@ class UnifiedPipeline:
                             self._detect_and_crop_equations(state, [page_num], output_dir)
                             # GH-36b: LaTeX sidecar (behind recover_clean_equations flag).
                             if _recover_eq:
-                                self._attach_equation_latex_sidecars(state, [bo])
+                                # GH-157 (cold review #664): pin this call's
+                                # scope to the current page explicitly. Without
+                                # it, a later page's call would re-examine an
+                                # earlier page's already-attached regions --
+                                # found via the accumulated state.events -- and
+                                # wrongly report that earlier page as missing a
+                                # PageOutput, since only THIS page's is passed.
+                                self._attach_equation_latex_sidecars(
+                                    state, [bo], page_nums=[page_num]
+                                )
 
                 # GH-86: strip VLM sentinel image refs before provisional flush.
                 if _agentic_doc_dir is not None:
@@ -11730,6 +11739,7 @@ class UnifiedPipeline:
         self,
         state: DocumentState,
         page_outputs: list,
+        page_nums: Iterable[int] | None = None,
     ) -> None:
         """GH-36b: read equation crop PNGs → 1A-validated LaTeX → 1C sidecar.
 
@@ -11753,6 +11763,20 @@ class UnifiedPipeline:
           - The crop PNG is always the visual ground truth — always inlined.
           - 1B (full render / image-compare) is NOT performed here.
           - This path stays default-off (config.recover_clean_equations = False).
+
+        ``page_nums`` (GH-157, cold review round 2 on #664): the real agentic
+        caller invokes this method ONCE PER PAGE with only that page's
+        ``PageOutput`` (``page_outputs=[bo]``), while ``state.events`` keeps
+        accumulating across the whole document. Without an explicit scope,
+        page 2's call would re-examine page 1's already-attached regions too
+        -- found via the accumulated events -- and, since page 1's
+        ``PageOutput`` is absent from THIS call's ``page_outputs``, wrongly
+        report page 1 as missing one. ``page_outputs`` cannot serve as the
+        scope by itself: an in-scope page with a genuinely absent
+        ``PageOutput`` must still emit the skip event, which is the whole
+        point of GH-157. ``None`` (legacy/whole-document callers, and tests
+        that pass every relevant page's output at once) keeps today's
+        behaviour: every page with detected regions is in scope.
         """
         from socr.core.audit_log import AuditEvent
         from socr.math.equation_latex import process_equation_region
@@ -11770,6 +11794,8 @@ class UnifiedPipeline:
         # Build a fast lookup from page_num to the PageOutput entry.
         output_by_page: dict[int, object] = {po.page_num: po for po in page_outputs}
 
+        scope = set(regions_by_page) if page_nums is None else set(page_nums)
+
         # GH-36b: use the dedicated clean-equation model field (defaults to
         # qwen3-vl:30b-a3b-instruct — the validated local instruct VLM).
         # Do NOT fall back to math_model here: that field defaults to
@@ -11781,17 +11807,36 @@ class UnifiedPipeline:
         rejected_total = 0
 
         for page_num, region_data_list in sorted(regions_by_page.items()):
+            if page_num not in scope:
+                # Out of scope for THIS call -- e.g. a page already handled by
+                # its own earlier per-page call. Not this call's business, and
+                # emitting an event for it would be a false "missing" report.
+                continue
+
             po = output_by_page.get(page_num)
             if po is None:
-                # GH-157: page not in page_outputs (shouldn't happen, but be
-                # defensive). This used to be a silent warning-only skip: crops
-                # stayed on disk, no sidecar was ever attached, and the page
-                # shipped as if nothing was detected. Never fabricate a
-                # PageOutput here -- there is nothing to attach a sidecar to --
-                # but the disposition must be visible at page/document level,
-                # so emit one terminal audit event per skipped region.
+                # GH-157: page in scope but not in page_outputs (shouldn't
+                # happen, but be defensive). This used to be a silent
+                # warning-only skip: crops stayed on disk, no sidecar was ever
+                # attached, and the page shipped as if nothing was detected.
+                # Never fabricate a PageOutput here -- there is nothing to
+                # attach a sidecar to -- but the disposition must be visible
+                # at page/document level, so emit one terminal audit event per
+                # skipped region.
                 for region_index, rdata in enumerate(region_data_list):
                     crop_path = rdata.get("crop_path")
+                    # Idempotent per region/outcome: this method can run again
+                    # over the same scope (e.g. a retried page), and a repeat
+                    # skip event for a disposition already on record would
+                    # inflate the count without adding information.
+                    already_recorded = any(
+                        e.kind == "equation_sidecar_skipped_no_page_output"
+                        and e.page_num == page_num
+                        and e.data.get("region_index") == region_index
+                        for e in state.events
+                    )
+                    if already_recorded:
+                        continue
                     logger.warning(
                         "GH-157: page %d region %d has a detected equation but "
                         "no PageOutput; skipping (crop=%r)",

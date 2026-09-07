@@ -1022,3 +1022,156 @@ class TestSkippedSkipEventSurvivesResume:
         )
         assert restored[0].data.get("crop_path") == str(crop)
         assert restored[0].data.get("region_index") == 0
+
+
+class TestSequentialPerPageCallsAreScoped:
+    """GH-157 cold review round 2 (#664, Codex/Astra): state.events accumulates
+    across the whole document, so a call for page N must not re-examine page
+    N-1's already-handled regions and wrongly report them as missing.
+
+    Reproduction (pre-fix): call once per page with page_outputs=[current_po]
+    only, as the real agentic per-page caller does -- page 2's call then finds
+    page 1's region via the accumulated events, page 1's PageOutput is absent
+    from THIS call's page_outputs, and a spurious skip event fires for a page
+    that was handled fine on its own call.
+    """
+
+    def _emit_region(self, state, page_num, crop):
+        from socr.core.audit_log import AuditEvent
+
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="equation_region_detected",
+                engine="detect_equations",
+                detail="test",
+                data={
+                    "source_bbox": [0.0, 0.0, 1.0, 1.0],
+                    "padded_bbox": [0.0, 0.0, 1.0, 1.0],
+                    "has_eq_number": False,
+                    "crop_path": str(crop),
+                    "detection_time_s": 0.001,
+                    "source_text": "region",
+                    "equation_label": None,
+                    "region_index": 0,
+                },
+            )
+        )
+
+    def test_previous_processed_page_not_reported_missing(self, tmp_path):
+        """The scoped call: page 2's call must not touch page 1's disposition."""
+        from socr.core.config import PipelineConfig
+        from socr.core.result import PageOutput, PageStatus
+        from socr.core.state import DocumentState, PageState
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        handle = MagicMock()
+        handle.path = tmp_path / "doc.pdf"
+        handle.filename = "doc.pdf"
+        state = DocumentState(handle=handle)
+        orch = UnifiedPipeline(PipelineConfig())
+
+        outputs = []
+        with patch("socr.math.equation_latex.latex_for_crop", return_value=""):
+            for page_num in (1, 2):
+                crop = tmp_path / f"equation_{page_num}.png"
+                crop.write_bytes(b"fakepng")
+                state.pages[page_num] = PageState(
+                    page_num=page_num, is_born_digital=True, native_text="region"
+                )
+                self._emit_region(state, page_num, crop)
+                po = PageOutput(
+                    page_num=page_num, text="region", status=PageStatus.SUCCESS, engine="native"
+                )
+                outputs.append(po)
+                # Mirrors the real per-page caller: only THIS page's output,
+                # scope pinned to THIS page.
+                orch._attach_equation_latex_sidecars(state, [po], page_nums=[page_num])
+
+        assert all("region" in po.text for po in outputs)
+        skipped = [e for e in state.events if e.kind == "equation_sidecar_skipped_no_page_output"]
+        assert skipped == [], f"page 1 was wrongly reported missing on page 2's call: {skipped}"
+
+    def test_unscoped_call_reproduces_the_pre_fix_behaviour(self, tmp_path):
+        """Difference control: WITHOUT an explicit page_nums scope, the same
+        sequence reproduces the bug -- proving the scope argument, not
+        something incidental, is what fixes it."""
+        from socr.core.config import PipelineConfig
+        from socr.core.result import PageOutput, PageStatus
+        from socr.core.state import DocumentState, PageState
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        handle = MagicMock()
+        handle.path = tmp_path / "doc.pdf"
+        handle.filename = "doc.pdf"
+        state = DocumentState(handle=handle)
+        orch = UnifiedPipeline(PipelineConfig())
+
+        with patch("socr.math.equation_latex.latex_for_crop", return_value=""):
+            for page_num in (1, 2):
+                crop = tmp_path / f"equation_unscoped_{page_num}.png"
+                crop.write_bytes(b"fakepng")
+                state.pages[page_num] = PageState(
+                    page_num=page_num, is_born_digital=True, native_text="region"
+                )
+                self._emit_region(state, page_num, crop)
+                po = PageOutput(
+                    page_num=page_num, text="region", status=PageStatus.SUCCESS, engine="native"
+                )
+                # No page_nums -- legacy/unscoped call, one page's output at a time.
+                orch._attach_equation_latex_sidecars(state, [po])
+
+        skipped = [e for e in state.events if e.kind == "equation_sidecar_skipped_no_page_output"]
+        assert skipped and skipped[0].page_num == 1, (
+            "expected the unscoped call to reproduce the false 'missing' report "
+            f"for page 1; got {skipped}"
+        )
+
+    def test_in_scope_page_with_empty_output_still_emits(self, tmp_path):
+        """The other half: an explicitly in-scope page with no PageOutput at
+        all must still emit -- the scope argument must not swallow real GH-157
+        skips along with the false positives."""
+        from socr.core.config import PipelineConfig
+        from socr.core.state import DocumentState, PageState
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        handle = MagicMock()
+        handle.path = tmp_path / "doc.pdf"
+        handle.filename = "doc.pdf"
+        state = DocumentState(handle=handle)
+        orch = UnifiedPipeline(PipelineConfig())
+
+        crop = tmp_path / "equation_empty.png"
+        crop.write_bytes(b"fakepng")
+        state.pages[5] = PageState(page_num=5, is_born_digital=True, native_text="region")
+        self._emit_region(state, 5, crop)
+
+        orch._attach_equation_latex_sidecars(state, [], page_nums=[5])
+
+        skipped = [e for e in state.events if e.kind == "equation_sidecar_skipped_no_page_output"]
+        assert len(skipped) == 1
+        assert skipped[0].page_num == 5
+
+    def test_skip_event_is_idempotent_on_a_repeat_call(self, tmp_path):
+        """Calling the same in-scope, output-less page twice must not double
+        the skip event."""
+        from socr.core.config import PipelineConfig
+        from socr.core.state import DocumentState, PageState
+        from socr.pipeline.orchestrator import UnifiedPipeline
+
+        handle = MagicMock()
+        handle.path = tmp_path / "doc.pdf"
+        handle.filename = "doc.pdf"
+        state = DocumentState(handle=handle)
+        orch = UnifiedPipeline(PipelineConfig())
+
+        crop = tmp_path / "equation_repeat.png"
+        crop.write_bytes(b"fakepng")
+        state.pages[6] = PageState(page_num=6, is_born_digital=True, native_text="region")
+        self._emit_region(state, 6, crop)
+
+        orch._attach_equation_latex_sidecars(state, [], page_nums=[6])
+        orch._attach_equation_latex_sidecars(state, [], page_nums=[6])
+
+        skipped = [e for e in state.events if e.kind == "equation_sidecar_skipped_no_page_output"]
+        assert len(skipped) == 1, f"expected one idempotent event, got {len(skipped)}: {skipped}"
