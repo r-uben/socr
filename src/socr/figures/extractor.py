@@ -144,6 +144,36 @@ DATA_STROKE_MIN_WIDTH = 1.0
 # literal) so it is tunable from data.
 CHART_MIN_CLUSTER_AREA: float = 120.0 * 120.0
 
+# --- Scan-raster / decorative-raster detection (GH-511 large half) ---
+# A raster that clears CHART_MIN_CLUSTER_AREA is not necessarily a chart: a
+# page-sized scan of typewritten prose, or a page-sized decorative slide
+# export, both place an image covering the whole page and both carry a native
+# text layer (OCR text under the scan; real slide text under the export).
+# Neither is a chart, and both currently false-positive the raster fast path.
+#
+# Minimum fraction of the page a raster must cover before the scan/decorative
+# check below even applies. Measured 2026-09-07 (docs/log/2026-09-07_E1-scan-raster-not-chart.md)
+# on every scan/decorative fixture in the corpus: coverage is 1.000 on all of
+# them (5 Fed scanned-minutes pages, 3 ECB slide-export pages). Set below that
+# floor with margin for a scan whose border strip falls just outside the
+# scanned raster, or a page/raster size mismatch of a few percent -- while
+# still requiring the raster to occupy essentially the whole page (a chart
+# inset that merely happens to be large must not qualify).
+SCAN_RASTER_PAGE_COVERAGE_MIN: float = 0.90
+
+# Minimum density (native words per 100pt^2, counted over the raster's own
+# placed area) of words centred inside the raster before it is called a scan
+# or decorative page raster rather than a chart. Measured 2026-09-07 on the
+# same fixtures: the not-chart floor is 1.37 words/100pt^2 (ECB 2021 slide
+# export p3, sparse bullet text) and the chart ceiling is 0.21 words/100pt^2
+# (a synthetic raster chart with axis tick labels as its only native text --
+# the only raster-chart anchor available in the corpus; no genuine grayscale
+# raster chart with an OCR text layer was found to calibrate against, so this
+# gate does not use image colorspace even though grayscale-vs-RGB happened to
+# separate every measured fixture -- see the log for that secondary reading).
+# 0.75 sits strictly between both anchors with margin on each side.
+RASTER_TEXT_DENSITY_MIN: float = 0.75
+
 # Minimum fraction of a cluster's bbox area that a single drawing must cover to
 # be treated as an enclosing plot frame (axes box) rather than a datum inside
 # the plot. Derived from two measured populations on real corpus pages: plot
@@ -1063,6 +1093,52 @@ def fence_chart_axis_residue(native_text: str) -> str:
     return f"{body}\n\n{fenced}" if body else fenced
 
 
+def _raster_is_scan_or_decorative(page, rect, page_area: float) -> bool:
+    """True when a page-covering raster is a scan or decorative page image.
+
+    GH-511 (large half). A raster whose placed area covers at least
+    ``SCAN_RASTER_PAGE_COVERAGE_MIN`` of the page, and whose page carries
+    native words centred inside that raster at a density of at least
+    ``RASTER_TEXT_DENSITY_MIN`` words/100pt², is the scan itself (OCR text
+    layer under a page photograph) or a decorative page export (real text
+    under a slide background) -- not a chart. A genuine raster chart's only
+    native text is sparse axis/tick labels, well below the density floor.
+
+    Fails CLOSED (returns False, i.e. "not a scan -- treat normally") on any
+    extraction error: this check only ever narrows the chart lane away from
+    True on positive evidence of prose, never on ignorance.
+    """
+    coverage = rect.width * rect.height / page_area if page_area else 0.0
+    if coverage < SCAN_RASTER_PAGE_COVERAGE_MIN:
+        return False
+    try:
+        words = page.get_text("words")
+    except Exception as exc:  # noqa: BLE001 - can't read text, fail closed
+        logger.debug("has_chart_marks: get_text('words') failed: %s", exc)
+        return False
+    if not words:
+        return False
+    inside = 0
+    for w in words:
+        cx = (w[0] + w[2]) / 2.0
+        cy = (w[1] + w[3]) / 2.0
+        if rect.x0 <= cx <= rect.x1 and rect.y0 <= cy <= rect.y1:
+            inside += 1
+    raster_area = rect.width * rect.height
+    density = inside / (raster_area / 10000.0) if raster_area else 0.0
+    is_scan = density >= RASTER_TEXT_DENSITY_MIN
+    logger.debug(
+        "has_chart_marks: raster coverage=%.3f words_inside=%d density=%.2f/100pt2 "
+        "(floor=%.2f) -> %s",
+        coverage,
+        inside,
+        density,
+        RASTER_TEXT_DENSITY_MIN,
+        "scan/decorative" if is_scan else "not scan",
+    )
+    return is_scan
+
+
 def has_chart_marks(page) -> bool:
     """Cluster-first chart detector for the PP-7 chart-asset routing lane.
 
@@ -1084,9 +1160,20 @@ def has_chart_marks(page) -> bool:
     an image -- the page FAILS OPEN and is treated as a chart, so the lane can
     only ever narrow on evidence, never on ignorance.
 
-    What this gate does NOT do: separate a page-sized photograph or decorative
-    background from a page-sized raster chart. Nothing in the geometry
-    distinguishes them, and no deterministic signal here can (GH-511).
+    Also returns False, even when the raster clears ``CHART_MIN_CLUSTER_AREA``,
+    when the raster covers essentially the whole page (``SCAN_RASTER_PAGE_
+    COVERAGE_MIN``) AND carries native words at prose density inside it
+    (``RASTER_TEXT_DENSITY_MIN``, see ``_raster_is_scan_or_decorative``): a
+    page-sized scan of typewritten text (OCR text layer under the photograph)
+    or a page-sized decorative slide export (real text under the background)
+    is the page itself, not a chart (GH-511 large half). A genuine raster
+    chart's only native text is sparse axis/tick labels, well under the
+    density floor, so it is unaffected.
+
+    What this gate still does NOT do: separate a page-sized photograph or
+    decorative background CARRYING NO NATIVE TEXT from a page-sized raster
+    chart. Nothing in the geometry distinguishes those two, and no
+    deterministic signal here can (GH-511 small residue: image-only pages).
 
     Note on ``_looks_like_table_grid``: this function is intentionally NOT called
     here.  Its first-line short-circuit ``if has_data_marks: return False`` means
@@ -1142,6 +1229,7 @@ def has_chart_marks(page) -> bool:
                 page_label = getattr(page, "number", "?")
 
             largest = 0.0
+            largest_rect = None
             unmeasurable = False
             for image in raster_images:
                 try:
@@ -1158,7 +1246,10 @@ def has_chart_marks(page) -> bool:
                     unmeasurable = True
                     continue
                 for rect in rects:
-                    largest = max(largest, abs(rect.width) * abs(rect.height))
+                    area = abs(rect.width) * abs(rect.height)
+                    if area > largest:
+                        largest = area
+                        largest_rect = rect
 
             if unmeasurable:
                 logger.debug(
@@ -1170,6 +1261,18 @@ def has_chart_marks(page) -> bool:
                 return True
 
             if largest >= CHART_MIN_CLUSTER_AREA:
+                if largest_rect is not None and _raster_is_scan_or_decorative(
+                    page, largest_rect, page_area
+                ):
+                    logger.debug(
+                        "has_chart_marks p%s: raster rejected — %d image(s), largest "
+                        "placement %.0fpt2 covers the page with dense native text "
+                        "(scan or decorative page raster, not a chart; GH-511)",
+                        page_label,
+                        len(raster_images),
+                        largest,
+                    )
+                    return False
                 logger.debug(
                     "has_chart_marks p%s: raster path — %d embedded image(s), "
                     "largest placement %.0fpt2 >= %.0f",
