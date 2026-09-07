@@ -20,6 +20,7 @@ flag-off comparison never pins an absolute outcome measured on one machine
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import fitz
@@ -647,3 +648,95 @@ class TestGateBindingEvidenceHelper:
         # contradiction still caps acceptance at UNVERIFIED, never REJECTED,
         # even though the underlying evidence is now typed CONTRADICT.
         assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+
+
+# ---------------------------------------------------------------------------
+# GH-609 round 2 (Astra P1): a boundary-rejected word the geometry predicate
+# could not rule out as table content must reach the run's durable audit
+# trail, not vanish into an in-memory ``BindingResult`` field nobody reads.
+# ---------------------------------------------------------------------------
+
+
+class TestUnresolvedBindingBoundaryAudit:
+    def test_unresolved_boundary_word_emits_a_durable_audit_event(self, tmp_path: Path) -> None:
+        from socr.tables.binding import bind
+
+        region = (100.0, 60.0, 400.0, 200.0)
+        # A real ``bind()`` call on the exact overflowing-numeric-cell shape
+        # pinned in test_binding.py -- TL inside, majority of the box past
+        # the region's right edge -- so this is the real binder's own
+        # output, not a hand-built BindingResult standing in for it.
+        overflow_cell = (390.0, 100.0, 440.0, 110.0, "0.51", 0, 1, 2)
+        words = [
+            (140.0, 70.0, 170.0, 80.0, "OLS", 0, 0, 0),
+            (240.0, 70.0, 270.0, 80.0, "IV", 0, 0, 1),
+            (115.0, 100.0, 180.0, 110.0, "Treasury", 0, 1, 0),
+            (200.0, 100.0, 230.0, 110.0, "0.50", 0, 1, 1),
+            overflow_cell,
+        ]
+        md = """
+|          | OLS  | IV   |
+|----------|------|------|
+| Treasury | 0.50 | 0.51 |
+"""
+        binding_result = bind(words, md, region=region)
+        assert binding_result.unresolved_boundary_words, (
+            "fixture premise: bind() must reject a numeric cell as unresolved"
+        )
+
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)  # real PDF path; not read by this call
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+
+        pipeline._record_unresolved_binding_boundary(state, 1, witness, binding_result)
+
+        events = _events_of_kind(state, "table_binding_boundary_unresolved")
+        assert len(events) == 1
+        event = events[0]
+        assert event.page_num == 1
+        assert event.data["table_id"] == "t1"
+        assert event.data["words"] == [{"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}]
+
+    def test_fully_checked_binding_emits_no_boundary_event(self, tmp_path: Path) -> None:
+        """Regression control: no unresolved boundary words -> no event, and
+        a None binding (ABSTAIN before bind() ever ran) is a safe no-op."""
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+
+        pipeline._record_unresolved_binding_boundary(state, 1, witness, None)
+        pipeline._record_unresolved_binding_boundary(state, 1, witness, BindingResult())
+
+        assert _events_of_kind(state, "table_binding_boundary_unresolved") == []
+
+    def test_gate_level_run_emits_the_event_for_a_real_witness(self, tmp_path: Path) -> None:
+        """End-to-end through ``_run_table_judge_gate`` on the exact
+        row-shift fixture PDF already used by this file's gate tests, with
+        an extra caption word positioned to be a genuine unresolved boundary
+        rejection (numeric-bearing would be more direct, but this exercises
+        the real ``prepare_table_witnesses`` -> ``bind()`` path end to end)."""
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        ps = state.pages[1]
+        bo = _bo(_CORRECT_MD)
+
+        rung = _accept_rung("high")
+        with (
+            patch.object(pipeline, "_transcribe_cell_token", return_value=None),
+            patch.object(
+                pipeline,
+                "_binding_evidence_for_witness",
+                return_value=(
+                    BindingResult(unresolved_boundary_words=[(0.0, 0.0, 1.0, 1.0, "1.23")]),
+                    BindingEvidence.ABSTAIN,
+                ),
+            ),
+        ):
+            pipeline._run_table_judge_gate(state, 1, ps, bo, [rung])
+
+        events = _events_of_kind(state, "table_binding_boundary_unresolved")
+        assert len(events) == 1
+        assert events[0].data["words"] == [{"text": "1.23", "bbox": [0.0, 0.0, 1.0, 1.0]}]

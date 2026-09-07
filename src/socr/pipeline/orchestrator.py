@@ -4788,6 +4788,50 @@ class UnifiedPipeline:
 
         return binding_result, classify_binding_evidence(binding_result)
 
+    def _record_unresolved_binding_boundary(
+        self, state: DocumentState, page_num: int, witness, binding
+    ) -> None:
+        """Make a possibly-dropped boundary word durable, not just in-memory.
+
+        GH-609 round 2 (Astra P1). ``BindingResult.unresolved_boundary_words``
+        already forces ``fully_checked`` False so a possibly-dropped numeric
+        cell cannot be classified PASS -- but that field lived only on the
+        in-process ``BindingResult`` with no consumer, so the drop was still
+        invisible to anything reading the run's audit trail or the page
+        sidecar metadata. This appends one ``AuditEvent`` per witness with an
+        unresolved boundary word, carrying its text and bbox, so a downstream
+        reader (or a human) can see exactly what geometry could not rule out
+        as table content. Fires independent of the evidence verdict: a table
+        that also CONTRADICTs elsewhere still had this specific coverage gap.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.binding import BindingResult
+
+        if not isinstance(binding, BindingResult) or not binding.unresolved_boundary_words:
+            return
+
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="table_binding_boundary_unresolved",
+                detail=(
+                    f"table {witness.table_id}: "
+                    f"{len(binding.unresolved_boundary_words)} boundary word(s) rejected by "
+                    "region membership but not confidently external"
+                ),
+                data={
+                    "table_id": witness.table_id,
+                    "words": [
+                        {
+                            "text": str(w[4]) if len(w) > 4 else "",
+                            "bbox": [w[0], w[1], w[2], w[3]],
+                        }
+                        for w in binding.unresolved_boundary_words
+                    ],
+                },
+            )
+        )
+
     def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
         """The E1 clamp's question, unchanged: is there a genuine contradiction?
 
@@ -5195,6 +5239,7 @@ class UnifiedPipeline:
                         continue
 
                     binding, evidence = self._binding_evidence_for_witness(state, page_num, witness)
+                    self._record_unresolved_binding_boundary(state, page_num, witness, binding)
                     if isinstance(binding, BindingResult) and (
                         binding.contradicted_cells or binding.row_label_contradictions
                     ):
