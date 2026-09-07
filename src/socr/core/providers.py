@@ -267,6 +267,34 @@ def provider_ladder(
     return sorted(ladder, key=_sort_key)
 
 
+def zero_cap_pinned_forbids_cloud(config: object) -> bool:
+    """GH-154: True when an EXPLICIT ``--max-cost-per-page 0`` forbids a
+    cloud/remote call, the same way ``--strict-local`` does.
+
+    The codebase-wide convention is ``max_cost_per_page <= 0.0`` means "no
+    cap" (the unset default -- see ``PipelineConfig.max_cost_per_page`` and
+    ``provider_ladder``'s own ``max_cost_per_page`` docstring). That sentinel
+    stays in force for an OMITTED flag: the primary agentic ladder's default
+    rung is ``qwen-cloud``, priced at $0.00, and flipping the sentinel
+    globally would silently disable it on every unconfigured run.
+
+    ``PipelineConfig.max_cost_per_page_pinned`` is set True only when the CLI
+    (or another caller) already confirmed the zero was TYPED, not defaulted.
+    Only then does a cloud/remote call get refused regardless of its own
+    listed price -- exactly like a $0.00 ``qwen-cloud`` rung, or a $0.00
+    ``table_judge_adjudicator_cost_per_call_usd``, both of which a price-only
+    check would wave through.
+
+    ONE shared predicate so every remote-call entry point -- the routing
+    ladder, the equation-region lane, corrupt-math direct recovery, the
+    table-judge ladder, and the blind-cell adjudicator -- applies the SAME
+    policy instead of each re-deriving (and potentially missing) it.
+    """
+    return bool(getattr(config, "max_cost_per_page_pinned", False)) and (
+        getattr(config, "max_cost_per_page", 0.0) <= 0.0
+    )
+
+
 def cost_of(
     engine: EngineType,
     n_pages: int = 1,

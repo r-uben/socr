@@ -427,6 +427,31 @@ class TestCostAndMetering:
         )
         assert decision.adjudicator_ran is True
 
+    def test_gh154_pinned_zero_forbids_the_adjudicator_call(self):
+        """GH-154 round 3: an EXPLICIT ``--max-cost-per-page 0`` must forbid
+        this cloud call regardless of its own listed price -- the opposite of
+        ``test_disabled_cap_zero_means_unlimited`` above, which is an
+        UNPINNED (default/omitted) zero and must keep meaning "no cap".
+        """
+        state = _state()
+        config = _config(
+            table_judge_adjudicator_cost_per_call_usd=0.0,  # same $0 shape as qwen-cloud
+            max_cost_per_page=0.0,
+            max_cost_per_page_pinned=True,
+        )
+
+        decision = evaluate_cell_guard(
+            state=state,
+            page_num=1,
+            crop_path=None,
+            extraction_tokens=EXTRACTION_TOKENS,
+            requested_refs=REFS,
+            geometry_evidence=BindingEvidence.ABSTAIN,
+            adjudicator=_never_called_kimi(),
+            config=config,
+        )
+        assert decision.adjudicator_ran is False
+
     def test_known_zero_cost_still_records_exactly_one_run(self):
         state = _state()
         config = _config(table_judge_adjudicator_cost_per_call_usd=0.0)

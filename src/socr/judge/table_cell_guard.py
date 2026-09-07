@@ -155,6 +155,20 @@ def _budget_refusal(
     state: DocumentState, page_num: int, config: PipelineConfig, call_cost: float
 ) -> str:
     """Why this call must not be made, or "" when it may be. Checked FIRST."""
+    from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+    # GH-154: the adjudicator is a cloud CLI whose
+    # ``table_judge_adjudicator_cost_per_call_usd`` defaults to $0.00 -- the
+    # SAME shape as the $0 ``qwen-cloud`` rung this ticket started from. An
+    # EXPLICIT ``--max-cost-per-page 0`` must forbid this call regardless of
+    # its own listed price, the same way it forbids that rung; the cap check
+    # below only ever fires for a POSITIVE cap and would otherwise wave a $0
+    # call straight through. Checked independently of
+    # ``_build_table_cell_adjudicator`` (which already refuses to construct
+    # the adjudicator under this same policy) so a caller that reaches this
+    # function with an adjudicator built some other way is still covered.
+    if zero_cap_pinned_forbids_cloud(config):
+        return "blind-cell adjudication skipped: --max-cost-per-page 0 forbids this cloud call"
     cap = config.max_cost_per_page
     if cap > 0:
         page_spend = getattr(state.pages.get(page_num), "page_cost_usd", 0.0)

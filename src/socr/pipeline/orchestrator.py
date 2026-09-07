@@ -1113,6 +1113,15 @@ class UnifiedPipeline:
                 for e in sorted(cfg.enabled_engines, key=lambda x: x.value)
             },
             "max_cost_per_page": cfg.max_cost_per_page,
+            # GH-154 round 3: an EXPLICIT ``--max-cost-per-page 0`` and an
+            # OMITTED one both leave ``max_cost_per_page == 0.0``, but
+            # ``zero_cap_pinned_forbids_cloud`` now makes them route
+            # differently -- the pinned case excludes cloud/remote rungs the
+            # unpinned default still admits. Two configs with the same numeric
+            # cap must not share a fingerprint when only this bit differs, or
+            # a resume could reuse a terminal page an opposite-policy run
+            # would route (or refuse) differently.
+            "max_cost_per_page_pinned": getattr(cfg, "max_cost_per_page_pinned", False),
             "cost_budget": cfg.cost_budget,
             # GH-96: the escalation lane rewrites page text, so a resumed run must
             # not reuse fragments produced with the flag in the other state — that
@@ -2226,12 +2235,15 @@ class UnifiedPipeline:
 
     def _corrupt_math_model_disabled_reason(self) -> str:
         """Why the direct equation-model call is forbidden by run policy."""
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
         model = self.config.math_model or ""
-        if self.config.strict_local and "cloud" in model.casefold():
+        is_cloud = "cloud" in model.casefold()
+        if self.config.strict_local and is_cloud:
             return f"model call skipped: strict-local forbids remote model {model}"
-        if "cloud" in model.casefold() and (
-            self.config.max_cost_per_page > 0 or self.config.cost_budget > 0
-        ):
+        if is_cloud and zero_cap_pinned_forbids_cloud(self.config):
+            return f"model call skipped: --max-cost-per-page 0 forbids remote model {model}"
+        if is_cloud and (self.config.max_cost_per_page > 0 or self.config.cost_budget > 0):
             return "model call skipped: remote equation model has no configured price"
         return ""
 
@@ -2503,13 +2515,15 @@ class UnifiedPipeline:
 
         Fail-closed: no rung, no call, native prose ships.
         """
-        from socr.core.providers import TIER_LOCAL, provider_ladder
+        from socr.core.providers import TIER_LOCAL, provider_ladder, zero_cap_pinned_forbids_cloud
         from socr.math.recover import DEFAULT_MODEL
 
         model = self.config.clean_equation_model or DEFAULT_MODEL
         is_cloud = "cloud" in model.casefold()
         if self.config.strict_local and is_cloud:
             return None, f"model call skipped: strict-local forbids remote model {model}"
+        if is_cloud and zero_cap_pinned_forbids_cloud(self.config):
+            return None, f"model call skipped: --max-cost-per-page 0 forbids remote model {model}"
         if is_cloud and (self.config.max_cost_per_page > 0 or self.config.cost_budget > 0):
             return None, "model call skipped: remote equation model has no configured price"
 
@@ -4497,8 +4511,9 @@ class UnifiedPipeline:
     def _build_table_judge_rungs(self) -> list:
         """Construct the ladder's rung sequence once per document.
 
-        Returns ``[]`` when the ladder flag is off, or when ``strict_local``
-        is set: both rungs are cloud (ollama-cloud, gemini CLI), so
+        Returns ``[]`` when the ladder flag is off, when ``strict_local``
+        is set, or when GH-154's ``zero_cap_pinned_forbids_cloud`` policy
+        forbids it: both rungs are cloud (ollama-cloud, gemini CLI), so
         ``strict_local and table_judge_ladder`` makes every rung unavailable
         BEFORE the first call (G1's documented interaction) -- an empty rung
         list is the fail-open signal ``_run_table_judge_gate`` reads to
@@ -4508,7 +4523,13 @@ class UnifiedPipeline:
         tests can override it to inject fake ``RungCallable``s without a
         live ollama daemon or a ``gemini`` binary on disk.
         """
-        if not self.config.table_judge_ladder or self.config.strict_local:
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if (
+            not self.config.table_judge_ladder
+            or self.config.strict_local
+            or zero_cap_pinned_forbids_cloud(self.config)
+        ):
             return []
 
         from socr.judge.table_rung_gemini import make_gemini_rung
@@ -4570,10 +4591,17 @@ class UnifiedPipeline:
           reachable is no evidence at all about it (cold review round 1,
           finding 2).
 
-        Both rungs are cloud rungs, so the ladder and ``strict_local`` gates
-        are checked before touching either external seam.
+        Both rungs are cloud rungs, so the ladder, ``strict_local``, and
+        GH-154's zero-cap-pinned gates are all checked before touching either
+        external seam.
         """
-        if not self.config.table_judge_ladder or self.config.strict_local:
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if (
+            not self.config.table_judge_ladder
+            or self.config.strict_local
+            or zero_cap_pinned_forbids_cloud(self.config)
+        ):
             return False
 
         kinds = [k for k in (rung_kinds or []) if k]
@@ -4904,10 +4932,21 @@ class UnifiedPipeline:
         ``strict_local`` forbids cloud egress and the adjudicator is a cloud
         CLI, so it is not built at all there -- the guard chain then falls
         through to its fail-closed terminal without ever attempting egress,
-        exactly as ``_build_table_judge_rungs`` does for the readers. A
-        separate method so tests can inject a fake without a real binary.
+        exactly as ``_build_table_judge_rungs`` does for the readers. GH-154:
+        an EXPLICIT ``--max-cost-per-page 0`` forbids it the same way, even
+        though ``table_judge_adjudicator_cost_per_call_usd`` defaults to
+        $0.00 -- a price-only check would otherwise wave a $0 cloud call
+        through exactly like the $0 ``qwen-cloud`` rung this ticket started
+        from. A separate method so tests can inject a fake without a real
+        binary.
         """
-        if not self.config.table_judge_ladder or self.config.strict_local:
+        from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+        if (
+            not self.config.table_judge_ladder
+            or self.config.strict_local
+            or zero_cap_pinned_forbids_cloud(self.config)
+        ):
             return None
         from socr.judge.table_rung_ollama import make_ollama_cell_adjudicator
 
