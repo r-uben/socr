@@ -1085,6 +1085,15 @@ class BindingResult:
     #: list here means the binding is NOT ``fully_checked``: a possibly
     #: dropped cell must abstain rather than silently pass.
     unresolved_boundary_words: list = field(default_factory=list)
+    #: The region-admitted words this attempt actually fed into row/column
+    #: binding -- populated ONLY once ``bind()`` gets past the markdown parse
+    #: gate (GH-609 round 5). Empty on a parse failure / no-numeric-lanes
+    #: absence-of-evidence result, even though ``boundary_words`` /
+    #: ``unresolved_boundary_words`` are computed earlier and so are NOT
+    #: empty in that case. A caller that needs "was this specific word
+    #: actually bound, on an attempt that really evaluated geometry" must
+    #: read this field, not merely the absence of an unresolved entry.
+    region_scoped_words: tuple = ()
 
     @property
     def fully_checked(self) -> bool:
@@ -1486,6 +1495,15 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     grid = parse_grid(markdown)
     if grid is None:
         return result
+
+    # GH-609 round 5: the region-admitted words this attempt ACTUALLY fed into
+    # row/column binding, set only past the parse-failure gate above. This is
+    # the "was this word really evaluated" signal a caller needs to tell a
+    # positive resolution ("bound, on a candidate that parsed") apart from an
+    # absence of evidence ("bind() never got past parse_grid") -- an empty
+    # ``unresolved_boundary_words`` on the latter proves nothing about any
+    # specific word, admitted or not.
+    result.region_scoped_words = tuple(words)
 
     candidate_grid = grid
     physical_n_cand_cols = candidate_grid.n_cols - 1

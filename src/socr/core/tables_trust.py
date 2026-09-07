@@ -267,20 +267,34 @@ def _word_key(entry: dict) -> tuple[str, tuple[float, ...]] | None:
 
 
 def _boundary_fully_resolved_tables(events: list) -> set[tuple[str, int, str]]:
-    """``(unresolved_kind, page_num, table_id)`` triples where EVERY word
-    ever reported unresolved for that table under that kind has a matching
-    word-keyed resolution event (per ``BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND``).
+    """``(unresolved_kind, page_num, table_id)`` triples with NO currently-open
+    unresolved word, per ``BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND``.
 
-    Cumulative and word-keyed, not kind/table_id-only: a table that later
-    reports a NEW unresolved word (a fresh unresolved event naming a word not
-    yet resolved) stays distrusted even if every OLDER word was resolved --
-    ``unresolved <= resolved`` per table, not "a resolution event exists for
-    this table_id at all". A ``NON_RESOLVABLE_DISTRUST_KINDS`` member absent
-    from ``BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND`` never appears here --
+    GH-609 round 5 (Astra P1): ordered per-word open/closed reduction, not a
+    cumulative union-vs-union subset check. The union version let an EARLIER
+    resolution permanently clear a LATER recurrence of the exact same word --
+    unresolved A -> resolved A -> unresolved A read as cleared, because "A is
+    in the resolved set" stayed true forever once recorded. Walking ``events``
+    IN ORDER and tracking each word's OPEN/CLOSED state fixes that: an
+    unresolved event (re)opens the word regardless of any prior resolution: a
+    resolution event closes only word observations that PRECEDE it. A table
+    is fully resolved here iff every word ever opened for it ends closed.
+
+    Still word-keyed and per-table, not kind/table_id-only: a table that
+    later reports a NEW unresolved word stays open even if every OLDER word
+    closed. A ``NON_RESOLVABLE_DISTRUST_KINDS`` member absent from
+    ``BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND`` never appears here --
     fail closed, not an oversight.
+
+    An unresolved event that names NO identifiable word at all (an event
+    with no ``words``, or only malformed entries) opens an un-closeable
+    sentinel instead of nothing: a resolution event can only ever name real
+    words, so it can never match a sentinel, and the table stays open
+    forever for that observation -- fail closed on missing identity, never
+    fail open by treating "no words recorded" as "no words to resolve".
     """
-    unresolved_by_table: dict[tuple[str, int, str], set] = {}
-    resolved_by_table: dict[tuple[str, int, str], set] = {}
+    _wordless = object()
+    open_words_by_table: dict[tuple[str, int, str], set] = {}
     for unresolved_kind, resolved_kind in BOUNDARY_RESOLUTION_KIND_BY_UNRESOLVED_KIND.items():
         for event in events:
             kind = getattr(event, "kind", "")
@@ -291,15 +305,14 @@ def _boundary_fully_resolved_tables(events: list) -> set[tuple[str, int, str]]:
             if table_id is None:
                 continue
             key = (unresolved_kind, getattr(event, "page_num", 0), str(table_id))
-            target = unresolved_by_table if kind == unresolved_kind else resolved_by_table
             word_keys = {wk for w in (data.get("words") or []) if (wk := _word_key(w)) is not None}
-            target.setdefault(key, set()).update(word_keys)
+            open_words = open_words_by_table.setdefault(key, set())
+            if kind == unresolved_kind:
+                open_words.update(word_keys or {_wordless})  # (re)open; sentinel if unidentified
+            else:
+                open_words.difference_update(word_keys)  # close only what precedes this
 
-    return {
-        key
-        for key, words in unresolved_by_table.items()
-        if words and words <= resolved_by_table.get(key, set())
-    }
+    return {key for key, open_words in open_words_by_table.items() if not open_words}
 
 
 # GH-353 TICKET-B2: fallback wording for the ladder terminals when the

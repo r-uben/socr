@@ -4868,6 +4868,24 @@ class UnifiedPipeline:
         clearance), never on kind/table_id alone. The original unresolved
         event is never mutated or removed -- history stays in the audit log;
         only the REDUCED current-trust view changes.
+
+        Round 5 (Astra P1 again): "no longer classified unresolved" was
+        satisfied by ``binding.unresolved_boundary_words`` simply being
+        EMPTY -- which a markdown parse failure / no-numeric-lanes absence
+        of evidence also produces, unconditionally, for every word ever
+        computed. That let a totally unevaluated ``bind()`` attempt
+        masquerade as "now bound or confidently excluded" for a word it
+        never looked at past the region partition. The fix requires a
+        POSITIVE per-word disposition from an attempt that actually reached
+        row/column binding: the word is in ``binding.region_scoped_words``
+        (the region-admitted words a SUCCESSFUL ``parse_grid`` fed into
+        binding -- empty on parse failure, unlike ``boundary_words``/
+        ``unresolved_boundary_words``, which the partition step populates
+        regardless of parse outcome), or it is in ``binding.boundary_words``
+        while absent from ``binding.unresolved_boundary_words`` (confidently
+        external, a geometric classification that does not depend on parse
+        success). Neither an absent binding nor an empty unresolved list
+        alone is that disposition.
         """
         from socr.core.audit_log import AuditEvent
         from socr.judge.table_verdict import (
@@ -4880,11 +4898,23 @@ class UnifiedPipeline:
             return
 
         table_id = witness.table_id
-        current_unresolved_keys = {
+        bound_keys = {
             key
-            for w in binding.unresolved_boundary_words
+            for w in binding.region_scoped_words
             if (key := self._boundary_word_key(w)) is not None
         }
+        external_keys = {
+            key
+            for w in binding.boundary_words
+            if w not in binding.unresolved_boundary_words
+            and (key := self._boundary_word_key(w)) is not None
+        }
+        # A word this attempt POSITIVELY disposed of, either by actually
+        # binding it (only possible past a successful parse) or by
+        # confidently classifying it as external prose. Deliberately NOT
+        # "absent from unresolved_keys" -- that is also true of every word
+        # on a parse-failure result, which disposed of nothing.
+        current_resolvable_keys = bound_keys | external_keys
 
         # Best-effort: read this pass's OWN native words independently, so a
         # resolution can be proven from THIS witness's actual geometry rather
@@ -4905,7 +4935,7 @@ class UnifiedPipeline:
                 exc,
             )
 
-        if native_words:
+        if native_words and current_resolvable_keys:
             present_now = {
                 key for w in native_words if (key := self._boundary_word_key(w)) is not None
             }
@@ -4924,7 +4954,7 @@ class UnifiedPipeline:
                     if key is not None:
                         prior_unresolved.add(key)
 
-            newly_resolved = (prior_unresolved & present_now) - current_unresolved_keys
+            newly_resolved = prior_unresolved & present_now & current_resolvable_keys
             if newly_resolved:
                 state.events.append(
                     AuditEvent(
