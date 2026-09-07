@@ -1101,8 +1101,17 @@ def _raster_is_scan_or_decorative(page, rect, page_area: float) -> bool:
     native words centred inside that raster at a density of at least
     ``RASTER_TEXT_DENSITY_MIN`` words/100pt², is the scan itself (OCR text
     layer under a page photograph) or a decorative page export (real text
-    under a slide background) -- not a chart. A genuine raster chart's only
-    native text is sparse axis/tick labels, well below the density floor.
+    under a slide background) -- not a chart.
+
+    This assumes a genuine raster chart's native text stays sparse (axis/tick
+    labels). That assumption is backed by only ONE anchor -- a synthetic
+    raster chart with axis labels, no real corpus fixture -- and is a KNOWN
+    BLIND SPOT: a raster chart dense with data labels (an annotated heat map,
+    a bar chart with a value label on every bar) can clear the density floor
+    and be misclassified as a scan, losing its image. Measured 2026-09-07
+    (reviewer, see the log): a synthetic labelled-bar-chart raster at density
+    5.0 words/100pt² reads as not-chart under this gate. Listed alongside the
+    image-only-raster residue as unsolved by this ticket.
 
     Fails CLOSED (returns False, i.e. "not a scan -- treat normally") on any
     extraction error: this check only ever narrows the chart lane away from
@@ -1166,14 +1175,22 @@ def has_chart_marks(page) -> bool:
     (``RASTER_TEXT_DENSITY_MIN``, see ``_raster_is_scan_or_decorative``): a
     page-sized scan of typewritten text (OCR text layer under the photograph)
     or a page-sized decorative slide export (real text under the background)
-    is the page itself, not a chart (GH-511 large half). A genuine raster
-    chart's only native text is sparse axis/tick labels, well under the
-    density floor, so it is unaffected.
+    is the page itself, not a chart (GH-511 large half). This assumes a
+    genuine raster chart's native text stays sparse (axis/tick labels), well
+    under the density floor -- an assumption backed by only one synthetic
+    anchor, see the blind spot noted below.
 
-    What this gate still does NOT do: separate a page-sized photograph or
+    What this gate still does NOT do: (1) separate a page-sized photograph or
     decorative background CARRYING NO NATIVE TEXT from a page-sized raster
     chart. Nothing in the geometry distinguishes those two, and no
     deterministic signal here can (GH-511 small residue: image-only pages).
+    (2) separate a page-sized raster chart dense with data labels (an
+    annotated heat map, a bar chart with a value on every bar) from a scan --
+    such a chart can clear ``RASTER_TEXT_DENSITY_MIN`` on its own native text
+    and be misclassified as not-chart. Measured 2026-09-07: a synthetic
+    labelled-bar-chart raster at density 5.0 words/100pt² reads as not-chart
+    under this gate. No corpus fixture of this shape exists yet to calibrate
+    a fix.
 
     Note on ``_looks_like_table_grid``: this function is intentionally NOT called
     here.  Its first-line short-circuit ``if has_data_marks: return False`` means

@@ -100,3 +100,10 @@ residue).
 - No genuine grayscale raster-chart-with-text fixture exists to calibrate a combined
   colorspace+density rule; if one turns up in a future census, worth revisiting whether colorspace
   can safely tighten the gate further.
+- **Confirmed blind spot (review, 2026-09-07):** the density rule assumes a genuine raster chart's
+  native text stays sparse (axis/tick labels), an assumption backed by only one synthetic anchor
+  (0.21 words/100pt²). The reviewer built a synthetic raster chart dense with data labels (a
+  labelled bar chart) at density 5.0 words/100pt² and confirmed it now misclassifies as not-chart
+  under `RASTER_TEXT_DENSITY_MIN = 0.75`. No corpus fixture of this shape exists to calibrate a
+  fix; documented in both docstrings (`_raster_is_scan_or_decorative` and `has_chart_marks`)
+  rather than pinned to a value. Tracked as GH-653.
