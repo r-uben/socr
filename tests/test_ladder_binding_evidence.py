@@ -740,3 +740,75 @@ class TestUnresolvedBindingBoundaryAudit:
         events = _events_of_kind(state, "table_binding_boundary_unresolved")
         assert len(events) == 1
         assert events[0].data["words"] == [{"text": "1.23", "bbox": [0.0, 0.0, 1.0, 1.0]}]
+
+    def test_boundary_unresolved_round_trips_through_flush_and_restore(
+        self, tmp_path: Path
+    ) -> None:
+        """GH-609 round 3 (Astra P2): the event must survive a real
+        flush -> resume -> restore cycle with its table_id and word
+        text/bbox intact -- ``resume_restore_kinds`` previously omitted it,
+        so ``_restore_terminal_page_state``'s allowlist filter silently
+        dropped it from the resumed run's ``state.events``.
+
+        Also exercises P1's persistence requirement post-resume: a LATER
+        ``table_ladder_accepted`` for the same table must still leave
+        ``tables_trust`` reporting the boundary uncertainty.
+        """
+        from socr.core.document import DocumentHandle
+        from socr.core.tables_trust import build_tables_trust
+        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+
+        pdf_path = _row_shift_pdf(tmp_path)
+        out_dir = tmp_path / "out"
+        pipeline = _make_pipeline()
+        pipeline._scan_root = pdf_path.parent
+        state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+
+        accepted = PageOutput(
+            page_num=1,
+            text="Treasury 0.50 0.51",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        )
+        ps = state.pages[1]
+        ps.attempts.append(accepted)
+        ps.best_output = accepted
+        state.events.append(
+            AuditEvent(
+                page_num=1,
+                kind=TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+                detail=(
+                    "table t1: 1 boundary word(s) rejected by region membership "
+                    "but not confidently external"
+                ),
+                data={
+                    "table_id": "t1",
+                    "words": [{"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}],
+                },
+            )
+        )
+
+        pipeline._flush_page_fragment(state, 1, accepted.text, out_dir)
+        pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True)
+
+        resumed_state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+        resumed_page = pipeline._load_terminal_page(resumed_state, 1, out_dir)
+        assert resumed_page is not None, "fixture premise: the page must skip-and-keep on resume"
+        pipeline._restore_terminal_page_state(resumed_state, 1, resumed_page, out_dir)
+
+        restored = [
+            e for e in resumed_state.events if e.kind == TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
+        ]
+        assert len(restored) == 1, "the event must survive resume, not be dropped by the allowlist"
+        assert restored[0].data["table_id"] == "t1"
+        assert restored[0].data["words"] == [{"text": "0.51", "bbox": [390.0, 100.0, 440.0, 110.0]}]
+
+        # P1, exercised post-resume: a LATER ladder acceptance for the same
+        # table must not make tables_trust drop the boundary uncertainty.
+        resumed_state.events.append(
+            AuditEvent(page_num=1, kind="table_ladder_accepted", data={"table_id": "t1"})
+        )
+        trust = build_tables_trust(resumed_state.handle.filename, resumed_state.events)
+        assert trust.untrusted_pages == [1]
+        assert TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND in trust.to_dict()["pages"]["1"]["reasons"]

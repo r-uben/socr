@@ -2432,12 +2432,21 @@ class UnifiedPipeline:
         """
         from socr.judge.table_verdict import (
             TABLE_BINDING_ADJUDICATED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
             TABLE_LADDER_EVENT_KINDS,
         )
 
         return frozenset(
             TABLE_LADDER_EVENT_KINDS
             | {TABLE_BINDING_ADJUDICATED_KIND}
+            # GH-609 round 3 (Astra P2): explicit inclusion, not folded into
+            # TABLE_LADDER_EVENT_KINDS -- that set is deliberately the GH-359
+            # drift guard's exact three/four terminals, and this kind is
+            # neither a terminal nor resolvable by one (see
+            # tables_trust.NON_RESOLVABLE_DISTRUST_KINDS). Without this, a
+            # resumed run's audit trail silently drops which boundary word
+            # geometry could not rule out as table content.
+            | {TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND}
             | cls.EQUATION_LANE_EVENT_KINDS
             # GH-519: the chart lane's debt is a standing property of the page,
             # not of the run that noticed it. GH-563 is the cautionary case: a
@@ -4803,8 +4812,19 @@ class UnifiedPipeline:
         reader (or a human) can see exactly what geometry could not rule out
         as table content. Fires independent of the evidence verdict: a table
         that also CONTRADICTs elsewhere still had this specific coverage gap.
+
+        Round 3 (Astra P1 again): the event's kind is in
+        ``TABLE_DISTRUST_KINDS`` (``tables_trust.py``), so it also reaches
+        ``tables_trust.json``, the document metadata note and the CLI trust
+        summary -- and it is in ``tables_trust.NON_RESOLVABLE_DISTRUST_KINDS``
+        so a later ``table_ladder_accepted``/``table_escalation_accepted`` on
+        the SAME table does not clear it; the excluded word is not put back
+        by a guard accepting the table's content. It is also added
+        explicitly to ``resume_restore_kinds`` (round 3, P2) so a resumed run
+        does not silently drop it.
         """
         from socr.core.audit_log import AuditEvent
+        from socr.judge.table_verdict import TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND
         from socr.tables.binding import BindingResult
 
         if not isinstance(binding, BindingResult) or not binding.unresolved_boundary_words:
@@ -4813,7 +4833,7 @@ class UnifiedPipeline:
         state.events.append(
             AuditEvent(
                 page_num=page_num,
-                kind="table_binding_boundary_unresolved",
+                kind=TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
                 detail=(
                     f"table {witness.table_id}: "
                     f"{len(binding.unresolved_boundary_words)} boundary word(s) rejected by "

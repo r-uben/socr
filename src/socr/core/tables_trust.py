@@ -25,6 +25,7 @@ from pathlib import Path
 from socr.judge.table_verdict import (
     CAUSE_DETAIL_PHRASES,
     CAUSE_UNKNOWN,
+    TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
     TABLE_LADDER_UNVERIFIED_KIND,
 )
 from socr.tables.reconcile import PATCH_ELIGIBLE_NOTE
@@ -216,8 +217,24 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # instead. A consumer must be able to see that an accepted table
         # existed and was overridden, not just that the floor fired.
         "structure_floor_overrode_ladder",
+        # GH-609 round 3 (Astra P1): the binder found a boundary-rejected word
+        # (numeric, or clipped on both axes) it could not rule out as table
+        # content -- see NON_RESOLVABLE_DISTRUST_KINDS below for why a later
+        # ladder acceptance does not clear this one.
+        TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
     }
 )
+
+# GH-609 round 3 (Astra P1): kinds that ``RESOLVING_KINDS`` must NEVER clear,
+# no matter how the resolving event's ``table_id`` lines up. A
+# ``table_ladder_accepted``/``table_escalation_accepted`` resolves "the judge
+# ladder is satisfied with this table's CONTENT" -- a different fact from "the
+# geometry predicate is no longer excluding a word that might be part of it".
+# The excluded word is still excluded; nothing about a later guard accepting
+# the table puts it back. Numeric contradiction (native_unbound / C4, already
+# outside TABLE_DISTRUST_KINDS entirely) and this uncertain-coverage signal
+# must stay distinguishable, and both must survive an unrelated acceptance.
+NON_RESOLVABLE_DISTRUST_KINDS: frozenset[str] = frozenset({TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND})
 
 
 # GH-353 TICKET-B2: fallback wording for the ladder terminals when the
@@ -380,15 +397,21 @@ def build_tables_trust(pdf_filename: str, events: list) -> TablesTrust:
 
     for event in events:
         page_num = getattr(event, "page_num", 0)
-        if page_num in resolved_pages:
-            continue
         kind = getattr(event, "kind", "")
         if kind not in TABLE_DISTRUST_KINDS:
+            continue
+        non_resolvable = kind in NON_RESOLVABLE_DISTRUST_KINDS
+
+        if not non_resolvable and page_num in resolved_pages:
             continue
 
         data = getattr(event, "data", None) or {}
         table_id = data.get("table_id")
-        if table_id is not None and (page_num, str(table_id)) in resolved_tables:
+        if (
+            not non_resolvable
+            and table_id is not None
+            and (page_num, str(table_id)) in resolved_tables
+        ):
             continue
 
         page = trust.pages.setdefault(page_num, PageTrust(page_num=page_num))
