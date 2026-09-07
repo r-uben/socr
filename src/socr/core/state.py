@@ -50,6 +50,13 @@ class PageState:
     #: CAN be a digit or an operator -- an unrecovered minus is a sign flip -- so
     #: the page must never be silently trusted.
     has_unrecovered_symbol_glyphs: bool = False
+    #: #165: sparse, span-level coverage evidence from whichever recovery lane
+    #: actually ran on this page, recorded AFTER the splice so it describes what
+    #: went into the body rather than what a model returned. Read only by
+    #: ``socr.math.accounting.unresolved_math_detail``; ``None`` means "no lane
+    #: recorded coverage", which is UNKNOWN and therefore unresolved -- never
+    #: "nothing was damaged" (that is ``has_unmapped_math_glyphs``).
+    math_recovery_evidence: dict | None = None
     attempts: list[PageOutput] = field(default_factory=list)  # all engine attempts
     best_output: PageOutput | None = None  # selected/reconciled best
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid

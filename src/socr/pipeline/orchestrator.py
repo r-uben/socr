@@ -63,6 +63,12 @@ from socr.core.result import (
 from socr.core.state import DocumentState, PageState, add_page_cost
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
+from socr.math.accounting import (
+    UNRESOLVED_MATH_KIND,
+    UnresolvedMathDetail,
+    missing_coverage_witnesses,
+    unresolved_math_detail,
+)
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
 from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
 from socr.judge.table_cell_guard import GuardDisposition, evaluate_cell_guard
@@ -2265,6 +2271,7 @@ class UnifiedPipeline:
 
         from socr.core.audit_log import AuditEvent
         from socr.core.pdf import open_pdf
+        from socr.math.accounting import corrupt_region_evidence
         from socr.math.recover import recover_math_regions, splice_math
 
         ps = state.pages[page_num]
@@ -2292,6 +2299,15 @@ class UnifiedPipeline:
             error = f"corrupt-equation region recovery failed: {exc}"
             logger.warning("%s on p%d", error, page_num)
             text = native_text
+
+        # #165: span-level coverage evidence, recorded AFTER ``splice_math``
+        # because that is what sets ``source_aligned`` -- before it, a resolved
+        # region says a model returned syntax-valid LaTeX, not that the
+        # replacement went into the body. Assigned unconditionally so a
+        # reprocessed page cannot inherit the previous attempt's coverage; the
+        # failure path above leaves ``regions`` empty, which is recorded as
+        # "enumerated nothing" rather than as an absent field.
+        ps.math_recovery_evidence = corrupt_region_evidence(regions)
 
         if not regions:
             unresolved = (
@@ -2460,6 +2476,13 @@ class UnifiedPipeline:
             # name it -- but it would silently downgrade the explanation to
             # "cause not recorded" on every resumed run.
             | {NO_WITNESS_BACKEND_KIND}
+            # #165: the unresolved-math record is a standing property of the
+            # page's SOURCE, not of the run that noticed it. A resumed page is
+            # not re-assessed and not re-recovered, so without this replay the
+            # damage would be reported once and then vanish -- and the resumed
+            # run would report a clean SUCCESS on a document whose mathematics
+            # is known to be missing.
+            | {UNRESOLVED_MATH_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -7553,8 +7576,9 @@ class UnifiedPipeline:
 
         Effects are mutations on objects passed in: appends the native
         ``PageOutput`` to ``ps.attempts``, sets ``ps.best_output``, and appends
-        up to three audit events (#92 unmapped math glyphs, #136 encoding
-        hygiene, #217 unrecovered symbol glyphs) to ``state.events``.
+        up to two audit events (#136 encoding hygiene, #217 unrecovered symbol
+        glyphs) to ``state.events``. The #92 unmapped-math-glyph record moved to
+        outcome-time accounting in ``_phase_assemble`` (#165).
         """
         # Tier 1: born-digital trusted native text — free, no OCR.
         # GH-151 TICKET-B1 / GH-200 / #211: a page reaches here
@@ -7585,33 +7609,18 @@ class UnifiedPipeline:
         ps.attempts.append(native_out)
         ps.best_output = native_out
 
-        # #92: born-digital page shipped as native text while carrying
-        # unmapped math glyphs (PUA / weak ToUnicode) that equation recovery
-        # did not reach. The prose is sound, but the math symbols are
-        # font-private and lost — surface it (never silent). Page stays
-        # SUCCESS (prose is usable); the event records the math-glyph gap.
-        if getattr(ps, "has_unmapped_math_glyphs", False) and not (
-            self.config.detect_equations and self.config.recover_clean_equations
-        ):
-            from socr.core.audit_log import AuditEvent
-
-            state.events.append(
-                AuditEvent(
-                    page_num=page_num,
-                    kind="native_math_unrecovered",
-                    engine="native",
-                    detail=(
-                        "born-digital native text shipped with unmapped math glyphs "
-                        "(private-use codepoints, weak ToUnicode); math symbols not "
-                        "recovered — enable --detect-equations --recover-clean-equations "
-                        "for region OCR -> LaTeX"
-                    ),
-                    data={
-                        "has_equations": ps.has_equations,
-                        "recover_clean_equations": self.config.recover_clean_equations,
-                    },
-                )
-            )
+        # #92 / #165: the unmapped-math-glyph (PUA / weak ToUnicode) record used
+        # to be emitted HERE, suppressed whenever ``--detect-equations`` and
+        # ``--recover-clean-equations`` were both set. That gate answered a
+        # question about the run's CONFIGURATION, and the only durable signal of
+        # lost mathematics could therefore be silenced by two flags that had not
+        # recovered a single glyph. It was also premature: this native branch
+        # runs before the region lanes, so a page later recovered in full still
+        # carried the warning.
+        #
+        # The record now follows the OUTCOME instead, and is raised once per
+        # affected page from ``_phase_assemble`` against the bytes that actually
+        # ship (see ``socr.math.accounting``). Nothing is emitted here.
 
         # #136: the text layer showed cosmetic encoding corruption (lost
         # spaces, fused words) in the flag band. The page ships SUCCESS —
@@ -8963,6 +8972,18 @@ class UnifiedPipeline:
                 list(b) for b in (getattr(ps, "detected_table_bboxes", []) or [])
             ]
 
+        # #165: the math-glyph damage signal and whatever coverage a lane proved
+        # for it. Written ONLY on affected pages, following the sparse rule
+        # above: the overwhelming majority of pages carry no PUA at all and must
+        # keep their existing sidecar bytes. Absence therefore restores as "no
+        # damage detected on the run that wrote this", which is what those runs
+        # recorded -- never as "damage, since recovered".
+        if ps and bool(getattr(ps, "has_unmapped_math_glyphs", False)):
+            payload["has_unmapped_math_glyphs"] = True
+            evidence = getattr(ps, "math_recovery_evidence", None)
+            if evidence:
+                payload["math_recovery_evidence"] = dict(evidence)
+
         # P1: sparse table retry latch -- persisted ONLY when True so default-off
         # sidecars remain byte-identical and satisfy P6 disposition persistence contracts.
         if bool(getattr(ps, "table_judge_retry_pending", False)):
@@ -9647,6 +9668,19 @@ class UnifiedPipeline:
             # both of which derive from ``state.events`` -- see
             # ``_tables_trust_note`` / ``build_tables_trust``). Restoring the
             # events, never re-judging: no rung is invoked here.
+            # #165: restore the damage signal and its coverage evidence before
+            # finalization, so the resumed page reaches the same accounting the
+            # original run did. OR'd rather than assigned: a live assessment on
+            # this run that found damage must never be cleared by a sidecar that
+            # predates the field. Evidence is only ever taken from the sidecar
+            # when this run recorded none -- a fresh recovery is the better
+            # witness, and a stale one must not vouch for it.
+            if bool(meta.get("has_unmapped_math_glyphs", False)):
+                ps.has_unmapped_math_glyphs = True
+            if ps.math_recovery_evidence is None:
+                restored_evidence = meta.get("math_recovery_evidence")
+                if isinstance(restored_evidence, dict):
+                    ps.math_recovery_evidence = dict(restored_evidence)
             disposition_raw = meta.get("table_ladder_disposition")
             ps.table_ladder_disposition = FailureMode(disposition_raw) if disposition_raw else None
             ps.table_ladder_incomplete = bool(meta.get("table_ladder_incomplete"))
@@ -10298,6 +10332,55 @@ class UnifiedPipeline:
             getattr(e, "kind", "") == "fabricated_image_ref" and getattr(e, "page_num", None) == 0
             for e in state.events
         )
+        # #165 / #140: detected math-glyph damage that survived into the bytes
+        # this run ships. Derived from the SAME finalized records the
+        # disposition buckets use, and through the same helper the manifest
+        # guard applies, so the page's WARNING and the document's demotion can
+        # never disagree. Deliberately NOT keyed off
+        # ``state.pages_needing_repair`` (attempt state, blind to what selection
+        # kept) nor off the two recovery flags, which is the #165 defect.
+        #
+        # Placed AFTER the document-level image sweeps above, and reconciled
+        # against ``final_text``, because those sweeps run on the assembled body
+        # rather than on any page's output: a sweep that removes a recovered
+        # region's crop reference removes the evidence pointer with it, and a
+        # per-page-only reading would then certify coverage the shipped document
+        # no longer carries.
+        unresolved_math_details = {}
+        for r in pre_records:
+            _mp = state.pages.get(r.output.page_num)
+            _detail = unresolved_math_detail(
+                has_unmapped_math_glyphs=bool(getattr(_mp, "has_unmapped_math_glyphs", False)),
+                evidence=getattr(_mp, "math_recovery_evidence", None),
+                text=r.output.text or "",
+            )
+            if _detail is None and has_text:
+                # Witnesses only. Re-running the whole reduction against
+                # ``final_text`` would read ANOTHER page's surviving private-use
+                # codepoints as this page's, and attribute the damage to the
+                # wrong page -- that page raises its own record.
+                _missing = missing_coverage_witnesses(
+                    getattr(_mp, "math_recovery_evidence", None), final_text
+                )
+                if _missing:
+                    _detail = UnresolvedMathDetail(
+                        reason=(
+                            f"{len(_missing)} recovered replacement(s) were removed from the "
+                            "assembled document after the page was finalized"
+                        ),
+                        lane=str((getattr(_mp, "math_recovery_evidence", None) or {}).get("lane")),
+                        regions_total=int(
+                            (getattr(_mp, "math_recovery_evidence", None) or {}).get(
+                                "regions_total", 0
+                            )
+                        ),
+                        regions_covered=0,
+                        residual_pua=0,
+                    )
+            if _detail is not None:
+                unresolved_math_details[r.output.page_num] = _detail
+        unresolved_math_pages = sorted(unresolved_math_details)
+
         pages_ok = not state.pages_needing_repair or has_passing_whole_doc
         pages_ok = pages_ok and not failed_pages and not native_fallback_pages
         pages_ok = pages_ok and not native_only_distrust_pages
@@ -10321,6 +10404,11 @@ class UnifiedPipeline:
         # GH-271: syntax-valid crop transcription is still mathematically
         # unverified, so the document must not report a clean success.
         pages_ok = pages_ok and not corrupt_math_hybrid_pages
+        # #165: detected math-glyph damage no retained recovery covers. The page
+        # keeps its prose, so this is AUDIT_FAILED rather than ERROR -- the same
+        # "completed with warnings, output written" path every other content-
+        # doubt bucket above takes.
+        pages_ok = pages_ok and not unresolved_math_pages
         # NOT a page failure -- the owner was explicit that the page is not failed
         # and the table is kept. AUDIT_FAILED at the document level is the
         # "completed with warnings, output written" path, which is the honest
@@ -10386,6 +10474,7 @@ class UnifiedPipeline:
             or structure_class_floor_pages
             or d3_model_table_pages
             or corrupt_math_hybrid_pages
+            or unresolved_math_pages
             or value_drift_pages
             or table_rejected_pages
             or table_unverified_pages
@@ -10444,6 +10533,27 @@ class UnifiedPipeline:
                             "crop_paths": crop_paths,
                             "audit_passed": False,
                         },
+                    )
+                )
+            # #165: one record per affected page, raised against the shipped
+            # bytes. Upserted, not appended: a resumed page replays its own
+            # persisted copy through ``resume_restore_kinds`` before this runs,
+            # and finalization is re-entered more than once per document.
+            _seen_unresolved_math = {
+                ev.page_num
+                for ev in state.events
+                if getattr(ev, "kind", "") == UNRESOLVED_MATH_KIND
+            }
+            for n in unresolved_math_pages:
+                if n in _seen_unresolved_math:
+                    continue
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind=UNRESOLVED_MATH_KIND,
+                        engine="native",
+                        detail=unresolved_math_details[n].detail,
+                        data=unresolved_math_details[n].as_data(),
                     )
                 )
             # GH-211 MAJOR-2: --native-only distrust pages get their own kind
@@ -10615,6 +10725,12 @@ class UnifiedPipeline:
                         f"  [yellow]{len(corrupt_math_hybrid_pages)} page(s) shipped "
                         "crop-backed equation candidate(s); mathematical fidelity "
                         f"remains unverified: {corrupt_math_hybrid_pages}[/yellow]"
+                    )
+                if unresolved_math_pages:
+                    console.print(
+                        f"  [yellow]{len(unresolved_math_pages)} page(s) shipped unmapped "
+                        "math glyphs no retained recovery covers; the mathematics on them "
+                        f"is lost, not merely unverified: {unresolved_math_pages}[/yellow]"
                     )
                 if native_only_distrust_pages:
                     console.print(
@@ -10834,6 +10950,23 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_math_note}"
             else:
                 final_result.error = _math_note
+        if unresolved_math_pages:
+            # #165: no "enable the recovery flags" advice. The flags may already
+            # have run; the honest note says what is missing and where the
+            # evidence is, and leaves the remedy to the reader.
+            _unresolved_note = (
+                "unrecovered math glyphs on page(s) "
+                + ", ".join(str(n) for n in unresolved_math_pages)
+                + "; inspect the source page and any retained crops ("
+                + "; ".join(
+                    f"p{n}: {unresolved_math_details[n].reason}" for n in unresolved_math_pages
+                )
+                + ")"
+            )
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_unresolved_note}"
+            else:
+                final_result.error = _unresolved_note
 
         # PP-2 cascade HALT: propagate the halt reason into the result error
         # so callers and tests can detect a partial-save due to a wedged backend.
