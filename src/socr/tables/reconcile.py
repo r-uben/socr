@@ -453,6 +453,37 @@ def table_content_defect(markdown: str | None) -> str:
     return ""
 
 
+def raw_table_block_lines(markdown: str) -> list[list[str]]:
+    """Every table block's own content lines, verbatim, one entry per block.
+
+    Same raw-row block-finding contract ``table_content_defect`` uses: code
+    fences, HTML comments, and indented code are stripped first
+    (``_markdown_content_lines`` / ``_strip_emission_literal_blocks``), then a
+    block is a run of >= 2 consecutive pipe-bearing lines, in source order.
+    Unlike ``find_table_blocks``/``_parse_grid``, nothing here reshapes or
+    drops a row -- a caller that needs the ORIGINAL text of a possibly
+    malformed row (e.g. TICKET-A2's truncation check, which reads a row's own
+    leading/trailing pipe style) gets it unchanged. Rows are not split into
+    cells; callers that want cells use ``_split_emission_row`` or
+    ``row_corroboration.split_cells`` on the lines returned here.
+    """
+    if not markdown:
+        return []
+    lines = _strip_emission_literal_blocks(_markdown_content_lines(markdown))
+    i, n = 0, len(lines)
+    blocks: list[list[str]] = []
+    while i < n:
+        if not _is_table_line(lines[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and _is_table_line(lines[j]):
+            j += 1
+        blocks.append(lines[i:j])
+        i = j
+    return blocks
+
+
 def has_strict_table_grid(markdown: str) -> bool:
     """Whether ``markdown`` contains a real GitHub-markdown table.
 
