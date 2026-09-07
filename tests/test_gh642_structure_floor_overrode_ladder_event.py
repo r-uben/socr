@@ -17,8 +17,16 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+from test_s1_structure_class_winner_corroboration import (
+    BAD_MD,
+    GOOD_MD,
+    _floored_structure_class_page,
+    _grid_reading_output,
+)
+
 from socr.core.audit_log import AuditEvent, build_run_audit
 from socr.core.document import DocumentHandle
+from socr.core.manifest import structure_class_floor_applies, structure_class_grid_winner
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.judge.table_verdict import TABLE_LADDER_ACCEPTED_KIND
@@ -67,8 +75,6 @@ def _floored_structure_class_state() -> DocumentState:
 
 
 def test_floor_override_fires_when_ladder_accepted_but_floor_applies() -> None:
-    from socr.core.manifest import structure_class_floor_applies
-
     state = _floored_structure_class_state()
     assert structure_class_floor_applies(state.pages[1]) is True  # precondition
 
@@ -78,25 +84,32 @@ def test_floor_override_fires_when_ladder_accepted_but_floor_applies() -> None:
     assert override_events[0].page_num == 1
 
 
-def test_no_floor_override_when_floor_does_not_apply() -> None:
-    """Same ladder-accepted event, but the page is NOT structure-class (no
-    tables detected) -- the floor never applies, so the override event must
-    not fire.
+def test_no_floor_override_when_corroboration_wins_the_real_selection_path() -> None:
+    """Astra review (#642): the no-event control must exercise the actual
+    corroboration/winner-selection path -- not a page that exits winner
+    selection before candidate scoring even runs (``has_tables=False``,
+    which ``_reaches_structure_class_branch`` rejects for an unrelated
+    reason). Reusing ``test_s1_structure_class_winner_corroboration``'s own
+    fixture: a ragged candidate (``GOOD_MD``) whose rows measurably
+    reproduce the cached native words wins the A1b row-corroboration
+    fallback over a non-corroborating sibling (``BAD_MD``), so
+    ``structure_class_floor_applies`` is False via the REAL predicate chain
+    (``_reaches_structure_class_branch`` -> ``structure_class_grid_winner``
+    -> ``_row_corroborated_grid_winner``), nothing mocked.
     """
+    good = _grid_reading_output("qwen", GOOD_MD)
+    bad = _grid_reading_output("gemini", BAD_MD)
+    p = _floored_structure_class_page(with_native_words=True, attempts=[bad, good])
+
+    winner = structure_class_grid_winner(p)
+    assert winner is not None and winner.engine == "qwen"  # precondition: a real winner exists
+    assert structure_class_floor_applies(p) is False  # precondition: the floor does not apply
+
     state = DocumentState(handle=_handle(1))
-    p = state.pages[1]
-    p.is_born_digital = True
-    p.native_text = "ordinary prose, no tables at all"
-    p.has_tables = False
-    p.attempts = [_non_grid_attempt()]
-    p.best_output = p.attempts[-1]
+    state.pages[1] = p
     state.events.append(
         AuditEvent(page_num=1, kind=TABLE_LADDER_ACCEPTED_KIND, detail="ladder accepted")
     )
-
-    from socr.core.manifest import structure_class_floor_applies
-
-    assert structure_class_floor_applies(state.pages[1]) is False  # precondition
 
     audit = build_run_audit(state)
     override_events = [e for e in audit.events if e.kind == "structure_floor_overrode_ladder"]

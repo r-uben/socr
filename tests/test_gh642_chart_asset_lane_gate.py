@@ -24,7 +24,19 @@ excluded.
 
 from __future__ import annotations
 
-from socr.core.manifest import _grid_reading_attempt, _grid_shaped_attempt
+from test_s1_structure_class_winner_corroboration import (
+    BAD_MD,
+    GOOD_MD,
+    _floored_structure_class_page,
+    _grid_reading_output,
+)
+
+from socr.core.manifest import (
+    _grid_reading_attempt,
+    _grid_shaped_attempt,
+    structure_class_floor_applies,
+    structure_class_grid_winner,
+)
 from socr.core.result import FailureMode, PageOutput, PageStatus
 
 STRICT_GRID_MD = (
@@ -84,3 +96,24 @@ def test_non_native_engine_still_admitted() -> None:
     """
     assert _grid_shaped_attempt(_output("qwen", STRICT_GRID_MD)) is True
     assert _grid_reading_attempt(_output("qwen", RAGGED_GRID_MD)) is True
+
+
+def test_chart_asset_cannot_win_the_real_corroboration_fallback() -> None:
+    """Astra review (#642): the two predicate-level tests above do not pin
+    CALLER wiring -- ``_grid_reading_attempt`` could return the right answer
+    while an upstream candidate-collection site still let a chart_asset
+    reading through some other way. Reuses
+    ``test_s1_structure_class_winner_corroboration``'s own real fixture
+    (``test_corroborating_candidate_wins_over_the_floor``, where an
+    otherwise-identical ``qwen`` attempt DOES win) with only the engine
+    label swapped to ``chart_asset``: the same row-corroborating text must
+    now be invisible to the actual ``structure_class_grid_winner`` /
+    ``_row_corroborated_grid_winner`` call chain, so no winner survives and
+    the floor applies.
+    """
+    chart = _grid_reading_output("chart_asset", GOOD_MD)
+    bad = _grid_reading_output("gemini", BAD_MD)
+    p = _floored_structure_class_page(with_native_words=True, attempts=[bad, chart])
+
+    assert structure_class_grid_winner(p) is None
+    assert structure_class_floor_applies(p) is True
