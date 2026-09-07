@@ -3222,7 +3222,6 @@ class UnifiedPipeline:
         from socr.core.manifest import is_page_failed_marker
         from socr.core.pdf import open_pdf
         from socr.figures.chart_regions import (
-            ALREADY_PRESENT,
             RENDER_FAILED,
             UNRESOLVED_PLACEMENT,
             chart_region_anchors,
@@ -3243,6 +3242,7 @@ class UnifiedPipeline:
         texts = list(page_texts)
         changed = False
         inventory: dict[int, list] = {}
+        preserved: dict[int, set[int]] = {}
 
         for pn in candidates:
             ps = state.pages[pn]
@@ -3268,18 +3268,20 @@ class UnifiedPipeline:
                         engine="chart_region",
                         detail=(
                             "chart region inventory could not be built; the page's chart "
-                            "preservation was not checked"
+                            "preservation was never checked -- no crop was retained and none "
+                            "is claimed"
                         ),
                         data={"error_type": type(exc).__name__, "error": str(exc)},
                     )
                 )
-                ps.chart_region_placement_unresolved = True
+                ps.chart_region_inventory_failed = True
                 continue
 
             bindings = table_bindings(bboxes, list(getattr(ps, "detected_table_bboxes", []) or []))
             assets = self._render_chart_region_crops(state.handle.path, pn, bboxes, figures_dir)
             new_body, outcomes = reconcile_chart_region_refs(body, assets, anchors, bindings)
             inventory[pn] = assets
+            preserved[pn] = {oc.region_index for oc in outcomes if oc.preserved}
 
             for oc in outcomes:
                 if oc.disposition == RENDER_FAILED:
@@ -3295,12 +3297,7 @@ class UnifiedPipeline:
                             else "chart_region_preserved"
                         ),
                         engine="chart_region",
-                        detail=oc.detail
-                        or (
-                            "crop already referenced by the winning text"
-                            if oc.disposition == ALREADY_PRESENT
-                            else oc.disposition
-                        ),
+                        detail=oc.detail or oc.disposition,
                         data={
                             "region_index": oc.region_index,
                             "disposition": oc.disposition,
@@ -3315,6 +3312,7 @@ class UnifiedPipeline:
                 changed = True
 
         state._chart_region_assets = inventory
+        state._chart_region_preserved = preserved
         return texts if changed else page_texts
 
     def _chart_region_figures(self, state: DocumentState) -> list:
@@ -3380,7 +3378,15 @@ class UnifiedPipeline:
             for n, p in state.pages.items()
             if getattr(p, "chart_region_placement_unresolved", False)
         )
+        unchecked = sorted(
+            n for n, p in state.pages.items() if getattr(p, "chart_region_inventory_failed", False)
+        )
         parts = []
+        if unchecked:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in unchecked)}: the chart region inventory "
+                "could not be built, so this page's chart preservation was never checked"
+            )
         if lost:
             parts.append(
                 f"page(s) {', '.join(str(n) for n in lost)}: a detected chart region could "
@@ -10426,13 +10432,17 @@ class UnifiedPipeline:
         # deliberately untouched; it selects the winner, and flipping it here
         # would discard the page's correct table (the #252 defect).
         #
-        # An UNRESOLVED PLACEMENT is deliberately NOT in this bucket. Nothing is
-        # lost there: the crop ships, referenced exactly once, inside a block
-        # that says in the output itself that its position is not established --
-        # the most visible surface there is, plus a page event, the metadata note
-        # below and the CLI line that prints it. Demoting the document for it
-        # would report a content loss that did not happen, on every page where a
-        # model rewrote the prose the anchors were drawn from.
+        # An UNRESOLVED PLACEMENT is deliberately NOT in this bucket, and neither
+        # is an inventory failure. Both are reported -- the finalized page copy
+        # goes WARNING (``_apply_chart_region_guard`` in manifest.py), the audit
+        # carries a per-region event, and the note below reaches metadata and the
+        # CLI. What they are not is a LOST-CONTENT verdict at document level:
+        # under an unresolved placement the crop ships, referenced exactly once,
+        # inside a block that states in the output itself that its position is
+        # not established, and an inventory failure means the check never ran,
+        # not that a chart went missing. Naming either of them the same way as a
+        # chart that is preserved nowhere would make the document-level signal
+        # unable to distinguish the two.
         chart_region_lost_pages = sorted(
             n for n, pg in state.pages.items() if getattr(pg, "chart_region_render_failed", False)
         )
@@ -11467,28 +11477,43 @@ class UnifiedPipeline:
     def _drop_chart_region_duplicates(self, state: DocumentState, extracted: list) -> list:
         """Remove extracted figures that re-localise an already-preserved chart region.
 
-        The test is geometric and threshold-free: an extracted figure is a
-        duplicate when its bbox CENTRE lies inside a registered chart region on
-        the same page. Every suppression is journalled -- a dropped asset must
-        never be invisible, even when dropping it is the right answer.
+        Two conditions, both required, and both deliberately strict because the
+        cost of a wrong suppression is a deleted asset:
+
+        1. The registered region must be **actually preserved** -- rendered AND
+           referenced from the reconciled page body. A region whose mandatory
+           crop FAILED to render preserves nothing, so an ordinary extraction
+           that succeeded on the same geometry is the only surviving image of
+           that chart and must be kept.
+        2. The extracted figure's bbox must be **contained** in the registered
+           region. A centre-inside test is not equivalence: a larger figure whose
+           centre happens to fall in the crop can carry a second panel outside
+           it, and dropping it would discard content no crop holds.
+
+        Every suppression is journalled -- a dropped asset must never be
+        invisible, even when dropping it is the right answer.
         """
         regions = getattr(state, "_chart_region_assets", None)
         if not regions:
             return extracted
+        preserved = getattr(state, "_chart_region_preserved", None) or {}
 
         from socr.core.audit_log import AuditEvent
 
         kept: list = []
         for fig in extracted:
             bbox = getattr(fig, "bbox", None)
-            assets = regions.get(getattr(fig, "page_num", None)) or []
+            page_num = getattr(fig, "page_num", None)
+            assets = regions.get(page_num) or []
+            live = preserved.get(page_num) or set()
             hit = None
             if bbox is not None and assets:
-                cx = (float(bbox[0]) + float(bbox[2])) / 2.0
-                cy = (float(bbox[1]) + float(bbox[3])) / 2.0
+                fx0, fy0, fx1, fy1 = (float(v) for v in bbox)
                 for asset in assets:
+                    if not asset.rendered or asset.region_index not in live:
+                        continue
                     ax0, ay0, ax1, ay1 = asset.bbox
-                    if ax0 <= cx <= ax1 and ay0 <= cy <= ay1:
+                    if ax0 <= fx0 and ay0 <= fy0 and fx1 <= ax1 and fy1 <= ay1:
                         hit = asset
                         break
             if hit is None:

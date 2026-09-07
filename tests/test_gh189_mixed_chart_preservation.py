@@ -183,6 +183,15 @@ def _body(result) -> str:
     return result.pages[0].text or ""
 
 
+def _final_page_status(out_dir: Path, page: int = 1) -> str:
+    """The status the authoritative page sidecar froze for *page*."""
+    import json
+
+    sidecars = list(out_dir.rglob(f"pages/{page:05d}.json"))
+    assert sidecars, "no page sidecar was written"
+    return json.loads(sidecars[0].read_text()).get("status", "")
+
+
 def _crop(out_dir: Path, index: int) -> Path:
     hits = list(out_dir.rglob(f"chart_region_p1_{index}.png"))
     return hits[0] if hits else out_dir / "__missing__"
@@ -288,7 +297,11 @@ def test_reconciliation_is_idempotent(tmp_path: Path) -> None:
     twice, second = reconcile_chart_region_refs(once, assets, anchors, bindings)
     assert twice == once, "reconciliation is not idempotent"
     assert all(o.placed for o in first)
-    assert all(o.disposition == "already_present" for o in second)
+    # The second pass strips its own output and re-places it, so it reports the
+    # same dispositions rather than a weaker "was already there".
+    assert [o.disposition for o in second] == [o.disposition for o in first]
+    for i in (1, 2):
+        assert once.count(f"figures/chart_region_p1_{i}.png") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +363,7 @@ def test_save_figures_does_not_duplicate_the_chart_region(tmp_path: Path) -> Non
 
 def test_one_failed_crop_is_visible_and_the_other_still_ships(tmp_path: Path) -> None:
     """Two crops, one failing at the save boundary: partial loss cannot hide."""
-    from socr.core.result import DocumentStatus
+    from socr.core.result import DocumentStatus, PageStatus
 
     pdf = _make_mixed_chart_table_pdf(tmp_path)
     out_dir = tmp_path / "out"
@@ -395,6 +408,12 @@ def test_one_failed_crop_is_visible_and_the_other_still_ships(tmp_path: Path) ->
     assert result.status is not DocumentStatus.SUCCESS
     assert result.audit_passed is False
 
+    # Finding 6: the loss must reach the FINALIZED page copy too, not only the
+    # whole-document status. The attempt itself stays exactly as selected.
+    assert _final_page_status(out_dir) == "warning"
+    assert ps.best_output.status is PageStatus.SUCCESS
+    assert ps.best_output.audit_passed is True
+
 
 # ---------------------------------------------------------------------------
 # Placement-failure repeat
@@ -433,9 +452,11 @@ def test_unplaceable_crops_are_preserved_but_never_claimed_in_source_order(
     note = pipeline._chart_region_note(state)
     assert note is not None and "position in the page could not be established" in note
     assert note in (result.error or ""), f"the note never reached metadata: {result.error!r}"
-    # Nothing was LOST, so the document is not demoted for it -- the difference
-    # against the placeable run is the note and the labelled block, not a status.
+    # Nothing was LOST, so the note does not say so and the document is not
+    # demoted for it. The PAGE is still reported as a warning: the reader has to
+    # be told the position is unestablished.
     assert "preserved nowhere" not in note
+    assert _final_page_status(out_dir) == "warning"
 
 
 def test_a_single_source_table_binds_a_chart_with_no_usable_anchor(tmp_path: Path) -> None:
@@ -492,3 +513,223 @@ def test_a_deleted_crop_is_repaired_on_the_next_run(tmp_path: Path) -> None:
     _p2, _s2, second = _run(pdf, out_dir)
     assert crop.exists() and crop.stat().st_size > 0, "the deleted crop was not repaired"
     assert _body(second) == _body(first), "the repaired run produced a different body"
+
+
+# ---------------------------------------------------------------------------
+# Reconciler invariants (round 2 review, findings 1-4)
+# ---------------------------------------------------------------------------
+
+
+def _asset(index: int, y: float = 10.0, *, rendered: bool = True):
+    from socr.figures.chart_regions import ChartRegionAsset
+
+    return ChartRegionAsset(
+        page_num=1,
+        region_index=index,
+        bbox=(0.0, y, 100.0, y + 10.0),
+        rel_path=f"figures/chart_region_p1_{index}.png" if rendered else "",
+        rendered=rendered,
+        error="" if rendered else "render error",
+    )
+
+
+def test_an_anchor_inside_a_table_cell_never_splits_the_table() -> None:
+    """Finding 1: a source word-row the model folded into a cell is not an anchor."""
+    from socr.figures.chart_regions import PLACED_TABLE_BOUND, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    text = "| Name | Value |\n|---|---|\n| Alpha | 10 |\n| Beta | 20 |"
+    out, outcomes = reconcile_chart_region_refs(text, [asset], {1: ("Alpha", "")}, {1: "after"})
+    assert text in out, f"the accepted table was split:\n{out}"
+    assert outcomes[0].disposition == PLACED_TABLE_BOUND
+    assert out.index(asset.rel_path) > out.index("| Beta | 20 |")
+
+
+def test_an_anchor_inside_a_code_fence_is_refused() -> None:
+    from socr.figures.chart_regions import UNRESOLVED_PLACEMENT, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    text = "```\nAlpha\n```"
+    out, outcomes = reconcile_chart_region_refs(text, [asset], {1: ("Alpha", "")}, {})
+    assert text in out, f"the code fence was split:\n{out}"
+    assert outcomes[0].disposition == UNRESOLVED_PLACEMENT
+
+
+def test_two_charts_sharing_one_anchor_keep_source_order() -> None:
+    """Finding 2: slots are computed against one body, not a growing one."""
+    from socr.figures.chart_regions import reconcile_chart_region_refs
+
+    a, b = _asset(1, 10.0), _asset(2, 40.0)
+    out, outcomes = reconcile_chart_region_refs(
+        "Intro\nTail", [a, b], {1: ("Intro", "Tail"), 2: ("Intro", "Tail")}, {}
+    )
+    assert out.index(a.rel_path) < out.index(b.rel_path), f"source order reversed:\n{out}"
+    assert all(o.placed for o in outcomes)
+
+
+def test_contradictory_anchors_are_not_trusted() -> None:
+    """The line below the chart in the source sits ABOVE the line over it."""
+    from socr.figures.chart_regions import UNRESOLVED_PLACEMENT, reconcile_chart_region_refs
+
+    out, outcomes = reconcile_chart_region_refs(
+        "Below\nAbove", [_asset(1)], {1: ("Above", "Below")}, {}
+    )
+    assert outcomes[0].disposition == UNRESOLVED_PLACEMENT
+    assert "Unresolved chart placement" in out
+
+
+def test_duplicate_existing_references_are_reduced_to_one() -> None:
+    """Finding 3: counting membership in a set cannot enforce exactly-once."""
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    out, _outcomes = reconcile_chart_region_refs(
+        f"Intro\n\n{image_ref(asset)}\n\n{image_ref(asset)}\n\nTail",
+        [asset],
+        {1: ("Intro", "Tail")},
+        {},
+    )
+    assert out.count(asset.rel_path) == 1, f"the duplicate reference survived:\n{out}"
+
+
+def test_existing_references_in_the_wrong_order_are_re_placed() -> None:
+    """A winner that emitted the crops reversed does not keep them reversed."""
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    a, b = _asset(1, 10.0), _asset(2, 40.0)
+    out, _outcomes = reconcile_chart_region_refs(
+        f"Intro\n\n{image_ref(b)}\n\n{image_ref(a)}\n\nTail",
+        [a, b],
+        {1: ("Intro", "Tail"), 2: ("Intro", "Tail")},
+        {},
+    )
+    assert out.index(a.rel_path) < out.index(b.rel_path), f"reversed refs were kept:\n{out}"
+    assert out.count(a.rel_path) == 1 and out.count(b.rel_path) == 1
+
+
+def test_a_stale_link_never_suppresses_the_failure_marker() -> None:
+    """Finding 4: a filename mention is not evidence that anything was preserved."""
+    from socr.figures.chart_regions import reconcile_chart_region_refs
+
+    asset = _asset(1, rendered=False)
+    out, _outcomes = reconcile_chart_region_refs(
+        f"![chart](figures/{asset.filename})", [asset], {}, {}
+    )
+    assert "NOT preserved" in out, f"the failure marker was suppressed:\n{out}"
+    assert "![" not in out, f"a broken image link survived:\n{out}"
+
+
+def test_prose_mentioning_a_crop_filename_is_never_deleted() -> None:
+    """Ownership is decided on the image target, so prose is left alone."""
+    from socr.figures.chart_regions import reconcile_chart_region_refs
+
+    asset = _asset(1)
+    text = "The file chart_region_p1_1.png holds the chart.\n\nTail"
+    out, _outcomes = reconcile_chart_region_refs(text, [asset], {1: ("Tail", "")}, {})
+    assert "The file chart_region_p1_1.png holds the chart." in out
+
+
+# ---------------------------------------------------------------------------
+# Duplicate suppression controls (finding 5)
+# ---------------------------------------------------------------------------
+
+
+class _Fig:
+    """A stand-in for one ``ExtractedFigure``: the data the suppressor reads."""
+
+    def __init__(self, page_num, bbox, figure_num=1):
+        self.page_num = page_num
+        self.bbox = bbox
+        self.figure_num = figure_num
+
+
+def _suppression_state(assets, preserved):
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+        handle = DocumentHandle(path=Path("x.pdf"), page_count=1)
+    state = DocumentState(handle=handle)
+    state._chart_region_assets = {1: assets}
+    state._chart_region_preserved = {1: preserved}
+    return state
+
+
+def test_a_contained_duplicate_is_suppressed() -> None:
+    pipeline = _make_pipeline()
+    asset = _asset(1)
+    state = _suppression_state([asset], {1})
+    inner = _Fig(1, (10.0, 12.0, 90.0, 18.0))
+    assert pipeline._drop_chart_region_duplicates(state, [inner]) == []
+
+
+def test_a_larger_multipanel_figure_is_never_suppressed() -> None:
+    """Finding 5b: centre-inside is not equivalence -- the extra panel would die."""
+    pipeline = _make_pipeline()
+    asset = _asset(1)  # bbox (0, 10, 100, 20)
+    state = _suppression_state([asset], {1})
+    # Centre (50, 15) falls inside the crop, but the figure reaches well past it.
+    wider = _Fig(1, (0.0, 0.0, 100.0, 30.0))
+    assert pipeline._drop_chart_region_duplicates(state, [wider]) == [wider]
+
+
+def test_a_failed_mandatory_render_never_suppresses_the_ordinary_asset() -> None:
+    """Finding 5a: the ordinary extraction is then the chart's ONLY image."""
+    pipeline = _make_pipeline()
+    failed = _asset(1, rendered=False)
+    state = _suppression_state([failed], set())
+    inner = _Fig(1, (10.0, 12.0, 90.0, 18.0))
+    assert pipeline._drop_chart_region_duplicates(state, [inner]) == [inner]
+
+
+def test_the_recovery_asset_survives_end_to_end_when_a_crop_fails(tmp_path: Path) -> None:
+    """The same control through the real pipeline, with figure extraction on."""
+    pdf = _make_mixed_chart_table_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    real_save = fitz.Pixmap.save
+
+    def _save(self, target, *args, **kwargs):
+        if str(target).endswith("chart_region_p1_2.png"):
+            raise RuntimeError("pixmap save died")
+        return real_save(self, target, *args, **kwargs)
+
+    with patch.object(fitz.Pixmap, "save", _save):
+        _pipeline, _state, result = _run(pdf, out_dir, save_figures=True)
+
+    survivors = [f for f in result.figures if f.engine != "chart_region"]
+    assert survivors, "the only remaining image of the failed region was discarded"
+    kept = [f for f in result.figures if f.engine == "chart_region"]
+    assert [f.figure_num for f in kept] == [1], "the successful crop was lost or duplicated"
+    body = _body(result)
+    assert body.count("figures/chart_region_p1_1.png") == 1
+    assert "NOT preserved" in body
+
+
+# ---------------------------------------------------------------------------
+# Inventory failure is its own outcome
+# ---------------------------------------------------------------------------
+
+
+def test_an_inventory_failure_is_never_reported_as_a_preserved_chart(tmp_path: Path) -> None:
+    """The check never ran, so nothing may claim a crop was retained."""
+    pdf = _make_mixed_chart_table_pdf(tmp_path)
+    out_dir = tmp_path / "out"
+    with patch(
+        "socr.tables.reconstruct.chart_region_bboxes",
+        side_effect=RuntimeError("detector died"),
+    ):
+        pipeline, state, result = _run(pdf, out_dir)
+
+    ps = state.pages[1]
+    assert ps.chart_region_inventory_failed is True
+    assert ps.chart_region_placement_unresolved is False
+    assert ps.chart_region_render_failed is False
+
+    note = pipeline._chart_region_note(state)
+    assert note is not None and "never checked" in note
+    assert "preserved" not in note, f"the note claims a preservation that did not happen: {note}"
+    assert note in (result.error or "")
+    assert _final_page_status(out_dir) == "warning"
+
+    events = [e for e in state.events if getattr(e, "kind", "") == "chart_region_inventory_failed"]
+    assert len(events) == 1

@@ -167,6 +167,12 @@ class PageState:
     #: labelled unresolved-placement block. The content is preserved; the claim
     #: "in source order" is not made for it.
     chart_region_placement_unresolved: bool = False
+    #: GH-189: the chart-region INVENTORY could not be built for this page (the
+    #: detector or the PDF open raised), so the page's chart preservation was
+    #: never checked at all. Deliberately its own flag: reusing the
+    #: placement-unresolved flag above would report "the crop is preserved but
+    #: unplaced" for a page from which no crop was ever retained.
+    chart_region_inventory_failed: bool = False
     #: S1/MAJOR-7(b): persisted answer to ``structure_class_grid_winner(p) is
     #: not None`` from the run that produced the terminal sidecar, restored by
     #: ``_restore_terminal_page_state`` on resume. Needed because resume

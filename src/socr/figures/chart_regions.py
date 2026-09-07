@@ -41,15 +41,20 @@ logger = logging.getLogger(__name__)
 #: Disposition of one detected chart region after reconciliation.
 PLACED_ANCHOR = "placed_anchor"
 PLACED_TABLE_BOUND = "placed_table_bound"
-ALREADY_PRESENT = "already_present"
 UNRESOLVED_PLACEMENT = "unresolved_placement"
 RENDER_FAILED = "render_failed"
 
 #: Dispositions that mean "this region's crop is referenced from the page body
 #: at a position derived from the source geometry".
-_PLACED = frozenset({PLACED_ANCHOR, PLACED_TABLE_BOUND, ALREADY_PRESENT})
+_PLACED = frozenset({PLACED_ANCHOR, PLACED_TABLE_BOUND})
 
-_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)")
+#: Dispositions under which the crop IS referenced from the page body, whether
+#: or not its position could be established.
+PRESERVED_DISPOSITIONS = frozenset({PLACED_ANCHOR, PLACED_TABLE_BOUND, UNRESOLVED_PLACEMENT})
+
+_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
+_FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
+_IMAGE_LINE_RE = re.compile(r"(?:!\[[^\]]*\]\([^)]*\)\s*)+")
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,10 @@ class ChartRegionOutcome:
     @property
     def placed(self) -> bool:
         return self.disposition in _PLACED
+
+    @property
+    def preserved(self) -> bool:
+        return self.disposition in PRESERVED_DISPOSITIONS
 
 
 def chart_region_filename(page_num: int, region_index: int) -> str:
@@ -183,8 +192,7 @@ def table_bindings(
     """
     if len(table_bboxes) != 1:
         return {}
-    tx0, ty0, tx1, ty1 = table_bboxes[0]
-    del tx0, tx1
+    _tx0, ty0, _tx1, ty1 = table_bboxes[0]
     out: dict[int, str] = {}
     for idx, box in enumerate(bboxes, start=1):
         if box.y1 <= ty0:
@@ -195,8 +203,137 @@ def table_bindings(
 
 
 # ---------------------------------------------------------------------------
-# Reconciliation (pure)
+# Owned artifacts: the exact strings this module writes, and how to find them
 # ---------------------------------------------------------------------------
+
+
+def image_ref(asset: ChartRegionAsset) -> str:
+    return f"![chart region {asset.region_index}]({asset.rel_path})"
+
+
+def render_failure_prefix(page_num: int, region_index: int) -> str:
+    return f"> **Chart region {region_index} on page {page_num} was NOT preserved**"
+
+
+def render_failure_marker(asset: ChartRegionAsset) -> str:
+    """Visible, greppable marker for a region whose crop could not be rendered.
+
+    Deliberately NOT a markdown image link: a link to a file that was never
+    written renders as a broken image and is stripped downstream by
+    ``strip_phantom_images``, which is precisely how this loss stayed silent.
+    """
+    reason = _normalize(asset.error) or "unknown error"
+    return (
+        f"{render_failure_prefix(asset.page_num, asset.region_index)} "
+        f"— crop `{asset.filename}` failed to render ({reason}). "
+        "The chart is present in the source PDF; no image was produced for it."
+    )
+
+
+def unresolved_placement_prefix(page_num: int) -> str:
+    return f"> **Unresolved chart placement on page {page_num}**"
+
+
+def unresolved_placement_note(page_num: int, indices: list[int]) -> str:
+    listed = ", ".join(str(i) for i in indices)
+    return (
+        f"{unresolved_placement_prefix(page_num)} — the source position of "
+        f"chart region(s) {listed} could not be located in the accepted text. The crop(s) "
+        "below are preserved in source order; their position relative to the surrounding "
+        "text and tables is NOT established."
+    )
+
+
+def _image_targets(line: str) -> list[str]:
+    """Every image TARGET on a line, in order. Alt text is never consulted."""
+    return [m.group(1) for m in _IMAGE_REF_RE.finditer(line)]
+
+
+def _is_owned(line: str, filenames: set[str], prefixes: tuple[str, ...]) -> bool:
+    """True when *line* is an artifact THIS module wrote for one of these regions.
+
+    Ownership is decided on the image TARGET's basename or on a marker's exact
+    generated prefix -- never on a bare filename mention. A model that happened
+    to name ``chart_region_p1_1.png`` in prose has not written our marker, and a
+    stale link to a crop that does not exist is not evidence that anything was
+    preserved (finding 4).
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if any(stripped.startswith(prefix) for prefix in prefixes):
+        return True
+    # Only a line that is NOTHING BUT image references may be dropped; a ref
+    # embedded in a sentence would take the sentence with it.
+    if not _IMAGE_LINE_RE.fullmatch(stripped):
+        return False
+    targets = _image_targets(stripped)
+    return bool(targets) and all(t.rsplit("/", 1)[-1] in filenames for t in targets)
+
+
+def _strip_owned(lines: list[str], filenames: set[str], prefixes: tuple[str, ...]) -> list[str]:
+    """Remove every owned artifact and the ONE blank separator it brought.
+
+    Exactly inverts ``_insert_block``, so reconciling this module's own output
+    reproduces it byte-for-byte instead of accumulating blank lines.
+    """
+    keep = [not _is_owned(ln, filenames, prefixes) for ln in lines]
+    if all(keep):
+        return list(lines)
+    out: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if keep[i]:
+            out.append(lines[i])
+            i += 1
+            continue
+        i += 1
+        if out and not out[-1].strip():
+            if i < n and not lines[i].strip():
+                i += 1  # drop the blank that followed
+            elif i >= n:
+                out.pop()  # end of body: drop the blank that preceded
+        elif not out:
+            if i < n and not lines[i].strip():
+                i += 1
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Protected blocks and slot resolution
+# ---------------------------------------------------------------------------
+
+
+def protected_spans(lines: list[str]) -> list[tuple[int, int]]:
+    """Inclusive line spans no insertion may land inside: tables and code fences.
+
+    Splitting an accepted table with an image and two blank lines destroys the
+    structure the page was selected for (finding 1). Placement matching decides
+    POSITION only; it may never rewrite what the winner authored.
+    """
+    from socr.tables.reconcile import find_table_blocks
+
+    spans = [(b.start, b.end) for b in find_table_blocks("\n".join(lines))]
+    fence_open: int | None = None
+    for i, line in enumerate(lines):
+        if not _FENCE_RE.match(line):
+            continue
+        if fence_open is None:
+            fence_open = i
+        else:
+            spans.append((fence_open, i))
+            fence_open = None
+    if fence_open is not None:
+        spans.append((fence_open, len(lines) - 1))
+    return spans
+
+
+def _inside(index: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= index <= end for start, end in spans)
+
+
+def _splits(slot: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start < slot <= end for start, end in spans)
 
 
 def _normalize(s: str) -> str:
@@ -207,7 +344,7 @@ def _unique_line_index(lines: list[str], anchor: str) -> int | None:
     """Index of the ONLY line containing *anchor*, or ``None``.
 
     Containment rather than equality because a model legitimately re-marks the
-    same source line (``GDP Growth`` -> ``# GDP Growth``).  Uniqueness, not
+    same source line (``GDP Growth`` -> ``# GDP Growth``). Uniqueness, not
     length, is the admission test -- a short line that occurs once is a better
     anchor than a long one that occurs twice, and a length cutoff would be a
     magic threshold.
@@ -217,6 +354,57 @@ def _unique_line_index(lines: list[str], anchor: str) -> int | None:
         return None
     hits = [i for i, ln in enumerate(lines) if needle in _normalize(ln)]
     return hits[0] if len(hits) == 1 else None
+
+
+def _anchor_slot(
+    lines: list[str],
+    spans: list[tuple[int, int]],
+    anchors: tuple[str, str],
+) -> tuple[int | None, str]:
+    """Resolve an insertion slot from the region's source anchors.
+
+    Both anchors are looked up, not just the first that matches: when they are
+    present and CONTRADICT each other (the line that is below the chart in the
+    source sits above the line that is over it), the winner's layout does not
+    agree with the page's and neither anchor establishes anything.
+
+    An anchor line inside a table or code block is refused outright. A word-row
+    that the model folded into a table cell is not prose, and using it would put
+    the crop inside the block or at a boundary the source never described.
+    """
+    above, below = anchors
+    ia = _unique_line_index(lines, above)
+    ib = _unique_line_index(lines, below)
+    if ia is not None and _inside(ia, spans):
+        ia = None
+    if ib is not None and _inside(ib, spans):
+        ib = None
+    if ia is not None and ib is not None and ia >= ib:
+        return None, "the source anchors above and below the region contradict the winner's order"
+    if ia is not None:
+        return ia + 1, "bound to the unique source line above the region"
+    if ib is not None:
+        return ib, "bound to the unique source line below the region"
+    return None, "no unique source anchor"
+
+
+def _table_slot(
+    lines: list[str],
+    side: str,
+) -> tuple[int | None, str]:
+    """Resolve a slot at the boundary of the winner's ONLY table block."""
+    from socr.tables.reconcile import find_table_blocks
+
+    if not side:
+        return None, "no unambiguous table binding"
+    blocks = find_table_blocks("\n".join(lines))
+    if len(blocks) != 1:
+        return None, "the winner's table blocks do not correspond 1:1 with the source"
+    block = blocks[0]
+    return (
+        block.start if side == "before" else block.end + 1,
+        f"bound {side} the page's only table block",
+    )
 
 
 def _insert_block(lines: list[str], idx: int, block: list[str]) -> list[str]:
@@ -230,37 +418,19 @@ def _insert_block(lines: list[str], idx: int, block: list[str]) -> list[str]:
     return lines[:idx] + payload + lines[idx:]
 
 
-def _image_targets(text: str) -> set[str]:
-    return {m.group(1) for m in _IMAGE_REF_RE.finditer(text)}
+def _interleave(refs: list[str]) -> list[str]:
+    """Blank-separated block, so ``_strip_owned`` can invert it exactly."""
+    out: list[str] = []
+    for ref in refs:
+        if out:
+            out.append("")
+        out.append(ref)
+    return out
 
 
-def image_ref(asset: ChartRegionAsset) -> str:
-    return f"![chart region {asset.region_index}]({asset.rel_path})"
-
-
-def render_failure_marker(asset: ChartRegionAsset) -> str:
-    """Visible, greppable marker for a region whose crop could not be rendered.
-
-    Deliberately NOT a markdown image link: a link to a file that was never
-    written renders as a broken image and is stripped downstream by
-    ``strip_phantom_images``, which is precisely how this loss stayed silent.
-    """
-    reason = _normalize(asset.error) or "unknown error"
-    return (
-        f"> **Chart region {asset.region_index} on page {asset.page_num} was NOT preserved** "
-        f"— crop `{asset.filename}` failed to render ({reason}). "
-        "The chart is present in the source PDF; no image was produced for it."
-    )
-
-
-def unresolved_placement_note(page_num: int, indices: list[int]) -> str:
-    listed = ", ".join(str(i) for i in indices)
-    return (
-        f"> **Unresolved chart placement on page {page_num}** — the source position of "
-        f"chart region(s) {listed} could not be located in the accepted text. The crop(s) "
-        "below are preserved in source order; their position relative to the surrounding "
-        "text and tables is NOT established."
-    )
+# ---------------------------------------------------------------------------
+# Reconciliation (pure)
+# ---------------------------------------------------------------------------
 
 
 def reconcile_chart_region_refs(
@@ -269,123 +439,94 @@ def reconcile_chart_region_refs(
     anchors: dict[int, tuple[str, str]],
     bindings: dict[int, str],
 ) -> tuple[str, list[ChartRegionOutcome]]:
-    """Guarantee one reference per detected chart region in *text*.
+    """Guarantee exactly one reference per detected chart region in *text*.
 
     Pure: no I/O, no state. An empty *assets* returns *text* byte-for-byte and
     no outcomes, which is what keeps chart-free documents byte-identical.
 
-    References are counted by TARGET, never by alt text -- a model that invented
-    the words "chart region 1" has not preserved anything. Nothing already in
-    the text is stripped or rewritten; the accepted table cells and prose are
-    left exactly as the winner authored them, because placement matching here
-    decides position only and must never be mistaken for table verification.
+    Method, in three passes:
 
-    Idempotent: running it on its own output changes nothing.
+    1. **Strip every owned artifact.** References to these regions' canonical
+       crops, and the markers this module writes, are removed wherever they sit.
+       Counting an existing reference as a finished placement cannot enforce
+       "exactly once, in source order": two references to one crop stay two, and
+       references the winner emitted in the wrong order stay wrong. Ownership is
+       decided on the image TARGET, never on alt text a model could invent.
+    2. **Resolve a slot per region against the STRIPPED body**, in source order.
+       Slots are line indices in that one body, so two regions sharing an anchor
+       collect at the same slot instead of each prepending to a body the previous
+       one just grew -- which reverses them.
+    3. **Apply the slots bottom-up**, one source-ordered group per slot, so
+       earlier indices stay valid.
+
+    Nothing the winner authored is rewritten: no insertion may land inside a
+    table or code block, and a region whose position cannot be established from
+    the source goes to a labelled unresolved block rather than being appended as
+    if it were known. Placement matching decides position only and must never be
+    mistaken for table verification.
+
+    Idempotent by construction: pass 1 exactly inverts what pass 3 wrote.
     """
     if not assets:
         return text, []
 
-    lines = text.split("\n")
+    page_num = assets[0].page_num
+    filenames = {a.filename for a in assets}
+    prefixes = tuple(
+        [render_failure_prefix(a.page_num, a.region_index) for a in assets]
+        + [unresolved_placement_prefix(page_num)]
+    )
+    lines = _strip_owned(text.split("\n"), filenames, prefixes)
+    spans = protected_spans(lines)
+
+    ordered = sorted(assets, key=lambda a: (a.bbox[1], a.region_index))
     outcomes: list[ChartRegionOutcome] = []
+    slots: dict[int, list[ChartRegionAsset]] = {}
     unresolved: list[ChartRegionAsset] = []
-    failed: list[ChartRegionAsset] = []
 
-    for asset in sorted(assets, key=lambda a: (a.bbox[1], a.region_index)):
-        current = "\n".join(lines)
+    for asset in ordered:
         if not asset.rendered:
-            if asset.filename in current:
-                outcomes.append(
-                    ChartRegionOutcome(
-                        asset.page_num,
-                        asset.region_index,
-                        RENDER_FAILED,
-                        "",
-                        "marker already present",
-                    )
-                )
-            else:
-                failed.append(asset)
-                outcomes.append(
-                    ChartRegionOutcome(
-                        asset.page_num, asset.region_index, RENDER_FAILED, "", asset.error
-                    )
-                )
-            continue
-
-        if asset.rel_path in _image_targets(current):
             outcomes.append(
                 ChartRegionOutcome(
-                    asset.page_num, asset.region_index, ALREADY_PRESENT, asset.rel_path
+                    asset.page_num, asset.region_index, RENDER_FAILED, "", asset.error
                 )
             )
             continue
 
-        above, below = anchors.get(asset.region_index, ("", ""))
-        idx = _unique_line_index(lines, above)
-        if idx is not None:
-            lines = _insert_block(lines, idx + 1, [image_ref(asset)])
+        slot, detail = _anchor_slot(lines, spans, anchors.get(asset.region_index, ("", "")))
+        disposition = PLACED_ANCHOR
+        if slot is None or _splits(slot, spans):
+            slot, detail = _table_slot(lines, bindings.get(asset.region_index, ""))
+            disposition = PLACED_TABLE_BOUND
+        if slot is None or _splits(slot, spans):
+            unresolved.append(asset)
             outcomes.append(
                 ChartRegionOutcome(
                     asset.page_num,
                     asset.region_index,
-                    PLACED_ANCHOR,
+                    UNRESOLVED_PLACEMENT,
                     asset.rel_path,
-                    "bound to the unique source line above the region",
+                    detail,
                 )
             )
             continue
-
-        idx = _unique_line_index(lines, below)
-        if idx is not None:
-            lines = _insert_block(lines, idx, [image_ref(asset)])
-            outcomes.append(
-                ChartRegionOutcome(
-                    asset.page_num,
-                    asset.region_index,
-                    PLACED_ANCHOR,
-                    asset.rel_path,
-                    "bound to the unique source line below the region",
-                )
-            )
-            continue
-
-        side = bindings.get(asset.region_index, "")
-        if side:
-            from socr.tables.reconcile import find_table_blocks
-
-            blocks = find_table_blocks("\n".join(lines))
-            if len(blocks) == 1:
-                at = blocks[0].start if side == "before" else blocks[0].end + 1
-                lines = _insert_block(lines, at, [image_ref(asset)])
-                outcomes.append(
-                    ChartRegionOutcome(
-                        asset.page_num,
-                        asset.region_index,
-                        PLACED_TABLE_BOUND,
-                        asset.rel_path,
-                        f"bound {side} the page's only table block",
-                    )
-                )
-                continue
-
-        unresolved.append(asset)
+        slots.setdefault(slot, []).append(asset)
         outcomes.append(
             ChartRegionOutcome(
-                asset.page_num,
-                asset.region_index,
-                UNRESOLVED_PLACEMENT,
-                asset.rel_path,
-                "no unique source anchor and no unambiguous table binding",
+                asset.page_num, asset.region_index, disposition, asset.rel_path, detail
             )
         )
 
+    for slot in sorted(slots, reverse=True):
+        lines = _insert_block(lines, slot, _interleave([image_ref(a) for a in slots[slot]]))
+
     if unresolved:
-        page_num = unresolved[0].page_num
         block = [unresolved_placement_note(page_num, [a.region_index for a in unresolved]), ""]
-        block.extend(image_ref(a) for a in unresolved)
+        block.extend(_interleave([image_ref(a) for a in unresolved]))
         lines = _insert_block(lines, len(lines), block)
 
-    for asset in failed:
-        lines = _insert_block(lines, len(lines), [render_failure_marker(asset)])
+    for asset in ordered:
+        if not asset.rendered:
+            lines = _insert_block(lines, len(lines), [render_failure_marker(asset)])
 
     return "\n".join(lines), outcomes
