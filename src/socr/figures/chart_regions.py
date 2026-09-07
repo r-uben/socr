@@ -52,7 +52,7 @@ _PLACED = frozenset({PLACED_ANCHOR, PLACED_TABLE_BOUND})
 #: or not its position could be established.
 PRESERVED_DISPOSITIONS = frozenset({PLACED_ANCHOR, PLACED_TABLE_BOUND, UNRESOLVED_PLACEMENT})
 
-_FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 @dataclass(frozen=True)
@@ -353,35 +353,103 @@ def live_image_tokens(line: str, literal: list[tuple[int, int]]) -> list[tuple[i
     return out
 
 
-def markdown_literal_context(lines: list[str]) -> tuple[set[int], dict[int, list[tuple[int, int]]]]:
-    """Where markdown is showing image syntax rather than using it.
+def _block_literal_lines(lines: list[str]) -> set[int] | None:
+    """Line numbers inside fenced/indented code or an HTML block, per CommonMark.
 
-    Returns the wholly-literal line numbers (fenced code, and lines inside a
-    multi-line HTML comment) and, per line, the character ranges covered by
-    inline code spans and HTML comments.
+    Delegated to ``markdown-it-py`` -- already in the tree behind ``rich``, and
+    declared for this use. Block context is where a hand-rolled scanner keeps
+    being wrong in ways that EDIT accepted content: a boolean toggled on any
+    fence-looking line closes a four-backtick block at an inner three-backtick
+    example, and a multi-line HTML comment whose closing line carries text is
+    left unprotected exactly where an anchor can match it. Both are settled
+    rules with a reference implementation; reusing it beats re-deriving it.
 
-    One context pass, computed on the ORIGINAL body and shared by removal,
-    counting and insertion. Independent regex exceptions per markdown construct
-    would disagree about which bytes form an image, which is how the fence-only
-    fix left inline code and comments still being edited.
-
-    Inline code spans are resolved within a line; a backtick span carried across
-    a line break is rare enough, and failing to see one only means an owned
-    reference inside it is treated as live.
+    ``None`` when the tokenizer is unavailable, so the caller falls back to the
+    scanner below rather than failing open on a document it cannot classify.
     """
-    fenced: set[int] = set()
-    ranges: dict[int, list[tuple[int, int]]] = {}
-    in_fence = False
+    try:
+        from markdown_it import MarkdownIt
+    except Exception as exc:  # pragma: no cover - dependency is declared
+        logger.debug("chart_regions: markdown-it unavailable (%s); using the line scanner", exc)
+        return None
+    try:
+        tokens = MarkdownIt("commonmark").parse("\n".join(lines))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("chart_regions: markdown-it parse failed (%s); using the line scanner", exc)
+        return None
+    out: set[int] = set()
+    for token in tokens:
+        if token.type in ("fence", "code_block", "html_block") and token.map:
+            out.update(range(token.map[0], min(token.map[1], len(lines))))
+    return out
+
+
+def _scanned_literal_lines(lines: list[str]) -> set[int]:
+    """Fallback block scan: fences by delimiter CHARACTER and LENGTH, comments.
+
+    Used only when the tokenizer is unavailable. A fence closes on the same
+    character at least as long as the opening run and nothing else on the line,
+    so a shorter inner fence is content and a tilde run cannot close a backtick
+    block.
+    """
+    out: set[int] = set()
+    open_char, open_len = "", 0
     in_comment = False
     for idx, line in enumerate(lines):
-        if _FENCE_RE.match(line) and not in_comment:
-            fenced.add(idx)
-            in_fence = not in_fence
-            ranges[idx] = []
+        if in_comment:
+            out.add(idx)
+            if "-->" in line:
+                in_comment = False
             continue
-        if in_fence:
-            fenced.add(idx)
+        match = _FENCE_RE.match(line)
+        if match:
+            delim = match.group(1)
+            char, length = delim[0], len(delim)
+            if not open_char:
+                open_char, open_len = char, length
+                out.add(idx)
+                continue
+            body = line.strip()
+            if char == open_char and length >= open_len and body == char * len(body):
+                open_char, open_len = "", 0
+                out.add(idx)
+                continue
+        if open_char:
+            out.add(idx)
+            continue
+        if line.lstrip().startswith("<!--") and "-->" not in line:
+            out.add(idx)
+            in_comment = True
+    return out
+
+
+def markdown_literal_context(lines: list[str]) -> tuple[set[int], dict[int, list[tuple[int, int]]]]:
+    """Where markdown is SHOWING image syntax rather than using it.
+
+    Returns the wholly-literal line numbers (fenced or indented code, HTML
+    blocks) and, per remaining line, the character ranges covered by inline code
+    spans and inline HTML comments.
+
+    One context pass, computed on the ORIGINAL body and shared by removal,
+    anchor matching, insertion and the final liveness check. Independent regex
+    exceptions per markdown construct would disagree about which bytes form an
+    image, which is how a fence-only fix left inline code and comments open, and
+    an inline-only fix left block fences and comment blocks open.
+
+    Inline spans are resolved per line, with an unterminated comment carried
+    forward; a backtick span split across a line break is rare enough, and
+    failing to see one only means an owned reference inside it is treated as
+    live.
+    """
+    block = _block_literal_lines(lines)
+    literal_lines = set(block) if block is not None else _scanned_literal_lines(lines)
+
+    ranges: dict[int, list[tuple[int, int]]] = {}
+    in_comment = False
+    for idx, line in enumerate(lines):
+        if idx in literal_lines:
             ranges[idx] = []
+            in_comment = False
             continue
         found: list[tuple[int, int]] = []
         i, n = 0, len(line)
@@ -423,8 +491,8 @@ def markdown_literal_context(lines: list[str]) -> tuple[set[int], dict[int, list
             i += 1
         ranges[idx] = found
         if in_comment:
-            fenced.add(idx)
-    return fenced, ranges
+            literal_lines.add(idx)
+    return literal_lines, ranges
 
 
 def code_fence_spans(lines: list[str]) -> list[tuple[int, int]]:
@@ -550,7 +618,11 @@ def _normalize(s: str) -> str:
     return " ".join(s.split())
 
 
-def _unique_line_index(lines: list[str], anchor: str) -> int | None:
+def _unique_line_index(
+    lines: list[str],
+    anchor: str,
+    literal: dict[int, list[tuple[int, int]]] | None = None,
+) -> int | None:
     """Index of the ONLY line containing *anchor*, or ``None``.
 
     Containment rather than equality because a model legitimately re-marks the
@@ -562,7 +634,17 @@ def _unique_line_index(lines: list[str], anchor: str) -> int | None:
     needle = _normalize(anchor)
     if not needle:
         return None
-    hits = [i for i, ln in enumerate(lines) if needle in _normalize(ln)]
+    hits = []
+    for i, line in enumerate(lines):
+        if needle not in _normalize(line):
+            continue
+        # A hit whose bytes sit inside an inline code span or a comment is text
+        # the page is SHOWING. Anchoring to it would bind the crop's position to
+        # an example rather than to the page's own prose.
+        offset = line.find(anchor)
+        if offset >= 0 and _in_ranges(offset, (literal or {}).get(i, [])):
+            continue
+        hits.append(i)
     return hits[0] if len(hits) == 1 else None
 
 
@@ -570,6 +652,7 @@ def _anchor_slot(
     lines: list[str],
     spans: list[tuple[int, int]],
     anchors: tuple[str, str],
+    literal: dict[int, list[tuple[int, int]]] | None = None,
 ) -> tuple[int | None, str]:
     """Resolve an insertion slot from the region's source anchors.
 
@@ -583,8 +666,8 @@ def _anchor_slot(
     the crop inside the block or at a boundary the source never described.
     """
     above, below = anchors
-    ia = _unique_line_index(lines, above)
-    ib = _unique_line_index(lines, below)
+    ia = _unique_line_index(lines, above, literal)
+    ib = _unique_line_index(lines, below, literal)
     if ia is not None and _inside(ia, spans):
         ia = None
     if ib is not None and _inside(ib, spans):
@@ -643,6 +726,67 @@ def _interleave(refs: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _refuse_all(
+    placements: list[tuple[ChartRegionAsset, int, str, str]],
+    unresolved: list[ChartRegionAsset],
+    reasons: dict[int, tuple[str, str]],
+    detail: str,
+) -> tuple[list, list[ChartRegionAsset]]:
+    """Withdraw every position CLAIM on the page, keeping every crop."""
+    out = list(unresolved)
+    for asset, _slot, _disposition, _detail in placements:
+        out.append(asset)
+        reasons[asset.region_index] = (UNRESOLVED_PLACEMENT, detail)
+    out.sort(key=lambda a: (a.bbox[1], a.region_index))
+    return [], out
+
+
+def _build_body(
+    base: list[str],
+    page_num: int,
+    ordered: list[ChartRegionAsset],
+    placements: list[tuple[ChartRegionAsset, int, str, str]],
+    unresolved: list[ChartRegionAsset],
+) -> list[str]:
+    """Apply slots bottom-up, then the unresolved block, then failure markers."""
+    out = list(base)
+    slots: dict[int, list[ChartRegionAsset]] = {}
+    for asset, slot, _disposition, _detail in placements:
+        slots.setdefault(slot, []).append(asset)
+    for slot in sorted(slots, reverse=True):
+        out = _insert_block(out, slot, _interleave([image_ref(a) for a in slots[slot]]))
+    if unresolved:
+        block = [unresolved_placement_note(page_num, [a.region_index for a in unresolved]), ""]
+        block.extend(_interleave([image_ref(a) for a in unresolved]))
+        out = _insert_block(out, len(out), block)
+    for asset in ordered:
+        if not asset.rendered:
+            out = _insert_block(out, len(out), [render_failure_marker(asset)])
+    return out
+
+
+def _all_refs_live(body: list[str], assets: list[ChartRegionAsset]) -> bool:
+    """True when each asset appears exactly once as a LIVE image in *body*.
+
+    Keyed on the path actually EMITTED, not on the canonical filename: the check
+    has to ask about the bytes that were written, or it answers a question about
+    a reference the body does not contain.
+    """
+    literal_lines, ranges = markdown_literal_context(body)
+    for asset in assets:
+        wanted = {asset.rel_path.rsplit("/", 1)[-1] or asset.filename}
+        seen = 0
+        for idx, line in enumerate(body):
+            if idx in literal_lines:
+                continue
+            for _start, _end, dest in live_image_tokens(line, ranges.get(idx, [])):
+                if _owns(dest, wanted):
+                    seen += 1
+        if seen != 1:
+            return False
+    return True
+
+
 def reconcile_chart_region_refs(
     text: str,
     assets: list[ChartRegionAsset],
@@ -681,45 +825,39 @@ def reconcile_chart_region_refs(
         return text, []
 
     page_num = assets[0].page_num
+    # Both the canonical crop name and whatever path was actually rendered: the
+    # two agree in production, and keying on only one of them would leave a
+    # reference this pass wrote invisible to the pass that has to remove it.
     filenames = {a.filename for a in assets}
+    filenames.update(a.rel_path.rsplit("/", 1)[-1] for a in assets if a.rel_path)
     prefixes = tuple(
         [render_failure_prefix(a.page_num, a.region_index) for a in assets]
         + [unresolved_placement_prefix(page_num)]
     )
     original = text.split("\n")
     lines = _strip_owned(original, filenames, prefixes, markdown_literal_context(original))
+    _literal_lines, literal_ranges = markdown_literal_context(lines)
     spans = protected_spans(lines)
 
     ordered = sorted(assets, key=lambda a: (a.bbox[1], a.region_index))
-    outcomes: list[ChartRegionOutcome] = []
+    rendered = [a for a in ordered if a.rendered]
+    reasons: dict[int, tuple[str, str]] = {
+        a.region_index: (RENDER_FAILED, a.error) for a in ordered if not a.rendered
+    }
     placements: list[tuple[ChartRegionAsset, int, str, str]] = []
     unresolved: list[ChartRegionAsset] = []
 
-    for asset in ordered:
-        if not asset.rendered:
-            outcomes.append(
-                ChartRegionOutcome(
-                    asset.page_num, asset.region_index, RENDER_FAILED, "", asset.error
-                )
-            )
-            continue
-
-        slot, detail = _anchor_slot(lines, spans, anchors.get(asset.region_index, ("", "")))
+    for asset in rendered:
+        slot, detail = _anchor_slot(
+            lines, spans, anchors.get(asset.region_index, ("", "")), literal_ranges
+        )
         disposition = PLACED_ANCHOR
         if slot is None or _splits(slot, spans):
             slot, detail = _table_slot(lines, bindings.get(asset.region_index, ""))
             disposition = PLACED_TABLE_BOUND
         if slot is None or _splits(slot, spans):
             unresolved.append(asset)
-            outcomes.append(
-                ChartRegionOutcome(
-                    asset.page_num,
-                    asset.region_index,
-                    UNRESOLVED_PLACEMENT,
-                    asset.rel_path,
-                    detail,
-                )
-            )
+            reasons[asset.region_index] = (UNRESOLVED_PLACEMENT, detail)
             continue
         placements.append((asset, slot, disposition, detail))
 
@@ -734,40 +872,44 @@ def reconcile_chart_region_refs(
     # and the alternative -- keeping the ones that happen to fit -- would pick
     # which charts to believe on no evidence. They still ship, source-ordered,
     # in the labelled unresolved block; what is withheld is only the CLAIM.
-    slot_order = [slot for _asset, slot, _d, _t in placements]
-    if slot_order != sorted(slot_order):
-        for asset, _slot, _d, _t in placements:
-            unresolved.append(asset)
-            outcomes.append(
-                ChartRegionOutcome(
-                    asset.page_num,
-                    asset.region_index,
-                    UNRESOLVED_PLACEMENT,
-                    asset.rel_path,
-                    "the winner's anchor order runs backwards against the source order",
-                )
-            )
-        unresolved.sort(key=lambda a: (a.bbox[1], a.region_index))
-        placements = []
-    else:
-        slots: dict[int, list[ChartRegionAsset]] = {}
-        for asset, slot, disposition, detail in placements:
-            slots.setdefault(slot, []).append(asset)
-            outcomes.append(
-                ChartRegionOutcome(
-                    asset.page_num, asset.region_index, disposition, asset.rel_path, detail
-                )
-            )
-        for slot in sorted(slots, reverse=True):
-            lines = _insert_block(lines, slot, _interleave([image_ref(a) for a in slots[slot]]))
+    if [slot for _a, slot, _d, _t in placements] != sorted(slot for _a, slot, _d, _t in placements):
+        placements, unresolved = _refuse_all(
+            placements,
+            unresolved,
+            reasons,
+            "the winner's anchor order runs backwards against the source order",
+        )
 
-    if unresolved:
-        block = [unresolved_placement_note(page_num, [a.region_index for a in unresolved]), ""]
-        block.extend(_interleave([image_ref(a) for a in unresolved]))
-        lines = _insert_block(lines, len(lines), block)
+    body = _build_body(lines, page_num, ordered, placements, unresolved)
 
-    for asset in ordered:
-        if not asset.rendered:
-            lines = _insert_block(lines, len(lines), [render_failure_marker(asset)])
+    # Liveness. A slot can be inside a construct that the span check reads as
+    # safe and markdown still swallows -- the reference is present as BYTES and
+    # renders as nothing. Reporting that as a placement is the same silent loss
+    # in a new costume, so the answer is checked, not assumed: every rendered
+    # region must appear exactly once as a LIVE image token in the final body.
+    # On any failure every placement is refused, the same way a non-monotone
+    # layout is. The fallback body is not re-checked: its block is appended at
+    # the very end, which is the last position left to try.
+    if placements and not _all_refs_live(body, rendered):
+        placements, unresolved = _refuse_all(
+            placements,
+            unresolved,
+            reasons,
+            "the reference could not be placed anywhere markdown renders it",
+        )
+        body = _build_body(lines, page_num, ordered, placements, unresolved)
 
-    return "\n".join(lines), outcomes
+    for asset, _slot, disposition, detail in placements:
+        reasons[asset.region_index] = (disposition, detail)
+
+    outcomes = [
+        ChartRegionOutcome(
+            asset.page_num,
+            asset.region_index,
+            reasons[asset.region_index][0],
+            "" if not asset.rendered else asset.rel_path,
+            reasons[asset.region_index][1],
+        )
+        for asset in ordered
+    ]
+    return "\n".join(body), outcomes

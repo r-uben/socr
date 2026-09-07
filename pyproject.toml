@@ -33,6 +33,14 @@ dependencies = [
     "numpy>=1.26.0",
     "opencv-python-headless>=4.9.0", # image-based table localization on scanned pages
     "pylatexenc>=2.10",
+    # GH-189: CommonMark block context (fenced code, HTML blocks) for the
+    # chart-region reconciler, which must know where markdown is SHOWING image
+    # syntax rather than using it. Already present behind ``rich``; declared
+    # here because socr imports it directly. A hand-rolled scanner got the fence
+    # delimiter rules and the HTML-comment closing line wrong in ways that
+    # EDITED accepted page content -- these are settled rules with a reference
+    # implementation, so socr reuses it instead of re-deriving it.
+    "markdown-it-py>=3.0.0",
 ]
 
 [project.urls]

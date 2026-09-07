@@ -904,3 +904,95 @@ def test_an_unreadable_source_reports_a_skipped_check_only_for_known_chart_pages
     assert len(events) == 1 and events[0].data["known_chart_pages"] == [1]
     note = pipeline._chart_region_note(state)
     assert note is not None and "never checked" in note and "page(s) 1" in note
+
+
+# ---------------------------------------------------------------------------
+# CommonMark block context (round 5 review)
+# ---------------------------------------------------------------------------
+
+
+def test_a_slot_before_a_comment_closing_line_is_refused() -> None:
+    """A closing line carries text, and that text is still inside the comment."""
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    out, _outcomes = reconcile_chart_region_refs(
+        "Intro\n<!-- notes\nCaption -->\nTail", [asset], {1: ("", "Caption")}, {}
+    )
+    start, end = out.index("<!--"), out.index("-->")
+    assert not start < out.index(image_ref(asset)) < end, (
+        f"the chart was inserted inside the HTML comment and renders as nothing:\n{out}"
+    )
+
+
+def test_a_shorter_inner_fence_does_not_close_a_longer_block() -> None:
+    """CommonMark: a fence closes only on the same char, at least as long."""
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    code = f"````markdown\n```\n{image_ref(asset)}\n```\n````"
+    out, _outcomes = reconcile_chart_region_refs(
+        f"Intro\n{code}\nTail", [asset], {1: ("Intro", "Tail")}, {}
+    )
+    assert code in out, f"the four-backtick example was edited:\n{out}"
+
+
+def test_a_tilde_fence_cannot_close_a_backtick_block() -> None:
+    from socr.figures.chart_regions import image_ref, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    code = f"```markdown\n~~~\n{image_ref(asset)}\n~~~\n```"
+    out, _outcomes = reconcile_chart_region_refs(
+        f"Intro\n{code}\nTail", [asset], {1: ("Intro", "Tail")}, {}
+    )
+    assert code in out, f"a tilde run closed a backtick block:\n{out}"
+
+
+def test_the_line_scanner_fallback_agrees_on_fences_and_comments() -> None:
+    """The tokenizer is declared, but its absence must not fail open."""
+    from socr.figures import chart_regions
+
+    lines = [
+        "Intro",
+        "````markdown",
+        "```",
+        "![c](figures/chart_region_p1_1.png)",
+        "```",
+        "````",
+        "<!-- notes",
+        "Caption -->",
+        "Tail",
+    ]
+    with patch.object(chart_regions, "_block_literal_lines", return_value=None):
+        fallback, _ranges = chart_regions.markdown_literal_context(lines)
+    tokenized, _ranges = chart_regions.markdown_literal_context(lines)
+    assert fallback == tokenized, f"scanner {sorted(fallback)} vs tokenizer {sorted(tokenized)}"
+    assert {1, 2, 3, 4, 5, 6, 7} <= tokenized
+
+
+def test_an_anchor_matching_only_literal_text_is_refused() -> None:
+    """Anchoring to a markdown example binds the crop to a demo, not to the page."""
+    from socr.figures.chart_regions import UNRESOLVED_PLACEMENT, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    out, outcomes = reconcile_chart_region_refs(
+        "Prose about `Caption` only", [asset], {1: ("Caption", "")}, {}
+    )
+    assert outcomes[0].disposition == UNRESOLVED_PLACEMENT
+    assert "Prose about `Caption` only" in out
+
+
+def test_a_reference_that_could_not_be_placed_live_is_reported_unresolved() -> None:
+    """Liveness is checked, not assumed: bytes present is not a chart rendered."""
+    from socr.figures import chart_regions
+    from socr.figures.chart_regions import UNRESOLVED_PLACEMENT, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    with patch.object(chart_regions, "_all_refs_live", return_value=False):
+        out, outcomes = reconcile_chart_region_refs(
+            "Intro\nTail", [asset], {1: ("Intro", "Tail")}, {}
+        )
+    assert outcomes[0].disposition == UNRESOLVED_PLACEMENT
+    assert "markdown renders it" in outcomes[0].detail
+    assert out.count(asset.rel_path) == 1
+    assert "Unresolved chart placement" in out
