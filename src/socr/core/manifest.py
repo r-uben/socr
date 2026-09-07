@@ -2139,7 +2139,17 @@ def _select_page_output_tagged(
             status=PageStatus.ERROR,
             engine=p.best_output.engine if p.best_output else "qwen",
             audit_passed=False,
-            failure_mode=FailureMode.HALLUCINATION,
+            # #658: this branch REBUILDS the shipped output from scratch, so a
+            # fixed HALLUCINATION here overwrote the honest attempt-level reason
+            # and the sidecar the corpus actually reads still said the model
+            # invented the table. The floor is unchanged -- same marker text,
+            # same ERROR, same provenance -- only the recorded cause follows the
+            # page's own flag.
+            failure_mode=(
+                FailureMode.NO_WITNESS_BACKEND
+                if getattr(p, "scanned_table_no_witness", False)
+                else FailureMode.HALLUCINATION
+            ),
         ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
     if p.is_born_digital and p.native_text:
         # TR-3: D3 fail-closed floor.  When the OCR ladder failed for a table
