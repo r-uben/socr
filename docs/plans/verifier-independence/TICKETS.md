@@ -230,7 +230,12 @@ returning `None` when no `R > region.x0` exists;
 `ordinal_origin(page, region)` — cluster the region's horizontal rules by y (rules closer than a
 rule thickness are one border), return the y of the **second** group, `None` when there is no
 second group (scanned pages). Every bound is derived from the page's own type sizes and rule
-thickness — no literal. In `binding.py`, `BindingResult` gains two **read-only** fields,
+thickness — no literal. `RowBand` gains an `ambiguity: str | None` field, set (to a
+reason string, e.g. `"merge-heuristic"`) exactly when the boundary above the band was a
+heuristic sub-size merge or was left unresolved by `_boundary_verdict`/`_gap_ambiguity`,
+and left `None` on a boundary that was cleanly `"separate"`; this is the sole signal C2b's
+prefix rule (below) reads to decide whether an ordinal chain is trustworthy. In `binding.py`,
+`BindingResult` gains two **read-only** fields,
 `native_rows` and `row_binding` (the `_native_rows` output and the `_bind_rows` mapping already
 computed) — nothing else in `binding.py` changes and no geometry enters it.
 **Files:** `src/socr/tables/locate.py`, `src/socr/tables/binding.py` (`BindingResult` fields
@@ -245,7 +250,10 @@ on a one-column fixture. Corpus check (skipped in CI): on the frozen 7 tables th
 C1's measured values (doc01 116.3, doc02 123.9, doc03 241.5, doc05/07 121.0, doc04 `None`) and
 the band counts per table match C1 §(d)'s inputs. `BindingResult.native_rows` /
 `.row_binding` are populated on every `bind()` call and the A1 harness output is byte-identical
-before/after. Full suite green; ruff format clean.
+before/after. (5) a clean booktabs fixture (every boundary `"separate"`) produces bands with
+`ambiguity is None` throughout; a fixture with one heuristically-merged sub-size boundary
+produces `ambiguity is not None` on exactly that band and `None` elsewhere — this is the pin
+C2b's prefix rule depends on. Full suite green; ruff format clean.
 
 ### TICKET-C2b — geometry-addressed disproof + abstain semantics · DONE (#621) · depends-on: C2a, A2, B1 · wave 5
 **Problem:** As C1 — `_disprove_one` transcribes `item.native_bbox`, so the recovery crop is
@@ -289,9 +297,13 @@ Any `process()` test patches `_available_engines_for_agentic`, `_resolve_judge_m
 `ambiguity` where a sub-size boundary was merged heuristically or left unresolved. An
 uncertain merge makes the row COUNT uncertain, so every ordinal derived through it is
 uncertain: C2b must **abstain on any item whose prefix of bands from the header origin
-crosses an ambiguous band**, even when native and model indices agree. Fourth control:
-an ambiguous merge ABOVE an otherwise clean target → `abstained`, transcriber call count
-0, both lane indices agreeing.
+crosses an ambiguous band** (reading-order from the header origin, not PDF y-axis),
+even when native and model indices agree. This abstain reason is a **distinct class**,
+not the bare `"abstained"` string — it is the literal `address()` reason
+`"prefix crosses ambiguous band(s) {indices}"`, so a prediction artifact can match on
+it specifically and not conflate it with a wrong-pointer or shifted-row abstention.
+Fourth control: an ambiguous merge ABOVE an otherwise clean target → abstained with
+that reason, transcriber call count 0, both lane indices agreeing.
 **Frozen-replay gate:** `socr-replay-binding` asserts the implementation matches the committed
 prediction item-for-item (address vs abstain, and the abstain reason class) on the 14 remaining
 items; every table A2 cleared stays cleared. **Feasibility checkpoint:** if fewer than one
