@@ -819,6 +819,25 @@ class TestMathFontDetection:
         ]
         assert BornDigitalDetector._detect_math_fonts(page)
 
+    def test_pazomath_font_detected(self) -> None:
+        """GH-219: mathpazo's PazoMath family (subset-prefixed) triggers detection."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (1, "cff", "Type1", "ABCDEF+PazoMath-Italic", "PazoMath-Italic", ""),
+        ]
+        assert BornDigitalDetector._detect_math_fonts(page)
+
+    def test_urw_palladio_prose_font_not_detected(self) -> None:
+        """GH-219: URWPalladioL body font (mathpazo's Palatino prose companion)
+        must NOT trigger -- it also sets ordinary prose, unlike PazoMath which
+        is math-only."""
+        page = MagicMock()
+        page.get_fonts.return_value = [
+            (1, "cff", "Type1", "ABCDEF+URWPalladioL-Roma", "URWPalladioL-Roma", ""),
+            (2, "cff", "Type1", "ABCDEF+URWPalladioL-Ital", "URWPalladioL-Ital", ""),
+        ]
+        assert not BornDigitalDetector._detect_math_fonts(page)
+
 
 # ---------------------------------------------------------------------------
 # Tests: Structured text extraction (markdown tables)

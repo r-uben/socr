@@ -448,6 +448,76 @@ class TestDetectDisplayEquations:
         result = detect_display_equations(_BrokenPage(), page_num=99)
         assert result.regions == []
 
+    def test_pazomath_display_equation_detected(self):
+        """GH-219: a centred line set in mathpazo's PazoMath family is detected
+        as a display equation -- the same geometry that CMMI10 clears."""
+        lines = [
+            (80, "Introductory prose line that sets the scene.", False),
+            (180, r"E = mc^2", True),  # centred PazoMath line
+            (280, "Concluding prose sentence.", False),
+        ]
+        doc, real_page = _make_page_with_math_font(lines)
+
+        class _PazoMathPage(_MathFontPage):
+            """Same wrapper as _MathFontPage but reports PazoMath, not CMMI10 --
+            the actual family mathpazo emits (see GH-219)."""
+
+            def get_fonts(self):
+                return [(1, "cff", "Type1", "PazoMath", "PazoMath", "WinAnsiEncoding")]
+
+            def get_text(self, mode: str) -> dict:
+                result = super().get_text(mode)
+                for block in result["blocks"]:
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            if span["font"] == "CMMI10":
+                                span["font"] = "PazoMath"
+                return result
+
+        page = _PazoMathPage(real_page, lines)
+        result = detect_display_equations(page, page_num=3)
+        assert len(result.regions) == 1
+
+    def test_urw_palladio_roma_prose_no_regions(self):
+        """GH-219: prose set purely in URWPalladioL-Roma (mathpazo's Palatino
+        body font) must NOT be mistaken for math -- unlike PazoMath, this
+        family also sets ordinary prose in a Pazo-typeset paper."""
+
+        class _URWPalladioProsePage:
+            rect = fitz.Rect(0, 0, 600, 800)
+
+            def get_fonts(self):
+                return [
+                    (1, "cff", "Type1", "URWPalladioL-Roma", "URWPalladioL-Roma", ""),
+                ]
+
+            def get_text(self, mode: str):
+                assert mode == "dict"
+                bbox = (72.0, 100.0, 400.0, 112.0)
+                return {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "bbox": bbox,
+                            "lines": [
+                                {
+                                    "bbox": bbox,
+                                    "spans": [
+                                        {
+                                            "text": "Ordinary Palatino body prose.",
+                                            "font": "URWPalladioL-Roma",
+                                            "bbox": bbox,
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+
+        result = detect_display_equations(_URWPalladioProsePage(), page_num=4)
+        assert result.regions == []
+
 
 class TestSaveEquationCrops:
     """Tests for crop-PNG storage."""

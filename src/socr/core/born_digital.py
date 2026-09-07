@@ -41,6 +41,9 @@ _MATH_FONT_RE = re.compile(
     r"(?i)(CMMI|CMSY|CMEX|MSAM|MSBM|"  # Computer Modern + AMS math
     r"STIXMath|STIXSize|STIXNonUnicode|XITSMath|LatinModernMath|LMMath|"  # STIX/OpenType math
     r"AsanaMath|LibertinusMath|CambriaMath|NewCMMath|"  # other OTF math families
+    r"PazoMath|"  # mathpazo's dedicated math family (GH-219) -- math-only, unlike
+    # the URWPalladioL body font mathpazo pairs it with, which also sets ordinary
+    # Palatino prose and would false-positive every Palatino-typeset paper as math.
     r"Euler|rsfs)"  # Euler script, RSFS (calligraphic)
 )
 
