@@ -2736,6 +2736,32 @@ def _apply_ladder_disposition_guard(output: PageOutput, page_num: int, p) -> Pag
     return output
 
 
+def _apply_label_unverified_guard(output: PageOutput) -> PageOutput:
+    """Apply the #659 label-unverified REPORTING status, post-selection only.
+
+    Astra review round 2 (P1): ``SourceEvidenceTableJudge`` used to set
+    ``output.status = WARNING`` itself, at judge time, before handing the SAME
+    output to the inner judge (``HeuristicPageJudge`` / ``VLMPageJudge``).
+    Both treat any non-SUCCESS status as empty/error input, so the mutation
+    rejected the very candidate the ticket exists to ship -- the ladder
+    escalated or fell back instead of shipping the flagged table. The judge now
+    only sets the DATA field (``table_label_unverified``) and leaves status
+    alone; this guard applies the reporting WARNING here, after selection has
+    already chosen this output and no judge will see it again -- the same
+    post-selection-guard shape ``_apply_ladder_disposition_guard`` above and
+    the #658 mode-carry use for a status decided after the fact.
+
+    Never overrides a MORE severe status: a page already ERROR (a harder
+    failure) or already WARNING for some other reason keeps it. Only a plain
+    SUCCESS candidate whose only doubt is this label gets demoted.
+    """
+    if not output.table_label_unverified:
+        return output
+    if output.status is not PageStatus.SUCCESS:
+        return output
+    return replace(output, status=PageStatus.WARNING)
+
+
 #: The marker families socr itself authors, keyed by the prose each builder emits
 #: after ``failed: ``. Cold review round 2, finding 3: the ending must be read from
 #: the SHIPPED BYTES through the one shared recogniser (``is_page_failed_marker``),
@@ -2845,7 +2871,8 @@ def _select_and_finalize_page(
       4. _apply_ladder_disposition_guard
       5. _apply_unresolved_math_guard
       6. _apply_chart_region_guard
-      7. Disposition construction from the guarded output and provenance.
+      7. _apply_label_unverified_guard
+      8. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
     if saved_text is not None:
@@ -2856,6 +2883,7 @@ def _select_and_finalize_page(
         output = _apply_ladder_disposition_guard(output, page_num, p)
         output = _apply_unresolved_math_guard(output, p)
         output = _apply_chart_region_guard(output, p)
+    output = _apply_label_unverified_guard(output)
 
     text = (output.text or "").strip()
 

@@ -284,6 +284,17 @@ class PageOutput:
     #: coverage_share, header_text}`` -- see
     #: ``manifest._apply_row_corroboration_disclosure`` for how it is built.
     table_corroboration: dict | None = None
+    #: #659: non-empty when this output's table shipped with every numeric
+    #: token corroborated but at least one content-label token unconfirmed by
+    #: the scanned-page evidence witness (``SourceEvidenceResult.
+    #: content_unverified``, set by ``source_evidence.verify_table_tokens``).
+    #: Deliberately a field on the CANDIDATE, not a page-level flag: it rides
+    #: with the specific output that carries the doubt, so a resume or a later
+    #: escalation that ships a DIFFERENT, fully-supported candidate for the
+    #: same page does not inherit a warning that no longer applies to what
+    #: shipped. "" means either no doubt, or this output never went through
+    #: the scanned-table gate at all.
+    table_label_unverified: str = ""
 
     @property
     def word_count(self) -> int:
@@ -331,6 +342,14 @@ class PageOutput:
         }
         if self.table_corroboration is not None:
             d["table_corroboration"] = self.table_corroboration
+        # #659: same omit-when-empty convention as ``table_corroboration``
+        # just above, and for the same reason -- this field postdates every
+        # already-terminal page's sidecar, and emitting it unconditionally
+        # would change the content-addressed fingerprint of pages that never
+        # touch the scanned-table label gate, forcing a spurious resume
+        # reprocess across every existing corpus.
+        if self.table_label_unverified:
+            d["table_label_unverified"] = self.table_label_unverified
         return d
 
     @classmethod
@@ -356,6 +375,7 @@ class PageOutput:
             judge_reason=d.get("judge_reason", ""),
             rejection_class=d.get("rejection_class", ""),
             table_corroboration=d.get("table_corroboration"),
+            table_label_unverified=d.get("table_label_unverified", ""),
         )
 
 

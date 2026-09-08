@@ -37,7 +37,7 @@ refusals (25 pp / 21 Fed docs; #263 closed — re-measure in D3 before reopening
 
 ## Stream A — selection: ship a corroborated candidate instead of failing closed
 
-### TICKET-A1a — `corroborate_rows()`: ordered row match against native words · TODO · depends-on: none · wave 1
+### TICKET-A1a — `corroborate_rows()`: ordered row match against native words · DONE (#630) · depends-on: none · wave 1
 **Problem:** the repo's `bind()` (`tables/binding.py:1323`) binds by multiset anchors and
 interpolation; nothing checks that a candidate row's ordered numeric run sits contiguously
 on one native baseline. That is the mechanical corroboration the census used and the
@@ -172,7 +172,7 @@ bbox, marker present, table region withheld. Golden byte-identity tests unchange
 
 ## Stream C — native prose geometry (#592)
 
-### TICKET-C1 — baseline-aligned adjacent blocks on a prose page are one line · TODO · depends-on: none · wave 1 · closes #592
+### TICKET-C1 — baseline-aligned adjacent blocks on a prose page are one line · DONE (#631) · depends-on: none · wave 1 · closes #592
 **Problem:** a tab-aligned two-column run (`Mr.` column, name column) is emitted block by
 block: 12 bare honorifics, then 12 names; 174 Fed pages, all SUCCESS; reproduces on main.
 The prose path returns `page.get_text("text")` before any block walk
@@ -191,7 +191,7 @@ the named two-column journal fixture is byte-identical on vs off; all golden tes
 
 ## Stream D — throughput and measurement
 
-### TICKET-D1 — nougat leaves the automatic ladder · TODO · depends-on: none · wave 1
+### TICKET-D1 — nougat leaves the automatic ladder · DONE (#632) · depends-on: none · wave 1
 **Problem:** nougat sits in the free tier of `provider_ladder` (`core/providers.py:195`); on a
 Mac it burns 6+ CPU minutes per rejected table page and won the Fed 1989 p3 page with a
 hallucination.
@@ -201,7 +201,7 @@ profile docstring.
 **Done when:** `provider_ladder()` default excludes nougat; `--primary nougat` still resolves;
 test pins the difference.
 
-### TICKET-D2 — measure the 5–7 min route phase · TODO · depends-on: B1 · wave 6
+### TICKET-D2 — measure the 5–7 min route phase · TODO · depends-on: E1 · wave 7
 **Problem:** `timings_s.route` is 317–420 s on ECB statistical pages; route should call no model.
 **Do:** Instrument route sub-stages (exclusive seconds) on the six ECB fixture pages; write
 `docs/log/<date>_route-phase-cost.md` naming the top cost. Measurement only.
