@@ -2162,8 +2162,15 @@ def test_simultaneous_xy_clipping_60_percent_each_axis_is_rejected_and_unresolve
 def test_gh601_empty_spacer_row_is_dropped_and_counted():
     """Owner ruling (#601, 2026-09-08): a candidate row whose label AND
     numeric multiset are both empty is layout (a printed blank gap), not
-    data. ``parse_grid`` must drop it and count the drop -- silently
-    changing the row count is exactly what #601 exists to make visible."""
+    data. ``bind()`` must drop it and count the drop -- silently changing
+    the row count under the binder is exactly what #601 exists to make
+    visible.
+
+    ``parse_grid`` itself does NOT remove the row -- ``Grid.rows`` stays
+    PHYSICAL-row-indexed (the shared parser is also read by
+    ``table_verdict.resolve_cell_refs``, which indexes by the row number a
+    judge cell ref names; see ``test_gh601_spacer_row_does_not_shift_a_cell_ref``).
+    It only records which row is a spacer, via ``spacer_row_indices``."""
     markdown = (
         "| Item | A | B |\n"
         "| --- | --- | --- |\n"
@@ -2173,8 +2180,60 @@ def test_gh601_empty_spacer_row_is_dropped_and_counted():
     )
     grid = parse_grid(markdown)
     assert grid is not None
-    assert grid.rows == (("Yield", "1.5", "2.5"), ("Forward", "3.5", "4.5"))
+    assert grid.rows == (("Yield", "1.5", "2.5"), ("", "", ""), ("Forward", "3.5", "4.5"))
+    assert grid.spacer_row_indices == frozenset({1})
     assert grid.spacer_rows_dropped == 1
+
+    result = bind(
+        [
+            w(100, 60, 140, 70, "1.5"),
+            w(100, 140, 140, 150, "3.5"),
+        ],
+        markdown,
+    )
+    assert result.candidate_spacer_rows_dropped == 1
+    assert result.candidate_row_labels == ("Yield", "Forward")
+
+
+def test_gh601_spacer_row_does_not_shift_a_cell_ref():
+    """Reviewer-demonstrated regression, fixed: dropping the spacer row
+    inside ``parse_grid`` corrupted physical-row indexing for every OTHER
+    shared-parser consumer -- ``table_verdict.resolve_cell_refs`` indexes
+    ``grid.rows[ref.row - 1]`` by the PHYSICAL row number a judge cell ref
+    names (the same coordinate ``prompts/cell_ref_grammar.md`` describes),
+    not by a row count ``bind()`` has quietly changed. A ref naming
+    physical row 3 (Beta, after a spacer at physical row 2) must resolve to
+    Beta's own value -- identical to what it resolved to before #601 ever
+    touched this parser -- never the next real row's (Gamma's)."""
+    from socr.judge.table_verdict import resolve_cell_refs
+
+    markdown = (
+        "| Item | A |\n| --- | --- |\n| Alpha | 1.0 |\n|  |  |\n| Beta | 2.0 |\n| Gamma | 3.0 |\n"
+    )
+    resolved = resolve_cell_refs(markdown, ["R3C2"])
+    assert resolved is not None
+    (value,) = resolved.values()
+    assert value == "2.0"  # Beta's own value, not Gamma's
+
+
+def test_gh624b_wrapped_label_merge_does_not_leak_into_cell_ref_resolution():
+    """#624b's wrapped-label merge is deliberately ``bind()``-internal only
+    (it needs native word geometry to prove itself; ``parse_grid`` never
+    sees native words -- see ``_wrapped_label_merge_plan``). A cell ref
+    naming the physical row of a would-be-merged label-only row must still
+    resolve to that row's own, unmerged cells: ``resolve_cell_refs`` goes
+    through ``parse_grid`` directly and must never observe a merge bind()
+    only ever applies to its own working copy."""
+    from socr.judge.table_verdict import resolve_cell_refs
+
+    markdown = (
+        "| Item | A |\n| --- | --- |\n| Other authorized | |\n| European currencies | 1250.0 |\n"
+    )
+    resolved = resolve_cell_refs(markdown, ["R1C1", "R2C1"])
+    assert resolved is not None
+    values = {ref.row: token for ref, token in resolved.items()}
+    assert values[1] == "Other authorized"
+    assert values[2] == "European currencies"
 
 
 def test_gh601_control_label_only_row_is_kept_not_dropped():
@@ -2211,6 +2270,23 @@ def test_gh624a_html_entities_and_leading_nbsp_stripped_from_label():
     grid = parse_grid(markdown)
     assert grid is not None
     assert grid.rows == (("Swiss francs", "600.0", "12/04/89"),)
+
+
+def test_gh624a_shipped_text_carries_the_plain_label_via_resolve_cell_refs():
+    """Scope ruling (team lead, 2026-09-08): #624a is a safe cell-level TEXT
+    rewrite (same row/column count, no physical coordinate moves), unlike
+    #601's drop and #624b's merge -- so it is baked into the shared
+    ``Grid`` every reader of the "emitted markdown table" gets, not kept
+    ``bind()``-internal. ``table_verdict.resolve_cell_refs`` -- the judge's
+    own read of "the final page text" for a table -- must return the plain
+    label, never the raw entity run."""
+    from socr.judge.table_verdict import resolve_cell_refs
+
+    markdown = "| Item | A |\n| --- | --- |\n| &nbsp;&nbsp;&nbsp;&nbsp;Swiss francs | 600.0 |\n"
+    resolved = resolve_cell_refs(markdown, ["R1C1"])
+    assert resolved is not None
+    (label,) = resolved.values()
+    assert label == "Swiss francs"
 
 
 def test_gh624a_binder_matches_nbsp_label_against_plain_native_label():

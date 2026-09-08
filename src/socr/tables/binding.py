@@ -122,11 +122,23 @@ class Grid:
 
     header_rows: tuple[tuple[str, ...], ...]
     rows: tuple[tuple[str, ...], ...]
-    #: #601: count of candidate body rows dropped because both the label AND
-    #: the numeric multiset were empty -- layout the model emitted between
-    #: printed blocks (a blank gap), never a data row (a label-only row and a
+    #: #601: 0-indexed positions in ``rows`` whose label AND numeric
+    #: multiset were both empty -- layout the model emitted between printed
+    #: blocks (a blank gap), never a data row (a label-only row and a
     #: values-only row are both kept; see ``_is_spacer_row``).
-    spacer_rows_dropped: int = 0
+    #:
+    #: These rows are NOT removed from ``rows``: ``rows`` is indexed by the
+    #: PHYSICAL 1-indexed row number the judge names in a cell ref
+    #: (``table_verdict.resolve_cell_refs`` does exactly
+    #: ``grid.rows[ref.row - 1]``), so dropping a row here would silently
+    #: shift every later ref onto the wrong physical row. ``bind()`` is the
+    #: one caller that filters spacer rows out, on its own internal working
+    #: copy, never on the ``Grid`` it returns to other callers.
+    spacer_row_indices: frozenset[int] = field(default_factory=frozenset)
+
+    @property
+    def spacer_rows_dropped(self) -> int:
+        return len(self.spacer_row_indices)
 
     @property
     def n_cols(self) -> int:
@@ -146,15 +158,21 @@ def _split_row(line: str) -> tuple[str, ...]:
 #
 # Owner rulings, 2026-09-08 (issues #601, #624, dispatched together):
 #   #601: a candidate row with an empty label AND an empty numeric multiset
-#     is layout (a printed blank gap), not data -- drop it here, in the
-#     candidate parser, before ``bind()`` ever sees it, and count the drops
-#     rather than silently changing the row count under the binder.
+#     is layout (a printed blank gap), not data -- IDENTIFY it here, in the
+#     candidate parser, but do not remove it from the returned ``Grid``:
+#     ``table_verdict.resolve_cell_refs`` indexes that same ``Grid`` by the
+#     PHYSICAL 1-indexed row a judge cell ref names, so dropping a row here
+#     would silently shift every later ref onto the wrong row. ``bind()``
+#     filters spacer rows out of its own internal working copy instead (see
+#     ``Grid.spacer_row_indices``), and counts the drop for the audit trail
+#     rather than silently changing anyone else's row count.
 #   #624a: decode HTML entities and strip leading whitespace runs (including
 #     U+00A0) from label cells at parse time -- the model sometimes encodes
 #     sub-row indentation as literal ``&nbsp;`` entities in the label cell.
-#     Normalising here, not at assembly, means every reader of this same
-#     ``Grid`` (the binder AND ``table_verdict.resolve_cell_refs``, which
-#     shares this parser) compares the real label, not its markup.
+#     This IS baked into the returned ``Grid`` (same row count/order, so no
+#     physical coordinate moves) -- every reader of this shared ``Grid``
+#     (the binder AND ``table_verdict.resolve_cell_refs``) compares the real
+#     label, not its markup.
 #   #624b: a label-only row (non-empty label, every other cell empty)
 #     immediately followed by a data row is a wrapped label -- merge its
 #     text onto the next row's label with a single space, UNLESS the row is
@@ -216,28 +234,28 @@ def _is_group_header_row(rows: tuple[tuple[str, ...], ...], i: int) -> bool:
 
 def _normalize_candidate_rows(
     raw_rows: tuple[tuple[str, ...], ...],
-) -> tuple[tuple[tuple[str, ...], ...], int]:
-    """Apply #624a label normalisation and #601 spacer drop.
+) -> tuple[tuple[tuple[str, ...], ...], frozenset[int]]:
+    """#624a label normalisation (applied to the returned rows) plus #601
+    spacer identification (recorded, NOT applied).
 
-    #624b's wrapped-label merge is deliberately NOT done here -- see
-    ``_wrapped_label_merge_plan`` in ``bind()`` for why a
-    text-only merge is unsafe and what native evidence it requires instead.
-    Label cells are normalised first so entity/whitespace noise cannot hide
-    a spacer row.
+    #624a is a pure cell-TEXT rewrite -- same row count, same row order --
+    so it is safe to bake into the ``Grid`` every caller reads, physical-row
+    consumers included: the shipped label is the plain one everywhere,
+    without touching any physical coordinate.
+
+    #601's spacer rows are only IDENTIFIED here (label cells are normalised
+    first so entity/whitespace noise cannot hide a spacer row); removing
+    them is left to ``bind()``'s own internal copy -- see
+    ``Grid.spacer_row_indices``. #624b's wrapped-label merge is likewise
+    deliberately NOT done here -- see ``_wrapped_label_merge_plan`` in
+    ``bind()`` for why a text-only merge is unsafe and what native evidence
+    it requires instead.
     """
     labeled = tuple(
         ((_normalize_label_cell(row[0]),) + row[1:] if row else row) for row in raw_rows
     )
-
-    kept: list[tuple[str, ...]] = []
-    spacer_dropped = 0
-    for row in labeled:
-        if _is_spacer_row(row):
-            spacer_dropped += 1
-            continue
-        kept.append(row)
-
-    return tuple(kept), spacer_dropped
+    spacer_indices = frozenset(i for i, row in enumerate(labeled) if _is_spacer_row(row))
+    return labeled, spacer_indices
 
 
 def _wrapped_label_merge_plan(
@@ -406,14 +424,14 @@ def parse_grid(markdown: str) -> Grid | None:
         if not body_rows:
             continue
 
-        norm_rows, spacer_dropped = _normalize_candidate_rows(tuple(body_rows))
-        if not norm_rows:
+        norm_rows, spacer_indices = _normalize_candidate_rows(tuple(body_rows))
+        if len(spacer_indices) == len(norm_rows):
             continue  # every body row was a spacer -- no real table here
 
         return Grid(
             header_rows=tuple(header_block),
             rows=norm_rows,
-            spacer_rows_dropped=spacer_dropped,
+            spacer_row_indices=spacer_indices,
         )
 
     return None
@@ -1709,6 +1727,18 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     if grid is None:
         return result
     result.candidate_spacer_rows_dropped = grid.spacer_rows_dropped
+
+    # #601: filter spacer rows out of bind()'s OWN working copy only. The
+    # ``Grid`` parse_grid returned keeps every physical row (see
+    # ``Grid.spacer_row_indices``'s docstring) -- other callers, chiefly
+    # ``table_verdict.resolve_cell_refs``, index it by the physical
+    # 1-indexed row a judge cell ref names, and must never see a row count
+    # bind() has quietly changed.
+    if grid.spacer_row_indices:
+        grid = replace(
+            grid,
+            rows=tuple(row for i, row in enumerate(grid.rows) if i not in grid.spacer_row_indices),
+        )
 
     # GH-609 round 5: the region-admitted words this attempt ACTUALLY fed into
     # row/column binding, set only past the parse-failure gate above. This is
