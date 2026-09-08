@@ -2762,6 +2762,30 @@ def _apply_label_unverified_guard(output: PageOutput) -> PageOutput:
     return replace(output, status=PageStatus.WARNING)
 
 
+def _apply_ditto_guard(output: PageOutput, page_num: int) -> PageOutput:
+    """#625: detect ditto-mark cells in the FINALIZED table text, post-selection.
+
+    Same post-selection-guard shape as ``_apply_label_unverified_guard`` and
+    ``_apply_unresolved_math_guard`` above, but with no judge behind it: the
+    ditto mark is a property of the shipped BYTES, so detection runs here,
+    directly on ``output.text``, exactly once selection has settled which
+    candidate ships. Sets the data field
+    (``PageOutput.table_ditto_columns``) unconditionally when found, and --
+    like the two guards above -- only ever turns SUCCESS into WARNING; a page
+    already ERROR or WARNING for a more specific reason keeps that status. The
+    cell text itself is never touched (owner ruling, #625: no fill-down).
+    """
+    from socr.tables.ditto import detect_ditto_columns
+
+    columns = detect_ditto_columns(output.text or "", page_num)
+    if not columns:
+        return output
+    data = [c.to_dict() for c in columns]
+    if output.status is PageStatus.SUCCESS:
+        return replace(output, status=PageStatus.WARNING, table_ditto_columns=data)
+    return replace(output, table_ditto_columns=data)
+
+
 #: The marker families socr itself authors, keyed by the prose each builder emits
 #: after ``failed: ``. Cold review round 2, finding 3: the ending must be read from
 #: the SHIPPED BYTES through the one shared recogniser (``is_page_failed_marker``),
@@ -2871,8 +2895,9 @@ def _select_and_finalize_page(
       4. _apply_ladder_disposition_guard
       5. _apply_unresolved_math_guard
       6. _apply_label_unverified_guard
-      7. _apply_chart_region_guard
-      8. Disposition construction from the guarded output and provenance.
+      7. _apply_ditto_guard
+      8. _apply_chart_region_guard
+      9. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
     if saved_text is not None:
@@ -2883,6 +2908,7 @@ def _select_and_finalize_page(
         output = _apply_ladder_disposition_guard(output, page_num, p)
         output = _apply_unresolved_math_guard(output, p)
     output = _apply_label_unverified_guard(output)
+    output = _apply_ditto_guard(output, page_num)
     if p is not None:
         # Last of the three status-only guards. Order among them is immaterial --
         # each only ever turns SUCCESS into WARNING and none of them upgrades --
