@@ -2798,6 +2798,30 @@ def _shipped_marker_reason(text: str) -> PagePrimaryReason:
     return PagePrimaryReason.SHIPPED_FAILURE_MARKER
 
 
+def _apply_chart_region_guard(output: PageOutput, p) -> PageOutput:
+    """GH-189: a page whose chart region was lost or unplaceable is not clean.
+
+    Status-only, on the FINALIZED copy. The attempt is untouched and selection
+    is settled by the time this runs, so this can neither reroute the page nor
+    discard its text -- the #252 mistake was flipping ``audit_passed`` on
+    ``best_output``, the winner-SELECTION flag, and that is deliberately not
+    done here either. What it forbids is a page serializing SUCCESS beside a
+    chart that is gone, sits at an unestablished position, or was never checked.
+
+    A page already demoted for a more specific reason keeps that status: this
+    only ever prevents a clean SUCCESS, it never upgrades or re-diagnoses.
+    """
+    if output.status is not PageStatus.SUCCESS:
+        return output
+    if not (
+        getattr(p, "chart_region_render_failed", False)
+        or getattr(p, "chart_region_placement_unresolved", False)
+        or getattr(p, "chart_region_inventory_failed", False)
+    ):
+        return output
+    return replace(output, status=PageStatus.WARNING)
+
+
 def _apply_unresolved_math_guard(output: PageOutput, p) -> PageOutput:
     """#165: demote a page whose detected math-glyph damage survived into its body.
 
@@ -2847,7 +2871,8 @@ def _select_and_finalize_page(
       4. _apply_ladder_disposition_guard
       5. _apply_unresolved_math_guard
       6. _apply_label_unverified_guard
-      7. Disposition construction from the guarded output and provenance.
+      7. _apply_chart_region_guard
+      8. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
     if saved_text is not None:
@@ -2858,6 +2883,11 @@ def _select_and_finalize_page(
         output = _apply_ladder_disposition_guard(output, page_num, p)
         output = _apply_unresolved_math_guard(output, p)
     output = _apply_label_unverified_guard(output)
+    if p is not None:
+        # Last of the three status-only guards. Order among them is immaterial --
+        # each only ever turns SUCCESS into WARNING and none of them upgrades --
+        # but it is fixed here so the chain reads in one direction.
+        output = _apply_chart_region_guard(output, p)
 
     text = (output.text or "").strip()
 

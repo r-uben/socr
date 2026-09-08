@@ -715,6 +715,13 @@ def _run_chart_detection_case(tmp_path: Path, *, fail_detector: bool):
     # P1 golden audit: pin the ladder off; this test is about chart detection
     pipeline = _make_agentic_pipeline(table_judge_ladder=False)
     state = _make_state_with_page(pdf, has_tables=True, native_text="Table 1 data")
+    # GH-189: extraction records the page's detected table geometry, and the
+    # chart-region preservation pass needs it to bind this fixture's chart
+    # (y 330-690) to the table it sits below. Without it the crop is preserved
+    # but UNPLACED -- a warning in its own right, which would land on BOTH arms
+    # of this test and mask the difference it exists to measure.
+    state.pages[1].detected_table_bboxes = [(72.0, 60.0, 540.0, 200.0)]
+    state.pages[1].detected_table_count = 1
     pipeline._last_assessment = state._last_assessment
     routed_output = PageOutput(
         page_num=1,

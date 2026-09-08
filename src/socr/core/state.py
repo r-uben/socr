@@ -170,6 +170,24 @@ class PageState:
     #: ``needs_repair`` (below): a detector crash must not force the chart lane
     #: or a repair pass — it is honoured downstream at the document buckets.
     chart_asset_detection_failed: bool = False
+    #: GH-189: at least one detected chart region on this mixed chart+table page
+    #: could not be rendered to a crop, so the chart ships as a visible marker and
+    #: nothing else. Deliberately distinct from ``chart_asset_render_failed``
+    #: above, which is the PAGE-level chart lane's whole-page PNG: here the page
+    #: is not a chart, it CONTAINS one among tables and prose.
+    chart_region_render_failed: bool = False
+    #: GH-189: at least one detected chart region's crop is referenced from the
+    #: page body, but its position relative to the surrounding text and tables
+    #: could not be established from the source anchors, so it ships in a
+    #: labelled unresolved-placement block. The content is preserved; the claim
+    #: "in source order" is not made for it.
+    chart_region_placement_unresolved: bool = False
+    #: GH-189: the chart-region INVENTORY could not be built for this page (the
+    #: detector or the PDF open raised), so the page's chart preservation was
+    #: never checked at all. Deliberately its own flag: reusing the
+    #: placement-unresolved flag above would report "the crop is preserved but
+    #: unplaced" for a page from which no crop was ever retained.
+    chart_region_inventory_failed: bool = False
     #: S1/MAJOR-7(b): persisted answer to ``structure_class_grid_winner(p) is
     #: not None`` from the run that produced the terminal sidecar, restored by
     #: ``_restore_terminal_page_state`` on resume. Needed because resume
