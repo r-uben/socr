@@ -11384,46 +11384,62 @@ class UnifiedPipeline:
         # by (page, table_id, column_index) rather than page alone because one
         # page can carry several flagged columns, unlike unresolved math which
         # is page-scoped.
+        #
+        # Astra P2 (round 1): the identity key must include ``ditto_cells``,
+        # not just (page, table_id, column_index). A replayed event whose
+        # COUNT is stale (the page's earlier winner had 14 ditto cells, the
+        # current winner has 1 in the same column) used to match on identity
+        # alone and be kept verbatim, so the audit event and
+        # ``tables_trust.json`` detail still said 14 while ``PageOutput``, the
+        # CLI line and the metadata note all said 1 -- the whole point of
+        # resolving off the FINAL winner, defeated by the dedup itself. A
+        # stale count is now a DIFFERENT identity, exactly like
+        # ``UNRESOLVED_MATH_KIND``'s own ``ev.detail == _detail.detail`` check
+        # above: it is dropped and the current reduction is re-emitted.
         if ditto_unresolved_pages or any(
             getattr(ev, "kind", "") == DITTO_UNRESOLVED_KIND for ev in state.events
         ):
             from socr.core.audit_log import AuditEvent as _DittoEvent
 
-            _current_ditto_keys: set[tuple[int, str, int]] = {
-                (n, c["table_id"], c["column_index"])
+            _current_ditto: dict[tuple[int, str, int], dict] = {
+                (n, c["table_id"], c["column_index"]): c
                 for n, cols in ditto_unresolved_columns.items()
                 for c in cols
             }
             _kept_ditto: list = []
-            _restored_ditto_keys: set[tuple[int, str, int]] = set()
+            _matched_ditto_keys: set[tuple[int, str, int]] = set()
             for ev in state.events:
                 if getattr(ev, "kind", "") != DITTO_UNRESOLVED_KIND:
                     _kept_ditto.append(ev)
                     continue
                 _d = getattr(ev, "data", None) or {}
                 _key = (ev.page_num, _d.get("table_id"), _d.get("column_index"))
-                if _key in _current_ditto_keys and _key not in _restored_ditto_keys:
+                _current = _current_ditto.get(_key)
+                if (
+                    _current is not None
+                    and _key not in _matched_ditto_keys
+                    and _d.get("ditto_cells") == _current["ditto_cells"]
+                ):
                     _kept_ditto.append(ev)
-                    _restored_ditto_keys.add(_key)
+                    _matched_ditto_keys.add(_key)
             state.events[:] = _kept_ditto
-            for n, cols in ditto_unresolved_columns.items():
-                for c in cols:
-                    _key = (n, c["table_id"], c["column_index"])
-                    if _key in _restored_ditto_keys:
-                        continue
-                    state.events.append(
-                        _DittoEvent(
-                            page_num=n,
-                            kind=DITTO_UNRESOLVED_KIND,
-                            engine="native",
-                            detail=(
-                                f"table {c['table_id']} column {c['column_index']}: "
-                                f"{c['ditto_cells']} ditto-mark cell(s), kept verbatim "
-                                "(no fill-down)"
-                            ),
-                            data=dict(c),
-                        )
+            for _key, c in _current_ditto.items():
+                if _key in _matched_ditto_keys:
+                    continue
+                n = _key[0]
+                state.events.append(
+                    _DittoEvent(
+                        page_num=n,
+                        kind=DITTO_UNRESOLVED_KIND,
+                        engine="native",
+                        detail=(
+                            f"table {c['table_id']} column {c['column_index']}: "
+                            f"{c['ditto_cells']} ditto-mark cell(s), kept verbatim "
+                            "(no fill-down)"
+                        ),
+                        data=dict(c),
                     )
+                )
 
         if (
             failed_pages

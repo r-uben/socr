@@ -20,6 +20,13 @@ Hermetic: pure text/dataclass round-trips, no ollama, no provider ladder.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+from ocr_output_contract import doc_dir_for, relative_key
+from test_gh659_label_unverified_finalization import _pipeline, _state
+
 from socr.core.audit_log import AuditEvent
 from socr.core.manifest import (
     FinalizedPageRecord,
@@ -232,3 +239,72 @@ def test_ditto_unresolved_note_is_none_on_a_clean_run() -> None:
 
 def test_ditto_kind_survives_resume_replay() -> None:
     assert DITTO_UNRESOLVED_KIND in UnifiedPipeline.resume_restore_kinds()
+
+
+def _one_col_table(cell: str) -> str:
+    return f"| Name | Value |\n| --- | --- |\n| A | 12 |\n| B | {cell} |\n"
+
+
+def test_changed_count_after_real_restore(tmp_path: Path) -> None:
+    """Astra P2 (round 1, e40495d): a REPLAYED event with a STALE count must
+    not survive the retire/readd dedup just because its (page, table_id,
+    column_index) identity still matches.
+
+    Simulates a genuine resume: an earlier run's terminal sidecar carries a
+    ``DITTO_UNRESOLVED_KIND`` event recording 14 ditto cells in this table's
+    column; ``_restore_terminal_page_state`` (the real method, reading a real
+    sidecar file) replays it into ``state.events``. The CURRENT winning
+    candidate for the same page/table/column carries only ONE ditto cell.
+    Every reader of the outcome -- the audit event, ``tables_trust.json``'s
+    detail, the document metadata note, the CLI line -- must report 1, not
+    the stale 14, because the field lives on the FINAL winning candidate
+    (owner ruling: no fill-down, no history-only truth).
+    """
+    pipeline = _pipeline()
+    state = _state(tmp_path, page_count=1)
+    stale_data = {"table_id": "p1-t0", "column_index": 1, "ditto_cells": 14}
+    stale_event = AuditEvent(
+        page_num=1,
+        kind=DITTO_UNRESOLVED_KIND,
+        engine="native",
+        detail="table p1-t0 column 1: 14 ditto-mark cell(s)",
+        data=stale_data,
+    )
+    doc_dir = doc_dir_for(tmp_path, relative_key(state.handle.path, state.handle.path.parent))
+    pages_dir = doc_dir / "pages"
+    pages_dir.mkdir(parents=True)
+    (pages_dir / "00001.json").write_text(json.dumps({"audit_events": [stale_event.to_dict()]}))
+
+    current_output = _apply_ditto_guard(
+        PageOutput(
+            page_num=1,
+            text=_one_col_table('"'),
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+            audit_passed=True,
+        ),
+        page_num=1,
+    )
+    assert current_output.table_ditto_columns == [
+        {"table_id": "p1-t0", "column_index": 1, "ditto_cells": 1}
+    ]
+    # Round-trip through the sidecar shape, same as a real resume load.
+    restored_output = PageOutput.from_dict(current_output.to_dict())
+    pipeline._restore_terminal_page_state(state, 1, restored_output, tmp_path)
+    assert any(e.kind == DITTO_UNRESOLVED_KIND for e in state.events)  # the stale replay landed
+
+    record = FinalizedPageRecord(
+        output=restored_output,
+        disposition=_disposition(),
+        selection_provenance=SelectionProvenance.NATIVE_CLEAN,
+    )
+    with patch("socr.core.manifest.finalized_page_records", return_value=[record]):
+        result = pipeline._phase_assemble(state, tmp_path)
+
+    error = result.error or ""
+    assert "1 ditto-mark cell(s)" in error
+    assert "14 ditto-mark cell(s)" not in error
+
+    ditto_events = [e for e in state.events if e.kind == DITTO_UNRESOLVED_KIND]
+    assert len(ditto_events) == 1
+    assert ditto_events[0].data["ditto_cells"] == 1
