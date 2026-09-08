@@ -2870,8 +2870,8 @@ def _select_and_finalize_page(
       3. _apply_table_emission_guard
       4. _apply_ladder_disposition_guard
       5. _apply_unresolved_math_guard
-      6. _apply_chart_region_guard
-      7. _apply_label_unverified_guard
+      6. _apply_label_unverified_guard
+      7. _apply_chart_region_guard
       8. Disposition construction from the guarded output and provenance.
     """
     output, provenance = _select_page_output_with_provenance(state, page_num, whole_doc)
@@ -2882,8 +2882,12 @@ def _select_and_finalize_page(
     if p is not None:
         output = _apply_ladder_disposition_guard(output, page_num, p)
         output = _apply_unresolved_math_guard(output, p)
-        output = _apply_chart_region_guard(output, p)
     output = _apply_label_unverified_guard(output)
+    if p is not None:
+        # Last of the three status-only guards. Order among them is immaterial --
+        # each only ever turns SUCCESS into WARNING and none of them upgrades --
+        # but it is fixed here so the chain reads in one direction.
+        output = _apply_chart_region_guard(output, p)
 
     text = (output.text or "").strip()
 

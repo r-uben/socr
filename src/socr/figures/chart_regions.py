@@ -43,6 +43,10 @@ PLACED_ANCHOR = "placed_anchor"
 PLACED_TABLE_BOUND = "placed_table_bound"
 UNRESOLVED_PLACEMENT = "unresolved_placement"
 RENDER_FAILED = "render_failed"
+#: The crop exists on disk, but no position in the accepted body renders a
+#: reference to it. Not a render failure -- the image is there -- and not a
+#: preservation either, because a reader of the document cannot reach it.
+NOT_REPRESENTABLE = "not_representable"
 
 #: Dispositions that mean "this region's crop is referenced from the page body
 #: at a position derived from the source geometry".
@@ -225,6 +229,20 @@ def render_failure_marker(asset: ChartRegionAsset) -> str:
         f"{render_failure_prefix(asset.page_num, asset.region_index)} "
         f"— crop `{asset.filename}` failed to render ({reason}). "
         "The chart is present in the source PDF; no image was produced for it."
+    )
+
+
+def unrenderable_prefix(page_num: int, region_index: int) -> str:
+    return f"> **Chart region {region_index} on page {page_num} could NOT be referenced**"
+
+
+def unrenderable_marker(asset: ChartRegionAsset) -> str:
+    """Marker for a crop that exists but that this body cannot point at."""
+    return (
+        f"{unrenderable_prefix(asset.page_num, asset.region_index)} "
+        f"— the crop `{asset.rel_path or asset.filename}` was written, but no position in "
+        "the accepted text renders a link to it. The chart is on disk and is NOT reachable "
+        "from this document."
     )
 
 
@@ -741,6 +759,68 @@ def _refuse_all(
     return [], out
 
 
+#: A line markdown always renders as a paragraph, used only to ask the
+#: tokenizer whether the end of a body is inside an open block.
+_EOF_PROBE = "socr chart region end of body probe"
+
+
+def _eof_is_inside_an_open_block(lines: list[str]) -> bool:
+    """True when appending at EOF would land inside an unterminated block.
+
+    A span check alone cannot answer this. An unclosed fence's span ends on the
+    body's LAST line, so ``len(lines)`` looks like a boundary after it -- while
+    markdown still reads everything appended there as code. Asking the tokenizer
+    what happens to an ordinary paragraph placed at the end is the only answer
+    that agrees with what a reader will see.
+    """
+    probe = [*lines, "", _EOF_PROBE]
+    literal_lines, _ranges = markdown_literal_context(probe)
+    return (len(probe) - 1) in literal_lines
+
+
+def _tail_candidates(lines: list[str]) -> list[int]:
+    """Boundaries for appending a trailing block, best first; 0 is always last.
+
+    Appending at EOF is right almost always and wrong exactly when the body ends
+    inside an open fence or comment -- which is where the crops that had nowhere
+    else to go were being written, invisible, under an outcome that said
+    preserved. The walk back goes to the start of each protected block, and
+    finally to 0, which no span can swallow.
+    """
+    spans = protected_spans(lines)
+    ordered = []
+    if not _eof_is_inside_an_open_block(lines):
+        ordered.append(len(lines))
+    ordered.extend(sorted({start for start, _end in spans}, reverse=True))
+    ordered.append(0)
+    out: list[int] = []
+    for slot in ordered:
+        if slot not in out and not _splits(slot, spans):
+            out.append(slot)
+    return out or [0]
+
+
+def _append_outside_blocks(
+    lines: list[str],
+    block: list[str],
+    verify: list[ChartRegionAsset] | None = None,
+) -> list[str]:
+    """Append *block* at the latest boundary markdown actually renders.
+
+    When *verify* is given, the result is CHECKED -- each of those assets must
+    parse back as a live image -- and the next candidate is tried when it does
+    not. Never report preserved on the strength of bytes that were written; only
+    on a reference the tokenizer reads back.
+    """
+    fallback = lines
+    for slot in _tail_candidates(lines):
+        candidate = _insert_block(lines, slot, block)
+        if verify is None or _all_refs_live(candidate, verify):
+            return candidate
+        fallback = candidate
+    return fallback
+
+
 def _build_body(
     base: list[str],
     page_num: int,
@@ -758,10 +838,10 @@ def _build_body(
     if unresolved:
         block = [unresolved_placement_note(page_num, [a.region_index for a in unresolved]), ""]
         block.extend(_interleave([image_ref(a) for a in unresolved]))
-        out = _insert_block(out, len(out), block)
+        out = _append_outside_blocks(out, block, verify=unresolved)
     for asset in ordered:
         if not asset.rendered:
-            out = _insert_block(out, len(out), [render_failure_marker(asset)])
+            out = _append_outside_blocks(out, [render_failure_marker(asset)])
     return out
 
 
@@ -832,6 +912,7 @@ def reconcile_chart_region_refs(
     filenames.update(a.rel_path.rsplit("/", 1)[-1] for a in assets if a.rel_path)
     prefixes = tuple(
         [render_failure_prefix(a.page_num, a.region_index) for a in assets]
+        + [unrenderable_prefix(a.page_num, a.region_index) for a in assets]
         + [unresolved_placement_prefix(page_num)]
     )
     original = text.split("\n")
@@ -887,10 +968,9 @@ def reconcile_chart_region_refs(
     # renders as nothing. Reporting that as a placement is the same silent loss
     # in a new costume, so the answer is checked, not assumed: every rendered
     # region must appear exactly once as a LIVE image token in the final body.
-    # On any failure every placement is refused, the same way a non-monotone
-    # layout is. The fallback body is not re-checked: its block is appended at
-    # the very end, which is the last position left to try.
-    if placements and not _all_refs_live(body, rendered):
+    # On failure every placement is refused, the same way a non-monotone layout
+    # is, and the rebuild re-runs the boundary search for the whole set.
+    if not _all_refs_live(body, rendered) and placements:
         placements, unresolved = _refuse_all(
             placements,
             unresolved,
@@ -898,6 +978,21 @@ def reconcile_chart_region_refs(
             "the reference could not be placed anywhere markdown renders it",
         )
         body = _build_body(lines, page_num, ordered, placements, unresolved)
+
+    # Last word. The fallback block is placed by a VERIFIED boundary search, so
+    # reaching here means no position in this body renders the reference at all.
+    # The crop is still on disk, but a reader of the document cannot see it --
+    # which is the loss this ticket exists to stop reporting as a success. Say
+    # so, in the page body and in the outcome, rather than claim preservation.
+    if not _all_refs_live(body, rendered):
+        for asset in rendered:
+            if _all_refs_live(body, [asset]):
+                continue
+            reasons[asset.region_index] = (
+                NOT_REPRESENTABLE,
+                "no position in the accepted text renders a reference to the crop",
+            )
+            body = _append_outside_blocks(body, [unrenderable_marker(asset)])
 
     for asset, _slot, disposition, detail in placements:
         reasons[asset.region_index] = (disposition, detail)

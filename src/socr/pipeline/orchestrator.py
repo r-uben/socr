@@ -3296,6 +3296,7 @@ class UnifiedPipeline:
         from socr.core.manifest import is_page_failed_marker
         from socr.core.pdf import open_pdf
         from socr.figures.chart_regions import (
+            NOT_REPRESENTABLE,
             RENDER_FAILED,
             UNRESOLVED_PLACEMENT,
             chart_region_anchors,
@@ -3408,8 +3409,13 @@ class UnifiedPipeline:
             inventory[pn] = assets
             preserved[pn] = {oc.region_index for oc in outcomes if oc.preserved}
 
+            lost = (RENDER_FAILED, NOT_REPRESENTABLE)
             for oc in outcomes:
-                if oc.disposition == RENDER_FAILED:
+                # NOT_REPRESENTABLE joins the LOST bucket, not the unresolved
+                # one: the crop exists on disk, but no position in the accepted
+                # body renders a link to it, so a reader of the document cannot
+                # reach the chart. That is the loss, whatever the filesystem says.
+                if oc.disposition in lost:
                     ps.chart_region_render_failed = True
                 elif oc.disposition == UNRESOLVED_PLACEMENT:
                     ps.chart_region_placement_unresolved = True
@@ -3418,7 +3424,7 @@ class UnifiedPipeline:
                         page_num=pn,
                         kind=(
                             "chart_region_not_preserved"
-                            if oc.disposition == RENDER_FAILED
+                            if oc.disposition in lost
                             else "chart_region_preserved"
                         ),
                         engine="chart_region",
@@ -3515,7 +3521,8 @@ class UnifiedPipeline:
         if lost:
             parts.append(
                 f"page(s) {', '.join(str(n) for n in lost)}: a detected chart region could "
-                "not be rendered; the chart ships as a marker and is preserved nowhere"
+                "not be rendered, or could not be referenced from the page body; the chart "
+                "ships as a marker and is not reachable from this document"
             )
         if unplaced:
             parts.append(

@@ -403,7 +403,7 @@ def test_one_failed_crop_is_visible_and_the_other_still_ships(tmp_path: Path) ->
 
     # Document status, metadata note and CLI line all disclose it.
     note = pipeline._chart_region_note(state)
-    assert note is not None and "page(s) 1" in note and "preserved nowhere" in note
+    assert note is not None and "page(s) 1" in note and "not reachable" in note
     assert note in (result.error or ""), f"the note never reached metadata: {result.error!r}"
     assert result.status is not DocumentStatus.SUCCESS
     assert result.audit_passed is False
@@ -457,7 +457,7 @@ def test_unplaceable_crops_are_preserved_but_never_claimed_in_source_order(
     # Nothing was LOST, so the note does not say so -- but a page the reader is
     # told to distrust cannot sit under a clean SUCCESS. AUDIT_FAILED is the
     # "output written, quality unresolved" path, not a lost-content verdict.
-    assert "preserved nowhere" not in note
+    assert "not reachable" not in note
     assert _final_page_status(out_dir) == "warning"
     assert result.status is DocumentStatus.AUDIT_FAILED
 
@@ -982,17 +982,94 @@ def test_an_anchor_matching_only_literal_text_is_refused() -> None:
     assert "Prose about `Caption` only" in out
 
 
-def test_a_reference_that_could_not_be_placed_live_is_reported_unresolved() -> None:
+def test_a_body_that_cannot_render_any_reference_is_never_called_preserved() -> None:
     """Liveness is checked, not assumed: bytes present is not a chart rendered."""
+    from socr.figures import chart_regions
+    from socr.figures.chart_regions import NOT_REPRESENTABLE, reconcile_chart_region_refs
+
+    asset = _asset(1)
+    with patch.object(chart_regions, "_all_refs_live", return_value=False):
+        _out, outcomes = reconcile_chart_region_refs(
+            "Intro\nTail", [asset], {1: ("Intro", "Tail")}, {}
+        )
+    assert outcomes[0].disposition == NOT_REPRESENTABLE
+    assert outcomes[0].preserved is False
+
+
+def test_an_unplaceable_reference_falls_back_before_it_is_called_unrenderable() -> None:
+    """The refusal path runs first: a claim is withdrawn before a loss is declared."""
     from socr.figures import chart_regions
     from socr.figures.chart_regions import UNRESOLVED_PLACEMENT, reconcile_chart_region_refs
 
     asset = _asset(1)
-    with patch.object(chart_regions, "_all_refs_live", return_value=False):
+    real = chart_regions._all_refs_live
+    calls = {"n": 0}
+
+    def _fail_the_first_build(body, assets):
+        # Fail only the verification of the ANCHORED build, so the rebuild that
+        # moves the crop into the unresolved block is what finally verifies.
+        calls["n"] += 1
+        return False if calls["n"] == 1 else real(body, assets)
+
+    with patch.object(chart_regions, "_all_refs_live", _fail_the_first_build):
         out, outcomes = reconcile_chart_region_refs(
             "Intro\nTail", [asset], {1: ("Intro", "Tail")}, {}
         )
     assert outcomes[0].disposition == UNRESOLVED_PLACEMENT
-    assert "markdown renders it" in outcomes[0].detail
+    assert outcomes[0].preserved is True
     assert out.count(asset.rel_path) == 1
     assert "Unresolved chart placement" in out
+
+
+# ---------------------------------------------------------------------------
+# The unresolved fallback lands where markdown renders it (round 6 review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["Intro\n```python\nunfinished code", "Intro\n<!-- unfinished comment"],
+    ids=["open-fence", "open-comment"],
+)
+def test_the_unresolved_block_is_live_even_at_an_open_block_at_eof(body: str) -> None:
+    """Appending at EOF is inside the block when the body never closes one."""
+    from markdown_it import MarkdownIt
+
+    from socr.figures.chart_regions import reconcile_chart_region_refs
+
+    asset = _asset(1)
+    out, outcomes = reconcile_chart_region_refs(body, [asset], {}, {})
+    assert outcomes[0].preserved, f"the crop was not preserved at all:\n{out}"
+    sources = [
+        child.attrGet("src")
+        for token in MarkdownIt("commonmark").parse(out)
+        for child in (token.children or [])
+        if child.type == "image"
+    ]
+    assert asset.rel_path in sources, f"the reference does not parse as an image:\n{out}"
+    # The block itself is untouched -- the crop went ABOVE it, which is the last
+    # boundary markdown still renders.
+    unfinished = body.split("\n", 1)[1]
+    assert unfinished in out, f"the unfinished block was edited:\n{out}"
+    assert out.index(asset.rel_path) < out.index(unfinished)
+
+
+def test_a_failure_marker_also_avoids_an_open_block_at_eof() -> None:
+    """The same boundary rule: an invisible marker is an invisible failure."""
+    from socr.figures.chart_regions import markdown_literal_context, reconcile_chart_region_refs
+
+    asset = _asset(1, rendered=False)
+    out, _outcomes = reconcile_chart_region_refs("Intro\n```python\nunfinished", [asset], {}, {})
+    lines = out.split("\n")
+    literal_lines, _ranges = markdown_literal_context(lines)
+    marker = next(i for i, line in enumerate(lines) if "NOT preserved" in line)
+    assert marker not in literal_lines, f"the failure marker is inside the code block:\n{out}"
+
+
+def test_the_eof_probe_tells_open_blocks_from_closed_ones() -> None:
+    from socr.figures.chart_regions import _eof_is_inside_an_open_block
+
+    assert _eof_is_inside_an_open_block(["Intro", "```python", "unfinished"]) is True
+    assert _eof_is_inside_an_open_block(["Intro", "<!-- open"]) is True
+    assert _eof_is_inside_an_open_block(["Intro", "```python", "done", "```"]) is False
+    assert _eof_is_inside_an_open_block(["Intro", "Tail"]) is False
