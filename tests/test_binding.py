@@ -2154,5 +2154,164 @@ def test_simultaneous_xy_clipping_60_percent_each_axis_is_rejected_and_unresolve
     assert clipped in unresolved
 
 
+# ---------------------------------------------------------------------------
+# #601 / #624 -- candidate-row normalisation before bind()
+# ---------------------------------------------------------------------------
+
+
+def test_gh601_empty_spacer_row_is_dropped_and_counted():
+    """Owner ruling (#601, 2026-09-08): a candidate row whose label AND
+    numeric multiset are both empty is layout (a printed blank gap), not
+    data. ``parse_grid`` must drop it and count the drop -- silently
+    changing the row count is exactly what #601 exists to make visible."""
+    markdown = (
+        "| Item | A | B |\n"
+        "| --- | --- | --- |\n"
+        "| Yield | 1.5 | 2.5 |\n"
+        "|  |  |  |\n"
+        "| Forward | 3.5 | 4.5 |\n"
+    )
+    grid = parse_grid(markdown)
+    assert grid is not None
+    assert grid.rows == (("Yield", "1.5", "2.5"), ("Forward", "3.5", "4.5"))
+    assert grid.spacer_rows_dropped == 1
+
+
+def test_gh601_control_label_only_row_is_kept_not_dropped():
+    """Control from the ruling: a row with a label and no values is NOT a
+    spacer -- it is a group header (#624b territory), and must survive."""
+    markdown = "| Item | A | B |\n| --- | --- | --- |\n| Panel: | | |\n| Yield | 1.5 | 2.5 |\n"
+    grid = parse_grid(markdown)
+    assert grid is not None
+    assert grid.spacer_rows_dropped == 0
+    assert grid.rows[0] == ("Panel:", "", "")
+
+
+def test_gh601_control_values_only_row_is_kept_not_dropped():
+    """Control from the ruling: a row with values and no label is NOT a
+    spacer -- an empty label with real numbers is unlabeled data, not
+    layout."""
+    markdown = "| Item | A | B |\n| --- | --- | --- |\n|  | 1.5 | 2.5 |\n"
+    grid = parse_grid(markdown)
+    assert grid is not None
+    assert grid.spacer_rows_dropped == 0
+    assert grid.rows == (("", "1.5", "2.5"),)
+
+
+def test_gh624a_html_entities_and_leading_nbsp_stripped_from_label():
+    """Owner ruling (#624a, 2026-09-08): decode HTML entities and strip
+    leading whitespace runs (incl. U+00A0) from label cells at parse time,
+    so the shipped label is plain text -- ``&nbsp;&nbsp;&nbsp;&nbsp;Swiss
+    francs`` must parse to the bare label ``Swiss francs``."""
+    markdown = (
+        "| Item | A | B |\n"
+        "| --- | --- | --- |\n"
+        "| &nbsp;&nbsp;&nbsp;&nbsp;Swiss francs | 600.0 | 12/04/89 |\n"
+    )
+    grid = parse_grid(markdown)
+    assert grid is not None
+    assert grid.rows == (("Swiss francs", "600.0", "12/04/89"),)
+
+
+def test_gh624a_binder_matches_nbsp_label_against_plain_native_label():
+    """Pin (implementer brief): the binder now matches ``Swiss francs``
+    against native even though the candidate markdown carries literal
+    ``&nbsp;`` entities in the label cell -- because normalisation runs in
+    the shared candidate parser, before ``bind()``, not at assembly."""
+    words = [
+        w(100, 60, 200, 70, "Swiss"),
+        w(205, 60, 260, 70, "francs"),
+        w(300, 60, 340, 70, "600.0"),
+    ]
+    markdown = "| Item | A |\n| --- | --- |\n| &nbsp;&nbsp;&nbsp;&nbsp;Swiss francs | 600.0 |\n"
+    result = bind(words, markdown)
+    assert result.row_label_contradictions == []
+    assert result.candidate_row_labels == ("Swiss francs",)
+
+
+def test_gh624b_control_group_header_with_trailing_dashes_is_not_merged():
+    """Owner ruling control: 'Bank for International Settlements--' stays a
+    header row -- the trailing '--' positively identifies it as a group
+    header, so it must NOT merge onto the child row below it.
+
+    The merge decision needs native geometry (``_wrapped_label_merge_plan``
+    runs in ``bind()``, not ``parse_grid`` -- parse_grid never sees native
+    words), so this is asserted through ``bind()``, not ``parse_grid``
+    directly."""
+    words = [
+        w(100, 60, 140, 70, "Swiss"),
+        w(145, 60, 195, 70, "francs"),
+        w(300, 60, 340, 70, "600.0"),
+    ]
+    markdown = (
+        "| Item | A |\n"
+        "| --- | --- |\n"
+        "| Bank for International Settlements-- | |\n"
+        "| Swiss francs | 600.0 |\n"
+    )
+    result = bind(words, markdown)
+    assert result.candidate_row_labels == (
+        "Bank for International Settlements--",
+        "Swiss francs",
+    )
+    assert result.candidate_wrapped_label_merges == ()
+
+
+def test_gh624b_control_601_spacer_row_is_dropped_not_merged():
+    """Owner ruling control: #601's empty spacer row must be dropped, not
+    merged -- and the label-only row above it ('Panel:') must not be
+    treated as a wrapped label either, since its trailing ':' positively
+    identifies it as a group header."""
+    words = [
+        w(100, 60, 140, 70, "Yield"),
+        w(300, 60, 340, 70, "1.5"),
+    ]
+    markdown = "| Item | A |\n| --- | --- |\n| Panel: | |\n|  |  |\n| Yield | 1.5 |\n"
+    result = bind(words, markdown)
+    assert result.candidate_spacer_rows_dropped == 1
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Panel:", "Yield")
+
+
+def test_gh601_binding_result_carries_spacer_drop_count():
+    """The count must reach ``BindingResult`` -- the orchestrator's page
+    audit reads it from there, not from ``parse_grid`` directly."""
+    words = [
+        w(100, 60, 140, 70, "1.5"),
+        w(100, 90, 140, 100, "3.5"),
+    ]
+    markdown = "| Item | A |\n| --- | --- |\n| Yield | 1.5 |\n|  |  |\n| Forward | 3.5 |\n"
+    result = bind(words, markdown)
+    assert result.candidate_spacer_rows_dropped == 1
+
+
+def test_gh624b_binding_result_carries_wrapped_label_merges():
+    """Owner ruling (#624b, 2026-09-08): a label-only row immediately
+    followed by a data row is a wrapped label -- merge with a single space.
+    'Other authorized' + 'European currencies' -> one merged row, and the
+    merge is counted and reflected in the row-aligned outputs
+    (``candidate_row_labels``, ``row_binding``) the merge is wired ahead of.
+
+    On the native page the source line is one physical line ('Other
+    authorized European currencies 1250.0') -- the candidate model is what
+    wrapped it into two markdown table rows. Native evidence proves the
+    merge: the trial binding matches the candidate's numeric row to this
+    one native row, whose real label is longer than 'European currencies'
+    alone."""
+    words = [
+        w(0, 60, 40, 70, "Other"),
+        w(45, 60, 95, 70, "authorized"),
+        w(100, 60, 160, 70, "European"),
+        w(165, 60, 260, 70, "currencies"),
+        w(300, 60, 340, 70, "1250.0"),
+    ]
+    markdown = (
+        "| Item | A |\n| --- | --- |\n| Other authorized | |\n| European currencies | 1250.0 |\n"
+    )
+    result = bind(words, markdown)
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+    assert result.candidate_row_labels == ("Other authorized European currencies",)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -2469,6 +2469,8 @@ class UnifiedPipeline:
             TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
             TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
             TABLE_LADDER_EVENT_KINDS,
+            TABLE_SPACER_ROWS_DROPPED_KIND,
+            TABLE_WRAPPED_LABEL_MERGED_KIND,
         )
         from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 
@@ -2517,6 +2519,13 @@ class UnifiedPipeline:
             # history and must not disappear on resume, same as every other
             # distrust kind), so it is replayed the same as the rest.
             | {LABEL_UNVERIFIED_KIND}
+            # #601 / #624b: the candidate-row normalisation counters live
+            # only on these events (the ``BindingResult`` that produced them
+            # is not itself persisted). Dropping them on resume would make
+            # the "no silent content loss" trail lie -- a resumed page would
+            # report normalisation that never happened this run.
+            | {TABLE_SPACER_ROWS_DROPPED_KIND}
+            | {TABLE_WRAPPED_LABEL_MERGED_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -5671,6 +5680,66 @@ class UnifiedPipeline:
             )
         )
 
+    def _record_candidate_row_normalization(
+        self, state: DocumentState, page_num: int, witness, binding
+    ) -> None:
+        """Surface #601 spacer drops and #624b wrapped-label merges.
+
+        ``binding.binding.parse_grid`` normalises the candidate grid before
+        ``bind()`` ever sees it (dropping a value-less layout row, merging a
+        wrapped label onto the data row below it) -- silently, from the
+        binder's point of view, which is the point: the binder must compare
+        real rows and real labels. But a silent row-count change is exactly
+        the failure mode this repo's "no silent content loss" rule forbids
+        (CLAUDE.md), so both normalisations are recorded here as one
+        ``AuditEvent`` each, per table, per binding attempt that actually
+        parsed a grid.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.table_verdict import (
+            TABLE_SPACER_ROWS_DROPPED_KIND,
+            TABLE_WRAPPED_LABEL_MERGED_KIND,
+        )
+        from socr.tables.binding import BindingResult
+
+        if not isinstance(binding, BindingResult):
+            return
+
+        table_id = witness.table_id
+        if binding.candidate_spacer_rows_dropped:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_SPACER_ROWS_DROPPED_KIND,
+                    detail=(
+                        f"table {table_id}: dropped "
+                        f"{binding.candidate_spacer_rows_dropped} empty-label/"
+                        "empty-value candidate row(s) as layout before binding"
+                    ),
+                    data={
+                        "table_id": table_id,
+                        "count": binding.candidate_spacer_rows_dropped,
+                    },
+                )
+            )
+        if binding.candidate_wrapped_label_merges:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_WRAPPED_LABEL_MERGED_KIND,
+                    detail=(
+                        f"table {table_id}: merged "
+                        f"{len(binding.candidate_wrapped_label_merges)} wrapped "
+                        "label-only row(s) onto the data row below"
+                    ),
+                    data={
+                        "table_id": table_id,
+                        "count": len(binding.candidate_wrapped_label_merges),
+                        "merged_labels": list(binding.candidate_wrapped_label_merges),
+                    },
+                )
+            )
+
     def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
         """The E1 clamp's question, unchanged: is there a genuine contradiction?
 
@@ -6090,6 +6159,7 @@ class UnifiedPipeline:
 
                     binding, evidence = self._binding_evidence_for_witness(state, page_num, witness)
                     self._record_unresolved_binding_boundary(state, page_num, witness, binding)
+                    self._record_candidate_row_normalization(state, page_num, witness, binding)
                     if isinstance(binding, BindingResult) and (
                         binding.contradicted_cells or binding.row_label_contradictions
                     ):
