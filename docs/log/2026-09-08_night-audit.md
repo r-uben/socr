@@ -19,7 +19,7 @@ accounting (#675, Refs — routing criterion open); #154/#160/#637 cost caps + n
 #609 majority-overlap membership + boundary evidence (#673, Refs — sub-case 1 surfaced not
 bound; #608 alignment still separate).
 
-In final review at time of writing: #189 mixed-page chart preservation (PR #672, 5 Astra rounds).
+#189 mixed-page chart preservation merged as #672 (main 0d45085) after 6 Astra rounds: vector-chart regions on mixed pages are now inventoried and reconciled at assembly; raster localisation and document-level asset resume stay open (#170).
 #659 label tokens flag-not-reject merged as #668 after 5 Astra rounds and two rebases.
 
 
