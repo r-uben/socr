@@ -1,12 +1,16 @@
 # STATUS — defect-census fixes
 
-Last updated: 2026-09-08
+Last updated: 2026-09-10
 
 ## Stage
-Waves 1-7 merged: A1a #630, C1 #631, D1 #632, A1b #640, A1c #644, A2 #647, B1 #651, E1 #654,
+Waves 1-9 merged: A1a #630, C1 #631, D1 #632, A1b #640, A1c #644, A2 #647, B1 #651, E1 #654,
 E2 #657. D3 measured 2026-09-07 (`docs/log/2026-09-07_D3-fed-table-lane-remeasure.md`); it
-surfaced two bugs, both filed and worked: #658 merged (#666); #659 fix in review (PR #668).
-D2, F1a, F1b, F2 still TODO.
+surfaced two bugs, both merged: #658 (PR #666), #659 (PR #668). Separately, #189 (mixed
+chart+table page) merged as PR #672. F1a (#625, ditto marks) merged as PR #686. F2 (#624,
+`&nbsp;` hierarchy) landed across PR #689 and PR #691 (#624b's font-evidence merge); #624 and
+#601 are both closed, but the decode does not survive to the shipped `.md` — that remainder is
+tracked as the still-open #688. #643 (recurring column lanes) remains parked: PR #663 is open
+as a draft. D2 (route cost measurement) and F1b (derived-cell provenance) are still TODO.
 
 ## Base state (clean before tickets)
 - `main@eb14c82`; census + plan on branch `docs/fed-ecb-census` (7015f46, d00fb11, 86db834, 7fea35a, +panel revision).
@@ -27,9 +31,9 @@ D2, F1a, F1b, F2 still TODO.
 | E1 | scan ≠ chart (#511) | DONE (#654 merged 2026-09-07; #653) | B1 | 6 |
 | E2 | table_not_scorable scope | DONE (#657 merged 2026-09-07) | E1 | 7 |
 | D2 | route cost (measure) | TODO | E1 | 7 |
-| F1a | ditto text (#625) | TODO | A2 | 7 |
+| F1a | ditto text (#625) | DONE (#686 merged) | A2 | 7 |
 | F1b | derived-cell provenance | TODO | F1a | 8 |
-| F2 | nbsp hierarchy (#624) | TODO | F1b | 9 |
+| F2 | nbsp hierarchy (#624) | DONE, remainder open (#689, #691 merged; decode-to-shipped-md gap tracked as #688) | F1b | 9 |
 
 ## Dispatch waves
 - Wave 1: A1a (`tables/row_corroboration.py`), C1 (`born_digital.py`), D1 (`providers.py`) — disjoint.
@@ -45,5 +49,8 @@ D2, F1a, F1b, F2 still TODO.
   A1c's Done-when; still open, needs measurement.
 
 ## Next action
-F1a/F1b/F2 and D2; #643 parked (needs font-size/bottom-rule evidence); #189 and #659 PRs in
-final review.
+D2 (route cost measurement) and F1b (derived-cell provenance) are the only remaining tickets
+on this board. Open issues still needing work: #649 (scanned page with no detected table
+geometry needs its own prose OCR attempt), #652 (B1 prose witness must not trust a
+corrupt/resume-empty native layer), #688 (decoded `&nbsp;` labels never reach the shipped
+`.md`), #643 (parked, needs font-size/bottom-rule evidence; PR #663 open as a draft).

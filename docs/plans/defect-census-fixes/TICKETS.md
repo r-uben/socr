@@ -64,7 +64,7 @@ two-table page scores each table against its own region. Running the function ov
 ECB fixture candidates (log the command) reproduces the census bound/total within ±1 row per
 page; the log records each page's share. `uvx ruff@0.16.0 format --check .` clean.
 
-### TICKET-A1b — selection consults corroboration before the floor · TODO · depends-on: A1a · wave 2
+### TICKET-A1b — selection consults corroboration before the floor · DONE (#640) · depends-on: A1a · wave 2
 **Problem:** `structure_class_grid_winner` (`core/manifest.py:853`) is a pure function over
 `PageState`, which carries no words (`core/state.py`); the S1 branch has nothing to score
 against. 9/9 ECB statistical pages floored over a candidate that reproduced the page.
@@ -103,7 +103,7 @@ existing floor fixtures (`tests/test_gh317_structure_class_floor.py`,
 `tests/test_s1_structure_class_winner_gh_reachability.py`, title-only text layers) still
 floor. `pytest tests/ -q` green.
 
-### TICKET-A1c — the corroborated page surfaces at every level; resume contract · TODO · depends-on: A1b · wave 3
+### TICKET-A1c — the corroborated page surfaces at every level; resume contract · DONE (#644) · depends-on: A1b · wave 3
 **Problem:** a corroborated table must ship as a doubt, visible everywhere; and a WARNING
 page is non-terminal (`_load_terminal_page` requires SUCCESS + `audit_passed`,
 `orchestrator.py:8939-8956`), so it re-runs the model on every resume.
@@ -124,7 +124,7 @@ asserts the corroborated sidecar is reprocessed. Then on the branch, with Ollama
 and the bulletin excerpt; the census scorer command (copied into the log) reports ≥ 95% numbers
 on all 6 pages, each with `header_binding_unverified`.
 
-### TICKET-A2 — a truncated candidate never beats a complete one · TODO · depends-on: A1c · wave 4
+### TICKET-A2 — a truncated candidate never beats a complete one · DONE (#647) · depends-on: A1c · wave 4
 **Problem:** bulletin p3: qwen's output ends mid-number (`| 2019 | 364.2 | 7,05`), 34/389
 numbers + 55 wrong, shipped WARNING over gemini's complete, ladder-ACCEPTED 389/389.
 Reproduced live on main+A1c (2026-09-07, `/tmp/a1c/ecb-meetings-2021-economic_bulletin-p127-129`,
@@ -153,7 +153,7 @@ the gemini candidate (389 numbers, 0 not-in-source, log the scorer command).
 
 ## Stream B — fail-closed marker scope (#591)
 
-### TICKET-B1 — the `page_failed` ending keeps prose outside the table · TODO · depends-on: A2 · wave 5 · closes #591
+### TICKET-B1 — the `page_failed` ending keeps prose outside the table · DONE (#651) · depends-on: A2 · wave 5 · closes #591 (remainder: #649, #652)
 **Problem:** the structure-class floor already splices prose around detected tables behind a
 four-condition coverage guard (`core/manifest.py:938-1023`, GH-520). The `page_failed`
 ending does not: ECB survey-2013 p1 and Fed 1989-11-14 p3 shipped the marker alone
@@ -208,7 +208,7 @@ test pins the difference.
 **Files:** `src/socr/pipeline/orchestrator.py` (route timers), `docs/log/`.
 **Done when:** the log attributes ≥ 80% of route seconds to named sub-stages.
 
-### TICKET-D3 — re-measure the Fed table lane on main · TODO · depends-on: A2 · wave 5
+### TICKET-D3 — re-measure the Fed table lane on main · DONE (measured 2026-09-07) · depends-on: A2 · wave 5
 **Problem:** the Fed table-lane counts in the census come from `6fa89d9` (349 commits behind,
 heuristic judge); the plan's claim to fix institution 1 is unverified until re-measured.
 **Do:** Sample 12 table-bearing fed-01 docs (stratified by decade), run on the wave-4 branch
@@ -221,7 +221,7 @@ reopens #263 with a count or records it as absent on main.
 
 ## Stream E — noise that erodes trust
 
-### TICKET-E1 — a page-sized raster with native words inside it is the scan · TODO · depends-on: B1 · wave 6
+### TICKET-E1 — a page-sized raster with native words inside it is the scan · DONE (#654) · depends-on: B1 · wave 6
 **Problem:** #511 large half: `has_chart_marks` (`figures/extractor.py:1066`) fires on 97% of
 scanned Fed pages; the "chart" PNG is the page itself. No prose lost; a phantom asset per page.
 **Do:** In `has_chart_marks` / `_is_chart_asset_page`: a raster whose placed area covers
@@ -236,7 +236,7 @@ summary agrees with the markdown marks on the fixture.
 **Done when:** Fed 1969-05-27 p1 fixture emits no chart mark; a raster-chart-with-text fixture
 still does; test pins the difference; audit summary == markdown marks on both.
 
-### TICKET-E2 — `table_not_scorable` only on pages with a detected table · TODO · depends-on: E1 · wave 7
+### TICKET-E2 — `table_not_scorable` only on pages with a detected table · DONE (#657) · depends-on: E1 · wave 7
 **Problem:** every prose page of a transcript is flagged "untrusted tables" (3/3 on ECB
 transcript; 400 events / 68 docs on Fed). No GitHub issue yet — open one first and cite it.
 **Do:** Emit `table_not_scorable` only when `detected_table_count > 0`.
@@ -247,7 +247,7 @@ test pins the difference.
 
 ## Stream F — one-table Fed items (last)
 
-### TICKET-F1a — ditto cells resolve to the value above (text) · TODO · depends-on: A2 · wave 7 · #625
+### TICKET-F1a — ditto cells resolve to the value above (text) · DONE (PR #686) · depends-on: A2 · wave 7 · #625
 **Do:** `OutputNormalizer.normalize()` (`core/normalizer.py:115`, returns a string) replaces
 a cell that is only a ditto glyph with the value above, and returns the list of
 `(table, row, col)` it changed alongside the text.
@@ -262,6 +262,6 @@ and the assembly; never silent.
 `tests/pipeline/test_derived_cells.py`.
 **Done when:** the 1979-11-20 fixture sidecar lists every resolved ditto; test pins the difference.
 
-### TICKET-F2 — `&nbsp;` indentation becomes hierarchy · TODO · depends-on: F1b · wave 9 · #624
+### TICKET-F2 — `&nbsp;` indentation becomes hierarchy · DONE, remainder open · depends-on: F1b · wave 9 · #624 (landed PR #689, PR #691; decode-to-shipped-md gap tracked as #688)
 **Files:** `src/socr/core/normalizer.py`, `tests/core/test_nbsp_hierarchy.py`.
 **Done when:** fixture rows carry the documented marker; no `&nbsp;` in output; test pins the difference.
