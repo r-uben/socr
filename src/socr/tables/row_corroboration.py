@@ -213,6 +213,17 @@ class RowCorroboration:
 class _NativeBand:
     tokens: tuple[str, ...]  # left-to-right normalized numeric tokens, spec-numbers excluded
     y_center: float  # the band's clustered word y-centre (mean), for skipped-band reporting
+    numeric_tokens_contiguous: bool = True  # no non-numeric WORD sits between this band's
+    # SECOND and LAST genuine numeric token (#643 round 3; the FIRST is deliberately
+    # excluded from this check -- it is routinely a row/footnote marker or a numeric row
+    # label, always followed by ordinary label text before the values start) -- False for
+    # a footnote/prose line like "1) See pages 45 and 12", where "and" interleaves the two
+    # VALUES; True (vacuously) for <= 1 numeric token, and for an ordinary table row.
+    non_numeric_word_count: int = 0  # count of this band's WORDS that are not genuine numeric
+    # tokens (#643 round 4) -- a footnote line's marker + label + prose easily outnumbers its
+    # one or two genuine values; an ordinary data row's single label never outnumbers its
+    # (usually several) numeric columns. See ``table_shaped_native_row_count``'s prose-heavy
+    # exclusion term.
 
 
 def _word_centroid_in_region(word: tuple, region: tuple[float, float, float, float]) -> bool:
@@ -263,6 +274,11 @@ def _is_genuine_numeric(text: str) -> tuple[bool, str]:
     return True, normalized
 
 
+def _median_word_height(words: list) -> float:
+    heights = [w[3] - w[1] for w in words if w[3] > w[1]]
+    return statistics.median(heights) if heights else 0.0
+
+
 def baseline_bands(words: list) -> list[_NativeBand]:
     """Cluster *words* into ordered baseline bands (top to bottom).
 
@@ -274,9 +290,7 @@ def baseline_bands(words: list) -> list[_NativeBand]:
     """
     if not words:
         return []
-    heights = [w[3] - w[1] for w in words if w[3] > w[1]]
-    median_height = statistics.median(heights) if heights else 0.0
-    tolerance = median_height * _ROW_BAND_TOLERANCE_FRACTION
+    tolerance = _median_word_height(words) * _ROW_BAND_TOLERANCE_FRACTION
 
     centered = sorted(words, key=lambda w: (w[1] + w[3]) / 2.0)
     raw_bands: list[list[tuple]] = []
@@ -297,12 +311,38 @@ def baseline_bands(words: list) -> list[_NativeBand]:
     for band_words in raw_bands:
         band_words_sorted = sorted(band_words, key=lambda w: w[0])
         tokens = []
+        is_numeric_flags = []
         for word in band_words_sorted:
             is_numeric, normalized = _is_genuine_numeric(word[4])
+            is_numeric_flags.append(is_numeric)
             if is_numeric:
                 tokens.append(normalized)
+        numeric_idxs = [i for i, flag in enumerate(is_numeric_flags) if flag]
+        if len(numeric_idxs) >= 2:
+            # #643 round 3: contiguity is checked from the SECOND numeric
+            # token onward, never the first. The first numeric token is
+            # routinely a row/footnote marker ("1)") OR a numeric row label
+            # (a bare year); either way it is always followed by ordinary
+            # non-numeric label text before the row's own values start
+            # ("1) Alpha 80" -- "Alpha" is a normal label, not prose) and
+            # penalising that would misclassify every ordinary numbered
+            # table row as a footnote (round-2 review, P1). A non-numeric
+            # WORD between the SECOND and LAST numeric token, however, is
+            # the actual footnote/prose signature ("1) See pages 45 and
+            # 12" -- "and" splits two VALUES, not a label from a value).
+            contiguous = all(is_numeric_flags[numeric_idxs[1] : numeric_idxs[-1] + 1])
+        else:
+            contiguous = True
+        non_numeric_word_count = sum(1 for flag in is_numeric_flags if not flag)
         y_center = statistics.mean((w[1] + w[3]) / 2.0 for w in band_words)
-        bands.append(_NativeBand(tokens=tuple(tokens), y_center=y_center))
+        bands.append(
+            _NativeBand(
+                tokens=tuple(tokens),
+                y_center=y_center,
+                numeric_tokens_contiguous=contiguous,
+                non_numeric_word_count=non_numeric_word_count,
+            )
+        )
     return bands
 
 
@@ -406,26 +446,86 @@ def is_column_index_row(tokens: tuple[str, ...]) -> bool:
     return values == list(range(1, len(values) + 1))
 
 
+#: A footnote/cross-reference marker rendered as a plain numeric token by
+#: the shared numeric-token regex (``NUM_TOKEN_RE`` permits an unpaired
+#: trailing ``)`` or ``.``, unlike ``_SPEC_NUMBER_RE`` above which requires
+#: BOTH parens) -- e.g. ``1)``, ``12)``, ``1.``. Reviewed round-2 addendum
+#: (#643): distinguishes a footnote/row marker from an ordinary numeric
+#: table value, which is never rendered as a bare digit-plus-punctuation.
+_FOOTNOTE_MARKER_TOKEN_RE = re.compile(r"^\d{1,3}[.)]$")
+
+
 def table_shaped_native_row_count(words: list, row_shape_min: int) -> int:
-    """Count of native baseline bands that look like a table row, by shape alone.
+    """Count of native baseline bands that look like a table row (TICKET-#643,
+    round 4 reviewed -- geometry-free DENYLIST).
 
     Factored out of ``manifest._row_shape_reconciliation_ok`` (TICKET-A1b,
     #634) so TICKET-A2's truncation term (#645) can reuse the identical
     "table-shaped row" definition without a second implementation drifting
-    from it. A band counts iff it has at least ``row_shape_min`` numeric
-    tokens (a caller-supplied, per-candidate floor — see
-    ``_row_shape_reconciliation_ok``'s own docstring for why that floor is
-    derived from the candidate rather than a named constant) and is not the
+    from it.
+
+    Round 3 stripped a leading marker token before comparing a band's width
+    to ``row_shape_min``, but the CANDIDATE side (``numeric_body_rows``)
+    never strips it -- a numeric-looking stub such as ``3)`` is anchored as
+    one of the candidate's own row tokens, so a marker-led candidate row
+    genuinely has one MORE numeric token than its data columns alone. That
+    mismatch made every source row look "too narrow" and let a truncated
+    candidate (``3) | 12 | 45`` alone, against four real source rows) pass
+    in both callers. This version compares LIKE WITH LIKE: the marker is
+    never stripped for the width check, exactly mirroring how the
+    candidate parser counts it.
+
+    Round 3 also excluded a band when NO OTHER band shared its lane --
+    but a genuinely short numbered table (one or two rows) has no other
+    band to share a lane with at all; the absence of a second row is not
+    positive evidence that the first is a footnote. Round 4 deletes lane
+    recurrence entirely -- geometry is never used to exclude a band.
+
+    A band is shape-eligible when it has at least ``row_shape_min``
+    genuine numeric tokens (marker included, per above) and is not the
     printed column-index legend row (``is_column_index_row``, a table
-    convention, not data).
+    convention, not data). A shape-eligible band that is NOT led by a
+    marker-shaped token (``_FOOTNOTE_MARKER_TOKEN_RE``) always counts -- a
+    real second table's own rows are never marker-led, so they can never
+    be at risk here. A MARKER-LED band is excluded only on POSITIVE prose
+    evidence:
+
+    - its numeric tokens (after the marker) are NOT contiguous
+      (``numeric_tokens_contiguous`` -- a non-numeric WORD such as "See
+      pages"/"and" sits between two of its VALUES: ``1) See pages 45 and
+      12``). An ordinary label right after the marker is not itself
+      between two numeric tokens, so ``1) Alpha | 80`` is unaffected.
+    - OR its non-numeric WORDS outnumber its genuine numeric tokens
+      (``non_numeric_word_count`` -- prose-heavy, even without two
+      numbers straddled by a single interleaving word).
+
+    Deliberately accepted (owner ruling, #643 round 4): a marker led by a
+    BARE run of numbers with no prose at all (``1) 45 12``, the issue's
+    own original synthetic repro) triggers NEITHER test -- one non-numeric
+    word (the marker's own punctuation aside) does not outnumber two
+    numeric tokens, and there is nothing else to interleave. It is KEPT,
+    and a page carrying such lines alongside a real table stays
+    fail-closed exactly as pre-#643. A REAL cross-reference footnote
+    always carries prose ("See pages", "and", "cf.") and is excluded by
+    the first test above; only a footnote with no prose at all -- of
+    which no real fixture is on file -- survives, and it is
+    indistinguishable from a genuine numbered data row by ANY property
+    available at this call site.
     """
-    return sum(
-        1
-        for band in baseline_bands(words)
-        if band.tokens
-        and len(band.tokens) >= row_shape_min
-        and not is_column_index_row(band.tokens)
-    )
+    count = 0
+    for band in baseline_bands(words):
+        if not band.tokens or len(band.tokens) < row_shape_min:
+            continue
+        if is_column_index_row(band.tokens):
+            continue
+        marker_led = bool(_FOOTNOTE_MARKER_TOKEN_RE.match(band.tokens[0]))
+        if marker_led:
+            if not band.numeric_tokens_contiguous:
+                continue  # excluded: a non-numeric word splits two values
+            if band.non_numeric_word_count > len(band.tokens):
+                continue  # excluded: prose-heavy line
+        count += 1
+    return count
 
 
 def numeric_body_rows(rows: list[list[str]]) -> list[tuple[str, ...]]:
