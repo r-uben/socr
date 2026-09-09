@@ -712,6 +712,16 @@ TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND = "table_binding_boundary_unresolved"
 #: excluded word (see ``tables_trust.NON_RESOLVABLE_DISTRUST_KINDS`` and its
 #: word-keyed clearance in ``build_tables_trust``).
 TABLE_BINDING_BOUNDARY_RESOLVED_KIND = "table_binding_boundary_resolved"
+#: #601: ``binding.parse_grid`` dropped a candidate row whose label AND
+#: numeric multiset were both empty -- layout the model emitted between
+#: printed blocks, not a data row. Carries the count so the drop is visible
+#: rather than a silent row-count change under the binder.
+TABLE_SPACER_ROWS_DROPPED_KIND = "table_spacer_rows_dropped"
+#: #624b: ``binding.parse_grid`` merged a wrapped label-only row onto the
+#: data row immediately below it (owner ruling, 2026-09-08) -- the source
+#: line wrapped across two physical lines and the model emitted it as two
+#: table rows. Carries the merged label text so the join is auditable.
+TABLE_WRAPPED_LABEL_MERGED_KIND = "table_wrapped_label_merged"
 
 #: All audit-event kinds this module defines, for callers that want to
 #: sanity-check membership without importing each constant by name.

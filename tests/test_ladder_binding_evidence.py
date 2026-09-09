@@ -830,6 +830,90 @@ class TestUnresolvedBindingBoundaryAudit:
 
 
 # ---------------------------------------------------------------------------
+# #601 / #624b: candidate-row normalisation (spacer drop, wrapped-label
+# merge) happens silently inside ``binding.parse_grid``/``bind()`` from the
+# binder's point of view -- the point is that the binder must compare real
+# rows and real labels. But a silent row-count change is exactly what this
+# repo's "no silent content loss" rule forbids, so both normalisations must
+# reach the page's durable audit trail, not stay an in-memory
+# ``BindingResult`` field nobody reads.
+# ---------------------------------------------------------------------------
+
+
+class TestCandidateRowNormalizationAudit:
+    def test_spacer_drop_and_wrapped_label_merge_each_emit_a_durable_event(
+        self, tmp_path: Path
+    ) -> None:
+        from socr.tables.binding import bind
+
+        # A real bind() call: one dropped spacer row (#601) and one proven
+        # wrapped-label merge (#624b), same shapes pinned in test_binding.py.
+        words = [
+            (0.0, 60.0, 40.0, 70.0, "Other", 0, 0, 0),
+            (45.0, 60.0, 95.0, 70.0, "authorized", 0, 0, 1),
+            (100.0, 60.0, 160.0, 70.0, "European", 0, 0, 2),
+            (165.0, 60.0, 260.0, 70.0, "currencies", 0, 0, 3),
+            (300.0, 60.0, 340.0, 70.0, "1250.0", 0, 0, 4),
+            (100.0, 100.0, 140.0, 110.0, "Yield", 0, 1, 0),
+            (300.0, 100.0, 340.0, 110.0, "1.5", 0, 1, 1),
+            (100.0, 140.0, 140.0, 150.0, "Forward", 0, 2, 0),
+            (300.0, 140.0, 340.0, 150.0, "3.5", 0, 2, 1),
+        ]
+        md = """
+| Item                | A      |
+| ------------------- | ------ |
+| Other authorized     |        |
+| European currencies | 1250.0 |
+| Yield                | 1.5    |
+|                      |        |
+| Forward              | 3.5    |
+"""
+        binding_result = bind(words, md)
+        assert binding_result.candidate_spacer_rows_dropped == 1, (
+            "fixture premise: bind() must drop the blank row between Yield and Forward"
+        )
+        assert binding_result.candidate_wrapped_label_merges == (
+            "Other authorized European currencies",
+        ), "fixture premise: bind() must merge the wrapped label onto its data row"
+
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)  # real PDF path; not read by this call
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+
+        pipeline._record_candidate_row_normalization(state, 1, witness, binding_result)
+
+        spacer_events = _events_of_kind(state, "table_spacer_rows_dropped")
+        assert len(spacer_events) == 1
+        assert spacer_events[0].page_num == 1
+        assert spacer_events[0].data == {"table_id": "t1", "count": 1}
+
+        merge_events = _events_of_kind(state, "table_wrapped_label_merged")
+        assert len(merge_events) == 1
+        assert merge_events[0].page_num == 1
+        assert merge_events[0].data == {
+            "table_id": "t1",
+            "count": 1,
+            "merged_labels": ["Other authorized European currencies"],
+        }
+
+    def test_no_normalisation_emits_no_events(self, tmp_path: Path) -> None:
+        """Regression control: nothing dropped or merged -> no events, and a
+        non-``BindingResult`` (ABSTAIN before ``bind()`` ever ran) is a safe
+        no-op, same contract as ``_record_unresolved_binding_boundary``."""
+        pipeline = _make_pipeline()
+        pdf_path = _row_shift_pdf(tmp_path)
+        state = _make_state(pdf_path)
+        witness = SimpleNamespace(table_id="t1")
+
+        pipeline._record_candidate_row_normalization(state, 1, witness, None)
+        pipeline._record_candidate_row_normalization(state, 1, witness, BindingResult())
+
+        assert _events_of_kind(state, "table_spacer_rows_dropped") == []
+        assert _events_of_kind(state, "table_wrapped_label_merged") == []
+
+
+# ---------------------------------------------------------------------------
 # GH-609 round 4 (Astra P2): the standing boundary distrust must have an
 # evidence-based path back to resolved -- a SPECIFIC word, by text and bbox,
 # demonstrably present in a later pass's own native words and no longer

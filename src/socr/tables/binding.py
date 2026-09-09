@@ -80,9 +80,10 @@ precision (``1.10`` normalises to itself, not ``1.1``; A3 comes for free).
 
 from __future__ import annotations
 
+import html
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from socr.tables.native_verifier import (
@@ -121,6 +122,23 @@ class Grid:
 
     header_rows: tuple[tuple[str, ...], ...]
     rows: tuple[tuple[str, ...], ...]
+    #: #601: 0-indexed positions in ``rows`` whose label AND numeric
+    #: multiset were both empty -- layout the model emitted between printed
+    #: blocks (a blank gap), never a data row (a label-only row and a
+    #: values-only row are both kept; see ``_is_spacer_row``).
+    #:
+    #: These rows are NOT removed from ``rows``: ``rows`` is indexed by the
+    #: PHYSICAL 1-indexed row number the judge names in a cell ref
+    #: (``table_verdict.resolve_cell_refs`` does exactly
+    #: ``grid.rows[ref.row - 1]``), so dropping a row here would silently
+    #: shift every later ref onto the wrong physical row. ``bind()`` is the
+    #: one caller that filters spacer rows out, on its own internal working
+    #: copy, never on the ``Grid`` it returns to other callers.
+    spacer_row_indices: frozenset[int] = field(default_factory=frozenset)
+
+    @property
+    def spacer_rows_dropped(self) -> int:
+        return len(self.spacer_row_indices)
 
     @property
     def n_cols(self) -> int:
@@ -133,6 +151,204 @@ class Grid:
 
 def _split_row(line: str) -> tuple[str, ...]:
     return tuple(c.strip() for c in line.strip().strip("|").split("|"))
+
+
+# --------------------------------------------------------------------------
+# #601 / #624 -- candidate-row normalisation before bind()
+#
+# Owner rulings, 2026-09-08 (issues #601, #624, dispatched together):
+#   #601: a candidate row with an empty label AND an empty numeric multiset
+#     is layout (a printed blank gap), not data -- IDENTIFY it here, in the
+#     candidate parser, but do not remove it from the returned ``Grid``:
+#     ``table_verdict.resolve_cell_refs`` indexes that same ``Grid`` by the
+#     PHYSICAL 1-indexed row a judge cell ref names, so dropping a row here
+#     would silently shift every later ref onto the wrong row. ``bind()``
+#     filters spacer rows out of its own internal working copy instead (see
+#     ``Grid.spacer_row_indices``), and counts the drop for the audit trail
+#     rather than silently changing anyone else's row count.
+#   #624a: decode HTML entities and strip leading whitespace runs (including
+#     U+00A0) from label cells at parse time -- the model sometimes encodes
+#     sub-row indentation as literal ``&nbsp;`` entities in the label cell.
+#     This IS baked into the returned ``Grid`` (same row count/order, so no
+#     physical coordinate moves) -- every reader of this shared ``Grid``
+#     (the binder AND ``table_verdict.resolve_cell_refs``) compares the real
+#     label, not its markup.
+#   #624b: a label-only row (non-empty label, every other cell empty)
+#     immediately followed by a data row is a wrapped label -- merge its
+#     text onto the next row's label with a single space, UNLESS the row is
+#     a group header. A group header is identified POSITIVELY: its label
+#     ends with ``--`` or ``:``, or it has >= 2 immediately-following child
+#     rows that each carry a value in every numeric column while the header
+#     row itself carries none, and a later sibling header exists. Never
+#     inferred from "not obviously a data row" -- an unproven header must
+#     merge like any other wrapped label (#601's empty spacer row still
+#     drops, never merges).
+# --------------------------------------------------------------------------
+
+_LEADING_WS_RE = re.compile(r"^[\s ]+")
+
+
+def _normalize_label_cell(text: str) -> str:
+    """Decode HTML entities and strip leading whitespace (incl. U+00A0)."""
+    return _LEADING_WS_RE.sub("", html.unescape(text))
+
+
+def _is_spacer_row(row: tuple[str, ...]) -> bool:
+    """#601: empty label AND empty numeric multiset -- layout, not data."""
+    if not row:
+        return True
+    return not row[0].strip() and not _candidate_row_multiset(row)
+
+
+def _is_label_only_row(row: tuple[str, ...]) -> bool:
+    """Non-empty label, every other cell empty."""
+    if not row or not row[0].strip():
+        return False
+    return all(not cell.strip() for cell in row[1:])
+
+
+def _is_group_header_row(rows: tuple[tuple[str, ...], ...], i: int) -> bool:
+    """Positive-only test: is row *i* (already known label-only) a header?
+
+    Punctuation is the primary signal (``'Bank for International
+    Settlements--'`` in the ruling's control). The structural fallback
+    requires >= 2 immediately-following child rows that ALL carry a value in
+    every numeric column, plus a later sibling label-only row -- a single
+    following data row is exactly the wrapped-label shape (#624b's
+    'Other authorized' / 'European currencies' control) and must merge, not
+    stay a header.
+    """
+    label = rows[i][0].strip()
+    if label.endswith("--") or label.endswith(":"):
+        return True
+    j = i + 1
+    children: list[tuple[str, ...]] = []
+    while j < len(rows) and not _is_spacer_row(rows[j]) and not _is_label_only_row(rows[j]):
+        children.append(rows[j])
+        j += 1
+    if len(children) >= 2 and all(all(cell.strip() for cell in r[1:]) for r in children):
+        if any(_is_label_only_row(rows[k]) for k in range(j, len(rows))):
+            return True
+    return False
+
+
+def _normalize_candidate_rows(
+    raw_rows: tuple[tuple[str, ...], ...],
+) -> tuple[tuple[tuple[str, ...], ...], frozenset[int]]:
+    """#624a label normalisation (applied to the returned rows) plus #601
+    spacer identification (recorded, NOT applied).
+
+    #624a is a pure cell-TEXT rewrite -- same row count, same row order --
+    so it is safe to bake into the ``Grid`` every caller reads, physical-row
+    consumers included: the shipped label is the plain one everywhere,
+    without touching any physical coordinate.
+
+    #601's spacer rows are only IDENTIFIED here (label cells are normalised
+    first so entity/whitespace noise cannot hide a spacer row); removing
+    them is left to ``bind()``'s own internal copy -- see
+    ``Grid.spacer_row_indices``. #624b's wrapped-label merge is likewise
+    deliberately NOT done here -- see ``_wrapped_label_merge_plan`` in
+    ``bind()`` for why a text-only merge is unsafe and what native evidence
+    it requires instead.
+    """
+    labeled = tuple(
+        ((_normalize_label_cell(row[0]),) + row[1:] if row else row) for row in raw_rows
+    )
+    spacer_indices = frozenset(i for i, row in enumerate(labeled) if _is_spacer_row(row))
+    return labeled, spacer_indices
+
+
+def _wrapped_label_merge_plan(
+    native_rows: list, rows: tuple[tuple[str, ...], ...]
+) -> tuple[int, ...]:
+    """#624b: candidate row indices that are a wrapped label merging onto
+    ``rows[i + 1]``, proven against native geometry.
+
+    A text-only rule is unsafe: this same label-only-row-followed-by-
+    data-row SHAPE is also how a legitimate value-less parent row (a
+    section/panel heading) or a units/footnote annotation sits above its
+    first data row (see ``test_invented_digits_on_parent_heading_row_are_model_unbound``,
+    ``test_candidate_valueless_units_row_absorbed_in_header_preserves_numeric_row_binding``)
+    -- nothing in the candidate's own cell text tells those apart from a
+    genuinely wrapped label with no lexicon or source-geometry access. This
+    is also why the merge cannot live in ``parse_grid`` (markdown text only,
+    no native words) -- it must run in ``bind()``, once native geometry
+    exists.
+
+    The native page does tell them apart. Run the ordinary anchor/
+    interpolation binding once on the UNMERGED rows: a legitimate parent or
+    units row binds to its own native counterpart (or is reported unbound
+    with the next row's OWN label already matching native exactly -- nothing
+    to gain by merging). A genuinely wrapped label's neighbour instead binds
+    to a native row whose real label is LONGER than the neighbour's own
+    label alone -- the source line the candidate split in two. Only THAT
+    proven case merges: the merge is accepted only when the merged text is
+    an exact ``label_key`` match for the native row it explains, never
+    merely because the neighbour's own label came up short.
+    """
+    if not rows:
+        return ()
+
+    trial_binding = _bind_rows(native_rows, rows)
+    merge_at: list[int] = []
+    i = 0
+    while i < len(rows):
+        row = rows[i]
+        if (
+            _is_label_only_row(row)
+            and i + 1 < len(rows)
+            and not _is_label_only_row(rows[i + 1])
+            and not _is_group_header_row(rows, i)
+        ):
+            next_row = rows[i + 1]
+            native_idx = trial_binding.get(i + 1)
+            native_label = (
+                native_rows[native_idx].row_path[-1].strip()
+                if native_idx is not None and native_rows[native_idx].row_path
+                else ""
+            )
+            merged_label = f"{row[0].strip()} {next_row[0].strip()}".strip()
+            proven = bool(native_label) and label_key(merged_label) == label_key(native_label)
+            next_alone_already_matches = bool(native_label) and label_key(
+                next_row[0].strip()
+            ) == label_key(native_label)
+            if proven and not next_alone_already_matches:
+                merge_at.append(i)
+                i += 2
+                continue
+        i += 1
+
+    return tuple(merge_at)
+
+
+def _apply_wrapped_label_merges(
+    rows: tuple[tuple[str, ...], ...], merge_at: tuple[int, ...]
+) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
+    """Collapse each ``rows[i]`` named in *merge_at* onto ``rows[i + 1]``.
+
+    *merge_at* comes from :func:`_wrapped_label_merge_plan` run against the
+    full-column candidate rows; applying the same index plan to a
+    column-projected parallel row tuple (``grid.rows`` after
+    ``_project_candidate_data_columns``) keeps both grids row-aligned with
+    ``row_binding``, since column 0 (the label column) survives projection
+    unchanged.
+    """
+    merge_set = set(merge_at)
+    merged: list[tuple[str, ...]] = []
+    merge_events: list[str] = []
+    i = 0
+    while i < len(rows):
+        if i in merge_set:
+            next_row = rows[i + 1]
+            merged_label = f"{rows[i][0].strip()} {next_row[0].strip()}".strip()
+            merged.append((merged_label,) + next_row[1:])
+            merge_events.append(merged_label)
+            i += 2
+            continue
+        merged.append(rows[i])
+        i += 1
+
+    return tuple(merged), tuple(merge_events)
 
 
 def parse_grid(markdown: str) -> Grid | None:
@@ -208,7 +424,15 @@ def parse_grid(markdown: str) -> Grid | None:
         if not body_rows:
             continue
 
-        return Grid(header_rows=tuple(header_block), rows=tuple(body_rows))
+        norm_rows, spacer_indices = _normalize_candidate_rows(tuple(body_rows))
+        if len(spacer_indices) == len(norm_rows):
+            continue  # every body row was a spacer -- no real table here
+
+        return Grid(
+            header_rows=tuple(header_block),
+            rows=norm_rows,
+            spacer_row_indices=spacer_indices,
+        )
 
     return None
 
@@ -1067,6 +1291,13 @@ class BindingResult:
     candidate_valueless_unbound: int = 0
     native_valueless_unbound: int = 0
     row_labels_checked: int = 0
+    #: #601: candidate body rows ``parse_grid`` dropped before binding
+    #: because both the label and the numeric multiset were empty (layout,
+    #: not data). 0 when ``parse_grid`` failed or nothing was dropped.
+    candidate_spacer_rows_dropped: int = 0
+    #: #624b: merged label text for each wrapped label-only row
+    #: ``parse_grid`` joined onto the data row below it, in row order.
+    candidate_wrapped_label_merges: tuple[str, ...] = ()
     #: Native rows and candidate→native map this call computed. Empty when
     #: parse_grid failed. Replay requires per-disputed-row evidence from these.
     native_rows: list = field(default_factory=list)
@@ -1495,6 +1726,19 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     grid = parse_grid(markdown)
     if grid is None:
         return result
+    result.candidate_spacer_rows_dropped = grid.spacer_rows_dropped
+
+    # #601: filter spacer rows out of bind()'s OWN working copy only. The
+    # ``Grid`` parse_grid returned keeps every physical row (see
+    # ``Grid.spacer_row_indices``'s docstring) -- other callers, chiefly
+    # ``table_verdict.resolve_cell_refs``, index it by the physical
+    # 1-indexed row a judge cell ref names, and must never see a row count
+    # bind() has quietly changed.
+    if grid.spacer_row_indices:
+        grid = replace(
+            grid,
+            rows=tuple(row for i, row in enumerate(grid.rows) if i not in grid.spacer_row_indices),
+        )
 
     # GH-609 round 5: the region-admitted words this attempt ACTUALLY fed into
     # row/column binding, set only past the parse-failure gate above. This is
@@ -1526,6 +1770,25 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
         _native_header_words(words, band_centers, header_band_idxs) if header_band_idxs else []
     )
     result.column_header_paths = build_column_header_paths(words, grid, lane_centers, header_words)
+
+    # #624b: merge a wrapped label-only row onto the data row below it, once
+    # native geometry exists to prove the merge (see
+    # ``_wrapped_label_merge_plan`` for why this cannot run in parse_grid).
+    # The same index plan is applied to both ``candidate_grid`` (full
+    # columns, what the plan was computed against) and ``grid`` (possibly
+    # column-projected) so every downstream ``cand_idx`` -- row_binding,
+    # candidate_row_labels, the cell walks below -- stays aligned across
+    # both.
+    merge_at = _wrapped_label_merge_plan(native_rows, candidate_grid.rows)
+    if merge_at:
+        merged_candidate_rows, merge_events = _apply_wrapped_label_merges(
+            candidate_grid.rows, merge_at
+        )
+        candidate_grid = replace(candidate_grid, rows=merged_candidate_rows)
+        if grid is not None:
+            merged_grid_rows, _ = _apply_wrapped_label_merges(grid.rows, merge_at)
+            grid = replace(grid, rows=merged_grid_rows)
+        result.candidate_wrapped_label_merges = merge_events
 
     # I1 BIDIRECTIONALITY: row-level binding and its unbound-row signals run
     # regardless of whether column geometry (lane_count vs n_cand_cols) is
