@@ -1216,6 +1216,40 @@ def count_digit_corruption(text: str) -> int:
     return len(_DIGIT_CORRUPTION_RE.findall(text or ""))
 
 
+def text_layer_trusted(text: str) -> bool:
+    """Whether an embedded PDF text layer is clean enough to be believed.
+
+    #652: ``manifest._prose_corroboration_ok`` corroborates an OCR attempt
+    against the page's own native words. A page classified SCANNED *because*
+    its text layer is corrupt (Fed 1989-11-14 p3: 6.6% encoding corruption,
+    above ``MAX_ENCODING_CORRUPTION``) would otherwise stand as the witness
+    for an attempt that may have been read off that same broken layer -- an
+    attempt echoing the corruption then corroborates itself, which is exactly
+    the fail-closed intent the guard exists to serve.
+
+    The two disqualifiers are the SHIPPED detector's own, not a third
+    definition of "corrupt": any eaten-leading-digit occurrence (#136), and
+    encoding corruption above the ratio at which the pipeline itself stops
+    trusting a layer and routes the page to OCR. ``benchmark.ground_truth``
+    applies the identical pair for the identical reason; it keeps its own
+    copy only because it must also report WHICH disqualifier fired.
+
+    Note the deliberate abstention inherited from
+    ``_encoding_corruption_ratio``: below 20 alpha tokens it returns 0.0
+    ("too little to judge") and this returns True. That is safe for the
+    caller here -- a region with almost no prose is also a witness too small
+    for a fabricated attempt to overlap with, so the corroboration ratio
+    refuses it on its own.
+    """
+    if not text or not text.strip():
+        return False
+    if count_digit_corruption(text) >= BornDigitalDetector.MAX_DIGIT_CORRUPTION_HITS:
+        return False
+
+    detector = BornDigitalDetector()
+    return detector._encoding_corruption_ratio(text) <= detector.MAX_ENCODING_CORRUPTION
+
+
 # Semantically-empty characters that publishers inject into the text layer for
 # justification / line-breaking. They carry no content but corrupt downstream use:
 # the soft hyphen splits words so search misses them ("hetero\xadgeneous" != the

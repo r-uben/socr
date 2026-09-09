@@ -263,14 +263,14 @@ def _is_genuine_numeric(text: str) -> tuple[bool, str]:
     return True, normalized
 
 
-def baseline_bands(words: list) -> list[_NativeBand]:
-    """Cluster *words* into ordered baseline bands (top to bottom).
+def cluster_band_words(words: list) -> list[list[tuple]]:
+    """Cluster *words* into ordered baseline bands, keeping each band's WORDS.
 
-    Clustering key is the word's y-centre, with a tolerance derived from
-    the region's own median word height (``_ROW_BAND_TOLERANCE_FRACTION``)
-    — never ``round(word_y0)`` (GH-600). A band's token list is its
-    genuine numeric tokens, left to right by x0; a band with none is kept
-    (it still occupies a line) but contributes nothing to matching.
+    The clustering half of :func:`baseline_bands`, factored out (#652) so the
+    prose-region partition (:func:`prose_region_words`) can reach the words a
+    band is made of rather than only its numeric tokens. ``baseline_bands``
+    calls this and then reduces each band to its tokens, so the two can never
+    disagree about where a printed line begins.
     """
     if not words:
         return []
@@ -292,9 +292,20 @@ def baseline_bands(words: list) -> list[_NativeBand]:
             raw_bands.append([word])
             band_y_sum = y_center
             band_y_count = 1
+    return raw_bands
 
+
+def baseline_bands(words: list) -> list[_NativeBand]:
+    """Cluster *words* into ordered baseline bands (top to bottom).
+
+    Clustering key is the word's y-centre, with a tolerance derived from
+    the region's own median word height (``_ROW_BAND_TOLERANCE_FRACTION``)
+    — never ``round(word_y0)`` (GH-600). A band's token list is its
+    genuine numeric tokens, left to right by x0; a band with none is kept
+    (it still occupies a line) but contributes nothing to matching.
+    """
     bands: list[_NativeBand] = []
-    for band_words in raw_bands:
+    for band_words in cluster_band_words(words):
         band_words_sorted = sorted(band_words, key=lambda w: w[0])
         tokens = []
         for word in band_words_sorted:
@@ -304,6 +315,86 @@ def baseline_bands(words: list) -> list[_NativeBand]:
         y_center = statistics.mean((w[1] + w[3]) / 2.0 for w in band_words)
         bands.append(_NativeBand(tokens=tuple(tokens), y_center=y_center))
     return bands
+
+
+#: The fail-closed limit of TICKET-A1b's per-candidate ``ROW_SHAPE_MIN``
+#: (``manifest._row_shape_reconciliation_ok``: the minimum numeric-token count
+#: over a CANDIDATE's own numeric body rows). #649's page has no candidate to
+#: derive it from -- the attempt emitted the table as column runs and authored
+#: no markdown grid at all -- so the partition below falls back to the
+#: strictest value the same formula can take: a band carrying ANY genuine
+#: numeric token is table-shaped and is withheld. Measured on the ticket's own
+#: fixture (Fed 1989-11-14 p3, 295 native words, 48 bands): every one of the
+#: 16 swap-arrangement rows carries 1-2 genuine numeric tokens and every one of
+#: the 32 prose/header bands carries 0, so this limit separates that page
+#: exactly. It is a limit of an existing derivation, not a tuned threshold: no
+#: value below 1 exists, and any value above it would ship printed numbers.
+PROSE_BAND_MAX_NUMERIC_TOKENS: int = 0
+
+
+def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:
+    """Split *words* into ``(prose_words, withheld_words)`` by baseline band.
+
+    #649 / #652 (owner ruling, 2026-09-10): on a scanned page with NO detected
+    table geometry there is no bbox to scope prose with, so the prose region is
+    delimited by the page's own native baseline bands -- a band whose genuine
+    numeric-token count is below *row_shape_min* is prose; every band at or
+    above it is withheld, exactly the numeric content the D3 floor protects.
+
+    *row_shape_min* defaults to ``PROSE_BAND_MAX_NUMERIC_TOKENS + 1`` (see that
+    constant for the derivation and the measurement behind it).
+
+    NOTHING ELSE is withheld, and that is a measured decision rather than an
+    omission. A withheld table's own zero-token lines -- the header block
+    above it, a wrapped row label inside it ("Bank for International" /
+    "Settlements-" on the ticket's fixture) -- do ship as prose. The obvious
+    fix, withholding every zero-token band inside the withheld bands' y-span,
+    was tried and rejected: on a two-table page it swallows the entire
+    paragraph printed BETWEEN the tables, and no threshold separates "wrapped
+    row label" from "paragraph between two tables" (the identical trap
+    ``manifest._row_shape_reconciliation_ok``'s docstring records for its own
+    distance-anchored rounds). Shipping a bare label is the cheaper error of
+    the two: it carries no printed value, so it cannot ship a wrong number,
+    and the fail-closed marker sits right beside it saying the table was
+    withheld. Losing a paragraph of policy text is the loss #649 exists to
+    stop.
+
+    The cost of the default *row_shape_min* runs the other way and is
+    disclosed too: a prose line carrying one bare integer ("...in 1989 the
+    Committee...") counts as table-shaped and is withheld with the table. It
+    is withheld, never silently dropped -- the marker declares it -- and one
+    fixture is not enough to calibrate anything looser. That calibration is
+    the same follow-up ``manifest.PROSE_CORROBORATION_MIN`` is waiting on: a
+    second real fixture.
+
+    Both lists are returned in PAGE READING ORDER (bands top to bottom, words
+    left to right within a band), not in the input order of *words*: #649's
+    caller ships the prose half as text, and the band order is the only order
+    that reproduces the printed page.
+    """
+    if row_shape_min is None:
+        row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
+    band_words = cluster_band_words(words)
+    if not band_words:
+        return [], []
+
+    numeric_counts: list[int] = []
+    for band in band_words:
+        count = 0
+        for word in band:
+            is_numeric, _normalized = _is_genuine_numeric(word[4])
+            if is_numeric:
+                count += 1
+        numeric_counts.append(count)
+
+    withheld_flags = [count >= row_shape_min for count in numeric_counts]
+
+    prose: list = []
+    withheld: list = []
+    for band, flag in zip(band_words, withheld_flags):
+        target = withheld if flag else prose
+        target.extend(sorted(band, key=lambda w: w[0]))
+    return prose, withheld
 
 
 #: A GFM separator/rule cell: optional leading/trailing ':' around one or

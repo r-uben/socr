@@ -130,6 +130,15 @@ class PageState:
     #: a resumed page's fallback simply has no native-words evidence to
     #: consult, which only ever makes the fallback abstain, never mis-fire.
     native_words: list[tuple] = field(default_factory=list)
+    #: #652 P2a: the live run's ``manifest._table_bbox_sane`` verdict for this
+    #: page, evaluated once while ``native_words`` above still exists. Unlike
+    #: those words this IS persisted in the sidecar and restored on resume,
+    #: because a resumed page re-runs selection over restored bboxes with no
+    #: words: without the recorded verdict the sanity check has no evidence and
+    #: fails closed, floor-stamping a page the live run spliced. ``None`` means
+    #: "never evaluated" (no bbox on the page, or an older sidecar), which is
+    #: doubt, not sanity -- see ``_table_bbox_sane``.
+    table_bbox_sane: bool | None = None
     scanned_table_evidence_failed: bool = False  # GH-90: source-evidence gate rejected table
     #: #658: the gate rejected the table because NOTHING READ THE PIXELS (no
     #: classical OCR backend, a crashed reader, an unrenderable page), not

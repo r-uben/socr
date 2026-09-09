@@ -1614,13 +1614,36 @@ def _table_bbox_sane(p) -> bool:
 
     Neither check is a licence on its own -- both run alongside the four
     coverage/reconstruction conditions below, and any one failing floors
-    the whole page. Returns True (no objection) when there is nothing to
-    check against, leaving the existing four conditions to decide.
+    the whole page. With no bbox claimed at all there is nothing to check
+    and this returns True, leaving the existing four conditions to decide
+    (they already floor a page whose ``detected_table_count`` is 0).
+
+    #652 P2a -- MISSING EVIDENCE IS NOT A PASS, AND RESUME MUST NOT RE-DECIDE.
+    ``native_words`` is a live-run cache: ``_restore_terminal_page_state``
+    restores ``detected_table_count`` and ``detected_table_bboxes`` from the
+    sidecar but never the words, and ``_select_and_finalize_page`` re-runs
+    selection over that restored state. So a resumed page reached this check
+    with bboxes but no words, the old ``return True`` skipped both sanity
+    checks, and the resumed run could stamp a different floor outcome than
+    the run that wrote the bytes. Two changes close it, in this order:
+
+    * the live run's verdict is PERSISTED (``PageState.table_bbox_sane``,
+      written to and restored from the sidecar) and is authoritative when
+      the words are gone -- resume replays the decision instead of retaking
+      it, so live and resumed reach the same outcome;
+    * with neither words nor a persisted verdict, this fails CLOSED. A bbox
+      was claimed and nothing can check it; absence of evidence is not
+      sanity.
     """
     words = getattr(p, "native_words", None) or []
     bboxes = getattr(p, "detected_table_bboxes", None) or []
-    if not words or not bboxes:
+    if not bboxes:
         return True
+    if not words:
+        persisted = getattr(p, "table_bbox_sane", None)
+        if persisted is None:
+            return False
+        return bool(persisted)
 
     from socr.tables.row_corroboration import baseline_bands, words_in_region
 
@@ -1636,6 +1659,18 @@ def _table_bbox_sane(p) -> bool:
         return False  # too small: the box captured no numeric row
     prose_bands = [b for b in bands if not b.tokens]
     return len(prose_bands) <= len(numeric_bands)  # too large otherwise
+
+
+def table_bbox_sanity_verdict(p) -> bool:
+    """Public entry for :func:`_table_bbox_sane`, for the orchestrator.
+
+    #652 P2a: the verdict has to be taken while ``native_words`` still exists
+    -- once the page is flushed and later resumed those words are gone -- so
+    the orchestrator evaluates it at extraction time and records it on the
+    page. Crossing a package boundary for a private name is a layering
+    violation (``test_package_layering``), so the boundary gets a name.
+    """
+    return _table_bbox_sane(p)
 
 
 def table_floor_text_for_source(
@@ -1724,6 +1759,52 @@ PROSE_CORROBORATION_MIN: float = 0.5
 _PROSE_TOKEN_RE = re.compile(r"[a-z]{4,}")
 
 
+def native_region_text(words: list) -> str:
+    """The printed text of *words*, one line per native baseline band.
+
+    #652/#649: both the trusted-layer check and the recovered-prose body need
+    the region's text as it was PRINTED, not as a flat bag of words -- one
+    line per band, words left to right. Reuses ``cluster_band_words`` so this
+    reconstruction and the prose/table partition can never disagree about
+    where a line begins.
+    """
+    from socr.tables.row_corroboration import cluster_band_words
+
+    lines = [
+        " ".join(str(w[4]) for w in sorted(band, key=lambda w: w[0]))
+        for band in cluster_band_words(words)
+    ]
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _attempt_prose_text(attempt_text: str) -> str:
+    """*attempt_text* with its markdown table blocks removed.
+
+    #652 P2b's necessary other half. ``PROSE_CORROBORATION_MIN``'s own comment
+    has always said "outside-table vocabulary", but the code tokenised the
+    whole attempt; that was harmless while the witness was also the whole page,
+    because both sides carried the table's words. Scoping the WITNESS to the
+    prose region and leaving the ATTEMPT whole would break the ratio in the
+    direction that loses content: a genuine attempt on a table-heavy page
+    would be scored on table tokens the witness can no longer contain, and the
+    page would fail closed for reproducing its table correctly. Both sides are
+    therefore prose. Blocks are located with ``find_table_blocks`` -- the same
+    parser ``table_floor_text_for_source`` counts blocks with, so "what is a
+    table block" has one definition here. #650 still owns the separate
+    question of what the 0.5 floor should BE; this only makes the two sides of
+    the ratio comparable.
+    """
+    text = attempt_text or ""
+    from socr.tables.reconcile import find_table_blocks
+
+    blocks = find_table_blocks(text)
+    if not blocks:
+        return text
+    lines = text.splitlines()
+    dropped = {idx for block in blocks for idx in range(block.start, block.end + 1)}
+    return "\n".join(line for idx, line in enumerate(lines) if idx not in dropped)
+
+
 def _prose_corroboration_ok(p, attempt_text: str) -> bool:
     """B1 / #591: geometric-only corroboration for ``UNVERIFIABLE_TABLE_SCANNED``.
 
@@ -1747,21 +1828,62 @@ def _prose_corroboration_ok(p, attempt_text: str) -> bool:
     No witness (``p.native_words`` empty, e.g. the page has no real text
     layer, or the caching gate in ``orchestrator.py`` never ran for it) fails
     closed -- absence of a check is not corroboration.
+
+    #652 P1 -- the witness must be a layer we TRUST. The orchestrator caches
+    ``native_words`` for every ``not is_born_digital`` page, and a page is
+    classified scanned precisely when its embedded layer is too corrupt to
+    route on (Fed 1989-11-14 p3: 6.6% encoding corruption). Corroborating an
+    attempt against that same broken layer is circular -- an attempt that
+    echoes the corruption would clear the guard the corruption caused. The
+    PROSE REGION's own text must pass ``born_digital.text_layer_trusted``, or
+    there is no witness and this fails closed. Measured on that fixture: the
+    whole page reads 6.6% (untrusted), its withheld numeric bands 33.3%, and
+    its prose region 0.5% -- the corruption is inside the table, and scoping
+    the trust question to the region actually used is what lets the guard
+    both refuse the corrupt half and keep the clean one.
+
+    #652 P2b -- the witness must be PROSE. Production
+    ``UNVERIFIABLE_TABLE_SCANNED`` pages routinely carry
+    ``detected_table_count == 0`` and no bbox at all (Fed p3 again), so the
+    bbox exclusion below removes nothing and every native token counted --
+    including the withheld table's own headers, row labels and values. A
+    faithful-table + fabricated-prose attempt then clears
+    ``PROSE_CORROBORATION_MIN`` on table vocabulary alone, corroborating the
+    one part of itself that was never in doubt. ``prose_region_words``
+    delimits the prose region by native baseline band instead (owner ruling,
+    2026-09-10), so the withheld table's vocabulary cannot vouch for
+    fabricated prose. This composes WITH the bbox exclusion; it does not
+    replace it.
     """
     words = getattr(p, "native_words", None) or []
     if not words:
         return False
     bboxes = getattr(p, "detected_table_bboxes", None) or []
-    native_tokens: set[str] = set()
+    outside_table: list = []
     for w in words:
-        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+        x0, y0, x1, y1 = w[0], w[1], w[2], w[3]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         if any(bx0 <= cx <= bx1 and by0 <= cy <= by1 for bx0, by0, bx1, by1 in bboxes):
             continue
-        native_tokens.update(_PROSE_TOKEN_RE.findall(text.lower()))
+        outside_table.append(w)
+    if not outside_table:
+        return False
+
+    from socr.core.born_digital import text_layer_trusted
+    from socr.tables.row_corroboration import prose_region_words
+
+    prose_words, _withheld = prose_region_words(outside_table)
+    if not prose_words:
+        return False
+    if not text_layer_trusted(native_region_text(prose_words)):
+        return False
+
+    native_tokens: set[str] = set()
+    for w in prose_words:
+        native_tokens.update(_PROSE_TOKEN_RE.findall(str(w[4]).lower()))
     if not native_tokens:
         return False
-    attempt_tokens = set(_PROSE_TOKEN_RE.findall((attempt_text or "").lower()))
+    attempt_tokens = set(_PROSE_TOKEN_RE.findall(_attempt_prose_text(attempt_text).lower()))
     if not attempt_tokens:
         return False
     overlap = len(attempt_tokens & native_tokens) / len(attempt_tokens)

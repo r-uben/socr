@@ -78,6 +78,13 @@ def _floored_page(tmp_path: Path, native_text: str, *, detected: int, bboxes: in
     ps.detected_table_bboxes = [
         (72.0, 100.0 + i * 200.0, 520.0, 250.0 + i * 200.0) for i in range(boxes)
     ]
+    # #652 P2a: stand in for the verdict the live run records. These bboxes and
+    # this native text are both synthetic and share no geometry (the fixture
+    # PDF carries one title line), so ``_table_bbox_sane`` has nothing real to
+    # measure -- and a claimed bbox with no words to check it against now fails
+    # CLOSED instead of shrugging. The live born-digital page this stands for
+    # has its words cached and its verdict recorded before selection runs.
+    ps.table_bbox_sane = True
     return state, ps
 
 
