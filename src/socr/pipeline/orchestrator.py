@@ -5505,9 +5505,17 @@ class UnifiedPipeline:
         from socr.core.pdf import open_pdf
         from socr.tables.binding import bind
 
+        from socr.core.born_digital import flatten_page_spans
+
         try:
             with open_pdf(state.handle.path) as doc:
-                words = doc[page_num - 1].get_text("words")
+                page = doc[page_num - 1]
+                words = page.get_text("words")
+                # GH-624b: font evidence for the wrapped-label-vs-heading
+                # merge. Best-effort -- a page whose text dict cannot be
+                # read yields [], so bind() falls back to its no-spans
+                # (today's) behaviour rather than aborting the check.
+                spans = flatten_page_spans(page)
         except Exception as exc:
             logger.warning(
                 "mechanical binding check: could not read native words on p%d (%s: %s)",
@@ -5520,7 +5528,7 @@ class UnifiedPipeline:
             return None, BindingEvidence.ABSTAIN
 
         try:
-            binding_result = bind(words, witness.markdown, region=witness.box.bbox)
+            binding_result = bind(words, witness.markdown, region=witness.box.bbox, spans=spans)
         except Exception as exc:
             logger.warning(
                 "mechanical binding check errored on p%d table %s (%s: %s); ignored",

@@ -64,6 +64,38 @@ def is_math_font(basefont: str) -> str | None:
     return match.group(0) if match else None
 
 
+def flatten_page_spans(page) -> list[dict]:
+    """Flat ``[{"bbox", "text", "font", "size", "flags"}, ...]`` for every
+    span on *page*, from its own ``get_text("dict")``.
+
+    GH-624b: the shared span-walking seam for callers that need font
+    evidence (basefont/size/bold) rather than plain text -- factored so
+    ``socr.tables.binding.bind()``'s optional ``spans`` argument has exactly
+    one production extraction to feed it, instead of a third ad hoc walker
+    next to this one and :func:`math_font_char_count`. Never raises: a page
+    whose text dict cannot be read returns ``[]``, same failure shape as
+    every other reader in this module.
+    """
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+    except Exception:
+        return []
+    spans: list[dict] = []
+    for block in blocks:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                spans.append(
+                    {
+                        "bbox": span.get("bbox"),
+                        "text": span.get("text", ""),
+                        "font": span.get("font", ""),
+                        "size": span.get("size", 0.0),
+                        "flags": span.get("flags", 0),
+                    }
+                )
+    return spans
+
+
 def math_font_char_count(page) -> int:
     """Characters on ``page`` rendered in a recognised math font.
 
