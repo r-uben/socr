@@ -20,7 +20,7 @@ from typing import Any, NamedTuple
 
 import fitz
 
-from socr.core.born_digital import BornDigitalDetector, _is_lane_stacked
+from socr.core.born_digital import BornDigitalDetector, _is_lane_stacked, flatten_page_spans
 from socr.core.pdf import open_pdf
 from socr.tables.binding import BindingResult, Grid, bind, parse_grid
 
@@ -424,9 +424,19 @@ def measure_manifest(manifest: Path, pdf_root: Path) -> CoverageReport:
                     if grid is not None:
                         strict_regions.append((ordinal, region, grid))
 
+                # GH-624b: font evidence for the wrapped-label-vs-heading
+                # merge -- see the identical comment in
+                # orchestrator._binding_evidence_for_witness.
+                spans = flatten_page_spans(page)
+
                 primary = select_primary_grid(strict_regions)
                 for ordinal, region, grid in strict_regions:
-                    result = bind(page.get_text("words"), region.content, region=tuple(region.rect))
+                    result = bind(
+                        page.get_text("words"),
+                        region.content,
+                        region=tuple(region.rect),
+                        spans=spans,
+                    )
                     region_records.append(
                         _record(
                             page_ref,
@@ -440,7 +450,7 @@ def measure_manifest(manifest: Path, pdf_root: Path) -> CoverageReport:
 
                 if primary is not None:
                     ordinal, region, grid = primary
-                    result = bind(page.get_text("words"), region.content)
+                    result = bind(page.get_text("words"), region.content, spans=spans)
                     page_records.append(_record(page_ref, ordinal, region, grid, result, True))
                 else:
                     # The committed dry run called bind with no selected pipe

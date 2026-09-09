@@ -365,8 +365,14 @@ def replay_table(
     callers must check whether the disputed rows/cells were actually
     compared (see ``_unchecked_reason``).
     """
+    from socr.core.born_digital import flatten_page_spans
+
     with open_pdf(pdf_path) as doc:
-        words = doc[page_num - 1].get_text("words")
+        page = doc[page_num - 1]
+        words = page.get_text("words")
+        # GH-624b: font evidence for the wrapped-label-vs-heading merge --
+        # see the identical comment in orchestrator._binding_evidence_for_witness.
+        spans = flatten_page_spans(page)
 
     with prepare_table_witnesses(pdf_path, page_num, model_markdown) as witnesses:
         witness = _witness_for_table(witnesses, table_id)
@@ -376,7 +382,7 @@ def replay_table(
             return (), f"witness status {witness.status.value} (no located box this tree)", None
         if not words:
             return (), "no native words on this page", None
-        binding_result = bind(words, witness.markdown, region=witness.box.bbox)
+        binding_result = bind(words, witness.markdown, region=witness.box.bbox, spans=spans)
     from socr.pipeline.orchestrator import UnifiedPipeline
 
     with open_pdf(pdf_path) as doc:

@@ -64,6 +64,71 @@ def is_math_font(basefont: str) -> str | None:
     return match.group(0) if match else None
 
 
+def iter_page_span_records(page, *, clip=None):
+    """Yield ``(block_index, line_index, span_dict)`` for every span on
+    *page*, from its own ``get_text("dict")``.
+
+    GH-624b round 3: THE shared page-span traversal primitive for this
+    module and ``socr.tables.native_rows`` -- every caller wanting a
+    different shape (bbox+font tuples, flat span dicts, a font-signature
+    summary, or a ``(block, line)``-keyed grouping for a superscript
+    check) builds on this rather than re-walking blocks/lines/spans
+    itself. Deliberately does NOT swallow exceptions here -- callers that
+    want a silent-failure seam (:func:`flatten_page_spans`,
+    :func:`math_font_char_count`) wrap their own consumption in
+    try/except, same as they did before this factor; callers that never
+    caught a ``get_text`` failure before this factor
+    (``_span_fonts``, the superscript walker in ``native_rows.py``) still
+    propagate it identically -- the traversal itself is behaviour-neutral.
+    """
+    page_dict = page.get_text("dict", clip=clip) if clip is not None else page.get_text("dict")
+    blocks = page_dict.get("blocks", [])
+    for block_index, block in enumerate(blocks):
+        for line_index, line in enumerate(block.get("lines", [])):
+            for span in line.get("spans", []):
+                yield block_index, line_index, span
+
+
+def iter_page_spans(page, *, clip=None):
+    """:func:`iter_page_span_records` without the block/line indices, for
+    callers that only need the spans themselves."""
+    for _block_index, _line_index, span in iter_page_span_records(page, clip=clip):
+        yield span
+
+
+def flatten_page_spans(page) -> list[dict]:
+    """Flat ``[{"bbox", "text", "font", "size", "flags"}, ...]`` for every
+    span on *page*.
+
+    GH-624b: the font-evidence shape ``socr.tables.binding.bind()``'s
+    optional ``spans`` argument wants. Never raises: a page whose text
+    dict cannot be read returns ``[]``, same failure shape as
+    :func:`math_font_char_count`.
+
+    ``font``/``size``/``flags`` are passed through with NO default when a
+    real span dict is missing one (``.get(...)`` with no fallback, unlike
+    ``text``) -- Astra P1 round 4: ``bind()``'s font-signature check treats
+    a missing attribute as absent evidence and abstains; substituting an
+    invented ``""``/``0.0``/``0`` here would let two independently
+    incomplete spans "agree" on that default and manufacture a merge with
+    no real evidence behind it.
+    """
+    try:
+        spans = list(iter_page_spans(page))
+    except Exception:
+        return []
+    return [
+        {
+            "bbox": span.get("bbox"),
+            "text": span.get("text", ""),
+            "font": span.get("font"),
+            "size": span.get("size"),
+            "flags": span.get("flags"),
+        }
+        for span in spans
+    ]
+
+
 def math_font_char_count(page) -> int:
     """Characters on ``page`` rendered in a recognised math font.
 
@@ -71,16 +136,14 @@ def math_font_char_count(page) -> int:
     0 on a page with no math-font spans and never raises on a page whose text
     dict cannot be read.
     """
-    total = 0
     try:
-        blocks = page.get_text("dict").get("blocks", [])
+        spans = list(iter_page_spans(page))
     except Exception:
         return 0
-    for block in blocks:
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                if is_math_font(span.get("font", "") or ""):
-                    total += len(span.get("text", ""))
+    total = 0
+    for span in spans:
+        if is_math_font(span.get("font", "") or ""):
+            total += len(span.get("text", ""))
     return total
 
 

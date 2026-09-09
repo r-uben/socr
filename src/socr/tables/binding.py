@@ -285,12 +285,41 @@ def _wrapped_label_merge_plan(
     proven case merges: the merge is accepted only when the merged text is
     an exact ``label_key`` match for the native row it explains, never
     merely because the neighbour's own label came up short.
+
+    GH-624b: that single-baseline proof (``row_path[-1]``) cannot see the
+    case where NATIVE ITSELF prints the label across two baselines (a
+    section heading is represented identically -- see the module's
+    ``gh 624b parked`` history). Widening the proof to the native row's
+    FULL ``row_path`` joined would catch that case, but is isomorphic to a
+    legitimate parent-heading-row-plus-child and merges the heading too
+    (``test_bound_parent_row_increments_row_labels_checked``). The owner
+    ruled ``bind()`` may consume font evidence as the missing
+    discriminator: a wrapped label's two printed lines are the SAME run of
+    text (same face/size/weight); a heading is typographically distinct
+    from its child. So the widened match only fires when BOTH native rows
+    it explains -- the label-only row's own native band, and the
+    following row's own native band -- carry equal, unambiguous
+    ``label_font`` signatures (from the optional ``spans`` argument to
+    ``bind()``). No spans, or disagreeing/ambiguous fonts, means no
+    widened merge -- fail closed, matching every guard fixture, which
+    supplies no font data at all.
     """
     if not rows:
-        return ()
+        return (), {}
 
     trial_binding = _bind_rows(native_rows, rows)
     merge_at: list[int] = []
+    # GH-624b round 4 (Astra P1): the label this merge was PROVEN against --
+    # ``row_path[-1]`` for the narrow proof, the full joined ``row_path`` for
+    # the widened one -- keyed by the pre-merge candidate index. The ordinary
+    # post-merge label check (in ``bind()``) must compare the merged label
+    # against THIS, not against the native row it ends up bound to's own
+    # ``row_path[-1]``: after the merge, ``_bind_rows`` rebinds the merged
+    # candidate row onto the native DATA band (the one carrying the numeric
+    # value), whose own leaf label is deliberately shorter than the merged
+    # text -- comparing against that leaf manufactures a contradiction out
+    # of the very merge that proved the two texts describe the same row.
+    proven_native_label: dict[int, str] = {}
     i = 0
     while i < len(rows):
         row = rows[i]
@@ -312,18 +341,53 @@ def _wrapped_label_merge_plan(
             next_alone_already_matches = bool(native_label) and label_key(
                 next_row[0].strip()
             ) == label_key(native_label)
+
+            # GH-624b widened proof: native itself split the label across two
+            # baselines. ``next_alone_already_matches`` is True in BOTH the
+            # wrapped-label case and the heading case (the parked issue
+            # comment measured this: the two fixtures are isomorphic on every
+            # text/geometry signal), so it cannot gate the widened branch --
+            # font evidence is the only discriminator, never text sameness.
+            font_widened = False
+            native_label_wide = ""
+            native_idx_this = trial_binding.get(i)
+            if (
+                native_idx is not None
+                and native_idx_this is not None
+                and native_rows[native_idx_this].is_parent
+                and native_rows[native_idx].row_path
+            ):
+                native_label_wide = " ".join(
+                    p.strip() for p in native_rows[native_idx].row_path
+                ).strip()
+                wide_proven = bool(native_label_wide) and label_key(merged_label) == label_key(
+                    native_label_wide
+                )
+                if wide_proven:
+                    font_a = native_rows[native_idx_this].label_font
+                    font_b = native_rows[native_idx].label_font
+                    font_widened = font_a is not None and font_a == font_b
+
             if proven and not next_alone_already_matches:
                 merge_at.append(i)
+                proven_native_label[i] = native_label
+                i += 2
+                continue
+            if font_widened:
+                merge_at.append(i)
+                proven_native_label[i] = native_label_wide
                 i += 2
                 continue
         i += 1
 
-    return tuple(merge_at)
+    return tuple(merge_at), proven_native_label
 
 
 def _apply_wrapped_label_merges(
-    rows: tuple[tuple[str, ...], ...], merge_at: tuple[int, ...]
-) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
+    rows: tuple[tuple[str, ...], ...],
+    merge_at: tuple[int, ...],
+    proven_native_label: dict[int, str] | None = None,
+) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...], dict[int, str]]:
     """Collapse each ``rows[i]`` named in *merge_at* onto ``rows[i + 1]``.
 
     *merge_at* comes from :func:`_wrapped_label_merge_plan` run against the
@@ -332,23 +396,35 @@ def _apply_wrapped_label_merges(
     ``_project_candidate_data_columns``) keeps both grids row-aligned with
     ``row_binding``, since column 0 (the label column) survives projection
     unchanged.
+
+    Also re-keys *proven_native_label* (pre-merge candidate index -> the
+    label the merge was proven against) to the POST-merge output index, so
+    ``bind()``'s label-contradiction check can look up the right label for a
+    merged row without re-deriving it (Astra P1, GH-624b round 4).
     """
     merge_set = set(merge_at)
+    proven_native_label = proven_native_label or {}
     merged: list[tuple[str, ...]] = []
     merge_events: list[str] = []
+    label_overrides: dict[int, str] = {}
     i = 0
+    out_idx = 0
     while i < len(rows):
         if i in merge_set:
             next_row = rows[i + 1]
             merged_label = f"{rows[i][0].strip()} {next_row[0].strip()}".strip()
             merged.append((merged_label,) + next_row[1:])
             merge_events.append(merged_label)
+            if i in proven_native_label:
+                label_overrides[out_idx] = proven_native_label[i]
+            out_idx += 1
             i += 2
             continue
         merged.append(rows[i])
+        out_idx += 1
         i += 1
 
-    return tuple(merged), tuple(merge_events)
+    return tuple(merged), tuple(merge_events), label_overrides
 
 
 def parse_grid(markdown: str) -> Grid | None:
@@ -521,6 +597,66 @@ class _NativeRow:
     # never consulted by conviction logic.
     lane_bboxes: dict[int, tuple[float, float, float, float]] = field(default_factory=dict)
     label_bbox: tuple[float, float, float, float] | None = None
+    # GH-624b: (basefont, rounded size, bold) for this row's label text, from
+    # the optional ``spans`` argument to ``bind()``. None when no spans were
+    # supplied, or when the label's own spans disagree on font -- either way
+    # font evidence abstains rather than guesses (see ``_label_font_signature``).
+    label_font: tuple[str, int, bool] | None = None
+
+
+# PyMuPDF span ``flags`` bit for bold (see ``get_text("dict")`` docs): bit 4.
+_SPAN_FLAGS_BOLD_BIT = 2**4
+
+
+def _span_is_bold(span: dict) -> bool:
+    """Bold via the documented PyMuPDF signals only -- no heuristic of our own."""
+    flags = span.get("flags") or 0
+    basefont = (span.get("font") or "").lower()
+    return bool(flags & _SPAN_FLAGS_BOLD_BIT) or "bold" in basefont
+
+
+def _bbox_overlaps(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    """True when two ``(x0, y0, x1, y1)`` boxes overlap in both x and y (strict)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return min(ax1, bx1) > max(ax0, bx0) and min(ay1, by1) > max(ay0, by0)
+
+
+def _label_font_signature(
+    spans: list[dict], label_bbox: tuple[float, float, float, float] | None
+) -> tuple[str, int, bool] | None:
+    """(basefont, rounded size, bold) for the spans overlapping *label_bbox*.
+
+    None on no spans, no overlap, disagreement among the overlapping spans,
+    or an overlapping span that is MISSING a font attribute -- ambiguous or
+    absent span evidence abstains rather than guesses, same as a missing
+    ``spans`` argument (GH-624b design constraint 2). An overlapping span
+    that carries text/bbox but not font/size/flags must never fall back to
+    the invented defaults (``""``/``0``/``False``) that a second such
+    incomplete span could then spuriously "agree" with -- Astra P1's
+    round-4 finding: absence of evidence is not evidence of sameness.
+    """
+    if not spans or label_bbox is None:
+        return None
+    signatures: set[tuple[str, int, bool]] = set()
+    for span in spans:
+        bbox = span.get("bbox")
+        text = (span.get("text") or "").strip()
+        if not bbox or not text:
+            continue
+        if not _bbox_overlaps(tuple(bbox), label_bbox):
+            continue
+        font = span.get("font")
+        size = span.get("size")
+        flags = span.get("flags")
+        if not font or size is None or flags is None:
+            return None
+        signatures.add((font, round(size), _span_is_bold(span)))
+    if len(signatures) != 1:
+        return None
+    return next(iter(signatures))
 
 
 def _union_word_bbox(words: list) -> tuple[float, float, float, float] | None:
@@ -800,7 +936,7 @@ def _native_lane_geometry(
 
 
 def _native_rows(
-    words: list, n_cand_cols: int | None = None
+    words: list, n_cand_cols: int | None = None, spans: list[dict] | None = None
 ) -> tuple[list[_NativeRow], list[float], list[int]]:
     """Parse native words into row bands with row paths and per-lane tokens.
 
@@ -880,6 +1016,7 @@ def _native_rows(
                     band_ambiguous=band_ambiguous,
                     lane_bboxes={},
                     label_bbox=label_bbox,
+                    label_font=_label_font_signature(spans, label_bbox),
                 )
             )
             continue
@@ -926,6 +1063,7 @@ def _native_rows(
                 band_ambiguous=band_ambiguous,
                 lane_bboxes=lane_bboxes,
                 label_bbox=label_bbox,
+                label_font=_label_font_signature(spans, label_bbox),
             )
         )
 
@@ -1700,8 +1838,21 @@ def _words_in_region(words: list, region: tuple | None) -> list:
     return kept
 
 
-def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingResult:
+def bind(
+    words: list,
+    markdown: str,
+    *,
+    region: tuple | None = None,
+    spans: list[dict] | None = None,
+) -> BindingResult:
     """Bind *markdown*'s candidate grid to the native geometry in *words*.
+
+    *spans*, when given, is a flat list of PyMuPDF span dicts (the ``spans``
+    entries of ``page.get_text("dict")``'s blocks/lines, each carrying
+    ``bbox``, ``size``, ``flags`` and ``font``/basefont). It is OPTIONAL and
+    additive: with ``spans=None`` (the default), behaviour is byte-for-byte
+    what it was before GH-624b, including the ambiguous wrapped-label-vs-
+    heading case, which stays unmerged. See ``_wrapped_label_merge_plan``.
 
     Never raises on malformed input: a markdown block that fails the A1
     strict parse, or a page with no numeric lanes, binds nothing and returns
@@ -1763,7 +1914,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
         grid = candidate_grid
     n_cand_cols = grid.n_cols - 1  # exclude the stub column
 
-    native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols)
+    native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols, spans)
     lane_count, _lane_of, lane_centers = _native_lane_geometry(words, n_cand_cols)
 
     header_words = (
@@ -1779,14 +1930,19 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
     # column-projected) so every downstream ``cand_idx`` -- row_binding,
     # candidate_row_labels, the cell walks below -- stays aligned across
     # both.
-    merge_at = _wrapped_label_merge_plan(native_rows, candidate_grid.rows)
+    merge_at, proven_native_label = _wrapped_label_merge_plan(native_rows, candidate_grid.rows)
+    # Astra P1 (GH-624b round 4): post-merge candidate index -> the label the
+    # merge was proven against, so the label-contradiction check below
+    # compares a merged row against the text that PROVED it, not against
+    # whichever native row it happens to rebind onto after the merge.
+    merged_row_proven_label: dict[int, str] = {}
     if merge_at:
-        merged_candidate_rows, merge_events = _apply_wrapped_label_merges(
-            candidate_grid.rows, merge_at
+        merged_candidate_rows, merge_events, merged_row_proven_label = _apply_wrapped_label_merges(
+            candidate_grid.rows, merge_at, proven_native_label
         )
         candidate_grid = replace(candidate_grid, rows=merged_candidate_rows)
         if grid is not None:
-            merged_grid_rows, _ = _apply_wrapped_label_merges(grid.rows, merge_at)
+            merged_grid_rows, _, _ = _apply_wrapped_label_merges(grid.rows, merge_at)
             grid = replace(grid, rows=merged_grid_rows)
         result.candidate_wrapped_label_merges = merge_events
 
@@ -1835,7 +1991,16 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
         result.row_labels_checked += 1
         candidate_label = candidate_grid.rows[cand_idx][0].strip()
         native_row = native_rows[native_idx]
-        native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
+        if cand_idx in merged_row_proven_label:
+            # Astra P1: this candidate row is a GH-624b wrapped-label merge
+            # -- compare against the label that PROVED the merge (narrow:
+            # the native leaf; widened: the native row's full joined path),
+            # not against ``row_path[-1]`` of whichever native row
+            # ``_bind_rows`` rebound the merged row onto (the data band,
+            # whose own leaf is deliberately shorter than the merged text).
+            native_label = merged_row_proven_label[cand_idx]
+        else:
+            native_label = native_row.row_path[-1].strip() if native_row.row_path else ""
         same_presence = bool(candidate_label) == bool(native_label)
         candidate_key = label_key(candidate_label)
         native_key = label_key(native_label)

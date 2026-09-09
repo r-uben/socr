@@ -27,6 +27,27 @@ def w(x0: float, y0: float, x1: float, y1: float, text: str) -> tuple:
     return (x0, y0, x1, y1, text, 0, 0, 0)
 
 
+def span(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    text: str,
+    *,
+    font: str = "Helvetica",
+    size: float = 10.0,
+    bold: bool = False,
+) -> dict:
+    """One ``page.get_text("dict")`` span dict, GH-624b font-evidence shape."""
+    return {
+        "bbox": (x0, y0, x1, y1),
+        "text": text,
+        "font": font + ("-Bold" if bold else ""),
+        "size": size,
+        "flags": (2**4) if bold else 0,
+    }
+
+
 def nums(markdown: str) -> list[str]:
     """All bare numeric-looking tokens in a markdown table, cell order irrelevant."""
     out = []
@@ -2387,6 +2408,89 @@ def test_gh624b_binding_result_carries_wrapped_label_merges():
     result = bind(words, markdown)
     assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
     assert result.candidate_row_labels == ("Other authorized European currencies",)
+
+
+# ---------------------------------------------------------------------------
+# GH-624b round 2: font evidence for the two-baseline (native-wrapped) case
+# ---------------------------------------------------------------------------
+
+# The #624 comment's parked fixture: native prints the label across TWO
+# baselines (y0=60 and y0=90), unlike the single-baseline fixture above.
+# Isomorphic to a legitimate section-heading fixture on every text/geometry
+# signal (measured in the parked issue comment) -- font evidence is the
+# only thing that can tell them apart.
+_TWO_BASELINE_WORDS = [
+    w(50, 60, 100, 70, "Other"),
+    w(105, 60, 165, 70, "authorized"),
+    w(50, 90, 110, 100, "European"),
+    w(115, 90, 175, 100, "currencies"),
+    w(300, 90, 340, 100, "1250.0"),
+]
+_TWO_BASELINE_MARKDOWN = (
+    "| Item | A |\n| --- | --- |\n| Other authorized | |\n| European currencies | 1250.0 |\n"
+)
+
+
+def test_gh624b_two_baseline_label_merges_when_fonts_agree():
+    """Font evidence proves the wrapped-label case: both printed lines are
+    the same face/size/weight, so the widened merge fires."""
+    spans = [
+        span(50, 60, 165, 70, "Other authorized"),
+        span(50, 90, 175, 100, "European currencies"),
+    ]
+    result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN, spans=spans)
+    assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
+    assert result.candidate_row_labels == ("Other authorized European currencies",)
+    # Astra P1 (round 4): the proven merge must not manufacture its own
+    # label contradiction by comparing the merged text against the native
+    # DATA row's own (shorter) leaf label.
+    assert result.row_label_contradictions == []
+
+
+def test_gh624b_missing_font_fields_are_not_positive_evidence():
+    """Astra P2 (round 4): a span carrying text/bbox but no font/size/flags
+    must abstain, not fall back to an invented ('', 0, False) signature that
+    a second such incomplete span could spuriously 'agree' with."""
+    spans = [
+        {"bbox": (50, 60, 165, 70), "text": "Other authorized"},
+        {"bbox": (50, 90, 175, 100), "text": "European currencies"},
+    ]
+    result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN, spans=spans)
+    assert result.candidate_wrapped_label_merges == ()
+
+
+def test_gh624b_two_baseline_label_does_not_merge_when_bold_differs():
+    """Font evidence rejects the merge when the first line is bold: that is
+    a section heading, not a wrapped label, even though the text and
+    geometry are otherwise identical to the merging case above."""
+    spans = [
+        span(50, 60, 165, 70, "Other authorized", bold=True),
+        span(50, 90, 175, 100, "European currencies", bold=False),
+    ]
+    result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN, spans=spans)
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
+
+
+def test_gh624b_two_baseline_label_does_not_merge_when_size_differs():
+    """Same as above but the discriminator is size, not weight -- a larger
+    heading font over a normal child row."""
+    spans = [
+        span(50, 60, 165, 70, "Other authorized", size=12.0),
+        span(50, 90, 175, 100, "European currencies", size=10.0),
+    ]
+    result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN, spans=spans)
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
+
+
+def test_gh624b_two_baseline_label_does_not_merge_without_spans():
+    """Opt-in: with no ``spans`` argument at all, behaviour is unchanged --
+    the ambiguous two-baseline case stays unmerged (today's, i.e. da40561's,
+    behaviour), proving the feature is strictly additive."""
+    result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN)
+    assert result.candidate_wrapped_label_merges == ()
+    assert result.candidate_row_labels == ("Other authorized", "European currencies")
 
 
 if __name__ == "__main__":

@@ -598,6 +598,103 @@ class TestBindingEvidenceIsClosed:
 # ---------------------------------------------------------------------------
 
 
+_WRAPPED_LABEL_MD = (
+    "| Item | A |\n| --- | --- |\n| Other authorized | |\n| European currencies | 1250.0 |\n"
+)
+
+
+def _wrapped_label_pdf(
+    tmp_path: Path,
+    *,
+    heading_font: str = "helv",
+    child_font: str = "helv",
+    name: str = "doc.pdf",
+) -> Path:
+    """GH-624b: a wrapped-label native table -- 'Other authorized' as a
+    value-less label-only row, 'European currencies' + '1250.0' as the data
+    row below it -- built as a real ruled-line PDF so ``_locate_boxes`` finds
+    the same box ``_row_shift_pdf`` does. *heading_font*/*child_font* let a
+    test set the label row's font apart from (or equal to) the data row's
+    own label font -- the GH-624b font-evidence signal."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page()
+    cols = [100, 250, 380]
+    rows = [100, 122, 144]
+    page.insert_text((cols[1] + 4, rows[0] + 12), "A", fontsize=9)
+    page.insert_text(
+        (cols[0] + 4, rows[1] + 12), "Other authorized", fontsize=9, fontname=heading_font
+    )
+    page.insert_text(
+        (cols[0] + 4, rows[2] + 12), "European currencies", fontsize=9, fontname=child_font
+    )
+    page.insert_text((cols[1] + 4, rows[2] + 12), "1250.0", fontsize=9, fontname=child_font)
+    for yy in [*rows, rows[-1] + 22]:
+        page.draw_line((100, yy), (460, yy))
+    for xx in [*cols, 460]:
+        page.draw_line((xx, rows[0]), (xx, rows[-1] + 22))
+    pdf_path = tmp_path / name
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
+class TestGateBindingEvidenceFontWiring:
+    """GH-624b round 2: prove ``spans`` is actually WIRED into the
+    production caller (``UnifiedPipeline._binding_evidence_for_witness``),
+    not just implemented in ``bind()`` itself. ``tests/test_binding.py``
+    already pins the predicate in isolation with hand-built span dicts --
+    that alone cannot catch a caller that never passes the argument (the
+    first attempt at this ticket had exactly that shape: a merge planner
+    that no call site ever exercised). This drives the REAL call site
+    against a REAL fitz-authored PDF, through ``flatten_page_spans``."""
+
+    def test_wrapped_label_merges_end_to_end_when_native_fonts_agree(self, tmp_path: Path) -> None:
+        pipeline = _make_pipeline()
+        pdf_path = _wrapped_label_pdf(tmp_path, heading_font="helv", child_font="helv")
+        state = _make_state(pdf_path)
+
+        from socr.tables.witness import prepare_table_witnesses
+
+        with prepare_table_witnesses(pdf_path, 1, _WRAPPED_LABEL_MD) as witnesses:
+            assert witnesses, "fixture premise: the table region must be located"
+            binding_result, evidence = pipeline._binding_evidence_for_witness(
+                state, 1, witnesses[0]
+            )
+
+        assert binding_result is not None
+        assert binding_result.candidate_wrapped_label_merges == (
+            "Other authorized European currencies",
+        )
+        # Astra P1 (round 4): a proven merge must not manufacture its own
+        # label contradiction and demote a correct table to CONTRADICT --
+        # reproduced through this exact production call site.
+        assert binding_result.row_label_contradictions == []
+        assert evidence is not BindingEvidence.CONTRADICT
+
+    def test_wrapped_label_does_not_merge_end_to_end_when_native_heading_is_bold(
+        self, tmp_path: Path
+    ) -> None:
+        """Same geometry, but the label-only row is set in bold Helvetica
+        ('hebo') while the data row's own label stays plain -- a real
+        section heading. The production call site must see that
+        distinction and withhold the merge."""
+        pipeline = _make_pipeline()
+        pdf_path = _wrapped_label_pdf(tmp_path, heading_font="hebo", child_font="helv")
+        state = _make_state(pdf_path)
+
+        from socr.tables.witness import prepare_table_witnesses
+
+        with prepare_table_witnesses(pdf_path, 1, _WRAPPED_LABEL_MD) as witnesses:
+            assert witnesses
+            binding_result, _evidence = pipeline._binding_evidence_for_witness(
+                state, 1, witnesses[0]
+            )
+
+        assert binding_result is not None
+        assert binding_result.candidate_wrapped_label_merges == ()
+
+
 class TestGateBindingEvidenceHelper:
     def test_shifted_labels_classify_as_contradict_at_the_gate(self, tmp_path: Path) -> None:
         pipeline = _make_pipeline()
