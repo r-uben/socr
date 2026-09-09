@@ -399,42 +399,90 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
     was refused with labels inline was ACCEPTED with them split -- shipping an
     invented sentence built from the table's own bank names.
 
-    So the witness abstains wherever prose/table attribution is unresolved. A
-    band qualifies only if it carries no printed numeral AND
+    So the witness abstains wherever prose/table attribution is unresolved. The
+    table's own extent is grown from ANCHORS outward, transitively:
 
-    no adjacent band -- previous or next, in printed order -- is withheld. A
-    band touching a numeric row is that row's wrapped label until something
-    says otherwise, and nothing available here can say otherwise.
+    * an anchor is a band carrying a genuine numeric token -- a candidate table
+      ROW. ``_is_genuine_numeric`` is the right instrument for this and the
+      wrong one for withholding, which is the mirror of #649's own finding: a
+      row-matching predicate is not a safety predicate, and a safety predicate
+      is not a structure predicate. A prose line quoting a rate ("...remained
+      around 5-1/4 percent...") is withheld from SHIPPING by the digit rule but
+      is not a table row, so it must not anchor a table here.
+    * from each anchor the walk continues outward band after band --
+      transitively, not one hop -- for as long as each step is no larger than
+      the page's own line advance (the median inter-band step, taken from the
+      page's geometry exactly as ``baseline_bands`` takes its clustering
+      tolerance from the page's median word height). A larger step is a block
+      break and the walk stops there.
 
-    Adjacency, and ONLY adjacency. A y-span rule ("inside the first and last
-    withheld band") was tried and measured wrong on the ticket's own fixture:
-    the withholding predicate now covers every printed digit, so a prose line
-    carrying a value ("...remained around 5-1/4 percent...") is itself
-    withheld, and the span between it and the table swallowed the entire
-    policy directive -- witness 89 of 295 words, overlap 0.34, a genuine
-    attempt refused. Adjacency costs only the band on each side of a withheld
-    run, which is exactly the band whose attribution is actually in doubt.
+    One hop was not enough, and that is measured rather than argued (Astra
+    round 3): with a units caption between a row label and its value --
+    "Austrian National Bank" / "in millions of dollars unless noted" / "250.0",
+    ordinary layout -- the label sits at distance 2 and went straight back into
+    the witness, corroborating "Austrian National Bank ratified quarterly
+    dividends." Transitivity closes every distance at once.
 
-    Over-exclusion is the safe direction and its cost is now bounded anyway:
+    The walk is anchored and gap-bounded rather than run-based because both
+    simpler rules measured wrong on the ticket's own fixture. A y-span rule
+    swallowed the whole policy directive (witness 89 of 295 words, overlap
+    0.34, a genuine attempt refused) once a prose line carrying a value counted
+    as table extent. Propagating through every zero-digit band with no stopping
+    rule empties the witness on any page whose prose touches a table at all,
+    which is nearly every page -- a guard that always refuses is not a guard.
+    Under the anchored walk that same fixture keeps a 190-word witness and its
+    genuine attempt still corroborates, while the table, its wrapped labels and
+    its entire header block are attributed to the table.
+
+    Over-exclusion is still the safe direction and its cost is bounded anyway:
     since #649, refusing corroboration no longer loses the page's prose, it
-    ships the native layer's own text instead.
-
-    Disclosed residual: a table's HEADER block, printed two or more bands above
-    its first numeric row, is outside the span and not adjacent, so its column
-    names remain in the witness. It carries no row label and no value, and
-    excluding it needs a threshold this module will not invent. The caller adds
-    one more defence that covers part of it -- see ``_prose_corroboration_ok``,
-    which subtracts every token the withheld region itself contains.
+    ships the native layer's own text instead. A page whose prose is set solid
+    against its table, with no block break anywhere, therefore yields no
+    witness and refuses -- correctly: nothing on such a page separates the
+    table's labels from its prose. The caller adds one more defence on top --
+    see ``_prose_corroboration_ok``, which subtracts every token the
+    table-attributed region itself contains.
     """
     bands = partition_prose_bands(words, row_shape_min)
-    withheld = {idx for idx, (is_prose, _band) in enumerate(bands) if not is_prose}
+    if not bands:
+        return [], []
+
+    centers = [statistics.mean((w[1] + w[3]) / 2.0 for w in band) for _is_prose, band in bands]
+    steps = [centers[i] - centers[i - 1] for i in range(1, len(centers))]
+    # The page's own line advance, the way ``baseline_bands`` takes its
+    # clustering tolerance from the page's own median word height rather than
+    # from a page-independent constant. A step no larger than this continues
+    # the block it is in; a larger one is a block break.
+    continues_block = statistics.median(steps) if steps else 0.0
+
+    anchors = {
+        idx
+        for idx, (_is_prose, band) in enumerate(bands)
+        if any(_is_genuine_numeric(word[4])[0] for word in band)
+    }
+
+    attributed = set(anchors)
+    for anchor in anchors:
+        for step in (-1, 1):
+            idx = anchor + step
+            while 0 <= idx < len(bands) and idx not in anchors:
+                gap = abs(centers[idx] - centers[idx - step])
+                if gap > continues_block:
+                    break
+                attributed.add(idx)
+                idx += step
 
     witness: list = []
     unresolved: list = []
     for idx, (is_prose, band) in enumerate(bands):
-        touches_withheld = (idx - 1) in withheld or (idx + 1) in withheld
-        target = unresolved if (not is_prose or touches_withheld) else witness
-        target.extend(band)
+        if idx in attributed:
+            unresolved.extend(band)
+        elif is_prose:
+            witness.extend(band)
+        # A band withheld for a printed digit that is NOT part of a table block
+        # (a prose line quoting a rate) is neither: not evidence, because
+        # nothing here vouches for it, and not table vocabulary either, so
+        # subtracting its ordinary words from the witness would be wrong.
     return witness, unresolved
 
 

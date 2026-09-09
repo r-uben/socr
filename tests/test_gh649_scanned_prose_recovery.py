@@ -330,6 +330,28 @@ class TestNativeTableSyntaxNeverShipsAsProse:
         assert "10.0" not in recovered
         assert "following domestic policy directive:" in recovered
 
+    def test_a_prose_line_holding_a_literal_pipe_is_marked_not_dropped(self) -> None:
+        """The disclosed cost of that rule, pinned rather than assumed.
+
+        ``is_table_syntax_line`` matches on a single ``|``, so an ordinary
+        sentence containing a literal pipe is folded into the withheld run.
+        That is over-exclusion in the safe direction, and this module's stated
+        policy accepts it -- but only because the line is MARKED where it went,
+        never silently dropped. If the marker ever stopped landing there, this
+        would be a silent loss and the tradeoff would no longer hold."""
+        below = [
+            "The committee reviewed the schedule in detail.",
+            "Options were listed as accept | defer in the minutes.",
+            "No dissenting votes were recorded at the meeting.",
+        ]
+        recovered = _ship(_page(prose_below=below)).text
+
+        assert "accept | defer" not in recovered
+        assert "The committee reviewed the schedule in detail." in recovered
+        assert "No dissenting votes were recorded at the meeting." in recovered
+        # Marked where it was elided: the table's run, plus this one.
+        assert recovered.count(MARKER) == 2
+
 
 class TestWhenItMustAbstain:
     def test_an_untrusted_prose_layer_ships_the_marker_alone(self) -> None:

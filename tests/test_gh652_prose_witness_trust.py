@@ -49,9 +49,15 @@ fitz = pytest.importorskip("fitz")
 def _words(lines: list[str], *, y0: float = 0.0, x0: float = 0.0) -> list[tuple]:
     """Native words laid out one printed line per entry of *lines*.
 
-    Real geometry matters to every check under test (both the bbox sanity
-    check and the prose/table band partition read it), so these fixtures place
-    words on real baselines rather than stacking them on one placeholder box.
+    Real geometry matters to every check under test (the bbox sanity check,
+    the prose/table band partition, and since round 3 the witness's own walk
+    outward from a table row), so these fixtures place words on real baselines
+    rather than stacking them on one placeholder box.
+
+    An EMPTY entry emits no words but still consumes a line, which is how
+    these fixtures print a block break -- the blank line between a table and
+    the paragraph beneath it. Without one, a page is set solid and the witness
+    walk correctly finds nothing separating the table's labels from its prose.
     """
     words: list[tuple] = []
     for line_idx, line in enumerate(lines):
@@ -181,7 +187,7 @@ class TestP2bTheWitnessMustBeProse:
     ]
 
     def _page(self) -> PageState:
-        return _scanned_page(_words(self._TABLE_LINES + self._PROSE_LINES))
+        return _scanned_page(_words(self._TABLE_LINES + [""] + self._PROSE_LINES))
 
     def test_a_faithful_table_cannot_vouch_for_fabricated_prose(self) -> None:
         # Every prose word is invented; every table word is copied exactly.
@@ -253,6 +259,11 @@ class TestWrappedLabelsAreNotEvidence:
         _FABRICATED + "\n\n| Label | Amount |\n| --- | --- |\n| Austrian National Bank | 250.0 |\n"
     )
 
+    # Ordinary layout that puts a row label TWO bands from its value: a units
+    # caption between them. Spacer lines and a value wrapped below a caption do
+    # the same thing.
+    _CAPTION = "in millions of dollars unless noted"
+
     def _page(self, *, split: bool) -> PageState:
         """The same table twice. ``split`` puts each label on its own baseline,
         the way a printed table wraps a long row label; otherwise each label
@@ -265,7 +276,7 @@ class TestWrappedLabelsAreNotEvidence:
             "authorized and directed until otherwise directed by the Committee",
             "to execute transactions in the System Account in accordance",
         ]
-        return _scanned_page(_words(table + prose))
+        return _scanned_page(_words(table + [""] + prose))
 
     @pytest.mark.parametrize("split", [False, True])
     def test_the_same_fabrication_is_refused_either_way(self, split: bool) -> None:
@@ -292,6 +303,60 @@ class TestWrappedLabelsAreNotEvidence:
         output, _provenance = _select_page_output_tagged(state, 1)
 
         assert "ratified quarterly dividends" not in output.text
+
+    # Astra's round-3 reproducer, verbatim in shape: ONE row whose label sits
+    # two bands from its value, and a fabrication built from that label.
+    _CAPTIONED_TABLE = ["Austrian National Bank", _CAPTION, "250.0"]
+    _CAPTIONED_FABRICATION = "Austrian National Bank ratified quarterly dividends."
+    _CAPTIONED_ATTEMPT = (
+        _CAPTIONED_FABRICATION
+        + "\n\n| Label | Amount |\n| --- | --- |\n| Austrian National Bank | 250.0 |\n"
+    )
+
+    def _captioned_page(self) -> PageState:
+        """Label, caption, value -- the label is at distance 2 from the band
+        that is actually withheld, with a block break before the paragraph."""
+        prose = [
+            "authorized and directed until otherwise directed by the Committee",
+            "to execute transactions in the System Account in accordance",
+        ]
+        return _scanned_page(_words(self._CAPTIONED_TABLE + [""] + prose))
+
+    def test_a_label_two_bands_from_its_value_is_not_evidence_either(self) -> None:
+        """#652 round 3 (Astra). The first fix walked one hop, so a single
+        intervening zero-digit band -- a units caption, ordinary layout -- put
+        the label straight back into the witness and this returned True: the
+        same fabrication class, one line away."""
+        assert _prose_corroboration_ok(self._captioned_page(), self._CAPTIONED_ATTEMPT) is False
+
+    def test_the_invented_sentence_never_ships_across_the_caption_either(self) -> None:
+        """Through real selection, the way the leak was reproduced."""
+        ps = self._captioned_page()
+        ps.best_output = PageOutput(
+            page_num=1,
+            text=self._CAPTIONED_ATTEMPT,
+            status=PageStatus.ERROR,
+            engine="nougat",
+            audit_passed=False,
+            failure_mode=FailureMode.HALLUCINATION,
+        )
+        ps.attempts = [ps.best_output]
+        state = DocumentState.__new__(DocumentState)
+        state.pages = {1: ps}
+        output, _provenance = _select_page_output_tagged(state, 1)
+
+        assert "ratified quarterly dividends" not in output.text
+
+    def test_a_paragraph_across_a_real_gap_still_corroborates(self) -> None:
+        """The control that keeps the fix from being "refuse everything": with
+        the label two bands from its value AND a block break between the table
+        and the paragraph, a genuine attempt still clears. The walk outward
+        from a table row stops at the break; it does not eat the page."""
+        genuine = (
+            "authorized and directed until otherwise directed by the Committee "
+            "to execute transactions in the System Account in accordance."
+        )
+        assert _prose_corroboration_ok(self._captioned_page(), genuine) is True
 
     def test_genuine_prose_still_corroborates_on_the_split_layout(self) -> None:
         """Control. The stricter witness must not refuse everything: an attempt
