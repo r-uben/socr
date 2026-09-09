@@ -658,7 +658,7 @@ class TestGateBindingEvidenceFontWiring:
 
         with prepare_table_witnesses(pdf_path, 1, _WRAPPED_LABEL_MD) as witnesses:
             assert witnesses, "fixture premise: the table region must be located"
-            binding_result, _evidence = pipeline._binding_evidence_for_witness(
+            binding_result, evidence = pipeline._binding_evidence_for_witness(
                 state, 1, witnesses[0]
             )
 
@@ -666,6 +666,11 @@ class TestGateBindingEvidenceFontWiring:
         assert binding_result.candidate_wrapped_label_merges == (
             "Other authorized European currencies",
         )
+        # Astra P1 (round 4): a proven merge must not manufacture its own
+        # label contradiction and demote a correct table to CONTRADICT --
+        # reproduced through this exact production call site.
+        assert binding_result.row_label_contradictions == []
+        assert evidence is not BindingEvidence.CONTRADICT
 
     def test_wrapped_label_does_not_merge_end_to_end_when_native_heading_is_bold(
         self, tmp_path: Path

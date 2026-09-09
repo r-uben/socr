@@ -2441,6 +2441,22 @@ def test_gh624b_two_baseline_label_merges_when_fonts_agree():
     result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN, spans=spans)
     assert result.candidate_wrapped_label_merges == ("Other authorized European currencies",)
     assert result.candidate_row_labels == ("Other authorized European currencies",)
+    # Astra P1 (round 4): the proven merge must not manufacture its own
+    # label contradiction by comparing the merged text against the native
+    # DATA row's own (shorter) leaf label.
+    assert result.row_label_contradictions == []
+
+
+def test_gh624b_missing_font_fields_are_not_positive_evidence():
+    """Astra P2 (round 4): a span carrying text/bbox but no font/size/flags
+    must abstain, not fall back to an invented ('', 0, False) signature that
+    a second such incomplete span could spuriously 'agree' with."""
+    spans = [
+        {"bbox": (50, 60, 165, 70), "text": "Other authorized"},
+        {"bbox": (50, 90, 175, 100), "text": "European currencies"},
+    ]
+    result = bind(_TWO_BASELINE_WORDS, _TWO_BASELINE_MARKDOWN, spans=spans)
+    assert result.candidate_wrapped_label_merges == ()
 
 
 def test_gh624b_two_baseline_label_does_not_merge_when_bold_differs():

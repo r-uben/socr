@@ -104,6 +104,14 @@ def flatten_page_spans(page) -> list[dict]:
     optional ``spans`` argument wants. Never raises: a page whose text
     dict cannot be read returns ``[]``, same failure shape as
     :func:`math_font_char_count`.
+
+    ``font``/``size``/``flags`` are passed through with NO default when a
+    real span dict is missing one (``.get(...)`` with no fallback, unlike
+    ``text``) -- Astra P1 round 4: ``bind()``'s font-signature check treats
+    a missing attribute as absent evidence and abstains; substituting an
+    invented ``""``/``0.0``/``0`` here would let two independently
+    incomplete spans "agree" on that default and manufacture a merge with
+    no real evidence behind it.
     """
     try:
         spans = list(iter_page_spans(page))
@@ -113,9 +121,9 @@ def flatten_page_spans(page) -> list[dict]:
         {
             "bbox": span.get("bbox"),
             "text": span.get("text", ""),
-            "font": span.get("font", ""),
-            "size": span.get("size", 0.0),
-            "flags": span.get("flags", 0),
+            "font": span.get("font"),
+            "size": span.get("size"),
+            "flags": span.get("flags"),
         }
         for span in spans
     ]
