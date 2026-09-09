@@ -270,6 +270,10 @@ def test_watched_kinds_are_real_emitted_kinds():
         # shared ``TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND`` constant, same
         # shape as the ladder terminals above.
         "table_binding_boundary_unresolved",
+        # #625: emitted by ``_phase_assemble``'s ditto retire-then-readd block
+        # through the shared ``DITTO_UNRESOLVED_KIND`` constant, same shape as
+        # the ladder terminals above.
+        "table_ditto_unresolved",
     }
     unknown = TABLE_DISTRUST_KINDS - literals - dynamic - pending
 

@@ -29,6 +29,7 @@ from socr.judge.table_verdict import (
     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
     TABLE_LADDER_UNVERIFIED_KIND,
 )
+from socr.tables.ditto import DITTO_UNRESOLVED_KIND
 from socr.tables.reconcile import PATCH_ELIGIBLE_NOTE
 from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND
 
@@ -240,6 +241,14 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # content -- see NON_RESOLVABLE_DISTRUST_KINDS below for why a later
         # ladder acceptance does not clear this one.
         TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        # #625: a shipped table column carries a ditto mark (owner ruling,
+        # option 3: keep the mark verbatim, surface it). Not a digit-wrong
+        # doubt -- the same "shipped, not a failure" shape as
+        # LABEL_UNVERIFIED_KIND below, resolved the same way, off the FINAL
+        # winning candidate's own ``table_ditto_columns`` field rather than
+        # generic resolved_pages/resolved_tables history (see
+        # ``ditto_unresolved_pages`` below).
+        DITTO_UNRESOLVED_KIND,
     }
 )
 
@@ -454,6 +463,7 @@ def build_tables_trust(
     events: list,
     *,
     label_unverified_pages: frozenset[int] | None = None,
+    ditto_unresolved_pages: frozenset[int] | None = None,
 ) -> TablesTrust:
     """Derive the trust index from a run's audit events.
 
@@ -476,6 +486,15 @@ def build_tables_trust(
     ``audit_log.json`` as real history. ``None`` (no records available, e.g. a
     caller deriving trust from bare history) keeps the old, history-only
     behaviour rather than silently trusting an unknown page clean.
+
+    ``ditto_unresolved_pages``: #625, same shape and same reason as
+    ``label_unverified_pages`` immediately above. ``DITTO_UNRESOLVED_KIND`` is
+    detected directly from the FINAL winning candidate's shipped text (there is
+    no judge and no resolving event, by design -- no fill-down means nothing
+    ever "fixes" a ditto mark), so its terminal truth lives on
+    ``PageOutput.table_ditto_columns``, not on event history. Pass the current
+    set (``UnifiedPipeline._ditto_unresolved_pages(records)``); ``None`` keeps
+    the old history-only behaviour.
     """
     trust = TablesTrust(pdf_filename=pdf_filename)
 
@@ -551,6 +570,15 @@ def build_tables_trust(
             # relative order here does not matter, only that neither of the
             # two special cases falls through into the generic check.
             if page_num not in label_unverified_pages:
+                continue
+        elif kind == DITTO_UNRESOLVED_KIND and ditto_unresolved_pages is not None:
+            # #625, same shape and same reasoning as the LABEL_UNVERIFIED_KIND
+            # branch immediately above: resolution is decided ENTIRELY by the
+            # caller-supplied current set, in both directions -- a page absent
+            # from it retires here even with no resolving event, because
+            # there is no fill-down, ever, to author one. ``None`` falls
+            # through to the generic history-only ``else`` branch.
+            if page_num not in ditto_unresolved_pages:
                 continue
         else:
             if page_num in resolved_pages:

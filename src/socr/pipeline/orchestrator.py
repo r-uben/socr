@@ -69,6 +69,7 @@ from socr.math.accounting import (
     missing_coverage_witnesses,
     unresolved_math_detail,
 )
+from socr.tables.ditto import DITTO_UNRESOLVED_KIND
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
 from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
 from socr.judge.table_cell_guard import GuardDisposition, evaluate_cell_guard
@@ -2526,6 +2527,15 @@ class UnifiedPipeline:
             # report normalisation that never happened this run.
             | {TABLE_SPACER_ROWS_DROPPED_KIND}
             | {TABLE_WRAPPED_LABEL_MERGED_KIND}
+            # #625: same contract as ``UNRESOLVED_MATH_KIND`` above -- the
+            # ditto flag is a standing property of the page's shipped table
+            # (its terminal truth lives on ``PageOutput.table_ditto_columns``,
+            # which round-trips through the sidecar), not of the run that
+            # noticed it, and there is no resolving event to wait for (no
+            # fill-down, ever). Dropping it on resume would silently retire
+            # the flag and let a resumed run report a clean SUCCESS on a
+            # table column it never re-examined.
+            | {DITTO_UNRESOLVED_KIND}
         )
 
     #: The backends the lane's transport can actually address. ``latex_for_crop``
@@ -4179,6 +4189,47 @@ class UnifiedPipeline:
             "row/column label (every numeric value is corroborated by page evidence; a "
             "content-label token was not) -- see source_evidence_table_label_unverified "
             "in audit_log.json"
+        )
+
+    @staticmethod
+    def _ditto_unresolved_pages(records: list) -> list[int]:
+        """#625: pages whose FINAL winning output carries a ditto-mark flag.
+
+        Read from ``rec.output.table_ditto_columns`` -- the field lives on the
+        CANDIDATE that shipped, not on ``PageState`` or on event history, same
+        precedence principle as ``_label_unverified_pages`` immediately above.
+        """
+        return sorted({rec.output.page_num for rec in records if rec.output.table_ditto_columns})
+
+    @staticmethod
+    def _ditto_unresolved_columns(records: list) -> dict[int, list[dict]]:
+        """#625: each flagged page's ``{table_id, column_index, ditto_cells}`` entries."""
+        return {
+            rec.output.page_num: list(rec.output.table_ditto_columns)
+            for rec in records
+            if rec.output.table_ditto_columns
+        }
+
+    @staticmethod
+    def _ditto_unresolved_note(records: list) -> str | None:
+        """Document-level one-liner naming pages whose table ships a ditto mark.
+
+        Mirrors ``_label_unverified_note``: a consumer gating on
+        ``metadata.json`` must see that a shipped table column carries an
+        unresolved ditto mark ("same as the row above"), without parsing the
+        full audit log. NOT a failure -- the owner ruling is keep-verbatim,
+        no fill-down -- so the wording says "shipped with", not "failed".
+        ``None`` on a clean run.
+        """
+        columns = UnifiedPipeline._ditto_unresolved_columns(records)
+        if not columns:
+            return None
+        pages = sorted(columns)
+        total = sum(c["ditto_cells"] for cols in columns.values() for c in cols)
+        return (
+            f"page(s) {', '.join(str(n) for n in pages)}: table shipped with {total} "
+            "ditto-mark cell(s) in a repeated-value column, kept verbatim and unresolved "
+            "(no fill-down) -- see table_ditto_unresolved in audit_log.json"
         )
 
     @staticmethod
@@ -11012,6 +11063,9 @@ class UnifiedPipeline:
         # below, or an otherwise-clean document whose ONLY defect is a label
         # doubt reports SUCCESS and never reaches the dedicated CLI line.
         label_unverified_pages = self._label_unverified_pages(pre_records)
+        # #625: same hoisting reason as ``label_unverified_pages`` above.
+        ditto_unresolved_columns = self._ditto_unresolved_columns(pre_records)
+        ditto_unresolved_pages = sorted(ditto_unresolved_columns)
 
         def _kept_defect(page_num: int) -> str:
             # ``best_output``, not the finalized record (cold review round 2,
@@ -11253,6 +11307,10 @@ class UnifiedPipeline:
         # labels is disputed. AUDIT_FAILED is the honest "completed with
         # warnings, output written" outcome.
         pages_ok = pages_ok and not label_unverified_pages
+        # #625: same reasoning -- NOT a page failure (owner ruling: keep the
+        # mark verbatim), but the document cannot report a clean SUCCESS
+        # while a shipped column carries an unresolved ditto mark.
+        pages_ok = pages_ok and not ditto_unresolved_pages
         pages_ok = pages_ok and not fabricated_ref_pages and not doc_fabrication
         pages_ok = pages_ok and not text_grid_rejected_pages
         # GH-318: chart eligibility raised and the page took the non-chart route
@@ -11389,6 +11447,70 @@ class UnifiedPipeline:
                     )
                 )
 
+        # #625: same retire-then-readd shape as ``UNRESOLVED_MATH_KIND`` above,
+        # and for the same reason -- this is computed fresh from
+        # ``pre_records`` every run, including a resumed one where a REPLAYED
+        # copy (``resume_restore_kinds``) is already in ``state.events``; keyed
+        # by (page, table_id, column_index) rather than page alone because one
+        # page can carry several flagged columns, unlike unresolved math which
+        # is page-scoped.
+        #
+        # Astra P2 (round 1): the identity key must include ``ditto_cells``,
+        # not just (page, table_id, column_index). A replayed event whose
+        # COUNT is stale (the page's earlier winner had 14 ditto cells, the
+        # current winner has 1 in the same column) used to match on identity
+        # alone and be kept verbatim, so the audit event and
+        # ``tables_trust.json`` detail still said 14 while ``PageOutput``, the
+        # CLI line and the metadata note all said 1 -- the whole point of
+        # resolving off the FINAL winner, defeated by the dedup itself. A
+        # stale count is now a DIFFERENT identity, exactly like
+        # ``UNRESOLVED_MATH_KIND``'s own ``ev.detail == _detail.detail`` check
+        # above: it is dropped and the current reduction is re-emitted.
+        if ditto_unresolved_pages or any(
+            getattr(ev, "kind", "") == DITTO_UNRESOLVED_KIND for ev in state.events
+        ):
+            from socr.core.audit_log import AuditEvent as _DittoEvent
+
+            _current_ditto: dict[tuple[int, str, int], dict] = {
+                (n, c["table_id"], c["column_index"]): c
+                for n, cols in ditto_unresolved_columns.items()
+                for c in cols
+            }
+            _kept_ditto: list = []
+            _matched_ditto_keys: set[tuple[int, str, int]] = set()
+            for ev in state.events:
+                if getattr(ev, "kind", "") != DITTO_UNRESOLVED_KIND:
+                    _kept_ditto.append(ev)
+                    continue
+                _d = getattr(ev, "data", None) or {}
+                _key = (ev.page_num, _d.get("table_id"), _d.get("column_index"))
+                _current = _current_ditto.get(_key)
+                if (
+                    _current is not None
+                    and _key not in _matched_ditto_keys
+                    and _d.get("ditto_cells") == _current["ditto_cells"]
+                ):
+                    _kept_ditto.append(ev)
+                    _matched_ditto_keys.add(_key)
+            state.events[:] = _kept_ditto
+            for _key, c in _current_ditto.items():
+                if _key in _matched_ditto_keys:
+                    continue
+                n = _key[0]
+                state.events.append(
+                    _DittoEvent(
+                        page_num=n,
+                        kind=DITTO_UNRESOLVED_KIND,
+                        engine="native",
+                        detail=(
+                            f"table {c['table_id']} column {c['column_index']}: "
+                            f"{c['ditto_cells']} ditto-mark cell(s), kept verbatim "
+                            "(no fill-down)"
+                        ),
+                        data=dict(c),
+                    )
+                )
+
         if (
             failed_pages
             or native_fallback_pages
@@ -11405,6 +11527,7 @@ class UnifiedPipeline:
             or table_unverified_pages
             or table_withheld_pages
             or label_unverified_pages
+            or ditto_unresolved_pages
         ):
             from socr.core.audit_log import AuditEvent
 
@@ -11631,6 +11754,17 @@ class UnifiedPipeline:
                         f"  [yellow]{len(label_unverified_pages)} table page(s) shipped with "
                         f"an unverified row/column label (numbers corroborated): "
                         f"{label_unverified_pages}[/yellow]"
+                    )
+                # #625: same shape and same reasoning as the label-unverified
+                # line above -- ships, not a failure, printed yellow.
+                if ditto_unresolved_pages:
+                    _ditto_total = sum(
+                        c["ditto_cells"] for cols in ditto_unresolved_columns.values() for c in cols
+                    )
+                    console.print(
+                        f"  [yellow]{len(ditto_unresolved_pages)} table page(s) shipped with "
+                        f"{_ditto_total} ditto-mark cell(s) kept verbatim (no fill-down): "
+                        f"{ditto_unresolved_pages}[/yellow]"
                     )
                 if native_fallback_pages:
                     console.print(
@@ -11947,6 +12081,14 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_label_note}"
             else:
                 final_result.error = _label_note
+        # #625: same no-silent-loss reason and the same append-only rule as
+        # the label-unverified note above -- not a failure, never overrides.
+        _ditto_note = self._ditto_unresolved_note(pre_records)
+        if _ditto_note:
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_ditto_note}"
+            else:
+                final_result.error = _ditto_note
         _chart_note = self._chart_detection_failed_note(state)
         if _chart_note:
             if final_result.error:
@@ -12420,8 +12562,14 @@ class UnifiedPipeline:
             label_pages = (
                 frozenset(self._label_unverified_pages(records)) if records is not None else None
             )
+            ditto_pages = (
+                frozenset(self._ditto_unresolved_pages(records)) if records is not None else None
+            )
             trust = build_tables_trust(
-                state.handle.filename, audit.events, label_unverified_pages=label_pages
+                state.handle.filename,
+                audit.events,
+                label_unverified_pages=label_pages,
+                ditto_unresolved_pages=ditto_pages,
             )
             trust_path = doc_dir / "tables_trust.json"
             if not trust.pages:
@@ -12492,8 +12640,18 @@ class UnifiedPipeline:
                 if records is not None
                 else None
             )
+            ditto_pages = (
+                frozenset(UnifiedPipeline._ditto_unresolved_pages(records))
+                if records is not None
+                else None
+            )
             return trust_note(
-                build_tables_trust(filename, events, label_unverified_pages=label_pages)
+                build_tables_trust(
+                    filename,
+                    events,
+                    label_unverified_pages=label_pages,
+                    ditto_unresolved_pages=ditto_pages,
+                )
             )
         except Exception as exc:
             logger.warning("table-trust note derivation failed (non-fatal): %s", exc)

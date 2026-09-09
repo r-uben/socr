@@ -295,6 +295,20 @@ class PageOutput:
     #: shipped. "" means either no doubt, or this output never went through
     #: the scanned-table gate at all.
     table_label_unverified: str = ""
+    #: #625: ditto marks (`"`, `''`, `”`, `″`, `〃`) detected verbatim in this
+    #: winning candidate's shipped table cells. Owner ruling (2026-09-08,
+    #: option 3): the mark is NOT resolved into the value it stands for --
+    #: writing a value the page does not print is the failure mode this
+    #: corpus most wants to avoid -- it is kept byte-for-byte and only its
+    #: presence is surfaced. One entry per (table, column) that carries at
+    #: least one ditto cell: ``{table_id, column_index, ditto_cells}``, see
+    #: ``socr.tables.ditto.detect_ditto_columns``. Empty list (the default)
+    #: means no ditto mark was detected in this candidate's text. Same
+    #: candidate-associated shape as ``table_label_unverified`` above and for
+    #: the same reason: it rides with the specific output that carries the
+    #: doubt, so a later, cleaner candidate for the same page does not
+    #: inherit a flag that no longer applies to what shipped.
+    table_ditto_columns: list[dict] = field(default_factory=list)
 
     @property
     def word_count(self) -> int:
@@ -350,6 +364,12 @@ class PageOutput:
         # reprocess across every existing corpus.
         if self.table_label_unverified:
             d["table_label_unverified"] = self.table_label_unverified
+        # #625: same omit-when-empty convention, same reason -- this field
+        # postdates every already-terminal page's sidecar; emitting it
+        # unconditionally would change the content-addressed fingerprint of
+        # pages that carry no ditto mark, forcing a spurious resume reprocess.
+        if self.table_ditto_columns:
+            d["table_ditto_columns"] = self.table_ditto_columns
         return d
 
     @classmethod
@@ -376,6 +396,7 @@ class PageOutput:
             rejection_class=d.get("rejection_class", ""),
             table_corroboration=d.get("table_corroboration"),
             table_label_unverified=d.get("table_label_unverified", ""),
+            table_ditto_columns=list(d.get("table_ditto_columns", [])),
         )
 
 
