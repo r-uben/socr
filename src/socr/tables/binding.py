@@ -285,6 +285,24 @@ def _wrapped_label_merge_plan(
     proven case merges: the merge is accepted only when the merged text is
     an exact ``label_key`` match for the native row it explains, never
     merely because the neighbour's own label came up short.
+
+    GH-624b: that single-baseline proof (``row_path[-1]``) cannot see the
+    case where NATIVE ITSELF prints the label across two baselines (a
+    section heading is represented identically -- see the module's
+    ``gh 624b parked`` history). Widening the proof to the native row's
+    FULL ``row_path`` joined would catch that case, but is isomorphic to a
+    legitimate parent-heading-row-plus-child and merges the heading too
+    (``test_bound_parent_row_increments_row_labels_checked``). The owner
+    ruled ``bind()`` may consume font evidence as the missing
+    discriminator: a wrapped label's two printed lines are the SAME run of
+    text (same face/size/weight); a heading is typographically distinct
+    from its child. So the widened match only fires when BOTH native rows
+    it explains -- the label-only row's own native band, and the
+    following row's own native band -- carry equal, unambiguous
+    ``label_font`` signatures (from the optional ``spans`` argument to
+    ``bind()``). No spans, or disagreeing/ambiguous fonts, means no
+    widened merge -- fail closed, matching every guard fixture, which
+    supplies no font data at all.
     """
     if not rows:
         return ()
@@ -312,7 +330,33 @@ def _wrapped_label_merge_plan(
             next_alone_already_matches = bool(native_label) and label_key(
                 next_row[0].strip()
             ) == label_key(native_label)
-            if proven and not next_alone_already_matches:
+
+            # GH-624b widened proof: native itself split the label across two
+            # baselines. ``next_alone_already_matches`` is True in BOTH the
+            # wrapped-label case and the heading case (the parked issue
+            # comment measured this: the two fixtures are isomorphic on every
+            # text/geometry signal), so it cannot gate the widened branch --
+            # font evidence is the only discriminator, never text sameness.
+            font_widened = False
+            native_idx_this = trial_binding.get(i)
+            if (
+                native_idx is not None
+                and native_idx_this is not None
+                and native_rows[native_idx_this].is_parent
+                and native_rows[native_idx].row_path
+            ):
+                native_label_wide = " ".join(
+                    p.strip() for p in native_rows[native_idx].row_path
+                ).strip()
+                wide_proven = bool(native_label_wide) and label_key(merged_label) == label_key(
+                    native_label_wide
+                )
+                if wide_proven:
+                    font_a = native_rows[native_idx_this].label_font
+                    font_b = native_rows[native_idx].label_font
+                    font_widened = font_a is not None and font_a == font_b
+
+            if (proven and not next_alone_already_matches) or font_widened:
                 merge_at.append(i)
                 i += 2
                 continue
@@ -521,6 +565,58 @@ class _NativeRow:
     # never consulted by conviction logic.
     lane_bboxes: dict[int, tuple[float, float, float, float]] = field(default_factory=dict)
     label_bbox: tuple[float, float, float, float] | None = None
+    # GH-624b: (basefont, rounded size, bold) for this row's label text, from
+    # the optional ``spans`` argument to ``bind()``. None when no spans were
+    # supplied, or when the label's own spans disagree on font -- either way
+    # font evidence abstains rather than guesses (see ``_label_font_signature``).
+    label_font: tuple[str, int, bool] | None = None
+
+
+# PyMuPDF span ``flags`` bit for bold (see ``get_text("dict")`` docs): bit 4.
+_SPAN_FLAGS_BOLD_BIT = 2**4
+
+
+def _span_is_bold(span: dict) -> bool:
+    """Bold via the documented PyMuPDF signals only -- no heuristic of our own."""
+    flags = span.get("flags") or 0
+    basefont = (span.get("font") or "").lower()
+    return bool(flags & _SPAN_FLAGS_BOLD_BIT) or "bold" in basefont
+
+
+def _bbox_overlaps(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    """True when two ``(x0, y0, x1, y1)`` boxes overlap in both x and y (strict)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return min(ax1, bx1) > max(ax0, bx0) and min(ay1, by1) > max(ay0, by0)
+
+
+def _label_font_signature(
+    spans: list[dict], label_bbox: tuple[float, float, float, float] | None
+) -> tuple[str, int, bool] | None:
+    """(basefont, rounded size, bold) for the spans overlapping *label_bbox*.
+
+    None on no spans, no overlap, or disagreement among the overlapping spans
+    -- ambiguous span evidence abstains rather than guesses, same as a missing
+    ``spans`` argument (GH-624b design constraint 2).
+    """
+    if not spans or label_bbox is None:
+        return None
+    signatures: set[tuple[str, int, bool]] = set()
+    for span in spans:
+        bbox = span.get("bbox")
+        text = (span.get("text") or "").strip()
+        if not bbox or not text:
+            continue
+        if not _bbox_overlaps(tuple(bbox), label_bbox):
+            continue
+        signatures.add(
+            (span.get("font") or "", round(span.get("size") or 0.0), _span_is_bold(span))
+        )
+    if len(signatures) != 1:
+        return None
+    return next(iter(signatures))
 
 
 def _union_word_bbox(words: list) -> tuple[float, float, float, float] | None:
@@ -800,7 +896,7 @@ def _native_lane_geometry(
 
 
 def _native_rows(
-    words: list, n_cand_cols: int | None = None
+    words: list, n_cand_cols: int | None = None, spans: list[dict] | None = None
 ) -> tuple[list[_NativeRow], list[float], list[int]]:
     """Parse native words into row bands with row paths and per-lane tokens.
 
@@ -880,6 +976,7 @@ def _native_rows(
                     band_ambiguous=band_ambiguous,
                     lane_bboxes={},
                     label_bbox=label_bbox,
+                    label_font=_label_font_signature(spans, label_bbox),
                 )
             )
             continue
@@ -926,6 +1023,7 @@ def _native_rows(
                 band_ambiguous=band_ambiguous,
                 lane_bboxes=lane_bboxes,
                 label_bbox=label_bbox,
+                label_font=_label_font_signature(spans, label_bbox),
             )
         )
 
@@ -1700,8 +1798,21 @@ def _words_in_region(words: list, region: tuple | None) -> list:
     return kept
 
 
-def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingResult:
+def bind(
+    words: list,
+    markdown: str,
+    *,
+    region: tuple | None = None,
+    spans: list[dict] | None = None,
+) -> BindingResult:
     """Bind *markdown*'s candidate grid to the native geometry in *words*.
+
+    *spans*, when given, is a flat list of PyMuPDF span dicts (the ``spans``
+    entries of ``page.get_text("dict")``'s blocks/lines, each carrying
+    ``bbox``, ``size``, ``flags`` and ``font``/basefont). It is OPTIONAL and
+    additive: with ``spans=None`` (the default), behaviour is byte-for-byte
+    what it was before GH-624b, including the ambiguous wrapped-label-vs-
+    heading case, which stays unmerged. See ``_wrapped_label_merge_plan``.
 
     Never raises on malformed input: a markdown block that fails the A1
     strict parse, or a page with no numeric lanes, binds nothing and returns
@@ -1763,7 +1874,7 @@ def bind(words: list, markdown: str, *, region: tuple | None = None) -> BindingR
         grid = candidate_grid
     n_cand_cols = grid.n_cols - 1  # exclude the stub column
 
-    native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols)
+    native_rows, band_centers, header_band_idxs = _native_rows(words, n_cand_cols, spans)
     lane_count, _lane_of, lane_centers = _native_lane_geometry(words, n_cand_cols)
 
     header_words = (
