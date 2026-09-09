@@ -1890,6 +1890,117 @@ def _prose_corroboration_ok(p, attempt_text: str) -> bool:
     return overlap >= PROSE_CORROBORATION_MIN
 
 
+#: Banner stamped above prose recovered by ``native_prose_floor_text``. The
+#: page is still an unverified scan whose table was withheld, and the body no
+#: longer starts with a failure marker, so the flag is what tells a reader --
+#: and ``is_page_failed_marker``, which correctly stops calling this page
+#: marker-only -- that these paragraphs are unverified. Deliberately NOT
+#: matched by ``_PAGE_FAILED_ANY_RE``: this page ships content.
+SCANNED_PROSE_RECOVERED_FLAG = (
+    "[page {page_num}: unverified scan — the paragraphs below are this page's own "
+    "text layer; every numeric row is withheld]"
+)
+
+#: Audit note recorded on the rebuilt output, so the recovery is visible in the
+#: page sidecar and not only in the bytes.
+SCANNED_PROSE_RECOVERED_NOTE = (
+    "scanned_prose_recovered: no OCR attempt could be spliced around the "
+    "withheld table; the page's own trusted prose bands ship flagged instead"
+)
+
+
+def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+    """The page's own prose, flagged, around a withheld table -- or ``None``.
+
+    #649 (owner ruling, 2026-09-10). Fed 1989-11-14 p3 reaches
+    ``UNVERIFIABLE_TABLE_SCANNED`` with ``detected_table_count == 0`` and a
+    corrupt-but-usable text layer. Its only cached attempt read the page's real
+    vocabulary but emitted the swap-arrangement table as column runs with no
+    markdown table syntax at all, so ``splice_all_table_regions`` returns
+    ``None`` and the marker shipped alone -- taking three paragraphs of the
+    FOMC policy directive with it. Nothing was wrong with those paragraphs;
+    they were collateral of a table that could not be verified.
+
+    With no table geometry to splice against, the prose region is delimited by
+    the page's own native baseline bands (``prose_region_words``): a band below
+    ``ROW_SHAPE_MIN`` numeric tokens is prose and ships; every band at or above
+    it is the table and is withheld, replaced in place by *marker_line*. The
+    withheld half is exactly the numeric content the D3 floor exists to
+    protect, so this recovers prose without ever relaxing the floor.
+
+    Three ways to abstain, all of which leave the caller's bare marker:
+
+    * no native words -- no page text to recover;
+    * nothing withheld -- there is no table-shaped band here, so this function
+      cannot say what it would be shipping prose "around", and a page that
+      reached the scanned-table floor with no numeric band at all is a shape
+      this has no evidence about;
+    * the prose region's own text fails ``text_layer_trusted`` (#652). The
+      page is a scan because its layer is corrupt; shipping that corruption as
+      recovered text would be the silent loss this ticket is trying to stop,
+      wearing the opposite mask. Measured on the ticket's own fixture the
+      corruption is INSIDE the table -- prose region 0.5%, numeric bands 33.3%
+      -- which is why the check is applied to the region that ships rather
+      than to the page.
+
+    What ships is the native layer's own bytes, never a model's: the attempt
+    that failed here failed on structure, and re-deriving prose from it would
+    put the reordered text back on the page. The page keeps ERROR status and
+    its failure mode; only the body changes.
+    """
+    from socr.core.born_digital import text_layer_trusted
+    from socr.tables.row_corroboration import partition_prose_bands
+
+    words = getattr(p, "native_words", None) or []
+    if not words:
+        return None
+
+    bands = partition_prose_bands(words)
+    prose_bands = [band for is_prose, band in bands if is_prose]
+    if not prose_bands or all(is_prose for is_prose, _band in bands):
+        return None
+
+    prose_words = [word for band in prose_bands for word in band]
+    if not text_layer_trusted(native_region_text(prose_words)):
+        return None
+
+    blocks: list[str] = [SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)]
+    marker_block = f"{marker_line}\n\n{png_ref}" if png_ref else marker_line
+    paragraph: list[str] = []
+    marker_placed = False
+
+    def _flush() -> None:
+        if paragraph:
+            blocks.append("\n".join(paragraph))
+            paragraph.clear()
+
+    for is_prose, band in bands:
+        if is_prose:
+            # Consecutive printed lines join into one paragraph rather than
+            # becoming one block each: these ARE the page's lines, and a
+            # directive split into twenty one-line paragraphs is not the page.
+            line = " ".join(str(w[4]) for w in band).strip()
+            if line:
+                paragraph.append(line)
+            continue
+        if marker_placed:
+            # ONE marker for the page's withheld content, at the first
+            # withheld band. Not one per contiguous withheld run: this branch
+            # is reached with ``detected_table_count == 0``, so nothing here
+            # knows how many tables the page has, and a run count is not that
+            # number -- on the ticket's own fixture a single swap-arrangement
+            # table breaks into three runs around its own wrapped row labels.
+            # Claiming three withheld tables would be inventing the structure
+            # the floor exists because we could not verify.
+            continue
+        _flush()
+        blocks.append(marker_block)
+        marker_placed = True
+
+    _flush()
+    return "\n\n".join(blocks)
+
+
 class PageEnding(str, Enum):
     """Normalized ending vocabulary for what actually ships on a page.
 
@@ -2252,6 +2363,19 @@ def _select_page_output_tagged(
         else:
             d3_text = None
 
+        # #649: no attempt could be spliced -- on this page's own fixture
+        # because the attempt emitted the table as column runs and authored no
+        # markdown table at all, so there was no block to work around. The
+        # marker then shipped ALONE and took the page's prose with it. Recover
+        # that prose from the page's own trusted text layer instead, with the
+        # withheld numeric bands replaced in place by the same marker. Returns
+        # None whenever it cannot prove what it would be shipping, which
+        # leaves the bare marker exactly as before.
+        prose_recovered = False
+        if d3_text is None:
+            d3_text = native_prose_floor_text(p, page_num, marker_line=d3_marker, png_ref=png_ref)
+            prose_recovered = d3_text is not None
+
         if d3_text is None:
             d3_text = f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker
 
@@ -2261,6 +2385,11 @@ def _select_page_output_tagged(
             status=PageStatus.ERROR,
             engine=p.best_output.engine if p.best_output else "qwen",
             audit_passed=False,
+            # #649: the recovery is a fact about what shipped, so it is
+            # recorded where the corpus reads it, not only in the bytes. The
+            # page stays ERROR with its own failure mode either way -- prose
+            # coming back does not mean the table was read.
+            audit_notes=([SCANNED_PROSE_RECOVERED_NOTE] if prose_recovered else []),
             # #658: this branch REBUILDS the shipped output from scratch, so a
             # fixed HALLUCINATION here overwrote the honest attempt-level reason
             # and the sidecar the corpus actually reads still said the model

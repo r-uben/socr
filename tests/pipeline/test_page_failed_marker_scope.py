@@ -487,10 +487,15 @@ def test_prose_corroboration_guard_satisfied_keeps_prose():
     assert "Decrease" not in output.text  # table region still withheld
 
 
-def test_prose_corroboration_guard_violated_ships_marker_only():
+def test_prose_corroboration_guard_violated_never_ships_the_invented_prose():
     """The attempt's vocabulary shares almost nothing with the page's real
-    native words -- fail closed to the bare marker rather than splice
-    invented prose around a withheld table."""
+    native words -- its prose must never be spliced around the withheld table.
+
+    #649 changed what fills the gap, not what is refused. The attempt's
+    invented sentences are still discarded; what ships in their place is the
+    page's OWN trusted text layer, flagged, with every numeric band withheld
+    behind the same marker. Losing the page's real prose was never part of
+    refusing the model's."""
     ps = _scanned_table_state(attempt_text=FABRICATED_ATTEMPT_MD)
 
     assert _prose_corroboration_ok(ps, FABRICATED_ATTEMPT_MD) is False
@@ -498,9 +503,20 @@ def test_prose_corroboration_guard_violated_ships_marker_only():
     output, provenance = _tagged(ps)
 
     assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
-    assert output.text == "[page 1 failed: unverifiable table — see image]"
+    assert "[page 1 failed: unverifiable table — see image]" in output.text
+    # The fabrication is gone.
     assert "quorum" not in output.text
     assert "municipal" not in output.text
+    # The page's own prose is not. Asserted token by token: this fixture's
+    # word grid round-robins each token onto its own baseline (see
+    # ``_words_for``, built to exercise band COUNTS), so the recovered body
+    # reproduces those synthetic bands rather than readable sentences.
+    assert "survey" in output.text
+    assert "responses" in output.text
+    assert "Respondents" in output.text
+    # And its numeric rows are still withheld.
+    assert "78" not in output.text
+    assert "| Decrease |" not in output.text
 
 
 def test_prose_corroboration_guard_no_witness_fails_closed():
@@ -614,15 +630,16 @@ def test_fed_1989_11_14_p3_scanned_branch_guard_passes_but_no_table_block_to_spl
     design, correctly does not catch: ``_prose_corroboration_ok`` measures
     True here (overlap 1.0, see the decision log's overlap table).
 
-    The marker still ships alone, matching this fixture's real recorded
-    output (``pages/00003.json``): ``splice_all_table_regions`` finds no
-    markdown pipe-table syntax in nougat's raw text (it never emitted one)
-    and returns ``None``, so the whole-page fallback fires regardless of the
-    guard. This test pins BOTH findings without asserting prose recovery
-    B1 cannot currently deliver for this specific fixture -- the
-    corroboration guard protects a DIFFERENT failure shape (an attempt with
-    fabricated vocabulary AND parseable table syntax), which this fixture
-    does not exhibit."""
+    ``splice_all_table_regions`` finds no markdown pipe-table syntax in
+    nougat's raw text (it never emitted one) and returns ``None``, so no
+    attempt can be spliced here regardless of the guard.
+
+    #649: that used to end the page -- the D3 marker shipped ALONE and the
+    three paragraphs of the FOMC domestic policy directive printed below the
+    swap-arrangement table went with it. They now ship from the page's own
+    text layer, flagged, with every numeric band withheld behind the same
+    marker. Both halves are asserted: the directive comes back, and not one
+    of the table's printed values does."""
     import fitz
 
     from socr.core.manifest import splice_all_table_regions
@@ -668,7 +685,27 @@ def test_fed_1989_11_14_p3_scanned_branch_guard_passes_but_no_table_block_to_spl
     output, provenance = _select_page_output_tagged(state, 3)
 
     assert provenance is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
-    # matches the real recorded output (pages/00003.json): the D3-style
-    # scanned-table marker, not page_failed_marker (that's NO_TEXT_MARKER's
-    # marker -- a different branch, see the test above).
-    assert output.text == "[page 3 failed: unverifiable table — see image]"
+    # The D3-style scanned-table marker still stamps the withheld table -- not
+    # page_failed_marker (that's NO_TEXT_MARKER's marker, a different branch,
+    # see the test above) -- and the page keeps its ERROR ending.
+    assert "[page 3 failed: unverifiable table — see image]" in output.text
+    assert output.status is PageStatus.ERROR
+    assert output.audit_passed is False
+
+    # #649's own loss, recovered: the directive's three paragraphs.
+    assert "following domestic policy directive" in output.text
+    assert "The information reviewed at this meeting suggests" in output.text
+    assert "civilian unemployment rate" in output.text
+
+    # And nothing from the withheld swap-arrangement table. Every printed
+    # amount and every maturity date stays behind the marker.
+    for withheld_value in ("250.0", "1,000.0", "6,000.0", "4,000.0", "1,250.0"):
+        assert withheld_value not in output.text, withheld_value
+
+    # Recorded where the corpus reads it, not only in the bytes.
+    assert any("scanned_prose_recovered" in note for note in output.audit_notes)
+
+    # And the page is no longer counted as marker-only: it ships content now.
+    from socr.core.manifest import is_page_failed_marker
+
+    assert is_page_failed_marker(output.text) is False

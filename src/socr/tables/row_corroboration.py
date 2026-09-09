@@ -332,6 +332,25 @@ def baseline_bands(words: list) -> list[_NativeBand]:
 PROSE_BAND_MAX_NUMERIC_TOKENS: int = 0
 
 
+def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list[tuple[bool, list]]:
+    """*words* as ordered bands, each tagged ``(is_prose, band_words)``.
+
+    The interleaved form of :func:`prose_region_words`, top of page to bottom.
+    #649's caller rebuilds the page from this: it has to put the fail-closed
+    marker where the withheld run actually sits, which the two flat lists
+    cannot say. See :func:`prose_region_words` for what "prose" means here and
+    for the two disclosed costs of the default *row_shape_min*.
+    """
+    if row_shape_min is None:
+        row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
+    bands: list[tuple[bool, list]] = []
+    for band in cluster_band_words(words):
+        numeric_count = sum(1 for word in band if _is_genuine_numeric(word[4])[0])
+        ordered = sorted(band, key=lambda w: w[0])
+        bands.append((numeric_count < row_shape_min, ordered))
+    return bands
+
+
 def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:
     """Split *words* into ``(prose_words, withheld_words)`` by baseline band.
 
@@ -372,28 +391,10 @@ def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[l
     caller ships the prose half as text, and the band order is the only order
     that reproduces the printed page.
     """
-    if row_shape_min is None:
-        row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
-    band_words = cluster_band_words(words)
-    if not band_words:
-        return [], []
-
-    numeric_counts: list[int] = []
-    for band in band_words:
-        count = 0
-        for word in band:
-            is_numeric, _normalized = _is_genuine_numeric(word[4])
-            if is_numeric:
-                count += 1
-        numeric_counts.append(count)
-
-    withheld_flags = [count >= row_shape_min for count in numeric_counts]
-
     prose: list = []
     withheld: list = []
-    for band, flag in zip(band_words, withheld_flags):
-        target = withheld if flag else prose
-        target.extend(sorted(band, key=lambda w: w[0]))
+    for is_prose, band in partition_prose_bands(words, row_shape_min):
+        (prose if is_prose else withheld).extend(band)
     return prose, withheld
 
 
