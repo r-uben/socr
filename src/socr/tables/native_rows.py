@@ -16,6 +16,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from socr.core.born_digital import iter_page_span_records, iter_page_spans
 from socr.core.table_grid import is_numeric_cell, rows_establish_grid as rows_establish_grid
 from socr.tables.native_verifier import strip_presentation
 
@@ -612,12 +613,7 @@ def _span_fonts(page, bbox) -> list[tuple[tuple[float, float, float, float], str
     region purely to recover it - nothing downstream of the band merge sees
     or depends on this data.
     """
-    spans: list[tuple[tuple[float, float, float, float], str]] = []
-    for block in page.get_text("dict", clip=bbox).get("blocks", ()):
-        for line in block.get("lines", ()):
-            for span in line.get("spans", ()):
-                spans.append((tuple(span["bbox"]), span["font"]))
-    return spans
+    return [(tuple(span["bbox"]), span["font"]) for span in iter_page_spans(page, clip=bbox)]
 
 
 def _font_of(
@@ -783,17 +779,13 @@ def _superscript_tokens(page, bbox) -> set[tuple[int, str]]:
     """
     x0_lim, y0_lim, x1_lim, y1_lim = bbox
     by_line: dict[tuple[int, int], list[tuple[float, float, str]]] = {}
-    for bi, block in enumerate(page.get_text("dict").get("blocks", [])):
-        for li, line in enumerate(block.get("lines", [])):
-            for span in line.get("spans", []):
-                sx0, sy0, sx1, sy1 = span.get("bbox", (0, 0, 0, 0))
-                if sx0 < x0_lim or sx1 > x1_lim or sy0 < y0_lim or sy1 > y1_lim:
-                    continue
-                text = (span.get("text") or "").strip()
-                if text:
-                    by_line.setdefault((bi, li), []).append(
-                        (round(span.get("size", 0.0), 1), sx0, text)
-                    )
+    for bi, li, span in iter_page_span_records(page):
+        sx0, sy0, sx1, sy1 = span.get("bbox", (0, 0, 0, 0))
+        if sx0 < x0_lim or sx1 > x1_lim or sy0 < y0_lim or sy1 > y1_lim:
+            continue
+        text = (span.get("text") or "").strip()
+        if text:
+            by_line.setdefault((bi, li), []).append((round(span.get("size", 0.0), 1), sx0, text))
 
     markers: set[tuple[int, str]] = set()
     for spans in by_line.values():
