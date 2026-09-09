@@ -331,24 +331,111 @@ def baseline_bands(words: list) -> list[_NativeBand]:
 #: value below 1 exists, and any value above it would ship printed numbers.
 PROSE_BAND_MAX_NUMERIC_TOKENS: int = 0
 
+_DIGIT_RE = re.compile(r"[0-9]")
+
+
+def bears_printed_numeral(text: str) -> bool:
+    """Whether *text* carries a printed digit of any form.
+
+    #649 round 2 (Astra, 2026-09-10). The withholding decision must NOT reuse
+    ``_is_genuine_numeric``: that predicate answers "is this token usable for
+    numeric ROW MATCHING", and it deliberately says no to forms that are very
+    much printed values -- a maturity date (``12/04/89``) is rejected outright,
+    and ``(1)``-style decoration is excluded as a footnote marker. A band
+    holding only ``12/04/89`` was therefore tagged prose and shipped verbatim
+    under the unverified-scan banner, breaking the one promise that lane makes.
+    The fixture tables' own maturity dates only vanished because a recognised
+    amount happened to share their baseline.
+
+    "Not useful for numeric row matching" is not "contains no printed value",
+    so withholding asks the exhaustive question instead: does the token show a
+    digit at all? Nothing about a digit's FORM can make it safe to ship off an
+    unverified scan, which is why this looks for the digit rather than for a
+    grammar of accepted numeric shapes -- there is no shape this could fail to
+    enumerate.
+
+    Deliberately NOT used for row matching, which still needs the narrower
+    predicate: this one would count a page number and a footnote marker as
+    table rows.
+    """
+    return bool(_DIGIT_RE.search(text or ""))
+
 
 def partition_prose_bands(words: list, row_shape_min: int | None = None) -> list[tuple[bool, list]]:
     """*words* as ordered bands, each tagged ``(is_prose, band_words)``.
 
     The interleaved form of :func:`prose_region_words`, top of page to bottom.
     #649's caller rebuilds the page from this: it has to put the fail-closed
-    marker where the withheld run actually sits, which the two flat lists
+    marker where each withheld run actually sits, which the two flat lists
     cannot say. See :func:`prose_region_words` for what "prose" means here and
-    for the two disclosed costs of the default *row_shape_min*.
+    for the disclosed cost of the default *row_shape_min*.
+
+    Counts tokens by :func:`bears_printed_numeral`, never by
+    ``_is_genuine_numeric`` -- see that function for why a row-matching
+    predicate is the wrong instrument for a withholding decision.
     """
     if row_shape_min is None:
         row_shape_min = PROSE_BAND_MAX_NUMERIC_TOKENS + 1
     bands: list[tuple[bool, list]] = []
     for band in cluster_band_words(words):
-        numeric_count = sum(1 for word in band if _is_genuine_numeric(word[4])[0])
+        numeral_count = sum(1 for word in band if bears_printed_numeral(word[4]))
         ordered = sorted(band, key=lambda w: w[0])
-        bands.append((numeric_count < row_shape_min, ordered))
+        bands.append((numeral_count < row_shape_min, ordered))
     return bands
+
+
+def corroboration_witness_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:
+    """``(witness_words, unresolved_words)`` -- the prose a MODEL may be scored
+    against, and the prose that is real page text but proves nothing.
+
+    #652 round 2 (Astra, 2026-09-10). :func:`prose_region_words` is the
+    SHIPPING partition, and it is deliberately permissive about a zero-numeral
+    band: a wrapped row label carries no printed value, so #649 ships it
+    flagged rather than lose it. Reusing that same partition as the
+    CORROBORATION witness quietly promoted those bands from "safe to show" to
+    "trustworthy evidence", and the two are not the same permission. A table
+    whose labels sit on baselines separate from their amounts put its entire
+    vocabulary back into the witness, and the identical fabricated attempt that
+    was refused with labels inline was ACCEPTED with them split -- shipping an
+    invented sentence built from the table's own bank names.
+
+    So the witness abstains wherever prose/table attribution is unresolved. A
+    band qualifies only if it carries no printed numeral AND
+
+    no adjacent band -- previous or next, in printed order -- is withheld. A
+    band touching a numeric row is that row's wrapped label until something
+    says otherwise, and nothing available here can say otherwise.
+
+    Adjacency, and ONLY adjacency. A y-span rule ("inside the first and last
+    withheld band") was tried and measured wrong on the ticket's own fixture:
+    the withholding predicate now covers every printed digit, so a prose line
+    carrying a value ("...remained around 5-1/4 percent...") is itself
+    withheld, and the span between it and the table swallowed the entire
+    policy directive -- witness 89 of 295 words, overlap 0.34, a genuine
+    attempt refused. Adjacency costs only the band on each side of a withheld
+    run, which is exactly the band whose attribution is actually in doubt.
+
+    Over-exclusion is the safe direction and its cost is now bounded anyway:
+    since #649, refusing corroboration no longer loses the page's prose, it
+    ships the native layer's own text instead.
+
+    Disclosed residual: a table's HEADER block, printed two or more bands above
+    its first numeric row, is outside the span and not adjacent, so its column
+    names remain in the witness. It carries no row label and no value, and
+    excluding it needs a threshold this module will not invent. The caller adds
+    one more defence that covers part of it -- see ``_prose_corroboration_ok``,
+    which subtracts every token the withheld region itself contains.
+    """
+    bands = partition_prose_bands(words, row_shape_min)
+    withheld = {idx for idx, (is_prose, _band) in enumerate(bands) if not is_prose}
+
+    witness: list = []
+    unresolved: list = []
+    for idx, (is_prose, band) in enumerate(bands):
+        touches_withheld = (idx - 1) in withheld or (idx + 1) in withheld
+        target = unresolved if (not is_prose or touches_withheld) else witness
+        target.extend(band)
+    return witness, unresolved
 
 
 def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:
@@ -356,9 +443,10 @@ def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[l
 
     #649 / #652 (owner ruling, 2026-09-10): on a scanned page with NO detected
     table geometry there is no bbox to scope prose with, so the prose region is
-    delimited by the page's own native baseline bands -- a band whose genuine
-    numeric-token count is below *row_shape_min* is prose; every band at or
-    above it is withheld, exactly the numeric content the D3 floor protects.
+    delimited by the page's own native baseline bands -- a band whose count of
+    digit-bearing tokens (:func:`bears_printed_numeral`) is below
+    *row_shape_min* is prose; every band at or above it is withheld, exactly
+    the printed numeric content the D3 floor protects.
 
     *row_shape_min* defaults to ``PROSE_BAND_MAX_NUMERIC_TOKENS + 1`` (see that
     constant for the derivation and the measurement behind it).
@@ -379,12 +467,14 @@ def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[l
     stop.
 
     The cost of the default *row_shape_min* runs the other way and is
-    disclosed too: a prose line carrying one bare integer ("...in 1989 the
-    Committee...") counts as table-shaped and is withheld with the table. It
-    is withheld, never silently dropped -- the marker declares it -- and one
-    fixture is not enough to calibrate anything looser. That calibration is
-    the same follow-up ``manifest.PROSE_CORROBORATION_MIN`` is waiting on: a
-    second real fixture.
+    disclosed too: a prose line carrying any printed digit ("...has remained
+    around 5-1/4 percent...", the one such line on the ticket's own fixture) is
+    withheld with the table. That is the intended direction -- it is a printed
+    value on a scan nothing verified -- and it is withheld, never silently
+    dropped: #649's caller stamps a marker at every contiguous withheld run
+    precisely so a line elided mid-paragraph is visible where it was elided.
+    One fixture is not enough to calibrate anything looser; that calibration
+    is the same follow-up ``manifest.PROSE_CORROBORATION_MIN`` waits on.
 
     Both lists are returned in PAGE READING ORDER (bands top to bottom, words
     left to right within a band), not in the input order of *words*: #649's

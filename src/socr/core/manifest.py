@@ -1849,11 +1849,19 @@ def _prose_corroboration_ok(p, attempt_text: str) -> bool:
     including the withheld table's own headers, row labels and values. A
     faithful-table + fabricated-prose attempt then clears
     ``PROSE_CORROBORATION_MIN`` on table vocabulary alone, corroborating the
-    one part of itself that was never in doubt. ``prose_region_words``
-    delimits the prose region by native baseline band instead (owner ruling,
-    2026-09-10), so the withheld table's vocabulary cannot vouch for
-    fabricated prose. This composes WITH the bbox exclusion; it does not
-    replace it.
+    one part of itself that was never in doubt. The witness is delimited by
+    native baseline band instead (owner ruling, 2026-09-10), so the withheld
+    table's vocabulary cannot vouch for fabricated prose. This composes WITH
+    the bbox exclusion; it does not replace it.
+
+    Round 2 (Astra, 2026-09-10): the witness is NOT the same partition #649
+    ships. Shipping an unattributed zero-numeral band, flagged, does not make
+    it trustworthy EVIDENCE about a model's prose -- a table whose labels sat
+    on their own baselines put its whole vocabulary back into the witness and
+    corroborated an invented sentence built from its own bank names. The two
+    permissions are kept apart: ``corroboration_witness_words`` abstains
+    wherever prose/table attribution is unresolved, and every token the
+    withheld region itself contains is subtracted on top of that.
     """
     words = getattr(p, "native_words", None) or []
     if not words:
@@ -1870,17 +1878,29 @@ def _prose_corroboration_ok(p, attempt_text: str) -> bool:
         return False
 
     from socr.core.born_digital import text_layer_trusted
-    from socr.tables.row_corroboration import prose_region_words
+    from socr.tables.row_corroboration import corroboration_witness_words
 
-    prose_words, _withheld = prose_region_words(outside_table)
-    if not prose_words:
+    witness_words, unresolved_words = corroboration_witness_words(outside_table)
+    if not witness_words:
         return False
-    if not text_layer_trusted(native_region_text(prose_words)):
+    if not text_layer_trusted(native_region_text(witness_words)):
         return False
+
+    # Defence in depth behind ``corroboration_witness_words``'s own disclosed
+    # residual (a header block printed clear of its table): a token the
+    # withheld region ITSELF contains cannot vouch for prose no matter where
+    # else on the page it also appears. Subtracting is safe in the one
+    # direction that matters -- it can only shrink the witness, never admit
+    # something new -- and a genuine attempt does not need a word the table
+    # already owns in order to corroborate its prose.
+    unresolved_tokens: set[str] = set()
+    for w in unresolved_words:
+        unresolved_tokens.update(_PROSE_TOKEN_RE.findall(str(w[4]).lower()))
 
     native_tokens: set[str] = set()
-    for w in prose_words:
+    for w in witness_words:
         native_tokens.update(_PROSE_TOKEN_RE.findall(str(w[4]).lower()))
+    native_tokens -= unresolved_tokens
     if not native_tokens:
         return False
     attempt_tokens = set(_PROSE_TOKEN_RE.findall(_attempt_prose_text(attempt_text).lower()))
@@ -1907,6 +1927,33 @@ SCANNED_PROSE_RECOVERED_NOTE = (
     "scanned_prose_recovered: no OCR attempt could be spliced around the "
     "withheld table; the page's own trusted prose bands ship flagged instead"
 )
+
+
+def _is_restored_prose_recovery(p, page_num: int) -> bool:
+    """Whether this page's winner IS an already-finalized prose recovery.
+
+    #649 round 2. Both halves of the evidence must hold, and neither alone is
+    enough:
+
+    * the winner carries ``SCANNED_PROSE_RECOVERED_NOTE``. socr writes that
+      note; a model's output cannot contain it, so it is the half that cannot
+      be forged. It survives resume because the sidecar serialises the winning
+      output's ``audit_notes`` and ``_restore_terminal_page_state`` rebuilds
+      the ``PageOutput`` from that record -- no new persisted field is needed.
+    * the winner's text starts with this module's own banner. A note without
+      the banner would mean something rewrote the body after the recovery, and
+      that body is not this function's to vouch for.
+
+    Requiring the note is what stops the banner from becoming a bypass: a
+    hallucinating model that emitted the banner line verbatim would otherwise
+    have its whole output shipped past the floor.
+    """
+    out = getattr(p, "best_output", None)
+    if out is None:
+        return False
+    if not any(SCANNED_PROSE_RECOVERED_NOTE in note for note in (out.audit_notes or [])):
+        return False
+    return (out.text or "").startswith(SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num))
 
 
 def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
@@ -1967,35 +2014,49 @@ def native_prose_floor_text(p, page_num: int, *, marker_line: str, png_ref: str)
     blocks: list[str] = [SCANNED_PROSE_RECOVERED_FLAG.format(page_num=page_num)]
     marker_block = f"{marker_line}\n\n{png_ref}" if png_ref else marker_line
     paragraph: list[str] = []
-    marker_placed = False
+    in_withheld_run = False
 
     def _flush() -> None:
         if paragraph:
             blocks.append("\n".join(paragraph))
             paragraph.clear()
 
+    from socr.tables.reconcile import is_table_syntax_line
+
     for is_prose, band in bands:
+        line = " ".join(str(w[4]) for w in band).strip()
+        # A native line that parses as markdown TABLE SYNTAX can never ship as
+        # prose here, whatever its digits say. The rows beneath it are withheld
+        # by definition on this page, so emitting it would assemble a header
+        # and a separator with no body -- a table structure asserted over
+        # content the floor just refused to verify, and exactly what
+        # ``_apply_table_emission_guard`` exists to catch downstream. It joins
+        # the withheld run instead.
+        if is_prose and is_table_syntax_line(line):
+            is_prose = False
         if is_prose:
+            in_withheld_run = False
             # Consecutive printed lines join into one paragraph rather than
             # becoming one block each: these ARE the page's lines, and a
             # directive split into twenty one-line paragraphs is not the page.
-            line = " ".join(str(w[4]) for w in band).strip()
             if line:
                 paragraph.append(line)
             continue
-        if marker_placed:
-            # ONE marker for the page's withheld content, at the first
-            # withheld band. Not one per contiguous withheld run: this branch
-            # is reached with ``detected_table_count == 0``, so nothing here
-            # knows how many tables the page has, and a run count is not that
-            # number -- on the ticket's own fixture a single swap-arrangement
-            # table breaks into three runs around its own wrapped row labels.
-            # Claiming three withheld tables would be inventing the structure
-            # the floor exists because we could not verify.
+        if in_withheld_run:
             continue
+        # #649 round 2 (Astra): ONE marker per contiguous withheld run, not one
+        # per page. The withholding predicate covers every printed digit, so a
+        # withheld band is no longer always inside the table -- a prose line
+        # carrying a printed value ("...remained around 5-1/4 percent...", the
+        # one such line on the ticket's fixture) is withheld mid-paragraph. A
+        # single marker at the top of the page would elide that line in
+        # silence, which is the exact loss this lane exists to stop. The marker
+        # names withheld content, not a table count: a run count is not a table
+        # count either, and this branch runs with ``detected_table_count == 0``,
+        # so no claim about how many tables the page holds is made anywhere.
         _flush()
         blocks.append(marker_block)
-        marker_placed = True
+        in_withheld_run = True
 
     _flush()
     return "\n\n".join(blocks)
@@ -2372,6 +2433,19 @@ def _select_page_output_tagged(
         # None whenever it cannot prove what it would be shipping, which
         # leaves the bare marker exactly as before.
         prose_recovered = False
+        if d3_text is None and _is_restored_prose_recovery(p, page_num):
+            # #649 round 2 (Astra): a page RESTORED from its terminal sidecar
+            # has already shipped this recovery, and the words it was built
+            # from are gone -- ``native_words`` is a live-run cache the sidecar
+            # deliberately does not carry. Recomputing therefore returned None
+            # and the finalized body was replaced by the bare marker: a
+            # transient missing cache erased text that had already shipped.
+            # The frozen result stands. It is not recomputed and not
+            # second-guessed; the evidence that it IS this lane's own output
+            # is the audit note socr wrote on it, which a model attempt cannot
+            # forge, plus the banner in the bytes.
+            d3_text = best_output_text
+            prose_recovered = True
         if d3_text is None:
             d3_text = native_prose_floor_text(p, page_num, marker_line=d3_marker, png_ref=png_ref)
             prose_recovered = d3_text is not None

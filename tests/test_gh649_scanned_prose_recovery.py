@@ -20,6 +20,8 @@ to protect; what comes back is the prose that was only ever collateral.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from socr.core.manifest import (
@@ -169,15 +171,17 @@ class TestTheProseComesBack:
         assert any("scanned_prose_recovered" in note for note in with_prose.audit_notes)
         assert not any("scanned_prose_recovered" in note for note in without.audit_notes)
 
-    def test_one_marker_for_the_page_however_many_runs_the_table_breaks_into(
-        self,
-    ) -> None:
-        """A withheld table's own wrapped row labels carry no numeric token, so
-        the withheld bands break into several runs (measured on the ticket's
-        fixture: one table, three runs). This branch is reached with
-        ``detected_table_count == 0``, so a run count is not a table count and
-        claiming one would invent the structure the floor exists because we
-        could not verify."""
+    def test_every_withheld_run_is_marked_where_it_was_elided(self) -> None:
+        """#649 round 2. The withholding predicate covers every printed digit,
+        so a withheld band is no longer always inside the table: a prose line
+        carrying a value is withheld mid-paragraph. Marking only the first
+        withheld run would elide that line in silence, which is the loss this
+        lane exists to stop, so every contiguous withheld run carries its own
+        marker exactly where the elision happened.
+
+        The marker names withheld content, not a table count -- this branch
+        runs with ``detected_table_count == 0`` and nothing here claims to know
+        how many tables the page holds."""
         rows_with_wrapped_labels = [
             "Austrian National Bank 250.0",
             "Bank for International",
@@ -188,9 +192,143 @@ class TestTheProseComesBack:
         ]
         recovered = _ship(_page(table_rows=rows_with_wrapped_labels)).text
 
-        assert recovered.count(MARKER) == 1
+        # Three runs, split by the wrapped labels that carry no printed value.
+        assert recovered.count(MARKER) == 3
         for amount in ("250.0", "600.0", "1,250.0"):
             assert amount not in recovered, amount
+        # The bare labels still ship: they carry no printed value, and the
+        # marker sits beside them saying the rows were withheld.
+        assert "Bank for International" in recovered
+
+    def test_a_prose_line_carrying_a_value_is_withheld_and_marked(self) -> None:
+        """The mid-paragraph case the per-run marker exists for: the line is
+        withheld (it is a printed value on an unverified scan) and its absence
+        is marked in place, between the paragraphs that surround it."""
+        below = [
+            "The information reviewed at this meeting suggests continuing expansion.",
+            "The civilian unemployment rate has remained around 5-1/4 percent.",
+            "Strike activity depressed industrial production noticeably in October.",
+        ]
+        recovered = _ship(_page(prose_below=below)).text
+
+        assert "5-1/4" not in recovered
+        assert "The information reviewed at this meeting suggests" in recovered
+        assert "Strike activity depressed industrial production" in recovered
+        # Two withheld runs: the table, and the elided line inside the prose.
+        assert recovered.count(MARKER) == 2
+
+
+class TestEveryPrintedNumeralIsWithheld:
+    """#649 round 2 (Astra, 2026-09-10).
+
+    The withholding decision used to reuse ``_is_genuine_numeric``, which
+    answers "is this token usable for numeric ROW MATCHING" -- and deliberately
+    says no to a maturity date and to ``(1)``-style decoration. A band holding
+    only a date was therefore tagged prose and shipped verbatim under the
+    unverified-scan banner, breaking the one promise this lane makes. The
+    fixtures above only looked right because a recognised amount shared the
+    dates' baseline.
+    """
+
+    @pytest.mark.parametrize("value", ["12/04/89", "(1)", "1.5", "1989"])
+    def test_a_band_holding_only_this_value_is_withheld(self, value: str) -> None:
+        """Each of these is a printed value on a page nothing verified. Whether
+        it is useful for row matching has no bearing on whether it is safe to
+        ship."""
+        recovered = _ship(_page(table_rows=["Outstanding amounts 250.0", "Maturity date", value]))
+
+        assert value not in recovered.text
+        assert MARKER in recovered.text
+
+    def test_the_label_beside_it_still_ships(self) -> None:
+        """Control, so the pin above cannot pass by withholding everything: a
+        band with no printed digit at all is unaffected."""
+        recovered = _ship(_page(table_rows=["Outstanding amounts 250.0", "Maturity date"]))
+
+        assert "Maturity date" in recovered.text
+        assert "250.0" not in recovered.text
+
+
+class TestTheRecoverySurvivesRestore:
+    """#649 round 2 (Astra, 2026-09-10): a transient missing cache must not
+    erase text that already shipped.
+
+    ``native_words`` is a live-run cache the sidecar deliberately does not
+    carry. Selection re-runs over a restored page, so the recovery was
+    RECOMPUTED rather than reused: with no words it returned None and
+    finalization replaced the shipped paragraphs, and the recovered-prose note,
+    with the bare marker.
+    """
+
+    def test_a_restored_page_keeps_its_recovered_prose(self, tmp_path: Path) -> None:
+        from test_gh659_label_unverified_finalization import _pipeline, _state
+
+        from socr.core.manifest import finalized_page_records
+
+        pipeline = _pipeline()
+        state = _state(tmp_path, page_count=1)
+        state.pages[1] = _page()
+
+        original = finalized_page_records(state)[0]
+        assert "policy directive" in original.output.text
+        assert any("scanned_prose_recovered" in n for n in original.output.audit_notes)
+
+        sidecar = pipeline._flush_page_sidecar(state, 1, tmp_path, record=original)
+        assert sidecar.exists()
+
+        restored = _state(tmp_path, page_count=1)
+        pipeline._restore_terminal_page_state(
+            restored,
+            1,
+            PageOutput.from_dict(original.output.to_dict()),
+            tmp_path,
+        )
+        # The condition under test: the words are gone, exactly as resume
+        # leaves them.
+        assert not restored.pages[1].native_words
+
+        replayed = finalized_page_records(restored)[0]
+        assert replayed.output.text == original.output.text
+        assert replayed.output.audit_notes == original.output.audit_notes
+
+    def test_the_banner_alone_is_not_a_bypass(self, tmp_path: Path) -> None:
+        """The evidence is socr's own audit note, not the bytes. A model that
+        emitted the banner line verbatim must not get its whole output shipped
+        past the floor -- without the note there is nothing to reuse, and the
+        page falls back to recomputing (here, to the bare marker)."""
+        from socr.core.manifest import SCANNED_PROSE_RECOVERED_FLAG
+
+        ps = _page(with_words=False)
+        forged = SCANNED_PROSE_RECOVERED_FLAG.format(page_num=1) + "\n\nInvented settlement terms."
+        ps.best_output = PageOutput(
+            page_num=1,
+            text=forged,
+            status=PageStatus.ERROR,
+            engine="qwen",
+            audit_passed=False,
+            failure_mode=FailureMode.HALLUCINATION,
+        )
+        ps.attempts = [ps.best_output]
+
+        shipped = _ship(ps).text
+        assert "Invented settlement terms" not in shipped
+        assert is_page_failed_marker(shipped) is True
+
+
+class TestNativeTableSyntaxNeverShipsAsProse:
+    def test_a_native_markdown_table_line_joins_the_withheld_run(self) -> None:
+        """A native line that parses as markdown table syntax carries no digit,
+        so the numeral rule alone would ship it -- assembling a header and a
+        separator over a body the floor just withheld. That is a table
+        structure asserted about unverified content, and it is withheld."""
+        recovered = _ship(
+            _page(table_rows=["| Product | Price |", "| --- | --- |", "| Widget | 10.0 |"])
+        ).text
+
+        assert "| Product | Price |" not in recovered
+        assert "| --- | --- |" not in recovered
+        assert "10.0" not in recovered
+        assert "following domestic policy directive:" in recovered
 
 
 class TestWhenItMustAbstain:

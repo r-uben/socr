@@ -35,10 +35,11 @@ from socr.core.config import PipelineConfig
 from socr.core.manifest import (
     PROSE_CORROBORATION_MIN,
     _prose_corroboration_ok,
+    _select_page_output_tagged,
     _table_bbox_sane,
     table_floor_text_for_source,
 )
-from socr.core.result import PageOutput, PageStatus
+from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentHandle, DocumentState, PageState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -220,6 +221,87 @@ class TestP2bTheWitnessMustBeProse:
             "the fixture must be one the old whole-page witness accepted, or "
             "the refusal above pins nothing"
         )
+
+
+class TestWrappedLabelsAreNotEvidence:
+    """#652 round 2 (Astra, 2026-09-10): the witness is not the shipping
+    partition.
+
+    #649 ships a zero-numeral band -- a wrapped row label -- flagged rather
+    than lose it, because it carries no printed value. Reusing that same
+    partition as the corroboration witness quietly promoted those bands from
+    "safe to show" to "trustworthy evidence about prose". A table whose labels
+    sat on baselines separate from their amounts therefore put its ENTIRE
+    vocabulary back into the witness, and the identical fabricated attempt that
+    was refused with labels inline was accepted with them split.
+    """
+
+    _LABELS = [
+        "Austrian National Bank",
+        "National Bank of Belgium",
+        "German Federal Bank",
+        "Swiss National Bank",
+        "Netherlands Bank",
+        "Bank of England",
+    ]
+    # Invented prose, built entirely from the table's own row labels.
+    _FABRICATED = (
+        "Austrian National Bank German Federal Bank Swiss National Bank "
+        "ratified quarterly dividends."
+    )
+    _ATTEMPT = (
+        _FABRICATED + "\n\n| Label | Amount |\n| --- | --- |\n| Austrian National Bank | 250.0 |\n"
+    )
+
+    def _page(self, *, split: bool) -> PageState:
+        """The same table twice. ``split`` puts each label on its own baseline,
+        the way a printed table wraps a long row label; otherwise each label
+        shares its amount's baseline."""
+        if split:
+            table = [line for label in self._LABELS for line in (label, "250.0")]
+        else:
+            table = [f"{label} 250.0" for label in self._LABELS]
+        prose = [
+            "authorized and directed until otherwise directed by the Committee",
+            "to execute transactions in the System Account in accordance",
+        ]
+        return _scanned_page(_words(table + prose))
+
+    @pytest.mark.parametrize("split", [False, True])
+    def test_the_same_fabrication_is_refused_either_way(self, split: bool) -> None:
+        """The falsification. Before this, ``split=True`` returned True."""
+        assert _prose_corroboration_ok(self._page(split=split), self._ATTEMPT) is False
+
+    @pytest.mark.parametrize("split", [False, True])
+    def test_the_invented_sentence_never_ships(self, split: bool) -> None:
+        """Through real selection, not the predicate alone: baseline layout
+        must not decide what a page ships."""
+        ps = self._page(split=split)
+        ps.best_output = PageOutput(
+            page_num=1,
+            text=self._ATTEMPT,
+            status=PageStatus.ERROR,
+            engine="nougat",
+            audit_passed=False,
+            failure_mode=FailureMode.HALLUCINATION,
+        )
+        ps.attempts = [ps.best_output]
+
+        state = DocumentState.__new__(DocumentState)
+        state.pages = {1: ps}
+        output, _provenance = _select_page_output_tagged(state, 1)
+
+        assert "ratified quarterly dividends" not in output.text
+
+    def test_genuine_prose_still_corroborates_on_the_split_layout(self) -> None:
+        """Control. The stricter witness must not refuse everything: an attempt
+        whose prose really is the page's still clears, with the labels on their
+        own baselines."""
+        genuine = (
+            "authorized and directed until otherwise directed by the Committee "
+            "to execute transactions in the System Account in accordance."
+        )
+        assert _prose_corroboration_ok(self._page(split=True), genuine) is True
 
 
 class TestP2aMissingEvidenceIsNotSanity:
