@@ -1,4 +1,4 @@
-"""#652 round 13: the review viewer must render a recovered scan's escaped
+"""#652 rounds 13-14: the review viewer must render a recovered scan's escaped
 native text as the characters that were printed.
 
 ``review.html`` does not use markdown-it-py. It embeds its own regex renderer
@@ -9,6 +9,14 @@ did not implement CommonMark backslash escapes: Astra fed it
 Native recovery now emits that encoding for every line of a scanned page's own
 text layer, so a literal asterisk on the page became italics in socr's own
 review instrument.
+
+Round 14 then fixed how those escapes are held while the regexes run. Round
+13 parked each one at a fixed private-use codepoint and decoded that whole
+range off the output, which rewrote a page's OWN private-use glyphs -- this
+corpus carries them from math and symbol fonts -- into the punctuation they
+happened to encode. The placeholder namespace is now generated per render and
+verified absent from the source, and only the tokens a render created are
+restored.
 
 These tests run the ACTUAL JavaScript socr ships, extracted from the template
 and executed under Node, which is the only way to test the renderer that
@@ -137,3 +145,60 @@ def test_a_code_fence_keeps_its_own_backslashes() -> None:
     rendered = _render('```\nprintf("a\\*b");\n```\n')
 
     assert "a\\*b" in _visible(rendered)
+
+
+#: Astra's prose13 reproductions. Round 13 encoded each protected escape as a
+#: fixed private-use codepoint (``0xE000 + the character``) and decoded the
+#: whole of U+E021-U+E07E off the rendered output. That range is representable
+#: input: this corpus carries private-use glyphs from math and symbol fonts,
+#: so a page's own U+E031 became the digit ``1`` and U+E02A became ``*`` -- in
+#: the instrument used to judge digit fidelity, and inside code fences too,
+#: because the decode pass ran over the whole output rather than over the
+#: tokens the render had created.
+@pytest.mark.parametrize(
+    ("source", "glyph"),
+    [
+        ("Native symbol ", ""),
+        ("Native symbol ", ""),
+        ("```\nNative symbol \n```", ""),
+    ],
+    ids=["digit-range", "punctuation-range", "inside-a-fence"],
+)
+def test_a_private_use_glyph_in_the_source_is_not_decoded(source: str, glyph: str) -> None:
+    """The page's own characters survive. No fixed range can be assumed
+    unused, so the placeholder namespace is generated per render and checked
+    absent from the source; only tokens this render created are restored."""
+    visible = _visible(_render(source))
+
+    assert glyph in visible
+    assert "1" not in visible
+    assert "*" not in visible
+
+
+def test_a_private_use_glyph_beside_a_real_escape_survives_the_restoration() -> None:
+    """Both mechanisms on one line: the escape is honoured and the glyph that
+    would once have been mistaken for one is left exactly as printed."""
+    visible = _visible(_render("Rate  and " + _escaped_native_line("*starred*")))
+
+    assert "" in visible
+    assert "*starred*" in visible
+    assert "1" not in visible
+
+
+def test_a_forged_private_use_sentinel_cannot_inject_html() -> None:
+    """Astra's companion probe. Under round 13 these decoded into real angle
+    brackets; they now pass through as themselves, and either way no element
+    is created."""
+    rendered = _render("scriptalert(1)/script")
+
+    assert "<script" not in rendered
+    assert "script" in rendered
+
+
+def test_a_long_run_of_letters_in_the_source_is_not_mistaken_for_a_token() -> None:
+    """The placeholder is lowercase letters, so a document made of lowercase
+    letters is the adversarial case for the namespace check. It is verified
+    absent from this document's own source before any token is emitted."""
+    source = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb " + _escaped_native_line("*x*")
+
+    assert "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb *x*" in _visible(_render(source))

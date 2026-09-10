@@ -397,7 +397,7 @@ let cur = 0, raw = false, zoom = 100;
 
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-// #652 round 13. This renderer is regex-based, so a CommonMark backslash
+// #652 rounds 13-14. This renderer is regex-based, so a CommonMark backslash
 // escape used to be read twice over: the backslash survived into the output
 // and the character it was protecting still activated ('\*emphasis\*'
 // rendered as '\<i>emphasis\</i>'). Native recovery now emits exactly that
@@ -405,31 +405,63 @@ function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g
 // asterisk on the page became italics in socr's own review instrument.
 //
 // One contract, applied before anything else parses: '\' + an ASCII
-// punctuation character becomes a single private-use codepoint (0xE000 + the
-// character), which no rule below matches -- not the block tests, not the
-// table splitter, not the number marker, not the emphasis or code regexes --
-// and which esc() leaves alone because it is neither & nor < nor >. The
-// literal character is put back at the very end, THROUGH esc(), so an escaped
-// '<' still arrives as '&lt;' and the untrusted-HTML boundary is exactly
-// where it was.
+// punctuation character is lifted out of the text and replaced by a
+// placeholder token, and the literal character is put back at the very end.
 //
-// Fenced blocks are skipped: CommonMark does not process escapes inside a
-// code fence, and a fence's content here is a model's code sample that must
-// keep its own backslashes. A code SPAN is not skipped -- unprotecting inside
-// one drops a backslash the spec would keep -- which cannot reach the native
-// lane (its backticks are escaped, so no span can form there) and is noted as
-// the known divergence rather than hidden.
-function protect(src){
-  let fence = false;
-  return src.split('\n').map(line => {
-    if(/^```/.test(line)){ fence = !fence; return line; }
-    return fence ? line
-      : line.replace(/\\([!-\/:-@\[-`{-~])/g, m => String.fromCharCode(0xE000 + m.charCodeAt(1)));
-  }).join('\n');
+// The token namespace is generated per render and CHECKED ABSENT from this
+// document's own source (round 14). Round 13 used a fixed private-use range
+// as the sentinel, which decoded any source character in U+E021-U+E07E into
+// the punctuation it happened to encode -- a page's own U+E031 glyph became
+// the digit '1' in the instrument used to judge digit fidelity, and it did so
+// inside code fences too, because the decode pass ran over the whole rendered
+// output. A reserved range is still representable input, so no other fixed
+// range is a fix; the token is generated instead, and restoration only ever
+// touches tokens this render created. Source characters, private-use or not,
+// in a fence or out of one, are never rewritten.
+//
+// The token is lowercase ASCII letters only, so no rule below can see it: not
+// the block tests (it never starts a line), not the table splitter, not the
+// number marker (no digits), not emphasis or code (no punctuation), and esc()
+// leaves letters alone. Restoration goes THROUGH esc(), so an escaped '<'
+// still arrives as '&lt;' and the untrusted-HTML boundary is exactly where it
+// was.
+//
+// Fenced blocks are skipped when protecting: CommonMark does not process
+// escapes inside a code fence, and a fence's content here is a model's code
+// sample that must keep its own backslashes. A code SPAN is not skipped --
+// unprotecting inside one drops a backslash the spec would keep -- which
+// cannot reach the native lane (its backticks are escaped, so no span can
+// form there) and is noted as the known divergence rather than hidden.
+function letterKey(n){
+  let s = '';
+  do { s = String.fromCharCode(97 + (n % 26)) + s; n = Math.floor(n / 26); } while(n > 0);
+  return s;
 }
 
-function unprotect(html){
-  return html.replace(/[\uE021-\uE07E]/g, c => esc(String.fromCharCode(c.charCodeAt(0) - 0xE000)));
+function protect(src){
+  let base = '';
+  do {
+    base = '';
+    for(let k = 0; k < 16; k++) base += String.fromCharCode(97 + Math.floor(Math.random() * 26));
+  } while(src.indexOf(base) !== -1);
+  const literals = Object.create(null);
+  let fence = false;
+  const text = src.split('\n').map(line => {
+    if(/^```/.test(line)){ fence = !fence; return line; }
+    return fence ? line : line.replace(/\\([!-\/:-@\[-`{-~])/g, (m, ch) => {
+      const key = letterKey(ch.charCodeAt(0));
+      literals[key] = ch;
+      return base + key + base;
+    });
+  }).join('\n');
+  return {text: text, base: base, literals: literals};
+}
+
+function unprotect(html, state){
+  // Lazy: a document may be lowercase letters end to end, so a greedy run
+  // would swallow the text between two tokens and match neither.
+  const re = new RegExp(state.base + '([a-z]+?)' + state.base, 'g');
+  return html.replace(re, (m, key) => key in state.literals ? esc(state.literals[key]) : m);
 }
 
 // Numbers are the payload in a citation corpus, so they get marked for eye-scanning.
@@ -443,7 +475,8 @@ function inline(s){
 }
 
 function renderMd(src){
-  const lines = protect(src).split('\n'); let out = '', i = 0;
+  const protected_ = protect(src);
+  const lines = protected_.text.split('\n'); let out = '', i = 0;
   while(i < lines.length){
     const line = lines[i];
     if(/^```/.test(line)){
@@ -479,7 +512,7 @@ function renderMd(src){
       para.push(lines[i++]);
     out += '<p>'+inline(para.join(' '))+'</p>';
   }
-  return unprotect(out);
+  return unprotect(out, protected_);
 }
 
 function head(){

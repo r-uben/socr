@@ -523,3 +523,39 @@ protect, not that escaped documents render the same, which is the point.
 — what "prose" means, why nothing else is withheld, and the disclosed cost of
 the default `row_shape_min` — moves to `partition_prose_bands`, the partition
 every live reader takes.
+
+## Round 14 — the placeholder may not be a character the page can print
+
+Round 13's escape holder was a fixed private-use codepoint: `\` + punctuation
+became `0xE000 + the character`, and the last pass decoded every codepoint in
+U+E021–U+E07E back to punctuation. That range is representable input. This
+corpus carries private-use glyphs from math and symbol fonts, so a page that
+printed U+E031 was shown the digit `1`, and U+E02A was shown `*` — in the
+instrument whose whole job is judging digit fidelity. It happened inside code
+fences too: `protect` skips fenced lines, but the decode pass ran over the
+entire rendered output, so skipping never protected the fence's own characters.
+
+No other fixed range fixes this, because every codepoint is something a font
+can emit. The placeholder is now generated per render: sixteen random lowercase
+letters, regenerated until the string does not occur in this document's source,
+with each escaped character stored under a letters-only key and the token
+written as `base + key + base`. Letters are invisible to every rule in the
+renderer — they never start a line, carry no digits for the number marker and no
+punctuation for emphasis, code or the table splitter, and `esc` leaves them
+alone. Restoration matches only that generated namespace, and only keys this
+render stored; it still goes through `esc`, so an escaped `<` still arrives as
+`&lt;`. The match is lazy, because a page can legitimately be lowercase letters
+end to end and a greedy run would swallow the text between two tokens.
+
+Source characters are now never rewritten, private-use or not, inside a fence or
+outside one. Astra's forged-sentinel probe changes verdict accordingly: under
+round 13 the forged glyphs decoded into `&lt;script&gt;`, and under round 14
+they pass through as the glyphs they are. No element is created either way, and
+not decoding them is the stricter behaviour.
+
+Differential against round 13 over sixty corpus pages: identical output, and
+those pages contain neither a private-use glyph nor a backslash escape, so that
+run only shows the ordinary path is untouched. The behavioural difference shows
+on synthetic pages: a private-use glyph in prose and the same glyph inside a
+fence both change from decoded punctuation to the printed character, while
+model prose and an escaped literal render byte-identically.
