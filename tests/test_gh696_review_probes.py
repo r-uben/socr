@@ -17,11 +17,16 @@ impossible — see
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import fitz
 import pytest
 from test_gh696_spanning_header_flatten import (
     _DATA_ROWS,
+    _DATA_XS,
     _FONT_SIZE,
+    _LEAF_BAND,
     _padded_markdown,
     _single_level_markdown,
     _survey_page,
@@ -29,6 +34,7 @@ from test_gh696_spanning_header_flatten import (
 
 from socr.judge.table_verdict import resolve_cell_refs
 from socr.pipeline.agentic import AcceptDecision, NativeTableVerifierJudge
+from socr.tables.binding import bind, classify_binding_evidence
 from socr.tables.header_repair import (
     _candidate_header_depth,
     _claim_lanes,
@@ -540,3 +546,114 @@ def test_a_row_combining_two_printed_bands_still_folds():
     assert find_table_blocks(after)[0].grid[1:] == [
         [label, *values] for label, values in _DATA_ROWS
     ]
+
+
+# --------------------------------------------------------------------------
+# Finding 5 — a second table's heading row posed as this table's body
+# --------------------------------------------------------------------------
+
+
+def test_a_lower_tables_heading_is_not_this_tables_body():
+    """The reviewer's round-5 reproducer: the witness has to belong to THIS table.
+
+    A second table lower on the same page repeats the ten leaf headings. The
+    upper candidate's leaf row matches that row's words exactly, so the
+    round-4 escape read it as a located body occurrence, stopped the walk at
+    depth two and folded — shipping the leaf headings twice, once in the
+    reconstructed header and once as a sixth body row over five printed data
+    rows. A row below the header floor is only a body witness if it lies
+    inside the extent the geometry chain already attributed to this table.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, 330), "Second table", fontsize=_FONT_SIZE)
+    for x, text in _LEAF_BAND:
+        page.insert_text((x, 350), text, fontsize=_FONT_SIZE)
+    page.insert_text((58.5, 365), "Second observation", fontsize=_FONT_SIZE)
+    for x, value in zip(_DATA_XS, [str(i) for i in range(1, 11)]):
+        page.insert_text((x, 365), value, fontsize=_FONT_SIZE)
+    base = _padded_markdown().splitlines()
+    before = "\n".join([base[0], base[1], base[0], *base[2:]])
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    if count:
+        assert find_table_blocks(after)[0].grid[1:] == [
+            [label, *values] for label, values in _DATA_ROWS
+        ]
+    else:
+        assert after == before
+
+
+def test_the_body_escape_is_not_a_cell_verification_credential():
+    """Locating a row as body says where it belongs, not that its cells are right.
+
+    A candidate whose two printed ``18``s sit one column right of where the
+    page prints them still satisfies the escape, because the escape compares
+    an unordered multiset. The repair leaves the row exactly as emitted — it
+    neither relocates nor drops a value — and binding is what reports the
+    shift, so the two mechanisms stay separate.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, 211), "Overall", fontsize=_FONT_SIZE)
+    for x in _DATA_XS[:2]:
+        page.insert_text((x, 211), "18", fontsize=_FONT_SIZE)
+    shifted = ["Overall", "", "18", "18"] + [""] * 7
+    lines = _padded_markdown().splitlines()
+    lines.insert(3, "| " + " | ".join(shifted) + " |")
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), "\n".join(lines))
+
+    assert count == 1
+    assert find_table_blocks(after)[0].grid[1] == shifted
+
+    result = bind(page.get_text("words"), after)
+    assert classify_binding_evidence(result) is not None
+    assert not result.fully_checked
+    assert (
+        result.contradicted_cells
+        or result.model_unbound
+        or result.native_unbound
+        or result.column_binding_unverifiable
+    )
+
+
+_CENSUS_ROOT = Path.home() / "Data/socr/census-ecb-2026-09-06"
+_CENSUS_SLUG = "ecb-surveys-2018-ecb.blssurvey2018q2.en-p37-39"
+
+
+@pytest.mark.skipif(
+    not (_CENSUS_ROOT / "in" / f"{_CENSUS_SLUG}.pdf").exists(),
+    reason="local census corpus only — the cached candidates are not in the repo",
+)
+def test_the_motivating_census_page_still_repairs():
+    """The page #696 was filed from: the bad candidate repairs, the clean one is left.
+
+    This is the end the boundary rules exist for, and every tightening round
+    has to keep clearing it: the emitted candidate whose ``grid_shape`` defect
+    the flatten removes still has it removed, and the candidate that arrived
+    clean is still untouched.
+    """
+    from socr.tables.locate import _horizontal_rules
+    from socr.tables.structure_check import table_output_defect
+
+    with fitz.open(_CENSUS_ROOT / "in" / f"{_CENSUS_SLUG}.pdf") as doc:
+        page = doc[0]
+        words = page.get_text("words")
+        rules = _horizontal_rules(page)
+
+    outcomes = []
+    for path in sorted((_CENSUS_ROOT / "out" / _CENSUS_SLUG / "cache").glob("*/*.json")):
+        data = json.loads(path.read_text())
+        if data.get("page_num") != 1 or not data.get("text"):
+            continue
+        after, count = repair_table_headers_in_text(words, data["text"])
+        outcomes.append(
+            (
+                count,
+                table_output_defect(data["text"], words, rules),
+                table_output_defect(after, words, rules),
+            )
+        )
+
+    assert outcomes
+    assert any(count and before and not after for count, before, after in outcomes)

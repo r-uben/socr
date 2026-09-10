@@ -940,6 +940,7 @@ class _TableGeometry:
     lane_centers: list[float]
     data_start_x: float
     bands: list[tuple[float, float]]
+    data_ys: list[int]
 
 
 def _table_geometry(grid: list[list[str]], words: list) -> _TableGeometry | None:
@@ -974,6 +975,7 @@ def _table_geometry(grid: list[list[str]], words: list) -> _TableGeometry | None
         lane_centers=lane_centers,
         data_start_x=lane_centers[0],
         bands=_lane_bands(lane_groups),
+        data_ys=data_ys,
     )
 
 
@@ -1029,12 +1031,28 @@ def _row_word_counts(row: list) -> Counter:
     return Counter(w[4].strip().casefold() for w in row if w[4].strip())
 
 
-def _below_band_row_counts(geom: _TableGeometry, band_floor: float) -> list[Counter]:
-    """One multiset per printed row lying wholly below the header band."""
+def _body_extent_row_counts(geom: _TableGeometry, band_floor: float) -> list[Counter]:
+    """One multiset per printed row inside THIS table's body extent.
+
+    The extent runs from the header band's floor down to the last row the same
+    geometry chain attributed to this table -- the rows ``_table_geometry``
+    derived its lanes from, whose walk already stops at the first vertical gap
+    too large to be a row of this table. Nothing below that bottom row is part
+    of this body, whatever it says.
+
+    Scoping is the whole point (#696 round 5). "The same words appear on some
+    printed row lower down the page" is not evidence about this table: a
+    second table's leaf HEADING row satisfied it and licensed folding the
+    upper table's leaf band away as if it were data, which duplicated those
+    headings into the header and the body at once.
+    """
+    if not geom.data_ys:
+        return []
+    bottom = max(geom.data_ys)
     return [
         _row_word_counts(row)
-        for row in geom.rows_by_y.values()
-        if row and all(w[1] > band_floor for w in row)
+        for y, row in geom.rows_by_y.items()
+        if row and y <= bottom and all(w[1] > band_floor for w in row)
     ]
 
 
@@ -1057,7 +1075,8 @@ def _candidate_header_depth(
       and vocabulary shared with the body cannot prove it is not, so the whole
       repair abstains -- unless the page prints a row below the band whose
       words are exactly this row's, which locates the occurrence itself and
-      settles it as body.
+      settles it as body, PROVIDED that row lies within this table's own
+      body extent.
     * a row accounted for by neither region is unclassifiable: abstain.
 
     The single escape hatch runs only in the direction that KEEPS content. An
@@ -1076,7 +1095,7 @@ def _candidate_header_depth(
     band_tokens = _header_band_tokens(band_rows)
     band_floor = _band_floor(band_rows)
     below_tokens = _below_band_tokens(geom, band_floor)
-    below_rows = _below_band_row_counts(geom, band_floor)
+    below_rows = _body_extent_row_counts(geom, band_floor)
     depth = 1
     for row in grid[1:]:
         counts = Counter(
