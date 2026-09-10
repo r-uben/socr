@@ -1,6 +1,6 @@
 # STATUS — defect-census fixes
 
-Last updated: 2026-09-10 (overnight, second cycle)
+Last updated: 2026-09-11
 
 ## Stage
 Waves 1-9 merged: A1a #630, C1 #631, D1 #632, A1b #640, A1c #644, A2 #647, B1 #651, E1 #654,
@@ -29,6 +29,15 @@ candidate lost the page judge to a timeout (#713); A1b's twin has the same blind
 extraction before identities, so the shipped `.md` carries plain labels; interior entities are never decoded.
 #709 accepted as PR #720 (beside-heading unit: heading, adopted pair and run emit contiguously at the
 heading's block key). Filed: #713, #714, #717 (conftest neuters `shutil.which`).
+
+Third cycle and evening (2026-09-10 08:00–24:00): desk leftovers merged — #708 (PR #722, CI pin for the
+unequal-block search), #712 (PR #723, the withholding lane now escapes native lines), #718+#719 (PR #724, which
+also fixed a #716 regression: canonicalised labels printed twice as loose prose). #713 merged as PR #725: a typed
+page-judge outcome and an acceptance credential let a ladder-accepted candidate ship flagged after a judge
+timeout (four Codex rounds; a fresh BoE run was never performed, so the census page is still unmeasured). #714
+as PR #726: A1b declines the numeric-corroboration route on a text table instead of refusing it — the first
+version admitted a fabricated sentence on two numeric rows; text tables now need a page-judge acceptance or the
+#713 credential, so the cached BoE page still ships its marker, under an honest reason.
 
 ## Base state (clean before tickets)
 - `main@eb14c82`; census + plan on branch `docs/fed-ecb-census` (7015f46, d00fb11, 86db834, 7fea35a, +panel revision).
@@ -68,7 +77,7 @@ heading's block key). Filed: #713, #714, #717 (conftest neuters `shutil.which`).
 
 ## Next action
 D2 (route cost measurement) and F1b (derived-cell provenance) are the only remaining tickets
-on this board. Open issues still needing work: #643 (parked, needs font-size/bottom-rule evidence; PR #663 open as a
-draft), #707 (native fallback fidelity measurement, the only evidence behind #695's retention claim), #713
-(judge timeout discards a ladder-accepted candidate — the last blocker on the BoE text-table page), #714 (A1b
-twin), #717 (test hygiene). #688 and #703 closed by PRs #716 and #715; #709 by PR #720. #649/#652 closed by PR #695.
+on this board. Open issues still needing work: #643 (parked; PR #663 draft), #707 (native fallback fidelity measurement, the
+only evidence behind #695's retention claim), #717 (test hygiene). Next measurement: a fresh run of the BoE 2018
+excerpt with a live judge, to see whether #713's credential is minted and the text-table page ships.
+#688/#703/#709/#713/#714 closed by PRs #716/#715/#720/#725/#726. #649/#652 closed by PR #695.
