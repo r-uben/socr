@@ -329,12 +329,22 @@ def _native_page_has_column_lanes(words: list) -> bool:
     Reuses ``reconstruct.has_recurring_numeric_columns`` (GH-248's lane-reuse
     rule, both x0 and x1 anchors per GH-349) rather than a second
     implementation of "column lane".
+
+    Round 3 asks that helper for ``seeded_lanes`` rather than its default
+    adjacency clustering. The detector's greedy chaining is safe where its
+    answer is used positively but not here: one unrelated numeral printed
+    between two real columns (a footnote value at x=18 between columns at
+    x=12 and x=24, inside the 6pt tolerance of both) chains them into a single
+    lane, this gate returns False, term (b) abstains, and the truncated
+    candidate wins selection over the complete one. Recurrence-seeded lanes
+    cannot be bridged by a position that occurs once, so a NEGATIVE verdict
+    here means the page really has no recurring numeric columns.
     """
     if not words:
         return False
     from socr.tables.reconstruct import has_recurring_numeric_columns
 
-    return has_recurring_numeric_columns(words, _MIN_RECONCILABLE_LANES)
+    return has_recurring_numeric_columns(words, _MIN_RECONCILABLE_LANES, seeded_lanes=True)
 
 
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:

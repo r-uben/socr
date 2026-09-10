@@ -336,3 +336,126 @@ def test_real_boe_p1_difference_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     ungated = table_truncated(markdown, words)
 
     assert (ungated, gated) == (True, False)
+
+
+# ---------------------------------------------------------------------------
+# Astra's round-2 counterexample: one unrelated numeral bridging two columns
+# ---------------------------------------------------------------------------
+#
+# Round 2 asked the detector its lane question with its own greedy adjacency
+# clustering, in which an x position joins the running lane whenever it is
+# within the tolerance of the PREVIOUS one. A single footnote value printed
+# between two real columns is then inside the tolerance of both and chains
+# them into one lane, the gate returns False, term (b) abstains, and the
+# truncated candidate wins selection over the complete one. Round 3 seeds
+# lanes on recurrence instead: a position that occurs once can join a lane but
+# can never found or bridge one.
+
+
+def _bridged_sparse_prefix() -> tuple[str, str, list[tuple]]:
+    """``_sparse_prefix_fixture`` plus one unrelated footnote value.
+
+    Astra's geometry verbatim: ``999`` at x0=18, x1=26, on its own band, whose
+    left edge is 6pt from both column x0s (12 and 24) and whose right edge is
+    6pt from both column x1s (20 and 32). Neither the table nor either
+    candidate changes.
+    """
+    complete, truncated, words = _sparse_prefix_fixture()
+    return (
+        complete,
+        truncated,
+        words + [(0.0, 500.0, 8.0, 510.0, "Note"), (18.0, 500.0, 26.0, 510.0, "999")],
+    )
+
+
+def test_one_off_bridge_does_not_collapse_recurring_lanes() -> None:
+    """The clustering difference itself, pinned on the two lane builders.
+
+    Adjacency chains the two recurring columns through the one-off position;
+    recurrence-seeded clustering keeps them apart because ``18`` never founds
+    a lane and the two centres are further apart than the tolerance.
+    """
+    from socr.tables.reconstruct import _adjacent_lane_of, _seeded_lane_of
+
+    _, _, words = _bridged_sparse_prefix()
+    nums = [(w[0], round(w[1])) for w in words if w[4].replace(".", "").isdigit()]
+    xs = sorted({x for x, _ in nums})
+
+    adjacent = _adjacent_lane_of(xs)
+    seeded = _seeded_lane_of(nums, xs)
+
+    assert adjacent[12.0] == adjacent[24.0], "the bridge is what round 2 tripped over"
+    assert seeded[12.0] != seeded[24.0]
+    # the one-off position is absorbed, never a lane of its own
+    assert seeded[18.0] in {seeded[12.0], seeded[24.0]}
+
+
+def test_detector_entry_point_keeps_adjacency_clustering() -> None:
+    """``has_numeric_columns``' own answer is unchanged: the new clustering is
+    opt-in, so GH-248/GH-349's callers keep the behaviour they were measured on.
+    """
+    from socr.tables.reconstruct import has_recurring_numeric_columns
+
+    _, _, words = _bridged_sparse_prefix()
+
+    assert has_recurring_numeric_columns(words, 2) is False  # adjacency, as before
+    assert has_recurring_numeric_columns(words, 2, seeded_lanes=True) is True
+
+
+def test_one_off_numeric_bridge_does_not_disable_shortfall() -> None:
+    """Astra reproducer 4: the bridged page is still a numeric table, so the
+    two-row truncation is still caught.
+    """
+    _, truncated, bridged = _bridged_sparse_prefix()
+
+    assert _native_page_has_column_lanes(bridged) is True
+    assert table_truncated(truncated, bridged) is True
+
+
+def test_bridge_does_not_restore_truncated_winner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Astra reproducer 5, as a difference: with the gate forced open and with
+    the real gate, the complete gemini reading wins on the bridged page alike.
+    """
+    complete, truncated, bridged = _bridged_sparse_prefix()
+
+    def _winner():
+        page = _strict_page(
+            [_strict_grid_output("qwen", truncated), _grid_reading_output("gemini", complete)]
+        )
+        page.native_words = bridged
+        winner = structure_class_grid_winner(page)
+        return None if winner is None else winner.engine
+
+    gated = _winner()
+    monkeypatch.setattr(structure_check, "_native_page_has_column_lanes", lambda words: True)
+    ungated = _winner()
+
+    assert (ungated, gated) == ("gemini", "gemini")
+
+
+BOE_2003_PDF = Path.home() / "Data/socr/census-boe-2026-09-10/in/boe-meetings-2003-table-p15-17.pdf"
+
+
+@pytest.mark.skipif(not BOE_2003_PDF.exists(), reason="BoE census corpus not present")
+def test_real_boe_2003_pages_are_prose_not_tables() -> None:
+    """Astra's coverage probe, with its premise measured.
+
+    The three pages close the gate on both clusterings. That is not lost
+    coverage on a numeric table: the pages are the Bank's narrative annex, and
+    their 9/17/10 bands "at width two" are prose lines quoting two figures
+    each. No band puts a numeral in two recurring lanes on either anchor, which
+    is the shape term (b) needs to reconcile anything at all.
+    """
+    import pymupdf
+
+    from socr.tables.reconstruct import has_recurring_numeric_columns
+
+    with pymupdf.open(BOE_2003_PDF) as doc:
+        pages = [(p.get_text(), list(p.get_text("words"))) for p in doc]
+
+    assert "ANNEX:  SUMMARY OF DATA PRESENTED BY BANK STAFF" in pages[0][0]
+    assert "|" not in pages[1][0], "no pipe table, and no ruled table to read as one"
+
+    for text, words in pages:
+        assert _native_page_has_column_lanes(words) is False
+        assert has_recurring_numeric_columns(words, 2) is False

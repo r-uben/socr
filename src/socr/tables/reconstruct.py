@@ -567,7 +567,12 @@ def has_numeric_columns(page) -> bool:
     return has_recurring_numeric_columns(words)
 
 
-def has_recurring_numeric_columns(words: list, min_lanes_per_row: int = _MIN_LANES_PER_ROW) -> bool:
+def has_recurring_numeric_columns(
+    words: list,
+    min_lanes_per_row: int = _MIN_LANES_PER_ROW,
+    *,
+    seeded_lanes: bool = False,
+) -> bool:
     """``has_numeric_columns``' test on a WORD LIST rather than a page.
 
     Factored out for #703 so a caller that already holds
@@ -578,8 +583,24 @@ def has_recurring_numeric_columns(words: list, min_lanes_per_row: int = _MIN_LAN
 
     *min_lanes_per_row* is how many COLUMN-LIKE lanes a band must populate at
     once to count as a data row; "column-like" (recurrence over at least
-    ``_MIN_TABLE_ROWS`` bands) is unchanged and not a caller's choice. The
-    default reproduces ``has_numeric_columns`` exactly.
+    ``_MIN_TABLE_ROWS`` bands) is unchanged and not a caller's choice.
+
+    *seeded_lanes* selects how x positions are grouped into lanes:
+
+    ``False`` (default) keeps this function byte-identical to
+    ``has_numeric_columns`` for its existing callers -- greedy adjacency, in
+    which any x position within ``_LANE_X_TOL_PT`` of the previous one extends
+    the current lane.
+
+    ``True`` uses recurrence-seeded lanes instead (``_seeded_lane_of``), where
+    only x positions that themselves recur down the page may found a lane and a
+    one-off position can never merge two of them. Adjacency chaining is
+    acceptable when the answer is used POSITIVELY (a merged lane can only lower
+    the lane count, so the detector stays conservative about claiming a grid),
+    but #703 uses a NEGATIVE verdict to switch a loss guard off -- there an
+    under-count is the unsafe direction, and one unrelated footnote numeral
+    landing between two real columns was enough to collapse them into one lane
+    and disable A2's shortfall term on a genuinely numeric table.
     """
     numeric_words = [w for w in words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
     if len(numeric_words) < min_lanes_per_row * _MIN_TABLE_ROWS:
@@ -597,28 +618,103 @@ def has_recurring_numeric_columns(words: list, min_lanes_per_row: int = _MIN_LAN
     # only the anchor changes. Scatter has neither a stable left nor a stable
     # right edge, so it still fails on both.
     return any(
-        _numeric_columns_on_anchor(numeric_words, edge, min_lanes_per_row) for edge in (0, 2)
+        _numeric_columns_on_anchor(
+            numeric_words, edge, min_lanes_per_row, seeded_lanes=seeded_lanes
+        )
+        for edge in (0, 2)
     )
 
 
-def _numeric_columns_on_anchor(
-    numeric_words: list, edge: int, min_lanes_per_row: int = _MIN_LANES_PER_ROW
-) -> bool:
-    """``has_numeric_columns``' lane test, keyed on one edge (0 = x0, 2 = x1)."""
-    nums = [(w[edge], round(w[1])) for w in numeric_words]
+def _adjacent_lane_of(xs: list[float]) -> dict[float, int]:
+    """Greedy adjacency clustering: the original ``has_numeric_columns`` lanes.
 
-    xs = sorted({x for x, _ in nums})
+    Every x position joins the running lane when it is within
+    ``_LANE_X_TOL_PT`` of the PREVIOUS one, so a chain of near-neighbours can
+    span far more than the tolerance and a single intermediate position can
+    merge two clusters. Kept unchanged for the detector's positive use.
+    """
     lanes: list[list[float]] = []
     for x in xs:
         if lanes and x - lanes[-1][-1] <= _LANE_X_TOL_PT:
             lanes[-1].append(x)
         else:
             lanes.append([x])
-    lane_of = {x: i for i, lane in enumerate(lanes) for x in lane}
+    return {x: i for i, lane in enumerate(lanes) for x in lane}
+
+
+def _seeded_lane_of(nums: list[tuple[float, float]], xs: list[float]) -> dict[float, int]:
+    """Recurrence-seeded clustering (#703): only a recurring x founds a lane.
+
+    Three steps, none of which introduces a threshold of its own:
+
+    1. **Seed.** An x position is a seed when the bands (rounded y) carrying a
+       numeral within ``_LANE_X_TOL_PT`` of it number at least
+       ``_MIN_TABLE_ROWS`` -- the same recurrence already required of a
+       column-like lane downstream. A footnote value printed once is not a seed.
+    2. **Found lanes.** Seeds are taken in order of decreasing recurrence
+       (ties by x, so the result is deterministic) and each founds a new lane
+       unless it lies within the tolerance of an already-founded one. Lane
+       identity is therefore a distance to a fixed centre, never a chain: two
+       centres more than the tolerance apart can never be merged, by a one-off
+       position or by another seed.
+    3. **Assign.** Every remaining x joins the nearest centre within the
+       tolerance (ties by lane order); an x within reach of no centre is
+       dropped, contributing to no row's lane set.
+
+    The returned mapping therefore need not cover *xs*.
+    """
+    bands_at: dict[float, set] = {}
+    for x, y in nums:
+        bands_at.setdefault(x, set()).add(y)
+
+    seed_bands: dict[float, int] = {}
+    for i, x in enumerate(xs):  # xs is sorted, so the neighbourhood is a window
+        near_bands: set = set()
+        for j in range(i, -1, -1):
+            if x - xs[j] > _LANE_X_TOL_PT:
+                break
+            near_bands |= bands_at[xs[j]]
+        for j in range(i + 1, len(xs)):
+            if xs[j] - x > _LANE_X_TOL_PT:
+                break
+            near_bands |= bands_at[xs[j]]
+        if len(near_bands) >= _MIN_TABLE_ROWS:
+            seed_bands[x] = len(near_bands)
+
+    centres: list[float] = []
+    for x in sorted(seed_bands, key=lambda seed: (-seed_bands[seed], seed)):
+        if all(abs(x - centre) > _LANE_X_TOL_PT for centre in centres):
+            centres.append(x)
+
+    lane_of: dict[float, int] = {}
+    for x in xs:
+        reachable = [
+            (abs(x - centre), lane)
+            for lane, centre in enumerate(centres)
+            if abs(x - centre) <= _LANE_X_TOL_PT
+        ]
+        if reachable:
+            lane_of[x] = min(reachable)[1]
+    return lane_of
+
+
+def _numeric_columns_on_anchor(
+    numeric_words: list,
+    edge: int,
+    min_lanes_per_row: int = _MIN_LANES_PER_ROW,
+    *,
+    seeded_lanes: bool = False,
+) -> bool:
+    """``has_numeric_columns``' lane test, keyed on one edge (0 = x0, 2 = x1)."""
+    nums = [(w[edge], round(w[1])) for w in numeric_words]
+
+    xs = sorted({x for x, _ in nums})
+    lane_of = _seeded_lane_of(nums, xs) if seeded_lanes else _adjacent_lane_of(xs)
 
     row_lanes: dict[float, set] = {}
     for x, y in nums:
-        row_lanes.setdefault(y, set()).add(lane_of[x])
+        if x in lane_of:
+            row_lanes.setdefault(y, set()).add(lane_of[x])
 
     # GH-248: a lane only counts if it behaves like a COLUMN -- i.e. it recurs down
     # the page. A borderless table reuses the same x positions row after row; a

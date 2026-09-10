@@ -127,23 +127,95 @@ cached qwen `PageOutput`, against this worktree's source.
 So this change is proven at the predicate and at S1 selection; it is NOT proven
 to be the last blocker on the census page itself.
 
+## Round 3: recurrence-seeded lanes (Astra's bridge counterexample)
+
+Round 2 asked `reconstruct.has_recurring_numeric_columns` its lane question with
+that detector's own clustering: x positions are sorted and each one joins the
+running lane when it is within `_LANE_X_TOL_PT` of the **previous** one. That is
+single-linkage chaining, and a chain can span arbitrarily more than the
+tolerance.
+
+Astra's counterexample: in the sparse-prefix fixture the recurring columns sit
+at x0 = 12 and x0 = 24. Print one unrelated footnote value `999` at x0 = 18,
+x1 = 26, on a band of its own. Its left edge is 6pt from both column left edges
+and its right edge is 6pt from both column right edges, so on **both** anchors
+the two columns chain into a single lane. The gate returns False, term (b)
+abstains, and selection flips from the complete gemini reading to the truncated
+qwen one. The bridging word never recurs; it only has to exist once.
+
+Chaining is safe where the detector's answer is used positively -- merging lanes
+can only lower the lane count, so `has_numeric_columns` stays conservative about
+claiming a grid. #703 introduced the first NEGATIVE use, where an under-count
+switches a loss guard off. The fix is scoped to that use.
+
+`has_recurring_numeric_columns(..., seeded_lanes=True)` clusters by recurrence
+instead of adjacency (`reconstruct._seeded_lane_of`), in three steps and with no
+constant of its own:
+
+1. **Seed.** An x position is a seed when the bands carrying a numeral within
+   `_LANE_X_TOL_PT` of it number at least `_MIN_TABLE_ROWS` -- the same
+   recurrence already required of a column-like lane downstream.
+2. **Found.** Seeds are taken in order of decreasing recurrence (ties by x) and
+   each founds a lane unless it is within the tolerance of one already founded.
+   Lane identity is a distance to a fixed centre, never a chain, so two centres
+   more than the tolerance apart can never be merged.
+3. **Assign.** Every other x joins the nearest centre within the tolerance; an x
+   within reach of no centre is dropped and contributes to no row's lane set.
+
+`has_numeric_columns` and every other existing caller keep adjacency clustering
+(`seeded_lanes` defaults to False), pinned by
+`test_detector_entry_point_keeps_adjacency_clustering`.
+
+### Why direction (B) was not taken
+
+The alternative offered was to treat an ambiguous lane count (a lane whose span
+exceeds the tolerance, i.e. chaining occurred) as evidence that the page HAS
+lanes, so the loss guard fails closed. Measured, that rule fires on the ticket's
+own page: BoE 2018 p1 clusters its 16 x0 positions into chained lanes, so (B)
+would report lanes there and leave #703 unfixed. (A) discriminates; (B) does not.
+
+### The BoE 2003 "coverage loss" premise, measured
+
+Astra's coverage probe is correct about the verdicts and wrong about the pages.
+Seeded clustering changes no verdict anywhere on the census corpus (45 pages,
+BoE + ECB + Banxico): the gate result is identical to round 2 on every one. The
+three `boe-meetings-2003-table-p15-17` pages still close it -- because they are
+not tables. They are the Bank's narrative annex ("ANNEX: SUMMARY OF DATA
+PRESENTED BY BANK STAFF"), continuous prose whose lines quote two figures each:
+
+| page | native bands at width 2 | recurring lanes (x0) | bands populating 2 recurring lanes | gate |
+| --- | --- | --- | --- | --- |
+| boe-meetings-2003 p1 | 9 | 1 | 0 | False |
+| boe-meetings-2003 p2 | 17 | 3 | 0 | False |
+| boe-meetings-2003 p3 | 10 | 2 | 1 | False |
+| banxico-2018 p3 | 11 | 4 | 0 | False |
+| boe-minutes-1997 p1-p3 | 0 | 0 | 0 | False (no text layer at all) |
+| boe-meetings-2018 p1 (the ticket) | 4 | 2 | 0 | False |
+| boe-meetings-2018 p2 / p3 | 12 / 14 | 6 / 6 | 2 / 4 | True |
+| ecb-reports-2003 p2 | 41 | 23 | 41 | True |
+| ecb-surveys-2018 p1-p3 | 13 / 12 / 13 | 11 / 12 / 10 | 12 / 11 / 12 | True |
+
+Those width-2 bands are prose lines, not rows: no band puts numerals in two
+different recurring lanes, which is the shape term (b) needs before it can
+reconcile anything. This is exactly the class #703 was filed for, so closing the
+gate there is the intended behaviour rather than a price paid for it. The 1997
+scans have no text layer, so term (b) already abstained at `if not words`.
+
+Pinned by `test_real_boe_2003_pages_are_prose_not_tables`, which asserts the
+annex heading and the absence of any table before asserting the verdicts.
+
 ## Residuals
 
-- **The gate disarms term (b) on some real numeric table pages.** Measured over
-  the BoE and ECB census inputs (27 + 18 pages, gate verdict per page):
-  every ECB annex page and the BoE speech table pages open the gate, but
-  `boe-meetings-2003-table-p15-17` closes on all three pages despite carrying
-  9/17/10 table-shaped native bands at width 2, and so do the Banxico and 1997
-  scan pages. On those pages A2 now relies on term (a) alone. No content loss
-  was observed there (that excerpt shipped 97% of its numbers in the census),
-  but this is a genuine reduction in term (b)'s coverage, in the fail-open
-  direction for A2 and the fail-closed direction for content.
-- The likely mechanism is lane chaining: `_LANE_X_TOL_PT` clustering is greedy
-  and adjacency-based, so a page whose numeric x-positions are dense collapses
-  into one lane. Reproduced on a synthetic GH-643 shape (3 aligned data rows
-  plus 5 footnote bands at a different pitch): all lanes chain into one and the
-  gate closes. Fixing the clustering is out of scope here and belongs with
-  #642/#643.
+- **The gate's per-page verdicts over the census corpus** are tabulated in the
+  round-3 section. Every page that closes it was measured to be prose or to
+  have no text layer.
+- **Superseded in round 3.** The residual above described the round-2 gate.
+  Lane chaining is now eliminated for this use (see the round-3 section), and
+  the pages the round-2 residual named as lost coverage were measured to be
+  prose, not numeric tables. What remains true is narrower: term (b) is armed
+  only on pages showing recurring numeric columns, so a genuinely tabular page
+  whose columns are too sparse to recur over three bands relies on term (a)
+  alone. No such page was found in the 45-page census corpus.
 - **#643 is untouched.** It lives at a different call site
   (`manifest._row_shape_reconciliation_ok`, A1b), which this change does not
   modify. On the synthetic GH-643 shape the lane gate closes (above), so if that
