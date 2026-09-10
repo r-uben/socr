@@ -38,6 +38,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
+from socr.tables.label_canonical import canonicalize_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +302,16 @@ def route_page(
 
         if remaining_budget is not None:
             remaining_budget -= prof.cost_per_page_usd
+
+        # #688 -- THE candidate boundary. This is where a provider's proposed
+        # ``PageOutput.text`` becomes the candidate everything downstream
+        # judges, selects, binds, adjudicates and persists, so it is where its
+        # table row labels are canonicalised (decode the intended entities,
+        # drop the presentation indentation). Row/column counts and every
+        # value cell are untouched, so no physical cell reference moves. The
+        # provider's raw bytes remain immutable provenance in the transcript
+        # the caller keeps; what changes is the candidate.
+        canonicalize_candidate(output)
 
         try:
             decision = judge.assess(output, prof)
@@ -998,7 +1009,11 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
         if repair_count == 0:
             return vr
 
+        # #688: the repair produced a NEW candidate, so it crosses the same
+        # boundary before anything measures it -- the verifier included.
         output.text = repaired_text
+        canonicalize_candidate(output)
+        repaired_text = output.text
         new_vr = verify_native_table(fitz_page, repaired_text)
         self._emit_event(
             page_num=output.page_num,

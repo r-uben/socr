@@ -85,6 +85,7 @@ from socr.judge.table_verdict import (
 from socr.pipeline.agentic import route_page
 from socr.tables.extract import probe_ollama_idle, probe_openai_server_idle
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
+from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
 
 
 def _latched_rung_kinds(state: "DocumentState", page_nums) -> list[str]:
@@ -4943,6 +4944,11 @@ class UnifiedPipeline:
                     _record_attempt_cost()
                     return False, bo
 
+                # #688: the escalation candidate crosses the same boundary
+                # before ``decide_escalation`` measures it, so the comparison
+                # and the promoted bytes are the canonical ones.
+                canonicalize_candidate(out)
+
                 try:
                     decision = decide_escalation(page, incumbent_text, out.text)
                 except Exception:
@@ -7846,6 +7852,16 @@ class UnifiedPipeline:
                 if bo is None:
                     continue
 
+                # #688 backstop. Every routed candidate already crossed the
+                # boundary in ``route_page``; a page that reached here by any
+                # other door (the native lane, the chart/math lanes, a ledger
+                # restore) crosses it here, before table scoring, the crop
+                # reread, escalation, ``_run_table_judge_gate``'s
+                # ``prepare_table_witnesses`` / binding / adjudication, and the
+                # per-page flush. Idempotent, so for a routed page this is a
+                # no-op that leaves the object byte-identical.
+                canonicalize_candidate(bo)
+
                 # #123 TICKET-C2 scoring is NOT gated on the P5 signal: it must reach
                 # every page it reached before this branch, because it is the only
                 # surface `table_not_scorable` and `table_unexplained_lanes` ever get.
@@ -9230,7 +9246,11 @@ class UnifiedPipeline:
         # half-patched state (bo.text changed but event/counter missing).
         patched_delta = 0
         if result.patched:
+            # #688: a text replacement is a NEW candidate and crosses the
+            # boundary again -- before ``_rejudge_crop_patched_page`` compares
+            # it against the accepted bytes and re-judges it.
             bo.text = result.text
+            canonicalize_candidate(bo)
             patched_delta = 1
             if crop_repair_fallback:
                 bo.audit_notes.append(
@@ -10199,6 +10219,25 @@ class UnifiedPipeline:
             if not body.strip():
                 return None
             if is_page_failed_marker(body) and not is_ladder_withheld:
+                return None
+
+            # #688: derived evidence keyed to PRE-canonicalisation bytes is
+            # INVALIDATED, never dual-keyed. This ledger entry's audit verdict,
+            # ``markdown_sha256`` and ``markdown_table_identity`` were all
+            # computed over the body as written; if that body is not already
+            # canonical, the verdict describes bytes that would not ship, so
+            # the page is reprocessed rather than lifted. Reprocessing runs the
+            # boundary and writes a canonical fragment, so this converges in one
+            # pass and cannot loop.
+            #
+            # It is inert in practice: ``_socr_source_digest`` hashes every
+            # shipped ``socr`` ``.py`` file into ``_run_fingerprint``, so a page
+            # made terminal by a socr that predates this change already fails
+            # the fingerprint gate above and never reaches here. This is the
+            # guard for the case the fingerprint cannot see -- a body assembled
+            # by a path that never crossed the boundary.
+            if canonicalize_table_labels(body)[1]:
+                logger.debug("#688: p%d ledger body is not label-canonical; reprocessing", page_num)
                 return None
 
             try:

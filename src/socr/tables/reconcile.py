@@ -754,6 +754,61 @@ def table_syntax_line_indices(lines: list[str]) -> set[int]:
     return syntax
 
 
+def table_body_row_indices(lines: list[str]) -> set[int]:
+    """Indices of *lines* that are BODY rows of a genuine markdown table.
+
+    #688. The same boundary discipline as :func:`table_syntax_line_indices`
+    -- a table is anchored to its strict separator row, and the body is the
+    run of DELIMITED lines below it -- but header band and separator are
+    excluded, because the one caller (``tables.label_canonical``) rewrites
+    ROW-LABEL cells only, exactly the cells ``binding.parse_grid``
+    normalises. Header cells are column titles; the binder leaves them
+    alone, so this must too.
+
+    Anchoring to the separator rather than to a run of pipe-bearing lines is
+    what keeps a pipe-carrying sentence next to a table out of the set.
+    """
+    # A grid inside a fence or an HTML comment is a code SAMPLE, not a reading
+    # of the page, and its labels are not this transform's business. The
+    # blanking helpers preserve line count, so the indices stay usable against
+    # the caller's real lines; if a line-ending shape ever breaks that
+    # alignment, fall back to the raw lines rather than return wrong indices.
+    probe = _markdown_content_lines("\n".join(lines))
+    if len(probe) < len(lines) and not any(ln.strip() for ln in lines[len(probe) :]):
+        # ``splitlines`` drops the empty element a trailing newline leaves in a
+        # ``split("\n")`` list; pad it back so the indices still line up.
+        probe = probe + [""] * (len(lines) - len(probe))
+    if len(probe) == len(lines):
+        lines = probe
+
+    body: set[int] = set()
+    run_start: int | None = None
+
+    def _close(start: int, end: int) -> None:
+        separators = [idx for idx in range(start, end) if _is_separator_row(_split_row(lines[idx]))]
+        for separator in separators:
+            idx = separator + 1
+            while idx < end:
+                stripped = lines[idx].strip()
+                if not (stripped.startswith("|") and stripped.endswith("|")):
+                    break
+                if not _is_separator_row(_split_row(lines[idx])):
+                    body.add(idx)
+                idx += 1
+
+    for idx, line in enumerate(lines):
+        if _is_table_line(line):
+            if run_start is None:
+                run_start = idx
+            continue
+        if run_start is not None:
+            _close(run_start, idx)
+            run_start = None
+    if run_start is not None:
+        _close(run_start, len(lines))
+    return body
+
+
 def _parse_grid(rows: list[str]) -> list[list[str]]:
     """Parse markdown rows into a cell grid, dropping the separator row."""
     grid: list[list[str]] = []
