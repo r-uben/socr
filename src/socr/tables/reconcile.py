@@ -17,8 +17,11 @@ authoritative. This module:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 _PIPE_LINE = re.compile(r"^\s*\|?.*\|.*$")  # a markdown table row contains a pipe
 _SEP_CELL = re.compile(r"^:?-{1,}:?$")  # ---, :---, ---:, :---: separator cell
@@ -761,17 +764,27 @@ def _aligned_content_lines(lines: list[str]) -> list[str] | None:
     recognises boundaries ``split("\n")`` does not (VT, FF, FS/GS/RS, NEL,
     U+2028, U+2029). Callers that hold their own ``split("\n")`` list cannot
     use its output as an index map. This applies the same two blanking passes
-    directly to the caller's list and returns ``None`` when the result cannot
-    be aligned, so a mismatch abstains instead of silently unmasking fences.
+    directly to the caller's list.
+
+    An unclosed ``<!--`` truncates the masked text (deliberately, see
+    ``_strip_html_comments``). Round 3: rather than abandon the whole page,
+    keep the prefix that IS mapped -- dropping its last, possibly partial line
+    -- and blank the unmapped tail, so a table above the malformed comment is
+    still reachable while nothing below it is touched. ``None`` means not even
+    a prefix survives.
     """
-    masked = _strip_html_comments("\n".join(lines)).split("\n")
-    if len(masked) != len(lines):
-        # An unclosed ``<!--`` truncates the text: fail closed.
+    head = _strip_html_comments("\n".join(lines)).split("\n")
+    if len(head) > len(lines):  # defensive: the mask may only shrink
         return None
-    masked = _strip_fenced_regions(masked)
-    if len(masked) != len(lines):
+    if len(head) < len(lines):
+        head = head[:-1]  # the truncation can cut mid-line
+        if not head:
+            return None
+    masked = _strip_fenced_regions(head)
+    if len(masked) != len(head):
         return None
-    return ["" if _INDENTED_CODE.match(line) else line for line in masked]
+    masked = ["" if _INDENTED_CODE.match(line) else line for line in masked]
+    return masked + [""] * (len(lines) - len(masked))
 
 
 def table_body_row_indices(lines: list[str]) -> set[int]:
@@ -798,7 +811,10 @@ def table_body_row_indices(lines: list[str]) -> set[int]:
     # so no rewrite.
     masked = _aligned_content_lines(lines)
     if masked is None:
+        logger.debug("#688: no line mapping for this text; no label cell is canonicalised")
         return set()
+    if masked.count("") > lines.count(""):
+        logger.debug("#688: label canonicalisation narrowed to the mapped prefix of this text")
     lines = masked
 
     body: set[int] = set()

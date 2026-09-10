@@ -37,17 +37,19 @@ What the transform may do, and nothing else:
   ``reconcile._markdown_content_lines`` split with ``str.splitlines``, which
   also breaks on VT, FF, FS/GS/RS, NEL, U+2028 and U+2029. They are
   enumerated in ``_LINE_BOUNDARIES`` and each one is pinned by a test.
-* **Round-tripping is verified, not assumed.** ``html.unescape`` implements
-  the html5 replacement table, so a numeric reference to a C0 control or to
-  the C1 range does NOT come back (``&#11;`` decodes to nothing, ``&#133;``
-  to U+2026). A decoded label carrying such a character therefore has no
-  serialised form, and the cell is left exactly as found -- fail closed, no
-  coordinate move. Which characters survive is decided by asking
-  ``html.unescape`` at import time, not by a hand-written list.
+* **An entity that spells active syntax is left alone.** Decoding is not
+  meaning-preserving: ``&lt;b&gt;X&lt;/b&gt;`` decodes to a live CommonMark
+  tag and ``&ast;important&ast;`` to italics, so a label's own punctuation
+  would vanish from the rendered corpus. Any entity whose value is a single
+  Markdown/HTML syntax character is restored with its ORIGINAL spelling; only
+  the rest decodes. Nothing is ever newly encoded, so a literal ``&`` in
+  ``R&D`` stays literal and a clean label is never churned. A LITERAL line
+  boundary in the decoded remainder leaves the whole cell unchanged --
+  serialising it would move a row.
 * **Idempotent, per cell, mechanically.** The serialisation chosen for a
   cell is accepted only if ``decode_label_cell`` maps it back to the decoded
-  label it came from; a second application then recomputes the same choice
-  and is a byte-for-byte no-op. That is also the invariant #688 needs: the
+  label the raw cell reads as; a second application then recomputes the same
+  choice and is a byte-for-byte no-op. That is also the invariant #688 needs: the
   binder's view of the shipped label equals the binder's view of the raw
   one. Nested escapes are the reason a plain "decode to a fixed point"
   would be wrong -- ``&amp;nbsp;X`` means the literal text ``&nbsp;X``, and
@@ -91,19 +93,6 @@ _LINE_BOUNDARIES = (
 #: the module docstring.
 _STRUCTURAL = ("|",) + _LINE_BOUNDARIES
 
-#: The subset of ``_STRUCTURAL`` that a numeric character reference actually
-#: round-trips, asked of ``html.unescape`` rather than assumed: html5 drops a
-#: numeric reference to a C0 control and remaps the C1 range, so VT, FS, GS, RS
-#: and NEL have no representation. A label needing one of them is left alone.
-_ENTITY = {
-    char: f"&#{ord(char)};" for char in _STRUCTURAL if html.unescape(f"&#{ord(char)};") == char
-}
-
-#: Structural characters with no serialised form. Their presence in a decoded
-#: label makes the cell unrepresentable, so it is not rewritten.
-_UNREPRESENTABLE = tuple(char for char in _STRUCTURAL if char not in _ENTITY)
-
-
 #: Markdown cell padding: the ASCII run around a cell's content. Deliberately
 #: NOT ``str.strip``, which also eats the U+00A0 indentation this transform
 #: exists to remove -- stripping it as padding would leave the raw line
@@ -120,36 +109,79 @@ def decode_label_cell(text: str) -> str:
     return _LEADING_WS_RE.sub("", html.unescape(text))
 
 
-def _serialise_label(decoded: str) -> str | None:
-    """The page-markdown form of an already-decoded label, or ``None``.
+#: Characters that are ACTIVE Markdown or HTML syntax inside a table cell.
+#: #688 round 3: decoding is not meaning-preserving. ``&lt;b&gt;X&lt;/b&gt;``
+#: decodes to ``<b>X</b>``, which CommonMark then reads as a live tag, and
+#: ``&ast;important&ast;`` decodes to ``*important*``, which the review
+#: renderer emits as italics -- the label's own punctuation disappears from
+#: the visible text. An entity that spells one of these is doing real work and
+#: is kept exactly as written.
+_ACTIVE_SYNTAX = frozenset("<>&*_`[]\\~|")
 
-    Two candidate serialisations are tried, cheapest first: leave literal
-    ampersands alone, or escape every one of them as ``&amp;``. The first
-    whose ``decode_label_cell`` is *exactly* ``decoded`` wins. That check is
-    what makes the transform idempotent (a second pass recomputes the same
-    choice from the same decoded label) and what keeps the binder's reading of
-    the shipped cell equal to its reading of the raw cell. ``None`` means no
-    faithful form exists and the caller must leave the cell untouched.
+#: Block-level markers. Inert inside a GFM cell, but an entity spelling one is
+#: still deliberate, and preserving it costs nothing: this set only ever
+#: PREVENTS a rewrite, it never introduces an entity that was not there.
+_LEADING_SYNTAX = frozenset("#>-+=")
+
+#: The characters an entity is allowed to keep spelling.
+_KEEP_ENCODED = _ACTIVE_SYNTAX | _LEADING_SYNTAX | frozenset(_STRUCTURAL)
+
+#: A character reference, named or numeric, with or without its semicolon
+#: (html5 accepts both). Used only to LOCATE candidates; what each one means
+#: is decided by ``html.unescape``, never by this pattern.
+_ENTITY_REF_RE = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});?")
+
+#: Placeholder delimiter for a kept entity. NUL cannot occur in extracted page
+#: text and is not whitespace, so it neither collides with content nor lets a
+#: kept entity be mistaken for strippable indentation.
+_KEEP_MARK = "\x00"
+
+
+def _canonical_cell(text: str) -> str:
+    """The page-markdown form of a label cell. Idempotent; may be *text*.
+
+    One level of decoding, with the entities that spell active syntax held
+    back. Concretely:
+
+    * an entity whose value is a single character in ``_KEEP_ENCODED`` is
+      restored VERBATIM -- same spelling, same bytes -- so ``&lt;``,
+      ``&ast;``, ``&amp;`` and ``&#124;`` all survive untouched and the
+      shipped label stays literal;
+    * everything else decodes, which is the ticket's actual target: the
+      ``&nbsp;`` runs the model emits as sub-row indentation;
+    * a LITERAL line-boundary character in the decoded remainder makes the
+      cell unrepresentable, and the cell is returned unchanged rather than
+      rewritten around a row split this transform is forbidden to make.
+
+    Nothing is ever newly encoded, so a literal ``&`` in ``R&D`` stays literal
+    and a clean label is never churned. The result is verified by decoding it
+    back: if it does not read as the raw cell reads, the raw cell is returned.
     """
-    if any(char in decoded for char in _UNREPRESENTABLE):
-        return None
-    for escape_amp in (False, True):
-        candidate = decoded.replace("&", "&amp;") if escape_amp else decoded
-        for char, entity in _ENTITY.items():
-            candidate = candidate.replace(char, entity)
-        if decode_label_cell(candidate) == decoded:
-            return candidate
-    return None
+    kept: list[str] = []
+
+    def _hold(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        value = html.unescape(raw)
+        if len(value) == 1 and value in _KEEP_ENCODED:
+            kept.append(raw)
+            return f"{_KEEP_MARK}{len(kept) - 1}{_KEEP_MARK}"
+        return raw
+
+    held = _ENTITY_REF_RE.sub(_hold, text)
+    decoded_rest = _LEADING_WS_RE.sub("", html.unescape(held))
+    if any(char in decoded_rest for char in _LINE_BOUNDARIES):
+        return text
+    result = re.sub(
+        rf"{_KEEP_MARK}(\d+){_KEEP_MARK}", lambda m: kept[int(m.group(1))], decoded_rest
+    )
+    if decode_label_cell(result) != decode_label_cell(text):
+        return text
+    return result
 
 
 def canonicalize_label_cell(text: str) -> str:
-    """``decode_label_cell`` for a cell that must go back into page markdown.
-
-    Idempotent, and a no-op when the decoded label has no faithful markdown
-    form (see :func:`_serialise_label`).
-    """
-    serialised = _serialise_label(decode_label_cell(text))
-    return text if serialised is None else serialised
+    """The shipped form of a label cell. See :func:`_canonical_cell`."""
+    return _canonical_cell(text)
 
 
 def _canonicalize_row(line: str) -> tuple[str, bool]:

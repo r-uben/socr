@@ -24,17 +24,40 @@ from socr.core.document import DocumentHandle
 from socr.core.result import DocumentStatus, EngineResult, FailureMode, PageOutput
 
 
-def _canonical_native_text(text: str | None) -> str | None:
+def _canonical_native_text(text: str | None, identities: list[str]) -> tuple[str | None, list[str]]:
     """#688: the native candidate's table labels, canonicalised.
+
+    Returns the text to use and the region identities that go with it. Regions
+    already cross this boundary during extraction, so for a current assessment
+    this is a no-op; it stays as the backstop for a page whose text reaches
+    ingestion by another door.
+
+    The identities are the reason this cannot simply rewrite the text.
+    ``_verify_regions`` hashes each region during extraction, and D3's regional
+    splice matches those hashes against the page's parsed blocks 1:1 -- rewrite
+    one side only and every region fails to match, so the floor drops a healthy
+    sibling table and ships the whole-page marker. So: rebuild the identities
+    through a PROVEN mapping (same block count, and the recorded identities are
+    exactly this text's blocks, in order), or leave the text alone. Never
+    rewrite one side, never bypass the match.
 
     Imported lazily so ``socr.core.state`` keeps no import-time dependency on
     the table package (which pulls PyMuPDF through ``socr.tables.locate``).
     """
     if not text:
-        return text
+        return text, identities
     from socr.tables.label_canonical import canonicalize_table_labels
+    from socr.tables.reconcile import find_table_blocks, table_grid_identity
 
-    return canonicalize_table_labels(text)[0]
+    canonical = canonicalize_table_labels(text)[0]
+    if canonical == text or not identities:
+        return canonical, identities
+    before = [table_grid_identity(b.grid) for b in find_table_blocks(text)]
+    after = [table_grid_identity(b.grid) for b in find_table_blocks(canonical)]
+    if before != list(identities) or len(after) != len(before):
+        logger.debug("native label canonicalisation abstains: region identities are unmappable")
+        return text, identities
+    return canonical, after
 
 
 logger = logging.getLogger(__name__)
@@ -569,8 +592,11 @@ class DocumentState:
                     # bytes are the ones ``_load_terminal_page`` accepts on
                     # resume. The extractor's own bytes stay in
                     # ``native_text_raw``.
+                    _identities = list(getattr(pa, "native_table_region_identities", []) or [])
                     ps.native_text_raw = pa.native_text
-                    ps.native_text = _canonical_native_text(pa.native_text)
+                    ps.native_text, _identities = _canonical_native_text(
+                        pa.native_text, _identities
+                    )
                     ps.needs_ocr_enhancement = pa.needs_ocr_enhancement
                     # Propagate the backward-compatible native-table aggregate
                     # (raw emission, raw content, and parsed shape defects).
@@ -605,9 +631,9 @@ class DocumentState:
                         getattr(pa, "native_table_unverifiable_ordinals", []) or []
                     )
                     ps.native_table_region_count = getattr(pa, "native_table_region_count", 0)
-                    ps.native_table_region_identities = list(
-                        getattr(pa, "native_table_region_identities", []) or []
-                    )
+                    # #688: these travel WITH the text they were computed
+                    # from -- see ``_canonical_native_text``.
+                    ps.native_table_region_identities = _identities
                     # GH-520: the independent signal, carried alongside the
                     # parser-derived one it exists to contradict.
                     ps.detected_table_count = getattr(pa, "detected_table_count", 0)

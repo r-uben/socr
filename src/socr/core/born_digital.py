@@ -3198,6 +3198,18 @@ class BornDigitalDetector:
         # This is documented as a known limitation in the design note §1b.
         table_regions.sort(key=lambda tr: tr[0].y0)
 
+        # #688 round 3: the native regions cross the label-canonicalisation
+        # boundary HERE, before ``_verify_regions`` hashes them and before they
+        # are interleaved into the page text. Both derive from the same bytes,
+        # so ``markdown_table_identity`` keeps matching the shipped table and
+        # D3's regional splice can still retain a healthy sibling. Doing this
+        # downstream (at ingestion) rewrote the text after the identities were
+        # already computed, and the splice then refused every region and shipped
+        # the whole-page marker instead -- real content loss.
+        from socr.tables.label_canonical import canonicalize_table_labels
+
+        table_regions = [(rect, canonicalize_table_labels(md)[0]) for rect, md in table_regions]
+
         # TR-2/TR-3 per-region verifier scoping: verify each table region
         # independently against its own native numeric lanes.  The whole-page
         # verifier (verify_native_table) combines lanes from ALL tables on the

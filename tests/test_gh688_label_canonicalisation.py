@@ -24,6 +24,7 @@ never an absolute outcome.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,6 @@ from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.binding import bind, parse_grid
 from socr.tables.label_canonical import (
     _LINE_BOUNDARIES,
-    _UNREPRESENTABLE,
     canonicalize_candidate,
     canonicalize_label_cell,
     canonicalize_table_labels,
@@ -246,11 +246,11 @@ def test_gh688_decoding_cannot_manufacture_a_cell_or_a_row() -> None:
     assert len(grid.rows[0]) == 2
     assert grid.rows[0][0] == "|split\nhere"
 
-    # And the entity NAME form collapses onto the numeric one, once.
+    # The entity NAME form is kept as WRITTEN (#688 round 3: an entity that
+    # spells structure or active syntax is never respelled, only preserved).
     named = "| Item | A |\n| --- | --- |\n| &vert;split | 1 |\n"
-    once, _ = canonicalize_table_labels(named)
-    assert once == "| Item | A |\n| --- | --- |\n| &#124;split | 1 |\n"
-    assert canonicalize_table_labels(once)[1] == 0
+    once, changed_named = canonicalize_table_labels(named)
+    assert (once, changed_named) == (named, 0)
     assert len(parse_grid(once).rows[0]) == 2
 
 
@@ -507,13 +507,11 @@ def test_gh688_no_decoded_boundary_can_split_a_row(char: str) -> None:
     assert resolve_cell_refs(canonical, ["R1C1"]) == resolve_cell_refs(raw, ["R1C1"])
 
 
-def test_gh688_an_unrepresentable_boundary_leaves_the_cell_alone() -> None:
-    """html5 unescaping does not round-trip a numeric reference to VT, FS, GS,
-    RS or NEL. Those characters therefore have no serialised form, and a cell
-    whose decoded label carries one literally is left exactly as found rather
-    than rewritten into something that would split the row."""
-    assert set(_UNREPRESENTABLE) == {"\v", "\x1c", "\x1d", "\x1e", "\x85"}
-    for char in _UNREPRESENTABLE:
+def test_gh688_a_literal_boundary_character_leaves_the_cell_alone() -> None:
+    """A LITERAL line boundary in the decoded remainder has no serialised form
+    that keeps the row where it is, so the cell is returned unchanged. (An
+    ENTITY that spells one is kept encoded instead -- see the round-3 rule.)"""
+    for char in ("\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
         cell = f"&nbsp;A{char}B"
         assert canonicalize_label_cell(cell) == cell
 
@@ -700,7 +698,255 @@ def test_gh688_a_unicode_separator_does_not_unmask_a_fence() -> None:
 
 
 def test_gh688_an_unalignable_mask_abstains() -> None:
-    """An unclosed HTML comment truncates the masked text, so no index map can
-    be built. Abstain (no rewrite) rather than fall back to unmasked lines."""
+    """An unclosed HTML comment truncates the masked text. Nothing below it is
+    mapped, so nothing below it is rewritten."""
     raw = "<!-- unterminated\n| Item | A |\n| --- | --- |\n| &nbsp;X | 1 |\n"
     assert canonicalize_table_labels(raw) == (raw, 0)
+
+
+def test_gh688_the_mapped_prefix_is_kept_when_the_tail_is_unmappable() -> None:
+    """Round 3 narrows that abstention: a table ABOVE the malformed comment is
+    still canonicalised, while the unmapped tail stays untouched. Pinned as the
+    difference between the two halves of one document."""
+    above = "| Item | A |\n| --- | --- |\n| &nbsp;Above | 1 |\n"
+    below = "| Item | A |\n| --- | --- |\n| &nbsp;Below | 1 |\n"
+    canonical, changed = canonicalize_table_labels(above + "\n<!-- unterminated\n" + below)
+    assert changed == 1
+    assert "| Above | 1 |" in canonical
+    assert "| &nbsp;Below | 1 |" in canonical
+
+
+# ---------------------------------------------------------------------------
+# Round 3, finding 1: derived region identities and D3's regional splice.
+# ---------------------------------------------------------------------------
+
+_D3_MARKER = "[page 1 failed: unverifiable table — see image]"
+_BAD_REGION = "| Label | Value |\n| --- | --- |\n| &nbsp;Bad | 1 |\n"
+_HEALTHY_REGION = "| Label | Value |\n| --- | --- |\n| &nbsp;Healthy | 2 |\n"
+
+
+def _d3_page(pdf_path: Path, *, identities: list[str]) -> DocumentState:
+    """A born-digital page with two native table regions, the first of which
+    the per-region geometry verifier hard-failed, ingested through the real
+    ``apply_born_digital`` door with extractor-supplied identities."""
+    raw = _BAD_REGION + "\n" + _HEALTHY_REGION
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    state.apply_born_digital(
+        DocumentAssessment(
+            path=pdf_path,
+            pages=[
+                PageAssessment(
+                    page_num=1,
+                    is_born_digital=True,
+                    native_text=raw,
+                    confidence=1.0,
+                    native_table_region_count=2,
+                    native_table_region_identities=list(identities),
+                    native_table_unverifiable_ordinals=[0],
+                    has_unverifiable_table_region=True,
+                )
+            ],
+        )
+    )
+    ps = state.pages[1]
+    ps.native_table_structure_failed = True
+    ps.attempts.append(
+        PageOutput(page_num=1, text="", engine="qwen", status=PageStatus.ERROR, audit_passed=False)
+    )
+    ps.best_output = None
+    return state
+
+
+def test_gh688_the_d3_regional_splice_still_retains_a_healthy_sibling(tmp_path: Path) -> None:
+    """Round 2 canonicalised the page text at ingestion but copied the
+    extractor's region identities unchanged. ``_verify_regions`` computes those
+    identities during extraction, so after ingestion they no longer matched the
+    canonical regions, ``splice_failed_table_regions`` refused every region,
+    and D3's floor shipped only the marker -- dropping a healthy sibling table
+    it used to retain. That is content loss, not a resume nuisance.
+
+    Pinned through the real selector: the failed region becomes the marker, the
+    healthy one survives, and its label is canonical."""
+    pdf_path = _pdf(tmp_path)
+    identities = [markdown_table_identity(_BAD_REGION), markdown_table_identity(_HEALTHY_REGION)]
+
+    shipped = _winning_page_output(_d3_page(pdf_path, identities=identities), 1).text
+
+    assert _D3_MARKER in shipped
+    assert "| Healthy | 2 |" in shipped, "the healthy sibling table must survive the floor"
+    assert "| Bad | 1 |" not in shipped, "the failed region must still be replaced"
+    assert "&nbsp;" not in shipped
+
+
+def test_gh688_identities_and_text_are_rebuilt_together_or_not_at_all(tmp_path: Path) -> None:
+    """The rule that makes the above hold: ingestion rebuilds the identities
+    through a PROVEN mapping (same block count, and the recorded identities are
+    exactly this text's blocks in order) or leaves the text alone. Pinned as a
+    difference between provable and unprovable evidence, never as an absolute
+    identity value."""
+    pdf_path = _pdf(tmp_path)
+    raw = _BAD_REGION + "\n" + _HEALTHY_REGION
+
+    provable = _d3_page(
+        pdf_path,
+        identities=[markdown_table_identity(_BAD_REGION), markdown_table_identity(_HEALTHY_REGION)],
+    ).pages[1]
+    assert "&nbsp;" not in (provable.native_text or "")
+    assert provable.native_table_region_identities == [
+        markdown_table_identity(canonicalize_table_labels(_BAD_REGION)[0]),
+        markdown_table_identity(canonicalize_table_labels(_HEALTHY_REGION)[0]),
+    ]
+
+    # Evidence that does not describe this page's blocks proves no mapping, so
+    # the text is left exactly as the extractor wrote it and the two sides stay
+    # consistent with each other.
+    unprovable = _d3_page(pdf_path, identities=["not-this-page", "nor-this-one"]).pages[1]
+    assert unprovable.native_text == raw
+    assert unprovable.native_table_region_identities == ["not-this-page", "nor-this-one"]
+    assert _winning_page_output(_d3_page(pdf_path, identities=["x", "y"]), 1).text == _D3_MARKER
+
+
+def test_gh688_the_regional_floor_page_is_reproducible_and_not_blocked_by_688(
+    tmp_path: Path,
+) -> None:
+    """Two reconstructed runs of the same regional-floor page under one
+    fingerprint write byte-identical markdown, and the fragment they leave is
+    already label-canonical -- so #688's resume gate is not what refuses it.
+
+    It IS refused: a D3 floor page ships ``PageStatus.ERROR``, and the ledger
+    only ever restores an exactly-SUCCESS page. That rule predates this ticket
+    and is pinned here as a difference against a SUCCESS page written into the
+    same directory shape, so a future reader does not mistake it for the
+    non-canonical-body refusal."""
+    pipeline = _pipeline()
+    pdf_path = _pdf(tmp_path)
+    identities = [markdown_table_identity(_BAD_REGION), markdown_table_identity(_HEALTHY_REGION)]
+
+    first = pipeline._phase_assemble(
+        _d3_page(pdf_path, identities=identities), tmp_path / "d3run1"
+    ).markdown
+    second = pipeline._phase_assemble(
+        _d3_page(pdf_path, identities=identities), tmp_path / "d3run2"
+    ).markdown
+    assert "| Healthy | 2 |" in first
+    assert second == first
+
+    body = next((tmp_path / "d3run1").rglob("pages/00001.md")).read_text(encoding="utf-8")
+    assert canonicalize_table_labels(body)[1] == 0, "the ledger body is already canonical"
+    assert (
+        pipeline._load_terminal_page(
+            DocumentState(handle=DocumentHandle.from_path(pdf_path)), 1, tmp_path / "d3run1"
+        )
+        is None
+    )
+
+    # The control: same pipeline, same directory shape, a SUCCESS page -- which
+    # does restore. The floor page's refusal is its status, not its bytes.
+    canonical_success, _ = canonicalize_table_labels(RAW_PAGE)
+    _, success_dir, _ = _flush_terminal(pipeline, tmp_path, canonical_success, "d3control")
+    assert (
+        pipeline._load_terminal_page(
+            DocumentState(handle=DocumentHandle.from_path(tmp_path / "d3control.pdf")),
+            1,
+            success_dir,
+        )
+        is not None
+    )
+
+
+def test_gh688_native_regions_are_canonical_before_their_identities_exist(
+    tmp_path: Path,
+) -> None:
+    """Where the fix actually lives: the regions cross the boundary during
+    extraction, so ``_verify_regions`` hashes canonical bytes and the page text
+    it interleaves is the same bytes. Ingestion's rebuild is the backstop for a
+    page arriving by another door, not the primary repair."""
+    import fitz as _fitz
+
+    from socr.core.born_digital import BornDigitalDetector
+
+    path = tmp_path / "regions.pdf"
+    doc = _fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Item")
+    page.insert_text((260, 100), "Amount")
+    page.insert_text((72, 120), "Swiss francs")
+    page.insert_text((260, 120), "600.0")
+    doc.save(str(path))
+    doc.close()
+
+    detector = BornDigitalDetector()
+    reopened = _fitz.open(str(path))
+    try:
+        text = detector.extract_structured(reopened[0])
+    finally:
+        reopened.close()
+
+    identities = list(getattr(detector, "_last_extraction_region_identities", []) or [])
+    assert canonicalize_table_labels(text) == (text, 0), (
+        "the extractor's page text must already be label-canonical"
+    )
+    for identity in identities:
+        assert identity, "a region identity must still be computable"
+
+
+# ---------------------------------------------------------------------------
+# Round 3, finding 2: decoding is not meaning-preserving.
+# ---------------------------------------------------------------------------
+
+
+def test_gh688_an_entity_that_spells_emphasis_is_kept_encoded() -> None:
+    """``&ast;important&ast;`` decodes to ``*important*``, which every Markdown
+    renderer reads as italics: the label's own asterisks vanish from the
+    visible text. The entity is doing real work, so it is kept as written."""
+    raw = "| Label | Value |\n| --- | --- |\n| &ast;important&ast; | 1 |\n"
+    assert canonicalize_table_labels(raw) == (raw, 0)
+
+
+def test_gh688_an_entity_that_spells_a_tag_is_kept_encoded() -> None:
+    """``&lt;b&gt;X&lt;/b&gt;`` decodes to a live CommonMark tag."""
+    markdown_it = pytest.importorskip("markdown_it")
+    raw = "| Label | Value |\n| --- | --- |\n| &lt;b&gt;X&lt;/b&gt; | 1 |\n"
+    canonical, changed = canonicalize_table_labels(raw)
+    assert (canonical, changed) == (raw, 0)
+
+    renderer = markdown_it.MarkdownIt("commonmark").enable("table")
+    assert "<b>X</b>" not in renderer.render(canonical)
+    assert renderer.render(canonical) == renderer.render(raw)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_gh688_the_review_renderer_shows_the_same_label_before_and_after() -> None:
+    """Astra's control, run through the review viewer's own ``renderMd`` under
+    Node: what a reader sees must not change, and no tag may go live.
+
+    The skip is decided at IMPORT time on purpose: ``conftest`` neuters
+    ``shutil.which`` for every test, so a call-time probe always reports node
+    missing."""
+    from test_gh652_review_renderer_literal_escapes import _render, _visible
+
+    for raw in (
+        "| Label | Value |\n| --- | --- |\n| &lt;b&gt;X&lt;/b&gt; | 1 |\n",
+        "| Label | Value |\n| --- | --- |\n| &ast;important&ast; | 1 |\n",
+    ):
+        canonical, _ = canonicalize_table_labels(raw)
+        rendered = _render(canonical)
+        assert _visible(rendered) == _visible(_render(raw))
+        assert "<b>X</b>" not in rendered
+        assert "<i>important</i>" not in rendered
+
+
+def test_gh688_the_indentation_target_still_decodes() -> None:
+    """The keep-encoded rule must not swallow the ticket: ``&nbsp;`` is
+    whitespace, not syntax, and the label it indents still ships plain."""
+    canonical, changed = canonicalize_table_labels(RAW_PAGE)
+    assert changed == 2
+    assert CANONICAL_ROW in canonical
+    assert "&nbsp;" not in canonical
+
+
+def test_gh688_a_literal_ampersand_is_never_newly_encoded() -> None:
+    """Nothing is ever newly encoded, so a clean label is never churned."""
+    raw = "| Label | Value |\n| --- | --- |\n| R&D | 1 |\n"
+    assert canonicalize_table_labels(raw) == (raw, 0)
+    assert canonicalize_label_cell("&nbsp;R&D") == "R&D"
