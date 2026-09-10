@@ -12410,7 +12410,8 @@ class UnifiedPipeline:
                     console.print(
                         f"  [red]{len(text_table_floor_pages)} page(s) failed closed on a TEXT "
                         f"TABLE the numeric-row corroboration route cannot verify (prose cells; "
-                        f"no recurring numeric column lanes; nothing refused the reading). "
+                        f"no recurring numeric column lanes, so numeric-row reconciliation "
+                        f"does not apply -- which is not a claim that no judge refused it). "
                         f"Needs a completed page-judge acceptance or a table-acceptance "
                         f"credential: {text_table_floor_pages}[/red]"
                     )

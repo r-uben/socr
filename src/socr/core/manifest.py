@@ -1216,8 +1216,9 @@ def _row_shape_reconciliation(words: list, markdown: str) -> RowShapeOutcome:
       surface (page ``failure_mode``, sidecar, document buckets, CLI) precisely
       so it is not read as the old false refusal.
 
-    Both non-``RECONCILED`` outcomes decline admission, which is why
-    ``_row_shape_reconciliation_ok`` below stays a plain veto for its callers.
+    Both non-``RECONCILED`` outcomes decline admission -- callers admit on
+    ``RECONCILED`` and on nothing else, which is why there is no boolean face
+    of this function: the two declines are not interchangeable downstream.
     What changes is where the declined candidate goes: a text table falls
     through to the routes that CAN carry authority for prose cells -- a
     completed page-judge acceptance, or #713's table-acceptance credential --
@@ -1253,18 +1254,6 @@ def _row_shape_reconciliation(words: list, markdown: str) -> RowShapeOutcome:
     if len(candidate_rows) >= math.ceil(native_table_rows * ROW_CORROBORATION_MIN):
         return RowShapeOutcome.RECONCILED
     return RowShapeOutcome.SHORTFALL
-
-
-def _row_shape_reconciliation_ok(words: list, markdown: str) -> bool:
-    """TICKET-A1b (#634): the veto face of ``_row_shape_reconciliation``.
-
-    True only for ``RECONCILED``. Both other outcomes decline the
-    numeric-row-corroboration route; callers that need to tell them apart --
-    because a declined TEXT table is recoverable by a completed page
-    acceptance or a #713 credential, while a shortfall is not -- ask for the
-    outcome itself.
-    """
-    return _row_shape_reconciliation(words, markdown) is RowShapeOutcome.RECONCILED
 
 
 def _row_corroboration_scan(p):
@@ -1405,7 +1394,7 @@ def _row_corroborated_grid_winner(p):
     by ``_apply_row_corroboration_disclosure``.
 
     TICKET-A1b (#634) round 3 (owner redesign, 2026-09-06): the row-count
-    reconciliation below (``_row_shape_reconciliation_ok``) runs
+    reconciliation below (``_row_shape_reconciliation``) runs
     UNCONDITIONALLY on every candidate, regardless of ``region_kind`` --
     see its own docstring for why the region-anchored (round 1) and
     band-run-distance-anchored (round 2 follow-up) designs both broke on
@@ -3486,7 +3475,11 @@ def _select_page_output_tagged(
             # #714 round 2: and it stops lying about a THIRD why. When the only
             # corroborating candidate is a text-bearing table, the numeric-row
             # route declined it because that route's evidence cannot speak for
-            # prose cells -- not because anything refused the reading. That page
+            # prose cells -- numeric-row reconciliation is INAPPLICABLE to this
+            # candidate. That is a statement about this one comparison, not
+            # about the page: a judge elsewhere may well have rejected the same
+            # candidate on its own grounds, and this reason does not deny it.
+            # That page
             # fails closed under ``ROW_SHAPE_NOT_RECONCILABLE_TEXT_TABLE`` and
             # its own tag, and an operator reads "this needs a page acceptance
             # or a table credential", not "every model failed".

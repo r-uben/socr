@@ -38,7 +38,6 @@ from socr.core.manifest import (
     RowShapeOutcome,
     SelectionProvenance,
     _row_shape_reconciliation,
-    _row_shape_reconciliation_ok,
     _select_page_output_tagged,
     structure_class_text_table_declined,
 )
@@ -91,7 +90,7 @@ def test_hermetic_text_table_declines_the_route_with_its_own_reason(
     Ungated the candidate is refused as a SHORTFALL, which is the false refusal
     #714 was filed for. Gated it is declined as NOT_RECONCILABLE_TEXT_TABLE,
     which is a different fact with a different remedy. Neither admits it, and
-    that is the round-2 correction: the veto face stays False both ways.
+    that is the round-2 correction: neither outcome is RECONCILED.
     """
     assert structure_check._native_page_has_column_lanes(TEXT_TABLE_WORDS) is False
 
@@ -99,21 +98,25 @@ def test_hermetic_text_table_declines_the_route_with_its_own_reason(
         RowShapeOutcome.SHORTFALL,
         RowShapeOutcome.NOT_RECONCILABLE_TEXT_TABLE,
     )
-    assert _row_shape_reconciliation_ok(TEXT_TABLE_WORDS, TEXT_TABLE_MD) is False
+    assert (
+        _row_shape_reconciliation(TEXT_TABLE_WORDS, TEXT_TABLE_MD) is not RowShapeOutcome.RECONCILED
+    )
 
 
-def test_the_veto_face_is_true_only_for_reconciled() -> None:
-    """``_row_shape_reconciliation_ok`` must not read a decline as a pass --
-    the round-1 defect, pinned on real fixtures rather than on the enum.
+def test_only_reconciled_admits() -> None:
+    """Admission is ``RECONCILED`` and nothing else -- the round-1 defect,
+    pinned on real fixtures rather than on the enum.
 
-    Round 1 made the text-table case return True here, which is what admitted
-    the candidate on numeric evidence alone.
+    Round 1 made the text-table case admit, which is what shipped the
+    candidate on numeric evidence alone.
     """
     complete, truncated, numeric_words = _sparse_prefix_fixture()
 
-    assert _row_shape_reconciliation_ok(numeric_words, complete) is True
-    assert _row_shape_reconciliation_ok(numeric_words, truncated) is False
-    assert _row_shape_reconciliation_ok(TEXT_TABLE_WORDS, TEXT_TABLE_MD) is False
+    assert _row_shape_reconciliation(numeric_words, complete) is RowShapeOutcome.RECONCILED
+    assert _row_shape_reconciliation(numeric_words, truncated) is not RowShapeOutcome.RECONCILED
+    assert (
+        _row_shape_reconciliation(TEXT_TABLE_WORDS, TEXT_TABLE_MD) is not RowShapeOutcome.RECONCILED
+    )
 
     # and the three cases really are three, not two wearing one name
     assert {

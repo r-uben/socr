@@ -5,9 +5,9 @@ Round 1's diagnosis stands; its remedy is reversed.
 
 ## Why round 1 was wrong
 
-Round 1 made `_row_shape_reconciliation_ok` return True where the native page
-shows no recurring numeric column lanes, reasoning that the predicate is a veto
-so "not applicable" means "do not veto". At this call site True means ADMIT, and
+Round 1 made A1b's boolean veto return True where the native page shows no
+recurring numeric column lanes, reasoning that the predicate is a veto so "not
+applicable" means "do not veto". At that call site True means ADMIT, and
 the only evidence behind the admission is A1a's numeric-row corroboration.
 
 Astra reproduced the consequence on the real page. Take the real BoE 2018 p1
@@ -45,9 +45,9 @@ The outcome is three-valued (`RowShapeOutcome`):
 | `NOT_RECONCILABLE_TEXT_TABLE` | no lanes: this route cannot speak for this candidate | no |
 
 The invalid row-count comparison is NOT restored as an accidental defence: on a
-lane-closed page it is never computed. `_row_shape_reconciliation_ok` stays a
-plain veto (True only for `RECONCILED`), so no caller's contract changed;
-callers that need the distinction ask for the outcome.
+lane-closed page it is never computed. Callers admit on `RECONCILED` and on
+nothing else, so no caller's contract changed; the boolean face is gone (see the
+follow-through below) because the two declines are not interchangeable.
 
 The candidate falls through to the routes that CAN carry authority for text
 cells: a completed page-judge acceptance, or #713's table-acceptance credential.
@@ -155,3 +155,17 @@ Full suite 5143 passed, 4 xfailed. `uvx ruff@0.16.0 format --check .` clean.
   judge's acceptance and a table judge ladder's acceptance respectively. A
   fabricated prose cell inside a page the judge accepted is out of scope and
   remains so.
+
+## Follow-through (Astra's two nonblocking nits at `cc8e4c8`)
+
+- **`_row_shape_reconciliation_ok` is removed.** After round 2 no production
+  code called it; only tests did, and a boolean face invites exactly round 1's
+  mistake of reading "not False" as "admissible". The ticket tests now compare
+  `_row_shape_reconciliation` against `RowShapeOutcome.RECONCILED` directly.
+- **The "nothing refused the reading" claim is scoped.** In the CLI line and in
+  the selection comment it now says that numeric-row reconciliation does not
+  apply to this candidate, and states explicitly that this is not a claim that
+  no judge refused it: a page-judge or table-judge rejection can coexist with
+  this route diagnostic.
+
+No behaviour change: same outcomes, same failure mode, same tag, same buckets.
