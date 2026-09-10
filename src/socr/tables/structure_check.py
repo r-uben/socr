@@ -290,6 +290,49 @@ def _final_row_truncated(block_lines: Sequence[str]) -> bool:
 _STRAY_HEADER_BAND_ALLOWANCE = 1
 
 
+#: TICKET (#703): the narrowest candidate row width at which the native
+#: row-shape reconciliation carries any information. ``row_shape_min`` of 1
+#: says "a band holding one genuine numeric token is a table row" -- which is
+#: true of essentially every prose line on a page that mentions a figure, so
+#: on a TEXT table (cells are sentences carrying zero or one number each) the
+#: native count is the page's prose line count and the shortfall is an
+#: artefact of the page being prose, not evidence of a dropped row. Two
+#: tokens is the smallest width that is a numeric SEQUENCE rather than a
+#: single mentioned value, i.e. the smallest width whose repetition down a
+#: page distinguishes a tabulated column run from running text. This is the
+#: floor of an existing derivation (``row_shape_min``, itself derived from the
+#: candidate), not a tuned threshold: below it the predicate is vacuous and
+#: there is no value between 1 and 2.
+_ROW_SHAPE_DISCRIMINATING_MIN = 2
+
+
+def _numeric_dominant(candidate_rows: list[tuple[str, ...]]) -> bool:
+    """TICKET (#703): are this candidate's own body rows numeric-dominant --
+    a strict majority carrying at least ``_ROW_SHAPE_DISCRIMINATING_MIN``
+    genuine numeric tokens?
+
+    Derived entirely from the candidate (no page-level or corpus constant),
+    exactly as ``row_shape_min`` itself is. Measured on the BoE 2018
+    Inflation Report Table 3.B fixture (#703): a two-column comparison box
+    whose cells are sentences, ``numeric_body_rows`` yields two rows of width
+    1 (``('4%',)``, ``('32.',)``) against 19 native "table-shaped" bands, and
+    a complete, ladder-accepted candidate was called truncated and floored to
+    0/23 numbers shipped. Both ECB economic-bulletin truncation fixtures
+    (p2, p3) are numeric-dominant -- every one of their numeric body rows
+    carries 3 or more tokens -- so the gate leaves those verdicts untouched.
+
+    A strict majority rather than ``min(...) >= 2`` deliberately: one stray
+    single-numeric row (a total line, a footnote-marker row that survived
+    ``numeric_body_rows``) inside an otherwise numeric table must not disable
+    the guard for the whole candidate, which is exactly what taking the
+    minimum would do.
+    """
+    if not candidate_rows:
+        return False
+    wide = sum(1 for row in candidate_rows if len(row) >= _ROW_SHAPE_DISCRIMINATING_MIN)
+    return wide * 2 > len(candidate_rows)
+
+
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     """TICKET-A2 (#645) term (b): candidate's numeric body-row count falls
     short of the native table-shaped row count by more than A1b's own
@@ -304,6 +347,14 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     (returns False) with no ``words`` -- exception-path callers of
     ``table_output_defect`` supply none, matching every other geometry-needing
     term in this module.
+
+    Also abstains when the candidate's own rows are not numeric-dominant
+    (``_numeric_dominant``, #703): the reconciliation compares NUMERIC row
+    shapes, and on a text table (prose cells, zero or one number each) the
+    derived ``row_shape_min`` collapses to 1, at which point every prose line
+    carrying a figure counts as a native table row and a complete candidate
+    reads as a massive shortfall. Such candidates are left to term (a) and to
+    the ladder verdict.
     """
     if not words:
         return False
@@ -318,6 +369,9 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
         row for rows in table_blocks(markdown) for row in numeric_body_rows(rows) if row
     ]
     if not candidate_rows:
+        return False
+
+    if not _numeric_dominant(candidate_rows):
         return False
 
     row_shape_min = min(len(row) for row in candidate_rows)
