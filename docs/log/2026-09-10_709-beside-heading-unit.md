@@ -480,3 +480,110 @@ Both were found by a deletion witness returning nothing, not by a failure.
 * Only the band immediately at a run boundary is ever adopted, so a sub-list of
   several consecutive declined rows is still recovered one row deep. Unchanged.
 * "Two or more bands away" still means beyond an intervening OCCUPIED band.
+
+## Round 6 — one unit, one anchor
+
+Astra's round-5 review (`astra-rev-709e`) accepted the heading half and
+rejected the other half. Round 5 emitted the relocated pair at the heading's
+key and left the run's rows at their own block position, which is two
+independent anchors for one page structure. On the wide-heading fixture the
+roster's objects precede the heading's, so the rows printed first and the
+adopted first member travelled alone to the heading — Bernard at nonblank
+index 10, Gillum at 1. The heading stayed whole and two roster rows reversed,
+which is exactly the loss GH-592 exists to prevent. Astra's own six-document
+comparison against `cf28858` was 0/24, and #706's continuation was unaffected;
+neither covers an object-order reversal.
+
+### The rule
+
+The boundary heading, the pair adopted beside it and the run's rows are ONE
+unit. They are emitted contiguously, in vertical order, at the heading's own
+key in block order:
+
+| Boundary band | Emitted at the heading's key |
+| --- | --- |
+| above the run | heading, pair, run rows |
+| below the run | run rows, heading, pair |
+
+Within the band the heading is always left of the label — `_beside_heading_lines`
+requires `extra.x1 <= label.x0` — so heading-then-pair is the band's own reading
+order on both sides. The direction sheet said "run rows, then pair, then extra"
+for the lower boundary; that would print `STAFF:` after `Burns`, which is the
+#706 defect, so the band's reading order is what shipped.
+
+The extra still never moves relative to its own block, which is what keeps a
+multi-line heading whole: the lines above it are its block's, above it, and are
+never inspected or touched.
+
+### The move has to be checkable
+
+Emitting the unit at the heading's key carries the run's rows across every line
+lying between the run's first line and that key. `_relocation_keeps_reading_order`
+requires each crossed line to end up on the side the PAGE puts it: wholly above
+the unit if it now prints before, wholly below if it now prints after. A crossed
+line belonging to another run is judged by that run's whole vertical extent,
+because the other run's group travels with it. The comparison is between
+measured y extents with no tolerance; a line that overlaps the unit vertically
+has no unambiguous side and refuses. When it refuses, the adoption abstains
+whole — the pair keeps block order — rather than emit at a second anchor.
+
+Two fixtures pin the refusal, one per direction: a footnote printed below the
+roster whose object sits between the roster's and the heading's, and a page
+title printed above everything whose object sits between the heading's and the
+roster's.
+
+### Measured emissions
+
+| Page | Emitted |
+| --- | --- |
+| real 1977-11-15 p1 | 8 `PRESENT:`, 9 `Mr.`, 10 `Burns, Chairman`, 11 `Mr. Volcker, Vice Chairman` |
+| Astra's wide heading | prose, heading ×3, `Mr.`, `Bernard`, `Mr. Gillum`, `Mr. Angell`, `Mr. Guffey`, `Mr. Seger`, `Mr. Corrigan…` |
+| #706 STAFF fixture | prose, roster ×3, `STAFF:`, `Mr.`, `Burns`, `Mr.`, `Gillum…` |
+| STAFF written first | roster ×3, `STAFF:`, `Mr.`, `Burns` |
+| real 1990-11-13 p1 | unchanged |
+| marker column | full block order (abstains) |
+
+Six Fed minutes × first four pages, `extract_structured` against `cf28858`:
+**0/24 differ**.
+
+### Deletion witnesses
+
+`tests/test_gh709_beside_heading_unit.py`, `tests/test_gh706_section_heading_boundary.py`,
+`tests/test_gh592_lane_scoped_emission.py`, `tests/test_born_digital_aligned_runs.py`
+(65 tests) run against a copy of `src` with one clause deleted.
+
+| Clause deleted | Failures |
+| --- | ---: |
+| `_beside_heading_lines` wholly-left | 1 |
+| `_beside_heading_lines` baseline overlap | 0 |
+| `_beside_heading_lines` below-branch | 5 |
+| far-band series refusal | 0 |
+| far-band series refusal AND the ordering check | 4 |
+| abstain when the helper refuses | 5 |
+| one run, one anchor | 0 |
+| the ordering check | 2 |
+| ordering: unit prints after | 1 |
+| ordering: unit prints before | 1 |
+| ordering: another run's whole extent | 0 |
+| rows before the heading at a lower boundary | 3 |
+| rows after the pair at an upper boundary | 4 |
+| suppress the run's independent emission | 2 |
+
+### Residuals
+
+- **The far-band series refusal now has no independent witness.** The ordering
+  check refuses the marker fixture on its own; deleting both together fails 4
+  tests, deleting either alone fails none. The series check is not provably
+  redundant — a marker series whose block order happens to be contiguous would
+  pass the ordering check and be relocated — but no fixture separates them.
+  Kept, and flagged for Astra to rule on.
+- **One run, one anchor** is unwitnessed: no fixture carries a heading at both
+  boundaries of the same run.
+- **A crossed line's other-run extent** is unwitnessed: no fixture crosses a
+  second run.
+- The baseline-overlap clause carries its round-5 status: still unwitnessed.
+- Only the boundary band is ever adopted, so a multi-row sub-list is recovered
+  one row deep. Unchanged from round 5.
+- Astra's `test_astra_709d.py::test_measure_conservative_cost` still fails only
+  on its stale five-argument monkeypatch of `_beside_heading_lines`, which took
+  four arguments from round 5.

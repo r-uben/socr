@@ -768,21 +768,26 @@ def test_a_block_whose_last_line_shares_its_edge_keeps_all_three_lines():
 
 
 def test_a_wide_display_headings_last_line_is_not_torn_off_the_lines_above_it():
-    """Astra's round-4 counterexample, which round 5 turns from xfail to pass.
+    """Astra's round-4 counterexample, settled by the round-6 unit rule.
 
     Two aligned lines at x0 30 running past the label lane, then an indented
-    last line beside the pair. Round 4 shipped this as a strict xfail because
-    the heading supplies every piece of evidence the real 1977-11-15 page
-    supplies, so no test on the lines above could tell them apart. Astra
-    declined that residual, and the round-5 rule removes the question: the
-    heading is not moved, so its first two lines cannot end up behind its
-    third. The roster prints first, then the whole heading, then the member.
+    last line beside the pair. Round 4 shipped this as a strict xfail; round 5
+    kept the heading whole by never moving it, but left the run's rows at their
+    own block position -- and this page's roster objects PRECEDE the heading
+    objects, so the rows printed first and the adopted first member travelled
+    alone to the heading, landing after every later member.
+
+    Round 6 emits the whole unit at the heading's key: heading, first member,
+    then the rest of the roster, which is the page's vertical order.
     """
     lines = _emitted(_wide_display_heading_page())
 
-    assert lines.index("Mr. Corrigan, Vice Chairman of the Committee") < lines.index(
-        "STAFF AND OTHER ATTENDEES AT THE"
-    ), "the run keeps its own position; only the pair travels"
+    assert lines.index("Bernard") < lines.index("Mr. Gillum"), (
+        "the first member must still precede the members printed below it"
+    )
+    assert lines.index("STAFF AND OTHER ATTENDEES AT THE") < lines.index(
+        "Mr. Corrigan, Vice Chairman of the Committee"
+    ), "the heading introduces the whole roster, so it prints before all of it"
     _assert_heading_then_pair(
         lines,
         [
@@ -836,3 +841,208 @@ def test_a_marker_column_makes_the_adoption_abstain():
         "the two declined rows must not be reversed"
     )
     assert lines[1:7] == ["1", "2", "Mr.", "Mr.", "Bernard", "Gillum"], lines
+
+
+def test_the_adopted_first_member_precedes_the_members_printed_below_it():
+    """Astra's round-6 reproducer, on the page's own y order.
+
+    ``Bernard`` is printed above ``Gillum``. Round 5 emitted the pair at the
+    heading and the run's rows at their own block position, and on this page
+    the roster's objects come first, so Bernard ended up at nonblank index 10
+    against Gillum's 1 -- two roster rows reversed while the heading stayed
+    intact. The assertion is made on the extracted word geometry first, so a
+    fixture that stopped printing Bernard above Gillum would fail loudly
+    instead of passing vacuously.
+    """
+    page = _wide_display_heading_page()
+    words = page.get_text("words")
+    assert next(w[1] for w in words if w[4] == "Bernard") < next(
+        w[1] for w in words if w[4] == "Gillum"
+    ), "the fixture must print Bernard above Gillum"
+
+    lines = _emitted(page)
+
+    assert lines.index("Bernard") < lines.index("Mr. Gillum"), lines
+
+
+def _staff_heading_written_first_page() -> fitz.Page:
+    """``_staff_section_page``'s geometry with the staff objects written FIRST.
+
+    The lower-boundary counterpart to Astra's wide fixture. The heading and its
+    section are inserted before the roster, so the heading's block-order key
+    precedes every one of the run's rows. Emitting the pair at the heading and
+    the rows at their own position would print the whole roster after the staff
+    section that follows it on the page.
+    """
+    probe = fitz.open()
+    probe_page = probe.new_page()
+    probe_page.insert_textbox(fitz.Rect(90, 100, 130, 200), "Mr.\nMr.\nMr.", fontsize=10)
+    rows = sorted(w[1] for w in probe_page.get_text("words"))
+    pitch = rows[-1] - rows[-2]
+    first = rows[-1] + pitch
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    # insert_text takes a baseline; an existing word's y0 sits fontsize*1.075 above it.
+    page.insert_text((40, first + 10.75), "STAFF:", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, first, 130, first + 80), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, first, 560, first + 80),
+        "Burns\nGillum, Deputy Assistant Secretary",
+        fontsize=10,
+    )
+    page.insert_textbox(fitz.Rect(x, 100, 130, 200), "Mr.\nMr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 100, 560, 200),
+        "Angell\nGuffey\nCorrigan, Vice Chairman of Committee",
+        fontsize=10,
+    )
+    return page
+
+
+def test_a_lower_boundary_heading_written_first_keeps_the_roster_above_it():
+    """The lower-boundary counterpart: the rows travel to the heading too.
+
+    Same page as ``_staff_section_page`` with the object order inverted. The
+    unit is emitted at the heading's key, and because the boundary band sits
+    BELOW the run the vertical order within it is rows, heading, pair.
+    """
+    page = _staff_heading_written_first_page()
+    words = page.get_text("words")
+    assert next(w[1] for w in words if w[4] == "Angell") < next(
+        w[1] for w in words if w[4] == "Burns"
+    ), "the fixture must print the roster above the staff section"
+
+    lines = _emitted(page)
+
+    assert lines[1:7] == [
+        "Mr. Angell",
+        "Mr. Guffey",
+        "Mr. Corrigan, Vice Chairman of Committee",
+        "STAFF:",
+        "Mr.",
+        "Burns",
+    ], lines
+
+
+def _wide_heading_with_a_footnote_between_page() -> fitz.Page:
+    """Astra's wide heading with an unrelated footnote block written between.
+
+    Same geometry as ``_wide_display_heading_page``, plus one line printed
+    BELOW the whole roster whose object is written after the roster and before
+    the heading. Emitting the unit at the heading's key would carry the roster
+    past that footnote, printing a line from the bottom of the page above the
+    rows it follows.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 200
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(x, 211, x + 40, 251), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 240, x + 40, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    page.insert_text((72, 600), "A footnote printed below the whole roster.", fontsize=10)
+    page.insert_text((30, 186), "STAFF AND OTHER ATTENDEES AT THE", fontsize=10)
+    page.insert_text((30, 199), "NOVEMBER MEETING OF THE FEDERAL", fontsize=10)
+    page.insert_textbox(fitz.Rect(40, 211, x - 2, 251), "OPEN MARKET COMMITTEE", fontsize=10)
+    return page
+
+
+def test_a_line_the_unit_would_have_to_cross_upwards_makes_it_abstain():
+    """The unit may not carry the run past content printed below it.
+
+    The footnote's object sits between the roster's and the heading's, so
+    emitting the unit at the heading's key would print a line from the bottom
+    of the page above the roster rows it follows. There is no anchor that keeps
+    the unit contiguous without that reordering, so the adoption abstains
+    whole: the pair keeps block order and nothing moves.
+    """
+    lines = _emitted(_wide_heading_with_a_footnote_between_page())
+
+    assert lines.index("A footnote printed below the whole roster.") < lines.index(
+        "STAFF AND OTHER ATTENDEES AT THE"
+    ), "abstention means pure block order, footnote included"
+    assert lines[-3:] == [
+        "STAFF AND OTHER ATTENDEES AT THE",
+        "NOVEMBER MEETING OF THE FEDERAL",
+        "OPEN MARKET COMMITTEE",
+    ], "no pair follows the heading, so nothing was adopted"
+
+
+def _staff_heading_with_a_title_between_page() -> fitz.Page:
+    """``_staff_heading_written_first_page`` with a page title written between.
+
+    The title is printed at the very top of the page, above everything, but its
+    object is written after the heading's and before the roster's. Emitting the
+    unit at the heading's key would print the whole roster above that title.
+    """
+    probe = fitz.open()
+    probe_page = probe.new_page()
+    probe_page.insert_textbox(fitz.Rect(90, 100, 130, 200), "Mr.\nMr.\nMr.", fontsize=10)
+    rows = sorted(w[1] for w in probe_page.get_text("words"))
+    pitch = rows[-1] - rows[-2]
+    first = rows[-1] + pitch
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_text((40, first + 10.75), "STAFF:", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, first, 130, first + 80), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, first, 560, first + 80),
+        "Burns\nGillum, Deputy Assistant Secretary",
+        fontsize=10,
+    )
+    page.insert_text((72, 60), "Minutes of Actions", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 100, 130, 200), "Mr.\nMr.\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 100, 560, 200),
+        "Angell\nGuffey\nCorrigan, Vice Chairman of Committee",
+        fontsize=10,
+    )
+    return page
+
+
+def test_a_line_the_unit_would_have_to_cross_downwards_makes_it_abstain():
+    """The mirror of the footnote case, at a lower boundary.
+
+    Here the unit would be emitted EARLIER than the run's own block position,
+    so the crossed line ends up after it. The title is printed above the whole
+    page, so that would be a reordering too, and the adoption abstains.
+    """
+    lines = _emitted(_staff_heading_with_a_title_between_page())
+
+    assert lines.index("STAFF:") < lines.index("Minutes of Actions"), lines
+    assert lines[lines.index("STAFF:") + 1 : lines.index("STAFF:") + 3] == [
+        "Mr.",
+        "Mr.",
+    ], "the pair keeps block order; nothing was relocated"

@@ -837,6 +837,52 @@ def _adoptable_pair(
     return [label, value]
 
 
+def _relocation_keeps_reading_order(
+    anchor_position: int,
+    run_first_position: int,
+    unit_keys: set[tuple[int, int]],
+    unit_y0: float,
+    unit_y1: float,
+    all_lines: list[dict],
+    consumed_run: dict[tuple[int, int], int],
+    run_span: dict[int, tuple[float, float]],
+) -> bool:
+    """True when emitting a run's unit at ``anchor_position`` reorders nothing.
+
+    GH-709 round 6. Adopting a pair beside a boundary heading emits the
+    heading, the pair and the run's own rows as one unit at the heading's key
+    in block order. That move carries the run's rows across every line lying
+    between the run's first line and the heading. Each such line changes sides:
+    it prints before the whole unit, or after it.
+
+    The move is sound exactly when each crossed line ends up on the side the
+    PAGE already puts it -- wholly above the unit if it now prints first,
+    wholly below if it now prints last. Astra's wide-heading page is the
+    positive case: the two heading lines the run steps over are printed above
+    the heading's last line, so the run landing beneath them is vertical order
+    restored, not destroyed. A crossed line that belongs to another run is
+    judged by that run's whole vertical extent, because the other run's group
+    travels with it.
+
+    The comparison is between measured y extents, with no tolerance: a line
+    that overlaps the unit vertically has no unambiguous side and refuses.
+    """
+    low, high = sorted((anchor_position, run_first_position))
+    unit_prints_after = anchor_position < run_first_position
+    for it in all_lines[low : high + 1]:
+        key = (it["bi"], it["li"])
+        if key in unit_keys:
+            continue
+        other = consumed_run.get(key)
+        top, bottom = run_span[other] if other is not None else (it["y0"], it["y1"])
+        if unit_prints_after:
+            if top < unit_y1:
+                return False
+        elif bottom > unit_y0:
+            return False
+    return True
+
+
 def _beside_heading_lines(
     extras: list[dict],
     label: dict,
@@ -1261,21 +1307,45 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     # qualifies, and the rest keep block order. That is a tracked residual, not
     # a reason to reopen the walk.
     consumed: set[tuple[int, int]] = set()
-    for start, end, _merged in runs:
+    # GH-709 round 6. Relocating a pair moves its run's whole emitted group to
+    # the boundary heading's position in block order, so the walk has to be
+    # able to say what that move would step over. ``consumed_run`` names the
+    # run a line belongs to, ``run_span`` its vertical extent (a crossed line
+    # that belongs to another run drags that whole run with it), and
+    # ``block_position`` gives every line its index in the caller's order.
+    consumed_run: dict[tuple[int, int], int] = {}
+    run_span: dict[int, tuple[float, float]] = {}
+    for run_id, (start, end, _merged) in enumerate(runs):
         for band in bands[start : end + 1]:
             for it in band:
                 consumed.add((it["bi"], it["li"]))
+                consumed_run[(it["bi"], it["li"])] = run_id
+        run_lines = [it for band in bands[start : end + 1] for it in band]
+        run_span[run_id] = (
+            min(it["y0"] for it in run_lines),
+            max(it["y1"] for it in run_lines),
+        )
+    block_position = {(it["bi"], it["li"]): n for n, it in enumerate(all_lines)}
 
     # ``claimed`` also stops two runs from both adopting the same declined
     # line: the first run whose walk reaches it takes it, and the other run's
     # walk then finds nothing left in that band and stops there.
     claimed: dict[tuple[int, int], int] = {}
-    # GH-709 round 5. ``beside_units`` maps the block-order key of a boundary
-    # band's heading line to the pair text emitted directly after it;
-    # ``relocated`` holds those pair lines, which must not also print where
-    # block order puts them, and must not drag the run's group to their
-    # position either -- the run keeps its own.
-    beside_units: dict[tuple[int, int], list[str]] = {}
+    # GH-709 round 6. The boundary heading, the pair adopted beside it and the
+    # run's own rows are ONE unit and are emitted contiguously, in vertical
+    # order, at the heading's own place in block order. ``run_anchor`` records
+    # that placement per run -- the heading line's key, the pair's text, and
+    # which side of the run the boundary band sits on -- and ``relocated``
+    # holds the pair lines, which must not also print where block order puts
+    # them.
+    #
+    # Round 5 emitted the pair at the heading and left the run's group at its
+    # own block position. Astra measured the cost on a page whose roster
+    # objects precede the heading objects: the run printed first and the
+    # adopted first member travelled alone to the heading, landing after every
+    # later member -- roster rows reversed, which is the loss GH-592 exists to
+    # prevent. Nothing may be emitted at two independent anchors.
+    run_anchor: dict[int, tuple[tuple[int, int], list[str], int]] = {}
     relocated: set[tuple[int, int]] = set()
     group_members: dict[int, list[dict]] = {}
     run_payload: dict[int, list[str]] = {}
@@ -1402,6 +1472,43 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                         beside = _beside_heading_lines(extras, pair[0], bands, index)
                         if beside is None:
                             break
+                        # One run, one anchor. Both boundaries of the same run
+                        # can carry a heading; honouring the second would ask
+                        # the run's rows to be emitted in two places at once.
+                        if run_id in run_anchor:
+                            break
+                        # GH-709 round 6: the unit is emitted at the LAST
+                        # extra's own place in block order, which moves the
+                        # run's rows there too. Whatever that move steps over
+                        # must end up on the side of the unit its position on
+                        # the PAGE puts it -- above the unit if it now prints
+                        # before, below if it now prints after. A crossed line
+                        # belonging to another run drags that whole run with
+                        # it, so its run's extent is what is measured. When the
+                        # move cannot satisfy that, the adoption abstains
+                        # entirely rather than emit the pair or the rows at a
+                        # second anchor.
+                        heading_anchor = max(beside, key=lambda it: (it["bi"], it["li"]))
+                        unit_lines = [
+                            *(it for band in bands[start : end + 1] for it in band),
+                            *candidates,
+                        ]
+                        run_first = min(
+                            block_position[(it["bi"], it["li"])]
+                            for band in bands[start : end + 1]
+                            for it in band
+                        )
+                        if not _relocation_keeps_reading_order(
+                            block_position[(heading_anchor["bi"], heading_anchor["li"])],
+                            run_first,
+                            {(it["bi"], it["li"]) for it in unit_lines},
+                            min(it["y0"] for it in unit_lines),
+                            max(it["y1"] for it in unit_lines),
+                            all_lines,
+                            consumed_run,
+                            run_span,
+                        ):
+                            break
                     for it in pair:
                         claimed[(it["bi"], it["li"])] = run_id
                     if beside is None:
@@ -1415,16 +1522,15 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                                 }
                             )
                     else:
-                        # GH-709 round 5: the pair travels to the extra, not
-                        # the other way round. It leaves the run's emitted
-                        # group entirely and is emitted immediately after the
-                        # LAST extra in block order, so every extra -- and
-                        # every line above it, which is never inspected --
-                        # keeps the position the caller gave it.
-                        anchor = max(beside, key=lambda it: (it["bi"], it["li"]))
-                        beside_units[(anchor["bi"], anchor["li"])] = [
-                            it["text"] for it in sorted(pair, key=lambda it: it["x0"])
-                        ]
+                        # The extra never moves relative to its own block, so a
+                        # multi-line heading stays whole: the lines above the
+                        # extra are its block's, above it, and are never
+                        # touched. The pair and the run's rows come to IT.
+                        run_anchor[run_id] = (
+                            (heading_anchor["bi"], heading_anchor["li"]),
+                            [it["text"] for it in sorted(pair, key=lambda it: it["x0"])],
+                            step,
+                        )
                         for it in pair:
                             relocated.add((it["bi"], it["li"]))
                     # The adopted band becomes the new boundary, so the next
@@ -1464,20 +1570,40 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
             for it in band:
                 line_group[(it["bi"], it["li"])] = run_id
 
+    # An anchored run is emitted ONCE, at its boundary heading's key, as one
+    # contiguous unit in vertical order: heading, pair, rows when the boundary
+    # band is above the run; rows, heading, pair when it is below. Within the
+    # band the heading is always left of the label, so heading-then-pair is the
+    # band's own reading order either way.
+    anchored_at: dict[tuple[int, int], tuple[int, list[str], int]] = {
+        key: (run_id, pair_text, side) for run_id, (key, pair_text, side) in run_anchor.items()
+    }
+
     out_lines: list[str] = []
     emitted: set[int] = set()
     for it in all_lines:
         key = (it["bi"], it["li"])
         if key in relocated:
             continue
+        unit = anchored_at.get(key)
+        if unit is not None:
+            unit_run, pair_text, side = unit
+            emitted.add(unit_run)
+            if side > 0:
+                out_lines.extend(group_text[unit_run])
+            out_lines.append(it["text"])
+            out_lines.extend(pair_text)
+            if side < 0:
+                out_lines.extend(group_text[unit_run])
+            continue
         run_id = line_group.get(key)
         if run_id is None:
             out_lines.append(it["text"])
-            out_lines.extend(beside_units.get(key, ()))
             continue
-        if run_id not in emitted:
-            emitted.add(run_id)
-            out_lines.extend(group_text[run_id])
+        if run_id in run_anchor or run_id in emitted:
+            continue
+        emitted.add(run_id)
+        out_lines.extend(group_text[run_id])
     return "\n".join(out_lines).strip()
 
 
