@@ -23,6 +23,20 @@ from socr.core.born_digital import DocumentAssessment
 from socr.core.document import DocumentHandle
 from socr.core.result import DocumentStatus, EngineResult, FailureMode, PageOutput
 
+
+def _canonical_native_text(text: str | None) -> str | None:
+    """#688: the native candidate's table labels, canonicalised.
+
+    Imported lazily so ``socr.core.state`` keeps no import-time dependency on
+    the table package (which pulls PyMuPDF through ``socr.tables.locate``).
+    """
+    if not text:
+        return text
+    from socr.tables.label_canonical import canonicalize_table_labels
+
+    return canonicalize_table_labels(text)[0]
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +47,11 @@ class PageState:
     page_num: int
     is_born_digital: bool = False
     native_text: str | None = None
+    #: #688: the extractor's bytes before label canonicalisation. Provenance
+    #: only -- nothing routes, ships or verifies from it; ``native_text`` is
+    #: the candidate. Kept so the raw reading of the text layer stays
+    #: recoverable when the two differ.
+    native_text_raw: str | None = None
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded raster images
@@ -540,7 +559,18 @@ class DocumentState:
                     pa, "has_unrecovered_symbol_glyphs", False
                 )
                 if pa.is_born_digital:
-                    ps.native_text = pa.native_text
+                    # #688 round 2: the native reading is a CANDIDATE -- it is
+                    # what ``manifest._winning_page_output`` ships when no
+                    # engine output wins, and what D3's regional floor splices
+                    # around. Canonicalise its table labels here, at ingestion,
+                    # before any evidence, region identity or digest is built
+                    # from it, so the fallback lane cannot ship rows the binder
+                    # reads differently -- and so a fallback page's terminal
+                    # bytes are the ones ``_load_terminal_page`` accepts on
+                    # resume. The extractor's own bytes stay in
+                    # ``native_text_raw``.
+                    ps.native_text_raw = pa.native_text
+                    ps.native_text = _canonical_native_text(pa.native_text)
                     ps.needs_ocr_enhancement = pa.needs_ocr_enhancement
                     # Propagate the backward-compatible native-table aggregate
                     # (raw emission, raw content, and parsed shape defects).

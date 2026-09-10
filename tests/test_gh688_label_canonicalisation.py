@@ -28,8 +28,10 @@ from pathlib import Path
 
 import pytest
 
+from socr.core.born_digital import DocumentAssessment, PageAssessment
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
+from socr.core.manifest import _winning_page_output
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import PageOutput, PageStatus
 from socr.core.state import DocumentState
@@ -39,6 +41,8 @@ from socr.pipeline.agentic import AcceptDecision, route_page
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.binding import bind, parse_grid
 from socr.tables.label_canonical import (
+    _LINE_BOUNDARIES,
+    _UNREPRESENTABLE,
     canonicalize_candidate,
     canonicalize_label_cell,
     canonicalize_table_labels,
@@ -472,3 +476,231 @@ def test_gh688_a_table_inside_a_fence_is_a_code_sample_not_a_label() -> None:
     canonical, changed = canonicalize_table_labels(fenced)
     assert changed == 0
     assert canonical == fenced
+
+
+# ---------------------------------------------------------------------------
+# Round 2, finding 1: EVERY boundary the real parsers recognise.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("char", ("|",) + _LINE_BOUNDARIES)
+def test_gh688_no_decoded_boundary_can_split_a_row(char: str) -> None:
+    """``parse_grid`` and ``_markdown_content_lines`` split with
+    ``str.splitlines``, which honours far more than LF and CR. Round 1
+    re-encoded only pipe, CR and LF, so a decoded U+2028 became a physical row
+    boundary and the grid parsed to ``None``. Pinned per character rather than
+    on one example, because the enumeration IS the fix."""
+    raw = f"| Item | A |\n| --- | --- |\n| A&#{ord(char)};B | 1 |\n"
+    before = parse_grid(raw)
+    assert before is not None, "the raw fixture must itself be a grid"
+
+    canonical, _ = canonicalize_table_labels(raw)
+    after = parse_grid(canonical)
+
+    assert after is not None, "canonicalisation must not destroy the table"
+    assert len(after.rows) == len(before.rows)
+    assert [len(r) for r in after.rows] == [len(r) for r in before.rows]
+    assert after.rows == before.rows, "the binder must read the same labels"
+    assert canonical.split("\n")[2].count(char) == raw.split("\n")[2].count(char), (
+        "a structural character was emitted raw"
+    )
+    assert resolve_cell_refs(canonical, ["R1C1"]) == resolve_cell_refs(raw, ["R1C1"])
+
+
+def test_gh688_an_unrepresentable_boundary_leaves_the_cell_alone() -> None:
+    """html5 unescaping does not round-trip a numeric reference to VT, FS, GS,
+    RS or NEL. Those characters therefore have no serialised form, and a cell
+    whose decoded label carries one literally is left exactly as found rather
+    than rewritten into something that would split the row."""
+    assert set(_UNREPRESENTABLE) == {"\v", "\x1c", "\x1d", "\x1e", "\x85"}
+    for char in _UNREPRESENTABLE:
+        cell = f"&nbsp;A{char}B"
+        assert canonicalize_label_cell(cell) == cell
+
+
+# ---------------------------------------------------------------------------
+# Round 2, finding 2: nested escapes, and a serialised fixed point.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cell",
+    (
+        "&amp;nbsp;Swiss francs",
+        "&amp;amp;nbsp;Swiss francs",
+        "&nbsp;&nbsp;Swiss francs",
+        "R&D",
+        "A&#124;B",
+        "A&#8232;B",
+        "Total",
+    ),
+)
+def test_gh688_the_serialised_label_is_a_fixed_point(cell: str) -> None:
+    """Round 1 decoded to a *value* and re-encoded only structure, so a
+    literal entity text such as ``&amp;nbsp;X`` lost one level of escaping on
+    every pass: ``route_page`` judged one string and the lifecycle hook then
+    mutated it again. The transform now escapes the decoded ampersand, and
+    accepts a serialisation only when ``decode_label_cell`` maps it straight
+    back -- which makes a second pass a byte-for-byte no-op."""
+    once = canonicalize_label_cell(cell)
+    assert canonicalize_label_cell(once) == once
+    assert decode_label_cell(once) == decode_label_cell(cell)
+
+
+def test_gh688_a_nested_entity_label_survives_judging_unchanged() -> None:
+    """The same defect at page level, and the invariant that matters: the
+    binder's reading of the shipped cell equals its reading of the raw cell,
+    and the hook that runs after the judge changes nothing."""
+    raw = "| Item | A |\n| --- | --- |\n| &amp;nbsp;Swiss francs | 1 |\n"
+    once, _ = canonicalize_table_labels(raw)
+    twice, changes = canonicalize_table_labels(once)
+    assert twice == once
+    assert changes == 0
+    assert parse_grid(once).rows[0][0] == parse_grid(raw).rows[0][0] == "&nbsp;Swiss francs"
+
+
+def test_gh688_the_lifecycle_hook_cannot_mutate_judged_bytes() -> None:
+    """``route_page`` judges, then the per-page lifecycle crosses the boundary
+    again. Pinned as a difference of zero on the nested-escape fixture that
+    broke round 1."""
+    body = "| Item | A |\n| --- | --- |\n| &amp;nbsp;Swiss francs | 1 |\n"
+    output = PageOutput(page_num=1, text=body, status=PageStatus.SUCCESS, engine="qwen")
+    canonicalize_candidate(output)
+    judged = output.text
+    assert canonicalize_candidate(output) == 0
+    assert output.text == judged
+
+
+def test_gh688_an_encoded_pipe_stays_one_cell() -> None:
+    """Astra's control: the encoded pipe is stable and still resolves."""
+    raw = "| Item | A |\n| --- | --- |\n| A&#124;B | 1 |\n"
+    assert canonicalize_table_labels(raw) == (raw, 0)
+    assert "A|B" in resolve_cell_refs(raw, ["R1C1"]).values()
+
+
+# ---------------------------------------------------------------------------
+# Round 2, finding 3: the native fallback candidate.
+# ---------------------------------------------------------------------------
+
+
+def _born_digital_state(pdf_path: Path, native: str, *, via_ingestion: bool) -> DocumentState:
+    """A page whose only engine attempt was REJECTED, so the manifest falls
+    back to the native reading. ``via_ingestion`` selects the producer:
+    ``apply_born_digital`` (the real door) or a direct write to
+    ``PageState.native_text`` (the pre-fix shape, kept as the falsification
+    arm)."""
+    state = DocumentState(handle=DocumentHandle.from_path(pdf_path))
+    if via_ingestion:
+        state.apply_born_digital(
+            DocumentAssessment(
+                path=pdf_path,
+                pages=[
+                    PageAssessment(
+                        page_num=1,
+                        is_born_digital=True,
+                        native_text=native,
+                        confidence=1.0,
+                    )
+                ],
+            )
+        )
+    else:
+        ps = state.pages[1]
+        ps.is_born_digital = True
+        ps.native_text = native
+    ps = state.pages[1]
+    rejected = PageOutput(
+        page_num=1,
+        text=canonicalize_table_labels(native)[0],
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        audit_passed=False,
+    )
+    ps.attempts.append(rejected)
+    ps.best_output = None
+    return state
+
+
+def test_gh688_the_native_fallback_ships_canonical_rows_and_resumes(tmp_path: Path) -> None:
+    """The reachable hole round 1 left open. The per-page lifecycle skips a
+    page with no ``best_output``, but ``_winning_page_output`` then builds the
+    winner from the raw native reading -- so the page shipped ``&nbsp;`` rows
+    AND ``_load_terminal_page`` refused them on every resume, a page that
+    never becomes resumable under its own fingerprint.
+
+    Pinned as a difference between two producers of the same page, and across
+    two reconstructed runs under one fingerprint."""
+    pipeline = _pipeline()
+    pdf_path = _pdf(tmp_path)
+
+    ingested = _born_digital_state(pdf_path, RAW_PAGE, via_ingestion=True)
+    assert ingested.pages[1].native_text_raw == RAW_PAGE, "raw provenance is kept"
+    assert "&nbsp;" not in (ingested.pages[1].native_text or "")
+
+    winner = _winning_page_output(ingested, 1)
+    assert winner is not None
+    assert CANONICAL_ROW in winner.text
+    assert "&nbsp;" not in winner.text
+
+    first = pipeline._phase_assemble(ingested, tmp_path / "run1").markdown
+    assert CANONICAL_ROW in first
+    assert "&nbsp;" not in first
+
+    restored = pipeline._load_terminal_page(
+        DocumentState(handle=DocumentHandle.from_path(pdf_path)), 1, tmp_path / "run1"
+    )
+    assert restored is not None, "the fallback page must be resumable"
+
+    # The same document reconstructed a second time, same fingerprint.
+    second = pipeline._phase_assemble(
+        _born_digital_state(pdf_path, RAW_PAGE, via_ingestion=True), tmp_path / "run2"
+    ).markdown
+    assert second == first
+
+    # Falsification: the pre-fix producer still reproduces both halves of the
+    # defect, so neither assertion above is vacuous.
+    legacy = _born_digital_state(pdf_path, RAW_PAGE, via_ingestion=False)
+    assert "&nbsp;" in _winning_page_output(legacy, 1).text
+    legacy_md = pipeline._phase_assemble(legacy, tmp_path / "legacy").markdown
+    assert "&nbsp;" in legacy_md
+    assert (
+        pipeline._load_terminal_page(
+            DocumentState(handle=DocumentHandle.from_path(pdf_path)), 1, tmp_path / "legacy"
+        )
+        is None
+    )
+
+
+def test_gh688_the_d3_regional_floor_splices_around_canonical_native_text(
+    tmp_path: Path,
+) -> None:
+    """D3's floor reads ``p.native_text`` directly (``manifest`` region
+    splice), bypassing every candidate hook. It needs no hook of its own
+    because the bytes it reads are canonical at ingestion -- pinned here so a
+    future move of the canonicalisation site cannot silently un-fix it."""
+    pdf_path = _pdf(tmp_path)
+    state = _born_digital_state(pdf_path, RAW_PAGE, via_ingestion=True)
+    native = state.pages[1].native_text or ""
+    assert CANONICAL_ROW in native
+    assert native == canonicalize_table_labels(native)[0]
+
+
+# ---------------------------------------------------------------------------
+# Round 2, finding 4: the fence mask must be index-aligned.
+# ---------------------------------------------------------------------------
+
+
+def test_gh688_a_unicode_separator_does_not_unmask_a_fence() -> None:
+    """``_markdown_content_lines`` re-splits with ``str.splitlines``; the
+    caller holds a ``split("\\n")`` list. A U+2028 in prose above the fence
+    made the two lengths differ, and round 1's fallback then read the raw,
+    unmasked lines and rewrote the code sample."""
+    raw = "Prose continued again\n```\n| Item | A |\n| --- | --- |\n| &nbsp;X | 1 |\n```\n"
+    assert canonicalize_table_labels(raw) == (raw, 0)
+
+
+def test_gh688_an_unalignable_mask_abstains() -> None:
+    """An unclosed HTML comment truncates the masked text, so no index map can
+    be built. Abstain (no rewrite) rather than fall back to unmasked lines."""
+    raw = "<!-- unterminated\n| Item | A |\n| --- | --- |\n| &nbsp;X | 1 |\n"
+    assert canonicalize_table_labels(raw) == (raw, 0)

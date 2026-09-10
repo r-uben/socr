@@ -28,16 +28,30 @@ What the transform may do, and nothing else:
   ``decode_label_cell`` -- the same function ``binding`` uses -- so the
   shipped bytes and the binder's view of the label cannot diverge again.
 * **Re-encode structural characters** that decoding introduced. A cell
-  segment cannot contain a literal ``|``, ``\\n`` or ``\\r`` by construction
+  segment cannot contain a literal ``|`` or a line boundary by construction
   (it is delimited by pipes and lives on one line), so any that appears
   after ``html.unescape`` came from an entity, and writing it out raw would
   manufacture a cell or a row -- a coordinate move, which this transform is
-  forbidden to make. ``&#124;`` / ``&#10;`` / ``&#13;`` go back in their
-  place; ``decode_label_cell`` still resolves them to the intended
-  character, so the binder and the judge read what the model meant.
-* **Idempotent.** ``canonicalize_table_labels`` is a fixed point after one
-  application, which is what lets fresh processing and resume agree byte for
-  byte.
+  forbidden to make. **Every** boundary the real parsers honour counts, not
+  just LF and CR: ``binding.parse_grid`` and
+  ``reconcile._markdown_content_lines`` split with ``str.splitlines``, which
+  also breaks on VT, FF, FS/GS/RS, NEL, U+2028 and U+2029. They are
+  enumerated in ``_LINE_BOUNDARIES`` and each one is pinned by a test.
+* **Round-tripping is verified, not assumed.** ``html.unescape`` implements
+  the html5 replacement table, so a numeric reference to a C0 control or to
+  the C1 range does NOT come back (``&#11;`` decodes to nothing, ``&#133;``
+  to U+2026). A decoded label carrying such a character therefore has no
+  serialised form, and the cell is left exactly as found -- fail closed, no
+  coordinate move. Which characters survive is decided by asking
+  ``html.unescape`` at import time, not by a hand-written list.
+* **Idempotent, per cell, mechanically.** The serialisation chosen for a
+  cell is accepted only if ``decode_label_cell`` maps it back to the decoded
+  label it came from; a second application then recomputes the same choice
+  and is a byte-for-byte no-op. That is also the invariant #688 needs: the
+  binder's view of the shipped label equals the binder's view of the raw
+  one. Nested escapes are the reason a plain "decode to a fixed point"
+  would be wrong -- ``&amp;nbsp;X`` means the literal text ``&nbsp;X``, and
+  decoding it twice would silently reinterpret it as indentation.
 
 #624b's font-evidence wrapped-label merge stays ``bind()``-internal and is not
 touched here: it changes a ROW COUNT, and this boundary never does.
@@ -55,9 +69,40 @@ from socr.tables.reconcile import table_body_row_indices
 #: future reader (the model encodes sub-row indentation as ``&nbsp;`` runs).
 _LEADING_WS_RE = re.compile("^[\\s ]+")
 
-#: Characters that ARE markdown table structure. Decoding must never emit one
-#: raw into the page body -- see the module docstring.
-_STRUCTURAL_ENTITIES = (("|", "&#124;"), ("\n", "&#10;"), ("\r", "&#13;"))
+#: Every character ``str.splitlines`` recognises as a line boundary. The
+#: parsers this transform must not disturb (``binding.parse_grid``,
+#: ``reconcile._markdown_content_lines``) split with it, so emitting any of
+#: these raw into a label cell splits the row in two.
+_LINE_BOUNDARIES = (
+    "\n",  # LF
+    "\r",  # CR
+    "\v",  # VT
+    "\f",  # FF
+    "\x1c",  # FS
+    "\x1d",  # GS
+    "\x1e",  # RS
+    "\x85",  # NEL
+    "\u2028",  # LINE SEPARATOR
+    "\u2029",  # PARAGRAPH SEPARATOR
+)
+
+#: Characters that ARE markdown structure: the cell boundary plus every line
+#: boundary above. Decoding must never emit one raw into the page body -- see
+#: the module docstring.
+_STRUCTURAL = ("|",) + _LINE_BOUNDARIES
+
+#: The subset of ``_STRUCTURAL`` that a numeric character reference actually
+#: round-trips, asked of ``html.unescape`` rather than assumed: html5 drops a
+#: numeric reference to a C0 control and remaps the C1 range, so VT, FS, GS, RS
+#: and NEL have no representation. A label needing one of them is left alone.
+_ENTITY = {
+    char: f"&#{ord(char)};" for char in _STRUCTURAL if html.unescape(f"&#{ord(char)};") == char
+}
+
+#: Structural characters with no serialised form. Their presence in a decoded
+#: label makes the cell unrepresentable, so it is not rewritten.
+_UNREPRESENTABLE = tuple(char for char in _STRUCTURAL if char not in _ENTITY)
+
 
 #: Markdown cell padding: the ASCII run around a cell's content. Deliberately
 #: NOT ``str.strip``, which also eats the U+00A0 indentation this transform
@@ -75,16 +120,36 @@ def decode_label_cell(text: str) -> str:
     return _LEADING_WS_RE.sub("", html.unescape(text))
 
 
+def _serialise_label(decoded: str) -> str | None:
+    """The page-markdown form of an already-decoded label, or ``None``.
+
+    Two candidate serialisations are tried, cheapest first: leave literal
+    ampersands alone, or escape every one of them as ``&amp;``. The first
+    whose ``decode_label_cell`` is *exactly* ``decoded`` wins. That check is
+    what makes the transform idempotent (a second pass recomputes the same
+    choice from the same decoded label) and what keeps the binder's reading of
+    the shipped cell equal to its reading of the raw cell. ``None`` means no
+    faithful form exists and the caller must leave the cell untouched.
+    """
+    if any(char in decoded for char in _UNREPRESENTABLE):
+        return None
+    for escape_amp in (False, True):
+        candidate = decoded.replace("&", "&amp;") if escape_amp else decoded
+        for char, entity in _ENTITY.items():
+            candidate = candidate.replace(char, entity)
+        if decode_label_cell(candidate) == decoded:
+            return candidate
+    return None
+
+
 def canonicalize_label_cell(text: str) -> str:
     """``decode_label_cell`` for a cell that must go back into page markdown.
 
-    Idempotent: a second application is a no-op, because the only characters
-    re-encoded are the ones decoding would otherwise turn into structure.
+    Idempotent, and a no-op when the decoded label has no faithful markdown
+    form (see :func:`_serialise_label`).
     """
-    decoded = decode_label_cell(text)
-    for char, entity in _STRUCTURAL_ENTITIES:
-        decoded = decoded.replace(char, entity)
-    return decoded
+    serialised = _serialise_label(decode_label_cell(text))
+    return text if serialised is None else serialised
 
 
 def _canonicalize_row(line: str) -> tuple[str, bool]:

@@ -7848,6 +7848,23 @@ class UnifiedPipeline:
                 # ----------------------------------------------------------------
                 # Per-page lifecycle (runs for EVERY page that has best_output).
                 # ----------------------------------------------------------------
+                # #688 round 2. The native reading is a candidate too: it is
+                # what ``manifest._winning_page_output`` ships when nothing
+                # wins, and what D3's regional floor splices around. It is
+                # canonicalised at ingestion (``state.apply_born_digital``);
+                # re-cross the boundary here because later per-page work
+                # rewrites it in place (the chart-region PNG rehoming above).
+                # Idempotent, so this is a byte-for-byte no-op unless it was
+                # actually rewritten -- and this runs BEFORE the
+                # ``best_output`` gate, because a page with no winner is
+                # exactly the fallback page that must not be skipped.
+                if ps.native_text:
+                    _native_canonical, _native_changed = canonicalize_table_labels(ps.native_text)
+                    if _native_changed:
+                        if ps.native_text_raw is None:
+                            ps.native_text_raw = ps.native_text
+                        ps.native_text = _native_canonical
+
                 bo = ps.best_output
                 if bo is None:
                     continue

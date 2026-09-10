@@ -754,6 +754,26 @@ def table_syntax_line_indices(lines: list[str]) -> set[int]:
     return syntax
 
 
+def _aligned_content_lines(lines: list[str]) -> list[str] | None:
+    """``_markdown_content_lines``' mask, index-aligned to *lines*.
+
+    #688. ``_markdown_content_lines`` re-splits with ``str.splitlines``, which
+    recognises boundaries ``split("\n")`` does not (VT, FF, FS/GS/RS, NEL,
+    U+2028, U+2029). Callers that hold their own ``split("\n")`` list cannot
+    use its output as an index map. This applies the same two blanking passes
+    directly to the caller's list and returns ``None`` when the result cannot
+    be aligned, so a mismatch abstains instead of silently unmasking fences.
+    """
+    masked = _strip_html_comments("\n".join(lines)).split("\n")
+    if len(masked) != len(lines):
+        # An unclosed ``<!--`` truncates the text: fail closed.
+        return None
+    masked = _strip_fenced_regions(masked)
+    if len(masked) != len(lines):
+        return None
+    return ["" if _INDENTED_CODE.match(line) else line for line in masked]
+
+
 def table_body_row_indices(lines: list[str]) -> set[int]:
     """Indices of *lines* that are BODY rows of a genuine markdown table.
 
@@ -769,17 +789,17 @@ def table_body_row_indices(lines: list[str]) -> set[int]:
     what keeps a pipe-carrying sentence next to a table out of the set.
     """
     # A grid inside a fence or an HTML comment is a code SAMPLE, not a reading
-    # of the page, and its labels are not this transform's business. The
-    # blanking helpers preserve line count, so the indices stay usable against
-    # the caller's real lines; if a line-ending shape ever breaks that
-    # alignment, fall back to the raw lines rather than return wrong indices.
-    probe = _markdown_content_lines("\n".join(lines))
-    if len(probe) < len(lines) and not any(ln.strip() for ln in lines[len(probe) :]):
-        # ``splitlines`` drops the empty element a trailing newline leaves in a
-        # ``split("\n")`` list; pad it back so the indices still line up.
-        probe = probe + [""] * (len(lines) - len(probe))
-    if len(probe) == len(lines):
-        lines = probe
+    # of the page, and its labels are not this transform's business. The mask
+    # is built against the CALLER's own line split, never against
+    # ``str.splitlines`` -- #688 round 2: a U+2028 in prose above the fence
+    # makes the two disagree, and the old length test then silently dropped
+    # the fence exclusion and rewrote the code sample. When the mask cannot be
+    # aligned (an unclosed comment truncates the text), abstain: no indices,
+    # so no rewrite.
+    masked = _aligned_content_lines(lines)
+    if masked is None:
+        return set()
+    lines = masked
 
     body: set[int] = set()
     run_start: int | None = None
