@@ -202,18 +202,18 @@ class TestP2bTheWitnessMustBeProse:
         """RE-PINNED in round 7 (Astra, re-review at 0c67d2d).
 
         This was the difference pin: identical table half, real prose, accepted.
-        Round 7 rules that a block is evidence only where a recognised numeric
-        row sits across a measured gap on BOTH sides of it, because a row on one
-        side proves a table is nearby and not that the text beside it is prose
-        rather than that table's wrapped label. This fixture's paragraph is the
-        last thing on the page, so it has one side only and the witness now
-        abstains -- the disclosed and intended cost of that ruling.
+        Rounds 7 and 8 both refuse it, for widening reasons: round 7 because
+        the paragraph is the last thing on the page and so has a recognised
+        numeric row on one side only, round 8 because the page has a withheld
+        numeric band at all. Band-gap geometry says where blocks break, never
+        what a block IS, so model-prose salvage is disabled wherever a table's
+        extent is in question.
 
         The difference the class exists to pin moves to
-        ``test_genuine_prose_between_two_row_blocks_is_still_accepted`` below,
-        which keeps the same two attempts and gives the page evidence on both
-        sides. Refusal costs this page no text: since #649 the native layer's
-        own prose ships flagged either way."""
+        ``test_genuine_prose_between_two_row_blocks_is_refused_too`` below --
+        which round 8 re-pinned in turn, because flanking a block with rows
+        does not make it prose either. Refusal costs this page no text: since
+        #649 the native layer's own prose ships flagged either way."""
         genuine = (
             "| Foreign Bank | Amount |\n| --- | --- |\n"
             + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
@@ -223,11 +223,18 @@ class TestP2bTheWitnessMustBeProse:
         )
         assert _prose_corroboration_ok(self._page(), genuine) is False
 
-    def test_genuine_prose_between_two_row_blocks_is_still_accepted(self) -> None:
-        """The guard is not vacuous after round 7: on a page that supplies a
-        recognised row on both sides of its paragraph, the genuine attempt
-        clears and the fabricated one does not. Same two attempts as above;
-        only the paragraph's position on the page differs."""
+    def test_genuine_prose_between_two_row_blocks_is_refused_too(self) -> None:
+        """RE-PINNED in round 8. Round 7 added this as the proof that the guard
+        was not vacuous: with a recognised row on both sides of the paragraph,
+        the genuine attempt cleared and the fabricated one did not.
+
+        Astra's ruling rejects the inference. A flanked block is not thereby
+        prose -- a section heading or a wrapped header sits between two numeric
+        sections just as readily -- and the same layout was reproduced as a
+        fabrication path at eccd394. So salvage is disabled on any page with a
+        withheld numeric band, this page included, and what survives here is
+        the measurement: both attempts refused, no printed value shipped, the
+        page's own prose still shipped flagged by #649."""
         page = _scanned_page(
             _words(self._TABLE_LINES[:3] + [""] + self._PROSE_LINES + [""] + self._TABLE_LINES[3:])
         )
@@ -243,7 +250,7 @@ class TestP2bTheWitnessMustBeProse:
             + "".join(f"| {line} |\n" for line in self._TABLE_LINES)
             + "\nQuarterly dividends were ratified.\n"
         )
-        assert _prose_corroboration_ok(page, genuine) is True
+        assert _prose_corroboration_ok(page, genuine) is False
         assert _prose_corroboration_ok(page, fabricated) is False
 
     def test_the_table_half_alone_would_have_cleared_the_floor(self) -> None:

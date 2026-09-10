@@ -277,3 +277,50 @@ PYTHONPATH=/Users/rubenffuertes/repos/.worktrees/socr-b1/src ~/venvs/socr/bin/py
 uvx ruff@0.16.0 format --check .
 597 files already formatted
 ```
+
+## 2026-09-10 — #652 rounds 2-8: model-prose salvage disabled on unresolved scans
+
+The corroboration guard above scored a model attempt against a WITNESS built from
+the page's own native words. #652 asked whether that witness could be trusted, and
+the answer, after eight adversarial rounds against Astra, is that it cannot be built
+from page geometry at all. Every variant of the geometric admission rule was
+reproduced as a fabrication path — a real selection run shipping an invented
+sentence assembled from a table's own row labels:
+
+| Rejected rule | Reproducer shape that killed it |
+| --- | --- |
+| Page-wide MEDIAN line advance as the walk's stopping step | An unrelated footnote block tightened to 6pt pulled the median down; the table's own unchanged 12pt step became a "block break" and its label entered the witness. Text elsewhere must not redraw a table's extent. |
+| The anchors' own MEAN PITCH as that step | A units caption printed 18pt under a row label, in a table whose rows average 12pt: an average is not an upper bound on the individual steps inside one table, so the walk stopped inside it. |
+| SEPARATION alone (a run of unattributed bands with larger gaps around it) | A table label wrapped over two lines is such a block; so is a whole date table printed between two numeric rows, whose own dates then landed in neither list and were subtracted from nothing. |
+| A recognised numeric row on ONE side | Two bank-name bands at the page edge, 6pt apart, with an amount 24pt below them. A row on one side proves a table is NEARBY. |
+| A recognised numeric row on BOTH sides | 250.0 / two bank-name bands / 300.0. A section heading or wrapped header sits between two numeric sections as readily as a paragraph does. |
+| Letting an ABSORBED band vouch for a side (the lever considered instead of this rewrite) | The same geometry with a units caption at each end: the walk absorbs the captions, so the intervening label block becomes admissible again. |
+
+**Ruling (Astra, adopted by team-lead).** Band-gap geometry measures where blocks
+BREAK and cannot say what a block IS; the printed page does not distinguish a
+two-line paragraph above a table from that table's wrapped header. So model-prose
+salvage is DISABLED on any scanned page whose shipping partition withholds a
+numeric band. `corroboration_witness_words` now returns the whole page as witness
+only when `partition_prose_bands` withholds nothing anywhere (the pure-prose scan);
+otherwise every band is unresolved, corroboration refuses, and #649's native
+recovery ships the page's own prose flagged with the numeric bands withheld.
+`_separated_prose_runs` and the anchor walk are deleted.
+
+A rarely-accepting guard is the intended outcome: #652 exists to stop unsupported
+model prose passing corroboration, not to maximise acceptance, and refusal costs no
+page text — only the model's wording is discarded. The old control layouts are kept
+as MEASUREMENTS of refusal and fallback rather than deleted, and the round-7 flanked
+positive was re-pinned as refused, since flanking cannot establish that a block is
+prose. Measured on the ticket's own fixture (Fed 1989-11-14 p3, real PDF + cached
+nougat attempt): the witness goes from 185 words of 295 to none and the genuine
+attempt is refused, while the shipped `PageOutput` stays byte-identical to `ff5ed74`'s
+— the page had already failed its table check, so native recovery ships either way,
+the three directive paragraphs flagged and every printed amount withheld.
+
+**Not closed by this.** Reliable model-prose salvage remains open and is separate
+work: it needs independent source evidence for the region AND for its transcription
+— a source-verified prose region, or conservative matching against trusted source
+spans — not another threshold. Whether native fallback is lossless across all scans
+is also unestablished; one unchanged Fed page is not that measurement, and any claim
+that model prose reads better needs source-judged comparison rather than fluency or
+vocabulary overlap.

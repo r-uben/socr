@@ -388,291 +388,82 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
     """``(witness_words, unresolved_words)`` -- the prose a MODEL may be scored
     against, and the prose that is real page text but proves nothing.
 
-    #652 round 2 (Astra, 2026-09-10). :func:`prose_region_words` is the
-    SHIPPING partition, and it is deliberately permissive about a zero-numeral
-    band: a wrapped row label carries no printed value, so #649 ships it
-    flagged rather than lose it. Reusing that same partition as the
-    CORROBORATION witness quietly promoted those bands from "safe to show" to
-    "trustworthy evidence", and the two are not the same permission. A table
-    whose labels sit on baselines separate from their amounts put its entire
-    vocabulary back into the witness, and the identical fabricated attempt that
-    was refused with labels inline was ACCEPTED with them split -- shipping an
-    invented sentence built from the table's own bank names.
+    A page yields a witness ONLY when the shipping partition
+    (:func:`partition_prose_bands`) finds no withheld numeric band anywhere on
+    it. One withheld band and every band on the page is unresolved: there is
+    then no witness, corroboration refuses, and #649's native recovery ships
+    the page's own prose flagged with the numeric bands withheld. Model-prose
+    salvage is disabled on exactly the pages where a table's extent is in
+    question, which is what #652 asks for.
 
-    So the witness abstains wherever prose/table attribution is unresolved. The
-    table's own extent is grown from ANCHORS outward, transitively:
+    #652 round 8 (Astra's ruling, 2026-09-10) replaced the geometric admission
+    rule this function carried through rounds 2-7. FIVE successive variants of
+    it were reproduced as fabrication paths, each on a real selection run and
+    each shipping an invented sentence built from a table's own row labels:
 
-    * an anchor is a band carrying a genuine numeric token -- a candidate table
-      ROW. ``_is_genuine_numeric`` is the right instrument for this and the
-      wrong one for withholding, which is the mirror of #649's own finding: a
-      row-matching predicate is not a safety predicate, and a safety predicate
-      is not a structure predicate. A prose line quoting a rate ("...remained
-      around 5-1/4 percent...") is withheld from SHIPPING by the digit rule but
-      is not a table row, so it must not anchor a table here.
-    * from each anchor the walk continues outward band after band --
-      transitively, not one hop -- for as long as each step is no larger than
-      the page's own line advance (the median inter-band step, taken from the
-      page's geometry exactly as ``baseline_bands`` takes its clustering
-      tolerance from the page's median word height). A larger step is a block
-      break and the walk stops there.
+    * the page-wide MEDIAN line advance as the walk's stopping step. Tightening
+      an unrelated footnote block to 6pt pulled the median down, the table's
+      own unchanged 12pt step became a "block break", and its label entered the
+      witness. Text elsewhere must not redraw a table's extent.
+    * the ANCHORS' OWN MEAN PITCH as that step. An average is not an upper
+      bound on the individual steps inside one table: a units caption printed
+      18pt under a row label, in a table whose rows average 12pt, stops the
+      walk inside the table.
+    * SEPARATION alone -- a run of unattributed bands with larger gaps around
+      it. Separation proves a BLOCK exists, not that the block is prose. A
+      table label wrapped over two lines is such a block, and so is a whole
+      date table printed between two numeric rows.
+    * a recognised numeric row on ONE side of the run. That proves a table is
+      NEARBY. Two bank-name bands at the page edge, 6pt apart, with an amount
+      24pt below them satisfied it.
+    * a recognised numeric row on BOTH sides. Narrower, still not prose: a
+      section heading or a wrapped header sits between two numeric sections
+      just as readily as a paragraph does (250.0 / two bank-name bands / 300.0,
+      the reviewer's reproduction at eccd394).
+    * and the lever considered instead of this rewrite -- letting an ABSORBED
+      band vouch for a side -- was reproduced as a fabrication path too: put a
+      units caption at each end of that same geometry and the walk absorbs the
+      captions, so the intervening label block becomes admissible again.
 
-    One hop was not enough, and that is measured rather than argued (Astra
-    round 3): with a units caption between a row label and its value --
-    "Austrian National Bank" / "in millions of dollars unless noted" / "250.0",
-    ordinary layout -- the label sits at distance 2 and went straight back into
-    the witness, corroborating "Austrian National Bank ratified quarterly
-    dividends." Transitivity closes every distance at once.
+    The lesson is not that some sixth variant is waiting. Band-gap geometry
+    measures where blocks BREAK; it cannot say what a block IS, and the
+    printed page genuinely does not distinguish a two-line paragraph above a
+    table from that table's wrapped header. Reliable model-prose salvage needs
+    independent source evidence for the region AND for its transcription -- a
+    source-verified prose region, or conservative matching against trusted
+    source spans -- and that is separate work, not a threshold.
 
-    The walk is anchored and gap-bounded rather than run-based because both
-    simpler rules measured wrong on the ticket's own fixture. A y-span rule
-    swallowed the whole policy directive (witness 89 of 295 words, overlap
-    0.34, a genuine attempt refused) once a prose line carrying a value counted
-    as table extent. Propagating through every zero-digit band with no stopping
-    rule empties the witness on any page whose prose touches a table at all,
-    which is nearly every page -- a guard that always refuses is not a guard.
-    Under the anchored walk the table, its wrapped labels and its entire header
-    block are attributed to the table rather than read as prose.
+    Refusing costs the page no text. Since #649 the native layer's own prose
+    ships flagged whether or not a model attempt corroborates, so the only
+    thing discarded on a refusal is the model's WORDING. That the guard
+    therefore accepts rarely is intended: #652 exists to stop unsupported model
+    prose passing corroboration, not to maximise acceptance.
 
-    Rounds 5 to 7 (Astra, 2026-09-10) close the ways that walk still turned an
-    UNPROVEN gap into positive prose attribution. Stopping at a step larger
-    than the anchors' pitch says only that the step is unexplained; separation
-    only proves a BLOCK exists; a recognised row on one side of a block only
-    proves a table is nearby. None of the three says the block is prose rather
-    than the table's own label. A band is admitted as EVIDENCE only where
-    :func:`_separated_prose_runs` finds a run of prose-tagged bands whose
-    separating gap was measured, on BOTH sides, against a recognised table
-    ROW; everything else, including a withheld band sitting outside the
-    table's extent, is unresolved. And an empty anchor list is no longer read
-    as an empty page: see the no-anchor branch below.
+    The one page that still yields a witness is the pure-prose scan -- no
+    printed numeral anywhere, so the shipping partition withholds nothing and
+    there is no table whose extent could be in question. That case is asked
+    through the shipping partition rather than through a second numeric
+    detector, which is #652 round 5's finding: ``_is_genuine_numeric`` is a
+    row-MATCHING predicate and deliberately rejects printed forms that are
+    unmistakably values (a maturity date above all), so a table of institution
+    names and dates carries no anchor at all while the shipping side correctly
+    withholds every one of its bands. ``bears_printed_numeral``, via
+    :func:`partition_prose_bands`, is the safety predicate and the right one to
+    ask.
 
-    That is deliberately strict, and round 7 measured what it costs on the
-    ticket's own fixture: the witness goes from 185 words to none and the
-    genuine nougat attempt is refused, because the directive runs to the page
-    bottom and a page-edge block has only one side. The page's shipped bytes
-    do not move -- it had already failed its table check, so #649's native
-    recovery is what ships either way, the directive flagged and every printed
-    amount withheld.
-
-    Over-exclusion is still the safe direction and its cost is bounded anyway:
-    since #649, refusing corroboration no longer loses the page's prose, it
-    ships the native layer's own text instead. A page whose prose is set solid
-    against its table, with no block break anywhere, therefore yields no
-    witness and refuses -- correctly: nothing on such a page separates the
-    table's labels from its prose. The caller adds one more defence on top --
-    see ``_prose_corroboration_ok``, which subtracts every token the
-    table-attributed region itself contains.
+    Both lists are exhaustive: every word lands in exactly one of them. The
+    caller subtracts unresolved tokens from the witness before scoring -- see
+    ``manifest._prose_corroboration_ok`` -- so a third, silent case would let a
+    band be neither evidence nor subtracted.
     """
     bands = partition_prose_bands(words, row_shape_min)
     if not bands:
         return [], []
 
-    centers = [statistics.mean((w[1] + w[3]) / 2.0 for w in band) for _is_prose, band in bands]
-    anchors = sorted(
-        idx
-        for idx, (_is_prose, band) in enumerate(bands)
-        if any(_is_genuine_numeric(word[4])[0] for word in band)
-    )
-
-    if not anchors:
-        # No recognised numeric ROW is not "no table" (#652 round 5, Astra).
-        # ``_is_genuine_numeric`` is a row-MATCHING predicate and deliberately
-        # rejects printed forms that are unmistakably values -- a maturity
-        # date (``12/04/89``) above all -- so a table of institution names and
-        # maturity dates carries zero anchors while the SHIPPING partition
-        # correctly withholds every one of its date bands. Reading that
-        # absence as positive evidence of a prose-only page put the table's
-        # own bank names into the witness and corroborated an invented
-        # sentence built from them.
-        #
-        # So ask the exhaustive question the shipping side has already
-        # answered rather than adding a second numeric detector: does ANY band
-        # on this page carry a printed digit (``bears_printed_numeral``, via
-        # ``partition_prose_bands``)? If one does, this page has withheld
-        # numeric bands that the narrower structural matcher cannot recognise,
-        # its table's extent is unmeasured, and there is nothing here to
-        # attribute a band to a block with -- abstain. Only a page with no
-        # printed numeric content ANYWHERE is unambiguously prose.
-        if any(not is_prose for is_prose, _band in bands):
-            return [], [word for _is_prose, band in bands for word in band]
-        return [word for is_prose, band in bands if is_prose for word in band], []
-
-    # A LONE anchor is the opposite case. With one numeric row there is no row
-    # pitch to measure, so no step on the page can be shown to be a block break
-    # rather than the table's own advance -- and the label above it would be
-    # admitted as prose evidence on nothing but its distance. Abstain: no
-    # witness, corroboration refused. It costs no page text, because #649 ships
-    # the native prose either way.
-    if len(anchors) < 2:
-        return [], [word for _is_prose, band in bands for word in band]
-
-    def _row_pitch(anchor: int) -> float:
-        """The table's own line advance AT *anchor*, from its nearest rows.
-
-        Measured strictly between neighbouring anchors -- the distance to the
-        nearest anchor on each side, divided by the bands spanned -- so only
-        rows of the table being walked contribute. The page-wide median this
-        replaces was reachable from anywhere: Astra tightened an unrelated
-        footnote block to 6pt and the table's own unchanged 12pt step was
-        reclassified as a block break, letting its label back into the witness
-        and shipping the fabrication. Text elsewhere on the page must not be
-        able to redraw a table's extent, and mixed-pitch pages (a footnote
-        block under a table) are ordinary.
-        """
-        position = anchors.index(anchor)
-        pitches = []
-        if position > 0:
-            other = anchors[position - 1]
-            pitches.append(abs(centers[anchor] - centers[other]) / (anchor - other))
-        if position < len(anchors) - 1:
-            other = anchors[position + 1]
-            pitches.append(abs(centers[other] - centers[anchor]) / (other - anchor))
-        # The tighter of the two: a step this anchor's own rows never take is
-        # not this anchor's block.
-        return min(pitches)
-
-    attributed = set(anchors)
-    for anchor in anchors:
-        continues_block = _row_pitch(anchor)
-        for step in (-1, 1):
-            idx = anchor + step
-            while 0 <= idx < len(bands) and idx not in attributed:
-                gap = abs(centers[idx] - centers[idx - step])
-                if gap > continues_block:
-                    break
-                attributed.add(idx)
-                idx += step
-
-    separated = _separated_prose_runs(bands, centers, attributed, anchors)
-
-    # Exhaustive by construction (#652 round 6): every band lands in exactly
-    # one of the two lists. The previous three-way form had a third, silent
-    # case -- a band outside the table's grown extent that carried a printed
-    # digit was neither witness nor unresolved -- and a date table admitted as
-    # a "separated block" therefore put its institution labels into the
-    # witness while its own dates were subtracted from nothing.
-    # ``_separated_prose_runs`` returns only unattributed, prose-tagged bands,
-    # so no third case is needed and none can be re-introduced by accident.
-    witness: list = []
-    unresolved: list = []
-    for idx, (_is_prose, band) in enumerate(bands):
-        (witness if idx in separated else unresolved).extend(band)
-    return witness, unresolved
-
-
-def _separated_prose_runs(
-    bands: list[tuple[bool, list]],
-    centers: list[float],
-    attributed: set[int],
-    anchors: list[int],
-) -> set[int]:
-    """The bands the PAGE ITSELF shows to be prose of a block of their own.
-
-    #652 round 5 (Astra, 2026-09-10). Stopping the anchored walk at a step
-    larger than the table's own pitch says the step is unexplained; it does
-    not say the band beyond it is prose. The two are not the same claim, and
-    the average step between neighbouring anchors is not an upper bound on the
-    individual steps INSIDE one table: a units caption printed tight under its
-    row label ("Austrian National Bank" / 18pt / "Maturity schedule" / 6pt /
-    "250.0", the reviewer's measured counterexample) makes the label's own
-    18pt step exceed the 12pt pitch its rows average. The walk stopped there,
-    the label became "prose", and the fabricated sentence built from it
-    shipped. Nothing outside the table had to change for that.
-
-    #652 round 6 (Astra) is the same lesson one level up: separation proves a
-    BLOCK exists, not that the block is prose. Requiring only that a run of
-    unattributed bands be gap-separated admitted a table label wrapped over
-    two lines, and a whole date table printed between two recognised numeric
-    rows -- and in the second case the date table's institution labels entered
-    the witness while its own dates entered NEITHER list, so nothing
-    subtracted them either. Both shipped a fabricated sentence built from the
-    table's own bank names.
-
-    Where the block's role is unknown the repo's rule is to abstain, and
-    abstaining is cheap here: since #649, refusing corroboration costs no page
-    text -- the native layer's own prose ships flagged either way.
-
-    #652 round 7 (Astra) is that lesson at its limit. Round 6 asked for a
-    recognised row on ONE side. Two bank-name bands printed at the page edge,
-    6pt apart, with an amount 24pt below them satisfied it -- and the same
-    fabricated sentence shipped. A numeric row on one side proves a table is
-    NEARBY; it does not say whether the text beside it is a paragraph above
-    that table or the table's own wrapped label. Nothing in the words or the
-    bboxes separates those two readings, so both sides must supply the
-    evidence. This is not offered as a proof of prose either -- a header block
-    can sit between two numeric sections -- only as the most conservative rule
-    that closes the counterexample, and it costs a page nothing to apply.
-
-    A run is admitted only when the page establishes all of:
-
-    1. every band in it is PROSE-TAGGED by the same partition the shipping
-       side uses. A withheld, digit-bearing band is never evidence, and it
-       BREAKS the run rather than voiding it: a genuine paragraph quoting a
-       rate ("...has remained around 5-1/4 percent...", the one such line on
-       the ticket's own fixture) is real prose on both sides of that line,
-       while the date table's labels are left as one-band fragments that
-       cannot clear (2).
-    2. at least two such bands, so the run has an internal step at all. One
-       band has no measurable spacing of its own.
-    3. and 4., asked of BOTH sides (round 7): the nearest attributed band --
-       looking PAST unattributed bands, never past attributed ones -- exists,
-       is an ANCHOR (a band carrying a genuine numeric token, i.e. a
-       recognised table ROW), and is further away than the run's widest
-       internal step. The distance is round 5's gap evidence; requiring the
-       band across that gap to be a row is round 6's; requiring it on both
-       sides is round 7's. A run with nothing attributed on one side -- a
-       page-edge paragraph, and the ticket fixture's own directive -- has only
-       one side's evidence and therefore abstains. An unattributed withheld
-       band beside the run is not a boundary (it is the rate line inside the
-       paragraph again), so the search looks past it; if the nearest
-       attributed band lies past such a band the gap is not measured against
-       an adjacency and only the anchor test applies.
-
-    The anchor test is what the round-6 counterexamples lack. A gap is
-    evidence about the table's edge only if the thing on the table side of it
-    IS the table: a row it was recognised from, not material the walk itself
-    inferred. In the wrapped-label counterexample the
-    run's only neighbour is "Maturity schedule", a zero-digit caption the walk
-    absorbed because it sat 6pt from a value; excluding the label above it
-    then rests on inference stacked on inference, and no step in that chain
-    was ever measured against a row. Geometry alone cannot separate that shape
-    from a genuine two-line paragraph above a table -- both are a tight pair
-    with a wider gap below, and the ECB census fixture (prose at 10pt over
-    rows at 15pt) and the reviewer's label (6pt over rows at 12pt) differ by
-    nothing a page-wide leading comparison can rank. What differs is what the
-    gap is measured against.
-    """
-    total = len(bands)
-    anchor_set = set(anchors)
-
-    def _nearest_attributed(start: int, step: int) -> int | None:
-        idx = start
-        while 0 <= idx < total:
-            if idx in attributed:
-                return idx
-            idx += step
-        return None
-
-    admitted: set[int] = set()
-    run: list[int] = []
-    for idx in range(total + 1):
-        if idx < total and idx not in attributed and bands[idx][0]:
-            run.append(idx)
-            continue
-        if len(run) >= 2:
-            widest = max(centers[b] - centers[a] for a, b in zip(run, run[1:]))
-            sides = (
-                (run[0], _nearest_attributed(run[0] - 1, -1)),
-                (run[-1], _nearest_attributed(run[-1] + 1, 1)),
-            )
-            vouched = all(
-                near in anchor_set
-                and (abs(near - edge) > 1 or abs(centers[edge] - centers[near]) > widest)
-                for edge, near in sides
-            )
-            if vouched:
-                admitted.update(run)
-        run = []
-    return admitted
+    every_word = [word for _is_prose, band in bands for word in band]
+    if any(not is_prose for is_prose, _band in bands):
+        return [], every_word
+    return every_word, []
 
 
 def prose_region_words(words: list, row_shape_min: int | None = None) -> tuple[list, list]:

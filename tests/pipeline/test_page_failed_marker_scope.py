@@ -105,31 +105,21 @@ def _words_for(prose_before: str, prose_after: str) -> list[tuple]:
 NATIVE_WORDS = _words_for(PROSE_BEFORE, PROSE_AFTER)
 
 
-def _words_flanked() -> list[tuple]:
-    """``NATIVE_WORDS`` with a copy of the table's three numeric rows printed
-    above the first paragraph and below the last one.
+def _words_prose_only() -> list[tuple]:
+    """The same two paragraphs with NO numeric row printed anywhere.
 
-    #652 round 7: a block of text is evidence about the page's prose only
-    where a recognised numeric ROW sits across a measured gap on BOTH sides of
-    it. ``NATIVE_WORDS`` puts one paragraph at the top of the page and the
-    other at the bottom, so each has one side only and the witness abstains on
-    the whole page -- correct under that rule, but it leaves the corroboration
-    tests below with no page on which the guard can be SATISFIED, and a guard
-    that can only refuse pins nothing. The rows repeat the same three labels,
-    so the page's native vocabulary -- and the overlap ratios measured from it
-    -- are unchanged; only the evidence the layout supplies differs."""
-    words: list[tuple] = []
-    rows = [["Decrease", "17", "14"], ["Unchanged", "78", "73"], ["Increase", "6", "12"]]
-    for y0, line0 in ((25.0, 40), (230.0, 30)):
-        for row_i, row in enumerate(rows):
-            for tok_i, tok in enumerate(row):
-                words.append(_word(50.0 + tok_i * 40.0, y0 + row_i * 15.0, tok, line0 + row_i))
-        if y0 == 25.0:
-            words.extend(NATIVE_WORDS)
-    return words
+    #652 round 8 (Astra's ruling): a scanned page yields a corroboration
+    witness only where the shipping partition withholds nothing -- no printed
+    numeral on any band, so no table whose extent could be in question. That is
+    the one layout on which the guard can still be SATISFIED, and it is what
+    the controls below use to pin that the guard still discriminates rather
+    than always refusing. Every page with a withheld numeric band refuses by
+    construction now, ``NATIVE_WORDS`` included."""
+    tokens = (PROSE_BEFORE + " " + PROSE_AFTER).split()
+    return [_word(50.0, 85.0 + (i % 5) * 10.0, tok, i % 5) for i, tok in enumerate(tokens)]
 
 
-NATIVE_WORDS_FLANKED = _words_flanked()
+NATIVE_WORDS_PROSE_ONLY = _words_prose_only()
 
 
 def _no_text_marker_state(
@@ -503,12 +493,14 @@ FABRICATED_ATTEMPT_MD = (
 def test_prose_corroboration_guard_satisfied_keeps_prose():
     """The attempt's outside-table vocabulary is the page's own -- keep it.
 
-    #652 round 7 moved this control onto ``NATIVE_WORDS_FLANKED``: the page's
-    paragraphs need a recognised numeric row on both sides before they count
-    as evidence, and on ``NATIVE_WORDS`` each of them is at a page edge. The
-    same page with its paragraphs refused is pinned by
-    ``test_prose_corroboration_page_edge_prose_abstains`` below."""
-    ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD, native_words=NATIVE_WORDS_FLANKED)
+    #652 round 8 moved this control onto ``NATIVE_WORDS_PROSE_ONLY``: model
+    prose is salvageable only on a page the shipping partition withholds
+    nothing from, because band-gap geometry cannot say what a block IS. A page
+    carrying a withheld numeric band refuses whatever its paragraphs look like
+    -- pinned by
+    ``test_prose_corroboration_withheld_band_abstains_without_losing_prose``
+    below, on this fixture's own table layout."""
+    ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD, native_words=NATIVE_WORDS_PROSE_ONLY)
 
     assert _prose_corroboration_ok(ps, GENUINE_ATTEMPT_MD) is True
 
@@ -520,17 +512,20 @@ def test_prose_corroboration_guard_satisfied_keeps_prose():
     assert "Decrease" not in output.text  # table region still withheld
 
 
-def test_prose_corroboration_page_edge_prose_abstains_without_losing_it():
-    """#652 round 7, the cost of the both-sides rule, pinned where it lands.
+def test_prose_corroboration_withheld_band_abstains_without_losing_prose():
+    """#652 round 8, the cost of disabling salvage, pinned where it lands.
 
-    On ``NATIVE_WORDS`` the page's two paragraphs are the first and last things
-    printed, so neither has a recognised numeric row on both sides and the
-    witness abstains for the whole page. The genuine attempt is therefore
-    refused -- the same attempt the flanked layout accepts.
+    ``NATIVE_WORDS`` prints three numeric rows, so the shipping partition
+    withholds three bands and the witness abstains for the WHOLE page --
+    paragraphs included, wherever they sit and whatever surrounds them. The
+    genuine attempt is therefore refused: the same attempt the pure-prose
+    layout above accepts.
 
-    Refusal is not loss: what ships in its place is the page's OWN text layer,
-    flagged, with every numeric row still withheld. Only the model's wording is
-    discarded."""
+    Rounds 2-7 tried to admit those paragraphs from band-gap geometry and each
+    variant was reproduced as a fabrication path (see
+    ``corroboration_witness_words``). Refusal is not loss: what ships instead
+    is the page's OWN text layer, flagged, with every numeric row still
+    withheld. Only the model's wording is discarded."""
     ps = _scanned_table_state(attempt_text=GENUINE_ATTEMPT_MD)
 
     assert _prose_corroboration_ok(ps, GENUINE_ATTEMPT_MD) is False
@@ -619,13 +614,20 @@ def test_prose_corroboration_near_floor_fabrication_measured_ratios(monkeypatch)
     pass/fail verdict) and pin that the 0.5 floor is load-bearing -- with it
     monkeypatched to 0.0, the same fabricated attempt's verdict flips.
 
+    #652 round 8 moved this onto ``NATIVE_WORDS_PROSE_ONLY``, the only layout
+    on which the guard can still be satisfied at all, and re-measured both
+    ratios there: the page's printed rows are gone, so its native vocabulary
+    -- and both overlaps -- are smaller than the numbers this test carried
+    before. What it pins is unchanged: the floor, not the fixture, is what
+    separates the two attempts.
+
     Measured (via ``_PROSE_TOKEN_RE`` outside-table tokens, see manifest.py;
     ``_scanned_table_state``'s default ``detected_table_bboxes=[]`` means
-    the table-row words also count as native vocabulary here, same as the
-    other tests in this section):
-      * genuine (``GENUINE_ATTEMPT_MD``): overlap ratio 0.947 -- passes 0.5.
+    every native word counts as vocabulary here, same as the other tests in
+    this section):
+      * genuine (``GENUINE_ATTEMPT_MD``): overlap ratio 0.789 -- passes 0.5.
       * fabricated, paraphrase-style (``NEAR_FLOOR_FABRICATED_ATTEMPT_MD``):
-        overlap ratio 0.458 -- BELOW 0.5, but much closer to the floor than
+        overlap ratio 0.417 -- BELOW 0.5, but much closer to the floor than
         ``FABRICATED_ATTEMPT_MD``'s 0.05 above, despite reusing a
         substantial share of the page's real vocabulary (quarter, section,
         four, respondents, survey, responses, specify, reason all appear
@@ -638,7 +640,7 @@ def test_prose_corroboration_near_floor_fabrication_measured_ratios(monkeypatch)
     from socr.core.manifest import _PROSE_TOKEN_RE
 
     ps = _scanned_table_state(
-        attempt_text=NEAR_FLOOR_FABRICATED_ATTEMPT_MD, native_words=NATIVE_WORDS_FLANKED
+        attempt_text=NEAR_FLOOR_FABRICATED_ATTEMPT_MD, native_words=NATIVE_WORDS_PROSE_ONLY
     )
 
     def _measured_ratio(attempt_text: str) -> float:
@@ -656,8 +658,8 @@ def test_prose_corroboration_near_floor_fabrication_measured_ratios(monkeypatch)
     genuine_ratio = _measured_ratio(GENUINE_ATTEMPT_MD)
     fabricated_ratio = _measured_ratio(NEAR_FLOOR_FABRICATED_ATTEMPT_MD)
 
-    assert genuine_ratio == pytest.approx(0.9474, abs=0.001)
-    assert fabricated_ratio == pytest.approx(0.4583, abs=0.001)
+    assert genuine_ratio == pytest.approx(0.7895, abs=0.001)
+    assert fabricated_ratio == pytest.approx(0.4167, abs=0.001)
     assert fabricated_ratio < PROSE_CORROBORATION_MIN < genuine_ratio
 
     # The floor separates the two cases at its real value...

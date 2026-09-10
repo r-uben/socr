@@ -20,10 +20,19 @@ subtracted them either.
 
 Round 7 (re-review at 0c67d2d) reproduced it once more with the block at the
 page edge: a recognised row on ONE side of a block says a table is nearby, not
-that the block is prose rather than that table's wrapped label. Both sides must
-now supply the evidence, so a page-edge block abstains -- including the ticket
-fixture's own directive, whose two re-pinned tests below record the change and
-the measurement that it costs the page no text.
+that the block is prose rather than that table's wrapped label. Requiring BOTH
+sides then narrowed the accepted layouts without identifying prose either -- a
+wrapped header between two numeric sections passed it, and shipped the same
+fabricated sentence.
+
+Round 8 ends the sequence on Astra's ruling: band-gap geometry says where a
+block BREAKS and can never say what a block IS, so model-prose salvage is
+DISABLED on any scanned page whose shipping partition withholds a numeric band.
+Every test below therefore reads as a measurement of refusal and of what #649
+ships in its place. The one page that still yields a witness is the pure-prose
+scan with no printed numeral anywhere; it is pinned in
+``tests/pipeline/test_page_failed_marker_scope.py`` alongside the floor it
+exercises.
 
 The reviewer's reproducers are kept verbatim in behaviour; the controls around
 them pin what must NOT change. Abstaining costs no page text: since #649 the
@@ -108,16 +117,16 @@ def test_date_only_table_is_not_unambiguously_prose() -> None:
 
 
 def test_far_anchor_pair_paragraph_is_refused_but_still_ships() -> None:
-    """RE-PINNED in round 7, honestly, against the ruling that replaced it.
+    """RE-PINNED in round 7, and standing for a wider reason in round 8.
 
     This shape -- a genuine paragraph printed clear of the tables above and
     below it -- was round 4's positive control: the paragraph entered the
-    witness while the table label above the first row did not. Round 7 rules
-    that a run is admitted only where the nearest ATTRIBUTED band on BOTH
-    sides is a recognised numeric row, and on this page the nearest attributed
-    band below the paragraph is "Reference total", a zero-digit label the walk
-    absorbed from the row under it. That is inference, not a measured row, so
-    the page no longer proves the block's role and the witness abstains.
+    witness while the table label above the first row did not. Round 7 refused
+    it because the nearest attributed band below the paragraph is "Reference
+    total", a zero-digit label the walk absorbed rather than a measured row.
+    Round 8 refuses it for the reason that outlived every geometric variant:
+    the page has withheld numeric bands, so its table's extent is in question
+    and no block on it is evidence about the page's prose.
 
     What the re-pin must show is that abstention is not content loss: the
     paragraph still ships, flagged, from #649's native path, both printed
@@ -151,8 +160,10 @@ def test_two_line_label_directly_above_anchor_does_not_vouch() -> None:
 
     A numeric row on one side proves a table is nearby, not that the text
     beside it is prose rather than that table's wrapped label -- the words and
-    bboxes cannot tell those two readings apart. So both sides must supply the
-    evidence, and a page-edge block, having only one side, abstains."""
+    bboxes cannot tell those two readings apart. Round 7 asked for both sides;
+    round 8 stopped asking geometry at all. Either way this page refuses, and
+    the reproducer keeps its value as the case that showed one side is not
+    evidence."""
     ps = _page()
     ps.native_words = []
     for text, y in (
@@ -285,12 +296,12 @@ FED_1989_P3_NOUGAT = (
 def test_real_fixture_abstains_in_full_without_losing_its_prose() -> None:
     """The ticket's own page, on the real PDF and the real cached attempt.
 
-    RE-PINNED in round 7. Rounds 5-6 kept 185 of this page's 295 words in the
-    witness and the genuine nougat attempt corroborated. Under round 7's
-    both-sides rule the page abstains completely: the directive runs to the
-    page bottom, so its lower side has no attributed neighbour at all, and no
-    other block on the page has a recognised row on both sides either. The
-    witness is empty, every word is unresolved, and corroboration is refused.
+    RE-PINNED in round 7 and unchanged by round 8. Rounds 5-6 kept 185 of this
+    page's 295 words in the witness and the genuine nougat attempt
+    corroborated. Round 7's both-sides rule emptied the witness because the
+    directive runs to the page bottom; round 8 empties it because the page
+    prints numeric bands at all. The witness is empty, every word is
+    unresolved, and corroboration is refused.
 
     That refusal costs this page NOTHING, which is the point of the re-pin and
     was measured, not assumed: the page had already failed its table check, so
