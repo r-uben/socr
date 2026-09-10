@@ -434,14 +434,15 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
     genuine attempt still corroborates, while the table, its wrapped labels and
     its entire header block are attributed to the table.
 
-    Round 5 (Astra, 2026-09-10) closes the two ways that walk still turned an
-    UNPROVEN gap into positive prose attribution. Stopping at a step larger
-    than the anchors' pitch says only that the step is unexplained; the band
-    beyond it is admitted as EVIDENCE only if the page separately shows it to
-    be a block of its own (:func:`_separated_prose_runs`), because the mean
-    step between neighbouring anchors is not an upper bound on the individual
-    steps inside one table. And an empty anchor list is no longer read as an
-    empty page: see the no-anchor branch below.
+    Rounds 5 and 6 (Astra, 2026-09-10) close the ways that walk still turned
+    an UNPROVEN gap into positive prose attribution. Stopping at a step larger
+    than the anchors' pitch says only that the step is unexplained, and
+    separation only proves a BLOCK exists -- neither says the block is prose.
+    A band is admitted as EVIDENCE only where :func:`_separated_prose_runs`
+    finds a run of prose-tagged bands whose separating gap was measured
+    against a recognised table ROW; everything else, including a withheld band
+    sitting outside the table's extent, is unresolved. And an empty anchor
+    list is no longer read as an empty page: see the no-anchor branch below.
 
     Over-exclusion is still the safe direction and its cost is bounded anyway:
     since #649, refusing corroboration no longer loses the page's prose, it
@@ -532,24 +533,30 @@ def corroboration_witness_words(words: list, row_shape_min: int | None = None) -
                 attributed.add(idx)
                 idx += step
 
-    separated = _separated_prose_runs(centers, attributed, len(bands))
+    separated = _separated_prose_runs(bands, centers, attributed, anchors)
 
+    # Exhaustive by construction (#652 round 6): every band lands in exactly
+    # one of the two lists. The previous three-way form had a third, silent
+    # case -- a band outside the table's grown extent that carried a printed
+    # digit was neither witness nor unresolved -- and a date table admitted as
+    # a "separated block" therefore put its institution labels into the
+    # witness while its own dates were subtracted from nothing.
+    # ``_separated_prose_runs`` returns only unattributed, prose-tagged bands,
+    # so no third case is needed and none can be re-introduced by accident.
     witness: list = []
     unresolved: list = []
-    for idx, (is_prose, band) in enumerate(bands):
-        if idx in attributed or idx not in separated:
-            unresolved.extend(band)
-        elif is_prose:
-            witness.extend(band)
-        # A band withheld for a printed digit that is NOT part of a table block
-        # (a prose line quoting a rate) is neither: not evidence, because
-        # nothing here vouches for it, and not table vocabulary either, so
-        # subtracting its ordinary words from the witness would be wrong.
+    for idx, (_is_prose, band) in enumerate(bands):
+        (witness if idx in separated else unresolved).extend(band)
     return witness, unresolved
 
 
-def _separated_prose_runs(centers: list[float], attributed: set[int], total: int) -> set[int]:
-    """The bands the PAGE ITSELF shows to be a block of their own.
+def _separated_prose_runs(
+    bands: list[tuple[bool, list]],
+    centers: list[float],
+    attributed: set[int],
+    anchors: list[int],
+) -> set[int]:
+    """The bands the PAGE ITSELF shows to be prose of a block of their own.
 
     #652 round 5 (Astra, 2026-09-10). Stopping the anchored walk at a step
     larger than the table's own pitch says the step is unexplained; it does
@@ -562,39 +569,82 @@ def _separated_prose_runs(centers: list[float], attributed: set[int], total: int
     the label became "prose", and the fabricated sentence built from it
     shipped. Nothing outside the table had to change for that.
 
-    Where the extent cannot be established, the repo's rule is to abstain, and
+    #652 round 6 (Astra) is the same lesson one level up: separation proves a
+    BLOCK exists, not that the block is prose. Requiring only that a run of
+    unattributed bands be gap-separated admitted a table label wrapped over
+    two lines, and a whole date table printed between two recognised numeric
+    rows -- and in the second case the date table's institution labels entered
+    the witness while its own dates entered NEITHER list, so nothing
+    subtracted them either. Both shipped a fabricated sentence built from the
+    table's own bank names.
+
+    Where the block's role is unknown the repo's rule is to abstain, and
     abstaining is cheap here: since #649, refusing corroboration costs no page
     text -- the native layer's own prose ships flagged either way.
 
-    So a band enters the witness only on POSITIVE evidence of belonging to
-    another block, measured from the page's own geometry: it must sit in a run
-    of consecutive unattributed bands that is separated from the attributed
-    bands on either side by a gap strictly GREATER than the widest step inside
-    the run itself. The run's own widest internal step is the upper bound this
-    needs and the mean was not -- it is a distance this block is observed to
-    take between its own lines, so a separation that exceeds it is a step the
-    block never takes.
+    A run is admitted only when the page establishes all four of:
 
-    A LONE unattributed band has no internal step, so no bound exists to
-    measure its separation against and it is never admitted. That is exactly
-    the counterexample's shape (a single label stranded above the table), and
-    the cost of it is a genuine one-line paragraph or heading next to a table
-    being treated as unresolved rather than as evidence -- over-exclusion, the
-    safe direction, and #649 still ships the line.
+    1. every band in it is PROSE-TAGGED by the same partition the shipping
+       side uses. A withheld, digit-bearing band is never evidence, and it
+       BREAKS the run rather than voiding it: a genuine paragraph quoting a
+       rate ("...has remained around 5-1/4 percent...", the one such line on
+       the ticket's own fixture) is real prose on both sides of that line,
+       while the date table's labels are left as one-band fragments that
+       cannot clear (2).
+    2. at least two such bands, so the run has an internal step at all. One
+       band has no measurable spacing of its own.
+    3. an ADJACENT attributed band is further away than the run's widest
+       internal step -- round 5's gap evidence, now asked only of the table's
+       grown extent. An unattributed withheld band beside the run is not a
+       table boundary (it is the rate line inside the paragraph again), so it
+       neither vouches for the run nor has to be cleared.
+    4. on at least one side, the nearest attributed band -- looking PAST
+       unattributed bands, never past attributed ones -- is an ANCHOR: a band
+       carrying a genuine numeric token, i.e. a recognised table ROW.
+
+    (4) is what the two round-6 counterexamples lack and every genuine
+    fixture has. A gap is evidence about the table's edge only if the thing on
+    the table side of it IS the table: a row it was recognised from, not
+    material the walk itself inferred. In the wrapped-label counterexample the
+    run's only neighbour is "Maturity schedule", a zero-digit caption the walk
+    absorbed because it sat 6pt from a value; excluding the label above it
+    then rests on inference stacked on inference, and no step in that chain
+    was ever measured against a row. Geometry alone cannot separate that shape
+    from a genuine two-line paragraph above a table -- both are a tight pair
+    with a wider gap below, and the ECB census fixture (prose at 10pt over
+    rows at 15pt) and the reviewer's label (6pt over rows at 12pt) differ by
+    nothing a page-wide leading comparison can rank. What differs is what the
+    gap is measured against.
     """
+    total = len(bands)
+    anchor_set = set(anchors)
+
+    def _nearest_attributed(start: int, step: int) -> int | None:
+        idx = start
+        while 0 <= idx < total:
+            if idx in attributed:
+                return idx
+            idx += step
+        return None
+
     admitted: set[int] = set()
     run: list[int] = []
     for idx in range(total + 1):
-        if idx < total and idx not in attributed:
+        if idx < total and idx not in attributed and bands[idx][0]:
             run.append(idx)
             continue
         if len(run) >= 2:
             widest = max(centers[b] - centers[a] for a, b in zip(run, run[1:]))
-            above = run[0] - 1
-            below = run[-1] + 1
-            clear_above = above < 0 or abs(centers[run[0]] - centers[above]) > widest
-            clear_below = below >= total or abs(centers[below] - centers[run[-1]]) > widest
-            if clear_above and clear_below:
+            sides = (
+                (run[0], _nearest_attributed(run[0] - 1, -1)),
+                (run[-1], _nearest_attributed(run[-1] + 1, 1)),
+            )
+            cleared = all(
+                near is None or abs(near - edge) > 1 or abs(centers[edge] - centers[near]) > widest
+                for edge, near in sides
+            )
+            vouched = any(near in anchor_set for _edge, near in sides)
+            if cleared and vouched:
                 admitted.update(run)
         run = []
     return admitted

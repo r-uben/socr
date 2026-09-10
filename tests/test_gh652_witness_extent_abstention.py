@@ -1,4 +1,4 @@
-"""#652 round 5: where a table's extent cannot be measured, the witness abstains.
+"""#652 rounds 5-6: where a block's role is unproven, the witness abstains.
 
 Two reproduced findings (Astra review at ff5ed74), both in
 ``tables/row_corroboration.corroboration_witness_words`` and both the same
@@ -11,6 +11,13 @@ mistake -- converting an UNPROVEN gap into positive prose attribution:
   no anchor at all and the no-anchor branch declared the whole page
   unambiguously prose.
 
+Round 6 (re-review at 341ee68) reproduced the same mistake one level up:
+separation proves a BLOCK exists, not that the block is prose. A table label
+wrapped over two lines, and a whole date table printed between two recognised
+numeric rows, were both admitted as "separated blocks" -- and the date table's
+own dates landed in neither the witness nor the unresolved list, so nothing
+subtracted them either.
+
 The reviewer's reproducers are kept verbatim in behaviour; the controls around
 them pin what must NOT change. Abstaining costs no page text: since #649 the
 native prose ships flagged whether or not a model attempt corroborates.
@@ -18,8 +25,12 @@ native prose ships flagged whether or not a model attempt corroborates.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from socr.core.manifest import _prose_corroboration_ok
 from socr.tables.reconcile import table_syntax_line_indices
 from socr.tables.row_corroboration import corroboration_witness_words
 
@@ -139,3 +150,116 @@ def test_two_column_shared_digits_withheld() -> None:
     assert MARKER in output.text
     for value in ("250.0", "3000.0", "2000.0"):
         assert value not in output.text, value
+
+
+def test_two_line_table_label_does_not_become_prose() -> None:
+    """Round 6, form 1. The stranded label is wrapped over TWO lines, so it has
+    an internal step (6pt) and a larger gap below it (18pt) -- everything the
+    round-5 helper asked for. But its lines are set closer together than the
+    page sets its own (12pt), which is stacked table material, not body prose."""
+    ps = _page()
+    ps.native_words = []
+    for text, y in [
+        ("Austrian National Bank", 0),
+        ("German Federal Bank Swiss National Bank", 6),
+        ("Maturity schedule", 24),
+        ("250.0", 30),
+        ("Reference total", 42),
+        ("Annual schedule", 54),
+        ("300.0", 66),
+    ]:
+        ps.native_words += words(text, y, height=4)
+
+    assert FABRICATION not in _attempt(ps)
+
+
+def test_date_table_between_numeric_anchors_is_not_prose() -> None:
+    """Round 6, form 2. Two recognised anchors sit far above and below, so the
+    no-anchor branch never runs; the date table between them is an isolated
+    block whose dates the shipping partition withholds but the row matcher does
+    not recognise. Its labels must not become evidence -- and its dates must
+    land in the unresolved list, not in neither."""
+    ps = _page()
+    ps.native_words = []
+    for text, y in [
+        ("250.0", 0),
+        ("Austrian National Bank", 40),
+        ("12/04/89", 46),
+        ("German Federal Bank Swiss National Bank", 52),
+        ("12/05/90", 58),
+        ("300.0", 120),
+    ]:
+        ps.native_words += words(text, y, height=4)
+
+    witness, unresolved = corroboration_witness_words(ps.native_words)
+    assert not {w[4] for w in witness}
+    # The hole this closes: every band is in exactly one list, so the dates are
+    # subtracted from the witness rather than silently belonging to neither.
+    for date in ("12/04/89", "12/05/90"):
+        assert date in {w[4] for w in unresolved}, date
+
+    assert FABRICATION not in _attempt(ps)
+
+
+def test_subtracted_shared_words_still_ship_from_native() -> None:
+    """The disclosed conservative refusal, pinned as a difference rather than
+    argued: a genuine attempt whose every word also appears in the withheld
+    table rows is refused, and #649 ships that same text from the native layer
+    anyway. Abstention costs no page content."""
+    ps = _page()
+    ps.native_words = []
+    for line, y in [
+        ("Austrian National Bank 250.0", 0),
+        ("German Federal Bank 300.0", 12),
+        ("Austrian National Bank", 100),
+        ("German Federal Bank", 112),
+    ]:
+        ps.native_words += words(line, y)
+    genuine = "Austrian National Bank\nGerman Federal Bank"
+    ps.best_output.text = genuine + "\n\n| Bank | Amount |\n| --- | --- |\n| Bank | 250.0 |\n"
+
+    assert not _prose_corroboration_ok(ps, ps.best_output.text)
+    assert genuine in _ship(ps).text
+
+
+FED_1989_P3 = Path.home() / "Data/socr/fed-sample-2026-09-05/in/fed-1989-11-14-minutes.pdf"
+FED_1989_P3_NOUGAT = (
+    Path.home()
+    / "Data/socr/census-591-recheck/out/fed-1989-11-14-minutes/cache/ef"
+    / "ef6b822de4eb1e8546c0fa1d51be70b25e5f0200b4701462000c3c8773ca9a65.json"
+)
+
+
+@pytest.mark.skipif(
+    not (FED_1989_P3.exists() and FED_1989_P3_NOUGAT.exists()),
+    reason="real fixture not present on this machine",
+)
+def test_real_fixture_witness_survives_the_abstention() -> None:
+    """The ticket's own page, on the real PDF and the real cached attempt: the
+    tightening must not gut a page whose prose is genuinely separated.
+
+    The directive's paragraphs stay evidence, the swap-arrangement table's rows
+    do not, and the genuine attempt still corroborates -- which is what keeps
+    the shipped bytes identical to round 4's. (Byte identity of the whole
+    ``PageOutput`` was verified directly against the round-4 witness function
+    at both shas; it is pinned here by the invariants that produce it, so this
+    guard does not depend on a commit staying reachable.)"""
+    fitz = pytest.importorskip("fitz")
+
+    with fitz.open(str(FED_1989_P3)) as doc:
+        native_words = doc[2].get_text("words")
+    nougat_text = json.loads(FED_1989_P3_NOUGAT.read_text())["text"]
+
+    witness, unresolved = corroboration_witness_words(native_words)
+    witness_tokens = {w[4] for w in witness}
+    unresolved_tokens = {w[4] for w in unresolved}
+
+    assert "directive:" in witness_tokens
+    assert "unemployment" in witness_tokens
+    for amount in ("1,000.0", "6,000.0", "1,250.0"):
+        assert amount not in witness_tokens, amount
+        assert amount in unresolved_tokens, amount
+
+    ps = _page()
+    ps.native_words = native_words
+    assert _prose_corroboration_ok(ps, nougat_text) is True
