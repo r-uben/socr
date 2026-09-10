@@ -17,6 +17,10 @@ and the pair keeps block order. A heading-bearing unit always ends the
 continuation walk; it never authorises crossing a section boundary.
 """
 
+import pathlib
+import sys
+import types
+
 import fitz
 import pytest
 from test_born_digital_aligned_runs import _FED_1977_11_15_MINUTES
@@ -1046,3 +1050,200 @@ def test_a_line_the_unit_would_have_to_cross_downwards_makes_it_abstain():
         "Mr.",
         "Mr.",
     ], "the pair keeps block order; nothing was relocated"
+
+
+def _marker_series_with_the_run_written_first() -> fitz.Page:
+    """Astra's round-6 witness for the far-band series rule.
+
+    The same two declined marker rows above the run as
+    ``_roster_with_leading_pairs``, but the run's objects are written FIRST and
+    the markers form one contiguous block of their own. The far pair's objects
+    then fall outside the block-order interval the relocation guard inspects,
+    so geometry -- the marker in the same column on the far side of the
+    boundary -- is the only thing left that can refuse the move.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    page.insert_textbox(fitz.Rect(x, 240, 130, 400), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10)
+    page.insert_textbox(
+        fitz.Rect(right, 240, 560, 400),
+        "Angell\n\nGuffey\n\nSeger\n\nCorrigan, Vice Chairman of the Committee",
+        fontsize=10,
+    )
+    page.insert_textbox(fitz.Rect(60, 211, 80, 251), "1\n2", fontsize=10)
+    page.insert_textbox(fitz.Rect(x, 211, 130, 251), "Mr.\nMr.", fontsize=10)
+    page.insert_textbox(fitz.Rect(right, 211, 560, 251), "Bernard\nGillum", fontsize=10)
+    return page
+
+
+def _module_without(clause: str) -> types.ModuleType:
+    """The shipped module recompiled with one condition forced False.
+
+    Reads the source of the module under test rather than a git revision, so
+    the witness holds wherever the tests run.
+    """
+    source = pathlib.Path(bd.__file__).read_text()
+    assert clause in source, clause
+    mutant = types.ModuleType("socr.core._gh709_mutant")
+    sys.modules[mutant.__name__] = mutant
+    exec(compile(source.replace(clause, "if False:"), "<mutant>", "exec"), mutant.__dict__)
+    return mutant
+
+
+def test_the_far_band_series_rule_has_its_own_witness():
+    """Deleting the far-band rule reverses two roster rows on this page.
+
+    Round 6's relocation guard refuses the marker fixture whose objects are
+    written in reading order, which left the far-band rule without an
+    independent witness. Astra supplied one: with the run's objects first, the
+    far pair sits outside the interval the guard inspects, and only the
+    geometric series test refuses. Without it Gillum prints before Bernard.
+    """
+    page = _marker_series_with_the_run_written_first()
+
+    current = _emitted(page)
+    mutant = _module_without("if in_label_lane and same_column_marker:")
+    without = [
+        line.strip()
+        for line in mutant._assemble_prose_with_aligned_runs(page).splitlines()
+        if line.strip()
+    ]
+
+    assert current.index("Bernard") < current.index("Gillum"), current
+    assert without.index("Gillum") < without.index("Bernard"), without
+
+
+def _line(bi: int, y0: float, y1: float) -> dict:
+    return {"bi": bi, "li": 0, "y0": y0, "y1": y1}
+
+
+def test_a_crossed_line_overlapping_the_unit_refuses_the_move():
+    """Vertical overlap gives no unambiguous side, so the helper refuses.
+
+    Astra's focused probe: the unit spans 90-200 and the crossed line sits at
+    140-150, inside it. Moving the unit across that line would need reading
+    order evidence the geometry does not supply.
+    """
+    lines = [_line(0, 100, 110), _line(1, 140, 150), _line(2, 90, 100)]
+
+    assert not bd._relocation_keeps_reading_order(2, 0, {(0, 0), (2, 0)}, 90, 200, lines, {}, {})
+
+
+def test_a_crossed_line_is_judged_by_its_whole_runs_extent():
+    """The other-run branch changes the verdict on identical line geometry.
+
+    The crossed line alone sits at 50-60, wholly above a unit spanning 90-200,
+    and the move is allowed. Naming it as part of a run spanning 50-150 -- a
+    group that travels together -- makes the same move refuse.
+    """
+    lines = [_line(0, 100, 110), _line(1, 50, 60), _line(2, 90, 100)]
+    args = (2, 0, {(0, 0), (2, 0)}, 90, 200, lines)
+
+    assert bd._relocation_keeps_reading_order(*args, {}, {})
+    assert not bd._relocation_keeps_reading_order(*args, {(1, 0): 1}, {1: (50, 150)})
+
+
+def _two_rosters_interleaved_page() -> fitz.Page:
+    """Two headed rosters whose objects interleave, Astra's whole-page probe.
+
+    ``PRESENT:`` heads the first, ``STAFF:`` the second, and each heading is
+    printed beside its roster's first row. The object order makes the first
+    relocation cross the second run.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 200
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    rosters = (
+        (211, ("Bernard", "Gillum", "Angell", "Guffey", "Seger", "Corrigan, Vice Chairman")),
+        (411, ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta, Chief of Staff")),
+    )
+    for top, names in rosters:
+        page.insert_textbox(fitz.Rect(x, top, x + 40, top + 40), "Mr.\nMr.", fontsize=10)
+        page.insert_textbox(fitz.Rect(right, top, 560, top + 40), "\n".join(names[:2]), fontsize=10)
+        page.insert_textbox(
+            fitz.Rect(x, top + 29, x + 40, top + 189), "Mr.\n\nMr.\n\nMr.\n\nMr.", fontsize=10
+        )
+        page.insert_textbox(
+            fitz.Rect(right, top + 29, 560, top + 189), "\n\n".join(names[2:]), fontsize=10
+        )
+    for top, title in ((211, "PRESENT:"), (411, "STAFF:")):
+        page.insert_textbox(fitz.Rect(40, top, 198, top + 40), title, fontsize=10)
+    return page
+
+
+def test_a_unit_crossing_another_run_refuses_and_leaves_that_run_whole(monkeypatch):
+    """A relocation that would cross another run refuses; the other still adopts.
+
+    The refused unit keeps its pre-existing block-order limitations -- it is
+    not repaired here -- but nothing is torn or duplicated, and the second
+    roster's own adoption is unaffected.
+    """
+    crossings: list[tuple[set[int], bool]] = []
+    original = bd._relocation_keeps_reading_order
+
+    def trace(anchor, first, keys, y0, y1, lines, consumed, spans):
+        result = original(anchor, first, keys, y0, y1, lines, consumed, spans)
+        low, high = sorted((anchor, first))
+        others = {
+            consumed[(it["bi"], it["li"])]
+            for it in lines[low : high + 1]
+            if (it["bi"], it["li"]) not in keys and (it["bi"], it["li"]) in consumed
+        }
+        crossings.append((others, result))
+        return result
+
+    monkeypatch.setattr(bd, "_relocation_keeps_reading_order", trace)
+
+    lines = _emitted(_two_rosters_interleaved_page())
+
+    assert any(others and not result for others, result in crossings), crossings
+    assert lines.index("STAFF:") < lines.index("Alpha") < lines.index("Mr. Beta"), lines
+    for name in ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta"):
+        assert sum(name in line for line in lines) == 1, (name, lines)
+
+
+@pytest.mark.skipif(not _FED_1990_11_13_MINUTES.exists(), reason="Fed corpus not present")
+def test_the_real_1990_page_keeps_every_staff_member_exactly_once(monkeypatch):
+    """The real two-run page, which never reaches the relocation guard at all.
+
+    Astra's control for the other-run branch: 1990-11-13 p1 has two aligned
+    runs and zero calls to the guard, so this page verifies that round 6
+    changed nothing there, not that the branch works.
+    """
+    calls: list[bool] = []
+    original = bd._relocation_keeps_reading_order
+    monkeypatch.setattr(
+        bd,
+        "_relocation_keeps_reading_order",
+        lambda *args: calls.append(True) or original(*args),
+    )
+
+    with fitz.open(_FED_1990_11_13_MINUTES) as doc:
+        _bands, runs, _space = _bands_and_run(doc[0])
+        lines = _emitted(doc[0])
+
+    assert len(runs) == 2, runs
+    assert calls == []
+    for name in (
+        "Kohn, Secretary and Economist",
+        "Bernard, Assistant Secretary",
+        "Gillum, Deputy Assistant Secretary",
+    ):
+        assert sum(name in line for line in lines) == 1, name

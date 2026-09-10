@@ -847,7 +847,11 @@ def _relocation_keeps_reading_order(
     consumed_run: dict[tuple[int, int], int],
     run_span: dict[int, tuple[float, float]],
 ) -> bool:
-    """True when emitting a run's unit at ``anchor_position`` reorders nothing.
+    """True when the move preserves the measured order of the content it crosses.
+
+    Block order itself DOES change -- that is the point of the move. What must
+    survive is the relative order the page establishes between the unit and
+    every line the move steps over.
 
     GH-709 round 6. Adopting a pair beside a boundary heading emits the
     heading, the pair and the run's own rows as one unit at the heading's key

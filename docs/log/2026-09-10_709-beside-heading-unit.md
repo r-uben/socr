@@ -368,6 +368,12 @@ shape the corpus does not contain.
 
 ## Round 5 — invert what moves
 
+> **Superseded by round 6 in one respect.** Round 5 moved only the pair and
+> left the run's rows where block order put them. Round 6 keeps the inversion
+> -- the heading still never moves -- but the run's rows now travel with the
+> pair to the heading's key, as one unit. Read the rest of this section with
+> that correction in mind.
+
 Astra rejected round 4's residual (`astra-rev-709d-out.md`, reproducer
 `/private/tmp/test_astra_709d.py`). Crossing the label lane filters out the
 narrow counterexample without establishing that the text above the extra is
@@ -587,3 +593,51 @@ Six Fed minutes × first four pages, `extract_structured` against `cf28858`:
 - Astra's `test_astra_709d.py::test_measure_conservative_cost` still fails only
   on its stale five-argument monkeypatch of `_beside_heading_lines`, which took
   four arguments from round 5.
+
+## Round 6 accepted — the far-band rule keeps its place
+
+Astra accepted `b78298d` (`astra-rev-709f`) and found the independent witness
+for the far-band series rule that the round-6 fixtures could not supply.
+
+The construction: the same two declined marker rows above the run, but the
+run's objects are written FIRST and the markers form one contiguous block of
+their own. The far pair's objects then fall outside the block-order interval
+`_relocation_keeps_reading_order` inspects, so the guard permits the move and
+only the geometric series test can refuse it. With the
+`in_label_lane and same_column_marker` condition forced False, `Gillum` prints
+before `Bernard`. The rule is neither dead weight nor hypothetical, and the
+round-6 residual that recorded it as unwitnessed is closed. The repository
+version recompiles the shipped module's own source rather than a git revision,
+so the witness holds wherever the tests run.
+
+Two other round-6 residuals are also closed by Astra's helper-level probes,
+now in the suite. Vertical overlap between a crossed line and the unit refuses,
+which is the conservative reading of a marginal note or a column beside the
+roster. The other-run extent branch changes the verdict on identical line
+geometry: a crossed line at y 50-60 alone permits a move of a unit spanning
+90-200, and naming it as part of a run spanning 50-150 refuses the same move.
+
+Astra's whole-page probe with two headed rosters interleaved in object order is
+in the suite too: the first relocation crosses the second run and refuses, the
+second succeeds, `STAFF:` precedes `Alpha`, and every member appears exactly
+once. The refused unit keeps its pre-existing block-order limitations; it is
+not repaired. On the real 1990-11-13 page there are two aligned runs and ZERO
+calls to the relocation guard, which is why that page is a control for
+unchanged behaviour and not evidence for the other-run branch.
+
+### Residuals Astra kept
+
+- **One run, one anchor** stays as an explicit ownership invariant: overwriting
+  an existing anchor would risk losing an already relocated pair. It has no
+  dedicated whole-page witness.
+- **The baseline-overlap clause** in `_beside_heading_lines` remains defensive
+  rather than newly validated.
+- Only the boundary band is ever adopted, so a multi-row sub-list is recovered
+  one row deep.
+
+### Wording corrected
+
+`_relocation_keeps_reading_order` said it returns True when the move "reorders
+nothing". Block order does change; what survives is the measured relative order
+between the unit and the content it crosses. The round-5 section above now
+carries a note that the run's rows travel with the pair from round 6 onward.
