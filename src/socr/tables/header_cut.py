@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 
 from socr.tables.header_attribution import HeaderVerdict
 from socr.tables.header_repair import (
@@ -102,12 +103,28 @@ def _lane_centers(rows_by_y: dict[int, list], data_ys: list[int]) -> list[float]
     column (``.034``) forms no lane, the owed set silently shrinks and a real
     header loss goes unseen. That is the GH-206 blind spot.
     """
-    xs: list[float] = []
+    per_row: list[list[float]] = []
     for y in data_ys:
         row_words = rows_by_y.get(y, [])
         if len(_row_numeric_multiset(row_words)) < _MIN_DATA_NUMERIC_CELLS:
             continue
-        xs += [w[0] for w in row_words if is_numeric_token(w[4])]
+        per_row.append([w[0] for w in row_words if is_numeric_token(w[4])])
+    if not per_row:
+        return []
+
+    # #696: ``data_ys`` is every local y-group at or below the anchor, so the
+    # footnote block under the table is in it. A note carrying three numerals
+    # ("(score of 1) ... weights from 1 to 5") clears the multiset gate and
+    # invents a lane at a position no column occupies -- on the 2018 BLS survey
+    # page, a lane at x=144 in the label margin. The caption "(in percentages,
+    # unless otherwise stated)" then snapped its last word to that phantom lane,
+    # the band owed "stated", and a byte-correct header was refused HARD. Over-
+    # owing rejects correct tables (see this module's docstring), so lanes come
+    # only from rows at least as wide as the modal accepted row. Ties resolve to
+    # the wider count, which can only ever keep more lanes, never fewer.
+    tally = Counter(len(row) for row in per_row)
+    modal_width = max(tally.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    xs: list[float] = [x for row in per_row if len(row) >= modal_width for x in row]
     if not xs:
         return []
 

@@ -19,6 +19,15 @@ corpus, so accuracy of the numbers is the whole point:
   Low, Std Dev, Mean) — must use the same number of columns as the data rows. Do
   not flatten or merge columns for summary rows. If a summary row spans fewer
   visual columns than the header, insert blank cells to maintain alignment.
+- **Spanning group headings are flattened, not stacked.** A heading printed over
+  several columns belongs to EVERY column beneath it. Repeat it in each, joined
+  to that column's own label, and emit ONE header row: a group `Overall` above
+  the pair `Apr 18` / `Jul 18` becomes two columns headed `Overall Apr 18` and
+  `Overall Jul 18`. Do NOT emit a second header row for the lower level, and do
+  NOT pad the group row with blank cells to reach the body's width. Markdown has
+  no spanning cell, and both of those leave the header narrower than the body or
+  its labels one row away from the values they head. A header printed on a single
+  level is written exactly as it stands.
 - **Column-lane anchoring (critical for sparse rows):** Every value in every row
   must be placed under the header column it visually aligns with. Count column
   positions from the header row — do not left-pack or right-pack values when a row
