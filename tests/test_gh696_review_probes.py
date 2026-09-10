@@ -511,15 +511,20 @@ def test_footnote_vocabulary_cannot_stop_the_walk_half_way():
         assert after == before
 
 
-def test_a_footnote_no_longer_withholds_the_two_row_repair():
-    """The same footnote on the ordinary two-band candidate: a complete flatten.
+def test_a_footnote_withholds_the_two_row_repair_again():
+    """The same footnote on the ordinary two-band candidate: back to a no-op.
 
-    This control used to pin ``count == 0``. That abstention was a safe
-    alternative to an incorrect rewrite, never a requirement: the footnote is
-    not part of this table, so its words never had standing to make the
-    table's own leaf band ambiguous. Now that body evidence is scoped to the
-    table in both dimensions, the leaf band is accounted for by the header
-    alone and the repair the page justifies goes through.
+    This control has now been pinned three ways, and the record is the point.
+    It began at ``count == 0``; round 6 scoped body evidence to the table in
+    both dimensions, the footnote lost its standing, and it became a complete
+    flatten; round 9 measures the unresolved veto on distinct words, and the
+    footnote regains standing because it prints Apr, Jul and 18 inside this
+    table's columns — every distinct word the leaf band needs.
+
+    The footnote is still not this table's row, and this abstention is still
+    not a claim that it is. It is the price of the veto that stops a
+    duplicated model cell from deleting a printed value, and it is paid in
+    a repair not made rather than in content removed.
     """
     page = _survey_page()
     page.insert_text((72, 400), "Apr Jul 18", fontsize=_FONT_SIZE)
@@ -527,10 +532,8 @@ def test_a_footnote_no_longer_withholds_the_two_row_repair():
 
     after, count = repair_table_headers_in_text(page.get_text("words"), before)
 
-    assert count == 1
-    assert find_table_blocks(after)[0].grid[1:] == [
-        [label, *values] for label, values in _DATA_ROWS
-    ]
+    assert count == 0
+    assert after == before
 
 
 def test_a_row_combining_two_printed_bands_still_folds():
@@ -960,3 +963,85 @@ def test_an_unresolved_subset_does_not_block_a_larger_header_row():
     assert find_table_blocks(after)[0].grid[1:] == [
         [label, *values] for label, values in _DATA_ROWS
     ]
+
+
+# --------------------------------------------------------------------------
+# Finding 9 — a duplicated model cell bought permission to delete
+# --------------------------------------------------------------------------
+
+
+def test_a_duplicated_model_cell_does_not_delete_the_printed_value():
+    """The reviewer's round-9 reproducer: multiplicity is not authority.
+
+    The page prints ``Overall`` and ONE 18. The candidate emits the cell
+    twice and places the row directly under the header. Under an
+    exact-multiset veto the printed row no longer contained the candidate's
+    two 18s, so nothing withheld the deletion, both distinct words occur in
+    the band, and the walk absorbed the row — taking the 18 the page really
+    prints with it.
+
+    An extra model occurrence is a defect for binding to flag, not evidence
+    about which side of the boundary the row sits on. The veto therefore
+    compares distinct-token support, and this row survives.
+    """
+    page = _survey_page()
+    page.insert_text((58.5, 301), "Overall", fontsize=_FONT_SIZE)
+    page.insert_text((_DATA_XS[0], 301), "18", fontsize=_FONT_SIZE)
+    candidate = ["Overall", "18", "18"] + [""] * 8
+    lines = _padded_markdown().splitlines()
+    lines.insert(3, "| " + " | ".join(candidate) + " |")
+    before = "\n".join(lines)
+
+    after, count = repair_table_headers_in_text(page.get_text("words"), before)
+
+    assert candidate in find_table_blocks(after)[0].grid
+    if count == 0:
+        assert after == before
+
+
+def test_the_whole_cached_census_still_repairs_what_it_repaired():
+    """Every cached candidate on the census, before and after the repair.
+
+    The unresolved rule refuses more shapes at every round, so the standing
+    question is whether it has quietly frozen the corpus. It has not: the
+    same three candidates are rewritten, the same two structural defects
+    clear, and no candidate that parsed cleanly acquires a defect.
+    """
+    from socr.tables.locate import _horizontal_rules
+    from socr.tables.structure_check import table_output_defect
+
+    if not (_CENSUS_ROOT / "out").is_dir():
+        pytest.skip("census corpus not present")
+
+    records = []
+    for docdir in sorted((_CENSUS_ROOT / "out").iterdir()):
+        pdf = _CENSUS_ROOT / "in" / f"{docdir.name}.pdf"
+        if not docdir.is_dir() or not pdf.exists():
+            continue
+        with fitz.open(pdf) as doc:
+            for path in sorted((docdir / "cache").glob("*/*.json")):
+                data = json.loads(path.read_text())
+                before = data.get("text", "")
+                page_num = data.get("page_num")
+                if not find_table_blocks(before):
+                    continue
+                if not isinstance(page_num, int) or not 1 <= page_num <= len(doc):
+                    continue
+                page = doc[page_num - 1]
+                words = page.get_text("words")
+                rules = _horizontal_rules(page)
+                after, count = repair_table_headers_in_text(words, before)
+                records.append(
+                    {
+                        "doc": docdir.name,
+                        "page": page_num,
+                        "repairs": count,
+                        "before": table_output_defect(before, words, rules),
+                        "after": table_output_defect(after, words, rules),
+                    }
+                )
+
+    assert len(records) == 13
+    assert sum(r["repairs"] > 0 for r in records) == 3
+    assert sum(bool(r["before"]) and not r["after"] for r in records) == 2
+    assert not [r for r in records if not r["before"] and r["after"]]

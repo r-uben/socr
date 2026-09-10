@@ -1126,7 +1126,13 @@ def _candidate_header_depth(
     * a row the band accounts for is header only while NO printed row under
       the band accounts for it -- including one whose ownership could not be
       established. A candidate-compatible occurrence of unproven ownership
-      blocks the deletion and abstains.
+      blocks the deletion and abstains. Compatibility there is measured on
+      DISTINCT words, not multiplicity (#696 round 9): a model that emits a
+      cell twice does not thereby prove the row is header material, and an
+      exact-multiset veto let that duplicate delete the one 18 the page
+      really prints. The direction still runs candidate into printed row, so
+      a printed row carrying a lone 18 still cannot veto the ten-label leaf
+      band -- it has no Apr and no Jul to support them.
 
     The single escape hatch runs only in the direction that KEEPS content. An
     exact match against a printed band row would locate an occurrence just as
@@ -1164,7 +1170,7 @@ def _candidate_header_depth(
             break
         if not in_band:
             return None
-        if any(not counts - printed for printed in unresolved_counts):
+        if any(not set(counts) - set(printed) for printed in unresolved_counts):
             return None
         depth += 1
     # A candidate cannot carry more header bands than the page prints.
