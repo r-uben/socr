@@ -13,6 +13,17 @@ The fix is conservative: a pair earns a continuation place only when it is
 alone in its band, and the walk does not continue past a band that carried
 anything else. The band immediately at the run boundary keeps GH-704's
 behaviour, which is separately reviewed and unchanged here.
+
+What the continuation is for, stated plainly: it deliberately recovers pairs
+that the run-level fill-share statistic declined. Fill-share measures the
+distribution of right-column widths across a whole candidate window, so a
+window mixing long role-bearing names with short ones is refused wholesale,
+including its pair-only rows. Each recovered pair still has to satisfy, on its
+own, the ORIGINAL run's lane starts, row pitch, gap and whole-label
+vocabulary, and to bring no other content in its band.
+``test_a_synthetic_pair_only_continuation_crosses_two_bands`` isolates that:
+the same roster is refused by ``_try_aligned_run`` with fill-share checking and
+accepted with only that statistic disabled.
 """
 
 import ast
@@ -20,6 +31,9 @@ import subprocess
 
 import fitz
 import pytest
+from test_born_digital_aligned_runs import _FED_1977_11_15_MINUTES
+from test_born_digital_aligned_runs import _FED_1990_11_13_MINUTES
+from test_gh592_lane_scoped_emission import _bands_and_run
 
 from socr.core import born_digital as bd
 
@@ -166,6 +180,148 @@ def test_a_boundary_band_carrying_a_heading_is_still_adopted():
     assert lines.index("PRESENT:") < lines.index("Mr."), (
         "the heading must keep its place before the pair it introduces"
     )
+
+
+def _mixed_width_roster_page() -> tuple[fitz.Page, list[str]]:
+    """Astra's synthetic positive: long roles first, short names after.
+
+    Every row is a plain two-line ``Mr.`` / name pair at one of two constant
+    lane starts. Nothing is out of lane anywhere, so no band carries extra
+    content. The only thing that varies is the right column's width, which is
+    exactly what the run-level fill-share statistic measures.
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "Some ordinary running prose establishes the word space measurement here.",
+        fontsize=10,
+    )
+    x = 90
+    right = (
+        x + fitz.get_text_length("Mr.", fontsize=10) + 1.2 * fitz.get_text_length(" ", fontsize=10)
+    )
+    names = [
+        "Alpha, Deputy Assistant Secretary",
+        "Bravo, Deputy Assistant Secretary",
+        "Delta, Deputy Assistant Secretary",
+        "Eagle, Deputy Assistant Secretary",
+        "Angell",
+        "Guffey",
+        "Seger",
+        "Corrigan, Vice Chairman of the Committee",
+    ]
+    baselines = [100 + 13 * i if i < 2 else 126 + 14 * (i - 2) for i in range(len(names))]
+    # The two columns are written as separate passes, as on a real page: each
+    # becomes its own block, and the bands are formed by baseline alignment.
+    for baseline in baselines:
+        page.insert_text((x, baseline), "Mr.", fontsize=10)
+    for baseline, name in zip(baselines, names):
+        page.insert_text((right, baseline), name, fontsize=10)
+    return page, names
+
+
+def test_a_synthetic_pair_only_continuation_crosses_two_bands():
+    """A corpus-free witness that the walk crosses more than one band.
+
+    Astra's reproducer for the re-review of d3e750f. It also isolates WHY the
+    two leading rows need the continuation at all: the run search refuses the
+    whole roster under normal fill-share checking and accepts it when only that
+    statistic is disabled (``word_width=0``), with geometry, text and every
+    other guard unchanged.
+    """
+    page, names = _mixed_width_roster_page()
+    bands, runs, word_space_width = _bands_and_run(page)
+    roster = [item for band in bands[1:] for item in band]
+
+    refused = bd._try_aligned_run(
+        roster,
+        word_space_width,
+        bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES,
+        bd._median_word_width(page.get_text("words")) or 0.0,
+    )
+    without_fill_share = bd._try_aligned_run(
+        roster, word_space_width, bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES, 0.0
+    )
+    assert refused is None
+    assert without_fill_share is not None, (
+        "fill-share must be the only reason the whole roster is declined"
+    )
+
+    adoptable = []
+    for start, end, _ in runs:
+        items = [item for band in bands[start : end + 1] for item in band]
+        lanes = bd._run_column_lanes(items)
+        vocabulary = bd._run_label_vocabulary(items)
+        pitch = bd._run_row_pitch(bands, start, end)
+        boundary = bd._band_center(bands[start])
+        crossed = 0
+        for index in range(start - 1, -1, -1):
+            band = bands[index]
+            if len(band) != 2 or abs(bd._band_center(band) - boundary) > pitch:
+                break
+            if not bd._adoptable_pair(
+                band, lanes, vocabulary, word_space_width, bd.ALIGNED_RUN_GAP_MAX_WORD_SPACES
+            ):
+                break
+            crossed += 1
+            boundary = bd._band_center(band)
+        adoptable.append(crossed)
+    assert max(adoptable) >= 2, adoptable
+
+    lines = bd._assemble_prose_with_aligned_runs(page).splitlines()
+    for name in names[:2]:
+        assert lines[lines.index(name) - 1] == "Mr.", lines
+
+
+def test_a_later_band_carrying_a_heading_is_refused_not_merely_last():
+    """The witness that the two stop clauses are not one clause.
+
+    ``_assemble_prose_with_aligned_runs`` refuses a non-pair-only band beyond
+    the run boundary, and separately stops after adopting one at the boundary.
+    Drop the first and the walk would still stop -- but only after adopting the
+    offending pair, which is the #706 defect displaced by one band. Here the
+    fill-share roster carries ``STAFF:`` beside its OUTER leading row, so that
+    row is reached only through an adopted band and must be refused: its pair
+    keeps block order after the run instead of being lifted into the group.
+    """
+    page, _names = _mixed_width_roster_page()
+    baseline = min(word[1] for word in page.get_text("words") if word[4] == "Mr.")
+    page.insert_text((40, baseline + 10.75), "STAFF:", fontsize=10)
+    lines = [line.strip() for line in bd._assemble_prose_with_aligned_runs(page).splitlines()]
+
+    assert lines[lines.index("Bravo, Deputy Assistant Secretary") - 1] == "Mr.", (
+        "the pair-only band before the heading must still be adopted"
+    )
+    assert lines.index("Alpha, Deputy Assistant Secretary") > lines.index(
+        "Mr. Corrigan, Vice Chairman of the Committee"
+    ), ("the outer band's pair must keep block order, not join the run's group", lines)
+
+
+@pytest.mark.skipif(
+    not (_FED_1977_11_15_MINUTES.exists() and _FED_1990_11_13_MINUTES.exists()),
+    reason="fed-01 corpus not present",
+)
+def test_real_section_boundaries_are_separated_by_more_than_the_run_pitch():
+    """The measured answer to "could a real section break slip under the pitch?".
+
+    Astra looked for a heading-free, sub-pitch break between two distinct lists
+    on the real pages and found none: on both 1977-11-15 and 1990-11-13 every
+    band following an accepted run sits further away than that run's own row
+    pitch, so the distance bound stops the walk there without needing to reason
+    about section membership. Pinned as a measurement, not as a guarantee about
+    documents outside this corpus.
+    """
+    for path in (_FED_1977_11_15_MINUTES, _FED_1990_11_13_MINUTES):
+        with fitz.open(str(path)) as doc:
+            bands, runs, _ = _bands_and_run(doc[0])
+        assert runs, path.name
+        for start, end, _ in runs:
+            if end + 1 >= len(bands):
+                continue
+            pitch = bd._run_row_pitch(bands, start, end)
+            gap = bd._band_center(bands[end + 1]) - bd._band_center(bands[end])
+            assert gap > pitch, (path.name, start, end, gap, pitch)
 
 
 if __name__ == "__main__":

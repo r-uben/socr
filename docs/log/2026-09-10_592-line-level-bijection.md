@@ -678,32 +678,64 @@ Fed sweep, 6 minutes documents × first 4 pages:
 
 ### Witnesses
 
-Each clause was checked by deleting it from a copy of the source and re-running:
+Each clause was checked by deleting it from a copy of the source and re-running. **Run these
+with `-o pythonpath=<copy>/src`, not the `PYTHONPATH` environment variable**: `pyproject.toml`
+sets `pythonpath = ["src"]` under `[tool.pytest.ini_options]`, and pytest inserts that
+rootdir-relative path ahead of `PYTHONPATH`, so an env-var override silently tests the
+worktree's own source and every deletion appears harmless. An earlier version of this section
+was written from such a run and its first bullet was wrong.
 
-- deleting the **continuation** clause fails
-  `test_the_walk_stops_after_a_band_that_carried_out_of_lane_content`;
-- deleting the **stop-after** clause fails Astra's reproducer and both new GH-706 tests.
+- deleting the **stop-after** clause (`if not pair_only: break`) fails Astra's reproducer
+  `test_continuation_does_not_hoist_staff_before_its_heading` and
+  `test_a_continuation_band_carrying_out_of_lane_content_is_not_adopted`;
+- deleting the **refuse-later** clause (`if index != first and not pair_only: break`) fails only
+  `test_a_later_band_carrying_a_heading_is_refused_not_merely_last`, which was added for it. The
+  two clauses are not redundant: without the second, a band beyond the boundary that carries a
+  heading is adopted and only then stops the walk — the #706 defect displaced by one band;
+- deleting the **vocabulary** check fails
+  `test_an_adjacent_pair_whose_label_the_run_never_observed_is_refused`;
+- deleting the **pitch** bound fails
+  `test_a_far_lane_aligned_pair_the_guards_would_accept_is_still_refused`.
+
+`test_the_walk_stops_after_a_band_that_carried_out_of_lane_content` survives all four deletions.
+It pins the fixture's behaviour, and it is not a unique witness for any clause; that is now
+stated rather than implied.
 
 Astra's probe is copied to `tests/test_gh706_section_heading_boundary.py`, alongside a witness
 that the refused band is otherwise fully adoptable and a synthetic pin that a BOUNDARY band
 carrying a heading is still adopted.
 
-### A witness that had to be given up
+### What the continuation is for, and its corpus-free witness
+
+State it plainly: the continuation **deliberately recovers pairs that the run-level fill-share
+statistic declined**. Fill-share measures the distribution of right-column widths across a whole
+candidate window, so a window mixing long role-bearing names with short ones is refused
+wholesale — pair-only rows included. Each recovered pair must then independently satisfy the
+ORIGINAL run's lane starts, row pitch, gap and whole-label vocabulary, and carry no other
+content in its band. That is a different claim from "the run search would have taken it anyway".
 
 `test_the_walk_continues_only_while_each_band_brings_its_own_evidence` used a fixture whose
-leading bands carry an out-of-lane marker in the left margin. That marker is what makes
-`_find_aligned_runs` decline those bands in the first place — without it the search simply
-absorbs a pair-only band into the run and there is nothing left to adopt. The new rule stops on
-exactly that marker, so the fixture can no longer demonstrate a multi-band walk, and no
-synthetic fixture can: a band cannot simultaneously be declined by the search and be pair-only.
-The test is rewritten to pin the new stop behaviour under its accurate name, and the multi-band
-continuation is now witnessed **only on the real 1990-11-13 page**. Recorded as a residual
-rather than papered over.
+leading bands are withheld from the run search by an out-of-lane marker. The new rule stops on
+exactly that marker, so that fixture can no longer show a multi-band walk; it is rewritten to
+pin the stop behaviour under its accurate name.
+
+An **earlier version of this log claimed no synthetic fixture could show one. That was wrong**,
+and Astra built the counterexample. Withhold the bands through fill-share instead of through
+out-of-lane content and every band stays pair-only:
+`test_a_synthetic_pair_only_continuation_crosses_two_bands` puts four long role-bearing names
+before four short ones, shows `_try_aligned_run` refusing the roster under normal fill-share
+checking and accepting it with only that statistic disabled, and then crosses two leading
+bands. The multi-band continuation is therefore witnessed **corpus-free as well as on the real
+1990-11-13 page**.
+
+Astra's real-section measurement is pinned too
+(`test_real_section_boundaries_are_separated_by_more_than_the_run_pitch`): on both 1977-11-15
+and 1990-11-13, every band following an accepted run sits further away than that run's own
+pitch (24.70 vs 12.5; 24.05 vs 12.20; 23.94 vs 12.34). No heading-free sub-pitch break between
+two distinct lists was found in the measured sections.
 
 ### Residuals (GH-706 round 2)
 
-- The multi-band continuation has no corpus-free witness (above). A machine without the fed-01
-  fixtures verifies the stop rules but not the walk.
 - `Burns`, the first staff row in Astra's fixture, is still hoisted above `STAFF:` by GH-704's
   immediate-band rule on the merged base. This branch does not change that and deliberately
   does not fix it: it is a **#704 residual**, and the boundary-band exception is what keeps

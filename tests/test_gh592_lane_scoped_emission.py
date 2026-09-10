@@ -398,10 +398,13 @@ def test_the_walk_stops_after_a_band_that_carried_out_of_lane_content():
     is still adopted, under GH-704's separately reviewed immediate rule; the
     outer one keeps block order.
 
-    Note what this costs: a synthetic fixture cannot both keep the run search
-    from absorbing a pair-only band AND leave that band adoptable, so the
-    multi-band continuation is now witnessed only on the real 1990-11-13 page
-    (``test_1990_measures_every_alternate_member_band_the_walk_crosses``).
+    This fixture withholds its marker bands from the run search with out-of-lane
+    content, so it can no longer show a multi-band walk. A fixture that withholds
+    them through fill-share instead still can:
+    ``test_a_synthetic_pair_only_continuation_crosses_two_bands`` in
+    ``test_gh706_section_heading_boundary.py``. Note also that this test is not a
+    unique witness for either stop clause -- it passes with either one deleted --
+    so it pins behaviour rather than proving a clause necessary.
     """
     lines = _emitted(_roster_with_leading_pairs("Mr.", "Mr."))
     assert lines[lines.index("Gillum") - 1] == "Mr.", lines
