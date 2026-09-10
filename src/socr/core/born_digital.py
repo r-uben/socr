@@ -837,47 +837,13 @@ def _adoptable_pair(
     return [label, value]
 
 
-def _left_aligned_stack(
-    line: dict,
-    bands: list[list[dict]],
-    index: int,
-    word_space_width: float,
-) -> list[dict]:
-    """The lines of ``line``'s own left-aligned column, or ``[]`` if it has none.
-
-    A running paragraph or a left-aligned column is a STACK: line n starts at
-    the same left edge as line n-1. One line on its own carries no such
-    evidence, and neither does a centred heading, whose lines each start
-    somewhere else. The returned stack is ``line`` together with every line of
-    the band above it that shares its left edge within the page's own measured
-    word space.
-
-    The stack is read from the baseline bands rather than from PyMuPDF's
-    blocks, because on the page this exists for the blocks are not there.
-    1977-11-15's opening paragraph -- the four lines ending in
-    ``1977, at 9:30 a.m.`` -- is FOUR separate one-line blocks, so a
-    "does its block hold two aligned lines?" test finds nothing and would
-    refuse the very recovery it was meant to protect. The bands do hold it:
-    x0 107.00, 107.00, 108.00 in consecutive bands against that page's own
-    8.28pt word space.
-    """
-    above = index - 1
-    if above < 0:
-        return []
-    aligned = [other for other in bands[above] if abs(other["x0"] - line["x0"]) <= word_space_width]
-    if not aligned:
-        return []
-    return [line, *aligned]
-
-
 def _beside_heading_lines(
     extras: list[dict],
     label: dict,
     bands: list[list[dict]],
     index: int,
-    word_space_width: float,
 ) -> list[dict] | None:
-    """``extras`` when every one is a standalone heading printed BESIDE the pair.
+    """``extras`` when every one is a heading printed BESIDE the pair.
 
     GH-709 (Astra design note). ``_adoptable_pair`` moves a declined label/value
     pair into a run's emitted group and leaves every other line of that band
@@ -887,82 +853,45 @@ def _beside_heading_lines(
     introduces it. The tokens all survive and the section affiliation does not,
     which is the loss GH-592 exists to prevent.
 
-    The fix is scoped to the one boundary band: such a heading joins the pair as
-    a single emission unit, rendered left to right, placed where the band sits
-    relative to the run. A heading genuinely ABOVE the pair is in a DIFFERENT
-    band and is not touched -- this never reaches for a neighbouring band.
+    WHAT MOVES is the round-5 ruling (Astra review of 2a868bc), and it inverts
+    rounds 1-4. Those pulled the extra to the pair, forming one unit placed at
+    the boundary band's position relative to the run. That is what made a
+    heading's independence load-bearing: to move its last line safely you had
+    to prove the lines above it were not part of it, and no test does. Three
+    attempts failed on real PyMuPDF geometry -- shared block membership, a
+    shared left edge, and a left-aligned stack crossing the label lane -- and
+    each was defeated by an ordinary heading a page may legitimately contain.
 
-    Every extra line in the band must qualify, and each on evidence:
+    So the extra never moves. It stays exactly where the caller's block order
+    puts it, and so does everything above it; the PAIR travels to the extra and
+    is emitted immediately after it. A heading of any line count therefore
+    stays intact and still precedes its member, and no claim about the lines
+    above the extra is needed, because none of them is touched. This also
+    removes the abstention Astra measured a real cost for: refusing every
+    intersecting line above kept the synthetic heading whole but displaced
+    ``Burns, Chairman`` eleven lines down the 1977-11-15 roster, away from his
+    own label.
+
+    Each extra must still qualify, and each on evidence:
 
     * it lies wholly LEFT of the label, so its reading position within the row
       is unambiguous and it overlaps neither the label nor the value;
     * it is baseline-aligned with the label (their vertical extents overlap),
       so it is printed on that row rather than merely near it;
-    * nothing printed in the immediately adjacent bands may be its own
-      continuation. A heading or paragraph that carries on across a line break
-      must not have its first line torn off and moved.
+    * nothing in the band immediately BELOW may be its own continuation. That
+      side still matters under the round-5 rule: the pair is inserted directly
+      after the extra, so a heading that carries on downward would have the
+      label and value pushed between its own two lines.
 
     A continuation cannot avoid being printed over the same horizontal ground
     as the line it continues: however it is aligned inside its column -- flush,
     indented, centred, hanging -- its x-extent INTERSECTS. So the test is
-    horizontal intersection with the adjacent bands, across every block, with no
-    tolerance of its own. Two earlier attempts at this test were wrong and are
-    recorded so they are not tried again: shared block membership (PyMuPDF
-    splits a two-line heading into two blocks and lumps a heading in with an
-    unrelated column), and a shared left edge (a centred heading's second line
-    starts 4.17pt right of its first against a 2.78pt word space, and no wider
-    multiplier removes that -- it only moves it).
+    horizontal intersection with the band below, across every block, with no
+    tolerance of its own.
 
-    The two sides are not symmetric, and this is the round-3 correction (Astra
-    review of d5fcd15):
-
-    * BELOW, an intersecting line is ALWAYS a possible continuation, because
-      that is the direction a heading is read in. There is no dismissal clause
-      at all. Round 2 dismissed one that crossed the label lane at 1.5x the
-      roster's pitch, and split a heading around its first member.
-    * ABOVE, an intersecting line is dismissed only on independent evidence
-      that it is a paragraph's line rather than the extra's own heading. Three
-      things together, and each is read off the page's own geometry:
-
-      1. it continues a left-aligned stack of its own (``_left_aligned_stack``);
-      2. the extra does NOT share that stack's edge, so it is not a line of it;
-      3. every line of that stack CROSSES the label lane.
-
-    Condition 3 is the round-4 correction (Astra review of 052a749). Two equal
-    left edges followed by a different one do not prove independence: a display
-    heading can run ``STAFF`` (x0 30), ``AND`` (30), ``OTHERS`` (40 beside the
-    pair), and rounds 1-3 read its first two lines as a paragraph and tore the
-    third off them. What a paragraph's lines have and a narrow heading block
-    does not is measure: prose fills the line, so it runs past the column the
-    roster's labels start in. ``STAFF``/``AND`` stop far short of it.
-
-    That is what keeps 1977-11-15 correct, and it is the only real page in the
-    Fed set that exercises the dismissal -- Astra measured all six, and the
-    other five never expose ``PRESENT:`` as a line of its own beside the pair.
-    ``1977, at 9:30 a.m.`` (x0 108.00) does intersect ``PRESENT:``
-    (x0 142.00-198.64) horizontally, but it is the last line of a paragraph
-    left-aligned at x0 107-108 across four consecutive bands, ``PRESENT:``
-    starts 34pt right of that edge, and both its lines run past the label lane
-    (x1 235.12 and 543.08 against a lane at x0 214.00). It is a paragraph
-    carrying on above the roster, not a heading over it.
-
-    The lane in condition 3 is the LABEL's, not the value's. Measured on the
-    real page, the paragraph's last line stops at 235.12 and the value column
-    starts at 243.00, so a value-lane test would refuse 1977-11-15 -- the only
-    page in the Fed set that exposes this heading at all.
-
-    A residual survives all three conditions and is pinned as a strict xfail
-    (``test_a_wide_display_headings_last_line_is_not_torn_off_the_lines_above_it``):
-    a display heading whose aligned lines are themselves full measure supplies
-    every piece of evidence the real page does, and its indented last line is
-    still adopted. No discriminator with real-page support separates the two;
-    the round-4 log section records both that were measured and rejected.
-
-    Everything else abstains. A centred heading above (its lines share no left
-    edge), a left-aligned heading whose next line IS the extra (the extra
-    shares the edge), a lone line above with no stack behind it: none of these
-    can be told from a heading, so the pair is not adopted at all. Ambiguity
-    here is not a licence to fall back on the separation GH-709 is about.
+    There is deliberately no test on the band ABOVE. Rounds 1-4 needed one and
+    could not build one that survived review; round 5 does not need one, since
+    the extra is not being moved away from whatever is above it.
     """
     for extra in extras:
         if extra["x1"] > label["x0"]:
@@ -973,18 +902,6 @@ def _beside_heading_lines(
         if below < len(bands):
             for other in bands[below]:
                 if other["x1"] > extra["x0"] and extra["x1"] > other["x0"]:
-                    return None
-        above = index - 1
-        if above >= 0:
-            for other in bands[above]:
-                if other["x1"] <= extra["x0"] or extra["x1"] <= other["x0"]:
-                    continue
-                stack = _left_aligned_stack(other, bands, above, word_space_width)
-                if not stack:
-                    return None
-                if abs(extra["x0"] - other["x0"]) <= word_space_width:
-                    return None
-                if any(line["x1"] < label["x0"] for line in stack):
                     return None
     return extras
 
@@ -1353,6 +1270,13 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     # line: the first run whose walk reaches it takes it, and the other run's
     # walk then finds nothing left in that band and stops there.
     claimed: dict[tuple[int, int], int] = {}
+    # GH-709 round 5. ``beside_units`` maps the block-order key of a boundary
+    # band's heading line to the pair text emitted directly after it;
+    # ``relocated`` holds those pair lines, which must not also print where
+    # block order puts them, and must not drag the run's group to their
+    # position either -- the run keeps its own.
+    beside_units: dict[tuple[int, int], list[str]] = {}
+    relocated: set[tuple[int, int]] = set()
     group_members: dict[int, list[dict]] = {}
     run_payload: dict[int, list[str]] = {}
     for run_id, (start, end, merged) in enumerate(runs):
@@ -1425,24 +1349,84 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     extras = [it for it in candidates if (it["bi"], it["li"]) not in pair_keys]
                     if extras and index != first:
                         break
-                    unit = pair
+                    beside = None
                     if extras:
-                        beside = _beside_heading_lines(
-                            extras, pair[0], bands, index, word_space_width
-                        )
+                        # GH-709 round 5, measured correction. Relocating the
+                        # pair to the extra reorders it against the lines
+                        # between them, and that is damage as soon as the
+                        # boundary band is one of a SERIES of such bands
+                        # rather than the only one. The marker fixture is
+                        # exactly that: two declined rows carrying markers "1"
+                        # and "2" in one left-margin column, of which the walk
+                        # only ever adopts the boundary one. Relocating its
+                        # pair printed Gillum's row ahead of Bernard's -- two
+                        # roster rows reversed, the loss GH-592 exists to
+                        # prevent.
+                        #
+                        # So the band on the FAR side of the boundary, away
+                        # from the run, must not be another band of the same
+                        # shape. It is one when BOTH hold: a candidate in the
+                        # run's own LABEL lane, so it is a row of this kind
+                        # that is staying put; and a line outside both lanes
+                        # that horizontally intersects one of our extras, so
+                        # its marker is in the same column as ours. Both are
+                        # read off the run's own lanes and the lines' own
+                        # extents, with no tolerance.
+                        #
+                        # Each half is needed. The #706 staff fixture has a
+                        # plain Gillum row on the far side -- a label in the
+                        # lane, no marker -- and must still adopt. 1977-11-15
+                        # has "1977, at 9:30 a.m." there, out of the label
+                        # lane at x0 108.0 against 214.0, and must still
+                        # adopt. This refuses only where both appear at once.
+                        #
+                        # Refusing is the safe direction, so this needs no
+                        # proof that the far band IS a series member, only
+                        # that it looks like one.
+                        outward = index + step
+                        if 0 <= outward < len(bands):
+                            neighbours = bands[outward]
+                            in_label_lane = any(
+                                lanes[0][0] <= it["x0"] <= lanes[0][1] for it in neighbours
+                            )
+                            same_column_marker = any(
+                                not (lanes[0][0] <= it["x0"] <= lanes[0][1])
+                                and not (lanes[1][0] <= it["x0"] <= lanes[1][1])
+                                and it["x1"] > extra["x0"]
+                                and extra["x1"] > it["x0"]
+                                for it in neighbours
+                                for extra in extras
+                            )
+                            if in_label_lane and same_column_marker:
+                                break
+                        beside = _beside_heading_lines(extras, pair[0], bands, index)
                         if beside is None:
                             break
-                        unit = beside + pair
-                    for it in unit:
+                    for it in pair:
                         claimed[(it["bi"], it["li"])] = run_id
-                        members.append(
-                            {
-                                "y0": it["y0"],
-                                "y1": it["y1"],
-                                "x0": it["x0"],
-                                "text": it["text"],
-                            }
-                        )
+                    if beside is None:
+                        for it in pair:
+                            members.append(
+                                {
+                                    "y0": it["y0"],
+                                    "y1": it["y1"],
+                                    "x0": it["x0"],
+                                    "text": it["text"],
+                                }
+                            )
+                    else:
+                        # GH-709 round 5: the pair travels to the extra, not
+                        # the other way round. It leaves the run's emitted
+                        # group entirely and is emitted immediately after the
+                        # LAST extra in block order, so every extra -- and
+                        # every line above it, which is never inspected --
+                        # keeps the position the caller gave it.
+                        anchor = max(beside, key=lambda it: (it["bi"], it["li"]))
+                        beside_units[(anchor["bi"], anchor["li"])] = [
+                            it["text"] for it in sorted(pair, key=lambda it: it["x0"])
+                        ]
+                        for it in pair:
+                            relocated.add((it["bi"], it["li"]))
                     # The adopted band becomes the new boundary, so the next
                     # step is measured from IT -- but the evidence each band
                     # must produce is unchanged and is still measured against
@@ -1472,7 +1456,9 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
                     rendered.append(item["text"])
         group_text[run_id] = rendered
 
-    line_group: dict[tuple[int, int], int] = dict(claimed)
+    line_group: dict[tuple[int, int], int] = {
+        key: run_id for key, run_id in claimed.items() if key not in relocated
+    }
     for run_id, (start, end, _merged) in enumerate(runs):
         for band in bands[start : end + 1]:
             for it in band:
@@ -1481,9 +1467,13 @@ def _assemble_prose_with_aligned_runs(page: fitz.Page) -> str | None:
     out_lines: list[str] = []
     emitted: set[int] = set()
     for it in all_lines:
-        run_id = line_group.get((it["bi"], it["li"]))
+        key = (it["bi"], it["li"])
+        if key in relocated:
+            continue
+        run_id = line_group.get(key)
         if run_id is None:
             out_lines.append(it["text"])
+            out_lines.extend(beside_units.get(key, ()))
             continue
         if run_id not in emitted:
             emitted.add(run_id)

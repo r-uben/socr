@@ -22,6 +22,7 @@ import pytest
 from test_born_digital_aligned_runs import _FED_1977_11_15_MINUTES
 from test_born_digital_aligned_runs import _FED_1990_11_13_MINUTES
 from test_gh592_lane_scoped_emission import _bands_and_run
+from test_gh592_lane_scoped_emission import _roster_with_leading_pairs
 from test_gh706_section_heading_boundary import _staff_section_page
 
 from socr.core import born_digital as bd
@@ -31,6 +32,19 @@ def _emitted(page: fitz.Page) -> list[str]:
     out = bd._assemble_prose_with_aligned_runs(page)
     assert out is not None
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _assert_heading_then_pair(lines: list[str], heading: list[str], value: str) -> None:
+    """The round-5 contract: the heading whole and in order, its pair after it.
+
+    Under the round-5 rule the extra never moves, so every line of the heading
+    keeps the position the caller gave it, and the label and value are printed
+    immediately after its last line. Checking both halves together is what
+    distinguishes adoption from the abstention that also leaves a heading
+    whole -- rounds 1 to 4 could satisfy the first half by refusing outright.
+    """
+    start = lines.index(heading[0])
+    assert lines[start : start + len(heading) + 2] == [*heading, "Mr.", value], lines
 
 
 def test_the_staff_heading_precedes_both_staff_members():
@@ -47,9 +61,11 @@ def test_the_staff_heading_precedes_both_staff_members():
     assert lines.index("Mr. Corrigan, Vice Chairman of Committee") < lines.index("STAFF:")
     assert lines.index("STAFF:") < lines.index("Burns")
     assert lines.index("STAFF:") < lines.index("Gillum, Deputy Assistant Secretary")
-    assert lines[lines.index("Burns") - 1] == "Mr.", (
-        "the adopted pair must stay adjacent inside the unit"
-    )
+    # Pinned as the exact adopted sequence, not as "Mr. precedes Burns". Block
+    # order also puts a "Mr." immediately before "Burns" (the two labels print
+    # together, then the two values), so the weaker assertion holds just as
+    # well when the adoption abstains and nothing is recovered at all.
+    _assert_heading_then_pair(lines, ["STAFF:"], "Burns")
     assert lines.count("STAFF:") == 1 and lines.count("Burns") == 1
 
 
@@ -262,10 +278,17 @@ def test_a_marker_printed_right_of_the_value_makes_the_adoption_abstain():
         "the run is still emitted before the staff section",
         lines,
     )
-    assert lines.index("[note]") < lines.index("Burns"), (
-        "abstention leaves the boundary band in block order",
-        lines,
-    )
+    # Pinned as the whole tail. "[note] before Burns" is true whether the pair
+    # abstains or is relocated to sit directly after the note, and relocation
+    # is the defect here: the note is printed to the RIGHT of the value, so
+    # moving the pair behind it reverses their reading order.
+    assert lines[lines.index("[note]") :] == [
+        "[note]",
+        "Mr.",
+        "Mr.",
+        "Burns",
+        "Gillum, Deputy Assistant Secretary",
+    ], lines
     assert lines.count("[note]") == 1
 
 
@@ -390,9 +413,7 @@ def test_a_centered_headings_first_line_is_refused_on_the_helper_itself():
     assert [it["text"] for band in bands for it in band] == ["ALTERNATE", "MEMBERS"]
     upper = bands[0][0]
     label = dict(bi=9, li=0, x0=90, x1=105, y0=upper["y0"], y1=upper["y1"], text="Mr.")
-    word_space = bd._median_word_space_width(page.get_text("words"))
-
-    assert bd._beside_heading_lines([upper], label, bands, 0, word_space) is None
+    assert bd._beside_heading_lines([upper], label, bands, 0) is None
 
 
 def _heading_with_continuation_page(wide: bool, leading: float) -> fitz.Page:
@@ -466,20 +487,15 @@ def test_a_continuation_printed_below_the_heading_always_refuses_the_adoption(wi
     assert lines.index(continuation) < lines.index("Burns")
 
 
-def test_a_short_paragraph_line_above_the_heading_refuses_the_adoption():
-    """Round 4 gives this recall back, and the log records why.
+def test_a_short_paragraph_line_above_the_heading_does_not_affect_the_adoption():
+    """What is printed above the heading stopped mattering in round 5.
 
-    Round 3 adopted here: two prose lines at x0 72 are a left-aligned stack the
-    heading at x0 30 is not part of, and that was taken as evidence enough.
-    Round 4's third condition withdraws it. A stack whose lines stop short of
-    the label lane is exactly the shape of a narrow display heading -- Astra's
-    ``STAFF``/``AND``/``OTHERS`` -- and nothing on the page tells the two apart.
-
-    Nothing measured is lost. Astra measured all six Fed opening paragraphs and
-    every line of every one of them is full measure, so no real page in the set
-    is a short stack. The abstention costs recall only on a shape the corpus
-    does not contain, and it stops a heading being torn on a shape it plausibly
-    could.
+    Rounds 2 to 4 each ruled on this line and each ruled differently, because
+    each of them moved the heading and so had to decide whether the line above
+    was part of it. Round 5 moves the pair instead, and the line above is never
+    inspected: it stays where it is, the heading stays where it is, and the
+    pair is printed after the heading. Its width, its edge and its stack are
+    all irrelevant now, which is why the same fixture adopts whatever they are.
     """
     doc = fitz.open()
     page = doc.new_page()
@@ -511,11 +527,8 @@ def test_a_short_paragraph_line_above_the_heading_refuses_the_adoption():
 
     lines = _emitted(page)
 
-    assert lines.index("PRESENT:") < lines.index("Bernard")
-    assert lines[lines.index("Bernard") - 1] != "Mr.", (
-        "abstaining means the pair keeps block order, not that it is adopted anyway"
-    )
-    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee")
+    assert lines[lines.index("It.") + 1] == "PRESENT:", "the line above keeps its place"
+    _assert_heading_then_pair(lines, ["PRESENT:"], "Bernard")
 
 
 def _heading_above_the_pair_page(lines: list[str], centred: bool) -> fitz.Page:
@@ -554,41 +567,34 @@ def _heading_above_the_pair_page(lines: list[str], centred: bool) -> fitz.Page:
 
 
 def test_a_display_headings_last_line_is_not_torn_off_the_lines_above_it():
-    """The heading reads DOWNWARD into the boundary band, and must not be split.
+    """A centred display heading keeps all three lines AND gets its member.
 
     Three centred lines, so no two of them start at the same x: ``ALTERNATE``
     (24.55), ``MEMBERS`` (28.72), ``BOARD`` (36.22) against a 2.78pt word
-    space. The line above the boundary band intersects it, and it
-    continues no left-aligned stack of its own, so there is no evidence it is a
-    paragraph rather than this heading. The adoption abstains.
-
-    Nothing else refuses it: the last line starts 7.5pt from the one above, so
-    the shared-edge clause does not fire.
+    space. Rounds 1 to 4 had to decide whether the two lines above ``BOARD``
+    were part of the heading before they could move it, and abstained. Round 5
+    does not move it, so the heading survives intact and the pair still lands
+    beside it -- both halves of what GH-709 asked for, on a shape no earlier
+    round could serve.
     """
     page = _heading_above_the_pair_page(["ALTERNATE", "MEMBERS", "BOARD"], centred=True)
     bands, _runs, word_space = _bands_and_run(page)
     starts = [band[0]["x0"] for band in bands[1:4]]
     assert all(abs(a - b) > word_space for a, b in zip(starts, starts[1:])), starts
-    assert abs(starts[2] - starts[1]) > word_space, "the shared-edge clause must not fire here"
 
     lines = _emitted(page)
 
-    assert lines[lines.index("MEMBERS") + 1] == "BOARD", lines
-    assert lines.index("BOARD") < lines.index("Bernard")
-
-    assert lines[lines.index("Bernard") - 1] != "Mr.", (
-        "abstaining means the pair keeps block order, not that it is adopted anyway"
-    )
-    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee")
+    _assert_heading_then_pair(lines, ["ALTERNATE", "MEMBERS", "BOARD"], "Bernard")
 
 
 def test_a_left_aligned_headings_last_line_is_not_torn_off_the_lines_above_it():
-    """The same, when the heading IS a left-aligned stack.
+    """The same, when the heading is flush left instead of centred.
 
-    Here the line above the boundary band does continue a stack -- three lines
-    flush at x0 30 -- so the paragraph evidence is satisfied. What refuses the
-    adoption is that the extra line shares that same edge: it is a line OF that
-    stack, not a heading standing beside the pair.
+    Three lines at x0 30, so the last one shares its predecessors' edge. Round
+    4 refused precisely because of that shared edge, reading the last line as
+    belonging to the block above rather than standing beside the pair. Round 5
+    has no such question to answer: nothing above the last line is moved, so
+    the heading stays whole either way and the pair follows it.
     """
     page = _heading_above_the_pair_page(["STAFF AND", "OTHER FOLK", "PRESENT:"], centred=False)
     bands, _runs, word_space = _bands_and_run(page)
@@ -597,24 +603,17 @@ def test_a_left_aligned_headings_last_line_is_not_torn_off_the_lines_above_it():
 
     lines = _emitted(page)
 
-    assert lines[lines.index("OTHER FOLK") + 1] == "PRESENT:", lines
-    assert lines.index("PRESENT:") < lines.index("Bernard")
-
-    assert lines[lines.index("Bernard") - 1] != "Mr.", (
-        "abstaining means the pair keeps block order, not that it is adopted anyway"
-    )
-    assert lines.index("Bernard") > lines.index("Mr. Corrigan, Vice Chairman of the Committee")
+    _assert_heading_then_pair(lines, ["STAFF AND", "OTHER FOLK", "PRESENT:"], "Bernard")
 
 
-def test_a_lone_line_above_the_heading_with_nothing_behind_it_refuses_the_adoption():
-    """One line above and nothing above THAT is not evidence of a paragraph.
+def test_a_lone_line_above_the_heading_does_not_affect_the_adoption():
+    """One ambiguous line above the heading, and it no longer has to be judged.
 
     The page opens straight into the roster, so the line intersecting the
-    heading from above is the page's first band. It could be a paragraph's only
-    line or the heading's own first line, and nothing on the page separates
-    those, so the adoption abstains. This is the conservative half of the rule,
-    and it is why the #706 fixture that models 1977-11-15 now prints a
-    two-line opening paragraph: the real page has one.
+    heading from above is the page's first band. Whether it is a paragraph's
+    only line or the heading's own first line was unanswerable, and rounds 3
+    and 4 abstained on exactly that. Round 5 leaves it alone instead of
+    classifying it, and adopts.
     """
     doc = fitz.open()
     page = doc.new_page()
@@ -645,30 +644,21 @@ def test_a_lone_line_above_the_heading_with_nothing_behind_it_refuses_the_adopti
 
     lines = _emitted(page)
 
-    assert lines.index("PRESENT:") < lines.index("Bernard")
-    assert lines[lines.index("Bernard") - 1] != "Mr.", (
-        "the pair must keep block order when the line above cannot be placed"
-    )
+    assert lines[0] == prose["text"].strip(), "the ambiguous line keeps its place"
+    _assert_heading_then_pair(lines, ["PRESENT:"], "Bernard")
 
 
 @pytest.mark.parametrize("indent_middle", [True, False])
 def test_a_three_line_heading_whose_last_line_is_indented_stays_whole(indent_middle):
-    """Astra's round-3 reproducer, both halves of its pair.
+    """Astra's round-3 reproducer, both halves of its pair, now both adopted.
 
     A display heading need not end on the edge it began with. ``STAFF`` (30),
     ``AND`` (30 or 40), ``OTHERS`` (40 beside the pair) is one heading either
-    way. Round 3 refused the hanging-indent half (30/40/40) because the extra
-    shared the preceding line's edge, but adopted the other half: ``STAFF`` and
-    ``AND`` share an edge that ``OTHERS`` does not, which the rule read as
-    evidence of an independent paragraph above. Two equal left edges followed
-    by a different one are not that evidence, and the heading was torn -- its
-    last line printed ahead of its first two.
-
-    The third condition settles it on this page's own geometry: the dismissing
-    stack must CROSS the label lane. ``STAFF``/``AND`` end far left of it
-    (x1 near 55 against a lane at x0 90), so they are a narrow heading block,
-    not the full-measure prose lines that a running paragraph is made of. No
-    dismissal, so the adoption abstains and the heading is left whole.
+    way. Round 3 tore the 30/30/40 half by reading its first two lines as an
+    independent paragraph; round 4 stopped the tear by refusing the adoption
+    outright. Round 5 needs neither reading. The heading is never moved, so
+    both halves keep all three lines in order, and both get the pair after
+    them -- the recovery GH-709 exists for, on the fixture that broke it twice.
     """
     doc = fitz.open()
     page = doc.new_page()
@@ -705,11 +695,7 @@ def test_a_three_line_heading_whose_last_line_is_indented_stays_whole(indent_mid
 
     lines = _emitted(page)
 
-    start = lines.index("STAFF")
-    assert lines[start : start + 3] == ["STAFF", "AND", "OTHERS"], lines
-    assert lines[lines.index("Bernard") - 1] != "Mr.", (
-        "abstaining means the pair keeps block order, not that it is adopted anyway"
-    )
+    _assert_heading_then_pair(lines, ["STAFF", "AND", "OTHERS"], "Bernard")
 
 
 def _wide_display_heading_page(indent_last: bool = True) -> fitz.Page:
@@ -752,109 +738,101 @@ def _wide_display_heading_page(indent_last: bool = True) -> fitz.Page:
     return page
 
 
-def test_a_full_measure_paragraphs_short_last_line_is_not_torn_off_its_paragraph():
-    """The shared-edge clause on its own, with nothing else able to refuse.
+def test_a_block_whose_last_line_shares_its_edge_keeps_all_three_lines():
+    """Three lines flush at x0 30, the last one beside the pair.
 
-    Three lines flush at x0 30 whose first two run past the label lane, so the
-    stack evidence and the third condition are both satisfied. What refuses the
-    adoption is that the last line starts on that same edge: it is a line OF
-    that paragraph, not a heading standing beside the pair. Without this clause
-    a paragraph ending on a short line would have that line moved into the
-    roster.
+    Round 4 refused this on the shared edge, reasoning that a line starting
+    where the lines above start is a line OF that block and must not be moved
+    into the roster. It is, and it is not moved -- but under round 5 that
+    costs nothing, because the pair comes to it. The block stays whole in
+    order and the member is printed after it.
     """
     page = _wide_display_heading_page(indent_last=False)
     bands, _runs, word_space = _bands_and_run(page)
-    stack = [bands[1][0], bands[2][0]]
-    extra, label = sorted(bands[3], key=lambda it: it["x0"])[:2]
+    extra = sorted(bands[3], key=lambda it: it["x0"])[0]
 
     assert extra["text"].strip() == "OPEN MARKET COMMITTEE"
-    assert abs(extra["x0"] - stack[1]["x0"]) <= word_space, "the last line shares the edge"
-    assert all(line["x1"] >= label["x0"] for line in stack), (
-        "and the lines above it cross the label lane, so only the shared edge can refuse"
-    )
+    assert abs(extra["x0"] - bands[2][0]["x0"]) <= word_space, "the last line shares the edge"
 
     lines = _emitted(page)
 
-    start = lines.index("STAFF AND OTHER ATTENDEES AT THE")
-    assert lines[start : start + 3] == [
-        "STAFF AND OTHER ATTENDEES AT THE",
-        "NOVEMBER MEETING OF THE FEDERAL",
-        "OPEN MARKET COMMITTEE",
-    ], lines
-    assert lines[lines.index("Bernard") - 1] != "Mr.", (
-        "abstaining means the pair keeps block order, not that it is adopted anyway"
+    _assert_heading_then_pair(
+        lines,
+        [
+            "STAFF AND OTHER ATTENDEES AT THE",
+            "NOVEMBER MEETING OF THE FEDERAL",
+            "OPEN MARKET COMMITTEE",
+        ],
+        "Bernard",
     )
 
 
-def test_the_wide_display_heading_crosses_the_label_lane_like_prose_does():
-    """The measurement the residual rests on, pinned so it cannot drift.
-
-    This is the geometry that makes the counterexample a counterexample: the
-    heading's first two lines are indistinguishable from prose lines under all
-    three conditions. They share a left edge within the word space, the last
-    line does not share it, and both cross the label lane.
-    """
-    page = _wide_display_heading_page()
-    bands, _runs, word_space = _bands_and_run(page)
-    first, second = bands[1][0], bands[2][0]
-    extra, label = (
-        sorted(bands[3], key=lambda it: it["x0"])[0],
-        sorted(bands[3], key=lambda it: it["x0"])[1],
-    )
-
-    assert extra["text"].strip() == "OPEN MARKET COMMITTEE"
-    assert abs(first["x0"] - second["x0"]) <= word_space, "the first two lines are a stack"
-    assert abs(extra["x0"] - second["x0"]) > word_space, "the last line does not share that edge"
-    assert first["x1"] >= label["x0"] and second["x1"] >= label["x0"], (
-        "both stack lines cross the label lane, exactly as prose lines do"
-    )
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GH-709 documented residual, round 4: a display heading whose aligned "
-        "lines are as wide as prose lines satisfies every condition the real "
-        "1977-11-15 page supplies, so its indented last line is still adopted "
-        "and torn off. Neither candidate discriminator survives measurement -- "
-        "see the round-4 section of docs/log/2026-09-10_709-beside-heading-unit.md"
-    ),
-)
 def test_a_wide_display_headings_last_line_is_not_torn_off_the_lines_above_it():
-    """The counterexample itself, asserting the behaviour we want, not the one we ship."""
+    """Astra's round-4 counterexample, which round 5 turns from xfail to pass.
+
+    Two aligned lines at x0 30 running past the label lane, then an indented
+    last line beside the pair. Round 4 shipped this as a strict xfail because
+    the heading supplies every piece of evidence the real 1977-11-15 page
+    supplies, so no test on the lines above could tell them apart. Astra
+    declined that residual, and the round-5 rule removes the question: the
+    heading is not moved, so its first two lines cannot end up behind its
+    third. The roster prints first, then the whole heading, then the member.
+    """
     lines = _emitted(_wide_display_heading_page())
 
-    start = lines.index("STAFF AND OTHER ATTENDEES AT THE")
-    assert lines[start : start + 3] == [
-        "STAFF AND OTHER ATTENDEES AT THE",
-        "NOVEMBER MEETING OF THE FEDERAL",
-        "OPEN MARKET COMMITTEE",
-    ], lines
+    assert lines.index("Mr. Corrigan, Vice Chairman of the Committee") < lines.index(
+        "STAFF AND OTHER ATTENDEES AT THE"
+    ), "the run keeps its own position; only the pair travels"
+    _assert_heading_then_pair(
+        lines,
+        [
+            "STAFF AND OTHER ATTENDEES AT THE",
+            "NOVEMBER MEETING OF THE FEDERAL",
+            "OPEN MARKET COMMITTEE",
+        ],
+        "Bernard",
+    )
 
 
 @pytest.mark.skipif(not _FED_1977_11_15_MINUTES.exists(), reason="Fed corpus not present")
-def test_the_1977_paragraph_crosses_the_label_lane_but_not_the_value_lane():
-    """The real page's measurement, and the discriminator it rules out.
+def test_the_1977_present_row_keeps_its_emitted_positions():
+    """The real-page acceptance criterion, pinned as indices rather than order.
 
-    The dismissal that recovers ``PRESENT:`` rests on the opening paragraph's
-    last two lines being full-measure prose. They are: both end past the label
-    lane at x0 214. They do NOT reach the value lane at x0 243 -- the last one
-    stops at 235.12 -- so "the stack crosses the VALUE lane" cannot be used to
-    tighten this rule. It would refuse 1977-11-15, which is the one real page
-    in the Fed set that exposes the heading beside the pair at all.
+    Astra measured the cost of the alternative: refusing every intersecting
+    line above kept a synthetic heading whole but moved ``Burns, Chairman``
+    from index 10 to index 21, past ``Mr. Roos`` and ``Mr. Wallich``, away
+    from his own label. Round 5 keeps him at 10, directly after the label the
+    page prints beside him, and directly before the run.
     """
     with fitz.open(_FED_1977_11_15_MINUTES) as doc:
-        bands, _runs, _ws = _bands_and_run(doc[0])
-        index = next(
-            i for i, band in enumerate(bands) if any("PRESENT:" in it["text"] for it in band)
-        )
-        extra, label, value = sorted(bands[index], key=lambda it: it["x0"])[:3]
-        stack = [bands[index - 1][0], bands[index - 2][0]]
+        lines = _emitted(doc[0])
 
-    assert extra["text"].strip() == "PRESENT:"
-    assert all(line["x1"] >= label["x0"] for line in stack), (
-        "the paragraph's lines cross the label lane"
+    assert lines[8:12] == [
+        "PRESENT:",
+        "Mr.",
+        "Burns, Chairman",
+        "Mr. Volcker, Vice Chairman",
+    ], lines[:14]
+
+
+def test_a_marker_column_makes_the_adoption_abstain():
+    """The round-5 correction Astra's direction did not anticipate.
+
+    Moving the pair rather than the extra is safe only when the boundary band
+    is the ONLY band of its kind. The GH-592 marker fixture has two: declined
+    rows carrying markers ``1`` and ``2`` in one left-margin column, of which
+    the walk adopts only the boundary one. Relocating its pair to sit after
+    ``2`` printed Gillum's row ahead of Bernard's, reversing two roster rows.
+
+    So the band on the far side of the boundary must not look like another
+    band of the same series: a candidate in the run's label lane AND a line
+    out of both lanes intersecting our extra's column. Here it is both, so the
+    page keeps block order entirely.
+    """
+    page = _roster_with_leading_pairs("Mr.", "Mr.")
+    lines = _emitted(page)
+
+    assert lines.index("Bernard") < lines.index("Gillum"), (
+        "the two declined rows must not be reversed"
     )
-    assert not all(line["x1"] >= value["x0"] for line in stack), (
-        "they do not cross the value lane, so that cannot be a third condition"
-    )
+    assert lines[1:7] == ["1", "2", "Mr.", "Mr.", "Bernard", "Gillum"], lines

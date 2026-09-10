@@ -365,3 +365,118 @@ shape the corpus does not contain.
 * Unchanged from round 3: an unrelated isolated line beside the pair is still
   adopted; the marker column still abstains; "two or more bands away" means
   beyond an intervening OCCUPIED band, not a distance.
+
+## Round 5 — invert what moves
+
+Astra rejected round 4's residual (`astra-rev-709d-out.md`, reproducer
+`/private/tmp/test_astra_709d.py`). Crossing the label lane filters out the
+narrow counterexample without establishing that the text above the extra is
+independent, and a strict xfail documents a wrong emission order rather than
+fixing it. Astra also measured the alternative and showed the cheap escape does
+not exist: `break` at the boundary abandons the whole unit, there is no
+bare-pair fallback, and refusing every intersecting line above keeps the
+synthetic heading whole but moves `Burns, Chairman` from emitted index 10 to
+index 21 on the real 1977-11-15 page, past `Mr. Roos` and `Mr. Wallich`, away
+from his own label.
+
+Rounds 1 to 4 all shared one premise: the extra is pulled to the pair, and the
+unit is placed at the boundary band's position. That is what made the extra's
+independence load-bearing. To move a heading's last line safely you must prove
+the lines above it are not part of it, and no test does. Three were tried and
+each was defeated by an ordinary layout -- shared block membership, a shared
+left edge, and a left-aligned stack crossing the label lane.
+
+**Round 5 inverts it. The extra never moves.** It stays where the caller's
+block order puts it, and so does everything above it, which is never inspected.
+The PAIR travels to the extra and is emitted immediately after it. A heading of
+any line count therefore stays intact and still precedes its member, and no
+claim about the lines above is needed.
+
+Mechanically, the pair leaves the run's emitted group. It is recorded in
+`beside_units`, keyed by the block-order key of the last extra, and printed
+directly after that line; the pair's own keys go in `relocated`, so they neither
+print in block order nor drag the run's group to their position. The run keeps
+its own position. The ordinary GH-704 case, a boundary band with no extras, is
+untouched: the pair still joins the run's group.
+
+The above-branch machinery is gone -- `_left_aligned_stack`, the shared-edge
+test and the lane-crossing test all deleted, and `_beside_heading_lines` no
+longer takes `word_space_width`. The below-branch abstention stays and is now
+the only neighbour test: the pair is inserted directly after the extra, so a
+heading that carries on downward would have the label and value pushed between
+its own two lines.
+
+### The correction the direction did not anticipate
+
+Moving the pair is safe only when the boundary band is the ONLY band of its
+kind. The GH-592 marker fixture is not: two declined rows carry markers `1` and
+`2` in one left-margin column, and the walk adopts only the boundary one.
+Relocating its pair to sit after `2` emitted
+
+```text
+1  2  Mr.  Gillum  Mr.  Bernard  ...
+```
+
+reversing two roster rows -- the loss GH-592 exists to prevent. Neither the
+below-branch test nor the unique-pair test refuses it, so the directed rule set
+was not sufficient as given.
+
+The added condition is that the band on the FAR side of the boundary, away from
+the run, must not look like another band of the same series. It does when both
+hold: a candidate in the run's own LABEL lane, so it is a row of this kind that
+is staying put; and a line outside both lanes that horizontally intersects one
+of our extras, so its marker is in the same column as ours. Both halves are
+needed and both are witnessed. The #706 staff fixture has a plain Gillum row on
+the far side, a label in the lane with no marker, and must still adopt.
+1977-11-15 has `1977, at 9:30 a.m.` there, out of the label lane at x0 108.00
+against 214.00, and must still adopt. Refusing is the safe direction, so this
+needs no proof that the far band IS a series member, only that it looks like
+one.
+
+### Measured emissions
+
+| Page | Result |
+| --- | --- |
+| real 1977-11-15 p1 | `PRESENT:` 8, `Mr.` 9, `Burns, Chairman` 10, `Mr. Volcker` 11 |
+| real 1990-11-13 p1 | unchanged |
+| Astra's wide heading | roster, then all three heading lines in order, then `Mr.` / `Bernard` |
+| #706 staff fixture | byte-identical to round 4 |
+| marker column | abstains, whole page in block order |
+| Fed 6 documents x 4 pages vs `cf28858` | 0 of 24 differ |
+
+### Two pins were vacuous and are now exact
+
+Both were found by a deletion witness returning nothing, not by a failure.
+
+* The staff fixture asserted `Mr.` immediately precedes `Burns`. Block order
+  prints the two labels together and then the two values, so that is true when
+  the adoption abstains and nothing is recovered. It now pins the exact adopted
+  sequence.
+* The right-marker fixture asserted `[note]` precedes `Burns`. That is true
+  whether the pair abstains or is relocated to sit behind the note, which is
+  the defect. It now pins the whole tail.
+
+### Deletion witnesses
+
+| Clause | Tests that fail without it |
+| --- | ---: |
+| extra wholly left of the label | 1 |
+| baseline overlap with the label | **0** |
+| below-branch continuation | 5 |
+| far band holds a label-lane candidate | 12 |
+| far band's marker shares the extra's column | 1 |
+| the far-band rule as a whole | 2 |
+| abstain rather than adopt | 4 |
+| relocate the pair rather than the extra | 4 |
+
+### Residuals
+
+* The baseline-overlap clause still has no deletion witness, unchanged since
+  round 1.
+* Astra's `test_measure_conservative_cost` fails on the reviewer's own
+  monkeypatch, which wraps the five-argument helper; the signature is now four.
+  Its substantive half, `test_wide_heading_is_not_reversed`, passes. The same
+  stale-signature failure has stood in `test_astra_709.py` since round 2.
+* Only the band immediately at a run boundary is ever adopted, so a sub-list of
+  several consecutive declined rows is still recovered one row deep. Unchanged.
+* "Two or more bands away" still means beyond an intervening OCCUPIED band.
