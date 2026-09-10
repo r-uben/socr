@@ -290,6 +290,84 @@ def _final_row_truncated(block_lines: Sequence[str]) -> bool:
 _STRAY_HEADER_BAND_ALLOWANCE = 1
 
 
+#: TICKET (#703) round 2: how many recurring numeric column lanes the NATIVE
+#: page must show before term (b)'s row-shape reconciliation says anything.
+#: The reconciliation compares row WIDTHS; a single recurring lane gives every
+#: native band width 1, which is the vacuous case #703 was filed for, so two is
+#: the smallest arity at which a native row has a shape to reconcile at all --
+#: an arity floor, not a fitted threshold. Deliberately WEAKER than the
+#: detector's own ``reconstruct._MIN_LANES_PER_ROW`` (3): this is an ABSTENTION
+#: gate on a content-loss guard, so a wrong "no lanes here" silently disarms A2
+#: while a wrong "lanes here" only leaves A2 armed as it was before #703.
+#: "Recurring" is not redefined -- ``has_recurring_numeric_columns`` keeps the
+#: existing GH-248 rule that a lane counts only if it appears on at least
+#: ``_MIN_TABLE_ROWS`` bands.
+_MIN_RECONCILABLE_LANES = 2
+
+
+def _native_page_has_column_lanes(words: list) -> bool:
+    """TICKET (#703) round 2: does the NATIVE page show recurring numeric
+    column lanes -- evidence that survives a truncated candidate?
+
+    Round 1 gated term (b) on the candidate's own row widths, which is
+    unsound: the dominance disappears together with the missing rows. A
+    numeric table whose surviving rows happen to be sparse (two one-number
+    rows retained, eighteen dense rows dropped) then reads as a text table and
+    the guard A2 exists for switches itself off -- measured, the truncated
+    reading wins selection over the complete one. Native geometry cannot be
+    truncated by a model, so the eligibility question is asked there instead.
+
+    The discriminator between "a table" and "prose that mentions figures" is
+    not how many numerals a band carries -- on the BoE #703 page the native
+    table-shaped count is 19/4/2 bands at widths 1/2/3, table-specific at no
+    width -- but ALIGNMENT: a table's numerals recur in shared x-lanes down
+    the page, prose figures scatter. Measured on that page: 16 x0-lanes, only
+    2 of them recurring, and NO band populating two recurring lanes at once.
+    The ECB bulletin p2/p3 truncation fixtures show 11 recurring lanes and 3
+    such bands; a mixed dense/sparse numeric table shows 2 lanes and 18.
+
+    Reuses ``reconstruct.has_recurring_numeric_columns`` (GH-248's lane-reuse
+    rule, both x0 and x1 anchors per GH-349) rather than a second
+    implementation of "column lane".
+
+    Round 3 asks that helper for ``seeded_lanes`` rather than its default
+    adjacency clustering. The detector's greedy chaining is safe where its
+    answer is used positively but not here: one unrelated numeral printed
+    between two real columns (a footnote value at x=18 between columns at
+    x=12 and x=24, inside the 6pt tolerance of both) chains them into a single
+    lane, this gate returns False, term (b) abstains, and the truncated
+    candidate wins selection over the complete one. Recurrence-seeded lanes
+    cannot be bridged by a position that occurs once, so the one-off bridge no
+    longer flips this verdict.
+
+    **What the verdict does and does not mean.** This is a bounded detector
+    over TOKEN POSITIONS, not a semantic table detector. A positive verdict
+    says extracted numeric tokens recur in shared x-lanes; it does not
+    establish that those lanes are the cells of one table, and two token lanes
+    are not proof of two physical columns. Two measured limitations:
+
+    * A space-grouped number can be extracted as two tokens. Four lines of
+      ``1 234`` printed at 6pt come back from PyMuPDF as two words per line
+      (x=50.000 and x=55.004), which register as two recurring token lanes and
+      return True. The adjacency clustering this gate replaced does the same on
+      that fixture (its x1 anchor separates prefix from suffix), so this is the
+      detector's standing limitation, not the seeding's. Signs and brackets are
+      not affected: ``-0.5`` and ``(12)`` each extract as one token.
+    * The question is asked of the WHOLE page, so bands that belong to no
+      table -- numbered source citations, marker at one x and year at another
+      -- can arm term (b) for a candidate whose own table is elsewhere.
+
+    A negative verdict is correspondingly bounded: it says the page shows no
+    recurring numeric token lanes at this arity, which is why term (b) then
+    abstains rather than acquits.
+    """
+    if not words:
+        return False
+    from socr.tables.reconstruct import has_recurring_numeric_columns
+
+    return has_recurring_numeric_columns(words, _MIN_RECONCILABLE_LANES, seeded_lanes=True)
+
+
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     """TICKET-A2 (#645) term (b): candidate's numeric body-row count falls
     short of the native table-shaped row count by more than A1b's own
@@ -304,8 +382,27 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     (returns False) with no ``words`` -- exception-path callers of
     ``table_output_defect`` supply none, matching every other geometry-needing
     term in this module.
+
+    Also abstains when the native page shows no recurring numeric column
+    lanes (``_native_page_has_column_lanes``, #703): the reconciliation
+    compares NUMERIC row shapes, and on a text table (prose cells, zero or one
+    number each) the candidate-derived ``row_shape_min`` collapses to 1, at
+    which point every prose line carrying a figure counts as a native table
+    row and a complete candidate reads as a massive shortfall. Such candidates
+    are left to term (a) and to the ladder verdict.
+
+    ``row_shape_min`` is still the candidate's own minimum, deliberately. The
+    lane gate has already established that this page HAS column structure, so
+    counting native bands with one or more numerals is no longer "every prose
+    line on a prose page" -- and keeping the minimum is what catches the
+    sparse-prefix truncation the lane gate was added for (2 surviving rows of
+    width 1 against 20 native bands). Substituting a lane-derived width would
+    change the native counts A2 measured on the ECB fixtures for no gain on
+    any page measured here.
     """
     if not words:
+        return False
+    if not _native_page_has_column_lanes(words):
         return False
     from socr.tables.row_corroboration import (
         ROW_CORROBORATION_MIN,

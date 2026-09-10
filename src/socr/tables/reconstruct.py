@@ -89,6 +89,13 @@ _MIN_DATA_ROW_FRAC = 0.5
 _LANE_X_TOL_PT = 6.0  # numeric tokens within this x distance share a lane
 _MIN_LANES_PER_ROW = 3  # a data row must populate this many numeric lanes
 _MIN_TABLE_ROWS = 3  # and there must be this many such rows
+
+# Width of the bin that ``round`` maps an x into: adjacent quantised positions
+# differ by exactly this, so two raw coordinates further apart than this were
+# never separated by the rounding alone. Derived from the same rounding call
+# rather than written as a literal -- but it IS an explicit span boundary, and
+# is named as one: the rounding-bin width, not a threshold-free quantity.
+_ROUNDING_BIN_PT = float(round(1.0)) - float(round(0.0))
 # A running-head row swept in from the page margin reads like a journal/volume
 # line. Matched with OCR tolerance because older PDFs carry corrupted text layers
 # (observed "Joumal" for "Journal", "(/997)" for "(1997)"): journal-name tokens
@@ -564,8 +571,46 @@ def has_numeric_columns(page) -> bool:
         words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_no)
     except Exception:  # pragma: no cover - defensive
         return False
+    return has_recurring_numeric_columns(words)
+
+
+def has_recurring_numeric_columns(
+    words: list,
+    min_lanes_per_row: int = _MIN_LANES_PER_ROW,
+    *,
+    seeded_lanes: bool = False,
+) -> bool:
+    """``has_numeric_columns``' test on a WORD LIST rather than a page.
+
+    Factored out for #703 so a caller that already holds
+    ``page.get_text("words")`` can ask the same question without re-extracting
+    (the same factoring ``native_verifier._lane_count_from_words`` did for its
+    own page-level twin), and so a caller can ask for a weaker row arity than
+    the detector's ``_MIN_LANES_PER_ROW``.
+
+    *min_lanes_per_row* is how many COLUMN-LIKE lanes a band must populate at
+    once to count as a data row; "column-like" (recurrence over at least
+    ``_MIN_TABLE_ROWS`` bands) is unchanged and not a caller's choice.
+
+    *seeded_lanes* selects how x positions are grouped into lanes:
+
+    ``False`` (default) keeps this function byte-identical to
+    ``has_numeric_columns`` for its existing callers -- greedy adjacency, in
+    which any x position within ``_LANE_X_TOL_PT`` of the previous one extends
+    the current lane.
+
+    ``True`` uses recurrence-seeded lanes instead (``_seeded_lane_of``), where
+    only x positions that themselves recur down the page may found a lane and a
+    one-off position can never merge two of them. Adjacency chaining is
+    acceptable when the answer is used POSITIVELY (a merged lane can only lower
+    the lane count, so the detector stays conservative about claiming a grid),
+    but #703 uses a NEGATIVE verdict to switch a loss guard off -- there an
+    under-count is the unsafe direction, and one unrelated footnote numeral
+    landing between two real columns was enough to collapse them into one lane
+    and disable A2's shortfall term on a genuinely numeric table.
+    """
     numeric_words = [w for w in words if _NUM_TOKEN_RE.match(w[4]) and _NUMERIC_RE.search(w[4])]
-    if len(numeric_words) < _MIN_LANES_PER_ROW * _MIN_TABLE_ROWS:
+    if len(numeric_words) < min_lanes_per_row * _MIN_TABLE_ROWS:
         return False
 
     # GH-349: try BOTH edges as the column anchor. Keying lanes on x0 alone
@@ -579,25 +624,182 @@ def has_numeric_columns(page) -> bool:
     # 4 Glaeser noise pages). The same >= _MIN_TABLE_ROWS recurrence is required;
     # only the anchor changes. Scatter has neither a stable left nor a stable
     # right edge, so it still fails on both.
-    return any(_numeric_columns_on_anchor(numeric_words, edge) for edge in (0, 2))
+    return any(
+        _numeric_columns_on_anchor(
+            numeric_words, edge, min_lanes_per_row, seeded_lanes=seeded_lanes
+        )
+        for edge in (0, 2)
+    )
 
 
-def _numeric_columns_on_anchor(numeric_words: list, edge: int) -> bool:
-    """``has_numeric_columns``' lane test, keyed on one edge (0 = x0, 2 = x1)."""
-    nums = [(w[edge], round(w[1])) for w in numeric_words]
+def _adjacent_lane_of(xs: list[float]) -> dict[float, int]:
+    """Greedy adjacency clustering: the original ``has_numeric_columns`` lanes.
 
-    xs = sorted({x for x, _ in nums})
+    Every x position joins the running lane when it is within
+    ``_LANE_X_TOL_PT`` of the PREVIOUS one, so a chain of near-neighbours can
+    span far more than the tolerance and a single intermediate position can
+    merge two clusters. Kept unchanged for the detector's positive use.
+    """
     lanes: list[list[float]] = []
     for x in xs:
         if lanes and x - lanes[-1][-1] <= _LANE_X_TOL_PT:
             lanes[-1].append(x)
         else:
             lanes.append([x])
-    lane_of = {x: i for i, lane in enumerate(lanes) for x in lane}
+    return {x: i for i, lane in enumerate(lanes) for x in lane}
+
+
+def _seeded_lane_of(nums: list[tuple[float, float]], xs: list[float]) -> dict[float, int]:
+    """Recurrence-seeded clustering (#703): only a recurring x founds a lane,
+    and two columns that appear together on a row are never merged.
+
+    Four steps, none of which introduces a threshold of its own:
+
+    1. **Quantise.** An x is reduced to a POSITION with ``round``, the same
+       rounding the band key already applies to y. Sub-point extraction jitter
+       within one printed column therefore lands on one position; anything
+       coarser is left to step 3's tolerance.
+    1b. **Rejoin the halves the rounding split.** Jitter of a hundredth of a
+       point across a bin BOUNDARY (12.49 / 12.51) lands one printed column on
+       two positions and halves its evidence, so a four-row column can leave
+       neither half on ``_MIN_TABLE_ROWS`` bands and found nothing. Before
+       qualifying, a position under the minimum joins a group whose members'
+       ORIGINAL x coordinates span at most ``_ROUNDING_BIN_PT`` -- one point,
+       the rounding-bin width, an explicit span boundary and the same quantity
+       step 1 already uses -- and whose bands are DISJOINT from its own: same
+       column, different rows. The group's union then qualifies the seed.
+       Grouping instead within ``_LANE_X_TOL_PT`` was measured and rejected:
+       it distributes scattered positions over six points and reopens two
+       inspected non-table pages (BoE 2018 p3, ECB 2000 p3).
+    2. **Qualify.** A position is recurring when tokens sit on at least
+       ``_MIN_TABLE_ROWS`` bands at the position ITSELF, or at the group step
+       1b joined it to -- the occupancy of its own representative, never the
+       union over a neighbourhood. Round 3 counted the neighbourhood, so a footnote
+       value printed once between two columns borrowed both columns' support
+       (21 + 20 bands -> 22), outranked both, and founded the only centre.
+       A position occurring once now cannot found a lane at any ranking.
+    3. **Found.** Recurring positions are taken in order of decreasing
+       occupancy (ties by x) and each founds a lane unless it is within
+       ``_LANE_X_TOL_PT`` of one already founded AND does not CO-OCCUR with it:
+       two recurring positions carrying distinct numerals on the same band are
+       separate columns by direct evidence whatever their x distance, because
+       one column cannot hold two cells of the same row. Co-occurrence
+       therefore overrides the tolerance; without that, two genuine columns
+       printed 5pt apart merged into one centre on eighteen dense rows.
+
+       Co-occurrence carries NO count of its own -- one shared band already
+       settles the question. Requiring it to recur over ``_MIN_TABLE_ROWS``
+       bands divides a column's evidence exactly the way step 1's rounding
+       can: a column whose anchor jitters across the boundary is two positions
+       sharing the neighbour's rows between them, and neither half reaches the
+       count even when four rows carry a cell in both columns.
+    4. **Assign.** Every other x joins the nearest centre within the tolerance
+       (ties by lane order); an x within reach of no centre is dropped and
+       contributes to no row's lane set.
+
+    The returned mapping is keyed on the ORIGINAL x values and need not cover
+    all of *xs*.
+    """
+    position = {x: float(round(x)) for x in xs}
+
+    # Step 1b: rejoin the halves of a column whose anchor straddles a bin
+    # boundary. Only a position UNDER the recurrence minimum may join, only a
+    # group whose raw x coordinates span at most one rounding bin, and only
+    # when their bands are disjoint (one column cannot hold two cells of a
+    # row). Deterministic in the input order: groups are founded by the
+    # recurring positions in x order, joiners taken by decreasing occupancy.
+    occupancy: dict[float, set] = {}
+    raw_at: dict[float, list[float]] = {}
+    for x, y in nums:
+        occupancy.setdefault(position[x], set()).add(y)
+        raw_at.setdefault(position[x], []).append(x)
+
+    def _raw_span(members: list[float]) -> float:
+        raw = [v for pos in members for v in raw_at[pos]]
+        return max(raw) - min(raw)
+
+    groups: list[list[float]] = [
+        [pos] for pos in sorted(occupancy) if len(occupancy[pos]) >= _MIN_TABLE_ROWS
+    ]
+    for pos in sorted(occupancy, key=lambda seed: (-len(occupancy[seed]), seed)):
+        if len(occupancy[pos]) >= _MIN_TABLE_ROWS:
+            continue
+        eligible = [
+            group
+            for group in groups
+            if _raw_span([*group, pos]) <= _ROUNDING_BIN_PT
+            and all(not (occupancy[pos] & occupancy[other]) for other in group)
+        ]
+        if eligible:
+            nearest = min(eligible, key=lambda g: min(abs(pos - other) for other in g))
+            nearest.append(pos)
+        else:
+            groups.append([pos])
+    representative = {pos: group[0] for group in groups for pos in group}
+    position = {x: representative[position[x]] for x in xs}
+
+    bands_at: dict[float, set] = {}
+    for x, y in nums:
+        bands_at.setdefault(position[x], set()).add(y)
+    recurring = {pos for pos, ys in bands_at.items() if len(ys) >= _MIN_TABLE_ROWS}
+
+    # Same-band co-occurrence between recurring positions: direct evidence of
+    # two cells of one row, i.e. of two columns.
+    together: dict[tuple[float, float], int] = {}
+    band_positions: dict[float, set] = {}
+    for x, y in nums:
+        if position[x] in recurring:
+            band_positions.setdefault(y, set()).add(position[x])
+    for present in band_positions.values():
+        ordered = sorted(present)
+        for i, a in enumerate(ordered):
+            for b in ordered[i + 1 :]:
+                together[(a, b)] = together.get((a, b), 0) + 1
+
+    def _distinct_columns(a: float, b: float) -> bool:
+        return together.get((a, b) if a < b else (b, a), 0) > 0
+
+    centres: list[float] = []
+    for pos in sorted(recurring, key=lambda seed: (-len(bands_at[seed]), seed)):
+        if all(
+            abs(pos - centre) > _LANE_X_TOL_PT or _distinct_columns(pos, centre)
+            for centre in centres
+        ):
+            centres.append(pos)
+
+    lane_of: dict[float, int] = {}
+    for x in xs:
+        pos = position[x]
+        if pos in centres:
+            lane_of[x] = centres.index(pos)
+            continue
+        reachable = [
+            (abs(pos - centre), lane)
+            for lane, centre in enumerate(centres)
+            if abs(pos - centre) <= _LANE_X_TOL_PT
+        ]
+        if reachable:
+            lane_of[x] = min(reachable)[1]
+    return lane_of
+
+
+def _numeric_columns_on_anchor(
+    numeric_words: list,
+    edge: int,
+    min_lanes_per_row: int = _MIN_LANES_PER_ROW,
+    *,
+    seeded_lanes: bool = False,
+) -> bool:
+    """``has_numeric_columns``' lane test, keyed on one edge (0 = x0, 2 = x1)."""
+    nums = [(w[edge], round(w[1])) for w in numeric_words]
+
+    xs = sorted({x for x, _ in nums})
+    lane_of = _seeded_lane_of(nums, xs) if seeded_lanes else _adjacent_lane_of(xs)
 
     row_lanes: dict[float, set] = {}
     for x, y in nums:
-        row_lanes.setdefault(y, set()).add(lane_of[x])
+        if x in lane_of:
+            row_lanes.setdefault(y, set()).add(lane_of[x])
 
     # GH-248: a lane only counts if it behaves like a COLUMN -- i.e. it recurs down
     # the page. A borderless table reuses the same x positions row after row; a
@@ -619,7 +821,7 @@ def _numeric_columns_on_anchor(numeric_words: list, edge: int) -> bool:
             lane_rows.setdefault(lane, set()).add(y)
     column_lanes = {lane for lane, ys in lane_rows.items() if len(ys) >= _MIN_TABLE_ROWS}
 
-    grid_rows = sum(1 for ls in row_lanes.values() if len(ls & column_lanes) >= _MIN_LANES_PER_ROW)
+    grid_rows = sum(1 for ls in row_lanes.values() if len(ls & column_lanes) >= min_lanes_per_row)
     return grid_rows >= _MIN_TABLE_ROWS
 
 
