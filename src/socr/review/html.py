@@ -423,15 +423,16 @@ function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g
 // What follows is the third codec, and the comment on protect() gives the
 // argument that it cannot be defeated the same way.
 
-// The delimiter list, in the fixed order tried. Twenty-nine C0 control
-// characters plus DEL: every code point below 0x20 except tab, newline and
-// carriage return, which are the only three a Markdown page legitimately
-// carries. socr's own writers never emit the rest, and a page would have to
-// contain ALL twenty-nine before the codec runs out of choices.
+// The delimiter list, in the fixed order tried. Twenty-seven C0 control
+// characters plus DEL: every code point below 0x20 that JavaScript does NOT
+// treat as whitespace, which rules out tab, newline and carriage return -- the
+// three a Markdown page legitimately carries -- and also vertical tab and form
+// feed. Round 15 kept those last two and they broke the codec (see protect
+// below). socr's own writers emit none of the twenty-seven, and a page would
+// have to contain ALL of them before the codec runs out of choices.
 let ESC_DELIMS = (() => {
   const codes = [];
   for(let n = 1; n <= 8; n++) codes.push(n);
-  codes.push(11, 12);
   for(let n = 14; n <= 31; n++) codes.push(n);
   codes.push(127);
   return codes.map(n => String.fromCharCode(n));
@@ -463,10 +464,17 @@ function letterIndex(n){
 //   1. d does not occur in the source, so after protection EVERY d in the
 //      text was written by protect, and they were written in pairs.
 //   2. Between a pair, protect wrote only lowercase letters, and nothing
-//      below rewrites letters or control characters: esc() passes both, the
-//      number marker needs a digit, emphasis and code need punctuation, the
-//      block tests need their marker at the start of a line (a token starts
-//      with d, not with #, > or -), and the table splitter needs a pipe.
+//      below rewrites letters or NON-WHITESPACE control characters: esc()
+//      passes both, the number marker needs a digit, emphasis and code need
+//      punctuation, the block tests need their marker at the start of a line
+//      (a token starts with d, not with #, > or -), and the table splitter
+//      needs a pipe. The whitespace qualifier is load-bearing and was the
+//      round 15 defect: the renderer trims table cells and lets the heading
+//      and list regexes eat \s+ after the marker, so a delimiter JavaScript
+//      calls whitespace is deleted at a cell edge or straight after a '#',
+//      and the token it opened can never be closed. ESC_DELIMS therefore
+//      holds no whitespace character, and a test checks that of every entry
+//      under the real engine rather than taking it on trust.
 //   3. Scanning left to right for d, then letters, then d: the letters cannot
 //      run past the closing d, because d is not a letter, and they cannot
 //      start before the opening d, because the character before it is either
@@ -476,7 +484,7 @@ function letterIndex(n){
 // The proof needs only (1); it does not depend on which delimiter was picked,
 // which is the invariant the tests pin -- every choice renders identically.
 //
-// If a source somehow contains all twenty-nine delimiters, protect returns the
+// If a source somehow contains all twenty-seven delimiters, protect returns the
 // text untouched and no escape is honoured. That page renders as it did before
 // #652 round 13 -- backslashes visible, escaped syntax active -- which is a
 // visible defect rather than a silent rewrite of the page's characters.
@@ -493,7 +501,12 @@ function letterIndex(n){
 // escaped, so no span can form there) and is noted as the known divergence
 // rather than hidden.
 function protect(src){
-  const delim = ESC_DELIMS.find(d => src.indexOf(d) === -1);
+  // The whitespace test is applied HERE, not only when the list was written,
+  // so the premise cannot be lost by a later edit to ESC_DELIMS: a whitespace
+  // candidate is skipped, and if that leaves none the page falls back to no
+  // escape protection, which is visible, rather than to a token the renderer
+  // silently cuts in half.
+  const delim = ESC_DELIMS.find(d => !/\s/.test(d) && src.indexOf(d) === -1);
   if(delim === undefined) return {text: src, delim: null, literals: Object.create(null)};
   const literals = Object.create(null);
   let count = 0;

@@ -1,4 +1,4 @@
-"""#652 rounds 13-15: the review viewer must render a recovered scan's escaped
+"""#652 rounds 13-16: the review viewer must render a recovered scan's escaped
 native text as the characters that were printed.
 
 ``review.html`` does not use markdown-it-py. It embeds its own regex renderer
@@ -25,6 +25,12 @@ character early and swallows the real one. The token is now bracketed by a
 delimiter chosen deterministically as the first control character the source
 does not contain, which makes every occurrence of that delimiter one this
 render wrote, and the pairing unambiguous whatever text abuts the token.
+
+Round 16 removed vertical tab and form feed from the candidate list. Both are
+whitespace to JavaScript, and the renderer trims table cells and lets the
+heading and list regexes consume the run of whitespace after their marker, so
+either one is deleted at a cell edge or straight after a ``#`` and the token it
+opened is never closed.
 
 These tests run the ACTUAL JavaScript socr ships, extracted from the template
 and executed under Node, which is the only way to test the renderer that
@@ -217,7 +223,7 @@ def test_a_long_run_of_letters_in_the_source_is_not_mistaken_for_a_token() -> No
 
 #: Every delimiter the codec will try, in the order it tries them, read out of
 #: the renderer itself rather than restated here.
-_DELIMS = [chr(n) for n in list(range(1, 9)) + [11, 12] + list(range(14, 32)) + [127]]
+_DELIMS = [chr(n) for n in list(range(1, 9)) + list(range(14, 32)) + [127]]
 
 
 def _force(delims: list[str]) -> str:
@@ -301,3 +307,81 @@ def test_a_source_holding_every_delimiter_falls_back_to_no_protection() -> None:
     assert "\\" in rendered
     for delim in _DELIMS:
         assert delim in rendered, hex(ord(delim))
+
+
+def test_no_candidate_delimiter_is_whitespace_to_the_engine() -> None:
+    """The premise the proof rests on, checked by the machine.
+
+    Round 15's list held U+000B and U+000C. JavaScript calls both whitespace,
+    so ``c.trim()`` on a table cell and the ``\\s+`` in the heading and list
+    regexes deleted them, and a token that lost a delimiter could never be
+    closed. The argument above ``protect`` now says the delimiter is not
+    whitespace, and this asks the real engine rather than assuming it."""
+    verdict = json.loads(
+        subprocess.run(
+            [
+                "node",
+                "-e",
+                _RENDERER_JS
+                + "\nprocess.stdout.write(JSON.stringify(ESC_DELIMS.map("
+                + "d => [/\\s/.test(d), d.trim() === ''])));",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        ).stdout
+    )
+
+    assert verdict == [[False, False]] * len(_DELIMS)
+
+
+#: Every place the renderer has structure around the text, as Astra listed
+#: them: the two edges of a table cell, straight after a heading marker, after
+#: a list bullet and after a blockquote marker. Each is a context where a
+#: whitespace delimiter used to be trimmed or eaten.
+_STRUCTURAL_SOURCES = {
+    "table-cell-edges": "| Heading | Other |\n| --- | --- |\n| "
+    + _escaped_native_line("*literal*")
+    + " | text |",
+    "heading": "# " + _escaped_native_line("*literal*"),
+    "list-item": "- " + _escaped_native_line("*literal*"),
+    "blockquote": "> " + _escaped_native_line("*literal*"),
+}
+
+
+@pytest.mark.parametrize("delim", _DELIMS, ids=[f"U+{ord(d):04X}" for d in _DELIMS])
+@pytest.mark.parametrize("shape", sorted(_STRUCTURAL_SOURCES), ids=sorted(_STRUCTURAL_SOURCES))
+def test_a_literal_survives_every_structure_under_every_delimiter(shape: str, delim: str) -> None:
+    """Round 15 pinned equivalence only on paragraph-shaped text, which is why
+    the trimming contexts went unmeasured. Every candidate must carry a literal
+    through every structure the renderer builds."""
+    rendered = _render(_STRUCTURAL_SOURCES[shape], setup=_force([delim]))
+
+    assert "*literal*" in _visible(rendered)
+    assert "<i>" not in rendered
+
+
+def test_the_delimiter_the_source_forces_still_carries_a_heading() -> None:
+    """Astra's natural-selection case, which needs no forcing at all. A fenced
+    code sample holding U+0001 to U+0008 walks the candidate list past all
+    eight; round 15 landed on the vertical tab and lost the next heading."""
+    source = (
+        "```\n"
+        + "".join(chr(n) for n in range(1, 9))
+        + "\n```\n# "
+        + _escaped_native_line("*literal*")
+    )
+
+    assert "*literal*" in _visible(_render(source))
+
+
+def test_a_whitespace_delimiter_is_refused_rather_than_used_badly() -> None:
+    """The premise is enforced where the choice is made. Handed nothing but a
+    whitespace candidate, ``protect`` takes none and the page falls back to no
+    escape protection -- visibly wrong rather than a token the renderer cuts in
+    half and shows as stray index letters."""
+    rendered = _render("# " + _escaped_native_line("*literal*"), setup=_force(["\v", "\f"]))
+
+    assert "\\" in rendered
+    assert "a" not in _visible(rendered).replace("literal", "")

@@ -605,3 +605,40 @@ covering model prose, escapes, a private-use glyph and a fence: zero
 differences. Round 14 was already correct on everything real; the failure it
 had was reachable only by forcing the namespace, which is exactly why the new
 argument is a proof rather than a probability.
+
+## Round 16 — the delimiter must not be whitespace
+
+Round 15's proof said nothing in the renderer rewrites letters or control
+characters. Two of its twenty-nine candidates broke that: JavaScript calls
+U+000B and U+000C whitespace, and the renderer trims table cells and lets the
+heading and list regexes eat the whitespace run after their marker. A token
+that lost a delimiter at a cell edge or straight after a `#` could never be
+closed, so the page showed the internal index letters where the printed
+characters belonged.
+
+It needed no forcing to reach. Astra put U+0001 to U+0008 inside a code fence,
+which walks the candidate list past all eight, and the next escaped heading
+landed on the vertical tab and lost its asterisks. Confirmed here as the only
+difference between round 15 and round 16 across 169 corpus pages and five
+synthetic ones: that page rendered `aliteralb` and now renders `*literal*`.
+
+The list is now the twenty-seven non-whitespace controls, U+0001–U+0008,
+U+000E–U+001F and U+007F. The premise moved into the proof comment as an
+explicit qualifier, and a test asks the real engine — `/\s/.test(d)` and
+`d.trim() === ''` for every candidate — rather than restating it. The test that
+the file's copy of the list matches the shipped one already existed and still
+holds.
+
+The whitespace check also runs at selection time, not only when the list was
+written, so a later edit cannot reintroduce the defect: a whitespace candidate
+is skipped, and a list of nothing but whitespace falls back to no escape
+protection, which is visible, rather than to a token the renderer cuts in half.
+
+Equivalence across all candidates is no longer pinned on paragraph-shaped text
+alone. Every one of the twenty-seven now has to carry a literal through both
+edges of a table cell, a heading, a list item and a blockquote.
+
+Astra's forced probes for U+000B and U+000C remain red, and correctly so: they
+force a delimiter the codec no longer offers, and under the selection-time guard
+that configuration now falls back to unprotected rendering instead of a broken
+token.
