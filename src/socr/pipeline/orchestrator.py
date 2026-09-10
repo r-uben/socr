@@ -60,7 +60,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.core.state import DocumentState, PageState, add_page_cost
+from socr.core.state import DocumentState, PageState, canonical_native_text, add_page_cost
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.math.accounting import (
@@ -7858,12 +7858,25 @@ class UnifiedPipeline:
                 # actually rewritten -- and this runs BEFORE the
                 # ``best_output`` gate, because a page with no winner is
                 # exactly the fallback page that must not be skipped.
+                #
+                # #719: route through the SAME identity-aware helper ingestion
+                # uses (``state.canonical_native_text``), not a bare
+                # ``canonicalize_table_labels`` call. A one-sided rewrite here
+                # would leave ``native_table_region_identities`` keyed to the
+                # PRE-rewrite bytes, so D3's regional splice (which matches
+                # those identities 1:1 against the page's parsed blocks) would
+                # fail every region and drop a healthy sibling table -- the
+                # same one-sided-rewrite shape that caused the round-3 D3
+                # content loss this file's #688 tests guard against.
                 if ps.native_text:
-                    _native_canonical, _native_changed = canonicalize_table_labels(ps.native_text)
-                    if _native_changed:
+                    _native_canonical, _native_identities = canonical_native_text(
+                        ps.native_text, ps.native_table_region_identities
+                    )
+                    if _native_canonical != ps.native_text:
                         if ps.native_text_raw is None:
                             ps.native_text_raw = ps.native_text
                         ps.native_text = _native_canonical
+                        ps.native_table_region_identities = _native_identities
 
                 bo = ps.best_output
                 if bo is None:

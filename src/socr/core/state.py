@@ -24,7 +24,7 @@ from socr.core.document import DocumentHandle
 from socr.core.result import DocumentStatus, EngineResult, FailureMode, PageOutput
 
 
-def _canonical_native_text(text: str | None, identities: list[str]) -> tuple[str | None, list[str]]:
+def canonical_native_text(text: str | None, identities: list[str]) -> tuple[str | None, list[str]]:
     """#688: the native candidate's table labels, canonicalised.
 
     Returns the text to use and the region identities that go with it. Regions
@@ -594,9 +594,7 @@ class DocumentState:
                     # ``native_text_raw``.
                     _identities = list(getattr(pa, "native_table_region_identities", []) or [])
                     ps.native_text_raw = pa.native_text
-                    ps.native_text, _identities = _canonical_native_text(
-                        pa.native_text, _identities
-                    )
+                    ps.native_text, _identities = canonical_native_text(pa.native_text, _identities)
                     ps.needs_ocr_enhancement = pa.needs_ocr_enhancement
                     # Propagate the backward-compatible native-table aggregate
                     # (raw emission, raw content, and parsed shape defects).
@@ -632,7 +630,7 @@ class DocumentState:
                     )
                     ps.native_table_region_count = getattr(pa, "native_table_region_count", 0)
                     # #688: these travel WITH the text they were computed
-                    # from -- see ``_canonical_native_text``.
+                    # from -- see ``canonical_native_text``.
                     ps.native_table_region_identities = _identities
                     # GH-520: the independent signal, carried alongside the
                     # parser-derived one it exists to contradict.
